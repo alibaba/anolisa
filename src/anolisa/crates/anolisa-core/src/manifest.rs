@@ -45,6 +45,11 @@ pub struct ComponentManifest {
     pub build: BuildSpec,
     /// Files, services, and capabilities installed by this component.
     pub install: InstallSpec,
+    /// `[backends]` — backend-specific packaging metadata. Empty for components
+    /// that only ship raw artifacts; the RPM backend reads
+    /// [`ManifestBackends::rpm`] to resolve the package name during adopt.
+    #[serde(default, skip_serializing_if = "ManifestBackends::is_empty")]
+    pub backends: ManifestBackends,
     /// Component-level host requirements.
     pub env_requirements: EnvRequirements,
     /// Structured dependency lists. `build`, `runtime`, and `components`
@@ -90,6 +95,37 @@ pub struct DistributionSelector {
     /// Artifact-type preference used only after target filtering.
     #[serde(default)]
     pub preferred_artifact_types: Vec<ArtifactType>,
+}
+
+/// `[backends]` — backend-specific packaging metadata.
+///
+/// Orthogonal to [`DistributionSelector::pkg_base`] (which says *which package
+/// format a distribution uses*): this says *what the component is named under a
+/// given backend*. Only populated where a backend needs an explicit name; an
+/// absent table leaves package-name resolution to the lower mapping tiers
+/// (repo.toml `package_map` / RPM provides / default `anolisa-<component>`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ManifestBackends {
+    /// RPM backend packaging info; `None` falls through to the lower tiers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpm: Option<RpmBackendSpec>,
+}
+
+impl ManifestBackends {
+    /// Whether no backend metadata is present (used by `skip_serializing_if` so
+    /// raw-only manifests round-trip without an empty `[backends]` table).
+    pub fn is_empty(&self) -> bool {
+        self.rpm.is_none()
+    }
+}
+
+/// `[backends.rpm]` — RPM-backend packaging info for a component.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RpmBackendSpec {
+    /// RPM package name for this component (e.g. `anolisa-copilot-shell`),
+    /// the highest-precedence package-name source after a CLI `--package`
+    /// override.
+    pub package: String,
 }
 
 /// Component identity and placement metadata.
@@ -369,6 +405,11 @@ struct ComponentManifestRaw {
     build: Option<BuildRaw>,
     #[serde(default)]
     install: Option<InstallRaw>,
+    // `[backends]` deserializes directly into the typed shape: the structs are
+    // simple and tolerant (`default` table, optional `rpm` sub-table), so no
+    // separate Raw mirror is warranted.
+    #[serde(default)]
+    backends: ManifestBackends,
     #[serde(default, alias = "env_requirements")]
     environment: EnvRequirementsRaw,
     #[serde(default)]
@@ -790,6 +831,7 @@ impl From<ComponentManifestRaw> for ComponentManifest {
             distribution_selectors,
             build,
             install,
+            backends: raw.backends,
             env_requirements,
             dependencies,
             features,
@@ -982,6 +1024,15 @@ impl ComponentManifest {
         toml::from_str(s).map_err(|e| ManifestError::Parse("<string>".into(), e.to_string()))
     }
 
+    /// Declared RPM package name from `[backends.rpm].package`, if any.
+    ///
+    /// This is the highest-precedence package-name source after a CLI
+    /// `--package` override during RPM adopt; `None` falls through to the
+    /// repo.toml `package_map` / provides / default-naming tiers.
+    pub fn rpm_package(&self) -> Option<&str> {
+        self.backends.rpm.as_ref().map(|s| s.package.as_str())
+    }
+
     /// Health check to run after install: the declared
     /// `[component.health_check]`, or a synthesized `binary_version` over the
     /// first [`FileKind::Executable`] layout file. Returns `None` when neither
@@ -1105,6 +1156,64 @@ mod tests {
         assert_eq!(m.dependencies.build, vec!["rust>=1.91"]);
         assert_eq!(m.dependencies.runtime, vec!["kernel-headers"]);
         assert!(m.dependencies.components.is_empty());
+        // No `[backends]` table → empty, and the rpm-package accessor is None.
+        assert!(m.backends.is_empty());
+        assert_eq!(m.rpm_package(), None);
+    }
+
+    #[test]
+    fn component_manifest_parses_rpm_backend_package() {
+        let toml_text = r#"
+            [component]
+            name = "copilot-shell"
+            version = "0.1.0"
+            layer = "runtime"
+
+            [backends.rpm]
+            package = "anolisa-copilot-shell"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        assert!(!m.backends.is_empty());
+        assert_eq!(m.rpm_package(), Some("anolisa-copilot-shell"));
+    }
+
+    #[test]
+    fn component_manifest_rpm_backend_round_trips() {
+        // `[backends]` must survive a serialize→deserialize cycle, and a
+        // manifest without it must serialize *without* an empty table (the
+        // `skip_serializing_if` contract that keeps raw-only manifests clean).
+        let with_rpm = ComponentManifest::from_toml_str(
+            r#"
+            [component]
+            name = "copilot-shell"
+            version = "0.1.0"
+            layer = "runtime"
+
+            [backends.rpm]
+            package = "anolisa-copilot-shell"
+        "#,
+        )
+        .expect("parse");
+        let dumped = toml::to_string(&with_rpm).expect("serialize");
+        assert!(
+            dumped.contains("anolisa-copilot-shell"),
+            "rpm package must round-trip: {dumped}"
+        );
+
+        let without = ComponentManifest::from_toml_str(
+            r#"
+            [component]
+            name = "agentsight"
+            version = "0.2.0"
+            layer = "runtime"
+        "#,
+        )
+        .expect("parse");
+        let dumped = toml::to_string(&without).expect("serialize");
+        assert!(
+            !dumped.contains("[backends]"),
+            "empty backends must be skipped on serialize: {dumped}"
+        );
     }
 
     #[test]

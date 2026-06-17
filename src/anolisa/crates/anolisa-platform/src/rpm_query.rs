@@ -23,6 +23,19 @@ const INSTALLED_QF: &str = "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}\n";
 /// their source repo.
 const AVAILABLE_QF: &str = "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}|%{REPONAME}\n";
 
+/// Query format for the *installed* source repo (`dnf repoquery --installed`).
+///
+/// `rpm -q` cannot report a reponame, so `source_repo` for observed packages
+/// must come from the dnf side; this yields just the bare reponame per line.
+const REPONAME_QF: &str = "%{reponame}\n";
+
+/// Query format for the provides reverse-lookup (`rpm -q --whatprovides`).
+///
+/// Takes the bare `%{NAME}` rather than the default NEVRA string so the result
+/// is directly usable as a package name (the default `name-version-release.arch`
+/// is not).
+const PROVIDES_NAME_QF: &str = "%{NAME}\n";
+
 const RPM: &str = "rpm";
 const DNF: &str = "dnf";
 
@@ -99,6 +112,70 @@ impl<R: CommandRunner> PackageQuery for RpmPackageQuery<R> {
             .filter(|line| !line.is_empty())
             .map(parse_available_line)
             .collect()
+    }
+
+    fn installed_origin(&self, package: &str) -> Result<Option<String>, PackageQueryError> {
+        let out = self
+            .runner
+            .run(
+                DNF,
+                &["repoquery", "--installed", "--qf", REPONAME_QF, package],
+            )
+            .map_err(|e| map_spawn_error(e, DNF))?;
+
+        if out.code != Some(0) {
+            return Err(PackageQueryError::QueryFailed {
+                command: DNF.to_string(),
+                code: out.code,
+                stderr: out.stderr,
+            });
+        }
+
+        // First non-empty reponame line is the source repo (`@System`,
+        // `anolisa-release`, ...); no line means the origin is unknown, which
+        // is a non-fatal `None` rather than an error (it is supplementary
+        // metadata for the adopt record).
+        Ok(out
+            .stdout
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .map(str::to_string))
+    }
+
+    fn what_provides_installed(&self, capability: &str) -> Result<Vec<String>, PackageQueryError> {
+        let out = self
+            .runner
+            .run(
+                RPM,
+                &["-q", "--whatprovides", "--qf", PROVIDES_NAME_QF, capability],
+            )
+            .map_err(|e| map_spawn_error(e, RPM))?;
+
+        if out.code == Some(0) {
+            // De-dup by name: one package can match through several Provides
+            // lines. Insertion order is preserved; provider counts are tiny.
+            let mut names: Vec<String> = Vec::new();
+            for name in out.stdout.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                if !names.iter().any(|n| n == name) {
+                    names.push(name.to_string());
+                }
+            }
+            return Ok(names);
+        }
+
+        // "nothing provides it" is a normal empty result, mirroring the
+        // not-installed branch: rpm writes the notice to stdout, pinned to
+        // English by LC_ALL=C.
+        if out.stdout.contains("no package provides") {
+            return Ok(Vec::new());
+        }
+
+        Err(PackageQueryError::QueryFailed {
+            command: RPM.to_string(),
+            code: out.code,
+            stderr: out.stderr,
+        })
     }
 }
 
@@ -266,6 +343,25 @@ mod tests {
     /// would still pass the output-based assertions.
     fn assert_call_contract(program: &str, args: &[&str], expected_package: &str) {
         match program {
+            // `rpm -q --whatprovides --qf <fmt> <cap>` (what_provides_installed)
+            RPM if args.get(1) == Some(&"--whatprovides") => {
+                assert_eq!(
+                    args.len(),
+                    5,
+                    "rpm whatprovides needs [-q, --whatprovides, --qf, <fmt>, <cap>]: {args:?}"
+                );
+                assert_eq!(args[0], "-q");
+                assert_eq!(args[2], "--qf");
+                assert_eq!(
+                    args[3], PROVIDES_NAME_QF,
+                    "rpm whatprovides --qf drifted from PROVIDES_NAME_QF: {args:?}"
+                );
+                assert_eq!(
+                    args[4], expected_package,
+                    "rpm capability argument must be last: {args:?}"
+                );
+            }
+            // `rpm -q --qf <fmt> <pkg>` (query_installed)
             RPM => {
                 assert_eq!(
                     args.len(),
@@ -283,6 +379,25 @@ mod tests {
                     "rpm package argument must be last: {args:?}"
                 );
             }
+            // `dnf repoquery --installed --qf <fmt> <pkg>` (installed_origin)
+            DNF if args.get(1) == Some(&"--installed") => {
+                assert_eq!(
+                    args.len(),
+                    5,
+                    "dnf installed-origin needs [repoquery, --installed, --qf, <fmt>, <pkg>]: {args:?}"
+                );
+                assert_eq!(args[0], "repoquery");
+                assert_eq!(args[2], "--qf");
+                assert_eq!(
+                    args[3], REPONAME_QF,
+                    "dnf installed --qf drifted from REPONAME_QF: {args:?}"
+                );
+                assert_eq!(
+                    args[4], expected_package,
+                    "dnf package argument must be last: {args:?}"
+                );
+            }
+            // `dnf repoquery --quiet --qf <fmt> <pkg>` (query_available)
             DNF => {
                 assert_eq!(
                     args.len(),
@@ -505,5 +620,117 @@ mod tests {
         let q = query_with_dnf("pkg", ok_out(Some(0), "pkg|2.0.1\n", ""));
         let err = q.query_available("pkg").unwrap_err();
         assert!(matches!(err, PackageQueryError::UnexpectedOutput { .. }));
+    }
+
+    #[test]
+    fn installed_origin_returns_reponame() {
+        let q = query_with_dnf("anolisa-tokenless", ok_out(Some(0), "@System\n", ""));
+        assert_eq!(
+            q.installed_origin("anolisa-tokenless").unwrap().as_deref(),
+            Some("@System")
+        );
+    }
+
+    #[test]
+    fn installed_origin_empty_is_none() {
+        // A package with no reported reponame yields an empty repoquery result;
+        // origin is supplementary, so absence is a non-fatal `None`.
+        let q = query_with_dnf("anolisa-tokenless", ok_out(Some(0), "", ""));
+        assert_eq!(q.installed_origin("anolisa-tokenless").unwrap(), None);
+    }
+
+    #[test]
+    fn installed_origin_failure_maps_to_error() {
+        let q = query_with_dnf("x", ok_out(Some(1), "", "error: rpmdb open failed"));
+        let err = q.installed_origin("x").unwrap_err();
+        assert!(matches!(
+            err,
+            PackageQueryError::QueryFailed { command, .. } if command == DNF
+        ));
+    }
+
+    #[test]
+    fn installed_origin_command_missing_maps_to_error() {
+        let q = query_with_dnf("x", FakeOutcome::Err(io::ErrorKind::NotFound));
+        let err = q.installed_origin("x").unwrap_err();
+        assert!(matches!(
+            err,
+            PackageQueryError::CommandMissing { command } if command == DNF
+        ));
+    }
+
+    #[test]
+    fn what_provides_returns_single_name() {
+        let q = query_with_rpm(
+            "anolisa-component(tokenless)",
+            ok_out(Some(0), "anolisa-tokenless\n", ""),
+        );
+        let names = q
+            .what_provides_installed("anolisa-component(tokenless)")
+            .unwrap();
+        assert_eq!(names, vec!["anolisa-tokenless".to_string()]);
+    }
+
+    #[test]
+    fn what_provides_dedups_by_name() {
+        // One package can satisfy a capability through several Provides lines;
+        // the same name must collapse to a single entry.
+        let q = query_with_rpm(
+            "anolisa-component(tokenless)",
+            ok_out(Some(0), "anolisa-tokenless\nanolisa-tokenless\n", ""),
+        );
+        let names = q
+            .what_provides_installed("anolisa-component(tokenless)")
+            .unwrap();
+        assert_eq!(names, vec!["anolisa-tokenless".to_string()]);
+    }
+
+    #[test]
+    fn what_provides_keeps_distinct_names() {
+        // Two different packages providing the same capability is the ambiguous
+        // case callers must detect; both names are preserved in order.
+        let q = query_with_rpm(
+            "anolisa-component(tokenless)",
+            ok_out(Some(0), "anolisa-tokenless\nvendor-tokenless\n", ""),
+        );
+        let names = q
+            .what_provides_installed("anolisa-component(tokenless)")
+            .unwrap();
+        assert_eq!(
+            names,
+            vec![
+                "anolisa-tokenless".to_string(),
+                "vendor-tokenless".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn what_provides_not_provided_is_empty() {
+        // rpm writes "no package provides <cap>" to stdout with a non-zero exit;
+        // that is the normal "nothing matches" branch, not an error.
+        let q = query_with_rpm(
+            "anolisa-component(absent)",
+            ok_out(
+                Some(1),
+                "no package provides anolisa-component(absent)\n",
+                "",
+            ),
+        );
+        let names = q
+            .what_provides_installed("anolisa-component(absent)")
+            .unwrap();
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn what_provides_failure_maps_to_error() {
+        // Non-zero exit without the not-provided marker is a hard failure.
+        let q = query_with_rpm("x", ok_out(Some(1), "", "error: rpmdb open failed"));
+        let err = q.what_provides_installed("x").unwrap_err();
+        assert!(matches!(
+            err,
+            PackageQueryError::QueryFailed { command, .. } if command == RPM
+        ));
     }
 }

@@ -83,7 +83,7 @@ pub enum ComponentCommands {
     /// List available components from remote catalog
     #[command(visible_alias = "ls")]
     List(tier1::list::ListArgs),
-    /// Install a component from a configured backend (raw today; yum/npm planned)
+    /// Install a component from a configured backend (raw today; rpm/npm planned)
     Install(tier1::install::InstallArgs),
     /// Uninstall a component
     Uninstall(tier1::uninstall::UninstallArgs),

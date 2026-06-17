@@ -8,8 +8,16 @@
 //! from the raw repository root, resolve an artifact, then execute by
 //! downloading it with mandatory sha256 verification, loading the install
 //! contract, installing the declared files, and recording state plus a
-//! central-log audit entry. `yum` / `npm` backends are selectable but their
-//! executors are NOT_IMPLEMENTED.
+//! central-log audit entry.
+//!
+//! The `rpm` backend additionally supports **adopt** (issue #958): in system
+//! mode, when a component is already present as a system RPM, `install`
+//! records it as `rpm-observed` state without downloading or running
+//! `dnf install`. The backend decision is two-layered — pick a backend name
+//! (`--backend` > existing state > system RPM presence > `default_backend`),
+//! then pick an action by `(backend, rpmdb hit, install mode)`. Delegated
+//! `dnf install` for not-yet-installed RPM components is out of scope (#959),
+//! and `npm` remains NOT_IMPLEMENTED.
 //!
 //! Deliberately out of scope for this milestone: execution-policy gating,
 //! pre/post hooks, health checks, and service start/enable. Installed
@@ -31,21 +39,23 @@ use anolisa_core::lock::InstallLock;
 use anolisa_core::path_safety::validate_owned_path;
 use anolisa_core::state::{
     FileOwner, InstallMode as StateInstallMode, InstalledObject, InstalledState, ObjectKind,
-    ObjectStatus, OperationRecord, OwnedFile, Ownership, ServiceRef,
+    ObjectStatus, OperationRecord, OwnedFile, Ownership, RpmMetadata, ServiceRef,
 };
 use anolisa_core::{
     ArtifactType, ComponentManifest, DistributionEntry, DistributionIndex, FileKind, ResolveQuery,
     expand_layout_placeholders,
 };
 use anolisa_platform::fs_layout::FsLayout;
+use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError};
+use anolisa_platform::rpm_query::RpmPackageQuery;
 use chrono::{SecondsFormat, Utc};
 
 use crate::color::Palette;
 use crate::commands::common;
-use crate::context::CliContext;
+use crate::context::{CliContext, InstallMode};
 use crate::repo_config::{
-    HostVars, RepoConfig, RepoConfigError, normalize_override_url, raw_artifact_url, raw_index_url,
-    raw_relative_root,
+    BackendConfig, HostVars, RepoConfig, RepoConfigError, normalize_override_url, raw_artifact_url,
+    raw_index_url, raw_relative_root,
 };
 use crate::response::{CliError, render_json, render_json_with_status};
 
@@ -74,7 +84,7 @@ pub struct InstallArgs {
     /// Install a specific version instead of the latest in the channel
     #[arg(long, value_name = "VERSION")]
     pub version: Option<String>,
-    /// Backend override (raw | yum | npm); defaults to repo.toml default_backend
+    /// Backend override (raw | rpm | npm); defaults to repo.toml default_backend
     #[arg(long, value_name = "BACKEND")]
     pub backend: Option<String>,
     /// One-off base_url override for the selected backend
@@ -167,6 +177,33 @@ struct InstallResultPayload {
     warnings: Vec<String>,
 }
 
+/// What `handle_one` did, so `--all` can distinguish a fresh install from an
+/// RPM adopt in its batch summary (§7.5). The dry-run vs real distinction is
+/// layered on by the caller from [`CliContext::dry_run`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InstallOutcome {
+    /// A raw install (downloaded + placed files, or its dry-run preview).
+    Installed,
+    /// An existing system RPM recorded as `rpm-observed` (or its dry-run
+    /// preview); no bytes fetched, no owned files written.
+    Adopted,
+}
+
+/// Source that decided the backend name in layer 1 (§4). Only used to phrase
+/// conflict errors; the action is chosen by layer 2 from `(backend, rpmdb,
+/// mode)`, independent of how the name was picked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackendSource {
+    /// Explicit `--backend`.
+    Explicit,
+    /// Component already in state; backend follows its recorded provenance.
+    ExistingState,
+    /// State miss; system mode + rpmdb hit selected `rpm`.
+    SystemRpm,
+    /// None of the above; fell back to `default_backend`.
+    Default,
+}
+
 pub fn handle(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
     if args.fail_fast && !args.all {
         return Err(CliError::InvalidArgument {
@@ -183,22 +220,130 @@ pub fn handle(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
         .component
         .clone()
         .expect("clap ArgGroup ensures component is set when --all is absent");
-    handle_one(component, args, ctx)
+    handle_one(component, args, ctx).map(|_| ())
 }
 
-fn handle_one(component: String, args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
+fn handle_one(
+    component: String,
+    args: InstallArgs,
+    ctx: &CliContext,
+) -> Result<InstallOutcome, CliError> {
+    // Production uses the real rpm/dnf-backed query; tests inject a fake via
+    // `handle_one_with_query`. Construction is side-effect-free (it only holds
+    // a command runner), so building it on the raw path costs nothing.
+    let query = RpmPackageQuery::system();
+    handle_one_with_query(component, args, ctx, &query)
+}
+
+/// Core of [`handle_one`] with the package query injected, so tests can drive
+/// the adopt path without a live rpmdb.
+fn handle_one_with_query(
+    component: String,
+    args: InstallArgs,
+    ctx: &CliContext,
+    query: &dyn PackageQuery,
+) -> Result<InstallOutcome, CliError> {
     let command = format!("install {component}");
 
     let layout = common::resolve_layout(ctx);
     let env = anolisa_env::EnvService::detect();
-
-    // — Resolution chain: repo.toml → backend → base_url → package. —
     let repo_config = RepoConfig::load(&layout).map_err(|err| repo_config_err(err, false))?;
+    let installed = common::load_installed_state(ctx, COMMAND)?;
+
+    // ── Layer 1: pick the backend name + its source (§4). ──
+    //
+    // Priority: explicit --backend > existing state > system RPM presence
+    // (system mode only) > default_backend. The system-RPM probe runs only
+    // when nothing earlier decided, so non-RPM hosts and the common raw path
+    // never shell out to rpm/dnf.
+    let mut adopt_situation: Option<RpmSituation> = None;
+    let (backend_name, source): (String, BackendSource) = if let Some(explicit) =
+        args.backend.as_deref()
+    {
+        (explicit.to_string(), BackendSource::Explicit)
+    } else if let Some(label) = installed
+        .find_object(ObjectKind::Component, &component)
+        .and_then(installed_backend_label)
+    {
+        // Provenance is sticky: a re-`install` of an adopted rpm-observed
+        // component lands on `rpm` here and is routed to adopt-refresh by
+        // layer 2, rather than being rejected by the raw trunk.
+        (label.to_string(), BackendSource::ExistingState)
+    } else if ctx.install_mode == InstallMode::System {
+        let situation = probe_rpm_situation(&component, &args, &repo_config, ctx, query, &command)?;
+        if matches!(situation, RpmSituation::Absent) {
+            (repo_config.default_backend.clone(), BackendSource::Default)
+        } else {
+            adopt_situation = Some(situation);
+            ("rpm".to_string(), BackendSource::SystemRpm)
+        }
+    } else {
+        (repo_config.default_backend.clone(), BackendSource::Default)
+    };
+
+    // ── Layer 2: pick the action by (backend, rpmdb, mode) (§7.1). ──
+    if backend_name == "rpm" {
+        return route_rpm_adopt(
+            &component,
+            &args,
+            ctx,
+            &command,
+            &layout,
+            &repo_config,
+            &installed,
+            source,
+            adopt_situation,
+            query,
+        );
+    }
+
+    handle_raw_install(
+        component,
+        args,
+        ctx,
+        &command,
+        &layout,
+        &env,
+        &repo_config,
+        &installed,
+        &backend_name,
+    )
+}
+
+/// Existing raw-backend trunk: repo.toml → base_url → package → resolve →
+/// (dry-run preview | download + execute). Backends other than `raw` that
+/// reach here have no executor yet and return a not-implemented hint.
+#[allow(clippy::too_many_arguments)]
+fn handle_raw_install(
+    component: String,
+    args: InstallArgs,
+    ctx: &CliContext,
+    command: &str,
+    layout: &FsLayout,
+    env: &anolisa_env::EnvFacts,
+    repo_config: &RepoConfig,
+    installed: &InstalledState,
+    backend_name: &str,
+) -> Result<InstallOutcome, CliError> {
+    // Re-resolve through `select_backend` so the configured `[backends.<name>]`
+    // table (base_url, package_map, scope) is in hand. This stays on the raw
+    // path only; the rpm/adopt branch above never calls it (no table required).
     let (backend_name, backend) = repo_config
-        .select_backend(args.backend.as_deref())
-        // Only reachable via --backend (validation guarantees the default
-        // is configured), so this is caller input.
+        .select_backend(Some(backend_name))
         .map_err(|err| repo_config_err(err, true))?;
+
+    ensure_component_backend_compatible(installed, &component, backend_name, command)?;
+
+    // Backend gate: only raw can execute today. The selection above already
+    // validated the name/configuration, so this is purely "executor missing".
+    if backend_name != "raw" {
+        return Err(CliError::not_implemented_with_hint(
+            format!("install --backend {backend_name}"),
+            format!(
+                "the '{backend_name}' backend is configured but its executor is not implemented yet — only 'raw' can install today",
+            ),
+        ));
+    }
 
     let mut warnings: Vec<String> = Vec::new();
     let base_url = match args.repo.as_deref() {
@@ -225,24 +370,10 @@ fn handle_one(component: String, args: InstallArgs, ctx: &CliContext) -> Result<
     };
     let package = repo_config.package_name(backend, &component, args.package.as_deref());
 
-    let installed = common::load_installed_state(ctx, COMMAND)?;
-    ensure_component_backend_compatible(&installed, &component, backend_name, COMMAND)?;
-
-    // Backend gate: only raw can execute today. The selection above already
-    // validated the name/configuration, so this is purely "executor missing".
-    if backend_name != "raw" {
-        return Err(CliError::not_implemented_with_hint(
-            format!("install --backend {backend_name}"),
-            format!(
-                "the '{backend_name}' backend is configured but its executor is not implemented yet — only 'raw' can install today",
-            ),
-        ));
-    }
-
     let resolved = resolve_raw(
         ctx,
-        &layout,
-        &env,
+        layout,
+        env,
         ResolveInputs {
             component,
             package,
@@ -254,12 +385,411 @@ fn handle_one(component: String, args: InstallArgs, ctx: &CliContext) -> Result<
     )?;
 
     if ctx.dry_run {
-        let preview = build_install_preview(ctx, &layout, resolved)?;
-        return render_plan(ctx, &preview);
+        let preview = build_install_preview(ctx, layout, resolved)?;
+        render_plan(ctx, &preview)?;
+        return Ok(InstallOutcome::Installed);
     }
 
-    let prepared = prepare_raw_execution(ctx, &layout, resolved)?;
-    execute_raw(ctx, &layout, &command, prepared)
+    let prepared = prepare_raw_execution(ctx, layout, resolved)?;
+    execute_raw(ctx, layout, command, prepared)?;
+    Ok(InstallOutcome::Installed)
+}
+
+// ── rpm adopt path (#958) ───────────────────────────────────────────
+
+/// Result of probing whether `component` is present as a system RPM (§5/§7.1).
+enum RpmSituation {
+    /// Exactly one candidate package name, installed once — ready to adopt.
+    Adoptable {
+        /// Resolved package name (the candidate that hit rpmdb).
+        package: String,
+        /// rpmdb query result carrying EVR/arch for the state record.
+        info: PackageInfo,
+    },
+    /// Not present as a system RPM: the single candidate is not installed, or
+    /// the host has no rpm tooling at all. Layer 1 falls through to the
+    /// default backend; an explicit `--backend rpm` turns this into the
+    /// "dnf install not implemented" hint (§7.4).
+    Absent,
+    /// `provides` reverse-lookup matched several distinct installed packages
+    /// (§5.5). Reported, never silently adopted.
+    Ambiguous(Vec<String>),
+    /// The candidate resolved but rpmdb holds several installed versions of it
+    /// (`UnexpectedOutput`, §5.5) — a drift state, not a clean adopt target.
+    MultiVersion(String),
+}
+
+/// Resolve the candidate RPM package name(s) for `component` and probe rpmdb.
+///
+/// Errors only when a query hard-fails in a way that is not the host's normal
+/// "absent" signal; a missing `rpm`/`dnf` binary is treated as [`Absent`]
+/// (the host is not RPM-based, so no component can be a system RPM there).
+///
+/// [`Absent`]: RpmSituation::Absent
+fn probe_rpm_situation(
+    component: &str,
+    args: &InstallArgs,
+    repo_config: &RepoConfig,
+    ctx: &CliContext,
+    query: &dyn PackageQuery,
+    command: &str,
+) -> Result<RpmSituation, CliError> {
+    let manifest = load_optional_manifest(ctx, component);
+    let rpm_backend = repo_config.backends.get("rpm");
+    let candidates = rpm_package_candidates(
+        args.package.as_deref(),
+        manifest.as_ref(),
+        rpm_backend,
+        query,
+        component,
+    )
+    .map_err(|err| pkg_query_err(err, command))?;
+
+    if candidates.len() >= 2 {
+        return Ok(RpmSituation::Ambiguous(candidates));
+    }
+    // `rpm_package_candidates` always backfills the default name, so exactly
+    // one candidate remains here.
+    let package = candidates
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| format!("anolisa-{component}"));
+
+    match query.query_installed(&package) {
+        Ok(Some(info)) => Ok(RpmSituation::Adoptable { package, info }),
+        Ok(None) => Ok(RpmSituation::Absent),
+        // Same name, several installed versions: a drift the caller reports.
+        Err(PackageQueryError::UnexpectedOutput { .. }) => Ok(RpmSituation::MultiVersion(package)),
+        // No rpm/dnf on this host → it cannot host system RPMs at all.
+        Err(PackageQueryError::CommandMissing { .. }) => Ok(RpmSituation::Absent),
+        Err(err) => Err(pkg_query_err(err, command)),
+    }
+}
+
+/// Resolve candidate RPM package names for `component`, highest precedence
+/// first (§5): CLI `--package` > manifest `[backends.rpm].package` > repo.toml
+/// `package_map` > RPM `provides` reverse-lookup > default `anolisa-<name>`.
+///
+/// The first four levels short-circuit to a single candidate; only the
+/// `provides` level can yield several (the ambiguous case, §5.5). The default
+/// name backfills whenever `provides` is empty, so the result is never empty.
+///
+/// # Errors
+/// Propagates a hard [`PackageQueryError`] from the `provides` query; an empty
+/// `provides` result is the normal "no contract / no match" branch and falls
+/// through to default naming.
+pub(crate) fn rpm_package_candidates(
+    cli_override: Option<&str>,
+    manifest: Option<&ComponentManifest>,
+    rpm_backend: Option<&BackendConfig>,
+    query: &dyn PackageQuery,
+    component: &str,
+) -> Result<Vec<String>, PackageQueryError> {
+    if let Some(name) = cli_override {
+        return Ok(vec![name.to_string()]);
+    }
+    if let Some(name) = manifest.and_then(ComponentManifest::rpm_package) {
+        return Ok(vec![name.to_string()]);
+    }
+    if let Some(mapped) = rpm_backend.and_then(|b| b.package_map.get(component)) {
+        return Ok(vec![mapped.clone()]);
+    }
+    // Virtual-provides contract (`anolisa-component(<name>)`). It does not yet
+    // exist on the packaging side, so this returns empty today and the chain
+    // falls through to default naming — by design, not an error (§5.3).
+    let provides = query.what_provides_installed(&format!("anolisa-component({component})"))?;
+    if !provides.is_empty() {
+        return Ok(provides);
+    }
+    Ok(vec![format!("anolisa-{component}")])
+}
+
+/// Best-effort lookup of a component's manifest from the bundled catalog, for
+/// the `[backends.rpm].package` mapping level. Adopt does not require a local
+/// manifest (§5.1): any failure or miss yields `None` and the package-name
+/// chain falls through to the lower tiers.
+fn load_optional_manifest(ctx: &CliContext, component: &str) -> Option<ComponentManifest> {
+    let catalog = common::load_bundled_catalog(ctx, COMMAND).ok()?;
+    catalog.component(component).cloned()
+}
+
+/// Layer 2 for the `rpm` backend: reject in user mode, otherwise adopt an
+/// installed package, or surface the ambiguous / drift / not-yet-installed
+/// cases (§7.1). `situation` is reused from layer 1's probe when present
+/// (the `SystemRpm` source), and computed here otherwise (`Explicit` rpm).
+#[allow(clippy::too_many_arguments)]
+fn route_rpm_adopt(
+    component: &str,
+    args: &InstallArgs,
+    ctx: &CliContext,
+    command: &str,
+    layout: &FsLayout,
+    repo_config: &RepoConfig,
+    installed: &InstalledState,
+    source: BackendSource,
+    situation: Option<RpmSituation>,
+    query: &dyn PackageQuery,
+) -> Result<InstallOutcome, CliError> {
+    // Adopt is a system-scope action (§4.1). The only way to reach `rpm` in
+    // user mode is an explicit `--backend rpm`, which we reject rather than
+    // record a system RPM into user-scope state.
+    if ctx.install_mode != InstallMode::System {
+        return Err(CliError::InvalidArgument {
+            command: command.to_string(),
+            reason: format!(
+                "--backend rpm adopts a system RPM and requires system scope; re-run with --install-mode system (got {} mode)",
+                ctx.install_mode.as_str()
+            ),
+        });
+    }
+
+    // Explicit `--backend rpm` may switch an already-installed component's
+    // provenance; reuse the same guard the raw path uses.
+    if source == BackendSource::Explicit {
+        ensure_component_backend_compatible(installed, component, "rpm", command)?;
+    }
+
+    let situation = match situation {
+        Some(s) => s,
+        None => probe_rpm_situation(component, args, repo_config, ctx, query, command)?,
+    };
+
+    match situation {
+        RpmSituation::Adoptable { package, info } => {
+            execute_adopt(ctx, layout, command, component, package, info, query)
+        }
+        RpmSituation::Absent => Err(CliError::not_implemented_with_hint(
+            format!("install --backend rpm {component}"),
+            "--backend rpm requires the package to be installed for adopt; delegated 'dnf install' is not implemented yet (tracked in #959)"
+                .to_string(),
+        )),
+        RpmSituation::Ambiguous(names) => Err(CliError::InvalidArgument {
+            command: command.to_string(),
+            reason: format!(
+                "multiple installed RPMs provide component '{component}': {}; cannot adopt unambiguously — pin one with `--package <name>` or fix the manifest/package_map mapping",
+                names.join(", ")
+            ),
+        }),
+        RpmSituation::MultiVersion(package) => Err(CliError::InvalidArgument {
+            command: command.to_string(),
+            reason: format!(
+                "RPM package '{package}' has multiple installed versions; refusing to adopt a single version automatically — resolve the duplicate first",
+            ),
+        }),
+    }
+}
+
+/// Wire shape for an adopt result (`--json`) and its dry-run preview.
+#[derive(Serialize)]
+struct AdoptResultPayload {
+    component: String,
+    package: String,
+    backend: &'static str,
+    /// Always `rpm-observed`: adopt only records observation, never ownership.
+    ownership: &'static str,
+    version: String,
+    arch: Option<String>,
+    source_repo: Option<String>,
+    install_mode: String,
+    /// `None` on dry-run (nothing written).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation_id: Option<String>,
+    dry_run: bool,
+    warnings: Vec<String>,
+}
+
+/// Record an installed system RPM as `rpm-observed` state (§7.2). Fetches
+/// nothing, writes no owned files, touches no RPM-owned paths — only rpmdb
+/// reads plus a state write. On `--dry-run` it renders the plan without
+/// writing.
+fn execute_adopt(
+    ctx: &CliContext,
+    layout: &FsLayout,
+    command: &str,
+    component: &str,
+    package: String,
+    info: PackageInfo,
+    query: &dyn PackageQuery,
+) -> Result<InstallOutcome, CliError> {
+    let mut warnings: Vec<String> = Vec::new();
+    // source_repo is supplementary metadata: a failed origin lookup degrades
+    // to `None` with a warning and never fails the adopt (§7.2).
+    let source_repo = match query.installed_origin(&package) {
+        Ok(origin) => origin,
+        Err(err) => {
+            warnings.push(format!(
+                "could not determine source repo for '{package}': {err}"
+            ));
+            None
+        }
+    };
+    let evr = info.version.to_string();
+
+    let mut payload = AdoptResultPayload {
+        component: component.to_string(),
+        package: package.clone(),
+        backend: "rpm",
+        ownership: "rpm-observed",
+        version: evr.clone(),
+        arch: Some(info.arch.clone()),
+        source_repo: source_repo.clone(),
+        install_mode: ctx.install_mode.as_str().to_string(),
+        operation_id: None,
+        dry_run: ctx.dry_run,
+        warnings: warnings.clone(),
+    };
+
+    if ctx.dry_run {
+        render_adopt(ctx, &payload);
+        return Ok(InstallOutcome::Adopted);
+    }
+
+    // Acquire the lock, then load state inside it so a concurrent writer is
+    // not clobbered — mirrors `execute_raw`'s ordering.
+    let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("failed to acquire install lock: {err}"),
+    })?;
+    let mut state =
+        common::load_installed_state(ctx, command).map_err(|err| CliError::Runtime {
+            command: command.to_string(),
+            reason: format!("failed to load installed state: {err}"),
+        })?;
+
+    let started_at = now_iso8601();
+    let lock_ts = Utc::now();
+    let operation_id = format!(
+        "op-install-{}-{}",
+        lock_ts.format("%Y%m%d%H%M%S"),
+        lock_ts.timestamp_subsec_nanos()
+    );
+
+    // Adopt is system-scope by construction (route_rpm_adopt rejects user mode).
+    state.install_mode = StateInstallMode::System;
+    state.prefix = layout.prefix.clone();
+    state.upsert_object(InstalledObject {
+        kind: ObjectKind::Component,
+        name: component.to_string(),
+        // EVR form, the observed version.
+        version: evr.clone(),
+        // `Adopted` is the lifecycle status (state.rs); `RpmObserved` below is
+        // the orthogonal provenance. Together they model proposal §12 Adopted.
+        status: ObjectStatus::Adopted,
+        manifest_digest: None,
+        // Not an ANOLISA-delivered artifact.
+        distribution_source: None,
+        install_backend: Some("rpm".to_string()),
+        ownership: Some(Ownership::RpmObserved),
+        rpm_metadata: Some(RpmMetadata {
+            package_name: info.name.clone(),
+            evr: Some(evr.clone()),
+            arch: Some(info.arch.clone()),
+            source_repo: source_repo.clone(),
+        }),
+        installed_at: started_at.clone(),
+        last_operation_id: Some(operation_id.clone()),
+        // ANOLISA does not own the file transaction (owns_removal=false).
+        managed: false,
+        // Audit/UI vocabulary: explicit adoption.
+        adopted: true,
+        subscription_scope: Default::default(),
+        enabled_features: Vec::new(),
+        component_refs: Vec::new(),
+        // RPM-owned files stay out of ANOLISA owned-files: status/uninstall
+        // must not treat them as ANOLISA-owned.
+        files: Vec::new(),
+        external_modified_files: Vec::new(),
+        services: Vec::new(),
+        health: Vec::new(),
+    });
+    state.operations.push(OperationRecord {
+        id: operation_id.clone(),
+        command: command.to_string(),
+        status: "ok".to_string(),
+        started_at: started_at.clone(),
+        finished_at: Some(now_iso8601()),
+    });
+
+    let state_path = layout.state_dir.join("installed.toml");
+    state.save(&state_path).map_err(|err| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("failed to save state: {err}"),
+    })?;
+
+    // Audit log is best-effort: the adopt already persisted, so a log failure
+    // downgrades to a warning instead of unwinding.
+    let log = CentralLog::open(layout.central_log.clone());
+    let record = LogRecord {
+        kind: LogKind::Operation,
+        operation_id: Some(operation_id.clone()),
+        command: command.to_string(),
+        source: "anolisa-cli".to_string(),
+        component: Some(component.to_string()),
+        severity: Severity::Info,
+        message: format!(
+            "adopted existing RPM package {package} ({evr}) as rpm-observed for component {component}"
+        ),
+        actor: "cli".to_string(),
+        install_mode: Some(ctx.install_mode.as_str().to_string()),
+        started_at,
+        finished_at: Some(now_iso8601()),
+        status: Some(LogStatus::Ok),
+        objects: vec![component.to_string()],
+        backup_ids: Vec::new(),
+        warnings: warnings.clone(),
+        details: serde_json::Value::Null,
+    };
+    if let Err(err) = log.append(&record) {
+        eprintln!("warning: failed to write central log: {err}");
+    }
+
+    payload.operation_id = Some(operation_id);
+    render_adopt(ctx, &payload);
+    Ok(InstallOutcome::Adopted)
+}
+
+/// Render an adopt result (JSON envelope or the proposal §6.1 human text).
+/// Silent in quiet mode; the `--all` batch path drives its own summary.
+fn render_adopt(ctx: &CliContext, payload: &AdoptResultPayload) {
+    if ctx.json {
+        // Errors here are unreachable for a plain Serialize struct; ignore the
+        // Result so the (already-persisted) adopt is not reported as failed.
+        let _ = render_json(COMMAND, payload);
+        return;
+    }
+    if ctx.quiet {
+        return;
+    }
+    let color = Palette::new(ctx.no_color);
+    let repo = payload.source_repo.as_deref().unwrap_or("unknown repo");
+    let suffix = if payload.dry_run {
+        " (dry-run — nothing recorded)"
+    } else {
+        ""
+    };
+    println!(
+        "{} {} ({}, {}){}",
+        color.label("Detected existing RPM package:"),
+        payload.package,
+        payload.version,
+        repo,
+        color.muted(suffix),
+    );
+    println!(
+        "{}",
+        color.ok("Adopted as rpm-observed. ANOLISA will not replace it with raw.")
+    );
+    render_warnings(&payload.warnings, &color);
+}
+
+/// Map a [`PackageQueryError`] onto a CLI error. Spawn/permission/query
+/// failures are runtime faults; output-shape problems are runtime faults too
+/// (the caller has already split off the benign "not installed" branches).
+fn pkg_query_err(err: PackageQueryError, command: &str) -> CliError {
+    CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("rpm query failed: {err}"),
+    }
 }
 
 // ── --all support ───────────────────────────────────────────────────
@@ -283,7 +813,8 @@ struct AllCatalogEntry {
 }
 
 /// Wire shape for a batch entry.  `status` is one of:
-/// `installed` | `planned` (dry-run) | `failed` | `skipped`.
+/// `installed` | `planned` (dry-run) | `adopted` | `adopt-planned` (dry-run) |
+/// `failed` | `skipped`.
 #[derive(Serialize)]
 struct AllSummaryItem {
     component: String,
@@ -296,6 +827,10 @@ struct AllSummaryPayload {
     total: usize,
     installed: usize,
     planned: usize,
+    /// Existing system RPMs recorded as rpm-observed (§7.5).
+    adopted: usize,
+    /// Dry-run adopt previews.
+    adopt_planned: usize,
     failed: usize,
     skipped: usize,
     dry_run: bool,
@@ -319,6 +854,8 @@ fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
                     total: 0,
                     installed: 0,
                     planned: 0,
+                    adopted: 0,
+                    adopt_planned: 0,
                     failed: 0,
                     skipped: 0,
                     dry_run: ctx.dry_run,
@@ -338,10 +875,6 @@ fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
         quiet: true,
         ..ctx.clone()
     };
-
-    // Dry-run successes are "planned" rather than "installed": no files or
-    // state were written.
-    let ok_status: &'static str = if ctx.dry_run { "planned" } else { "installed" };
 
     let mut items: Vec<AllSummaryItem> = Vec::with_capacity(names.len());
     let mut first_error: Option<CliError> = None;
@@ -363,9 +896,12 @@ fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
             package: None,
         };
         match handle_one(name.clone(), per_args, &suppressed_ctx) {
-            Ok(()) => items.push(AllSummaryItem {
+            // Map (outcome, dry-run) to a batch status string so the summary
+            // distinguishes a fresh install from an RPM adopt (§7.5). Dry-run
+            // successes are "planned"/"adopt-planned": nothing was written.
+            Ok(outcome) => items.push(AllSummaryItem {
                 component: name.clone(),
-                status: ok_status,
+                status: batch_status(outcome, ctx.dry_run),
                 reason: None,
             }),
             Err(err) => {
@@ -397,6 +933,8 @@ fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
 
     let installed = items.iter().filter(|i| i.status == "installed").count();
     let planned = items.iter().filter(|i| i.status == "planned").count();
+    let adopted = items.iter().filter(|i| i.status == "adopted").count();
+    let adopt_planned = items.iter().filter(|i| i.status == "adopt-planned").count();
     let failed = items.iter().filter(|i| i.status == "failed").count();
     let skipped = items.iter().filter(|i| i.status == "skipped").count();
 
@@ -412,6 +950,8 @@ fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
                 total: names.len(),
                 installed,
                 planned,
+                adopted,
+                adopt_planned,
                 failed,
                 skipped,
                 dry_run: ctx.dry_run,
@@ -436,9 +976,22 @@ fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
             .collect();
         let ok_word = if ctx.dry_run { "planned" } else { "installed" };
         let ok_count = if ctx.dry_run { planned } else { installed };
+        // Adopts are a distinct outcome from installs; show them as their own
+        // segment (and only when non-zero) so the count isn't lost (§7.5).
+        let adopt_word = if ctx.dry_run {
+            "adopt-planned"
+        } else {
+            "adopted"
+        };
+        let adopt_count = if ctx.dry_run { adopt_planned } else { adopted };
+        let adopt_segment = if adopt_count > 0 {
+            format!("  {adopt_word}={adopt_count}")
+        } else {
+            String::new()
+        };
         if failed_names.is_empty() {
             println!(
-                "{} total={}  {ok_word}={}  skipped={}",
+                "{} total={}  {ok_word}={}{adopt_segment}  skipped={}",
                 color.label("summary:"),
                 names.len(),
                 ok_count,
@@ -446,7 +999,7 @@ fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
             );
         } else {
             println!(
-                "{} total={}  {ok_word}={}  failed={} ({})  skipped={}",
+                "{} total={}  {ok_word}={}{adopt_segment}  failed={} ({})  skipped={}",
                 color.label("summary:"),
                 names.len(),
                 ok_count,
@@ -460,6 +1013,18 @@ fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
                 }
             }
         }
+        // List adopted components explicitly so `--all` shows which were
+        // taken over rather than freshly installed.
+        for item in items
+            .iter()
+            .filter(|i| i.status == "adopted" || i.status == "adopt-planned")
+        {
+            println!(
+                "{} {}",
+                color.label("adopted rpm-observed:"),
+                item.component
+            );
+        }
     }
 
     // Human mode: preserve non-zero exit code on failure.
@@ -468,6 +1033,18 @@ fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
             command: "install --all".to_string(),
         }),
         None => Ok(()),
+    }
+}
+
+/// Batch status string for a successful `handle_one`, combining the outcome
+/// with dry-run. Kept aligned with the `filter`-by-string counting in
+/// [`handle_all`] (§7.5): a new string here must be matched there too.
+fn batch_status(outcome: InstallOutcome, dry_run: bool) -> &'static str {
+    match (outcome, dry_run) {
+        (InstallOutcome::Installed, false) => "installed",
+        (InstallOutcome::Installed, true) => "planned",
+        (InstallOutcome::Adopted, false) => "adopted",
+        (InstallOutcome::Adopted, true) => "adopt-planned",
     }
 }
 
@@ -2146,8 +2723,10 @@ sha256 = "{sha}"
     }
 
     /// A configured non-raw backend selects fine but has no executor yet.
+    /// `npm` is the stand-in: it is in `KNOWN_BACKENDS` and configurable, but
+    /// has no installer (unlike `rpm`, which routes to the adopt path).
     #[test]
-    fn install_configured_yum_backend_is_not_implemented() {
+    fn install_configured_npm_backend_is_not_implemented() {
         let tmp = tempdir().expect("tmpdir");
         let prefix = tmp.path().to_path_buf();
         let layout = FsLayout::system(Some(prefix.clone()));
@@ -2160,17 +2739,18 @@ default_backend = "raw"
 [backends.raw]
 base_url = "https://example.com/anolisa"
 
-[backends.yum]
-base_url = "https://example.com/yum-repo"
+[backends.npm]
+base_url = "https://registry.npmjs.org"
+scope = "@anolisa"
 "#,
         )
         .expect("write repo.toml");
 
         let mut a = args("agentsight");
-        a.backend = Some("yum".to_string());
+        a.backend = Some("npm".to_string());
         let err = handle(a, &ctx_with_prefix(false, Some(prefix))).expect_err("must error");
         assert_eq!(err.code(), "NOT_IMPLEMENTED");
-        assert!(err.reason().contains("yum"), "got: {}", err.reason());
+        assert!(err.reason().contains("npm"), "got: {}", err.reason());
     }
 
     /// A malformed `--repo` URL fails the same shape rules as configured
@@ -2420,8 +3000,9 @@ default_backend = "raw"
 [backends.raw]
 base_url = "https://example.com/anolisa"
 
-[backends.yum]
-base_url = "https://example.com/yum-repo"
+[backends.npm]
+base_url = "https://registry.npmjs.org"
+scope = "@anolisa"
 "#,
         )
         .expect("write repo.toml");
@@ -2458,13 +3039,13 @@ base_url = "https://example.com/yum-repo"
             .expect("save state");
 
         let mut a = args("agentsight");
-        a.backend = Some("yum".to_string());
+        a.backend = Some("npm".to_string());
         let err = handle(a, &ctx_with_prefix(false, Some(prefix))).expect_err("must error");
 
         assert_eq!(err.code(), "INVALID_ARGUMENT");
         assert!(
             err.reason().contains("already installed via backend 'raw'")
-                && err.reason().contains("backend 'yum'"),
+                && err.reason().contains("backend 'npm'"),
             "reason must explain backend conflict: {}",
             err.reason()
         );
@@ -2676,5 +3257,568 @@ base_url = "https://example.com/yum-repo"
             .filter(|n| !n.trim().is_empty())
             .collect();
         assert_eq!(names, vec!["valid"]);
+    }
+
+    // ── rpm adopt path (#958) ───────────────────────────────────────
+
+    use anolisa_platform::pkg_query::PackageVersion;
+
+    /// Configurable in-memory [`PackageQuery`] so adopt tests run without a
+    /// live rpmdb.
+    #[derive(Default)]
+    struct FakeQuery {
+        installed: Vec<(String, PackageInfo)>,
+        origins: Vec<(String, String)>,
+        provides: Vec<(String, Vec<String>)>,
+        multi_version: Vec<String>,
+        origin_fails: bool,
+    }
+
+    impl PackageQuery for FakeQuery {
+        fn query_installed(&self, package: &str) -> Result<Option<PackageInfo>, PackageQueryError> {
+            if self.multi_version.iter().any(|p| p == package) {
+                return Err(PackageQueryError::UnexpectedOutput {
+                    command: "rpm".to_string(),
+                    detail: "2 installed versions".to_string(),
+                });
+            }
+            Ok(self
+                .installed
+                .iter()
+                .find(|(n, _)| n == package)
+                .map(|(_, info)| info.clone()))
+        }
+
+        fn query_available(&self, _package: &str) -> Result<Vec<PackageInfo>, PackageQueryError> {
+            Ok(Vec::new())
+        }
+
+        fn installed_origin(&self, package: &str) -> Result<Option<String>, PackageQueryError> {
+            if self.origin_fails {
+                return Err(PackageQueryError::QueryFailed {
+                    command: "dnf".to_string(),
+                    code: Some(1),
+                    stderr: "boom".to_string(),
+                });
+            }
+            Ok(self
+                .origins
+                .iter()
+                .find(|(n, _)| n == package)
+                .map(|(_, repo)| repo.clone()))
+        }
+
+        fn what_provides_installed(
+            &self,
+            capability: &str,
+        ) -> Result<Vec<String>, PackageQueryError> {
+            Ok(self
+                .provides
+                .iter()
+                .find(|(cap, _)| cap == capability)
+                .map(|(_, names)| names.clone())
+                .unwrap_or_default())
+        }
+    }
+
+    fn pkg_info(name: &str, version: &str, release: Option<&str>, arch: &str) -> PackageInfo {
+        PackageInfo {
+            name: name.to_string(),
+            version: PackageVersion {
+                epoch: None,
+                version: version.to_string(),
+                release: release.map(str::to_string),
+            },
+            arch: arch.to_string(),
+            origin: None,
+        }
+    }
+
+    /// System-mode ctx over a tempdir with a raw-only `repo.toml` (the AC1
+    /// shape: no `[backends.rpm]` table). Returns the temp guard so callers
+    /// keep the directory alive.
+    fn system_ctx_with_raw_repo(dry_run: bool) -> (tempfile::TempDir, CliContext) {
+        let tmp = tempdir().expect("tmpdir");
+        let prefix = tmp.path().to_path_buf();
+        let layout = FsLayout::system(Some(prefix.clone()));
+        std::fs::create_dir_all(&layout.etc_dir).expect("etc dir");
+        std::fs::create_dir_all(&layout.state_dir).expect("state dir");
+        std::fs::write(
+            layout.etc_dir.join("repo.toml"),
+            "schema_version = 1\ndefault_backend = \"raw\"\n\n[backends.raw]\nbase_url = \"https://example.com/anolisa\"\n",
+        )
+        .expect("write repo.toml");
+        let mut ctx = ctx_with_prefix(false, Some(prefix));
+        ctx.dry_run = dry_run;
+        (tmp, ctx)
+    }
+
+    fn load_state(ctx: &CliContext) -> InstalledState {
+        let layout = common::resolve_layout(ctx);
+        InstalledState::load(&layout.state_dir.join("installed.toml")).expect("load state")
+    }
+
+    fn repo_with_rpm_map(pairs: &[(&str, &str)]) -> RepoConfig {
+        let mut map = String::new();
+        for (k, v) in pairs {
+            map.push_str(&format!("{k} = \"{v}\"\n"));
+        }
+        RepoConfig::from_toml_str(&format!(
+            "schema_version = 1\ndefault_backend = \"rpm\"\n[backends.rpm]\nbase_url = \"https://e/x\"\n[backends.rpm.package_map]\n{map}"
+        ))
+        .expect("parse repo")
+    }
+
+    // ── §5 package-name mapping ──
+
+    #[test]
+    fn candidates_cli_override_wins() {
+        let q = FakeQuery::default();
+        let got =
+            rpm_package_candidates(Some("explicit-pkg"), None, None, &q, "copilot-shell").unwrap();
+        assert_eq!(got, vec!["explicit-pkg".to_string()]);
+    }
+
+    #[test]
+    fn candidates_manifest_package_wins_over_default() {
+        let manifest = ComponentManifest::from_toml_str(
+            "[component]\nname = \"copilot-shell\"\nversion = \"1.0.0\"\nlayer = \"runtime\"\n\n[backends.rpm]\npackage = \"vendor-copilot\"\n",
+        )
+        .expect("parse manifest");
+        let q = FakeQuery::default();
+        let got = rpm_package_candidates(None, Some(&manifest), None, &q, "copilot-shell").unwrap();
+        assert_eq!(got, vec!["vendor-copilot".to_string()]);
+    }
+
+    #[test]
+    fn candidates_package_map_wins_over_default() {
+        let repo = repo_with_rpm_map(&[("copilot-shell", "site-copilot")]);
+        let backend = repo.backends.get("rpm");
+        let q = FakeQuery::default();
+        let got = rpm_package_candidates(None, None, backend, &q, "copilot-shell").unwrap();
+        assert_eq!(got, vec!["site-copilot".to_string()]);
+    }
+
+    #[test]
+    fn candidates_provides_single_match() {
+        let q = FakeQuery {
+            provides: vec![(
+                "anolisa-component(copilot-shell)".to_string(),
+                vec!["anolisa-copilot-shell".to_string()],
+            )],
+            ..Default::default()
+        };
+        let got = rpm_package_candidates(None, None, None, &q, "copilot-shell").unwrap();
+        assert_eq!(got, vec!["anolisa-copilot-shell".to_string()]);
+    }
+
+    #[test]
+    fn candidates_provides_multiple_is_ambiguous() {
+        let q = FakeQuery {
+            provides: vec![(
+                "anolisa-component(copilot-shell)".to_string(),
+                vec!["pkg-a".to_string(), "pkg-b".to_string()],
+            )],
+            ..Default::default()
+        };
+        let got = rpm_package_candidates(None, None, None, &q, "copilot-shell").unwrap();
+        assert_eq!(got, vec!["pkg-a".to_string(), "pkg-b".to_string()]);
+    }
+
+    #[test]
+    fn candidates_falls_back_to_default_naming() {
+        let q = FakeQuery::default();
+        let got = rpm_package_candidates(None, None, None, &q, "copilot-shell").unwrap();
+        assert_eq!(got, vec!["anolisa-copilot-shell".to_string()]);
+    }
+
+    // ── §5/§7.1 situation probe ──
+
+    #[test]
+    fn probe_reports_adoptable_for_installed_default_name() {
+        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        let repo = RepoConfig::load(&common::resolve_layout(&ctx)).expect("repo");
+        let q = FakeQuery {
+            installed: vec![(
+                "anolisa-copilot-shell".to_string(),
+                pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+            )],
+            ..Default::default()
+        };
+        let situation = probe_rpm_situation(
+            "copilot-shell",
+            &args("copilot-shell"),
+            &repo,
+            &ctx,
+            &q,
+            "install",
+        )
+        .expect("probe");
+        match situation {
+            RpmSituation::Adoptable { package, info } => {
+                assert_eq!(package, "anolisa-copilot-shell");
+                assert_eq!(info.version.to_string(), "2.3.0-1.al8");
+            }
+            other => panic!(
+                "expected Adoptable, got {other:?}",
+                other = situation_label(&other)
+            ),
+        }
+    }
+
+    #[test]
+    fn probe_reports_absent_when_not_installed() {
+        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        let repo = RepoConfig::load(&common::resolve_layout(&ctx)).expect("repo");
+        let q = FakeQuery::default();
+        let situation = probe_rpm_situation(
+            "copilot-shell",
+            &args("copilot-shell"),
+            &repo,
+            &ctx,
+            &q,
+            "install",
+        )
+        .expect("probe");
+        assert!(matches!(situation, RpmSituation::Absent));
+    }
+
+    #[test]
+    fn probe_reports_ambiguous_for_multiple_providers() {
+        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        let repo = RepoConfig::load(&common::resolve_layout(&ctx)).expect("repo");
+        let q = FakeQuery {
+            provides: vec![(
+                "anolisa-component(copilot-shell)".to_string(),
+                vec!["pkg-a".to_string(), "pkg-b".to_string()],
+            )],
+            ..Default::default()
+        };
+        let situation = probe_rpm_situation(
+            "copilot-shell",
+            &args("copilot-shell"),
+            &repo,
+            &ctx,
+            &q,
+            "install",
+        )
+        .expect("probe");
+        assert!(matches!(situation, RpmSituation::Ambiguous(_)));
+    }
+
+    #[test]
+    fn probe_reports_multi_version_drift() {
+        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        let repo = RepoConfig::load(&common::resolve_layout(&ctx)).expect("repo");
+        let q = FakeQuery {
+            multi_version: vec!["anolisa-copilot-shell".to_string()],
+            ..Default::default()
+        };
+        let situation = probe_rpm_situation(
+            "copilot-shell",
+            &args("copilot-shell"),
+            &repo,
+            &ctx,
+            &q,
+            "install",
+        )
+        .expect("probe");
+        assert!(matches!(situation, RpmSituation::MultiVersion(_)));
+    }
+
+    fn situation_label(s: &RpmSituation) -> &'static str {
+        match s {
+            RpmSituation::Adoptable { .. } => "Adoptable",
+            RpmSituation::Absent => "Absent",
+            RpmSituation::Ambiguous(_) => "Ambiguous",
+            RpmSituation::MultiVersion(_) => "MultiVersion",
+        }
+    }
+
+    // ── §7.2 adopt state write ──
+
+    #[test]
+    fn adopt_writes_rpm_observed_state() {
+        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        let q = FakeQuery {
+            installed: vec![(
+                "anolisa-copilot-shell".to_string(),
+                pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+            )],
+            origins: vec![("anolisa-copilot-shell".to_string(), "@System".to_string())],
+            ..Default::default()
+        };
+        let outcome =
+            handle_one_with_query("copilot-shell".to_string(), args("copilot-shell"), &ctx, &q)
+                .expect("adopt ok");
+        assert_eq!(outcome, InstallOutcome::Adopted);
+
+        let state = load_state(&ctx);
+        let obj = state
+            .find_object(ObjectKind::Component, "copilot-shell")
+            .expect("component recorded");
+        assert_eq!(obj.status, ObjectStatus::Adopted);
+        assert_eq!(obj.ownership, Some(Ownership::RpmObserved));
+        assert_eq!(obj.install_backend.as_deref(), Some("rpm"));
+        assert!(!obj.managed, "rpm-observed must not be ANOLISA-managed");
+        assert!(obj.adopted);
+        assert!(obj.files.is_empty(), "RPM-owned files stay out of state");
+        assert_eq!(obj.version, "2.3.0-1.al8");
+        let meta = obj.rpm_metadata.as_ref().expect("rpm metadata");
+        assert_eq!(meta.package_name, "anolisa-copilot-shell");
+        assert_eq!(meta.evr.as_deref(), Some("2.3.0-1.al8"));
+        assert_eq!(meta.arch.as_deref(), Some("x86_64"));
+        assert_eq!(meta.source_repo.as_deref(), Some("@System"));
+    }
+
+    #[test]
+    fn adopt_dry_run_does_not_write_state() {
+        let (_tmp, ctx) = system_ctx_with_raw_repo(true);
+        let q = FakeQuery {
+            installed: vec![(
+                "anolisa-copilot-shell".to_string(),
+                pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+            )],
+            ..Default::default()
+        };
+        let outcome =
+            handle_one_with_query("copilot-shell".to_string(), args("copilot-shell"), &ctx, &q)
+                .expect("adopt plan ok");
+        assert_eq!(outcome, InstallOutcome::Adopted);
+        let state = load_state(&ctx);
+        assert!(
+            state
+                .find_object(ObjectKind::Component, "copilot-shell")
+                .is_none(),
+            "dry-run must not persist adopt state"
+        );
+    }
+
+    #[test]
+    fn adopt_refresh_overwrites_evr() {
+        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        // Pre-seed an older rpm-observed record.
+        let mut state = InstalledState {
+            install_mode: StateInstallMode::System,
+            prefix: common::resolve_layout(&ctx).prefix.clone(),
+            ..Default::default()
+        };
+        state.upsert_object(InstalledObject {
+            kind: ObjectKind::Component,
+            name: "copilot-shell".to_string(),
+            version: "2.2.0-1.al8".to_string(),
+            status: ObjectStatus::Adopted,
+            manifest_digest: None,
+            distribution_source: None,
+            install_backend: Some("rpm".to_string()),
+            ownership: Some(Ownership::RpmObserved),
+            rpm_metadata: Some(RpmMetadata {
+                package_name: "anolisa-copilot-shell".to_string(),
+                evr: Some("2.2.0-1.al8".to_string()),
+                arch: Some("x86_64".to_string()),
+                source_repo: Some("@System".to_string()),
+            }),
+            installed_at: "2026-06-01T10:00:00Z".to_string(),
+            last_operation_id: Some("op-prior".to_string()),
+            managed: false,
+            adopted: true,
+            subscription_scope: Default::default(),
+            enabled_features: Vec::new(),
+            component_refs: Vec::new(),
+            files: Vec::new(),
+            external_modified_files: Vec::new(),
+            services: Vec::new(),
+            health: Vec::new(),
+        });
+        state
+            .save(
+                &common::resolve_layout(&ctx)
+                    .state_dir
+                    .join("installed.toml"),
+            )
+            .expect("seed state");
+
+        // rpmdb now reports a newer EVR.
+        let q = FakeQuery {
+            installed: vec![(
+                "anolisa-copilot-shell".to_string(),
+                pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+            )],
+            origins: vec![("anolisa-copilot-shell".to_string(), "@System".to_string())],
+            ..Default::default()
+        };
+        // No --backend: existing rpm-observed state must route to adopt-refresh,
+        // not be blocked by the raw trunk.
+        let outcome =
+            handle_one_with_query("copilot-shell".to_string(), args("copilot-shell"), &ctx, &q)
+                .expect("refresh ok");
+        assert_eq!(outcome, InstallOutcome::Adopted);
+        let state = load_state(&ctx);
+        let obj = state
+            .find_object(ObjectKind::Component, "copilot-shell")
+            .expect("still recorded");
+        assert_eq!(obj.version, "2.3.0-1.al8");
+        assert_eq!(
+            obj.rpm_metadata.as_ref().and_then(|m| m.evr.as_deref()),
+            Some("2.3.0-1.al8")
+        );
+    }
+
+    #[test]
+    fn adopt_origin_failure_degrades_to_none() {
+        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        let q = FakeQuery {
+            installed: vec![(
+                "anolisa-copilot-shell".to_string(),
+                pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+            )],
+            origin_fails: true,
+            ..Default::default()
+        };
+        let outcome =
+            handle_one_with_query("copilot-shell".to_string(), args("copilot-shell"), &ctx, &q)
+                .expect("adopt still succeeds");
+        assert_eq!(outcome, InstallOutcome::Adopted);
+        let state = load_state(&ctx);
+        let obj = state
+            .find_object(ObjectKind::Component, "copilot-shell")
+            .expect("recorded");
+        assert_eq!(
+            obj.rpm_metadata
+                .as_ref()
+                .and_then(|m| m.source_repo.as_deref()),
+            None,
+            "origin lookup failure must degrade source_repo to None, not fail the adopt"
+        );
+    }
+
+    #[test]
+    fn explicit_rpm_not_installed_is_not_implemented() {
+        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        let q = FakeQuery::default();
+        let mut a = args("copilot-shell");
+        a.backend = Some("rpm".to_string());
+        let err = handle_one_with_query("copilot-shell".to_string(), a, &ctx, &q)
+            .expect_err("not installed → not implemented");
+        assert_eq!(err.code(), "NOT_IMPLEMENTED");
+        // The #959 delegation hint rides on the NotImplemented variant; reason()
+        // surfaces the command, which still names the rpm backend.
+        assert!(err.reason().contains("rpm"), "got: {}", err.reason());
+    }
+
+    #[test]
+    fn adopt_ambiguous_is_invalid_argument() {
+        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        let q = FakeQuery {
+            provides: vec![(
+                "anolisa-component(copilot-shell)".to_string(),
+                vec!["pkg-a".to_string(), "pkg-b".to_string()],
+            )],
+            ..Default::default()
+        };
+        let err =
+            handle_one_with_query("copilot-shell".to_string(), args("copilot-shell"), &ctx, &q)
+                .expect_err("ambiguous → refuse");
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert!(err.reason().contains("pkg-a") && err.reason().contains("pkg-b"));
+    }
+
+    #[test]
+    fn explicit_rpm_in_user_mode_is_rejected() {
+        // route_rpm_adopt rejects user scope before touching rpmdb; call it
+        // directly so the test needs no $HOME isolation.
+        let tmp = tempdir().expect("tmpdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let repo =
+            RepoConfig::from_toml_str("schema_version = 1\ndefault_backend = \"raw\"\n[backends.raw]\nbase_url = \"https://e/x\"\n")
+                .expect("repo");
+        let installed = InstalledState::default();
+        let q = FakeQuery::default();
+        let mut user_ctx = ctx_with_prefix(false, Some(tmp.path().to_path_buf()));
+        user_ctx.install_mode = InstallMode::User;
+
+        let mut a = args("copilot-shell");
+        a.backend = Some("rpm".to_string());
+        let err = route_rpm_adopt(
+            "copilot-shell",
+            &a,
+            &user_ctx,
+            "install copilot-shell",
+            &layout,
+            &repo,
+            &installed,
+            BackendSource::Explicit,
+            None,
+            &q,
+        )
+        .expect_err("user mode must be rejected");
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert!(
+            err.reason().contains("system"),
+            "rejection must point at --install-mode system: {}",
+            err.reason()
+        );
+    }
+
+    #[test]
+    fn explicit_rpm_on_raw_installed_component_is_rejected() {
+        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        // Component already installed via raw.
+        let mut state = InstalledState {
+            install_mode: StateInstallMode::System,
+            prefix: common::resolve_layout(&ctx).prefix.clone(),
+            ..Default::default()
+        };
+        state.upsert_object(InstalledObject {
+            kind: ObjectKind::Component,
+            name: "copilot-shell".to_string(),
+            version: "1.0.0".to_string(),
+            status: ObjectStatus::Installed,
+            manifest_digest: None,
+            distribution_source: Some("https://example.com/raw".to_string()),
+            install_backend: Some("raw".to_string()),
+            ownership: Some(Ownership::RawManaged),
+            rpm_metadata: None,
+            installed_at: "2026-06-01T10:00:00Z".to_string(),
+            last_operation_id: Some("op-prior".to_string()),
+            managed: true,
+            adopted: false,
+            subscription_scope: Default::default(),
+            enabled_features: Vec::new(),
+            component_refs: Vec::new(),
+            files: Vec::new(),
+            external_modified_files: Vec::new(),
+            services: Vec::new(),
+            health: Vec::new(),
+        });
+        state
+            .save(
+                &common::resolve_layout(&ctx)
+                    .state_dir
+                    .join("installed.toml"),
+            )
+            .expect("seed state");
+
+        let q = FakeQuery {
+            installed: vec![(
+                "anolisa-copilot-shell".to_string(),
+                pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+            )],
+            ..Default::default()
+        };
+        let mut a = args("copilot-shell");
+        a.backend = Some("rpm".to_string());
+        let err = handle_one_with_query("copilot-shell".to_string(), a, &ctx, &q)
+            .expect_err("backend switch must be rejected");
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert!(err.reason().contains("raw") && err.reason().contains("rpm"));
+    }
+
+    #[test]
+    fn batch_status_maps_outcome_and_dry_run() {
+        assert_eq!(batch_status(InstallOutcome::Installed, false), "installed");
+        assert_eq!(batch_status(InstallOutcome::Installed, true), "planned");
+        assert_eq!(batch_status(InstallOutcome::Adopted, false), "adopted");
+        assert_eq!(batch_status(InstallOutcome::Adopted, true), "adopt-planned");
     }
 }

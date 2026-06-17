@@ -22,8 +22,9 @@ use anolisa_core::adapter::claim::ClaimStatus;
 use anolisa_core::adapter::manager::ScanEntry;
 use anolisa_core::path_safety::{PathBoundaryError, validate_owned_path};
 use anolisa_core::{
-    Catalog, HealthEntry, HealthSpec, InstalledObject, InstalledState, IntegrityStatus, ObjectKind,
-    ServiceState, check_owned_file, service_for_install_mode as service_factory,
+    Catalog, ComponentManifest, HealthEntry, HealthSpec, InstalledObject, InstalledState,
+    IntegrityStatus, ObjectKind, ServiceState, check_owned_file,
+    service_for_install_mode as service_factory,
 };
 
 /// Wall-clock ceiling for a single manifest command-kind probe. `status`
@@ -47,10 +48,14 @@ const SHELL_METACHARS: &[char] = &[
 ];
 use anolisa_env::EnvService;
 use anolisa_platform::fs_layout::FsLayout;
+use anolisa_platform::pkg_query::PackageQuery;
+use anolisa_platform::rpm_query::RpmPackageQuery;
 
 use crate::color::{Palette, pad_right};
 use crate::commands::common;
-use crate::context::CliContext;
+use crate::commands::tier1::install::rpm_package_candidates;
+use crate::context::{CliContext, InstallMode};
+use crate::repo_config::{BackendConfig, RepoConfig};
 use crate::response::{CliError, render_json};
 
 const COMMAND: &str = "status";
@@ -104,6 +109,17 @@ struct ComponentRecord {
     /// Associated adapter summaries from `AdapterManager::scan()`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     adapters: Vec<AdapterSummaryRecord>,
+    /// RPM package name, set only for `observed` rows (rpmdb hit, no state)
+    /// and adopted `rpm-observed` rows (§8). Absent for raw components.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rpm_package: Option<String>,
+    /// Full EVR of the RPM, paired with [`rpm_package`](Self::rpm_package).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rpm_evr: Option<String>,
+    /// Source repo/label that supplied the RPM (e.g. `@System`); `None` when
+    /// it could not be determined.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rpm_source_repo: Option<String>,
 }
 
 pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
@@ -118,7 +134,7 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
 
     let adapter_scan = common::build_adapter_manager(ctx).scan().ok();
 
-    let records = select_components(
+    let mut records = select_components(
         &state,
         &layout,
         catalog.as_ref(),
@@ -126,6 +142,24 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
         args.component.as_deref(),
         adapter_scan.as_ref().map(|r| r.entries.as_slice()),
     );
+
+    // Read-only Observed report (§8): when a named component is absent from
+    // ANOLISA state but present in rpmdb (system mode), upgrade the synthetic
+    // `not_installed` row to `observed` with the package/EVR/repo. This never
+    // writes state — adopting is `install`'s job.
+    if let Some(target) = args.component.as_deref()
+        && ctx.install_mode == InstallMode::System
+        && records.len() == 1
+        && records[0].status == "not_installed"
+    {
+        let repo_config = RepoConfig::load(&layout).ok();
+        let rpm_backend = repo_config.as_ref().and_then(|c| c.backends.get("rpm"));
+        let manifest = catalog.as_ref().and_then(|c| c.component(target).cloned());
+        let query = RpmPackageQuery::system();
+        if let Some(observed) = observed_record(target, rpm_backend, manifest.as_ref(), &query) {
+            records = vec![observed];
+        }
+    }
 
     if ctx.json {
         let data = serde_json::json!({ "components": records });
@@ -180,9 +214,53 @@ fn select_components(
                 enabled_features: Vec::new(),
                 health: Vec::new(),
                 adapters: Vec::new(),
+                rpm_package: None,
+                rpm_evr: None,
+                rpm_source_repo: None,
             }],
         },
     }
+}
+
+/// Probe rpmdb for `component` and, if a matching system RPM is installed,
+/// build an `observed` record (§8). Returns `None` when nothing is installed
+/// or the host has no rpm tooling — the caller keeps the `not_installed` row.
+///
+/// Read-only and best-effort: a single hard query failure on a candidate
+/// stops the probe (returns `None`) rather than failing `status`. `query` is
+/// injected so tests can drive this without a live rpmdb.
+fn observed_record(
+    component: &str,
+    rpm_backend: Option<&BackendConfig>,
+    manifest: Option<&ComponentManifest>,
+    query: &dyn PackageQuery,
+) -> Option<ComponentRecord> {
+    // Same candidate chain as adopt (§5), minus the CLI `--package` override
+    // (status takes no such flag).
+    let candidates = rpm_package_candidates(None, manifest, rpm_backend, query, component).ok()?;
+    for package in candidates {
+        let Ok(Some(info)) = query.query_installed(&package) else {
+            // Not this candidate (absent), or a hard error / multi-version
+            // drift: status does not adjudicate drift, so move on.
+            continue;
+        };
+        let evr = info.version.to_string();
+        let source_repo = query.installed_origin(&package).ok().flatten();
+        return Some(ComponentRecord {
+            name: component.to_string(),
+            status: "observed".to_string(),
+            version: Some(evr.clone()),
+            installed_at: None,
+            last_operation_id: None,
+            enabled_features: Vec::new(),
+            health: Vec::new(),
+            adapters: Vec::new(),
+            rpm_package: Some(info.name),
+            rpm_evr: Some(evr),
+            rpm_source_repo: source_repo,
+        });
+    }
+    None
 }
 
 /// Build adapter summary records for `component` from the scan entries.
@@ -228,13 +306,30 @@ fn record_from_object(
     // can fail an otherwise-clean install). Probes are skipped when no
     // catalog is loaded — fresh checkouts without a packaged catalog still
     // get integrity-only behavior.
-    let manifest_status = if let Some(cat) = catalog {
-        let (manifest_entries, escalated) =
-            manifest_health_probe(layout, cat, install_mode, obj, &integrity_status);
-        health.extend(manifest_entries);
-        escalated
-    } else {
-        integrity_status
+    //
+    // rpm-observed objects are exempt: ANOLISA owns none of their files and
+    // does not lay out the raw artifact tree, so the manifest health checks
+    // (which assume that layout) would spuriously escalate an adopted row to
+    // degraded/failed (§8, review P2). The status stays `adopted`.
+    let manifest_status = match catalog {
+        Some(cat) if !obj.is_rpm_observed() => {
+            let (manifest_entries, escalated) =
+                manifest_health_probe(layout, cat, install_mode, obj, &integrity_status);
+            health.extend(manifest_entries);
+            escalated
+        }
+        _ => integrity_status,
+    };
+
+    // Surface RPM provenance for adopted rpm-observed rows so human/JSON
+    // output shows the package/EVR/repo behind the `adopted` status.
+    let (rpm_package, rpm_evr, rpm_source_repo) = match &obj.rpm_metadata {
+        Some(meta) => (
+            Some(meta.package_name.clone()),
+            meta.evr.clone(),
+            meta.source_repo.clone(),
+        ),
+        None => (None, None, None),
     };
 
     ComponentRecord {
@@ -246,6 +341,9 @@ fn record_from_object(
         enabled_features: obj.enabled_features.clone(),
         health,
         adapters: Vec::new(),
+        rpm_package,
+        rpm_evr,
+        rpm_source_repo,
     }
 }
 
@@ -737,6 +835,20 @@ fn render_human(records: &[ComponentRecord], verbose: bool, no_color: bool) {
             version = version,
             installed_at = color.muted(installed_at),
         );
+        // RPM provenance for observed / adopted rpm-observed rows (§8).
+        if let Some(pkg) = record.rpm_package.as_deref() {
+            let repo = record.rpm_source_repo.as_deref().unwrap_or("unknown repo");
+            let evr = record.rpm_evr.as_deref().unwrap_or("-");
+            println!("    {} {pkg} ({evr}, {repo})", color.label("rpm package:"),);
+        }
+        // Observed = present in rpmdb but not yet tracked; point at adopt.
+        if record.status == "observed" {
+            println!(
+                "    {} run 'anolisa --install-mode system install {}' to adopt as rpm-observed",
+                color.label("hint:"),
+                record.name,
+            );
+        }
         if verbose {
             if let Some(op) = record.last_operation_id.as_deref() {
                 println!("    {} {}", color.label("last_operation_id:"), color.id(op));
@@ -2028,11 +2140,18 @@ mod tests {
             enabled_features: Vec::new(),
             health: Vec::new(),
             adapters: Vec::new(),
+            rpm_package: None,
+            rpm_evr: None,
+            rpm_source_repo: None,
         };
         let json = serde_json::to_value(&record).expect("serialize");
         assert!(
             json.get("adapters").is_none(),
             "empty adapters must be omitted from JSON"
+        );
+        assert!(
+            json.get("rpm_package").is_none(),
+            "empty rpm fields must be omitted from JSON"
         );
     }
 
@@ -2063,5 +2182,187 @@ mod tests {
         let mut not_enabled = base.clone();
         not_enabled.enabled = false;
         assert_eq!(adapter_state_label(&not_enabled), "not enabled");
+    }
+
+    // ── rpm-observed status (#958) ──────────────────────────────────
+
+    use anolisa_core::{Ownership, RpmMetadata};
+    use anolisa_platform::pkg_query::{PackageInfo, PackageQueryError, PackageVersion};
+
+    /// An adopted `rpm-observed` component record.
+    fn rpm_observed_object(name: &str, package: &str, evr: &str) -> InstalledObject {
+        InstalledObject {
+            kind: ObjectKind::Component,
+            name: name.to_string(),
+            version: evr.to_string(),
+            status: ObjectStatus::Adopted,
+            manifest_digest: None,
+            distribution_source: None,
+            install_backend: Some("rpm".to_string()),
+            ownership: Some(Ownership::RpmObserved),
+            rpm_metadata: Some(RpmMetadata {
+                package_name: package.to_string(),
+                evr: Some(evr.to_string()),
+                arch: Some("x86_64".to_string()),
+                source_repo: Some("@System".to_string()),
+            }),
+            installed_at: "2026-06-01T10:00:00Z".to_string(),
+            last_operation_id: Some("op-adopt-001".to_string()),
+            managed: false,
+            adopted: true,
+            subscription_scope: SubscriptionScope::None,
+            enabled_features: Vec::new(),
+            component_refs: Vec::new(),
+            files: Vec::new(),
+            external_modified_files: Vec::new(),
+            services: Vec::new(),
+            health: Vec::new(),
+        }
+    }
+
+    /// P2 gate: an rpm-observed row must keep `adopted` even when a manifest
+    /// health check would fail a raw install — ANOLISA owns none of its files
+    /// and never laid out the raw tree, so those checks do not apply (§8).
+    #[test]
+    fn rpm_observed_row_skips_manifest_health_escalation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let layout = test_layout(dir.path());
+        let probe_path = layout.bin_dir.join("ghost-binary");
+        let manifest = format!(
+            r#"
+            [component]
+            name = "copilot-shell"
+            version = "2.3.0-1.al8"
+
+            [[health_checks]]
+            name = "binary"
+            kind = "file"
+            probe = "{}"
+        "#,
+            probe_path.display()
+        );
+        let (catalog, _guard) = catalog_with_component("copilot-shell", &manifest);
+
+        // Control: a raw install with the same failing check escalates.
+        let mut raw_state = InstalledState::default();
+        raw_state.upsert_object(component_object(
+            "copilot-shell",
+            "2.3.0",
+            ObjectStatus::Installed,
+        ));
+        let raw = select_components(
+            &raw_state,
+            &layout,
+            Some(&catalog),
+            "system",
+            Some("copilot-shell"),
+            None,
+        );
+        assert_eq!(raw[0].status, "failed", "raw install must escalate");
+
+        // rpm-observed with the same catalog stays adopted and surfaces the
+        // RPM provenance fields.
+        let mut obs_state = InstalledState::default();
+        obs_state.upsert_object(rpm_observed_object(
+            "copilot-shell",
+            "anolisa-copilot-shell",
+            "2.3.0-1.al8",
+        ));
+        let obs = select_components(
+            &obs_state,
+            &layout,
+            Some(&catalog),
+            "system",
+            Some("copilot-shell"),
+            None,
+        );
+        assert_eq!(obs[0].status, "adopted", "rpm-observed must not escalate");
+        assert_eq!(obs[0].rpm_package.as_deref(), Some("anolisa-copilot-shell"));
+        assert_eq!(obs[0].rpm_evr.as_deref(), Some("2.3.0-1.al8"));
+        assert_eq!(obs[0].rpm_source_repo.as_deref(), Some("@System"));
+    }
+
+    /// Configurable [`PackageQuery`] for the observed-probe tests.
+    #[derive(Default)]
+    struct FakeQuery {
+        installed: Vec<(String, PackageInfo)>,
+        origins: Vec<(String, String)>,
+    }
+
+    impl PackageQuery for FakeQuery {
+        fn query_installed(&self, package: &str) -> Result<Option<PackageInfo>, PackageQueryError> {
+            Ok(self
+                .installed
+                .iter()
+                .find(|(n, _)| n == package)
+                .map(|(_, i)| i.clone()))
+        }
+        fn query_available(&self, _package: &str) -> Result<Vec<PackageInfo>, PackageQueryError> {
+            Ok(Vec::new())
+        }
+        fn installed_origin(&self, package: &str) -> Result<Option<String>, PackageQueryError> {
+            Ok(self
+                .origins
+                .iter()
+                .find(|(n, _)| n == package)
+                .map(|(_, r)| r.clone()))
+        }
+    }
+
+    fn pkg_info(name: &str, version: &str, release: &str) -> PackageInfo {
+        PackageInfo {
+            name: name.to_string(),
+            version: PackageVersion {
+                epoch: None,
+                version: version.to_string(),
+                release: Some(release.to_string()),
+            },
+            arch: "x86_64".to_string(),
+            origin: None,
+        }
+    }
+
+    #[test]
+    fn observed_record_reports_installed_default_name() {
+        let q = FakeQuery {
+            installed: vec![(
+                "anolisa-copilot-shell".to_string(),
+                pkg_info("anolisa-copilot-shell", "2.3.0", "1.al8"),
+            )],
+            origins: vec![("anolisa-copilot-shell".to_string(), "@System".to_string())],
+        };
+        let rec = observed_record("copilot-shell", None, None, &q).expect("observed");
+        assert_eq!(rec.status, "observed");
+        assert_eq!(rec.rpm_package.as_deref(), Some("anolisa-copilot-shell"));
+        assert_eq!(rec.rpm_evr.as_deref(), Some("2.3.0-1.al8"));
+        assert_eq!(rec.rpm_source_repo.as_deref(), Some("@System"));
+        assert_eq!(rec.version.as_deref(), Some("2.3.0-1.al8"));
+    }
+
+    #[test]
+    fn observed_record_none_when_not_installed() {
+        let q = FakeQuery::default();
+        assert!(observed_record("copilot-shell", None, None, &q).is_none());
+    }
+
+    #[test]
+    fn observed_record_honors_package_map() {
+        // package_map renames the component's RPM; the probe must query the
+        // mapped name, not the default.
+        let repo = RepoConfig::from_toml_str(
+            "schema_version = 1\ndefault_backend = \"rpm\"\n[backends.rpm]\nbase_url = \"https://e/x\"\n[backends.rpm.package_map]\ncopilot-shell = \"site-copilot\"\n",
+        )
+        .expect("repo");
+        let backend = repo.backends.get("rpm");
+        let q = FakeQuery {
+            installed: vec![(
+                "site-copilot".to_string(),
+                pkg_info("site-copilot", "9.9", "1"),
+            )],
+            origins: Vec::new(),
+        };
+        let rec = observed_record("copilot-shell", backend, None, &q).expect("observed");
+        assert_eq!(rec.rpm_package.as_deref(), Some("site-copilot"));
+        assert_eq!(rec.rpm_source_repo, None);
     }
 }

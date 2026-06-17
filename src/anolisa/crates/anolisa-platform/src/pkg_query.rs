@@ -120,4 +120,32 @@ pub trait PackageQuery {
     /// # Errors
     /// See [`PackageQueryError`].
     fn query_available(&self, package: &str) -> Result<Vec<PackageInfo>, PackageQueryError>;
+
+    /// Source repo of an *installed* package (e.g. `@System`, `anolisa-release`);
+    /// `None` when it cannot be determined.
+    ///
+    /// [`query_installed`](Self::query_installed) cannot report this (its
+    /// `rpm -q` path yields no reponame, hence [`PackageInfo::origin`] is always
+    /// `None` there), so adopt/observe callers query the origin separately to
+    /// populate `source_repo`. The default returns `None` so backends without
+    /// origin support still satisfy the trait.
+    ///
+    /// # Errors
+    /// See [`PackageQueryError`]; "no origin" is `Ok(None)`, not an error.
+    fn installed_origin(&self, _package: &str) -> Result<Option<String>, PackageQueryError> {
+        Ok(None)
+    }
+
+    /// Names of *installed* packages that provide `capability` (an RPM virtual
+    /// provide such as `anolisa-component(<name>)`), de-duplicated by name.
+    ///
+    /// No provider yields an empty `Vec` (a normal branch, not an error). The
+    /// default returns empty so backends without provides lookup still satisfy
+    /// the trait. Callers treat ≥2 distinct names as an ambiguous match.
+    ///
+    /// # Errors
+    /// See [`PackageQueryError`]; "nothing provides it" is `Ok(vec![])`.
+    fn what_provides_installed(&self, _capability: &str) -> Result<Vec<String>, PackageQueryError> {
+        Ok(Vec::new())
+    }
 }

@@ -11,7 +11,7 @@
 #
 #   * It is a directory root, not a file. What lives under it is a
 #     per-backend convention: raw → the v1 distribution root containing
-#     `index.toml`; yum → handed to dnf as-is (must contain `repodata/`);
+#     `index.toml`; rpm → handed to dnf as-is (must contain `repodata/`);
 #     npm → the registry API root.
 #   * It may reference `$os`, `$arch`, `$basearch`, `$releasever`,
 #     `$channel`. Values come from host detection, overridable in
@@ -57,13 +57,13 @@ base_url = "https://anolisa.oss-cn-hangzhou.aliyuncs.com/anolisa-releases/anolis
 cache_ttl_secs = 3600
 offline_fallback = true
 
-# yum — resolution/install delegated to dnf against this repo.
-[backends.yum]
+# rpm — resolution/install delegated to dnf against this repo.
+[backends.rpm]
 base_url = "http://mirrors.cloud.aliyuncs.com/alinux/$releasever/os/$basearch/os/"
 insecure = true
 gpgcheck = true
 
-[backends.yum.package_map]
+[backends.rpm.package_map]
 agentsight = "anolis-agentsight"
 
 # npm — Node-ecosystem components.
