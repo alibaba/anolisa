@@ -135,6 +135,7 @@ mod tests {
         ToolContext {
             cwd: PathBuf::from("/tmp"),
             session_id: "test".to_string(),
+            project_root: PathBuf::from("/tmp"),
         }
     }
 

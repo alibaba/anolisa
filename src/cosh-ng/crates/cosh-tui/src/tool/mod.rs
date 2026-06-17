@@ -8,11 +8,13 @@ pub mod write_file;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::provider::ToolDeclaration;
+use crate::skill::SkillManager;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ToolKind {
@@ -24,7 +26,10 @@ pub enum ToolKind {
 
 pub struct ToolContext {
     pub cwd: PathBuf,
+    #[allow(dead_code)]
     pub session_id: String,
+    #[allow(dead_code)]
+    pub project_root: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -83,7 +88,7 @@ impl ToolRegistry {
         names
     }
 
-    pub fn with_defaults() -> Self {
+    pub fn with_defaults(skill_manager: Arc<SkillManager>) -> Self {
         let mut registry = Self::new();
         registry.register(Box::new(shell::ShellTool));
         registry.register(Box::new(read_file::ReadFileTool));
@@ -91,8 +96,15 @@ impl ToolRegistry {
         registry.register(Box::new(edit::EditTool));
         registry.register(Box::new(grep::GrepTool));
         registry.register(Box::new(todo::TodoTool::new()));
-        registry.register(Box::new(skill::SkillTool::new()));
+        registry.register(Box::new(skill::SkillTool::new(skill_manager)));
         registry
+    }
+
+    /// Convenience constructor for tests that don't need a real SkillManager.
+    #[cfg(test)]
+    pub fn with_defaults_for_test() -> Self {
+        let mgr = SkillManager::new(PathBuf::from("/tmp"), vec![]);
+        Self::with_defaults(mgr)
     }
 
     pub fn declarations(&self) -> Vec<ToolDeclaration> {
@@ -211,6 +223,7 @@ mod tests {
         let ctx = ToolContext {
             cwd: PathBuf::from("/tmp"),
             session_id: "test".to_string(),
+            project_root: PathBuf::from("/tmp"),
         };
         let result = tool
             .invoke(serde_json::json!({"input": "hello"}), &ctx)

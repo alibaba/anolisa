@@ -388,6 +388,7 @@ impl CoshCore {
             let ctx = ToolContext {
                 cwd: self.cwd(),
                 session_id: self.session_id.clone(),
+                project_root: self.cwd(),
             };
 
             let mut interrupted = false;
@@ -947,7 +948,7 @@ mod tests {
 
         let mut config = CoreConfig::default();
         config.agent.approval_mode = "trust".to_string();
-        let tools = ToolRegistry::with_defaults();
+        let tools = ToolRegistry::with_defaults_for_test();
         let mut core = CoshCore::new(config, Box::new(provider), tools);
         let mut output = Vec::new();
         let mut reader = empty_reader().await;
@@ -995,7 +996,7 @@ mod tests {
 
         let mut config = CoreConfig::default();
         config.agent.approval_mode = "trust".to_string();
-        let tools = ToolRegistry::with_defaults();
+        let tools = ToolRegistry::with_defaults_for_test();
         let mut core = CoshCore::new(config, Box::new(provider), tools);
         let mut output = Vec::new();
         let mut reader = empty_reader().await;
@@ -1043,7 +1044,7 @@ mod tests {
 
         let mut config = CoreConfig::default();
         config.agent.approval_mode = "trust".to_string();
-        let tools = ToolRegistry::with_defaults();
+        let tools = ToolRegistry::with_defaults_for_test();
         let mut core = CoshCore::new(config, Box::new(provider), tools);
         let mut output = Vec::new();
         let mut reader = empty_reader().await;
@@ -1166,7 +1167,7 @@ mod tests {
 
         let mut config = CoreConfig::default();
         config.agent.approval_mode = "suggest".to_string();
-        let tools = ToolRegistry::with_defaults();
+        let tools = ToolRegistry::with_defaults_for_test();
         let mut core = CoshCore::new(config, Box::new(provider), tools);
 
         let allow_response = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"allow"}}}"#;
@@ -1207,7 +1208,7 @@ mod tests {
 
         let mut config = CoreConfig::default();
         config.agent.approval_mode = "suggest".to_string();
-        let tools = ToolRegistry::with_defaults();
+        let tools = ToolRegistry::with_defaults_for_test();
 
         let deny_response = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"deny","message":"Too dangerous"}}}"#;
         let input = format!("{deny_response}\n");
@@ -1340,7 +1341,7 @@ mod tests {
 
         let mut config = CoreConfig::default();
         config.agent.approval_mode = "suggest".to_string();
-        let tools = ToolRegistry::with_defaults();
+        let tools = ToolRegistry::with_defaults_for_test();
         let mut core = CoshCore::new(config, Box::new(provider), tools);
 
         let response = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"host_executed_shell","result":{"llmContent":"should not be accepted","returnDisplay":null,"metadata":{"command":"echo bad","status":"completed","exit_code":0}}}}}"#;
@@ -1390,7 +1391,7 @@ mod tests {
 
         let mut config = CoreConfig::default();
         config.agent.approval_mode = "trust".to_string();
-        let tools = ToolRegistry::with_defaults();
+        let tools = ToolRegistry::with_defaults_for_test();
         let mut core = CoshCore::new(config, Box::new(provider), tools);
 
         let answer_response = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"answer":"Rust"}}}"#;

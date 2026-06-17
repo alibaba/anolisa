@@ -119,6 +119,7 @@ mod tests {
         ToolContext {
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp")),
             session_id: "test".to_string(),
+            project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp")),
         }
     }
 

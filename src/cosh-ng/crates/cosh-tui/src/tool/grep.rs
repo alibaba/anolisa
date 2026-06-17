@@ -112,6 +112,7 @@ mod tests {
         ToolContext {
             cwd: dir.to_path_buf(),
             session_id: "test".to_string(),
+            project_root: dir.to_path_buf(),
         }
     }
 
