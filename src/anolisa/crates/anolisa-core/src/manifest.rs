@@ -347,12 +347,24 @@ pub struct AdapterSpec {
     /// Adapter display or manifest name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Human-facing adapter label for CLI output and documentation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     /// Framework this adapter targets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub framework: Option<String>,
     /// Adapter kind (`first-party`, `third-party`, `protocol`, ...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// Adapter type within the framework (`plugin`, `extension`,
+    /// `service`, ...). Informational; driver behavior is not keyed on
+    /// this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_type: Option<String>,
+    /// Trust level (`first-party`, `third-party`, `protocol`). Separate
+    /// from `kind` so both dimensions remain usable independently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust: Option<String>,
     /// Framework-native plugin identifier, when one exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_id: Option<String>,
@@ -362,9 +374,56 @@ pub struct AdapterSpec {
     /// Destination path after layout placeholder expansion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dest: Option<String>,
+    /// Bundle description: how the driver should read the adapter's
+    /// resource directory.
+    #[serde(default, skip_serializing_if = "AdapterBundleSpec::is_empty")]
+    pub bundle: AdapterBundleSpec,
+    /// Compatibility metadata: driver schema and framework version
+    /// constraints.
+    #[serde(default, skip_serializing_if = "AdapterCompatSpec::is_empty")]
+    pub compat: AdapterCompatSpec,
     /// Framework-specific detection hints preserved as TOML values.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub detect: BTreeMap<String, toml::Value>,
+}
+
+/// Bundle description for an adapter resource directory. The driver uses
+/// `entry` as a hint to locate the framework-native manifest inside the
+/// bundle; it is NOT an executable path.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AdapterBundleSpec {
+    /// Bundle schema version, for future evolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<u32>,
+    /// Entry-point file inside the bundle directory (e.g.
+    /// `"plugin.json"`). The driver reads this file to understand the
+    /// bundle; it is never executed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<String>,
+}
+
+impl AdapterBundleSpec {
+    fn is_empty(&self) -> bool {
+        self.schema.is_none() && self.entry.is_none()
+    }
+}
+
+/// Compatibility metadata for an adapter entry. Lets packaging and the
+/// driver gate on schema evolution and framework version constraints.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AdapterCompatSpec {
+    /// Driver-side schema version this adapter targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_schema: Option<u32>,
+    /// Semver constraint on the target framework, e.g. `">=0.1.0"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framework_version: Option<String>,
+}
+
+impl AdapterCompatSpec {
+    fn is_empty(&self) -> bool {
+        self.driver_schema.is_none() && self.framework_version.is_none()
+    }
 }
 
 /// One `[[health_checks]]` entry. Multiple checks per component are
@@ -617,9 +676,15 @@ struct AdapterRaw {
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
     framework: Option<String>,
     #[serde(default)]
     kind: Option<String>,
+    #[serde(default)]
+    adapter_type: Option<String>,
+    #[serde(default)]
+    trust: Option<String>,
     #[serde(default)]
     plugin_id: Option<String>,
     #[serde(default)]
@@ -627,7 +692,27 @@ struct AdapterRaw {
     #[serde(default)]
     dest: Option<String>,
     #[serde(default)]
+    bundle: AdapterBundleRaw,
+    #[serde(default)]
+    compat: AdapterCompatRaw,
+    #[serde(default)]
     detect: BTreeMap<String, toml::Value>,
+}
+
+#[derive(Deserialize, Default)]
+struct AdapterBundleRaw {
+    #[serde(default)]
+    schema: Option<u32>,
+    #[serde(default)]
+    entry: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct AdapterCompatRaw {
+    #[serde(default)]
+    driver_schema: Option<u32>,
+    #[serde(default)]
+    framework_version: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -794,11 +879,22 @@ impl From<ComponentManifestRaw> for ComponentManifest {
             .into_iter()
             .map(|a| AdapterSpec {
                 name: a.name,
+                display_name: a.display_name,
                 framework: a.framework,
                 kind: a.kind,
+                adapter_type: a.adapter_type,
+                trust: a.trust,
                 plugin_id: a.plugin_id,
                 source: a.source,
                 dest: a.dest,
+                bundle: AdapterBundleSpec {
+                    schema: a.bundle.schema,
+                    entry: a.bundle.entry,
+                },
+                compat: AdapterCompatSpec {
+                    driver_schema: a.compat.driver_schema,
+                    framework_version: a.compat.framework_version,
+                },
                 detect: a.detect,
             })
             .collect();
@@ -1613,6 +1709,177 @@ mod tests {
             Some("agentsight.service")
         );
         assert_eq!(m.health_checks[1].optional, Some(true));
+    }
+
+    #[test]
+    fn adapter_new_fields_parse_full_example() {
+        let toml_text = r#"
+            [component]
+            name = "sec-core"
+            version = "0.1.0"
+
+            [[adapters]]
+            framework = "openclaw"
+            name = "sec-core-openclaw"
+            display_name = "Sec Core for OpenClaw"
+            adapter_type = "plugin"
+            trust = "first-party"
+            plugin_id = "sec-core"
+            source = "adapters/openclaw"
+            dest = "{datadir}/adapters/{component}/openclaw/"
+
+            [adapters.bundle]
+            schema = 1
+            entry = "plugin.json"
+
+            [adapters.compat]
+            driver_schema = 1
+            framework_version = ">=0.1.0"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        assert_eq!(m.adapters.len(), 1);
+        let a = &m.adapters[0];
+        assert_eq!(a.name.as_deref(), Some("sec-core-openclaw"));
+        assert_eq!(a.display_name.as_deref(), Some("Sec Core for OpenClaw"));
+        assert_eq!(a.framework.as_deref(), Some("openclaw"));
+        assert_eq!(a.adapter_type.as_deref(), Some("plugin"));
+        assert_eq!(a.trust.as_deref(), Some("first-party"));
+        assert_eq!(a.plugin_id.as_deref(), Some("sec-core"));
+        assert_eq!(a.source.as_deref(), Some("adapters/openclaw"));
+        assert_eq!(
+            a.dest.as_deref(),
+            Some("{datadir}/adapters/{component}/openclaw/")
+        );
+        assert_eq!(a.bundle.schema, Some(1));
+        assert_eq!(a.bundle.entry.as_deref(), Some("plugin.json"));
+        assert_eq!(a.compat.driver_schema, Some(1));
+        assert_eq!(a.compat.framework_version.as_deref(), Some(">=0.1.0"));
+    }
+
+    #[test]
+    fn adapter_new_fields_round_trip() {
+        let toml_text = r#"
+            [component]
+            name = "roundtrip"
+            version = "1.0.0"
+
+            [[adapters]]
+            framework = "openclaw"
+            name = "rt-adapter"
+            display_name = "RT Adapter"
+            adapter_type = "extension"
+            trust = "third-party"
+            plugin_id = "rt"
+            source = "adapters/openclaw"
+            dest = "{datadir}/adapters/{component}/openclaw/"
+
+            [adapters.bundle]
+            schema = 2
+            entry = "manifest.json"
+
+            [adapters.compat]
+            driver_schema = 3
+            framework_version = ">=1.0.0"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let serialized = toml::to_string_pretty(&m).expect("serialize");
+        let m2 = ComponentManifest::from_toml_str(&serialized).expect("re-parse");
+        assert_eq!(
+            m.adapters, m2.adapters,
+            "round-trip must preserve all adapter fields"
+        );
+    }
+
+    #[test]
+    fn adapter_minimal_fields_still_parse() {
+        let toml_text = r#"
+            [component]
+            name = "minimal"
+            version = "1.0.0"
+
+            [[adapters]]
+            framework = "openclaw"
+            source = "adapters/openclaw"
+            dest = "{datadir}/adapters/{component}/openclaw/"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        assert_eq!(m.adapters.len(), 1);
+        let a = &m.adapters[0];
+        assert_eq!(a.framework.as_deref(), Some("openclaw"));
+        assert!(a.display_name.is_none());
+        assert!(a.adapter_type.is_none());
+        assert!(a.trust.is_none());
+        assert!(a.bundle.is_empty());
+        assert!(a.compat.is_empty());
+    }
+
+    #[test]
+    fn adapter_empty_adapters_array_still_parses() {
+        let toml_text = r#"
+            [component]
+            name = "no-adapters"
+            version = "1.0.0"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        assert!(m.adapters.is_empty());
+    }
+
+    #[test]
+    fn adapter_new_fields_default_to_none_when_absent() {
+        let toml_text = r#"
+            [component]
+            name = "agentsight"
+            version = "0.2.0"
+
+            [[adapters]]
+            framework = "openclaw"
+            kind = "third-party"
+            plugin_id = "agentsight-openclaw"
+            source = "adapters/agentsight/openclaw"
+            dest = "{datadir}/adapters/{component}/openclaw/"
+
+            [adapters.detect]
+            config_path = "~/.openclaw/config.toml"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let a = &m.adapters[0];
+        assert!(a.display_name.is_none());
+        assert!(a.adapter_type.is_none());
+        assert!(a.trust.is_none());
+        assert!(a.bundle.schema.is_none());
+        assert!(a.bundle.entry.is_none());
+        assert!(a.compat.driver_schema.is_none());
+        assert!(a.compat.framework_version.is_none());
+        // Existing fields preserved.
+        assert_eq!(a.kind.as_deref(), Some("third-party"));
+        assert_eq!(
+            a.detect.get("config_path").and_then(|v| v.as_str()),
+            Some("~/.openclaw/config.toml")
+        );
+    }
+
+    #[test]
+    fn adapter_bundle_and_compat_skip_serializing_when_empty() {
+        let toml_text = r#"
+            [component]
+            name = "skiptest"
+            version = "1.0.0"
+
+            [[adapters]]
+            framework = "cosh"
+            source = "adapters/cosh"
+            dest = "{datadir}/adapters/{component}/cosh/"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let serialized = toml::to_string_pretty(&m).expect("serialize");
+        assert!(
+            !serialized.contains("[bundle]"),
+            "empty bundle must be skipped in serialization"
+        );
+        assert!(
+            !serialized.contains("[compat]"),
+            "empty compat must be skipped in serialization"
+        );
     }
 
     #[test]

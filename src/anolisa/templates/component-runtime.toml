@@ -111,10 +111,21 @@ btf_available = "true"
 
 [[adapters]]
 framework = "openclaw"
-kind = "third-party" # first-party | third-party | protocol
+name = "agentsight-openclaw"
+display_name = "AgentSight for OpenClaw"
+adapter_type = "plugin"            # plugin | extension | service
+trust = "first-party"              # first-party | third-party | protocol
 plugin_id = "agentsight-openclaw"
-source = "adapters/agentsight/openclaw"
+source = "adapters/openclaw"
 dest = "{datadir}/adapters/{component}/openclaw/"
+
+[adapters.bundle]
+schema = 1
+entry = "openclaw.plugin.json"    # driver reads this to understand the bundle; not executed
+
+[adapters.compat]
+driver_schema = 1
+framework_version = ">=0.1.0"
 
 [adapters.detect]
 config_path = "~/.openclaw/config.toml"
