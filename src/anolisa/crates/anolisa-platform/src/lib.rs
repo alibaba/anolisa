@@ -6,6 +6,7 @@
 
 pub mod command;
 pub mod fs_layout;
+pub mod ipc;
 pub mod package_manager;
 pub mod pkg_query;
 pub mod pkg_transaction;
