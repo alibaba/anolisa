@@ -406,10 +406,11 @@ enum RpmSituation {
         /// rpmdb query result carrying EVR/arch for the state record.
         info: PackageInfo,
     },
-    /// Not present as a system RPM: the single candidate is not installed, or
-    /// the host has no rpm tooling at all. Layer 1 falls through to the
+    /// Not present as a system RPM: the single candidate is not installed
+    /// (rpm tooling ran and returned nothing). Layer 1 falls through to the
     /// default backend; an explicit `--backend rpm` turns this into the
-    /// "dnf install not implemented" hint (§7.4).
+    /// "dnf install not implemented" hint (§7.4). A *missing* rpm/dnf binary
+    /// is a different case — it is a hard warn-and-exit, not `Absent`.
     Absent,
     /// `provides` reverse-lookup matched several distinct installed packages
     /// (§5.5). Reported, never silently adopted.
@@ -421,9 +422,10 @@ enum RpmSituation {
 
 /// Resolve the candidate RPM package name(s) for `component` and probe rpmdb.
 ///
-/// Errors only when a query hard-fails in a way that is not the host's normal
-/// "absent" signal; a missing `rpm`/`dnf` binary is treated as [`Absent`]
-/// (the host is not RPM-based, so no component can be a system RPM there).
+/// Errors when a query hard-fails. A missing `rpm`/`dnf` binary is a
+/// warn-and-exit ([`rpm_tooling_missing_error`]): the probe cannot prove the
+/// component is *not* an unobserved system RPM, so we refuse to silently fall
+/// back to raw rather than treat it as [`Absent`].
 ///
 /// [`Absent`]: RpmSituation::Absent
 fn probe_rpm_situation(
@@ -436,14 +438,20 @@ fn probe_rpm_situation(
 ) -> Result<RpmSituation, CliError> {
     let manifest = load_optional_manifest(ctx, component);
     let rpm_backend = repo_config.backends.get("rpm");
-    let candidates = rpm_package_candidates(
+    let candidates = match rpm_package_candidates(
         args.package.as_deref(),
         manifest.as_ref(),
         rpm_backend,
         query,
         component,
-    )
-    .map_err(|err| pkg_query_err(err, command))?;
+    ) {
+        Ok(candidates) => candidates,
+        // No rpm/dnf on this host: refuse to silently fall back to raw (§7.1).
+        Err(PackageQueryError::CommandMissing { .. }) => {
+            return Err(rpm_tooling_missing_error(command));
+        }
+        Err(err) => return Err(pkg_query_err(err, command)),
+    };
 
     if candidates.len() >= 2 {
         return Ok(RpmSituation::Ambiguous(candidates));
@@ -460,8 +468,8 @@ fn probe_rpm_situation(
         Ok(None) => Ok(RpmSituation::Absent),
         // Same name, several installed versions: a drift the caller reports.
         Err(PackageQueryError::UnexpectedOutput { .. }) => Ok(RpmSituation::MultiVersion(package)),
-        // No rpm/dnf on this host → it cannot host system RPMs at all.
-        Err(PackageQueryError::CommandMissing { .. }) => Ok(RpmSituation::Absent),
+        // No rpm/dnf on this host: refuse to silently fall back to raw (§7.1).
+        Err(PackageQueryError::CommandMissing { .. }) => Err(rpm_tooling_missing_error(command)),
         Err(err) => Err(pkg_query_err(err, command)),
     }
 }
@@ -789,6 +797,21 @@ fn pkg_query_err(err: PackageQueryError, command: &str) -> CliError {
     CliError::Runtime {
         command: command.to_string(),
         reason: format!("rpm query failed: {err}"),
+    }
+}
+
+/// Warn-and-exit error raised when the system-RPM probe cannot run because
+/// `rpm`/`dnf` is absent (§7.1).
+///
+/// Without rpm tooling the probe cannot tell whether the component is already
+/// installed as a system RPM. We deliberately refuse to silently fall back to
+/// a raw install here: a raw install over an unobserved system RPM could
+/// clobber or duplicate it. The caller may still force a raw install with an
+/// explicit `--backend raw`, which bypasses the probe entirely.
+fn rpm_tooling_missing_error(command: &str) -> CliError {
+    CliError::Runtime {
+        command: command.to_string(),
+        reason: "rpm/dnf not found: cannot detect whether this component is already installed as a system RPM. Install rpm/dnf, or pass `--backend raw` to install without RPM adoption".to_string(),
     }
 }
 
@@ -2248,6 +2271,22 @@ mod tests {
         }
     }
 
+    /// Single-component [`handle`] seam that injects a fake package query
+    /// reporting an rpm-capable host with no anolisa packages installed.
+    ///
+    /// System-mode installs with no `--backend` run the system-RPM probe, which
+    /// now warn-and-exits when rpm/dnf is absent. Raw-path tests must not depend
+    /// on the CI host actually having rpm tooling, so they drive the probe with
+    /// this benign fake (every candidate resolves to "not installed" → `Absent`
+    /// → the default raw backend proceeds), keeping them hermetic.
+    fn handle_with_fake_rpm(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
+        let component = args
+            .component
+            .clone()
+            .expect("single-component install test sets args.component");
+        handle_one_with_query(component, args, ctx, &FakeQuery::default()).map(|_| ())
+    }
+
     fn toml_string_array(values: &[&str]) -> String {
         let quoted: Vec<String> = values.iter().map(|value| format!("\"{value}\"")).collect();
         format!("[{}]", quoted.join(", "))
@@ -2638,7 +2677,8 @@ sha256 = "{sha}"
         let mut a = args("no-such-component");
         a.repo = Some(write_empty_repo(&tmp.path().join("repo")));
 
-        let err = handle(a, &ctx_with_prefix(false, Some(prefix))).expect_err("must error");
+        let err =
+            handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix))).expect_err("must error");
         assert_eq!(err.code(), "INVALID_ARGUMENT");
         assert!(err.reason().contains("no-such-component"));
     }
@@ -2657,7 +2697,8 @@ sha256 = "{sha}"
             &["user"],
         ));
 
-        let err = handle(a, &ctx_with_prefix(false, Some(prefix))).expect_err("must error");
+        let err =
+            handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix))).expect_err("must error");
         assert_eq!(err.code(), "INVALID_ARGUMENT");
         assert!(
             err.reason().contains("install mode is not supported"),
@@ -2682,7 +2723,8 @@ sha256 = "{sha}"
             &["user"],
         ));
 
-        let err = handle(a, &ctx_with_prefix(false, Some(prefix))).expect_err("must error");
+        let err =
+            handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix))).expect_err("must error");
         assert_eq!(err.code(), "INVALID_ARGUMENT");
         assert!(
             err.reason()
@@ -2760,7 +2802,7 @@ scope = "@anolisa"
         let tmp = tempdir().expect("tmpdir");
         let mut a = args("agentsight");
         a.repo = Some("ftp://example.com/repo".to_string());
-        let err = handle(a, &ctx_with_prefix(false, Some(tmp.path().to_path_buf())))
+        let err = handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(tmp.path().to_path_buf())))
             .expect_err("must error");
         assert_eq!(err.code(), "INVALID_ARGUMENT");
         assert!(err.reason().contains("ftp"), "got: {}", err.reason());
@@ -2778,7 +2820,7 @@ scope = "@anolisa"
         a.repo = Some(repo_url);
         let mut ctx = ctx_with_prefix(false, Some(prefix.clone()));
         ctx.dry_run = true;
-        handle(a, &ctx).expect("dry-run must succeed");
+        handle_with_fake_rpm(a, &ctx).expect("dry-run must succeed");
 
         let layout = FsLayout::system(Some(prefix));
         assert!(
@@ -2886,7 +2928,8 @@ scope = "@anolisa"
             &["system"],
         ));
 
-        handle(a, &ctx_with_prefix(false, Some(prefix.clone()))).expect("install must succeed");
+        handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+            .expect("install must succeed");
 
         let bin = FsLayout::system(Some(prefix)).bin_dir.join("legacy-bin");
         assert!(bin.exists(), "binary artifact must be installed");
@@ -2907,7 +2950,8 @@ scope = "@anolisa"
 
         let mut a = args("agentsight");
         a.repo = Some(repo_url.clone());
-        handle(a, &ctx_with_prefix(false, Some(prefix.clone()))).expect("install must succeed");
+        handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+            .expect("install must succeed");
 
         let layout = FsLayout::system(Some(prefix));
         let bin = layout.bin_dir.join("agentsight");
@@ -2968,7 +3012,8 @@ scope = "@anolisa"
 
         let mut a = args("remote-only");
         a.repo = Some(repo_url);
-        handle(a, &ctx_with_prefix(false, Some(prefix.clone()))).expect("install must succeed");
+        handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+            .expect("install must succeed");
 
         let layout = FsLayout::system(Some(prefix));
         assert!(
@@ -3061,7 +3106,8 @@ scope = "@anolisa"
 
         let mut a = args("agentsight");
         a.repo = Some(repo_url.clone());
-        handle(a, &ctx_with_prefix(false, Some(prefix.clone()))).expect("install must succeed");
+        handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+            .expect("install must succeed");
 
         let layout = FsLayout::system(Some(prefix));
         assert!(layout.bin_dir.join("agentsight").exists());
@@ -3103,7 +3149,8 @@ scope = "@anolisa"
 
         let mut a = args("agentsight");
         a.repo = Some(template_url);
-        handle(a, &ctx_with_prefix(false, Some(prefix.clone()))).expect("install must succeed");
+        handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+            .expect("install must succeed");
 
         let layout = FsLayout::system(Some(prefix));
         assert!(layout.bin_dir.join("agentsight").exists());
@@ -3139,8 +3186,8 @@ scope = "@anolisa"
         let mut a = args("agentsight");
         a.repo = Some(repo_url);
         a.version = Some("9.9.9".to_string());
-        let err =
-            handle(a, &ctx_with_prefix(false, Some(prefix))).expect_err("must fail to resolve");
+        let err = handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix)))
+            .expect_err("must fail to resolve");
         assert_eq!(err.code(), "INVALID_ARGUMENT");
         assert!(err.reason().contains("9.9.9"), "got: {}", err.reason());
     }
@@ -3272,10 +3319,19 @@ scope = "@anolisa"
         provides: Vec<(String, Vec<String>)>,
         multi_version: Vec<String>,
         origin_fails: bool,
+        /// Simulate a host with no rpm/dnf: every rpmdb-touching query returns
+        /// [`PackageQueryError::CommandMissing`], exercising the probe's
+        /// warn-and-exit guard.
+        command_missing: bool,
     }
 
     impl PackageQuery for FakeQuery {
         fn query_installed(&self, package: &str) -> Result<Option<PackageInfo>, PackageQueryError> {
+            if self.command_missing {
+                return Err(PackageQueryError::CommandMissing {
+                    command: "rpm".to_string(),
+                });
+            }
             if self.multi_version.iter().any(|p| p == package) {
                 return Err(PackageQueryError::UnexpectedOutput {
                     command: "rpm".to_string(),
@@ -3312,6 +3368,11 @@ scope = "@anolisa"
             &self,
             capability: &str,
         ) -> Result<Vec<String>, PackageQueryError> {
+            if self.command_missing {
+                return Err(PackageQueryError::CommandMissing {
+                    command: "rpm".to_string(),
+                });
+            }
             Ok(self
                 .provides
                 .iter()
@@ -3704,6 +3765,56 @@ scope = "@anolisa"
         // The #959 delegation hint rides on the NotImplemented variant; reason()
         // surfaces the command, which still names the rpm backend.
         assert!(err.reason().contains("rpm"), "got: {}", err.reason());
+    }
+
+    #[test]
+    fn system_install_without_rpm_tooling_warns_and_exits() {
+        // Auto-detect path (system mode, no --backend, fresh state): with rpm/dnf
+        // absent the probe cannot prove the component is not an unobserved system
+        // RPM, so install refuses rather than silently falling back to raw (§7.1).
+        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        let q = FakeQuery {
+            command_missing: true,
+            ..Default::default()
+        };
+        let err =
+            handle_one_with_query("copilot-shell".to_string(), args("copilot-shell"), &ctx, &q)
+                .expect_err("missing rpm/dnf must abort, not fall back to raw");
+        assert_eq!(err.code(), "EXECUTION_FAILED");
+        assert!(
+            err.reason().contains("rpm/dnf not found"),
+            "got: {}",
+            err.reason()
+        );
+        // No fallback raw install happened: state stays empty.
+        let state = load_state(&ctx);
+        assert!(
+            state
+                .find_object(ObjectKind::Component, "copilot-shell")
+                .is_none(),
+            "warn-and-exit must not write any state"
+        );
+    }
+
+    #[test]
+    fn explicit_rpm_without_tooling_warns_and_exits() {
+        // Explicit `--backend rpm` cannot adopt without rpmdb either; missing
+        // tooling is a warn-and-exit, not the #959 "dnf install" hint.
+        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        let q = FakeQuery {
+            command_missing: true,
+            ..Default::default()
+        };
+        let mut a = args("copilot-shell");
+        a.backend = Some("rpm".to_string());
+        let err = handle_one_with_query("copilot-shell".to_string(), a, &ctx, &q)
+            .expect_err("missing rpm/dnf must abort");
+        assert_eq!(err.code(), "EXECUTION_FAILED");
+        assert!(
+            err.reason().contains("rpm/dnf not found"),
+            "got: {}",
+            err.reason()
+        );
     }
 
     #[test]
