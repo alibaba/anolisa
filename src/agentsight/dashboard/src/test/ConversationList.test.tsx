@@ -365,7 +365,7 @@ describe('ConversationList', () => {
       last_seen_ns: Date.now() * 1_000_000,
     }]);
     mockFetchTokenSavings.mockResolvedValue({
-      sessions: [{ session_id: 'sess-with-savings', saved_tokens: 500 }],
+      sessions: [{ session_id: 'sess-with-savings', compounded_saved: 500, saved_tokens: 500 }],
       summary: null,
       stats_available: true,
     });

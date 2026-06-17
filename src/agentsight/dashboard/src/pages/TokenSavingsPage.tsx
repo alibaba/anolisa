@@ -4,7 +4,7 @@ import {
   PieChart, Pie, Cell, ResponsiveContainer,
 } from 'recharts';
 import { fetchTokenSavings, fetchAgentNames } from '../utils/apiClient';
-import type { SessionSavings, SavingsSummary, OptimizationItem, DiffLine } from '../utils/apiClient';
+import type { SessionSavings, SavingsSummary, OptimizationItem, DiffLine, StrategyBreakdownItem } from '../utils/apiClient';
 import { DateTimePicker } from '../components/DateTimePicker';
 import { SessionIdHelp } from '../components/SessionIdHelp';
 
@@ -74,6 +74,15 @@ const CATEGORY_CONFIG: Record<OptimizationCategory, { label: string; color: stri
   mcp_response: { label: 'MCP输出', color: 'text-violet-700', bg: 'bg-violet-100' },
 };
 
+// ─── Strategy config ─────────────────────────────────────────────────────────
+
+const STRATEGY_CONFIG: Record<string, { label: string; color: string; bg: string; pie: string; tooltip: string }> = {
+  'compress-schema':   { label: 'Schema 压缩', color: 'text-blue-700',   bg: 'bg-blue-100',   pie: '#3b82f6', tooltip: '精简工具/MCP 接口定义，减少上下文体积' },
+  'compress-response': { label: '响应压缩',    color: 'text-violet-700', bg: 'bg-violet-100', pie: '#8b5cf6', tooltip: '清理响应冗余字段，保留语义关键内容' },
+  'rewrite-command':   { label: '命令重写',    color: 'text-orange-700', bg: 'bg-orange-100', pie: '#f59e0b', tooltip: '将工具命令重写为更精简的等价形式' },
+  'compress-toon':     { label: 'TOON 编码',   color: 'text-teal-700',  bg: 'bg-teal-100',  pie: '#14b8a6', tooltip: '将 JSON 输出转换为紧凑 TOON 表格文本' },
+};
+
 // ─── Pie chart data ───────────────────────────────────────────────────────────
 
 const PIE_COLORS = ['#3b82f6', '#10b981']; // 输入蓝, 输出绿
@@ -113,6 +122,11 @@ const DiffView: React.FC<{ item: OptimizationItem }> = ({ item }) => {
 const OptimizationTableRow: React.FC<{ item: OptimizationItem }> = ({ item }) => {
   const [expanded, setExpanded] = useState(false);
   const cfg = CATEGORY_CONFIG[item.category];
+  const stratCfg = STRATEGY_CONFIG[item.strategy] ?? {
+    label: item.strategy_label || item.strategy,
+    color: 'text-gray-700', bg: 'bg-gray-100', pie: '#9ca3af',
+    tooltip: '',
+  };
 
   return (
     <>
@@ -120,6 +134,17 @@ const OptimizationTableRow: React.FC<{ item: OptimizationItem }> = ({ item }) =>
         <td className="px-4 py-3">
           <span className={`px-2 py-0.5 rounded text-xs font-medium ${cfg.bg} ${cfg.color}`}>
             {cfg.label}
+          </span>
+        </td>
+        <td className="px-4 py-3">
+          <span className={`relative group px-2 py-0.5 rounded text-xs font-medium ${stratCfg.bg} ${stratCfg.color} cursor-default`}>
+            {stratCfg.label}
+            {stratCfg.tooltip && (
+              <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 hidden group-hover:block px-2 py-1.5 rounded bg-gray-800 text-white text-xs whitespace-nowrap shadow-lg z-50 pointer-events-none">
+                {stratCfg.tooltip}
+                <span className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-800" />
+              </span>
+            )}
           </span>
         </td>
         <td className="px-4 py-3 text-sm text-gray-600 text-right">
@@ -142,7 +167,7 @@ const OptimizationTableRow: React.FC<{ item: OptimizationItem }> = ({ item }) =>
       </tr>
       {expanded && (
         <tr className="bg-gray-50">
-          <td colSpan={5} className="px-4 py-3">
+          <td colSpan={6} className="px-4 py-3">
             <DiffView item={item} />
           </td>
         </tr>
@@ -218,11 +243,14 @@ const SessionRow: React.FC<{
           <td colSpan={6} className="px-4 lg:px-8 py-4">
             {/* Optimization items table */}
             <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-              <table className="w-full min-w-[600px]">
+              <table className="w-full min-w-[700px]">
                 <thead className="bg-gray-50 border-b border-gray-200">
                   <tr>
                     <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[90px]">
                       分类
+                    </th>
+                    <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[110px]">
+                      节省策略
                     </th>
                     <th className="px-4 py-2 text-right text-xs font-semibold text-gray-600 uppercase tracking-wide w-[100px]">
                       优化前
@@ -446,44 +474,92 @@ export const TokenSavingsPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Card 2: Saved tokens */}
+        {/* Card 2: Saved tokens — strategy breakdown pie */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
           <p className="text-sm text-gray-500">已降低 Token</p>
           <p className="text-3xl font-bold text-green-600 mt-1">
             {fmtTokens(totalCompoundedSaved)}
           </p>
           <div className="mt-3">
-            <ResponsiveContainer width="100%" height={60}>
-              <PieChart>
-                <Pie
-                  data={[
-                    { name: '工具', value: totalCompoundedToolSaved },
-                    { name: 'MCP', value: totalCompoundedMcpSaved },
-                  ]}
-                  cx="50%"
-                  cy="50%"
-                  innerRadius={14}
-                  outerRadius={26}
-                  paddingAngle={2}
-                  dataKey="value"
-                  stroke="none"
-                >
-                  {SAVED_PIE_COLORS.map((c, i) => (
-                    <Cell key={i} fill={c} />
-                  ))}
-                </Pie>
-              </PieChart>
-            </ResponsiveContainer>
-            <div className="flex justify-center gap-4 -mt-1">
-              <span className="flex items-center gap-1 text-xs text-gray-500">
-                <span className="w-2 h-2 rounded-full bg-orange-500" />
-                工具 {fmtTokens(totalCompoundedToolSaved)}
-              </span>
-              <span className="flex items-center gap-1 text-xs text-gray-500">
-                <span className="w-2 h-2 rounded-full bg-violet-500" />
-                MCP {fmtTokens(totalCompoundedMcpSaved)}
-              </span>
-            </div>
+            {(() => {
+              const breakdown = summary?.strategy_breakdown ?? [];
+              const hasStrategy = breakdown.length > 0 && breakdown.some(b => b.compounded_saved > 0);
+              if (hasStrategy) {
+                const pieData = breakdown
+                  .filter(b => b.compounded_saved > 0)
+                  .map(b => ({
+                    name: (STRATEGY_CONFIG[b.strategy]?.label ?? b.label),
+                    value: b.compounded_saved,
+                    color: (STRATEGY_CONFIG[b.strategy]?.pie ?? '#9ca3af'),
+                  }));
+                return (
+                  <>
+                    <ResponsiveContainer width="100%" height={60}>
+                      <PieChart>
+                        <Pie
+                          data={pieData}
+                          cx="50%"
+                          cy="50%"
+                          innerRadius={14}
+                          outerRadius={26}
+                          paddingAngle={2}
+                          dataKey="value"
+                          stroke="none"
+                        >
+                          {pieData.map((d, i) => (
+                            <Cell key={i} fill={d.color} />
+                          ))}
+                        </Pie>
+                      </PieChart>
+                    </ResponsiveContainer>
+                    <div className="flex flex-wrap justify-center gap-3 -mt-1">
+                      {pieData.map((d, i) => (
+                        <span key={i} className="flex items-center gap-1 text-xs text-gray-500">
+                          <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: d.color }} />
+                          {d.name} {fmtTokens(d.value)}
+                        </span>
+                      ))}
+                    </div>
+                  </>
+                );
+              }
+              // Fallback to category-level 2-slice pie
+              return (
+                <>
+                  <ResponsiveContainer width="100%" height={60}>
+                    <PieChart>
+                      <Pie
+                        data={[
+                          { name: '工具', value: totalCompoundedToolSaved },
+                          { name: 'MCP', value: totalCompoundedMcpSaved },
+                        ]}
+                        cx="50%"
+                        cy="50%"
+                        innerRadius={14}
+                        outerRadius={26}
+                        paddingAngle={2}
+                        dataKey="value"
+                        stroke="none"
+                      >
+                        {SAVED_PIE_COLORS.map((c, i) => (
+                          <Cell key={i} fill={c} />
+                        ))}
+                      </Pie>
+                    </PieChart>
+                  </ResponsiveContainer>
+                  <div className="flex justify-center gap-4 -mt-1">
+                    <span className="flex items-center gap-1 text-xs text-gray-500">
+                      <span className="w-2 h-2 rounded-full bg-orange-500" />
+                      工具 {fmtTokens(totalCompoundedToolSaved)}
+                    </span>
+                    <span className="flex items-center gap-1 text-xs text-gray-500">
+                      <span className="w-2 h-2 rounded-full bg-violet-500" />
+                      MCP {fmtTokens(totalCompoundedMcpSaved)}
+                    </span>
+                  </div>
+                </>
+              );
+            })()}
           </div>
         </div>
 

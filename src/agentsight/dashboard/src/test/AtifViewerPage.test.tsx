@@ -7,13 +7,15 @@ import { MemoryRouter } from 'react-router-dom';
 vi.mock('../utils/apiClient', () => ({
   fetchAtifBySession: vi.fn(),
   fetchAtifByConversation: vi.fn(),
+  fetchSessionSavings: vi.fn(),
 }));
 
-import { fetchAtifBySession, fetchAtifByConversation } from '../utils/apiClient';
+import { fetchAtifBySession, fetchAtifByConversation, fetchSessionSavings } from '../utils/apiClient';
 import { AtifViewerPage } from '../pages/AtifViewerPage';
 
 const mockFetchAtifBySession = fetchAtifBySession as ReturnType<typeof vi.fn>;
 const mockFetchAtifByConversation = fetchAtifByConversation as ReturnType<typeof vi.fn>;
+const mockFetchSessionSavings = fetchSessionSavings as ReturnType<typeof vi.fn>;
 
 function renderPage(route = '/atif') {
   return render(
@@ -79,6 +81,8 @@ const mockAtifDoc = {
 beforeEach(() => {
   mockFetchAtifBySession.mockReset();
   mockFetchAtifByConversation.mockReset();
+  mockFetchSessionSavings.mockReset();
+  mockFetchSessionSavings.mockRejectedValue(new Error('no savings'));
 });
 
 describe('AtifViewerPage', () => {
@@ -268,5 +272,49 @@ describe('AtifViewerPage', () => {
       renderPage('/atif?type=session&id=sess-from-url');
     });
     expect(mockFetchAtifBySession).toHaveBeenCalledWith('sess-from-url');
+  });
+
+  it('should show Token savings comparison card when savings data exists', async () => {
+    mockFetchAtifBySession.mockResolvedValue(mockAtifDoc);
+    mockFetchSessionSavings.mockResolvedValue({
+      session_id: 'sess-atif-test-123456789',
+      stats_available: true,
+      total_actual_tokens: 8000,
+      total_compounded_saved: 2000,
+      total_original_tokens: 10000,
+      savings_rate: 20.0,
+      items: [{
+        id: 'tc-1',
+        category: 'tool_output',
+        strategy: 'compress-schema',
+        strategy_label: 'Schema 压缩',
+        title: 'Schema 压缩',
+        before_tokens: 500,
+        after_tokens: 200,
+        saved_tokens: 300,
+        compounded_saved: 600,
+        compounding_turns: 2,
+        before_summary: '原始内容 500 tokens',
+        after_summary: '优化后 200 tokens',
+        before_text: null,
+        after_text: null,
+        diff_lines: [],
+      }],
+    });
+
+    await act(async () => {
+      renderPage('/atif?type=session&id=sess-atif-test-123456789');
+    });
+
+    // Wait for savings data to load
+    await act(async () => {
+      await new Promise(r => setTimeout(r, 50));
+    });
+
+    expect(screen.getByText('Token 节省对比')).toBeInTheDocument();
+    expect(screen.getByText('原始 Token（未优化）')).toBeInTheDocument();
+    expect(screen.getByText('实际 Token（优化后）')).toBeInTheDocument();
+    expect(screen.getByText('10,000')).toBeInTheDocument();
+    expect(screen.getByText('8,000')).toBeInTheDocument();
   });
 });

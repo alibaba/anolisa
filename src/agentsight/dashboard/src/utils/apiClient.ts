@@ -204,6 +204,8 @@ export interface OptimizationItem {
   id: string;
   category: 'tool_output' | 'mcp_response';
   title: string;
+  strategy: string;
+  strategy_label: string;
   before_tokens: number;
   after_tokens: number;
   saved_tokens: number;
@@ -232,6 +234,13 @@ export interface SessionSavings {
   optimization_items: OptimizationItem[];
 }
 
+export interface StrategyBreakdownItem {
+  strategy: string;
+  label: string;
+  saved: number;
+  compounded_saved: number;
+}
+
 export interface SavingsSummary {
   total_input_tokens: number;
   total_output_tokens: number;
@@ -244,6 +253,7 @@ export interface SavingsSummary {
   total_mcp_saved: number;
   total_compounded_tool_saved: number;
   total_compounded_mcp_saved: number;
+  strategy_breakdown: StrategyBreakdownItem[];
 }
 
 export interface TokenSavingsResponse {
@@ -266,6 +276,29 @@ export async function fetchTokenSavings(
   });
   if (agentName) params.set('agent_name', agentName);
   return apiFetch<TokenSavingsResponse>(`${API_BASE}/api/token-savings?${params.toString()}`);
+}
+
+// ─── Session-scoped Token Savings ─────────────────────────────────────────────
+
+export interface SessionSavingsDetail {
+  session_id: string;
+  stats_available: boolean;
+  total_actual_tokens: number;
+  total_compounded_saved: number;
+  total_original_tokens: number;
+  savings_rate: number;
+  items: OptimizationItem[];
+}
+
+/**
+ * Fetch token savings detail for a single session.
+ */
+export async function fetchSessionSavings(
+  sessionId: string,
+): Promise<SessionSavingsDetail> {
+  return apiFetch<SessionSavingsDetail>(
+    `${API_BASE}/api/token-savings/session/${encodeURIComponent(sessionId)}`
+  );
 }
 
 /**

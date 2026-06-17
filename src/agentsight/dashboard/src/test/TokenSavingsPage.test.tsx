@@ -110,6 +110,10 @@ describe('TokenSavingsPage', () => {
         total_compounded_tool_saved: 1200,
         total_compounded_mcp_saved: 800,
         compounded_savings_rate: 25.0,
+        strategy_breakdown: [
+          { strategy: 'rewrite-command', label: '命令重写', saved: 600, compounded_saved: 1200 },
+          { strategy: 'compress-response', label: '响应压缩', saved: 400, compounded_saved: 800 },
+        ],
       },
       stats_available: true,
     });
@@ -146,6 +150,7 @@ describe('TokenSavingsPage', () => {
         total_compounded_tool_saved: 200,
         total_compounded_mcp_saved: 100,
         compounded_savings_rate: 20.0,
+        strategy_breakdown: [],
       },
       stats_available: true,
     });
@@ -157,7 +162,7 @@ describe('TokenSavingsPage', () => {
     expect(screen.getByText('TestAgent')).toBeInTheDocument();
   });
 
-  it('should expand session row to show optimization details', async () => {
+  it('should expand session row to show optimization details with strategy badge', async () => {
     mockFetchTokenSavings.mockResolvedValue({
       sessions: [{
         session_id: 'sess-expand-test',
@@ -170,6 +175,8 @@ describe('TokenSavingsPage', () => {
         optimization_items: [{
           id: 'opt-1',
           category: 'tool_output',
+          strategy: 'compress-schema',
+          strategy_label: 'Schema 压缩',
           before_tokens: 400,
           after_tokens: 100,
           compounded_saved: 300,
@@ -186,6 +193,9 @@ describe('TokenSavingsPage', () => {
         total_compounded_tool_saved: 300,
         total_compounded_mcp_saved: 200,
         compounded_savings_rate: 16.7,
+        strategy_breakdown: [
+          { strategy: 'compress-schema', label: 'Schema 压缩', saved: 300, compounded_saved: 300 },
+        ],
       },
       stats_available: true,
     });
@@ -199,6 +209,7 @@ describe('TokenSavingsPage', () => {
       fireEvent.click(row!);
     });
     expect(screen.getByText('工具输出')).toBeInTheDocument();
+    expect(screen.getByText('Schema 压缩')).toBeInTheDocument();
     expect(screen.getAllByText('详情').length).toBeGreaterThanOrEqual(1);
   });
 
@@ -213,6 +224,7 @@ describe('TokenSavingsPage', () => {
         total_compounded_tool_saved: 3000,
         total_compounded_mcp_saved: 1000,
         compounded_savings_rate: 50.0,
+        strategy_breakdown: [],
       },
       stats_available: true,
     });

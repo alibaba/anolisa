@@ -4,6 +4,7 @@
 //! AgentSight storage data, and optionally serves the embedded frontend.
 
 mod handlers;
+mod token_savings;
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -143,7 +144,8 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
         .service(handlers::list_conversation_interruptions)
         .service(handlers::resolve_interruption)
         .service(handlers::get_interruption)
-        .service(handlers::get_token_savings)
+        .service(token_savings::get_token_savings)
+        .service(token_savings::get_session_savings)
         // agent-sec Security Observability API routes
         .service(handlers::security_status)
         .service(handlers::security_summary)

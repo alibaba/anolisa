@@ -1551,6 +1551,15 @@ pub struct TokenSavingsQuery {
     pub agent_name: Option<String>,
 }
 
+/// Per-strategy saved amounts
+#[derive(Debug, Serialize)]
+pub struct StrategyBreakdown {
+    pub strategy: String,
+    pub label: String,
+    pub saved: i64,
+    pub compounded_saved: i64,
+}
+
 /// Overall savings summary
 #[derive(Debug, Serialize)]
 pub struct SavingsSummary {
@@ -1565,14 +1574,17 @@ pub struct SavingsSummary {
     pub total_mcp_saved: i64,
     pub total_compounded_tool_saved: i64,
     pub total_compounded_mcp_saved: i64,
+    pub strategy_breakdown: Vec<StrategyBreakdown>,
 }
 
 /// A single optimization item within a session
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct OptimizationItemDto {
     pub id: String,
     pub category: String,
     pub title: String,
+    pub strategy: String,
+    pub strategy_label: String,
     pub before_tokens: i64,
     pub after_tokens: i64,
     pub saved_tokens: i64,
@@ -1586,7 +1598,7 @@ pub struct OptimizationItemDto {
 }
 
 /// A single diff line
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct DiffLineDto {
     #[serde(rename = "type")]
     pub line_type: String,
@@ -1622,8 +1634,8 @@ pub struct TokenSavingsResponse {
 /// Map stats.db operation field to frontend category.
 fn map_operation_to_category(operation: &str) -> &str {
     match operation {
-        "compress-response" => "mcp_response",
-        "rewrite-command" => "tool_output",
+        "compress-response" | "compress-toon" => "mcp_response",
+        "rewrite-command" | "compress-schema" => "tool_output",
         _ => "tool_output",
     }
 }
@@ -1633,7 +1645,20 @@ fn map_operation_to_title(operation: &str) -> &str {
     match operation {
         "compress-response" => "MCP\u{54cd}\u{5e94}\u{538b}\u{7f29}",
         "rewrite-command" => "\u{5de5}\u{5177}\u{8f93}\u{51fa}\u{4f18}\u{5316}",
-        _ => "\u{5de5}\u{5177}\u{8f93}\u{51fa}\u{4f18}\u{5316}",
+        "compress-schema" => "Schema \u{538b}\u{7f29}",
+        "compress-toon" => "TOON \u{7f16}\u{7801}",
+        _ => "\u{5176}\u{4ed6}\u{4f18}\u{5316}",
+    }
+}
+
+/// Map operation to a human-readable strategy label.
+fn map_operation_to_strategy_label(operation: &str) -> &str {
+    match operation {
+        "compress-schema" => "Schema \u{538b}\u{7f29}",
+        "compress-response" => "\u{54cd}\u{5e94}\u{538b}\u{7f29}",
+        "rewrite-command" => "\u{547d}\u{4ee4}\u{91cd}\u{5199}",
+        "compress-toon" => "TOON \u{7f16}\u{7801}",
+        _ => "\u{5176}\u{4ed6}\u{4f18}\u{5316}",
     }
 }
 
@@ -1711,6 +1736,8 @@ pub async fn get_token_savings(
     let mut grand_mcp_saved: i64 = 0;
     let mut grand_compounded_tool_saved: i64 = 0;
     let mut grand_compounded_mcp_saved: i64 = 0;
+    let mut grand_strategy_map: std::collections::HashMap<String, (i64, i64)> =
+        std::collections::HashMap::new();
 
     for session in &sessions {
         let total_tokens = session.total_input_tokens + session.total_output_tokens;
@@ -1752,10 +1779,22 @@ pub async fn get_token_savings(
 
                 let diff_lines: Vec<DiffLineDto> = Vec::new();
 
+                let strategy = row.operation.clone();
+                let strategy_label = map_operation_to_strategy_label(&row.operation).to_string();
+
+                // Accumulate per-strategy totals for the grand summary
+                let entry = grand_strategy_map
+                    .entry(row.operation.clone())
+                    .or_insert((0, 0));
+                entry.0 += saved;
+                entry.1 += compounded;
+
                 items.push(OptimizationItemDto {
                     id: row.tool_use_id.clone(),
                     category: category.to_string(),
                     title: title.to_string(),
+                    strategy,
+                    strategy_label,
                     before_tokens: row.before_tokens,
                     after_tokens: row.after_tokens,
                     saved_tokens: saved,
@@ -1822,6 +1861,16 @@ pub async fn get_token_savings(
         0.0
     };
 
+    let strategy_breakdown: Vec<StrategyBreakdown> = grand_strategy_map
+        .into_iter()
+        .map(|(strategy, (saved, compounded_saved))| StrategyBreakdown {
+            label: map_operation_to_strategy_label(&strategy).to_string(),
+            strategy,
+            saved,
+            compounded_saved,
+        })
+        .collect();
+
     HttpResponse::Ok().json(TokenSavingsResponse {
         stats_available,
         summary: SavingsSummary {
@@ -1836,8 +1885,155 @@ pub async fn get_token_savings(
             total_mcp_saved: grand_mcp_saved,
             total_compounded_tool_saved: grand_compounded_tool_saved,
             total_compounded_mcp_saved: grand_compounded_mcp_saved,
+            strategy_breakdown,
         },
         sessions: resp_sessions,
+    })
+}
+
+// ─── Session-scoped Token Savings endpoint ──────────────────────────────────
+
+/// Response for /api/token-savings/session/{session_id}
+#[derive(Debug, Serialize)]
+pub struct SessionSavingsDetail {
+    pub session_id: String,
+    pub stats_available: bool,
+    pub total_actual_tokens: i64,
+    pub total_compounded_saved: i64,
+    pub total_original_tokens: i64,
+    pub savings_rate: f64,
+    pub items: Vec<OptimizationItemDto>,
+}
+
+/// GET /api/token-savings/session/{session_id}
+///
+/// Returns token savings detail for a single session.
+#[get("/api/token-savings/session/{session_id}")]
+pub async fn get_session_savings(
+    data: web::Data<AppState>,
+    path: web::Path<String>,
+) -> impl Responder {
+    let session_id = path.into_inner();
+    let db_path = &data.storage_path;
+
+    // Step 1: Query session from genai_events.db
+    let store = match GenAISqliteStore::new_with_path(db_path) {
+        Ok(s) => s,
+        Err(e) => {
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": e.to_string()}));
+        }
+    };
+
+    let sessions = match store.list_sessions_for_savings(0, i64::MAX, None) {
+        Ok(s) => s,
+        Err(e) => {
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": e.to_string()}));
+        }
+    };
+
+    let session = match sessions.iter().find(|s| s.session_id == session_id) {
+        Some(s) => s,
+        None => {
+            return HttpResponse::Ok().json(SessionSavingsDetail {
+                session_id,
+                stats_available: false,
+                total_actual_tokens: 0,
+                total_compounded_saved: 0,
+                total_original_tokens: 0,
+                savings_rate: 0.0,
+                items: Vec::new(),
+            });
+        }
+    };
+
+    let total_tokens = session.total_input_tokens + session.total_output_tokens;
+    let request_count = session.request_count;
+
+    // Step 2: Get turn indices for tool_call_ids
+    let session_ids = vec![session_id.as_str()];
+    let turn_indices = match GenAISqliteStore::new_with_path(db_path) {
+        Ok(st) => st
+            .get_tool_call_turn_indices(&session_ids)
+            .unwrap_or_default(),
+        Err(_) => std::collections::HashMap::new(),
+    };
+
+    // Step 3: Open stats.db
+    let stats_path = tokenless::default_stats_path();
+    let stats_store = TokenlessStatsStore::open_if_exists(&stats_path);
+    let stats_available = stats_store.is_some();
+
+    let mut items = Vec::new();
+    let mut total_compounded_saved: i64 = 0;
+
+    if let Some(ref store) = stats_store {
+        let tool_use_ids: Vec<&str> = turn_indices.keys().map(|s| s.as_str()).collect();
+        let rows = store.get_stats_by_tool_use_ids(&tool_use_ids);
+
+        for row in &rows {
+            // Only include rows belonging to this session
+            let sid = turn_indices
+                .get(&row.tool_use_id)
+                .map(|info| info.session_id.as_str())
+                .unwrap_or(&row.session_id);
+            if sid != session_id {
+                continue;
+            }
+
+            let saved = row.before_tokens - row.after_tokens;
+            let category = map_operation_to_category(&row.operation);
+            let title = map_operation_to_title(&row.operation);
+            let strategy = row.operation.clone();
+            let strategy_label = map_operation_to_strategy_label(&row.operation).to_string();
+
+            let turn_index = turn_indices
+                .get(&row.tool_use_id)
+                .map(|info| info.turn_index)
+                .unwrap_or(1) as i64;
+            let compounding_turns = (request_count - turn_index).max(1);
+            let compounded = saved * compounding_turns;
+            total_compounded_saved += compounded;
+
+            items.push(OptimizationItemDto {
+                id: row.tool_use_id.clone(),
+                category: category.to_string(),
+                title: title.to_string(),
+                strategy,
+                strategy_label,
+                before_tokens: row.before_tokens,
+                after_tokens: row.after_tokens,
+                saved_tokens: saved,
+                compounded_saved: compounded,
+                compounding_turns,
+                before_summary: format!(
+                    "\u{539f}\u{59cb}\u{5185}\u{5bb9} {} tokens",
+                    row.before_tokens
+                ),
+                after_summary: format!("\u{4f18}\u{5316}\u{540e} {} tokens", row.after_tokens),
+                before_text: row.before_text.clone(),
+                after_text: row.after_text.clone(),
+                diff_lines: Vec::new(),
+            });
+        }
+    }
+
+    let total_original = total_tokens + total_compounded_saved;
+    let savings_rate = if total_original > 0 {
+        total_compounded_saved as f64 / total_original as f64 * 100.0
+    } else {
+        0.0
+    };
+
+    HttpResponse::Ok().json(SessionSavingsDetail {
+        session_id,
+        stats_available,
+        total_actual_tokens: total_tokens,
+        total_compounded_saved,
+        total_original_tokens: total_original,
+        savings_rate,
+        items,
     })
 }
 
@@ -1851,6 +2047,296 @@ pub struct SkillMetricsQuery {
     pub agent_name: Option<String>,
     /// Granularity for hotness trend: "day" or "week" (default: "week")
     pub granularity: Option<String>,
+}
+
+// ─── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod token_savings_tests {
+    use super::*;
+    use actix_web::test as actix_test;
+    use actix_web::{App, web};
+    use std::sync::{Arc, Mutex, RwLock};
+    use std::time::Instant;
+
+    // Tests manipulate the HOME env var which is process-global.
+    // Use a mutex to serialize tests that depend on it.
+    // allow(clippy::await_holding_lock): intentional — we need the lock held
+    // for the entire test to prevent parallel env var races.
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    /// Create a temp genai_events.db with test data and return its path.
+    fn setup_genai_db(dir: &std::path::Path) -> std::path::PathBuf {
+        let db_path = dir.join("genai_events.db");
+        // Use GenAISqliteStore to create proper schema
+        let store = crate::storage::sqlite::GenAISqliteStore::new_with_path(&db_path).unwrap();
+        // Insert test data directly via raw connection
+        drop(store);
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO genai_events (event_type, session_id, call_id, agent_name, model, input_tokens, output_tokens, start_timestamp_ns, event_json, tool_call_ids)
+             VALUES ('llm_call', 'sess-1', 'call-1', 'test-agent', 'gpt-4', 1000, 500, 100000000, '{}', '[\"tc-1\"]')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO genai_events (event_type, session_id, call_id, agent_name, model, input_tokens, output_tokens, start_timestamp_ns, event_json, tool_call_ids)
+             VALUES ('llm_call', 'sess-1', 'call-2', 'test-agent', 'gpt-4', 800, 400, 200000000, '{}', '[\"tc-2\"]')",
+            [],
+        ).unwrap();
+        db_path
+    }
+
+    /// Create a temp stats.db with test data and return its path.
+    fn setup_stats_db(dir: &std::path::Path) -> std::path::PathBuf {
+        let stats_dir = dir.join(".tokenless");
+        std::fs::create_dir_all(&stats_dir).unwrap();
+        let stats_path = stats_dir.join("stats.db");
+        let conn = rusqlite::Connection::open(&stats_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT,
+                tool_use_id TEXT,
+                before_tokens INTEGER,
+                after_tokens INTEGER,
+                before_text TEXT,
+                after_text TEXT,
+                operation TEXT
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO stats (session_id, tool_use_id, before_tokens, after_tokens, before_text, after_text, operation)
+             VALUES ('sess-1', 'tc-1', 2000, 500, 'long text', 'short', 'compress-response')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO stats (session_id, tool_use_id, before_tokens, after_tokens, before_text, after_text, operation)
+             VALUES ('sess-1', 'tc-2', 1000, 300, 'schema text', 'mini', 'compress-schema')",
+            [],
+        ).unwrap();
+        stats_path
+    }
+
+    fn make_app_state(db_path: std::path::PathBuf) -> AppState {
+        AppState {
+            storage_path: db_path,
+            start_time: Instant::now(),
+            health_store: Arc::new(RwLock::new(crate::health::HealthStore::default())),
+            interruption_store: None,
+        }
+    }
+
+    // ─── Unit tests for mapping functions ─────────────────────────────────
+
+    #[test]
+    fn test_map_operation_to_category() {
+        assert_eq!(
+            map_operation_to_category("compress-response"),
+            "mcp_response"
+        );
+        assert_eq!(map_operation_to_category("compress-toon"), "mcp_response");
+        assert_eq!(map_operation_to_category("rewrite-command"), "tool_output");
+        assert_eq!(map_operation_to_category("compress-schema"), "tool_output");
+        assert_eq!(map_operation_to_category("unknown-op"), "tool_output");
+    }
+
+    #[test]
+    fn test_map_operation_to_title() {
+        assert_eq!(
+            map_operation_to_title("compress-response"),
+            "MCP\u{54cd}\u{5e94}\u{538b}\u{7f29}"
+        );
+        assert_eq!(
+            map_operation_to_title("rewrite-command"),
+            "\u{5de5}\u{5177}\u{8f93}\u{51fa}\u{4f18}\u{5316}"
+        );
+        assert_eq!(
+            map_operation_to_title("compress-schema"),
+            "Schema \u{538b}\u{7f29}"
+        );
+        assert_eq!(
+            map_operation_to_title("compress-toon"),
+            "TOON \u{7f16}\u{7801}"
+        );
+        assert_eq!(
+            map_operation_to_title("other"),
+            "\u{5176}\u{4ed6}\u{4f18}\u{5316}"
+        );
+    }
+
+    #[test]
+    fn test_map_operation_to_strategy_label() {
+        assert_eq!(
+            map_operation_to_strategy_label("compress-schema"),
+            "Schema \u{538b}\u{7f29}"
+        );
+        assert_eq!(
+            map_operation_to_strategy_label("compress-response"),
+            "\u{54cd}\u{5e94}\u{538b}\u{7f29}"
+        );
+        assert_eq!(
+            map_operation_to_strategy_label("rewrite-command"),
+            "\u{547d}\u{4ee4}\u{91cd}\u{5199}"
+        );
+        assert_eq!(
+            map_operation_to_strategy_label("compress-toon"),
+            "TOON \u{7f16}\u{7801}"
+        );
+        assert_eq!(
+            map_operation_to_strategy_label("unknown"),
+            "\u{5176}\u{4ed6}\u{4f18}\u{5316}"
+        );
+    }
+
+    // ─── Integration tests for handlers ───────────────────────────────────
+
+    #[allow(clippy::await_holding_lock)]
+    #[actix_web::test]
+    async fn test_get_token_savings_no_stats_db() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // When stats.db doesn't exist, handler should return stats_available=false
+        let tmp = std::env::temp_dir().join(format!("agentsight_test_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db_path = setup_genai_db(&tmp);
+
+        // Point HOME to a dir without .tokenless/stats.db
+        let fake_home = tmp.join("fakehome");
+        std::fs::create_dir_all(&fake_home).unwrap();
+        unsafe { std::env::set_var("HOME", &fake_home) };
+
+        let state = make_app_state(db_path);
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .service(get_token_savings),
+        )
+        .await;
+
+        let req = actix_test::TestRequest::get()
+            .uri("/api/token-savings?start_ns=0&end_ns=9999999999999999")
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+        assert_eq!(body["stats_available"], false);
+        assert!(!body["sessions"].as_array().unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[actix_web::test]
+    async fn test_get_token_savings_with_stats() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let tmp =
+            std::env::temp_dir().join(format!("agentsight_test_stats_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db_path = setup_genai_db(&tmp);
+        let _stats_path = setup_stats_db(&tmp);
+
+        // Point HOME to tmp so default_stats_path() finds .tokenless/stats.db
+        unsafe { std::env::set_var("HOME", &tmp) };
+
+        let state = make_app_state(db_path);
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .service(get_token_savings),
+        )
+        .await;
+
+        let req = actix_test::TestRequest::get()
+            .uri("/api/token-savings?start_ns=0&end_ns=9999999999999999")
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+        assert_eq!(body["stats_available"], true);
+        // Should have strategy_breakdown
+        let breakdown = body["summary"]["strategy_breakdown"].as_array().unwrap();
+        assert!(!breakdown.is_empty());
+        // Check savings were computed
+        let total_saved = body["summary"]["total_saved_tokens"].as_i64().unwrap();
+        assert!(total_saved > 0);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[actix_web::test]
+    async fn test_get_session_savings_not_found() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let tmp = std::env::temp_dir().join(format!("agentsight_test_sess_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db_path = setup_genai_db(&tmp);
+
+        let fake_home = tmp.join("fakehome2");
+        std::fs::create_dir_all(&fake_home).unwrap();
+        unsafe { std::env::set_var("HOME", &fake_home) };
+
+        let state = make_app_state(db_path);
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .service(get_session_savings),
+        )
+        .await;
+
+        let req = actix_test::TestRequest::get()
+            .uri("/api/token-savings/session/nonexistent")
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+        assert_eq!(body["stats_available"], false);
+        assert_eq!(body["session_id"], "nonexistent");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[actix_web::test]
+    async fn test_get_session_savings_with_data() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let tmp =
+            std::env::temp_dir().join(format!("agentsight_test_sess_data_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db_path = setup_genai_db(&tmp);
+        let _stats_path = setup_stats_db(&tmp);
+
+        unsafe { std::env::set_var("HOME", &tmp) };
+
+        let state = make_app_state(db_path);
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .service(get_session_savings),
+        )
+        .await;
+
+        let req = actix_test::TestRequest::get()
+            .uri("/api/token-savings/session/sess-1")
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+        assert_eq!(body["stats_available"], true);
+        assert_eq!(body["session_id"], "sess-1");
+        let items = body["items"].as_array().unwrap();
+        assert!(!items.is_empty());
+        // Verify strategy fields are present
+        assert!(items[0]["strategy"].as_str().is_some());
+        assert!(items[0]["strategy_label"].as_str().is_some());
+        let compounded = body["total_compounded_saved"].as_i64().unwrap();
+        assert!(compounded > 0);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
 
 /// GET /api/skill-metrics — full skill metrics report

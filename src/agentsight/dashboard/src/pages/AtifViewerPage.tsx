@@ -3,7 +3,8 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import type {
   AtifDocument, AtifStep, AtifToolCall, AtifObservation, AtifStepMetrics,
 } from '../types';
-import { fetchAtifBySession, fetchAtifByConversation } from '../utils/apiClient';
+import { fetchAtifBySession, fetchAtifByConversation, fetchSessionSavings } from '../utils/apiClient';
+import type { SessionSavingsDetail, OptimizationItem } from '../utils/apiClient';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -26,6 +27,15 @@ function fmtTimestamp(iso?: string): string {
 function shortId(id: string, len = 20): string {
   return id.length > len ? id.slice(0, len) + '\u2026' : id;
 }
+
+// ─── Strategy label config (shared with TokenSavingsPage) ────────────────────
+
+const STRATEGY_LABELS: Record<string, { label: string; color: string; bg: string }> = {
+  'compress-schema':   { label: 'Schema 压缩', color: 'text-blue-700',   bg: 'bg-blue-100' },
+  'compress-response': { label: '响应压缩',    color: 'text-violet-700', bg: 'bg-violet-100' },
+  'rewrite-command':   { label: '命令重写',    color: 'text-orange-700', bg: 'bg-orange-100' },
+  'compress-toon':     { label: 'TOON 编码',   color: 'text-teal-700',  bg: 'bg-teal-100' },
+};
 
 // ─── Source styling ───────────────────────────────────────────────────────────
 
@@ -121,9 +131,10 @@ interface StepCardProps {
   step: AtifStep;
   expandedSections: Set<string>;
   onToggleSection: (key: string) => void;
+  savingsMap?: Map<string, OptimizationItem>;
 }
 
-const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSection }) => {
+const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSection, savingsMap }) => {
   const style = getSourceStyle(step.source);
   const sectionKey = (name: string) => `${step.step_id}-${name}`;
   const isOpen = (name: string) => expandedSections.has(sectionKey(name));
@@ -197,7 +208,7 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
                 >
                   <div className="space-y-2">
                     {step.tool_calls!.map((tc, i) => (
-                      <ToolCallItem key={tc.tool_call_id || i} tc={tc} />
+                      <ToolCallItem key={tc.tool_call_id || i} tc={tc} savingsMap={savingsMap} />
                     ))}
                   </div>
                 </Collapsible>
@@ -263,12 +274,14 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
 
 // ─── ToolCallItem ─────────────────────────────────────────────────────────────
 
-const ToolCallItem: React.FC<{ tc: AtifToolCall }> = ({ tc }) => {
+const ToolCallItem: React.FC<{ tc: AtifToolCall; savingsMap?: Map<string, OptimizationItem> }> = ({ tc, savingsMap }) => {
   const [showArgs, setShowArgs] = useState(false);
   const argsStr = typeof tc.arguments === 'string'
     ? tc.arguments
     : JSON.stringify(tc.arguments, null, 2);
   const isLongArgs = argsStr.length > 200;
+  const savings = savingsMap?.get(tc.tool_call_id);
+  const stratStyle = savings ? (STRATEGY_LABELS[savings.strategy] ?? { label: savings.strategy_label, color: 'text-gray-700', bg: 'bg-gray-100' }) : null;
 
   return (
     <div className="border border-orange-100 rounded-lg overflow-hidden">
@@ -277,6 +290,11 @@ const ToolCallItem: React.FC<{ tc: AtifToolCall }> = ({ tc }) => {
           {tc.function_name}
         </span>
         <span className="text-xs text-gray-400 font-mono">{shortId(tc.tool_call_id, 16)}</span>
+        {savings && stratStyle && (
+          <span className={`px-2 py-0.5 rounded text-xs font-medium ${stratStyle.bg} ${stratStyle.color}`}>
+            已优化 -{fmtTokens(savings.compounded_saved)} tokens ({stratStyle.label})
+          </span>
+        )}
         {isLongArgs && (
           <button
             onClick={() => setShowArgs(!showArgs)}
@@ -347,6 +365,13 @@ export const AtifViewerPage: React.FC = () => {
   const [doc, setDoc] = useState<AtifDocument | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [savingsDetail, setSavingsDetail] = useState<SessionSavingsDetail | null>(null);
+
+  // Build tool_call_id → OptimizationItem map for StepCard badges
+  const savingsMap = React.useMemo(() => {
+    if (!savingsDetail?.items?.length) return new Map<string, OptimizationItem>();
+    return new Map(savingsDetail.items.map(item => [item.id, item]));
+  }, [savingsDetail]);
 
   // UI state
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
@@ -381,6 +406,12 @@ export const AtifViewerPage: React.FC = () => {
         data = await fetchAtifBySession(i.trim());
       }
       setDoc(data);
+      // Fetch savings data for the session
+      if (data.session_id) {
+        fetchSessionSavings(data.session_id)
+          .then(setSavingsDetail)
+          .catch(() => setSavingsDetail(null));
+      }
     } catch (e: any) {
       setError(e.message ?? '加载失败');
     } finally {
@@ -599,6 +630,54 @@ export const AtifViewerPage: React.FC = () => {
               )}
             </div>
 
+            {/* Token Savings Comparison Card */}
+            {savingsDetail && savingsDetail.total_compounded_saved > 0 && (
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+                <h3 className="text-sm font-semibold text-gray-900 mb-3">Token 节省对比</h3>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
+                  <div>
+                    <span className="text-xs text-gray-500">原始 Token（未优化）</span>
+                    <p className="text-xl font-bold text-gray-700">{fmtTokens(savingsDetail.total_original_tokens)}</p>
+                  </div>
+                  <div>
+                    <span className="text-xs text-gray-500">实际 Token（优化后）</span>
+                    <p className="text-xl font-bold text-blue-600">{fmtTokens(savingsDetail.total_actual_tokens)}</p>
+                  </div>
+                  <div>
+                    <span className="text-xs text-gray-500">节省</span>
+                    <p className="text-xl font-bold text-green-600">
+                      -{fmtTokens(savingsDetail.total_compounded_saved)}
+                      <span className="text-sm font-normal text-gray-400 ml-1">
+                        ({savingsDetail.savings_rate.toFixed(1)}%)
+                      </span>
+                    </p>
+                  </div>
+                </div>
+                {/* Comparison bar */}
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-gray-400 w-10">原始</span>
+                    <div className="flex-1 h-3 bg-gray-100 rounded-full overflow-hidden">
+                      <div className="h-full bg-gray-400 rounded-full" style={{ width: '100%' }} />
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-gray-400 w-10">实际</span>
+                    <div className="flex-1 h-3 bg-gray-100 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-green-500 rounded-full"
+                        style={{
+                          width: savingsDetail.total_original_tokens > 0
+                            ? `${(savingsDetail.total_actual_tokens / savingsDetail.total_original_tokens) * 100}%`
+                            : '100%',
+                        }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Step Timeline */}
             <div>
               <h2 className="text-lg font-semibold text-gray-900 mb-4">
@@ -624,6 +703,7 @@ export const AtifViewerPage: React.FC = () => {
                       step={step}
                       expandedSections={expandedSections}
                       onToggleSection={toggleSection}
+                      savingsMap={savingsMap}
                     />
                   ))}
                 </div>
