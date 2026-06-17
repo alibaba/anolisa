@@ -91,6 +91,7 @@ describe('TokenSavingsPage', () => {
       sessions: [],
       summary: { total_input_tokens: 0, total_output_tokens: 0, total_tokens: 0, total_compounded_saved: 0, total_compounded_tool_saved: 0, total_compounded_mcp_saved: 0, compounded_savings_rate: 0 },
       stats_available: false,
+      optimization_tips: [{ level: 'warning', title: '未检测到 Tokenless 组件', description: '未发现 stats.db，请确认 tokenless 组件已安装并启用。' }],
     });
     await act(async () => { renderPage(); });
     await act(async () => {
@@ -116,6 +117,7 @@ describe('TokenSavingsPage', () => {
         ],
       },
       stats_available: true,
+      optimization_tips: [{ level: 'success', title: '节省效果良好', description: '当前复合节省率 25.0%，已达到良好水平。' }],
     });
     await act(async () => { renderPage(); });
     await act(async () => {
@@ -153,6 +155,7 @@ describe('TokenSavingsPage', () => {
         strategy_breakdown: [],
       },
       stats_available: true,
+      optimization_tips: [],
     });
     await act(async () => { renderPage(); });
     await act(async () => {
@@ -180,6 +183,9 @@ describe('TokenSavingsPage', () => {
           before_tokens: 400,
           after_tokens: 100,
           compounded_saved: 300,
+          compression_ratio: 75.0,
+          explanation: '工具输出优化: 原始 400 tokens → 100 tokens，压缩率 75.0%。后续 1 轮LLM调用均受益，复合节省 300 tokens。',
+          compounding_turns: 1,
           before_text: 'long original text',
           after_text: 'short text',
           diff_lines: [],
@@ -198,19 +204,30 @@ describe('TokenSavingsPage', () => {
         ],
       },
       stats_available: true,
+      optimization_tips: [],
     });
     await act(async () => { renderPage(); });
     await act(async () => {
       fireEvent.click(screen.getByText('查询'));
     });
-    // Click session row to expand
-    const row = screen.getByText('Expander').closest('tr');
+    // Click session row to expand - find the one inside the table (has <tr> ancestor)
+    const allExpander = screen.getAllByText('Expander');
+    const row = allExpander.map(el => el.closest('tr')).find(tr => tr !== null);
     await act(async () => {
       fireEvent.click(row!);
     });
-    expect(screen.getByText('工具输出')).toBeInTheDocument();
-    expect(screen.getByText('Schema 压缩')).toBeInTheDocument();
+    expect(screen.getAllByText('工具输出').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('Schema 压缩').length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText('详情').length).toBeGreaterThanOrEqual(1);
+    // Click "详情" to expand DiffView and verify compression_ratio renders
+    const detailBtns = screen.getAllByText('详情');
+    await act(async () => {
+      fireEvent.click(detailBtns[0]);
+    });
+    // The explanation banner should show compression ratio text
+    expect(screen.getByText(/75\.0%/)).toBeInTheDocument();
+    // The explanation text itself
+    expect(screen.getByText(/压缩率/)).toBeInTheDocument();
   });
 
   it('should show savings rate badge as 优秀 when >= 30%', async () => {
@@ -227,11 +244,86 @@ describe('TokenSavingsPage', () => {
         strategy_breakdown: [],
       },
       stats_available: true,
+      optimization_tips: [{ level: 'success', title: '节省效果优秀', description: '当前复合节省率 50.0%，表现优秀！继续保持当前配置。' }],
     });
     await act(async () => { renderPage(); });
     await act(async () => {
       fireEvent.click(screen.getByText('查询'));
     });
     expect(screen.getByText('优秀')).toBeInTheDocument();
+  });
+
+  it('should render optimization tips panel', async () => {
+    mockFetchTokenSavings.mockResolvedValue({
+      sessions: [],
+      summary: {
+        total_input_tokens: 5000,
+        total_output_tokens: 3000,
+        total_tokens: 8000,
+        total_compounded_saved: 200,
+        total_compounded_tool_saved: 200,
+        total_compounded_mcp_saved: 0,
+        compounded_savings_rate: 2.5,
+      },
+      stats_available: true,
+      optimization_tips: [
+        { level: 'warning', title: '节省率较低', description: '当前复合节省率不足 5%，建议检查 tokenless 配置。' },
+        { level: 'info', title: '建议开启 MCP 响应压缩', description: '当前仅有工具输出优化，未检测到 MCP 响应压缩。开启后可进一步降低 Token 消耗。' },
+      ],
+    });
+    await act(async () => { renderPage(); });
+    await act(async () => {
+      fireEvent.click(screen.getByText('查询'));
+    });
+    expect(screen.getByText('优化建议')).toBeInTheDocument();
+    expect(screen.getByText('节省率较低')).toBeInTheDocument();
+    expect(screen.getByText('建议开启 MCP 响应压缩')).toBeInTheDocument();
+  });
+
+  it('should render savings breakdown panel with top items', async () => {
+    mockFetchTokenSavings.mockResolvedValue({
+      sessions: [{
+        session_id: 'sess-breakdown',
+        agent_name: 'BreakdownAgent',
+        total_input_tokens: 3000,
+        total_output_tokens: 1500,
+        saved_tokens: 800,
+        compounded_saved: 800,
+        compounded_savings_rate: 17.8,
+        optimization_items: [
+          {
+            id: 'item-1',
+            category: 'tool_output',
+            before_tokens: 500,
+            after_tokens: 100,
+            saved_tokens: 400,
+            compounded_saved: 800,
+            compounding_turns: 2,
+            compression_ratio: 80.0,
+            explanation: '工具输出优化: 原始 500 tokens → 100 tokens，压缩率 80.0%。',
+            before_text: 'original',
+            after_text: 'compressed',
+            diff_lines: [],
+          },
+        ],
+      }],
+      summary: {
+        total_input_tokens: 3000,
+        total_output_tokens: 1500,
+        total_tokens: 4500,
+        total_compounded_saved: 800,
+        total_compounded_tool_saved: 800,
+        total_compounded_mcp_saved: 0,
+        compounded_savings_rate: 17.8,
+      },
+      stats_available: true,
+      optimization_tips: [],
+    });
+    await act(async () => { renderPage(); });
+    await act(async () => {
+      fireEvent.click(screen.getByText('查询'));
+    });
+    expect(screen.getByText('节省排行 Top 5（按复合节省量）')).toBeInTheDocument();
+    expect(screen.getAllByText('BreakdownAgent').length).toBeGreaterThanOrEqual(1);
   });
 });

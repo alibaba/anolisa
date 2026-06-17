@@ -4,7 +4,7 @@ import {
   PieChart, Pie, Cell, ResponsiveContainer,
 } from 'recharts';
 import { fetchTokenSavings, fetchAgentNames } from '../utils/apiClient';
-import type { SessionSavings, SavingsSummary, OptimizationItem, DiffLine, StrategyBreakdownItem } from '../utils/apiClient';
+import type { SessionSavings, SavingsSummary, OptimizationItem, DiffLine, StrategyBreakdownItem, OptimizationTip } from '../utils/apiClient';
 import { DateTimePicker } from '../components/DateTimePicker';
 import { SessionIdHelp } from '../components/SessionIdHelp';
 
@@ -140,26 +140,20 @@ const DiffView: React.FC<{ item: OptimizationItem }> = ({ item }) => {
 
   return (
     <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-      {/* Optimization explanation panel */}
-      {item.optimization_reason && (
-        <div className="px-4 py-3 bg-blue-50 border-b border-blue-100">
-          <p className="text-sm text-blue-800">
-            <span className="font-medium">优化说明：</span>{item.optimization_reason}
+      {/* Explanation banner */}
+      <div className="px-3 py-2 bg-blue-50 border-b border-blue-100 flex items-start gap-2">
+        <span className="text-blue-500 mt-0.5">💡</span>
+        <div>
+          <p className="text-sm text-blue-800 font-medium">{item.explanation}</p>
+          <p className="text-xs text-blue-600 mt-0.5">
+            压缩率 <span className="font-semibold">{item.compression_ratio.toFixed(1)}%</span>
+            {' · '}
+            影响后续 <span className="font-semibold">{item.compounding_turns}</span> 轮调用
+            {' · '}
+            复合节省 <span className="font-semibold text-green-700">{fmtTokens(item.compounded_saved)}</span> tokens
           </p>
-          {item.compounding_turns > 1 && (
-            <p className="text-xs text-blue-600 mt-1">
-              累计效果：此优化在后续 {item.compounding_turns} 轮对话中持续生效，
-              总计节省 {item.compounded_saved.toLocaleString()} tokens
-            </p>
-          )}
-          <div className="mt-2 h-1.5 rounded bg-blue-100 overflow-hidden">
-            <div
-              className="h-full bg-blue-500 rounded"
-              style={{ width: `${Math.min((item.saved_tokens / Math.max(item.before_tokens, 1)) * 100, 100)}%` }}
-            />
-          </div>
         </div>
-      )}
+      </div>
 
       {/* Line-level diff body */}
       <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
@@ -206,6 +200,95 @@ const DiffView: React.FC<{ item: OptimizationItem }> = ({ item }) => {
           <span className="text-green-600">+{addedCount} 行新增</span>
         </div>
       )}
+    </div>
+  );
+};
+
+// ─── Optimization Tips Panel ─────────────────────────────────────────────────
+
+const TIP_STYLE: Record<string, { icon: string; border: string; bg: string; text: string }> = {
+  success: { icon: '✅', border: 'border-green-200', bg: 'bg-green-50', text: 'text-green-800' },
+  info: { icon: '💡', border: 'border-blue-200', bg: 'bg-blue-50', text: 'text-blue-800' },
+  warning: { icon: '⚠️', border: 'border-yellow-200', bg: 'bg-yellow-50', text: 'text-yellow-800' },
+};
+
+const OptimizationTipsPanel: React.FC<{ tips: OptimizationTip[] }> = ({ tips }) => {
+  if (tips.length === 0) return null;
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+      <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
+        <span>🎯</span> 优化建议
+      </h3>
+      <div className="space-y-2">
+        {tips.map((tip, idx) => {
+          const style = TIP_STYLE[tip.level] || TIP_STYLE.info;
+          return (
+            <div key={idx} className={`flex items-start gap-2 px-3 py-2 rounded-lg border ${style.border} ${style.bg}`}>
+              <span className="mt-0.5">{style.icon}</span>
+              <div>
+                <p className={`text-sm font-medium ${style.text}`}>{tip.title}</p>
+                <p className={`text-xs ${style.text} opacity-80 mt-0.5`}>{tip.description}</p>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+// ─── Savings Breakdown Panel ─────────────────────────────────────────────────
+
+const SavingsBreakdownPanel: React.FC<{ sessions: SessionSavings[] }> = ({ sessions }) => {
+  // Get top 5 optimization items across all sessions by compounded_saved
+  const allItems = sessions.flatMap(s =>
+    s.optimization_items.map(item => ({
+      ...item,
+      session_id: s.session_id,
+      agent_name: s.agent_name,
+    }))
+  );
+  const topItems = [...allItems]
+    .sort((a, b) => b.compounded_saved - a.compounded_saved)
+    .slice(0, 5);
+
+  if (topItems.length === 0) return null;
+
+  const maxSaved = topItems[0]?.compounded_saved || 1;
+
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+      <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
+        <span>📊</span> 节省排行 Top 5（按复合节省量）
+      </h3>
+      <div className="space-y-2">
+        {topItems.map((item, idx) => {
+          const cfg = CATEGORY_CONFIG[item.category];
+          const pct = (item.compounded_saved / maxSaved) * 100;
+          return (
+            <div key={item.id || idx} className="flex items-center gap-3">
+              <span className="text-xs text-gray-400 w-4 text-right">#{idx + 1}</span>
+              <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${cfg.bg} ${cfg.color} flex-shrink-0`}>
+                {cfg.label}
+              </span>
+              <div className="flex-1 min-w-0">
+                <div className="h-5 bg-gray-100 rounded-full overflow-hidden relative">
+                  <div
+                    className="h-full bg-gradient-to-r from-green-400 to-green-600 rounded-full transition-all"
+                    style={{ width: `${pct}%` }}
+                  />
+                  <span className="absolute inset-0 flex items-center px-2 text-xs font-medium text-gray-700">
+                    {fmtTokens(item.compounded_saved)} tokens
+                  </span>
+                </div>
+              </div>
+              <span className="text-xs text-gray-400 flex-shrink-0 truncate max-w-[100px]" title={item.agent_name}>
+                {item.agent_name}
+              </span>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 };
@@ -402,6 +485,7 @@ export const TokenSavingsPage: React.FC = () => {
   const [sessions, setSessions] = useState<SessionSavings[]>([]);
   const [summary, setSummary] = useState<SavingsSummary | null>(null);
   const [statsAvailable, setStatsAvailable] = useState(true);
+  const [tips, setTips] = useState<OptimizationTip[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [agentNames, setAgentNames] = useState<string[]>([]);
@@ -427,6 +511,7 @@ export const TokenSavingsPage: React.FC = () => {
       setSessions(resp.sessions);
       setSummary(resp.summary);
       setStatsAvailable(resp.stats_available);
+      setTips(resp.optimization_tips ?? []);
     } catch (e: any) {
       setError(e.message || 'Failed to fetch token savings');
     } finally {
@@ -743,6 +828,12 @@ export const TokenSavingsPage: React.FC = () => {
           </div>
         );
       })()}
+
+      {/* ── Optimization tips + Savings breakdown ── */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <OptimizationTipsPanel tips={tips} />
+        <SavingsBreakdownPanel sessions={sessions} />
+      </div>
 
       {/* ── Session table ── */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">

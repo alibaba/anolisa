@@ -62,6 +62,8 @@ pub struct OptimizationItemDto {
     pub saved_tokens: i64,
     pub compounded_saved: i64,
     pub compounding_turns: i64,
+    pub compression_ratio: f64,
+    pub explanation: String,
     pub before_summary: String,
     pub after_summary: String,
     pub optimization_reason: String,
@@ -79,7 +81,7 @@ pub struct DiffLineDto {
 }
 
 /// Per-session savings data
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct SessionSavingsDto {
     pub session_id: String,
     pub agent_name: String,
@@ -97,12 +99,21 @@ pub struct SessionSavingsDto {
     pub optimization_items: Vec<OptimizationItemDto>,
 }
 
+/// An actionable optimization tip
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct OptimizationTip {
+    pub level: String,
+    pub title: String,
+    pub description: String,
+}
+
 /// Full response for /api/token-savings
 #[derive(Debug, Serialize)]
 pub struct TokenSavingsResponse {
     pub stats_available: bool,
     pub summary: SavingsSummary,
     pub sessions: Vec<SessionSavingsDto>,
+    pub optimization_tips: Vec<OptimizationTip>,
 }
 
 /// Response for /api/token-savings/session/{session_id}
@@ -318,6 +329,119 @@ fn now_ns() -> u64 {
         .as_nanos() as u64
 }
 
+/// Compute compression ratio clamped to [0.0, 100.0].
+/// Returns 0.0 when before_tokens is 0 or after >= before (no real compression).
+pub(crate) fn compute_compression_ratio(before_tokens: i64, after_tokens: i64) -> f64 {
+    if before_tokens > 0 {
+        let raw = (1.0 - after_tokens as f64 / before_tokens as f64) * 100.0;
+        raw.clamp(0.0, 100.0)
+    } else {
+        0.0
+    }
+}
+
+/// Build a human-readable explanation string for an optimization item.
+pub(crate) fn build_explanation(
+    category: &str,
+    before_tokens: i64,
+    after_tokens: i64,
+    compression_ratio: f64,
+    compounding_turns: i64,
+    compounded: i64,
+) -> String {
+    if category == "mcp_response" {
+        format!(
+            "MCP响应压缩: 原始 {} tokens → {} tokens，压缩率 {:.1}%。后续 {} 轮LLM调用均受益，复合节省 {} tokens。",
+            before_tokens, after_tokens, compression_ratio, compounding_turns, compounded
+        )
+    } else {
+        format!(
+            "工具输出优化: 原始 {} tokens → {} tokens，压缩率 {:.1}%。后续 {} 轮LLM调用均受益，复合节省 {} tokens。",
+            before_tokens, after_tokens, compression_ratio, compounding_turns, compounded
+        )
+    }
+}
+
+/// Generate optimization tips based on aggregated savings data.
+pub(crate) fn generate_optimization_tips(
+    stats_available: bool,
+    grand_total: i64,
+    grand_compounded_rate: f64,
+    grand_compounded_tool_saved: i64,
+    grand_compounded_mcp_saved: i64,
+    sessions: &[SessionSavingsDto],
+) -> Vec<OptimizationTip> {
+    let mut tips: Vec<OptimizationTip> = Vec::new();
+
+    if !stats_available {
+        tips.push(OptimizationTip {
+            level: "warning".to_string(),
+            title: "未检测到 Tokenless 组件".to_string(),
+            description: "未发现 stats.db，请确认 tokenless 组件已安装并启用。启用后可自动压缩工具输出和 MCP 响应，显著降低 Token 消耗。".to_string(),
+        });
+    } else if grand_compounded_rate < 15.0 && grand_total > 0 {
+        tips.push(OptimizationTip {
+            level: "warning".to_string(),
+            title: "节省率较低".to_string(),
+            description: "当前复合节省率不足 15%，建议检查 tokenless 配置是否已对所有 Agent 生效，确保工具输出和 MCP 响应压缩均已开启。".to_string(),
+        });
+    }
+
+    if grand_compounded_tool_saved > 0 && grand_compounded_mcp_saved == 0 && grand_total > 0 {
+        tips.push(OptimizationTip {
+            level: "info".to_string(),
+            title: "建议开启 MCP 响应压缩".to_string(),
+            description:
+                "当前仅有工具输出优化，未检测到 MCP 响应压缩。开启后可进一步降低 Token 消耗。"
+                    .to_string(),
+        });
+    }
+
+    if grand_compounded_mcp_saved > 0 && grand_compounded_tool_saved == 0 && grand_total > 0 {
+        tips.push(OptimizationTip {
+            level: "info".to_string(),
+            title: "建议开启工具输出优化".to_string(),
+            description:
+                "当前仅有 MCP 响应压缩，未检测到工具输出优化。开启后可进一步降低 Token 消耗。"
+                    .to_string(),
+        });
+    }
+
+    let zero_savings_sessions = sessions
+        .iter()
+        .filter(|s| s.compounded_saved == 0 && s.total_tokens > 1000)
+        .count();
+    if zero_savings_sessions > 0 {
+        tips.push(OptimizationTip {
+            level: "info".to_string(),
+            title: format!("发现 {} 个未优化会话", zero_savings_sessions),
+            description: "部分会话消耗较高但无优化记录，可能是对应 Agent 未启用 tokenless 或工具调用较少。建议检查这些会话的 Agent 配置。".to_string(),
+        });
+    }
+
+    if grand_compounded_rate >= 30.0 {
+        tips.push(OptimizationTip {
+            level: "success".to_string(),
+            title: "节省效果优秀".to_string(),
+            description: format!(
+                "当前复合节省率 {:.1}%，表现优秀！继续保持当前配置。",
+                grand_compounded_rate
+            ),
+        });
+    } else if grand_compounded_rate >= 15.0 {
+        tips.push(OptimizationTip {
+            level: "success".to_string(),
+            title: "节省效果良好".to_string(),
+            description: format!(
+                "当前复合节省率 {:.1}%，已达到良好水平。可尝试调整压缩策略以进一步提升。",
+                grand_compounded_rate
+            ),
+        });
+    }
+
+    tips
+}
+
 // ─── GET /api/token-savings ──────────────────────────────────────────────────
 
 /// GET /api/token-savings?start_ns=<i64>&end_ns=<i64>&agent_name=<str>
@@ -449,8 +573,6 @@ pub async fn get_token_savings(
                 let strategy_label = map_operation_to_strategy_label(&row.operation).to_string();
 
                 // FIX(#2): aggregate by strategy key so unknown ops merge into one slice.
-                // Use operation name as key for known ops (frontend STRATEGY_CONFIG matches on this),
-                // and "other" for unknown ops so they collapse into a single slice.
                 let strategy_key = match row.operation.as_str() {
                     "compress-response" | "compress-toon" | "rewrite-command"
                     | "compress-schema" => row.operation.clone(),
@@ -464,6 +586,17 @@ pub async fn get_token_savings(
                 entry.1 += saved;
                 entry.2 += compounded;
 
+                let compression_ratio =
+                    compute_compression_ratio(row.before_tokens, row.after_tokens);
+                let explanation = build_explanation(
+                    category,
+                    row.before_tokens,
+                    row.after_tokens,
+                    compression_ratio,
+                    compounding_turns,
+                    compounded,
+                );
+
                 items.push(OptimizationItemDto {
                     id: row.tool_use_id.clone(),
                     category: category.to_string(),
@@ -475,6 +608,8 @@ pub async fn get_token_savings(
                     saved_tokens: saved,
                     compounded_saved: compounded,
                     compounding_turns,
+                    compression_ratio,
+                    explanation,
                     before_summary: format!("原始内容 {} tokens", row.before_tokens),
                     after_summary: format!("优化后 {} tokens", row.after_tokens),
                     optimization_reason,
@@ -567,7 +702,15 @@ pub async fn get_token_savings(
             total_compounded_mcp_saved: grand_compounded_mcp_saved,
             strategy_breakdown,
         },
-        sessions: resp_sessions,
+        sessions: resp_sessions.clone(),
+        optimization_tips: generate_optimization_tips(
+            stats_available,
+            grand_total,
+            grand_compounded_rate,
+            grand_compounded_tool_saved,
+            grand_compounded_mcp_saved,
+            &resp_sessions,
+        ),
     })
 }
 
@@ -671,6 +814,15 @@ pub async fn get_session_savings(
                 saved_tokens: saved,
                 compounded_saved: compounded,
                 compounding_turns,
+                compression_ratio: compute_compression_ratio(row.before_tokens, row.after_tokens),
+                explanation: build_explanation(
+                    category,
+                    row.before_tokens,
+                    row.after_tokens,
+                    compute_compression_ratio(row.before_tokens, row.after_tokens),
+                    compounding_turns,
+                    compounded,
+                ),
                 before_summary: format!("原始内容 {} tokens", row.before_tokens),
                 after_summary: format!("优化后 {} tokens", row.after_tokens),
                 optimization_reason: generate_optimization_reason(
@@ -1119,6 +1271,27 @@ mod tests {
         }
     }
 
+    // ─── Unit tests for helper functions ─────────────────────────────────
+
+    fn make_session_for_tips(compounded_saved: i64, total_tokens: i64) -> SessionSavingsDto {
+        SessionSavingsDto {
+            session_id: "sess-1".to_string(),
+            agent_name: "TestAgent".to_string(),
+            total_input_tokens: total_tokens / 2,
+            total_output_tokens: total_tokens / 2,
+            total_tokens,
+            baseline_tokens: total_tokens + compounded_saved,
+            saved_tokens: compounded_saved,
+            compounded_saved,
+            savings_rate: 0.0,
+            compounded_savings_rate: 0.0,
+            request_count: 1,
+            tool_saved: 0,
+            mcp_saved: 0,
+            optimization_items: vec![],
+        }
+    }
+
     #[test]
     fn test_diff_replace_remove_before_add() {
         let before = "old_line";
@@ -1129,6 +1302,65 @@ mod tests {
         assert!(
             first_remove < first_add || first_add.is_none(),
             "removes should come before adds"
+        );
+    }
+
+    #[test]
+    fn test_compute_compression_ratio_normal() {
+        let ratio = compute_compression_ratio(1000, 250);
+        assert!((ratio - 75.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_compute_compression_ratio_zero_before() {
+        assert_eq!(compute_compression_ratio(0, 100), 0.0);
+    }
+
+    #[test]
+    fn test_compute_compression_ratio_no_compression() {
+        let ratio = compute_compression_ratio(500, 500);
+        assert!((ratio - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_compute_compression_ratio_negative_clamped() {
+        let ratio = compute_compression_ratio(100, 200);
+        assert_eq!(ratio, 0.0);
+    }
+
+    #[test]
+    fn test_build_explanation_mcp_response() {
+        let explanation = build_explanation("mcp_response", 1000, 200, 80.0, 3, 2400);
+        assert!(explanation.contains("MCP"));
+        assert!(explanation.contains("1000"));
+        assert!(explanation.contains("200"));
+        assert!(explanation.contains("80.0%"));
+        assert!(explanation.contains("3"));
+        assert!(explanation.contains("2400"));
+    }
+
+    #[test]
+    fn test_build_explanation_tool_output() {
+        let explanation = build_explanation("tool_output", 500, 100, 80.0, 2, 800);
+        assert!(explanation.contains("工具输出"));
+        assert!(explanation.contains("500"));
+        assert!(explanation.contains("100"));
+    }
+
+    #[test]
+    fn test_tips_stats_unavailable() {
+        let tips = generate_optimization_tips(false, 0, 0.0, 0, 0, &[]);
+        assert_eq!(tips.len(), 1);
+        assert_eq!(tips[0].level, "warning");
+        assert!(tips[0].title.contains("Tokenless"));
+    }
+
+    #[test]
+    fn test_tips_low_savings_rate() {
+        let tips = generate_optimization_tips(true, 10000, 10.0, 100, 200, &[]);
+        assert!(
+            tips.iter()
+                .any(|t| t.level == "warning" && t.title.contains("节省率"))
         );
     }
 
@@ -1168,5 +1400,86 @@ mod tests {
             .join("\n");
         let result = compute_diff_lines(Some(&before), Some(&after));
         assert!(result.len() <= 200);
+    }
+
+    #[test]
+    fn test_tips_boundary_at_15_no_warning() {
+        let tips = generate_optimization_tips(true, 10000, 15.0, 1000, 500, &[]);
+        assert!(
+            !tips
+                .iter()
+                .any(|t| t.level == "warning" && t.title.contains("节省率"))
+        );
+        assert!(tips.iter().any(|t| t.level == "success"));
+    }
+
+    #[test]
+    fn test_tips_boundary_at_30_excellent() {
+        let tips = generate_optimization_tips(true, 10000, 30.0, 2000, 1000, &[]);
+        assert!(
+            tips.iter()
+                .any(|t| t.level == "success" && t.title.contains("优秀"))
+        );
+    }
+
+    #[test]
+    fn test_tips_boundary_just_below_15_warning() {
+        let tips = generate_optimization_tips(true, 10000, 14.9, 500, 500, &[]);
+        assert!(
+            tips.iter()
+                .any(|t| t.level == "warning" && t.title.contains("节省率"))
+        );
+    }
+
+    #[test]
+    fn test_tips_only_tool_saved_suggest_mcp() {
+        let tips = generate_optimization_tips(true, 10000, 10.0, 500, 0, &[]);
+        assert!(
+            tips.iter()
+                .any(|t| t.level == "info" && t.title.contains("MCP"))
+        );
+    }
+
+    #[test]
+    fn test_tips_only_mcp_saved_suggest_tool() {
+        let tips = generate_optimization_tips(true, 10000, 10.0, 0, 500, &[]);
+        assert!(
+            tips.iter()
+                .any(|t| t.level == "info" && t.title.contains("工具"))
+        );
+    }
+
+    #[test]
+    fn test_tips_zero_savings_sessions() {
+        let sessions = vec![
+            make_session_for_tips(0, 5000),
+            make_session_for_tips(200, 3000),
+        ];
+        let tips = generate_optimization_tips(true, 8000, 10.0, 100, 100, &sessions);
+        assert!(tips.iter().any(|t| t.title.contains("1")));
+    }
+
+    #[test]
+    fn test_tips_excellent_rate() {
+        let tips = generate_optimization_tips(true, 10000, 35.0, 2000, 1500, &[]);
+        assert!(
+            tips.iter()
+                .any(|t| t.level == "success" && t.title.contains("优秀"))
+        );
+    }
+
+    #[test]
+    fn test_tips_good_rate() {
+        let tips = generate_optimization_tips(true, 10000, 20.0, 1000, 1000, &[]);
+        assert!(
+            tips.iter()
+                .any(|t| t.level == "success" && t.title.contains("良好"))
+        );
+    }
+
+    #[test]
+    fn test_tips_empty_when_no_data() {
+        let tips = generate_optimization_tips(true, 0, 0.0, 0, 0, &[]);
+        assert!(tips.is_empty());
     }
 }

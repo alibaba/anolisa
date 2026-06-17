@@ -211,6 +211,8 @@ export interface OptimizationItem {
   saved_tokens: number;
   compounded_saved: number;
   compounding_turns: number;
+  compression_ratio: number;
+  explanation: string;
   before_summary: string;
   after_summary: string;
   optimization_reason: string;
@@ -259,10 +261,17 @@ export interface SavingsSummary {
   strategy_breakdown: StrategyBreakdownItem[];
 }
 
+export interface OptimizationTip {
+  level: 'success' | 'info' | 'warning';
+  title: string;
+  description: string;
+}
+
 export interface TokenSavingsResponse {
   stats_available: boolean;
   summary: SavingsSummary;
   sessions: SessionSavings[];
+  optimization_tips: OptimizationTip[];
 }
 
 /**
