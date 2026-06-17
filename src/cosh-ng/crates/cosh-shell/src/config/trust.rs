@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use super::load::dirs_next_or_home;
+use super::load::copilot_shell_cosh_dir;
 use super::CoshConfig;
 
 pub fn trust_project_root(root: &Path) -> Result<(), String> {
@@ -25,7 +25,11 @@ pub(super) fn project_trust_store_path() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("COSH_SHELL_PROJECT_TRUST_STORE") {
         return Some(PathBuf::from(path));
     }
-    dirs_next_or_home().map(|d| d.join(".config/cosh/trusted-project-hooks"))
+    copilot_shell_cosh_dir().map(|d| project_trust_store_path_in_dir(&d))
+}
+
+pub(super) fn project_trust_store_path_in_dir(cosh_dir: &Path) -> PathBuf {
+    cosh_dir.join("trusted-project-hooks")
 }
 
 pub(super) fn load_project_trust_store(config: &mut CoshConfig, path: &Path) {

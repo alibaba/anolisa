@@ -1,16 +1,16 @@
 use std::path::PathBuf;
 
 use super::hook_feedback::{
-    read_hook_feedback_from_store_path, write_hook_feedback_entries_to_store_path,
-    write_hook_feedback_to_store_path,
+    hook_feedback_store_path_in_dir, read_hook_feedback_from_store_path,
+    write_hook_feedback_entries_to_store_path, write_hook_feedback_to_store_path,
 };
 use super::language::{language_setting_from_config_content, write_language_config_to_path};
 use super::load::{config_read_file_path_for_home, load_config_file_into};
 use super::parse::{parse_simple_config, parse_toml_config};
 use super::trust::{
     add_trusted_project_root_to_store_path, load_project_trust_store,
-    read_trusted_project_roots_from_store_path, remove_trusted_project_root_from_store_path,
-    write_trusted_project_roots_to_store_path,
+    project_trust_store_path_in_dir, read_trusted_project_roots_from_store_path,
+    remove_trusted_project_root_from_store_path, write_trusted_project_roots_to_store_path,
 };
 use super::{parse_language_setting, CoshConfig, HookFeedbackPreference, LanguageSetting};
 
@@ -71,15 +71,33 @@ fn config_read_path_prefers_shared_copilot_shell_config() {
 }
 
 #[test]
-fn config_read_path_falls_back_to_legacy_cosh_config() {
-    let home = temp_home_path("legacy-config-fallback");
+fn config_read_path_ignores_legacy_cosh_config() {
+    let home = temp_home_path("legacy-config-ignored");
     let legacy = home.join(".config/cosh/config.toml");
     std::fs::create_dir_all(legacy.parent().unwrap()).expect("legacy dir");
     std::fs::write(&legacy, "[ui]\nlanguage = \"zh-CN\"\n").expect("legacy config");
 
-    assert_eq!(config_read_file_path_for_home(&home), legacy);
+    assert_eq!(
+        config_read_file_path_for_home(&home),
+        home.join(".copilot-shell/config.toml")
+    );
 
     let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn cosh_state_paths_use_copilot_shell_cosh_dir() {
+    let home = temp_home_path("cosh-state-paths");
+    let cosh_dir = home.join(".copilot-shell/cosh");
+
+    assert_eq!(
+        project_trust_store_path_in_dir(&cosh_dir),
+        home.join(".copilot-shell/cosh/trusted-project-hooks")
+    );
+    assert_eq!(
+        hook_feedback_store_path_in_dir(&cosh_dir),
+        home.join(".copilot-shell/cosh/hook-feedback")
+    );
 }
 
 #[test]

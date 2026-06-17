@@ -119,10 +119,7 @@ pub(crate) fn configured_raw_invocation(args: &[String]) -> (String, RawShellKin
 
 fn cosh_shell_default_state_previous_shell() -> Option<String> {
     let home = std::env::var("HOME").ok()?;
-    let path = std::path::Path::new(&home)
-        .join(".config")
-        .join("cosh")
-        .join("cosh-shell-default.state");
+    let path = cosh_shell_default_state_path_for_home(std::path::Path::new(&home));
     let content = std::fs::read_to_string(path).ok()?;
     content.lines().find_map(|line| {
         line.strip_prefix("PREVIOUS_SHELL=")
@@ -132,11 +129,15 @@ fn cosh_shell_default_state_previous_shell() -> Option<String> {
     })
 }
 
+fn cosh_shell_default_state_path_for_home(home: &std::path::Path) -> std::path::PathBuf {
+    home.join(".copilot-shell/cosh/cosh-shell-default.state")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        adapter_name_from_args, parse_raw_shell, raw_shell_from_args, shell_from_default_or_auto,
-        should_start_default_raw, RawShellKind,
+        adapter_name_from_args, cosh_shell_default_state_path_for_home, parse_raw_shell,
+        raw_shell_from_args, shell_from_default_or_auto, should_start_default_raw, RawShellKind,
     };
 
     #[test]
@@ -190,6 +191,14 @@ mod tests {
         assert_eq!(
             adapter_name_from_args(&["--shell".to_string(), "zsh".to_string(), "co".to_string()]),
             Some("co")
+        );
+    }
+
+    #[test]
+    fn default_shell_state_path_uses_copilot_shell_cosh_dir() {
+        assert_eq!(
+            cosh_shell_default_state_path_for_home(std::path::Path::new("/tmp/cosh-home")),
+            std::path::PathBuf::from("/tmp/cosh-home/.copilot-shell/cosh/cosh-shell-default.state")
         );
     }
 

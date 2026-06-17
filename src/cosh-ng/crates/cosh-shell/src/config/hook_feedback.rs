@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use super::load::dirs_next_or_home;
+use super::load::copilot_shell_cosh_dir;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookFeedbackPreference {
@@ -125,7 +125,11 @@ fn hook_feedback_store_path() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("COSH_SHELL_HOOK_FEEDBACK_STORE") {
         return Some(PathBuf::from(path));
     }
-    dirs_next_or_home().map(|d| d.join(".config/cosh/hook-feedback"))
+    copilot_shell_cosh_dir().map(|d| hook_feedback_store_path_in_dir(&d))
+}
+
+pub(super) fn hook_feedback_store_path_in_dir(cosh_dir: &Path) -> PathBuf {
+    cosh_dir.join("hook-feedback")
 }
 
 fn validate_hook_feedback_preference(preference: &HookFeedbackPreference) -> Result<(), String> {

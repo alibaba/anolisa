@@ -106,6 +106,27 @@ fn raw_cli_agent_question_answer_slash_is_ignored() {
 }
 
 #[test]
+fn raw_cli_agent_free_text_question_echoes_input_before_submit() {
+    let output = run_raw_cli_with_delayed_input(
+        "fake",
+        vec![
+            (b"?? ask free question\n".to_vec(), Duration::ZERO),
+            (b"feature/x".to_vec(), Duration::from_millis(800)),
+            (vec![0x03], Duration::from_millis(300)),
+            (b"exit\n".to_vec(), Duration::from_millis(200)),
+        ],
+    );
+
+    assert!(output.contains("Agent question"), "{output}");
+    assert!(
+        output.contains("Tell me the branch name to inspect"),
+        "{output}"
+    );
+    assert!(output.contains("Answer: feature/x"), "{output}");
+    assert!(!output.contains("Got your answer: feature/x"), "{output}");
+}
+
+#[test]
 fn raw_cli_agent_question_ctrl_c_cancels_card_without_answer_turn() {
     let output = run_raw_cli_with_delayed_input(
         "fake",
@@ -238,7 +259,7 @@ fn raw_cli_agent_question_accepts_multiple_answers_with_custom_card_answer() {
 
     assert!(output.contains("Choose checks to run"), "{output}");
     assert!(output.contains("[x] [1] Lint"), "{output}");
-    assert!(output.contains("> [4] Other: Docs"), "{output}");
+    assert!(output.contains("> [4] Answer: Docs"), "{output}");
     assert!(output.contains("Answer: Lint, Docs"), "{output}");
     assert!(!output.contains("Answer sent"), "{output}");
     assert!(output.contains("Answer: Lint, Docs"), "{output}");
@@ -281,7 +302,7 @@ fn raw_cli_agent_question_accepts_natural_language_answer() {
         output.contains("Got your answer: \u{7eff}\u{8272}"),
         "{output}"
     );
-    assert!(output.contains("Other: \u{7eff}\u{8272}"), "{output}");
+    assert!(output.contains("Answer: \u{7eff}\u{8272}"), "{output}");
     assert!(!output.contains("/answer"), "{output}");
     assert!(!output.contains("bash:"), "{output}");
 }
@@ -302,7 +323,10 @@ fn raw_cli_agent_question_accepts_custom_card_answer() {
 
     assert!(output.contains("Agent question"), "{output}");
     assert!(!output.contains("Agent question q-1"), "{output}");
-    assert!(output.contains("> [4] Other: \u{7ea2}\u{8272}"), "{output}");
+    assert!(
+        output.contains("> [4] Answer: \u{7ea2}\u{8272}"),
+        "{output}"
+    );
     assert!(!output.contains("Answer sent"), "{output}");
     assert!(output.contains("Answer: \u{7ea2}\u{8272}"), "{output}");
     assert!(!output.contains("Sent to Agent"), "{output}");

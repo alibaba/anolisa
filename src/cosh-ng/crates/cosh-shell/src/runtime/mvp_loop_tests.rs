@@ -315,6 +315,14 @@ fn governance_display_text_uses_requested_language_for_shell_owned_fallbacks() {
             allow_free_text: true,
             selection_mode: QuestionSelectionMode::Single,
         },
+        AgentEvent::UserQuestion {
+            run_id: "run-1".to_string(),
+            provider_request_id: None,
+            question: String::new(),
+            options: Vec::new(),
+            allow_free_text: true,
+            selection_mode: QuestionSelectionMode::Single,
+        },
         AgentEvent::AgentCancelled {
             run_id: "run-1".to_string(),
             reason: "user requested cancellation".to_string(),
@@ -343,6 +351,7 @@ fn governance_display_text_uses_requested_language_for_shell_owned_fallbacks() {
     assert!(text.contains("Tool 输出: tool-1 stdout"), "{text}");
     assert!(text.contains("Tool 已完成: tool-1"), "{text}");
     assert!(text.contains("问题: 继续吗？"), "{text}");
+    assert!(text.contains("问题: Agent 需要你的输入"), "{text}");
     assert!(text.contains("Agent 已取消"), "{text}");
     assert!(text.contains("原因: 用户请求取消"), "{text}");
     assert!(!text.contains("Approval required:"), "{text}");
@@ -352,6 +361,7 @@ fn governance_display_text_uses_requested_language_for_shell_owned_fallbacks() {
     assert!(!text.contains("Skill loaded:"), "{text}");
     assert!(!text.contains("Skill failed:"), "{text}");
     assert!(!text.contains("Tool output:"), "{text}");
+    assert!(!text.contains("Question: Agent needs your input"), "{text}");
 }
 
 #[test]

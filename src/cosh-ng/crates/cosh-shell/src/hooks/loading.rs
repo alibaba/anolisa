@@ -2,12 +2,16 @@ use std::path::{Path, PathBuf};
 
 pub(crate) fn dirs_for_hook_loading() -> Option<PathBuf> {
     let home = std::env::var("HOME").ok()?;
-    let dir = PathBuf::from(home).join(".config/cosh/hooks");
+    let dir = user_hooks_dir_for_home(&PathBuf::from(home));
     if dir.is_dir() {
         Some(dir)
     } else {
         None
     }
+}
+
+pub(crate) fn user_hooks_dir_for_home(home: &Path) -> PathBuf {
+    home.join(".copilot-shell/cosh/hooks")
 }
 
 pub(crate) fn project_hook_root_from_cwd(cwd: &Path) -> Option<PathBuf> {
@@ -33,6 +37,16 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn user_hooks_dir_uses_copilot_shell_cosh_dir() {
+        let home = PathBuf::from("/tmp/cosh-shell-home");
+
+        assert_eq!(
+            user_hooks_dir_for_home(&home),
+            PathBuf::from("/tmp/cosh-shell-home/.copilot-shell/cosh/hooks")
+        );
+    }
 
     #[test]
     fn project_hook_root_from_cwd_walks_up_to_cosh_hooks() {

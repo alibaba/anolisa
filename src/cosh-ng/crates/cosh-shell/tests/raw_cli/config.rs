@@ -56,8 +56,8 @@ debug = true
 }
 
 #[test]
-fn raw_cli_config_summary_reads_language_from_legacy_user_config() {
-    let home = temp_shell_home("config-language-legacy-summary");
+fn raw_cli_config_summary_ignores_legacy_user_config() {
+    let home = temp_shell_home("config-language-legacy-ignored");
     write_legacy_cosh_config(
         &home,
         r#"
@@ -72,9 +72,11 @@ language = "zh-CN"
         &[("HOME", &home_str), ("COSH_SHELL_LANG", RAW_CLI_UNSET_ENV)],
     );
 
-    assert!(output.contains("配置"), "{output}");
-    assert!(output.contains("语言: zh-CN 来源: config"), "{output}");
-    assert!(output.contains(".copilot-shell/config.toml"), "{output}");
+    assert!(output.contains("Config:"), "{output}");
+    assert!(output.contains("language: en-US effective"), "{output}");
+    assert!(!output.contains("语言: zh-CN 来源: config"), "{output}");
+    assert!(output.contains(".copilot-shell"), "{output}");
+    assert!(output.contains("config.toml"), "{output}");
     assert!(!output.contains("bash: /config"), "{output}");
 }
 

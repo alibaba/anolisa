@@ -302,10 +302,11 @@ fn user_facing_tool_name(name: &str, i18n: &I18n) -> String {
 }
 
 fn render_user_question(question: &str, options: &[String], i18n: &I18n) -> String {
+    let question = display_question_text(question, i18n);
     if options.is_empty() {
         return i18n.format(
             MessageId::AgentGovernanceQuestionLine,
-            &[("question", question)],
+            &[("question", question.as_str())],
         );
     }
 
@@ -318,9 +319,18 @@ fn render_user_question(question: &str, options: &[String], i18n: &I18n) -> Stri
         "{}{rendered}",
         i18n.format(
             MessageId::AgentGovernanceQuestionLine,
-            &[("question", question)]
+            &[("question", question.as_str())]
         )
     )
+}
+
+fn display_question_text(question: &str, i18n: &I18n) -> String {
+    let question = question.trim();
+    if question.is_empty() {
+        i18n.t(MessageId::QuestionDefaultPrompt).to_string()
+    } else {
+        question.to_string()
+    }
 }
 
 fn agent_cancelled_reason(reason: &str, i18n: &I18n) -> String {

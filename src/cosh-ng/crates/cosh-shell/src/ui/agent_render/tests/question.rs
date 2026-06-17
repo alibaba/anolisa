@@ -125,7 +125,7 @@ fn question_panel_keeps_cjk_and_emoji_borders_aligned() {
     assert!(text.contains("Select one or more:"), "{text}");
     assert!(text.contains("[x] [1] 分析 CPU 占用 🧪"), "{text}");
     assert!(text.contains("[x] [2] 分析内存占用"), "{text}");
-    assert!(text.contains("> [4] Other: 重点看中文路径"), "{text}");
+    assert!(text.contains("> [4] Answer: 重点看中文路径"), "{text}");
     assert!(text.contains("type answer"), "{text}");
     assert_rendered_width(&text, 54);
     assert_box_lines_aligned(&text, 54);
@@ -195,6 +195,28 @@ fn question_panel_free_text_only_omits_fake_option_section() {
     assert!(!text.contains("Answer:"), "{text}");
     assert!(!text.contains("Type an answer"), "{text}");
     assert!(!text.contains("[1]"), "{text}");
+    assert_rendered_width(&text, 90);
+}
+
+#[test]
+fn question_panel_free_text_only_renders_input_value() {
+    let renderer = RatatuiInlineRenderer::with_width(90).with_language(crate::Language::ZhCn);
+    let text = renderer
+        .question_panel_lines(QuestionPanelModel {
+            id: "q-4",
+            question: "你的爱好是什么？",
+            options: &[],
+            selected_option: 0,
+            selected_options: &[],
+            custom_answer: "我的爱好是撸猫",
+            allow_free_text: true,
+            selection_mode: QuestionSelectionMode::Single,
+        })
+        .join("\n");
+
+    assert!(text.contains("回答: 我的爱好是撸猫"), "{text}");
+    assert!(!text.contains("[1]"), "{text}");
+    assert!(text.contains("输入回答"), "{text}");
     assert_rendered_width(&text, 90);
 }
 
@@ -355,7 +377,7 @@ fn question_panel_renders_custom_answer_input_value() {
         })
         .join("\n");
 
-    assert!(text.contains("> [3] Other: 红色"), "{text}");
+    assert!(text.contains("> [3] Answer: 红色"), "{text}");
     assert!(!text.contains("Custom answer"), "{text}");
     assert_rendered_width(&text, 90);
 }

@@ -516,9 +516,10 @@ pub(crate) fn record_user_questions(
             continue;
         };
         let id = next_question_id(state);
+        let question = display_question_text(state, question);
         state.questions.items.push(RuntimeUserQuestion {
             id: id.clone(),
-            question: question.clone(),
+            question,
             options: options.clone(),
             selected_option: 0,
             selected_options: Vec::new(),
@@ -532,6 +533,15 @@ pub(crate) fn record_user_questions(
         ids.push(id);
     }
     ids
+}
+
+fn display_question_text(state: &InlineState, question: &str) -> String {
+    let question = question.trim();
+    if question.is_empty() {
+        state.i18n().t(MessageId::QuestionDefaultPrompt).to_string()
+    } else {
+        question.to_string()
+    }
 }
 
 fn next_question_id(state: &InlineState) -> String {
@@ -572,4 +582,42 @@ pub(crate) fn render_user_questions<W: Write>(
         state.questions.active_panel_height = height;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn record_user_questions_localizes_empty_question_fallback() {
+        let mut state = InlineState {
+            language: Language::ZhCn,
+            ..InlineState::default()
+        };
+        let events = vec![GovernedEvent {
+            decision: GovernanceDecision::Display,
+            policy_decision: GovernancePolicyDecision::DisplayOnly,
+            event: AgentEvent::UserQuestion {
+                run_id: "run-1".to_string(),
+                provider_request_id: None,
+                question: String::new(),
+                options: Vec::new(),
+                allow_free_text: true,
+                selection_mode: QuestionSelectionMode::Single,
+            },
+            reason: "display".to_string(),
+            display_text: String::new(),
+            auto_execute: false,
+        }];
+
+        let ids = record_user_questions(&mut state, &events);
+
+        assert_eq!(ids, vec!["q-1".to_string()]);
+        assert_eq!(state.questions.items[0].question, "Agent 需要你的输入");
+        let mut output = Vec::new();
+        render_user_questions(&mut state, &ids, &mut output).expect("render question");
+        let text = String::from_utf8(output).expect("utf8 question");
+        assert!(text.contains("Agent 需要你的输入"), "{text}");
+        assert!(!text.contains("Agent needs your input"), "{text}");
+    }
 }

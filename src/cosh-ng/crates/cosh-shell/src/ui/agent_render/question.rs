@@ -114,8 +114,8 @@ impl RatatuiInlineRenderer {
                 &instruction_text(&model, i18n, selected),
                 content_width,
             ));
-        }
-        if model.options.is_empty() {
+        } else {
+            lines.extend(free_text_answer_lines(&model, i18n, content_width));
             lines.extend(wrap_plain_line(
                 &instruction_text(&model, i18n, selected_option(&model)),
                 content_width,
@@ -225,11 +225,18 @@ fn render_question_panel(
         .wrap(Wrap { trim: true })
         .render(chunks[0], buffer);
 
-    let mut option_lines = vec![Line::from(Span::styled(
-        question_option_heading(&model, i18n).to_string(),
-        Style::default().add_modifier(Modifier::BOLD),
-    ))];
-    if !model.options.is_empty() {
+    let mut option_lines = Vec::new();
+    if model.options.is_empty() {
+        option_lines.extend(
+            free_text_answer_lines(&model, i18n, content_width)
+                .into_iter()
+                .map(Line::from),
+        );
+    } else {
+        option_lines.push(Line::from(Span::styled(
+            question_option_heading(&model, i18n).to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
         option_lines.extend(rendered_option_lines(
             &model,
             selected_option,
@@ -281,7 +288,7 @@ fn question_rows(model: &QuestionPanelModel<'_>, width: usize) -> u16 {
 
 fn option_rows(model: &QuestionPanelModel<'_>, i18n: crate::I18n, width: usize) -> u16 {
     if model.options.is_empty() {
-        return 0;
+        return free_text_answer_lines(model, i18n, width).len() as u16;
     }
     let option_count = model
         .options
@@ -475,9 +482,10 @@ fn custom_option_label(i18n: crate::I18n, custom_answer: &str) -> String {
         i18n.t(crate::MessageId::QuestionOtherEmptyLabel)
             .to_string()
     } else {
-        i18n.format(
-            crate::MessageId::QuestionOtherValueLabel,
-            &[("answer", custom_answer)],
+        format!(
+            "{}: {}",
+            i18n.t(crate::MessageId::QuestionAnswerLabel),
+            custom_answer
         )
     }
 }
@@ -497,6 +505,22 @@ fn wrapped_question_label_rows(label: &str, text: &str, width: usize) -> Vec<Str
             }
         })
         .collect()
+}
+
+fn free_text_answer_lines(
+    model: &QuestionPanelModel<'_>,
+    i18n: crate::I18n,
+    width: usize,
+) -> Vec<String> {
+    if model.options.is_empty() && !model.custom_answer.is_empty() {
+        wrapped_question_label_rows(
+            i18n.t(crate::MessageId::QuestionAnswerLabel),
+            model.custom_answer,
+            width,
+        )
+    } else {
+        Vec::new()
+    }
 }
 
 fn wrap_option_text(prefix: &str, text: &str, width: usize) -> Vec<String> {

@@ -428,7 +428,7 @@ pub(super) fn user_question_from_tool_input(
         .and_then(|value| value.as_str())
         .map(ToString::to_string)
         .or_else(|| context.as_ref().map(|context| context.question.clone()))
-        .unwrap_or_else(|| "Agent needs your input".to_string())
+        .unwrap_or_default()
         .to_string();
     let mut options = input
         .get("options")

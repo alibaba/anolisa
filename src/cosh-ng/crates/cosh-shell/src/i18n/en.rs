@@ -585,11 +585,11 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::ToolSummaryTimedOut => "tool request timed out",
         MessageId::ToolSummaryFailed => "tool request failed",
         MessageId::QuestionTitle => "Agent question",
+        MessageId::QuestionDefaultPrompt => "Agent needs your input",
         MessageId::QuestionAnswerLabel => "Answer",
         MessageId::QuestionSelectOneLabel => "Select one:",
         MessageId::QuestionSelectMultipleLabel => "Select one or more:",
         MessageId::QuestionOtherEmptyLabel => "Other...",
-        MessageId::QuestionOtherValueLabel => "Other: {answer}",
         MessageId::QuestionKeysPrefix => "Keys: ",
         MessageId::QuestionInstructionMoveTypeSend => "Left/Right move | type answer | Enter send",
         MessageId::QuestionInstructionMoveToggleSend => {

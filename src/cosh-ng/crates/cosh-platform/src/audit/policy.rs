@@ -2,7 +2,7 @@
 //!
 //! Resolves the active policy from (in priority order):
 //! 1. `$COSH_AUDIT_POLICY`           (explicit override; CI/tests)
-//! 2. `~/.config/cosh/audit.toml`    (per-user)
+//! 2. `~/.copilot-shell/cosh/audit.toml` (per-user)
 //! 3. `/etc/cosh/audit.toml`         (system; ops-managed)
 //! 4. Built-in `balanced` preset     (factory default)
 //!
@@ -178,10 +178,7 @@ fn validate_string_match(sm: &StringMatch, rule_name: &str, field: &str) -> Resu
         StringMatch::Glob { glob } => glob.as_bytes(),
     };
     if bytes.contains(&0) {
-        return Err(format!(
-            "rule '{}' {} contains NUL byte",
-            rule_name, field
-        ));
+        return Err(format!("rule '{}' {} contains NUL byte", rule_name, field));
     }
     Ok(())
 }
@@ -194,10 +191,14 @@ fn candidate_policy_paths() -> Vec<PathBuf> {
         }
     }
     if let Some(home) = std::env::var_os("HOME") {
-        out.push(PathBuf::from(home).join(".config/cosh/audit.toml"));
+        out.push(user_policy_path_for_home(Path::new(&home)));
     }
     out.push(PathBuf::from("/etc/cosh/audit.toml"));
     out
+}
+
+fn user_policy_path_for_home(home: &Path) -> PathBuf {
+    home.join(".copilot-shell/cosh/audit.toml")
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -314,5 +315,13 @@ mod tests {
         let loaded = LoadedPolicy::from_user_file(&path).unwrap();
         assert_eq!(loaded.policy.version, "v1-test");
         assert!(loaded.policy_version.starts_with("user@v1-test+sha256:"));
+    }
+
+    #[test]
+    fn user_policy_path_uses_copilot_shell_cosh_dir() {
+        assert_eq!(
+            user_policy_path_for_home(Path::new("/tmp/cosh-home")),
+            PathBuf::from("/tmp/cosh-home/.copilot-shell/cosh/audit.toml")
+        );
     }
 }

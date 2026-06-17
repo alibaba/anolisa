@@ -106,9 +106,10 @@ pub(crate) fn remember_agent_activity(active_run: &mut ActiveAgentRun, governed:
             }
             AgentEvent::UserQuestion { question, .. } => {
                 active_run.current_phase = i18n.t(MessageId::AgentStatusQuestion).to_string();
+                let question = display_question_text(question, &i18n);
                 active_run.current_message = i18n.format(
                     MessageId::AgentStatusWaitingUserAnswer,
-                    &[("question", question)],
+                    &[("question", question.as_str())],
                 );
             }
             AgentEvent::Action { command, .. } => {
@@ -169,6 +170,15 @@ pub(crate) fn remember_agent_activity(active_run: &mut ActiveAgentRun, governed:
                 active_run.current_message = "Authentication credentials required".to_string();
             }
         }
+    }
+}
+
+fn display_question_text(question: &str, i18n: &I18n) -> String {
+    let question = question.trim();
+    if question.is_empty() {
+        i18n.t(MessageId::QuestionDefaultPrompt).to_string()
+    } else {
+        question.to_string()
     }
 }
 
@@ -258,5 +268,35 @@ mod tests {
         assert_eq!(active_run.current_phase, "tool");
         assert!(active_run.current_message.contains("provider tool"));
         assert!(!active_run.current_message.contains("approval"));
+    }
+
+    #[test]
+    fn question_activity_localizes_empty_question_fallback() {
+        let mut active_run = test_active_run();
+        active_run.language = Language::ZhCn;
+        remember_agent_activity(
+            &mut active_run,
+            &[GovernedEvent {
+                decision: GovernanceDecision::Display,
+                policy_decision: GovernancePolicyDecision::DisplayOnly,
+                event: AgentEvent::UserQuestion {
+                    run_id: "run-1".to_string(),
+                    provider_request_id: None,
+                    question: String::new(),
+                    options: Vec::new(),
+                    allow_free_text: true,
+                    selection_mode: QuestionSelectionMode::Single,
+                },
+                reason: "agent question requires explicit user input".to_string(),
+                display_text: String::new(),
+                auto_execute: false,
+            }],
+        );
+
+        assert_eq!(active_run.current_phase, "问题");
+        assert!(active_run.current_message.contains("Agent 需要你的输入"));
+        assert!(!active_run
+            .current_message
+            .contains("Agent needs your input"));
     }
 }
