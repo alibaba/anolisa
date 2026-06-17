@@ -11,6 +11,7 @@ resolver = "2"
 [workspace.package]
 version = "0.6.0"
 edition = "2021"
+rust-version = "1.74"
 license = "Apache-2.0"
 repository = "https://gitlab.alibaba-inc.com/Agentic-OS/cosh-ng"
 

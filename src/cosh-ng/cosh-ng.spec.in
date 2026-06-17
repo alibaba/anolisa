@@ -1,0 +1,98 @@
+%define anolis_release 1
+%global debug_package %{nil}
+%global _libexecdir_cosh %{_libexecdir}/anolisa/cosh-ng
+
+Name:           cosh-ng
+Version:        @VERSION@
+Release:        %{anolis_release}%{?dist}
+Summary:        Computable Operating System Harness - deterministic Agent-OS interface
+License:        Apache-2.0
+URL:            https://github.com/alibaba/anolisa
+Source0:        %{name}-%{version}.tar.gz
+
+BuildRequires:  rust >= 1.74
+BuildRequires:  cargo
+BuildRequires:  gcc
+BuildRequires:  openssl-devel
+Requires(post):   lua
+Requires(postun): lua
+Provides:       %{_bindir}/cosh %{_bindir}/cosh-shell
+
+%description
+Computable Operating System Harness (cosh-ng) - a deterministic Agent-OS interface
+with a single `cosh` entry point that provides dual-mode behavior:
+interactive TUI mode and structured CLI mode with JSON output for Agents.
+
+%prep
+%setup -q
+
+%build
+cargo build --workspace --release
+
+%install
+rm -rf %{buildroot}
+
+# Install internal binaries to libexec
+install -d %{buildroot}%{_libexecdir_cosh}
+install -m 0755 target/release/cosh-tui %{buildroot}%{_libexecdir_cosh}/cosh-tui
+install -m 0755 target/release/cosh-shell %{buildroot}%{_libexecdir_cosh}/cosh-shell
+
+# Install CLI binary
+install -d %{buildroot}%{_bindir}
+install -m 0755 target/release/cosh %{buildroot}%{_bindir}/cosh
+
+# Install launcher script
+cat > %{buildroot}%{_bindir}/cosh-shell << 'EOF'
+#!/bin/bash
+exec %{_libexecdir}/anolisa/cosh-ng/cosh-shell raw cosh-tui "$@"
+EOF
+chmod 0755 %{buildroot}%{_bindir}/cosh-shell
+
+# Install documentation
+install -d %{buildroot}%{_docdir}/%{name}
+install -m 0644 LICENSE %{buildroot}%{_docdir}/%{name}/LICENSE
+install -m 0644 README.md %{buildroot}%{_docdir}/%{name}/README.md
+
+%files
+%license %{_docdir}/%{name}/LICENSE
+%doc %{_docdir}/%{name}/README.md
+%{_bindir}/cosh
+%{_bindir}/cosh-shell
+%dir %{_libexecdir_cosh}
+%{_libexecdir_cosh}/cosh-tui
+%{_libexecdir_cosh}/cosh-shell
+
+%post -p <lua>
+nl        = '\n'
+cosh      = '%{_bindir}/cosh-shell'..nl
+f = io.open('/etc/shells', 'a+')
+if f then
+  local shells = nl..f:read('*all')..nl
+  if not shells:find(nl..cosh) then f:write(cosh) end
+  f:close()
+end
+
+%postun -p <lua>
+-- Run it only if we are uninstalling
+if arg[2] == 0
+then
+  t={}
+  for line in io.lines("/etc/shells")
+  do
+    if line ~= "%{_bindir}/cosh-shell"
+    then
+      table.insert(t,line)
+    end
+  end
+
+  f = io.open("/etc/shells", "w+")
+  for n,line in pairs(t)
+  do
+    f:write(line.."\n")
+  end
+  f:close()
+end
+
+%changelog
+* Mon Jun 16 2026 Shenglong Zhu <shenglongzhu@linux.alibaba.com> - 0.6.0-1
+- Initial RPM package
