@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use super::load::config_file_path;
+use super::load::{config_file_path, config_read_file_path};
 use super::CoshConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,7 +78,7 @@ pub fn write_user_language_config(language: &str) -> Result<PathBuf, String> {
 
 pub fn language_config_status() -> LanguageConfigStatus {
     let config_path = config_file_path();
-    let config_setting = config_path
+    let config_setting = config_read_file_path()
         .as_ref()
         .and_then(|path| language_setting_from_config_path(path));
     let mut setting = config_setting.clone().unwrap_or_else(|| "auto".to_string());

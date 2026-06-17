@@ -3,15 +3,18 @@ use crate::tools::readonly_rules::{
     RuntimeValidator,
 };
 
-pub(super) fn parse_disabled_rules(value: &toml::Value) -> Result<Vec<ReadonlyRuleKey>, String> {
+pub(super) fn parse_disabled_rules(
+    value: &toml::Value,
+    key: &str,
+) -> Result<Vec<ReadonlyRuleKey>, String> {
     let Some(items) = value.as_array() else {
-        return Err("approval.readonly_disabled must be an array".to_string());
+        return Err(format!("{key} must be an array"));
     };
     items
         .iter()
         .map(|item| {
             let Some(raw) = item.as_str() else {
-                return Err("approval.readonly_disabled entries must be strings".to_string());
+                return Err(format!("{key} entries must be strings"));
             };
             let parts = raw.split_whitespace().collect::<Vec<_>>();
             match parts.as_slice() {
@@ -26,9 +29,10 @@ pub(super) fn parse_disabled_rules(value: &toml::Value) -> Result<Vec<ReadonlyRu
 pub(super) fn parse_runtime_spec(
     command: &str,
     value: &toml::Value,
+    prefix: &str,
 ) -> Result<Option<RuntimeReadonlySpec>, String> {
     let Some(table) = value.as_table() else {
-        return Err(format!("approval.readonly.{command} must be a table"));
+        return Err(format!("{prefix}.{command} must be a table"));
     };
     if table
         .get("disabled")
@@ -38,7 +42,8 @@ pub(super) fn parse_runtime_spec(
         return Ok(None);
     }
 
-    let validator = parse_validator_table(command, table)?;
+    let label = format!("{prefix}.{command}");
+    let validator = parse_validator_table(&label, table)?;
     Ok(Some(RuntimeReadonlySpec {
         command: command.to_string(),
         validator,

@@ -402,7 +402,7 @@ fn raw_cli_auto_mode_skips_exact_trusted_command() {
     let home = temp_shell_home("trusted-exact");
     write_cosh_config(
         &home,
-        r#"approval.trusted_command = "touch /tmp/cosh-shell-fake-action-should-not-run""#,
+        r#"shell.trusted_command = "touch /tmp/cosh-shell-fake-action-should-not-run""#,
     );
     let home_str = home.to_string_lossy().to_string();
     let _ = fs::remove_file("/tmp/cosh-shell-fake-action-should-not-run");
@@ -426,7 +426,7 @@ fn raw_cli_auto_mode_trusted_command_requires_exact_match() {
     let home = temp_shell_home("trusted-exact-miss");
     write_cosh_config(
         &home,
-        r#"approval.trusted_command = "touch /tmp/cosh-shell-fake-action-should-not-run --dry-run""#,
+        r#"shell.trusted_command = "touch /tmp/cosh-shell-fake-action-should-not-run --dry-run""#,
     );
     let home_str = home.to_string_lossy().to_string();
     let _ = fs::remove_file("/tmp/cosh-shell-fake-action-should-not-run");

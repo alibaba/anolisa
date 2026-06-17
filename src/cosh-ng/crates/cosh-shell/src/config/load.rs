@@ -8,7 +8,7 @@ use super::CoshConfig;
 pub fn load_config() -> CoshConfig {
     let mut config = CoshConfig::default();
 
-    if let Some(path) = config_file_path() {
+    if let Some(path) = config_read_file_path() {
         load_config_file_into(&path, &mut config);
     }
     if let Some(path) = project_trust_store_path() {
@@ -26,8 +26,40 @@ pub(super) fn load_config_file_into(path: &Path, config: &mut CoshConfig) {
     }
 }
 
+// Only the shared user-facing config.toml follows cosh-tui's .copilot-shell path.
+// Hook feedback, project trust, external hooks and audit policy remain separate
+// runtime state/policy stores under their existing paths.
 pub(super) fn config_file_path() -> Option<PathBuf> {
+    dirs_next_or_home().map(|d| d.join(".copilot-shell/config.toml"))
+}
+
+pub(super) fn config_read_file_path() -> Option<PathBuf> {
+    let shared = config_file_path()?;
+    if shared.exists() {
+        return Some(shared);
+    }
+    let legacy = legacy_config_file_path()?;
+    if legacy.exists() {
+        return Some(legacy);
+    }
+    Some(shared)
+}
+
+pub(super) fn legacy_config_file_path() -> Option<PathBuf> {
     dirs_next_or_home().map(|d| d.join(".config/cosh/config.toml"))
+}
+
+#[cfg(test)]
+pub(super) fn config_read_file_path_for_home(home: &Path) -> PathBuf {
+    let shared = home.join(".copilot-shell/config.toml");
+    if shared.exists() {
+        return shared;
+    }
+    let legacy = home.join(".config/cosh/config.toml");
+    if legacy.exists() {
+        return legacy;
+    }
+    shared
 }
 
 pub(super) fn dirs_next_or_home() -> Option<PathBuf> {

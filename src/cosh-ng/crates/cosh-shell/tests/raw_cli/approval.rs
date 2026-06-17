@@ -19,7 +19,8 @@ fn run_raw_cli_ask_with_args_env_and_delayed_input(
     let home = temp_shell_home("approval-cards");
     write_cosh_config(
         &home,
-        r#"approval.readonly_disabled = ["git status", "pwd"]"#,
+        r#"[shell]
+readonly_disabled = ["git status", "pwd"]"#,
     );
     let home_str = home.to_string_lossy().to_string();
     let mut env = vec![("HOME", home_str.as_str())];

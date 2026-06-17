@@ -346,6 +346,12 @@ pub(crate) fn temp_shell_home(label: &str) -> PathBuf {
 }
 
 pub(crate) fn write_cosh_config(home: &Path, content: &str) {
+    let config_dir = home.join(".copilot-shell");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(config_dir.join("config.toml"), content).unwrap();
+}
+
+pub(crate) fn write_legacy_cosh_config(home: &Path, content: &str) {
     let config_dir = home.join(".config/cosh");
     fs::create_dir_all(&config_dir).unwrap();
     fs::write(config_dir.join("config.toml"), content).unwrap();

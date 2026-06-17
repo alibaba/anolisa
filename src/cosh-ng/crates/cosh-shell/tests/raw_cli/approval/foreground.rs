@@ -122,7 +122,8 @@ fn raw_cli_approved_sudo_tool_is_emitted_to_foreground_shell() {
     let home = temp_shell_home("approval-sudo-shell");
     write_cosh_config(
         &home,
-        r#"approval.readonly_disabled = ["git status", "pwd"]"#,
+        r#"[shell]
+readonly_disabled = ["git status", "pwd"]"#,
     );
     let bin_dir = home.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
