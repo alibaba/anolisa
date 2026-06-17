@@ -6,6 +6,7 @@ mod compression;
 mod config;
 mod context;
 mod core;
+mod extension;
 mod headless;
 mod hook;
 mod interactive;
