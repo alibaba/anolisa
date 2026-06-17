@@ -14,6 +14,7 @@ pub struct SkillManager {
     cache: RwLock<HashMap<SkillLevel, Vec<SkillConfig>>>,
     project_root: PathBuf,
     custom_paths: Vec<PathBuf>,
+    extension_paths: Vec<PathBuf>,
     change_tx: broadcast::Sender<()>,
     #[allow(dead_code)]
     watcher_handle: RwLock<Option<notify::RecommendedWatcher>>,
@@ -29,12 +30,14 @@ impl SkillManager {
     ///   project-level skills at `<project>/.copilot-shell/skills/`).
     /// * `custom_paths` – already-expanded custom skill directory paths from
     ///   config (`skills.custom_paths`).
-    pub fn new(project_root: PathBuf, custom_paths: Vec<PathBuf>) -> Arc<Self> {
+    /// * `extension_paths` – skill directories contributed by loaded extensions.
+    pub fn new(project_root: PathBuf, custom_paths: Vec<PathBuf>, extension_paths: Vec<PathBuf>) -> Arc<Self> {
         let (change_tx, _) = broadcast::channel(16);
         Arc::new(Self {
             cache: RwLock::new(HashMap::new()),
             project_root,
             custom_paths,
+            extension_paths,
             change_tx,
             watcher_handle: RwLock::new(None),
             user_dir_override: None,
@@ -56,6 +59,7 @@ impl SkillManager {
             cache: RwLock::new(HashMap::new()),
             project_root,
             custom_paths,
+            extension_paths: Vec::new(),
             change_tx,
             watcher_handle: RwLock::new(None),
             user_dir_override: user_dir,
@@ -68,7 +72,7 @@ impl SkillManager {
         let mut new_cache: HashMap<SkillLevel, Vec<SkillConfig>> = HashMap::new();
 
         for &level in SkillLevel::all() {
-            if level == SkillLevel::Custom {
+            if level == SkillLevel::Custom || level == SkillLevel::Extension {
                 continue; // handled separately below
             }
             if let Some(dir) = self.base_dir_of(level) {
@@ -96,13 +100,28 @@ impl SkillManager {
             }
         }
 
+        // Extension level: multiple paths from loaded extensions
+        if !self.extension_paths.is_empty() {
+            let mut ext_skills: Vec<SkillConfig> = Vec::new();
+            for ext_path in &self.extension_paths {
+                if ext_path.exists() {
+                    let skills =
+                        loader::load_skills_from_dir(ext_path, SkillLevel::Extension);
+                    ext_skills.extend(skills);
+                }
+            }
+            if !ext_skills.is_empty() {
+                new_cache.insert(SkillLevel::Extension, ext_skills);
+            }
+        }
+
         *self.cache.write().await = new_cache;
         let _ = self.change_tx.send(());
     }
 
     /// Return a deduplicated, priority-merged list of all available skills.
-    /// Higher-priority levels (Project > Custom > User > System) shadow
-    /// lower-priority skills with the same name.
+    /// Higher-priority levels (Project > Custom > User > Extension > System)
+    /// shadow lower-priority skills with the same name.
     pub async fn list(&self) -> Vec<SkillConfig> {
         let cache = self.cache.read().await;
         let mut merged: HashMap<String, SkillConfig> = HashMap::new();
@@ -212,6 +231,7 @@ impl SkillManager {
                 }
             }
             SkillLevel::Custom => None, // custom paths are iterated separately
+            SkillLevel::Extension => None, // extension paths are iterated separately
             SkillLevel::User => {
                 if let Some(ref p) = self.user_dir_override {
                     return Some(p.clone());
@@ -235,6 +255,7 @@ impl SkillManager {
             }
         }
         dirs.extend(self.custom_paths.iter().cloned());
+        dirs.extend(self.extension_paths.iter().cloned());
         dirs
     }
 }
@@ -263,17 +284,20 @@ fn expand_env_vars(s: &str) -> String {
     let mut result = s.to_string();
 
     // ${VAR}
-    while let Some(start) = result.find("${") {
+    let mut search_from = 0;
+    while let Some(pos) = result[search_from..].find("${") {
+        let start = search_from + pos;
         if let Some(end) = result[start..].find('}') {
             let var_name = &result[start + 2..start + end];
-            let replacement = std::env::var(var_name)
-                .unwrap_or_else(|_| format!("${{{}}}", var_name));
-            result = format!(
-                "{}{}{}",
-                &result[..start],
-                replacement,
-                &result[start + end + 1..]
-            );
+            match std::env::var(var_name) {
+                Ok(val) => {
+                    result = format!("{}{}{}", &result[..start], val, &result[start + end + 1..]);
+                    search_from = start + val.len();
+                }
+                Err(_) => {
+                    search_from = start + end + 1;
+                }
+            }
         } else {
             break;
         }

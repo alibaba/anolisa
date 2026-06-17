@@ -6,6 +6,7 @@ use crate::auth::{apply_auth_credentials, builtin_auth_providers, wait_for_auth_
 use crate::cli::CliArgs;
 use crate::config::{self, CoreConfig};
 use crate::core::CoshCore;
+use crate::extension::ExtensionManager;
 use crate::protocol::{
     AuthReason, InputMessage, OutputMessage, ShellControlRequest,
 };
@@ -40,26 +41,26 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) {
     let resolved = config.resolve_provider();
     let extra_params = resolved.extra_params.clone();
 
-    // --- Skill Manager setup ---
-    // NOTE: project_root is fixed at process startup time. In headless mode
-    // the cosh-tui process is typically short-lived (single-prompt or piped
-    // JSONL session) so this is acceptable.  If multi-project / long-lived
-    // sessions are needed in the future, SkillManager should be updated to
-    // track ShellContext.cwd changes dynamically.
+    // --- Extension Manager setup ---
     let project_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let mut ext_manager = ExtensionManager::new(project_root.clone());
+    ext_manager.refresh();
+
+    // --- Skill Manager setup ---
     let custom_paths: Vec<std::path::PathBuf> = config
         .skills
         .custom_paths
         .iter()
         .filter_map(|p| expand_path(p))
         .collect();
-    let skill_manager = SkillManager::new(project_root, custom_paths);
+    let skill_manager = SkillManager::new(project_root, custom_paths, ext_manager.skill_dirs());
     skill_manager.refresh().await;
     skill_manager.start_watching().await;
 
     let tools = ToolRegistry::with_defaults(skill_manager);
     let mut engine = CoshCore::new(config, provider, tools);
     engine.extra_params = extra_params;
+    engine.hook_system.register_extension_hooks(&ext_manager.hook_definitions());
 
     if let Some(ref sid) = args.resume {
         engine.session_id = sid.clone();

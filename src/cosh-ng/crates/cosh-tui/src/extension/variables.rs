@@ -25,21 +25,26 @@ pub fn hydrate_config(config: &mut ExtensionConfig, ctx: &VariableContext) {
         *dir = hydrate_string(dir, &ext_path, &ws_path);
     }
 
-    // Hydrate hook commands
-    hydrate_hooks(&mut config.hooks.pre_tool_use, &ext_path, &ws_path);
-    hydrate_hooks(&mut config.hooks.post_tool_use, &ext_path, &ws_path);
-    hydrate_hooks(&mut config.hooks.user_prompt_submit, &ext_path, &ws_path);
-    hydrate_hooks(&mut config.hooks.session_start, &ext_path, &ws_path);
-    hydrate_hooks(&mut config.hooks.stop, &ext_path, &ws_path);
+    // Hydrate hook commands in all hook groups
+    hydrate_hook_groups(&mut config.hooks.pre_tool_use, &ext_path, &ws_path);
+    hydrate_hook_groups(&mut config.hooks.post_tool_use, &ext_path, &ws_path);
+    hydrate_hook_groups(&mut config.hooks.post_tool_use_failure, &ext_path, &ws_path);
+    hydrate_hook_groups(&mut config.hooks.user_prompt_submit, &ext_path, &ws_path);
+    hydrate_hook_groups(&mut config.hooks.session_start, &ext_path, &ws_path);
+    hydrate_hook_groups(&mut config.hooks.stop, &ext_path, &ws_path);
+    hydrate_hook_groups(&mut config.hooks.before_model, &ext_path, &ws_path);
+    hydrate_hook_groups(&mut config.hooks.after_model, &ext_path, &ws_path);
 }
 
-fn hydrate_hooks(
-    hooks: &mut [crate::config::HookDefinition],
+fn hydrate_hook_groups(
+    groups: &mut [super::config::HookGroup],
     ext_path: &str,
     ws_path: &str,
 ) {
-    for hook in hooks.iter_mut() {
-        hook.command = hydrate_string(&hook.command, ext_path, ws_path);
+    for group in groups.iter_mut() {
+        for hook in group.hooks.iter_mut() {
+            hook.command = hydrate_string(&hook.command, ext_path, ws_path);
+        }
     }
 }
 
@@ -96,7 +101,13 @@ mod tests {
             "name": "test",
             "skills": ["${extensionPath}/skills", "${extensionPath}/extra"],
             "hooks": {
-                "PreToolUse": [{"command": "${extensionPath}/hooks/pre.sh --ws=${workspacePath}"}]
+                "PreToolUse": [
+                    {
+                        "hooks": [
+                            {"type": "command", "command": "${extensionPath}/hooks/pre.sh --ws=${workspacePath}"}
+                        ]
+                    }
+                ]
             }
         }"#;
         let mut config: ExtensionConfig = serde_json::from_str(json).unwrap();
@@ -108,7 +119,7 @@ mod tests {
 
         assert_eq!(config.skills.0, vec!["/opt/ext/skills", "/opt/ext/extra"]);
         assert_eq!(
-            config.hooks.pre_tool_use[0].command,
+            config.hooks.pre_tool_use[0].hooks[0].command,
             "/opt/ext/hooks/pre.sh --ws=/workspace"
         );
     }

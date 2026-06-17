@@ -66,21 +66,90 @@ impl<'de> Deserialize<'de> for SkillsDirs {
     }
 }
 
+// ─── HookGroup: copilot-shell nested hook format ─────────────────────────
+
+/// A single command hook configuration within a hook group.
+/// Corresponds to copilot-shell's `CommandHookConfig` interface.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CommandHookConfig {
+    /// Hook type, always "command" for now.
+    #[serde(default, rename = "type")]
+    pub hook_type: Option<String>,
+    /// The shell command to execute.
+    pub command: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub timeout: Option<u64>,
+}
+
+/// A hook group containing an optional matcher and an array of hook configs.
+/// Corresponds to copilot-shell's `HookDefinition` interface:
+/// ```typescript
+/// interface HookDefinition {
+///   matcher?: string;
+///   sequential?: boolean;
+///   hooks: HookConfig[];
+/// }
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+pub struct HookGroup {
+    /// Matcher pattern (regex or exact string) for tool-based events.
+    #[serde(default)]
+    pub matcher: Option<String>,
+    /// Whether hooks in this group run sequentially.
+    #[serde(default)]
+    pub sequential: Option<bool>,
+    /// The actual hook configurations in this group.
+    pub hooks: Vec<CommandHookConfig>,
+}
+
+impl HookGroup {
+    /// Flatten this hook group into individual `HookDefinition`s.
+    /// The group-level `matcher` and `sequential` are propagated to each hook.
+    pub fn flatten(&self) -> Vec<HookDefinition> {
+        self.hooks
+            .iter()
+            .map(|h| HookDefinition {
+                command: h.command.clone(),
+                name: h.name.clone(),
+                matcher: self.matcher.clone(),
+                timeout: h.timeout,
+                sequential: self.sequential,
+            })
+            .collect()
+    }
+}
+
+/// Flatten a list of hook groups into a flat `Vec<HookDefinition>`.
+pub fn flatten_hook_groups(groups: &[HookGroup]) -> Vec<HookDefinition> {
+    groups.iter().flat_map(|g| g.flatten()).collect()
+}
+
 // ─── ExtensionHooks ──────────────────────────────────────────────────────
 
 /// Hook definitions declared by an extension, grouped by event type.
+/// Uses the copilot-shell nested hook group format.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ExtensionHooks {
     #[serde(default, rename = "PreToolUse")]
-    pub pre_tool_use: Vec<HookDefinition>,
+    pub pre_tool_use: Vec<HookGroup>,
     #[serde(default, rename = "PostToolUse")]
-    pub post_tool_use: Vec<HookDefinition>,
+    pub post_tool_use: Vec<HookGroup>,
+    #[serde(default, rename = "PostToolUseFailure")]
+    pub post_tool_use_failure: Vec<HookGroup>,
     #[serde(default, rename = "UserPromptSubmit")]
-    pub user_prompt_submit: Vec<HookDefinition>,
+    pub user_prompt_submit: Vec<HookGroup>,
     #[serde(default, rename = "SessionStart")]
-    pub session_start: Vec<HookDefinition>,
+    pub session_start: Vec<HookGroup>,
     #[serde(default, rename = "Stop")]
-    pub stop: Vec<HookDefinition>,
+    pub stop: Vec<HookGroup>,
+    #[serde(default, rename = "BeforeModel")]
+    pub before_model: Vec<HookGroup>,
+    #[serde(default, rename = "AfterModel")]
+    pub after_model: Vec<HookGroup>,
 }
 
 impl ExtensionHooks {
@@ -88,9 +157,24 @@ impl ExtensionHooks {
     pub fn is_empty(&self) -> bool {
         self.pre_tool_use.is_empty()
             && self.post_tool_use.is_empty()
+            && self.post_tool_use_failure.is_empty()
             && self.user_prompt_submit.is_empty()
             && self.session_start.is_empty()
             && self.stop.is_empty()
+            && self.before_model.is_empty()
+            && self.after_model.is_empty()
+    }
+
+    /// Merge another `ExtensionHooks` into this one (appending).
+    pub fn merge(&mut self, other: &ExtensionHooks) {
+        self.pre_tool_use.extend(other.pre_tool_use.clone());
+        self.post_tool_use.extend(other.post_tool_use.clone());
+        self.post_tool_use_failure.extend(other.post_tool_use_failure.clone());
+        self.user_prompt_submit.extend(other.user_prompt_submit.clone());
+        self.session_start.extend(other.session_start.clone());
+        self.stop.extend(other.stop.clone());
+        self.before_model.extend(other.before_model.clone());
+        self.after_model.extend(other.after_model.clone());
     }
 }
 
@@ -123,18 +207,161 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_hooks() {
+    fn test_parse_copilot_shell_hook_format() {
         let json = r#"{
             "name": "ext",
             "hooks": {
-                "PreToolUse": [{"command": "echo pre", "name": "pre-hook"}],
-                "SessionStart": [{"command": "echo start"}]
+                "PreToolUse": [
+                    {
+                        "matcher": "run_shell_command",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "python3 /ext/hooks/scanner.py",
+                                "name": "code-scanner",
+                                "timeout": 5000
+                            }
+                        ]
+                    },
+                    {
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "python3 /ext/hooks/guard.py",
+                                "name": "sandbox-guard"
+                            }
+                        ]
+                    }
+                ],
+                "SessionStart": [
+                    {
+                        "hooks": [
+                            {"type": "command", "command": "echo start", "name": "init"}
+                        ]
+                    }
+                ]
             }
         }"#;
         let config: ExtensionConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.hooks.pre_tool_use.len(), 1);
-        assert_eq!(config.hooks.pre_tool_use[0].command, "echo pre");
+        assert_eq!(config.hooks.pre_tool_use.len(), 2);
         assert_eq!(config.hooks.session_start.len(), 1);
         assert!(config.hooks.post_tool_use.is_empty());
+
+        // Verify first group has matcher
+        let group0 = &config.hooks.pre_tool_use[0];
+        assert_eq!(group0.matcher.as_deref(), Some("run_shell_command"));
+        assert_eq!(group0.hooks.len(), 1);
+        assert_eq!(group0.hooks[0].command, "python3 /ext/hooks/scanner.py");
+        assert_eq!(group0.hooks[0].name.as_deref(), Some("code-scanner"));
+        assert_eq!(group0.hooks[0].timeout, Some(5000));
+
+        // Verify second group has no matcher (matches all)
+        let group1 = &config.hooks.pre_tool_use[1];
+        assert!(group1.matcher.is_none());
+        assert_eq!(group1.hooks[0].name.as_deref(), Some("sandbox-guard"));
+    }
+
+    #[test]
+    fn test_flatten_hook_groups() {
+        let groups = vec![
+            HookGroup {
+                matcher: Some("skill".to_string()),
+                sequential: None,
+                hooks: vec![
+                    CommandHookConfig {
+                        hook_type: Some("command".to_string()),
+                        command: "echo a".to_string(),
+                        name: Some("hook-a".to_string()),
+                        description: None,
+                        timeout: Some(3000),
+                    },
+                ],
+            },
+            HookGroup {
+                matcher: None,
+                sequential: Some(true),
+                hooks: vec![
+                    CommandHookConfig {
+                        hook_type: None,
+                        command: "echo b".to_string(),
+                        name: None,
+                        description: None,
+                        timeout: None,
+                    },
+                ],
+            },
+        ];
+        let flat = flatten_hook_groups(&groups);
+        assert_eq!(flat.len(), 2);
+        // First hook inherits matcher from group
+        assert_eq!(flat[0].command, "echo a");
+        assert_eq!(flat[0].matcher.as_deref(), Some("skill"));
+        assert_eq!(flat[0].timeout, Some(3000));
+        // Second hook inherits sequential from group, no matcher
+        assert_eq!(flat[1].command, "echo b");
+        assert!(flat[1].matcher.is_none());
+        assert_eq!(flat[1].sequential, Some(true));
+    }
+
+    #[test]
+    fn test_parse_real_agent_sec_core_format() {
+        // Simulates the real agent-sec-core cosh-extension.json structure
+        let json = r#"{
+            "name": "agent-sec-core",
+            "version": "0.6.0",
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "skill",
+                        "hooks": [
+                            {"type": "command", "name": "skill-ledger", "command": "python3 ${extensionPath}/hooks/skill_ledger_hook.py", "timeout": 5000}
+                        ]
+                    },
+                    {
+                        "hooks": [
+                            {"type": "command", "command": "python3 ${extensionPath}/hooks/sandbox-guard.py", "name": "sandbox-guard"}
+                        ]
+                    }
+                ],
+                "UserPromptSubmit": [
+                    {
+                        "hooks": [
+                            {"type": "command", "name": "prompt-scanner", "command": "python3 hooks/prompt_scanner_hook.py", "timeout": 10000},
+                            {"type": "command", "name": "pii-checker", "command": "python3 hooks/pii_checker_hook.py", "timeout": 10000}
+                        ]
+                    }
+                ],
+                "BeforeModel": [
+                    {"hooks": [{"type": "command", "name": "obs", "command": "echo obs", "timeout": 5000}]}
+                ],
+                "AfterModel": [
+                    {"hooks": [{"type": "command", "name": "obs", "command": "echo obs"}]}
+                ],
+                "PostToolUseFailure": [
+                    {"hooks": [{"type": "command", "command": "echo fail", "name": "fail-handler"}]}
+                ],
+                "Stop": [
+                    {"hooks": [{"type": "command", "name": "obs", "command": "echo stop"}]}
+                ]
+            }
+        }"#;
+        let config: ExtensionConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.name, "agent-sec-core");
+        assert_eq!(config.hooks.pre_tool_use.len(), 2);
+        assert_eq!(config.hooks.user_prompt_submit.len(), 1);
+        // UserPromptSubmit group has 2 hooks inside
+        assert_eq!(config.hooks.user_prompt_submit[0].hooks.len(), 2);
+        assert_eq!(config.hooks.before_model.len(), 1);
+        assert_eq!(config.hooks.after_model.len(), 1);
+        assert_eq!(config.hooks.post_tool_use_failure.len(), 1);
+        assert_eq!(config.hooks.stop.len(), 1);
+
+        // Flatten all PreToolUse hooks
+        let flat = flatten_hook_groups(&config.hooks.pre_tool_use);
+        assert_eq!(flat.len(), 2);
+        assert_eq!(flat[0].matcher.as_deref(), Some("skill"));
+        assert_eq!(flat[0].name.as_deref(), Some("skill-ledger"));
+        assert!(flat[1].matcher.is_none());
+        assert_eq!(flat[1].name.as_deref(), Some("sandbox-guard"));
     }
 }

@@ -2,12 +2,14 @@ use std::fmt;
 use std::path::PathBuf;
 
 /// Skill priority level. Lower ordinal = higher priority.
-/// Project-level skills override Custom, Custom overrides User, User overrides System.
+/// Project-level skills override Custom, Custom overrides User,
+/// User overrides Extension, Extension overrides System.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SkillLevel {
     Project,
     Custom,
     User,
+    Extension,
     System,
 }
 
@@ -17,6 +19,7 @@ impl fmt::Display for SkillLevel {
             SkillLevel::Project => write!(f, "project"),
             SkillLevel::Custom => write!(f, "custom"),
             SkillLevel::User => write!(f, "user"),
+            SkillLevel::Extension => write!(f, "extension"),
             SkillLevel::System => write!(f, "system"),
         }
     }
@@ -29,6 +32,7 @@ impl SkillLevel {
             SkillLevel::Project,
             SkillLevel::Custom,
             SkillLevel::User,
+            SkillLevel::Extension,
             SkillLevel::System,
         ]
     }

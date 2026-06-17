@@ -100,19 +100,7 @@ impl ExtensionManager {
             if !ext.is_active {
                 continue;
             }
-            merged
-                .pre_tool_use
-                .extend(ext.config.hooks.pre_tool_use.clone());
-            merged
-                .post_tool_use
-                .extend(ext.config.hooks.post_tool_use.clone());
-            merged
-                .user_prompt_submit
-                .extend(ext.config.hooks.user_prompt_submit.clone());
-            merged
-                .session_start
-                .extend(ext.config.hooks.session_start.clone());
-            merged.stop.extend(ext.config.hooks.stop.clone());
+            merged.merge(&ext.config.hooks);
         }
         merged
     }
@@ -306,8 +294,12 @@ mod tests {
             r#"{
                 "name": "hook-ext",
                 "hooks": {
-                    "PreToolUse": [{"command": "echo pre", "name": "h1"}],
-                    "Stop": [{"command": "echo stop"}]
+                    "PreToolUse": [
+                        {"hooks": [{"type": "command", "command": "echo pre", "name": "h1"}]}
+                    ],
+                    "Stop": [
+                        {"hooks": [{"type": "command", "command": "echo stop"}]}
+                    ]
                 }
             }"#,
         );
@@ -321,7 +313,7 @@ mod tests {
 
         let hooks = mgr.hook_definitions();
         assert_eq!(hooks.pre_tool_use.len(), 1);
-        assert_eq!(hooks.pre_tool_use[0].command, "echo pre");
+        assert_eq!(hooks.pre_tool_use[0].hooks[0].command, "echo pre");
         assert_eq!(hooks.stop.len(), 1);
         assert!(hooks.post_tool_use.is_empty());
     }
@@ -368,7 +360,9 @@ mod tests {
             r#"{
                 "name": "var-ext",
                 "hooks": {
-                    "PreToolUse": [{"command": "${extensionPath}/run.sh --ws=${workspacePath}"}]
+                    "PreToolUse": [
+                        {"hooks": [{"type": "command", "command": "${extensionPath}/run.sh --ws=${workspacePath}"}]}
+                    ]
                 }
             }"#,
         );
@@ -383,7 +377,7 @@ mod tests {
         let hooks = mgr.hook_definitions();
         let ext_path = user_dir.join("var-ext").canonicalize().unwrap();
         let expected = format!("{}/run.sh --ws=/my/workspace", ext_path.display());
-        assert_eq!(hooks.pre_tool_use[0].command, expected);
+        assert_eq!(hooks.pre_tool_use[0].hooks[0].command, expected);
     }
 
     #[test]
