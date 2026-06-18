@@ -543,5 +543,101 @@ class TestPromptScanBackendOutputFormat(unittest.TestCase):
         self.assertNotIn("confidence", parsed)
 
 
+class TestPromptScanBackendMultiTurn(unittest.TestCase):
+    """execute() must handle MULTI_TURN mode by calling scan_multi_turn()."""
+
+    def setUp(self):
+        self.backend = PromptScanBackend()
+        self.ctx = RequestContext(action="prompt_scan")
+
+    @patch("agent_sec_cli.security_middleware.backends.prompt_scan.PromptScanner")
+    def test_multi_turn_calls_scan_multi_turn(self, MockScanner):
+        scan_result = _make_scan_result(verdict=Verdict.PASS)
+        mock_scanner = MagicMock()
+        mock_scanner.scan_multi_turn.return_value = scan_result
+        MockScanner.return_value = mock_scanner
+
+        history = [{"role": "user", "content": "hello"}]
+        result = self.backend.execute(
+            self.ctx,
+            text="what is 1+1?",
+            mode="multi_turn",
+            history=history,
+            assistant_response="2",
+        )
+
+        MockScanner.assert_called_once_with(mode=ScanMode.MULTI_TURN)
+        mock_scanner.scan_multi_turn.assert_called_once_with(
+            history=history,
+            current_query="what is 1+1?",
+            assistant_response="2",
+            source=None,
+        )
+        mock_scanner.scan.assert_not_called()
+        self.assertTrue(result.success)
+
+    @patch("agent_sec_cli.security_middleware.backends.prompt_scan.PromptScanner")
+    def test_multi_turn_with_source(self, MockScanner):
+        scan_result = _make_scan_result(verdict=Verdict.PASS)
+        mock_scanner = MagicMock()
+        mock_scanner.scan_multi_turn.return_value = scan_result
+        MockScanner.return_value = mock_scanner
+
+        self.backend.execute(
+            self.ctx,
+            text="query",
+            mode="multi_turn",
+            history=[],
+            assistant_response="resp",
+            source="cosh_after_model",
+        )
+
+        mock_scanner.scan_multi_turn.assert_called_once_with(
+            history=[],
+            current_query="query",
+            assistant_response="resp",
+            source="cosh_after_model",
+        )
+
+    @patch("agent_sec_cli.security_middleware.backends.prompt_scan.PromptScanner")
+    def test_multi_turn_defaults_history_and_response(self, MockScanner):
+        """Missing history/assistant_response default to empty values."""
+        scan_result = _make_scan_result(verdict=Verdict.PASS)
+        mock_scanner = MagicMock()
+        mock_scanner.scan_multi_turn.return_value = scan_result
+        MockScanner.return_value = mock_scanner
+
+        self.backend.execute(
+            self.ctx,
+            text="query",
+            mode="multi_turn",
+        )
+
+        mock_scanner.scan_multi_turn.assert_called_once_with(
+            history=[],
+            current_query="query",
+            assistant_response="",
+            source=None,
+        )
+
+    @patch("agent_sec_cli.security_middleware.backends.prompt_scan.PromptScanner")
+    def test_multi_turn_exception_returns_error(self, MockScanner):
+        mock_scanner = MagicMock()
+        mock_scanner.scan_multi_turn.side_effect = RuntimeError("ollama down")
+        MockScanner.return_value = mock_scanner
+
+        result = self.backend.execute(
+            self.ctx,
+            text="query",
+            mode="multi_turn",
+            history=[],
+            assistant_response="",
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("Scanner error: ollama down", result.error)
+
+
 if __name__ == "__main__":
     unittest.main()

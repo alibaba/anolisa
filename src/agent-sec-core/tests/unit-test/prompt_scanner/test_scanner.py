@@ -9,6 +9,7 @@ from agent_sec_cli.prompt_scanner.exceptions import (
     LayerNotAvailableError,
     ScannerInputError,
 )
+from agent_sec_cli.prompt_scanner.preprocessor import Preprocessor
 from agent_sec_cli.prompt_scanner.result import (
     LayerResult,
     ScanResult,
@@ -18,6 +19,7 @@ from agent_sec_cli.prompt_scanner.result import (
 from agent_sec_cli.prompt_scanner.scanner import (
     AsyncPromptScanner,
     PromptScanner,
+    _build_skip_reason,
 )
 
 # ---------------------------------------------------------------------------
@@ -314,3 +316,121 @@ class TestAsyncPromptScanner(unittest.TestCase):
         self.assertEqual(len(results), 2)
         for r in results:
             self.assertIsInstance(r, ScanResult)
+
+    def test_async_scan_multi_turn_returns_scan_result(self) -> None:
+        """AsyncPromptScanner.scan_multi_turn offloads to thread pool."""
+        scanner = AsyncPromptScanner(mode=ScanMode.FAST)
+        result = asyncio.run(
+            scanner.scan_multi_turn(
+                history=[{"role": "user", "content": "hi"}],
+                current_query="hello",
+                assistant_response="world",
+            )
+        )
+        self.assertIsInstance(result, ScanResult)
+
+
+# ---------------------------------------------------------------------------
+# Tests: _build_skip_reason helper
+# ---------------------------------------------------------------------------
+
+
+class TestBuildSkipReason(unittest.TestCase):
+    def test_known_detector_names(self) -> None:
+        msg = _build_skip_reason(["multi_turn_intent"])
+        self.assertIn("multi-turn intent", msg.lower())
+
+    def test_multiple_detectors_joined(self) -> None:
+        msg = _build_skip_reason(["multi_turn_intent", "semantic"])
+        self.assertIn(";", msg)
+
+    def test_unknown_detector_falls_back(self) -> None:
+        msg = _build_skip_reason(["some_unknown_detector"])
+        self.assertIn("some_unknown_detector", msg)
+        self.assertIn("not available", msg)
+
+    def test_empty_list_returns_empty_string(self) -> None:
+        self.assertEqual(_build_skip_reason([]), "")
+
+
+# ---------------------------------------------------------------------------
+# Tests: PromptScanner.scan_multi_turn
+# ---------------------------------------------------------------------------
+
+
+class TestPromptScannerMultiTurn(unittest.TestCase):
+    def _make_scanner_with_mock_layer(
+        self, detected: bool, score: float
+    ) -> PromptScanner:
+        scanner = PromptScanner.__new__(PromptScanner)
+        scanner._config = ScanConfig(layers=["rule_engine"], fast_fail=True)
+        scanner._preprocessor = Preprocessor()
+        scanner._skipped_detectors = []
+        scanner._detectors = [_mock_layer("multi_turn_intent", detected, score)]
+        return scanner
+
+    def test_empty_current_query_raises(self) -> None:
+        scanner = self._make_scanner_with_mock_layer(False, 0.0)
+        with self.assertRaises(ScannerInputError):
+            scanner.scan_multi_turn(history=[], current_query="", assistant_response="")
+
+    def test_whitespace_current_query_raises(self) -> None:
+        scanner = self._make_scanner_with_mock_layer(False, 0.0)
+        with self.assertRaises(ScannerInputError):
+            scanner.scan_multi_turn(
+                history=[], current_query="   ", assistant_response=""
+            )
+
+    def test_scan_multi_turn_returns_result(self) -> None:
+        scanner = self._make_scanner_with_mock_layer(False, 0.1)
+        result = scanner.scan_multi_turn(
+            history=[{"role": "user", "content": "hi"}],
+            current_query="hello",
+            assistant_response="world",
+        )
+        self.assertIsInstance(result, ScanResult)
+        self.assertFalse(result.is_threat)
+
+    def test_scan_multi_turn_with_source(self) -> None:
+        scanner = self._make_scanner_with_mock_layer(False, 0.0)
+        result = scanner.scan_multi_turn(
+            history=[],
+            current_query="hello",
+            assistant_response="world",
+            source="cosh_after_model",
+        )
+        self.assertEqual(result.metadata.get("source"), "cosh_after_model")
+
+    def test_scan_multi_turn_history_in_metadata(self) -> None:
+        scanner = self._make_scanner_with_mock_layer(False, 0.0)
+        history = [{"role": "user", "content": "test"}]
+        result = scanner.scan_multi_turn(
+            history=history,
+            current_query="hello",
+            assistant_response="resp",
+        )
+        self.assertEqual(result.metadata.get("conversation_history"), history)
+        self.assertEqual(result.metadata.get("assistant_response"), "resp")
+
+
+# ---------------------------------------------------------------------------
+# Tests: empty detectors and NOT_SCANNED
+# ---------------------------------------------------------------------------
+
+
+class TestScannerEmptyDetectors(unittest.TestCase):
+    def test_no_detectors_sets_skip_reason(self) -> None:
+        """When all detectors are skipped, skip_reason is set in metadata."""
+        scanner = PromptScanner.__new__(PromptScanner)
+        scanner._config = ScanConfig(layers=[], fast_fail=False)
+        scanner._preprocessor = Preprocessor()
+        scanner._skipped_detectors = ["multi_turn_intent"]
+        scanner._detectors = []
+        result = scanner.scan("hello world")
+        self.assertIn("skip_reason", result.metadata)
+        self.assertIn("multi-turn intent", result.metadata["skip_reason"].lower())
+
+    def test_determine_threat_type_empty_returns_not_scanned(self) -> None:
+        """_determine_threat_type([]) returns ThreatType.NOT_SCANNED."""
+        result = PromptScanner._determine_threat_type([])
+        self.assertEqual(result, ThreatType.NOT_SCANNED)

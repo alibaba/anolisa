@@ -755,3 +755,212 @@ class TestCliAuditIntegration(unittest.TestCase):
         # The verdict in the output should reflect the threat
         data = json.loads(out.stdout)
         self.assertEqual(data["verdict"], "deny")
+
+
+# ---------------------------------------------------------------------------
+# Tests: multi_turn mode (L4)
+# ---------------------------------------------------------------------------
+
+
+class TestCliMultiTurnMode(unittest.TestCase):
+    """Tests for the MULTI_TURN mode CLI path.
+
+    Multi_turn reads a JSON payload from stdin and calls invoke() directly
+    (bypassing the daemon).  These tests cover the full multi_turn code path.
+    """
+
+    def _payload(self, **overrides) -> str:
+        data = {
+            "history": [{"role": "user", "content": "hi"}],
+            "current_query": "hello",
+            "assistant_response": "world",
+        }
+        data.update(overrides)
+        return json.dumps(data)
+
+    def _mock_multi_turn_invoke(self, result: ScanResult, **kwargs):
+        """Patch invoke for multi_turn mode and return the mock."""
+        d = result.to_dict()
+        mw_result = ActionResult(
+            success=(result.verdict != Verdict.ERROR),
+            data=kwargs.get("data", d),
+            stdout=kwargs.get("stdout", json.dumps(d, indent=2, ensure_ascii=False)),
+            error=kwargs.get("error", ""),
+            exit_code=kwargs.get("exit_code", 0),
+        )
+        return patch(
+            "agent_sec_cli.prompt_scanner.cli.invoke",
+            return_value=mw_result,
+        )
+
+    # --- --text / --input rejected in multi_turn ---
+
+    def test_text_flag_rejected_in_multi_turn(self) -> None:
+        out = runner.invoke(
+            scanner_app,
+            ["--mode", "multi_turn", "--text", "hello"],
+        )
+        self.assertEqual(out.exit_code, 1)
+        self.assertIn("not supported", out.stderr)
+
+    def test_input_flag_rejected_in_multi_turn(self) -> None:
+        out = runner.invoke(
+            scanner_app,
+            ["--mode", "multi_turn", "--input", "/tmp/foo.txt"],
+        )
+        self.assertEqual(out.exit_code, 1)
+        self.assertIn("not supported", out.stderr)
+
+    # --- stdin errors ---
+
+    def test_empty_stdin_in_multi_turn(self) -> None:
+        out = runner.invoke(scanner_app, ["--mode", "multi_turn"], input="")
+        self.assertEqual(out.exit_code, 1)
+        self.assertIn("No input", out.stderr)
+
+    def test_invalid_json_in_multi_turn(self) -> None:
+        out = runner.invoke(
+            scanner_app,
+            ["--mode", "multi_turn"],
+            input="not valid json {{{",
+        )
+        self.assertEqual(out.exit_code, 1)
+        self.assertIn("Invalid JSON", out.stderr)
+
+    # --- payload validation ---
+
+    def test_history_not_list_rejected(self) -> None:
+        payload = json.dumps(
+            {
+                "history": "not a list",
+                "current_query": "hello",
+                "assistant_response": "world",
+            }
+        )
+        out = runner.invoke(scanner_app, ["--mode", "multi_turn"], input=payload)
+        self.assertEqual(out.exit_code, 1)
+        self.assertIn("history", out.stderr.lower())
+
+    def test_current_query_not_string_rejected(self) -> None:
+        payload = json.dumps(
+            {
+                "history": [],
+                "current_query": 123,
+                "assistant_response": "world",
+            }
+        )
+        out = runner.invoke(scanner_app, ["--mode", "multi_turn"], input=payload)
+        self.assertEqual(out.exit_code, 1)
+        self.assertIn("current_query", out.stderr.lower())
+
+    def test_empty_current_query_rejected(self) -> None:
+        payload = json.dumps(
+            {
+                "history": [],
+                "current_query": "   ",
+                "assistant_response": "world",
+            }
+        )
+        out = runner.invoke(scanner_app, ["--mode", "multi_turn"], input=payload)
+        self.assertEqual(out.exit_code, 1)
+        self.assertIn("empty", out.stderr.lower())
+
+    # --- successful multi_turn scan (JSON output) ---
+
+    def test_multi_turn_json_output(self) -> None:
+        result = _make_scan_result()
+        with self._mock_multi_turn_invoke(result) as mock_invoke:
+            out = runner.invoke(
+                scanner_app,
+                ["--mode", "multi_turn"],
+                input=self._payload(),
+            )
+        self.assertEqual(out.exit_code, 0)
+        mock_invoke.assert_called_once_with(
+            "prompt_scan",
+            text="hello",
+            mode="multi_turn",
+            source="",
+            history=[{"role": "user", "content": "hi"}],
+            assistant_response="world",
+        )
+        parsed = json.loads(out.stdout)
+        self.assertEqual(parsed["verdict"], "pass")
+
+    # --- successful multi_turn scan (text output) ---
+
+    def test_multi_turn_text_output(self) -> None:
+        result = _make_scan_result()
+        with self._mock_multi_turn_invoke(result):
+            out = runner.invoke(
+                scanner_app,
+                ["--mode", "multi_turn", "--format", "text"],
+                input=self._payload(),
+            )
+        self.assertEqual(out.exit_code, 0)
+        self.assertIn("Verdict", out.stdout)
+        self.assertIn("PASS", out.stdout)
+
+    # --- invoke exception → ERROR JSON ---
+
+    def test_multi_turn_invoke_exception(self) -> None:
+        with patch(
+            "agent_sec_cli.prompt_scanner.cli.invoke",
+            side_effect=RuntimeError("scanner crashed"),
+        ):
+            out = runner.invoke(
+                scanner_app,
+                ["--mode", "multi_turn"],
+                input=self._payload(),
+            )
+        self.assertEqual(out.exit_code, 1)
+        parsed = json.loads(out.stdout)
+        self.assertEqual(parsed["verdict"], "error")
+        self.assertIn("scanner crashed", parsed["summary"])
+
+    # --- L4 unavailable warning ---
+
+    def test_multi_turn_warns_when_l4_unavailable(self) -> None:
+        result = _make_scan_result()
+        d = result.to_dict()
+        # Simulate L4 not running: layer_results is empty
+        d["layer_results"] = []
+        mw_result = ActionResult(
+            success=True,
+            data=d,
+            stdout=json.dumps(d, indent=2, ensure_ascii=False),
+            exit_code=0,
+        )
+        with patch(
+            "agent_sec_cli.prompt_scanner.cli.invoke",
+            return_value=mw_result,
+        ):
+            out = runner.invoke(
+                scanner_app,
+                ["--mode", "multi_turn"],
+                input=self._payload(),
+            )
+        self.assertEqual(out.exit_code, 0)
+        self.assertIn("not available", out.stderr.lower())
+
+    # --- text output when mw_result.data is None ---
+
+    def test_multi_turn_text_output_error_when_no_data(self) -> None:
+        mw_result = ActionResult(
+            success=False,
+            data=None,
+            stdout="",
+            error="scan failed",
+            exit_code=1,
+        )
+        with patch(
+            "agent_sec_cli.prompt_scanner.cli.invoke",
+            return_value=mw_result,
+        ):
+            out = runner.invoke(
+                scanner_app,
+                ["--mode", "multi_turn", "--format", "text"],
+                input=self._payload(),
+            )
+        self.assertEqual(out.exit_code, 1)
+        self.assertIn("scan failed", out.stderr)

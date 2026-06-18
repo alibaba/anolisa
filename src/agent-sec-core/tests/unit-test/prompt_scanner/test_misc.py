@@ -178,10 +178,18 @@ class TestBestConfidence(unittest.TestCase):
 
 class TestScanResultBuildSummary(unittest.TestCase):
     def _make(self, is_threat: bool, threat_type: ThreatType) -> ScanResult:
+        # Include a dummy layer result so _build_summary doesn't take the
+        # "no detection layers executed" path.
+        dummy_layer = LayerResult(
+            layer_name="rule_engine",
+            detected=is_threat,
+            score=0.9 if is_threat else 0.0,
+        )
         return ScanResult(
             is_threat=is_threat,
             threat_type=threat_type,
             verdict=Verdict.DENY if is_threat else Verdict.PASS,
+            layer_results=[dummy_layer],
         )
 
     def test_benign_summary(self) -> None:

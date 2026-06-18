@@ -9,9 +9,13 @@ from pydantic import BaseModel, Field
 class ScanMode(str, Enum):
     """Predefined detection mode presets.
 
-    - FAST:     L1 only.  Latency < 5ms.   Real-time chat scenarios.
-    - STANDARD: L1 + L2.  Latency 20-80ms. Recommended for most production use.
-    - STRICT:   L1+L2+L3. Latency 50-200ms. High-security (finance, healthcare).
+    - FAST:         L1 only.  Latency < 5ms.   Real-time chat scenarios.
+    - STANDARD:     L1 + L2.  Latency 20-80ms. Recommended for most production use.
+    - STRICT:       L1+L2+L3. Latency 50-200ms. High-security (finance, healthcare).
+    - MULTI_TURN:   L4 only.  Multi-turn intent detection over a full
+                    conversation triple (history, current query, assistant
+                    response).  Calls Ollama via HTTP.  L4 is optional —
+                    only invoked when the user explicitly selects this mode.
 
     Note: L3 (semantic vector search) is planned but not yet implemented.
     STRICT mode is reserved for future use.
@@ -20,6 +24,7 @@ class ScanMode(str, Enum):
     FAST = "fast"
     STANDARD = "standard"
     STRICT = "strict"
+    MULTI_TURN = "multi_turn"
 
 
 class ScanConfig(BaseModel):
@@ -43,6 +48,10 @@ class ScanConfig(BaseModel):
     # Attempt to decode obfuscated encodings (Base64, ROT13, etc.)
     detect_encoding: bool = True
 
+    # L4 multi-turn intent: p_harmful threshold for BLOCK verdict.
+    # Only used when "multi_turn_intent" is in layers.
+    multi_turn_threshold: float = 0.55
+
 
 # ---------------------------------------------------------------------------
 # Preset configurations
@@ -61,6 +70,15 @@ PRESET_CONFIGS: dict[ScanMode, ScanConfig] = {
     # STRICT preset is kept as a placeholder for future use.
     ScanMode.STRICT: ScanConfig(
         layers=["rule_engine", "ml_classifier"],
+        fast_fail=False,
+    ),
+    # L4 multi-turn intent detection — runs only the multi_turn_intent
+    # detector.  Decoupled from L1-L3 because it consumes a richer input
+    # (conversation triple) and delegates to an external Ollama service.
+    # L4 is optional: when Ollama is unreachable, the detector is silently
+    # skipped and the scan returns PASS.
+    ScanMode.MULTI_TURN: ScanConfig(
+        layers=["multi_turn_intent"],
         fast_fail=False,
     ),
 }

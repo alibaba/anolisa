@@ -73,7 +73,7 @@ def scan_prompt(
     mode: str = typer.Option(
         "standard",
         "--mode",
-        help="Detection mode: fast (L1), standard (L1+L2), strict (L1+L2+L3)",
+        help="Detection mode: fast (L1), standard (L1+L2), strict (L1+L2+L3), multi_turn (L4, reads JSON from stdin)",
         case_sensitive=False,
     ),
     output_format: str = typer.Option(
@@ -112,6 +112,12 @@ def scan_prompt(
 
     Input priority: --text > --input <file> > stdin
 
+    For multi_turn (L4) mode, pipe a JSON payload via stdin with
+    {history, current_query, assistant_response}:
+
+        echo '{"history":[...],"current_query":"...","assistant_response":"..."}' | \\
+            agent-sec-cli scan-prompt --mode multi_turn
+
     Examples::
 
         # Direct text
@@ -134,11 +140,11 @@ def scan_prompt(
         scan_mode = ScanMode(mode.lower())
     except ValueError:
         typer.echo(
-            f"Error: Invalid mode '{mode}'. Choose from: fast, standard, strict",
+            f"Error: Invalid mode '{mode}'. "
+            "Choose from: fast, standard, strict, multi_turn",
             err=True,
         )
         raise typer.Exit(code=1)
-
     # --- Validate format ---
     if output_format not in ("json", "text"):
         typer.echo(
@@ -146,6 +152,85 @@ def scan_prompt(
             err=True,
         )
         raise typer.Exit(code=1)
+
+    # --- MULTI_TURN mode: read JSON payload from stdin ---
+    # L4 always invokes locally: it calls Ollama over HTTP directly, so the
+    # daemon's L2 model pre-load gives no benefit, and the daemon's
+    # prompt_scan_state readiness gate would reject a mode that doesn't need
+    # the L2 model.  Audit parity is preserved — the local invoke() path
+    # emits the same prompt_scan SecurityEvent as the daemon-disabled L1-L3
+    # path (only the daemon access_log is skipped, identical to running with
+    # AGENT_SEC_DAEMON_DISABLED=1).
+    if scan_mode is ScanMode.MULTI_TURN:
+        if text is not None or input_file:
+            typer.echo(
+                "Error: --text and --input are not supported with multi_turn mode. "
+                "Pipe a JSON payload via stdin:\n"
+                '  echo \'{"history":[...],"current_query":"...","assistant_response":"..."}\' | '
+                "agent-sec-cli scan-prompt --mode multi_turn",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+
+        raw = sys.stdin.read().strip()
+        if not raw:
+            typer.echo("Error: No input received from stdin.", err=True)
+            raise typer.Exit(code=1)
+        try:
+            payload = json.loads(raw)
+        except (json.JSONDecodeError, ValueError) as exc:
+            typer.echo(f"Error: Invalid JSON: {exc}", err=True)
+            raise typer.Exit(code=1)
+
+        history = payload.get("history") or []
+        current_query = payload.get("current_query") or ""
+        assistant_response = payload.get("assistant_response") or ""
+        if not isinstance(history, list) or not isinstance(current_query, str):
+            typer.echo(
+                "Error: payload must include a 'history' list and 'current_query' string.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        if not current_query.strip():
+            typer.echo("Error: current_query is empty.", err=True)
+            raise typer.Exit(code=1)
+
+        try:
+            mw_result = invoke(
+                "prompt_scan",
+                text=current_query,
+                mode=scan_mode.value,
+                source=source,
+                history=history,
+                assistant_response=assistant_response,
+            )
+        except Exception as exc:
+            typer.echo(
+                json.dumps(
+                    _build_error_output(f"Scanner error: {exc}"),
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
+            raise typer.Exit(code=1)
+
+        # Warn when L4 is unavailable — the scan passes through with no
+        # detectors having run (MULTI_TURN mode only configures L4).
+        if mw_result.data and not mw_result.data.get("layer_results"):
+            typer.echo(
+                "Warning: L4 multi-turn intent detection is not available "
+                "(Ollama unreachable). Scan returned a pass-through verdict.",
+                err=True,
+            )
+
+        if output_format == "text":
+            if not mw_result.data:
+                typer.echo(f"Error: {mw_result.error}", err=True)
+                raise typer.Exit(code=mw_result.exit_code)
+            _print_text(mw_result.data)
+        else:
+            typer.echo(mw_result.stdout)
+        raise typer.Exit(code=0)
 
     # --- Read input texts ---
     texts: list[str]
@@ -257,12 +342,6 @@ def _daemon_error_message(response: DaemonResponse) -> str:
     if response.error:
         return response.error.get("message", "daemon request failed")
     return "daemon request failed"
-
-
-def _daemon_unavailable_message(detail: str) -> str:
-    return (
-        "Error: agent-sec daemon is unavailable for scan-prompt. " f"Detail: {detail}"
-    )
 
 
 def _print_error_json(message: str) -> None:

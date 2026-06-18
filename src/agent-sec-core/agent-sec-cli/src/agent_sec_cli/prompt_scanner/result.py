@@ -15,12 +15,14 @@ class ThreatType(str, Enum):
                           — also known as IPI (Indirect Prompt Injection).
     - JAILBREAK:          Attempt to bypass safety restrictions or role-play.
     - BENIGN:             No threat detected.
+    - NOT_SCANNED:        No detection layers executed (all detectors unavailable).
     """
 
     DIRECT_INJECTION = "direct_injection"
     INDIRECT_INJECTION = "indirect_injection"
     JAILBREAK = "jailbreak"
     BENIGN = "benign"
+    NOT_SCANNED = "not_scanned"
 
 
 class Severity(str, Enum):
@@ -122,7 +124,11 @@ class ScanResult(BaseModel):
             "schema_version": "1.0",
             "ok": not self.is_threat,
             "verdict": self.verdict.value,
-            "risk_level": _verdict_to_risk_level(self.verdict),
+            "risk_level": (
+                "unknown"
+                if not self.layer_results
+                else _verdict_to_risk_level(self.verdict)
+            ),
             "threat_type": self.threat_type.value,
             **(
                 {"confidence": round(_best_confidence(self.layer_results), 3)}
@@ -147,10 +153,19 @@ class ScanResult(BaseModel):
 
             No threats detected (benign probability: <N>%)
 
+        Format (no detection ran)::
+
+            No detection layers executed (all detectors unavailable)
+
         The confidence figure comes from the ML layer when available (model-
         backed softmax probability), otherwise from the rule-engine score.
         Evidence is the first matched_text snippet, truncated to 60 chars.
         """
+        if not self.layer_results:
+            return self.metadata.get(
+                "skip_reason",
+                "No detection layers executed (all detectors unavailable)",
+            )
         if not self.is_threat:
             # Try to surface the ML benign confidence so the user has a signal.
             for lr in self.layer_results:

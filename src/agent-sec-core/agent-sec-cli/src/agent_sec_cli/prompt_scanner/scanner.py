@@ -9,6 +9,11 @@ from typing import Any
 from agent_sec_cli.prompt_scanner.config import ScanConfig, ScanMode, get_config
 from agent_sec_cli.prompt_scanner.detectors.base import DetectionLayer
 from agent_sec_cli.prompt_scanner.detectors.ml_classifier import MLClassifier
+from agent_sec_cli.prompt_scanner.detectors.multi_turn_intent import (
+    META_ASSISTANT_RESPONSE,
+    META_HISTORY,
+    MultiTurnIntentDetector,
+)
 from agent_sec_cli.prompt_scanner.detectors.rule_engine import RuleEngine
 from agent_sec_cli.prompt_scanner.exceptions import (
     LayerNotAvailableError,
@@ -30,12 +35,28 @@ log = logging.getLogger(__name__)
 _DETECTOR_REGISTRY: dict[str, type[DetectionLayer]] = {
     "rule_engine": RuleEngine,
     "ml_classifier": MLClassifier,
+    "multi_turn_intent": MultiTurnIntentDetector,
 }
 
 # Detectors that can be skipped silently when unavailable.
 # L1 (rule_engine) and L2 (ml_classifier) are mandatory — their deps ship
-# with the package.  Only future optional layers (e.g. L3 semantic) go here.
-_OPTIONAL_DETECTORS = frozenset({"semantic"})
+# with the package.  L4 (multi_turn_intent) is optional — it depends on an
+# external Ollama service.  When unavailable, MULTI_TURN mode returns a
+# pass-through verdict.  L4 is only invoked when the user explicitly
+# selects --mode multi_turn.
+_OPTIONAL_DETECTORS = frozenset({"semantic", "multi_turn_intent"})
+
+# Human-readable skip reasons for optional detectors that are unavailable.
+_SKIP_REASONS: dict[str, str] = {
+    "multi_turn_intent": "L4 multi-turn intent detection is not available",
+    "semantic": "L3 semantic detection is not available",
+}
+
+
+def _build_skip_reason(skipped: list[str]) -> str:
+    """Build a human-readable message explaining why no detectors ran."""
+    reasons = [_SKIP_REASONS.get(name, f"{name} is not available") for name in skipped]
+    return "; ".join(reasons)
 
 
 class PromptScanner:
@@ -63,6 +84,7 @@ class PromptScanner:
     ) -> None:
         self._config = config if config is not None else get_config(mode)
         self._preprocessor = Preprocessor(detect_encoding=self._config.detect_encoding)
+        self._skipped_detectors: list[str] = []
         self._detectors: list[DetectionLayer] = self._init_detectors()
 
     def warmup(self) -> None:
@@ -103,7 +125,6 @@ class PromptScanner:
         text = text.strip()
         if not text:
             raise ScannerInputError("Input text must not be empty.")
-        t0 = time.perf_counter()
 
         # 1. Preprocess
         prep = self._preprocessor.preprocess(text)
@@ -114,31 +135,41 @@ class PromptScanner:
         if prep.decoded_variants:
             metadata["decoded_variants"] = prep.decoded_variants
 
-        # 2. Run detectors
-        layer_results: list[LayerResult] = []
-        for detector in self._detectors:
-            lr = detector.detect(prep.normalized_text, metadata)
-            layer_results.append(lr)
-            if self._config.fast_fail and lr.detected:
-                break
+        # 2. Run the detection pipeline
+        return self._run_pipeline(prep.normalized_text, metadata)
 
-        # 3. Verdict
-        verdict = determine_verdict(layer_results)
+    def scan_multi_turn(
+        self,
+        history: list[dict],
+        current_query: str,
+        assistant_response: str,
+        source: str | None = None,
+    ) -> ScanResult:
+        """Multi-turn intent scan entry point used by MULTI_TURN mode.
 
-        # 4. Determine threat type
-        threat_type = self._determine_threat_type(layer_results)
-        is_threat = verdict in (Verdict.WARN, Verdict.DENY)
+        Args:
+            history: Prior turns as ``[{"role": "user"/"assistant", "content": ...}]``.
+            current_query: The user's latest prompt.
+            assistant_response: The assistant's reply that just got generated.
+            source: Optional label (e.g. ``"cosh_after_model"``).
 
-        elapsed = (time.perf_counter() - t0) * 1000  # ms
+        Returns:
+            ScanResult shaped like ``scan()`` but built from the
+            ``multi_turn_intent`` layer's verdict.
+        """
+        if not current_query or not current_query.strip():
+            raise ScannerInputError("current_query must not be empty.")
 
-        return ScanResult(
-            is_threat=is_threat,
-            threat_type=threat_type,
-            layer_results=layer_results,
-            latency_ms=elapsed,
-            metadata=metadata,
-            verdict=verdict,
-        )
+        prep = self._preprocessor.preprocess(current_query)
+        metadata: dict[str, Any] = prep.metadata
+        if source:
+            metadata["source"] = source
+        if prep.decoded_variants:
+            metadata["decoded_variants"] = prep.decoded_variants
+        metadata[META_HISTORY] = history
+        metadata[META_ASSISTANT_RESPONSE] = assistant_response
+
+        return self._run_pipeline(prep.normalized_text, metadata)
 
     def scan_batch(
         self,
@@ -189,6 +220,40 @@ class PromptScanner:
     # Internals
     # ------------------------------------------------------------------
 
+    def _run_pipeline(
+        self,
+        text: str,
+        metadata: dict[str, Any],
+    ) -> ScanResult:
+        """Run the detection pipeline with the given preprocessed text and metadata.
+
+        Shared by ``scan()`` and ``scan_multi_turn()`` to avoid duplication.
+        """
+        t0 = time.perf_counter()
+        layer_results: list[LayerResult] = []
+        for detector in self._detectors:
+            lr = detector.detect(text, metadata)
+            layer_results.append(lr)
+            if self._config.fast_fail and lr.detected:
+                break
+
+        if not self._detectors:
+            metadata["skip_reason"] = _build_skip_reason(self._skipped_detectors)
+
+        verdict = determine_verdict(layer_results)
+        threat_type = self._determine_threat_type(layer_results)
+        is_threat = verdict in (Verdict.WARN, Verdict.DENY)
+        elapsed = (time.perf_counter() - t0) * 1000  # ms
+
+        return ScanResult(
+            is_threat=is_threat,
+            threat_type=threat_type,
+            layer_results=layer_results,
+            latency_ms=elapsed,
+            metadata=metadata,
+            verdict=verdict,
+        )
+
     def _init_detectors(self) -> list[DetectionLayer]:
         """Instantiate detectors listed in config.layers.
 
@@ -205,10 +270,13 @@ class PromptScanner:
             # Pass model-specific config to detectors that accept it.
             if name == "ml_classifier":
                 detector = cls(model_name=self._config.model_name)
+            elif name == "multi_turn_intent":
+                detector = cls(harmful_threshold=self._config.multi_turn_threshold)
             else:
                 detector = cls()
             if not detector.is_available():
                 if name in _OPTIONAL_DETECTORS:
+                    self._skipped_detectors.append(name)
                     log.warning(
                         "Detector '%s' is not available (missing dependencies) "
                         "and will be skipped.",
@@ -225,6 +293,8 @@ class PromptScanner:
     @staticmethod
     def _determine_threat_type(layer_results: list[LayerResult]) -> ThreatType:
         """Infer the primary threat type from layer results."""
+        if not layer_results:
+            return ThreatType.NOT_SCANNED
         for lr in layer_results:
             if lr.detected:
                 for detail in lr.details:
@@ -265,6 +335,24 @@ class AsyncPromptScanner:
         """Async scan – offloads to thread pool."""
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._sync_scanner.scan, text, source)
+
+    async def scan_multi_turn(
+        self,
+        history: list[dict],
+        current_query: str,
+        assistant_response: str,
+        source: str | None = None,
+    ) -> ScanResult:
+        """Async multi-turn intent scan – offloads to thread pool."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            self._sync_scanner.scan_multi_turn,
+            history,
+            current_query,
+            assistant_response,
+            source,
+        )
 
     async def scan_batch(self, texts: list[str]) -> list[ScanResult]:
         """Async batch scan."""

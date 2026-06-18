@@ -7,6 +7,9 @@ from agent_sec_cli.prompt_scanner.models.model_manager import (
     ClassifierResult,
     ModelManager,
 )
+from agent_sec_cli.prompt_scanner.models.multi_turn_intent import (
+    MultiTurnIntentClassifier,
+)
 from agent_sec_cli.prompt_scanner.models.prompt_guard import (
     PromptGuardClassifier,
 )
@@ -15,5 +18,6 @@ __all__ = [
     "ModelManager",
     "ClassifierResult",
     "DeBERTaClassifier",
+    "MultiTurnIntentClassifier",
     "PromptGuardClassifier",
 ]
