@@ -47,10 +47,7 @@ impl DaemonServer {
     /// Silently succeeds if the group doesn't exist (e.g. in tests).
     fn chgrp_anolisa(path: &std::path::Path) -> io::Result<()> {
         use std::process::Command;
-        let status = Command::new("chgrp")
-            .arg("anolisa")
-            .arg(path)
-            .status();
+        let status = Command::new("chgrp").arg("anolisa").arg(path).status();
         match status {
             Ok(s) if s.success() => Ok(()),
             Ok(_) => {

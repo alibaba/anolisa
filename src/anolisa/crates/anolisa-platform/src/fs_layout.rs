@@ -53,7 +53,7 @@ mod fhs {
     pub const CACHE: &str = "/var/cache/anolisa";
     pub const LOG: &str = "/var/log/anolisa";
     pub const RUNTIME: &str = "/run/anolisa";
-    pub const SYSTEMD_UNITS: &str = "/etc/systemd/system";
+    pub const SYSTEMD_UNITS: &str = "/usr/local/lib/systemd/system";
 }
 
 // ---- User-mode (file-hierarchy(7)) leaf names ---------------------------
@@ -376,7 +376,7 @@ mod tests {
         assert_eq!(layout.runtime_dir, PathBuf::from("/run/anolisa"));
         assert_eq!(
             layout.systemd_unit_dir,
-            PathBuf::from("/etc/systemd/system")
+            PathBuf::from("/usr/local/lib/systemd/system")
         );
         assert_eq!(
             layout.central_log,
@@ -420,7 +420,7 @@ mod tests {
         assert_eq!(layout.runtime_dir, PathBuf::from("/opt/x/run/anolisa"));
         assert_eq!(
             layout.systemd_unit_dir,
-            PathBuf::from("/opt/x/etc/systemd/system")
+            PathBuf::from("/opt/x/usr/local/lib/systemd/system")
         );
     }
 

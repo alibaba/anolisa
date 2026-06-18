@@ -3,12 +3,13 @@
 //! Subcommands:
 //! - `serve` — start the system-helper daemon (foreground, for systemd).
 //! - `setup` — one-time installation of the system helper daemon.
+//! - `teardown` — remove system helper: stop service, delete unit + binary.
 //! - `status` — check system helper health (read-only, no root required).
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
@@ -18,6 +19,7 @@ use serde::Serialize;
 
 use anolisa_core::daemon_server::DaemonServer;
 use anolisa_core::system_helper::{HelperRequest, HelperResponse};
+use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::ipc::{self, SYSTEM_HELPER_SOCKET};
 use anolisa_platform::privilege;
 use anolisa_platform::systemd::{self, SystemdError};
@@ -41,14 +43,16 @@ pub enum SystemCommands {
     },
     /// One-time setup: install system helper daemon
     Setup {
-        /// Override helper binary destination
-        #[arg(long, default_value = "/usr/local/libexec/anolisa-system-helper")]
-        helper_path: String,
+        /// Override helper binary destination (defaults to FsLayout libexec_dir)
+        #[arg(long)]
+        helper_path: Option<String>,
 
         /// Upgrade existing installation
         #[arg(long)]
         upgrade: bool,
     },
+    /// Remove system helper: stop service, delete unit + binary
+    Teardown,
     /// Check system helper health
     Status {
         /// Machine-readable output
@@ -63,7 +67,8 @@ pub fn handle(args: SystemArgs, ctx: &CliContext) -> Result<(), CliError> {
         SystemCommands::Setup {
             helper_path,
             upgrade,
-        } => handle_setup(&helper_path, upgrade),
+        } => handle_setup(helper_path.as_deref(), upgrade, ctx),
+        SystemCommands::Teardown => handle_teardown(ctx),
         SystemCommands::Status { json } => handle_status(json, ctx),
     }
 }
@@ -87,11 +92,20 @@ fn handle_serve(socket: &str) -> Result<(), CliError> {
 // ─── Setup ───────────────────────────────────────────────────────────────────
 
 const SERVICE_NAME: &str = "anolisa-system-helper";
-const UNIT_PATH: &str = "/etc/systemd/system/anolisa-system-helper.service";
+const UNIT_FILENAME: &str = "anolisa-system-helper.service";
 const RUNTIME_DIR: &str = "/run/anolisa";
 const ANOLISA_GROUP: &str = "anolisa";
 
-fn handle_setup(helper_path: &str, upgrade: bool) -> Result<(), CliError> {
+/// Resolve the system-mode FsLayout from context.
+fn resolve_layout(ctx: &CliContext) -> FsLayout {
+    FsLayout::system(ctx.prefix.clone())
+}
+
+fn handle_setup(
+    helper_path_override: Option<&str>,
+    upgrade: bool,
+    ctx: &CliContext,
+) -> Result<(), CliError> {
     let cmd = "system setup";
 
     // 1. Check root
@@ -103,55 +117,76 @@ fn handle_setup(helper_path: &str, upgrade: bool) -> Result<(), CliError> {
         });
     }
 
-    // 2. Copy current exe to helper_path
+    let layout = resolve_layout(ctx);
+    let helper_path: PathBuf = match helper_path_override {
+        Some(p) => PathBuf::from(p),
+        None => layout.libexec_dir.join("anolisa-system-helper"),
+    };
+    let unit_path = layout.systemd_unit_dir.join(UNIT_FILENAME);
+
+    // 2. Stop the service if it's running (avoids "Text file busy" on binary overwrite)
+    let _ = Command::new("systemctl")
+        .args(["stop", SERVICE_NAME])
+        .output();
+
+    // 3. Copy current exe to helper_path
     let current_exe = std::env::current_exe().map_err(|e| CliError::Runtime {
         command: cmd.to_string(),
         reason: format!("failed to determine current executable path: {e}"),
     })?;
 
     // Ensure parent directory exists
-    if let Some(parent) = Path::new(helper_path).parent() {
+    if let Some(parent) = helper_path.parent() {
         fs::create_dir_all(parent).map_err(|e| CliError::Runtime {
             command: cmd.to_string(),
             reason: format!("failed to create directory {}: {e}", parent.display()),
         })?;
     }
 
-    fs::copy(&current_exe, helper_path).map_err(|e| CliError::Runtime {
+    fs::copy(&current_exe, &helper_path).map_err(|e| CliError::Runtime {
         command: cmd.to_string(),
-        reason: format!("failed to copy binary to {helper_path}: {e}"),
+        reason: format!("failed to copy binary to {}: {e}", helper_path.display()),
     })?;
-    eprintln!("[setup] installed helper binary → {helper_path}");
+    eprintln!(
+        "[setup] installed helper binary → {}",
+        helper_path.display()
+    );
 
-    // 3. Set helper permissions (0755)
-    fs::set_permissions(helper_path, fs::Permissions::from_mode(0o755)).map_err(|e| {
+    // 4. Set helper permissions (0755)
+    fs::set_permissions(&helper_path, fs::Permissions::from_mode(0o755)).map_err(|e| {
         CliError::Runtime {
             command: cmd.to_string(),
-            reason: format!("failed to set permissions on {helper_path}: {e}"),
+            reason: format!(
+                "failed to set permissions on {}: {e}",
+                helper_path.display()
+            ),
         }
     })?;
 
     if !upgrade {
-        // 4. Create anolisa system group (ignore if already exists)
+        // 5. Create anolisa system group (ignore if already exists)
         setup_group(cmd)?;
 
-        // 5. Add calling user to anolisa group
+        // 6. Add calling user to anolisa group
         setup_user_membership(cmd)?;
     }
 
-    // 6. Create /run/anolisa/ directory
+    // 7. Create /run/anolisa/ directory
     setup_runtime_dir(cmd)?;
 
-    // 7. Generate systemd unit file
-    write_unit_file(cmd, helper_path)?;
+    // 8. Generate systemd unit file
+    write_unit_file(cmd, &helper_path, &unit_path)?;
 
-    // 8. systemctl daemon-reload + enable + start/restart
+    // 9. Deploy sandbox.toml configuration file
+    deploy_sandbox_config(cmd, &layout)?;
+
+    // 10. systemctl daemon-reload + enable + start/restart
     reload_and_start_service(cmd, upgrade)?;
 
-    // 9. Verify socket
+    // 11. Verify socket
     verify_socket(cmd)?;
 
-    // 10. Success
+    // 12. Success
     eprintln!("[setup] anolisa system helper is running and verified.");
     Ok(())
 }
@@ -236,32 +271,78 @@ fn setup_runtime_dir(cmd: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-fn write_unit_file(cmd: &str, helper_path: &str) -> Result<(), CliError> {
-    let unit_content = format!(
-        "[Unit]\n\
-         Description=ANOLISA System Helper \u{2014} privileged operations daemon\n\
-         After=network.target\n\
-         \n\
-         [Service]\n\
-         Type=simple\n\
-         ExecStart={helper_path} system serve --socket {socket}\n\
-         Restart=on-failure\n\
-         RestartSec=5\n\
-         WatchdogSec=30\n\
-         RuntimeDirectory=anolisa\n\
-         RuntimeDirectoryMode=0750\n\
-         \n\
-         [Install]\n\
-         WantedBy=multi-user.target\n",
-        helper_path = helper_path,
-        socket = SYSTEM_HELPER_SOCKET,
-    );
+/// Determine the sandbox.toml deployment path.
+///
+/// - System-level (euid==0): `<layout.etc_dir>/sandbox.toml`
+/// - User-level: `$XDG_CONFIG_HOME/anolisa/sandbox.toml`
+fn resolve_sandbox_config_path(layout: &FsLayout) -> PathBuf {
+    if privilege::is_root() {
+        layout.etc_dir.join("sandbox.toml")
+    } else {
+        let config_home = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+            format!("{home}/.config")
+        });
+        PathBuf::from(config_home)
+            .join("anolisa")
+            .join("sandbox.toml")
+    }
+}
 
-    fs::write(UNIT_PATH, &unit_content).map_err(|e| CliError::Runtime {
+fn deploy_sandbox_config(cmd: &str, layout: &FsLayout) -> Result<(), CliError> {
+    const SANDBOX_TOML_TEMPLATE: &str =
+        include_str!("../../../../manifests/osbase/sandbox.toml");
+
+    let config_path = resolve_sandbox_config_path(layout);
+
+    if config_path.exists() {
+        eprintln!(
+            "[setup] sandbox.toml already exists, skipping (use --reset-config to overwrite)"
+        );
+        return Ok(());
+    }
+
+    // Ensure parent directory exists
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| CliError::Runtime {
+            command: cmd.to_string(),
+            reason: format!("failed to create directory {}: {e}", parent.display()),
+        })?;
+    }
+
+    fs::write(&config_path, SANDBOX_TOML_TEMPLATE).map_err(|e| CliError::Runtime {
         command: cmd.to_string(),
-        reason: format!("failed to write unit file {UNIT_PATH}: {e}"),
+        reason: format!(
+            "failed to write sandbox.toml to {}: {e}",
+            config_path.display()
+        ),
     })?;
-    eprintln!("[setup] systemd unit written → {UNIT_PATH}");
+
+    eprintln!("[setup] sandbox.toml deployed \u{2192} {}", config_path.display());
+    Ok(())
+}
+
+fn write_unit_file(cmd: &str, helper_path: &Path, unit_path: &Path) -> Result<(), CliError> {
+    const UNIT_TEMPLATE: &str =
+        include_str!("../../../../systemd/anolisa-system-helper.service.in");
+
+    let unit_content = UNIT_TEMPLATE
+        .replace("@@HELPER_PATH@@", &helper_path.display().to_string())
+        .replace("@@SOCKET_PATH@@", SYSTEM_HELPER_SOCKET);
+
+    // Ensure unit directory exists
+    if let Some(parent) = unit_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| CliError::Runtime {
+            command: cmd.to_string(),
+            reason: format!("failed to create directory {}: {e}", parent.display()),
+        })?;
+    }
+
+    fs::write(unit_path, &unit_content).map_err(|e| CliError::Runtime {
+        command: cmd.to_string(),
+        reason: format!("failed to write unit file {}: {e}", unit_path.display()),
+    })?;
+    eprintln!("[setup] systemd unit written → {}", unit_path.display());
     Ok(())
 }
 
@@ -349,6 +430,115 @@ fn verify_socket(cmd: &str) -> Result<(), CliError> {
             reason: format!("unexpected handshake response: {other:?}"),
         }),
     }
+}
+
+// ─── Teardown ────────────────────────────────────────────────────────────────
+
+fn handle_teardown(ctx: &CliContext) -> Result<(), CliError> {
+    let cmd = "system teardown";
+
+    // 1. Check root
+    if !privilege::is_root() {
+        return Err(CliError::PermissionDenied {
+            command: cmd.to_string(),
+            reason: "system teardown must be run as root (euid 0)".to_string(),
+            hint: Some("run with: sudo anolisa system teardown".to_string()),
+        });
+    }
+
+    let layout = resolve_layout(ctx);
+    let helper_path = layout.libexec_dir.join("anolisa-system-helper");
+    let unit_path = layout.systemd_unit_dir.join(UNIT_FILENAME);
+    let mut warnings: Vec<String> = Vec::new();
+
+    // 2. Stop service (ignore "not loaded" errors)
+    if let Err(e) = run_systemctl(cmd, &["stop", SERVICE_NAME]) {
+        let msg = format!("{e}");
+        if msg.contains("not loaded") || msg.contains("not found") {
+            warnings.push(format!(
+                "service {SERVICE_NAME} was not loaded (already stopped)"
+            ));
+        } else {
+            warnings.push(format!("failed to stop {SERVICE_NAME}: {msg}"));
+        }
+    } else {
+        eprintln!("[teardown] stopped {SERVICE_NAME}");
+    }
+
+    // 3. Disable service (ignore errors)
+    if let Err(e) = run_systemctl(cmd, &["disable", SERVICE_NAME]) {
+        warnings.push(format!("failed to disable {SERVICE_NAME}: {e}"));
+    } else {
+        eprintln!("[teardown] disabled {SERVICE_NAME}");
+    }
+
+    // 4. Delete unit file
+    if unit_path.exists() {
+        if let Err(e) = fs::remove_file(&unit_path) {
+            warnings.push(format!(
+                "failed to remove unit file {}: {e}",
+                unit_path.display()
+            ));
+        } else {
+            eprintln!("[teardown] removed unit file {}", unit_path.display());
+        }
+    } else {
+        warnings.push(format!("unit file {} already removed", unit_path.display()));
+    }
+
+    // 5. Reload systemd
+    if let Err(e) = run_systemctl(cmd, &["daemon-reload"]) {
+        warnings.push(format!("daemon-reload failed: {e}"));
+    } else {
+        eprintln!("[teardown] systemd daemon-reload complete");
+    }
+
+    // 6. Delete helper binary
+    if helper_path.exists() {
+        if let Err(e) = fs::remove_file(&helper_path) {
+            warnings.push(format!(
+                "failed to remove helper binary {}: {e}",
+                helper_path.display()
+            ));
+        } else {
+            eprintln!("[teardown] removed helper binary {}", helper_path.display());
+        }
+    } else {
+        warnings.push(format!(
+            "helper binary {} already removed",
+            helper_path.display()
+        ));
+    }
+
+    // 7. Remove sandbox.toml config file
+    let sandbox_config_path = resolve_sandbox_config_path(&layout);
+    if sandbox_config_path.exists() {
+        if let Err(e) = fs::remove_file(&sandbox_config_path) {
+            warnings.push(format!(
+                "failed to remove sandbox.toml {}: {e}",
+                sandbox_config_path.display()
+            ));
+        } else {
+            eprintln!("[teardown] removed sandbox.toml");
+        }
+    }
+
+    // 8. Optionally remove /run/anolisa/
+    let runtime_path = Path::new(RUNTIME_DIR);
+    if runtime_path.exists() {
+        if let Err(e) = fs::remove_dir_all(runtime_path) {
+            warnings.push(format!("failed to remove {RUNTIME_DIR}: {e}"));
+        } else {
+            eprintln!("[teardown] removed runtime directory {RUNTIME_DIR}");
+        }
+    }
+
+    // 9. Print warnings and success
+    for w in &warnings {
+        eprintln!("[teardown] warning: {w}");
+    }
+    eprintln!("[teardown] system helper teardown complete.");
+    Ok(())
 }
 
 // ─── Status command ─────────────────────────────────────────────────────────────────
