@@ -6,10 +6,12 @@
 use crate::config;
 use anyhow::{Context, Result};
 use libbpf_rs::{
-    Link, MapHandle,
+    Link,
     skel::{OpenSkel, SkelBuilder},
 };
-use std::{mem::MaybeUninit, os::fd::AsFd};
+use std::mem::MaybeUninit;
+
+use super::shared_maps::{MapKind, SharedMaps};
 
 // ─── Generated skeleton ───────────────────────────────────────────────────────
 #[allow(
@@ -123,12 +125,16 @@ pub struct ProcMon {
     _links: Vec<Link>,
 }
 
+/// Maps procmon reuses from the shared bundle. procmon keeps full audit
+/// coverage, so it only shares the ring buffer (no process / cgroup filter).
+const SHARED_MAPS: &[MapKind] = &[MapKind::Rb];
+
 impl ProcMon {
-    /// Create a new ProcMon that reuses an existing ring buffer
+    /// Create a new ProcMon that reuses the shared ring buffer.
     ///
     /// # Arguments
-    /// * `rb` - External ring buffer map handle to reuse
-    pub fn new_with_rb(rb: &MapHandle) -> Result<Self> {
+    /// * `shared` - Bundle of shared BPF maps (only the ring buffer is used)
+    pub fn new_with_shared(shared: &SharedMaps) -> Result<Self> {
         // Open + load skeleton
         let mut builder = ProcmonSkelBuilder::default();
         builder.obj_builder.debug(config::verbose());
@@ -136,12 +142,10 @@ impl ProcMon {
         let open_object = Box::new(MaybeUninit::<libbpf_rs::OpenObject>::uninit());
         let mut open_skel = builder.open().context("failed to open BPF object")?;
 
-        // Reuse external rb map
-        open_skel
-            .maps_mut()
-            .rb()
-            .reuse_fd(rb.as_fd())
-            .context("failed to reuse external rb map")?;
+        // Reuse the shared ring buffer.
+        shared
+            .reuse_into(SHARED_MAPS, open_skel.open_object_mut())
+            .context("failed to reuse shared maps for procmon")?;
 
         let skel = open_skel.load().context("failed to load BPF object")?;
 

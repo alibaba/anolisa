@@ -7,11 +7,12 @@
 use crate::config;
 use anyhow::{Context, Result};
 use libbpf_rs::{
-    Link, MapHandle, RingBufferBuilder, UprobeOpts,
+    Link, RingBufferBuilder, UprobeOpts,
     skel::{OpenSkel, SkelBuilder},
 };
 use procfs::process::Process;
-use std::os::fd::AsFd;
+
+use super::shared_maps::{MapKind, SharedMaps};
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -193,21 +194,22 @@ pub struct SslSniff {
     rx: crossbeam_channel::Receiver<SslEvent>,
 }
 
+/// Maps sslsniff reuses from the shared bundle: ring buffer + process filter.
+const SHARED_MAPS: &[MapKind] = &[MapKind::Rb, MapKind::TracedProcesses];
+
 impl SslSniff {
-    /// Create a new SslSniff with its own traced_processes map
+    /// Create a new SslSniff with its own (unshared) maps.
     pub fn new() -> Result<Self> {
-        Self::new_with_traced_processes(None, None)
+        Self::build(None)
     }
 
-    /// Create a new SslSniff with an optional external traced_processes map and shared ring buffer
-    ///
-    /// # Arguments
-    /// * `traced_processes` - Optional external MapHandle for traced_processes (for map reuse)
-    /// * `rb` - Optional external MapHandle for shared ring buffer (for map reuse)
-    pub fn new_with_traced_processes(
-        traced_processes: Option<&MapHandle>,
-        rb: Option<&MapHandle>,
-    ) -> Result<Self> {
+    /// Create a new SslSniff that reuses the shared ring buffer and process filter.
+    pub fn new_with_shared(shared: &SharedMaps) -> Result<Self> {
+        Self::build(Some(shared))
+    }
+
+    /// Open + load the skeleton (optionally reusing shared maps) and build `Self`.
+    fn build(shared: Option<&SharedMaps>) -> Result<Self> {
         // ── Open + load skeleton ───────────────────────────────────────
         let mut builder = SslsniffSkelBuilder::default();
         builder.obj_builder.debug(config::verbose());
@@ -215,22 +217,11 @@ impl SslSniff {
         let open_object = Box::new(MaybeUninit::<libbpf_rs::OpenObject>::uninit());
         let mut open_skel = builder.open().context("failed to open BPF object")?;
 
-        // If external traced_processes map is provided, reuse its fd
-        if let Some(map) = traced_processes {
-            open_skel
-                .maps_mut()
-                .traced_processes()
-                .reuse_fd(map.as_fd())
-                .context("failed to reuse external traced_processes map")?;
-        }
-
-        // If external rb map is provided, reuse its fd
-        if let Some(map) = rb {
-            open_skel
-                .maps_mut()
-                .rb()
-                .reuse_fd(map.as_fd())
-                .context("failed to reuse external rb map")?;
+        // Reuse shared maps when running under the unified manager.
+        if let Some(shared) = shared {
+            shared
+                .reuse_into(SHARED_MAPS, open_skel.open_object_mut())
+                .context("failed to reuse shared maps for sslsniff")?;
         }
 
         let skel = open_skel.load().context("failed to load BPF object")?;

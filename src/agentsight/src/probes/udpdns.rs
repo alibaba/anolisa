@@ -10,10 +10,12 @@
 use crate::config;
 use anyhow::{Context, Result};
 use libbpf_rs::{
-    Link, MapHandle,
+    Link,
     skel::{OpenSkel, SkelBuilder},
 };
-use std::{mem::MaybeUninit, os::fd::AsFd};
+use std::mem::MaybeUninit;
+
+use super::shared_maps::{MapKind, SharedMaps};
 
 // --- Generated skeleton ---
 #[allow(
@@ -162,32 +164,26 @@ pub struct UdpDns {
     _links: Vec<Link>,
 }
 
+/// Maps udpdns reuses from the shared bundle: ring buffer + process filter
+/// (used to skip already-traced processes). No cgroup filter.
+const SHARED_MAPS: &[MapKind] = &[MapKind::Rb, MapKind::TracedProcesses];
+
 impl UdpDns {
-    /// Create a new UdpDns that reuses existing traced_processes and ring buffer maps
+    /// Create a new UdpDns that reuses the shared ring buffer and process filter.
     ///
     /// # Arguments
-    /// * `traced_processes` - External MapHandle for process filtering (skip already-traced)
-    /// * `rb` - External ring buffer map handle to reuse
-    pub fn new_with_maps(traced_processes: &MapHandle, rb: &MapHandle) -> Result<Self> {
+    /// * `shared` - Bundle of shared BPF maps (ring buffer + traced_processes)
+    pub fn new_with_shared(shared: &SharedMaps) -> Result<Self> {
         let mut builder = UdpdnsSkelBuilder::default();
         builder.obj_builder.debug(config::verbose());
 
         let open_object = Box::new(MaybeUninit::<libbpf_rs::OpenObject>::uninit());
         let mut open_skel = builder.open().context("failed to open udpdns BPF object")?;
 
-        // Reuse external traced_processes map
-        open_skel
-            .maps_mut()
-            .traced_processes()
-            .reuse_fd(traced_processes.as_fd())
-            .context("failed to reuse external traced_processes map for udpdns")?;
-
-        // Reuse external ring buffer
-        open_skel
-            .maps_mut()
-            .rb()
-            .reuse_fd(rb.as_fd())
-            .context("failed to reuse external rb map for udpdns")?;
+        // Reuse shared ring buffer + process filter.
+        shared
+            .reuse_into(SHARED_MAPS, open_skel.open_object_mut())
+            .context("failed to reuse shared maps for udpdns")?;
 
         let skel = open_skel
             .load()

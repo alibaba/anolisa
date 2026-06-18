@@ -6,10 +6,12 @@
 use crate::config;
 use anyhow::{Context, Result};
 use libbpf_rs::{
-    Link, MapHandle,
+    Link,
     skel::{OpenSkel, SkelBuilder},
 };
-use std::{mem::MaybeUninit, os::fd::AsFd};
+use std::mem::MaybeUninit;
+
+use super::shared_maps::{MapKind, SharedMaps};
 
 // ─── Generated skeleton ───────────────────────────────────────────────────────
 #[allow(
@@ -96,23 +98,16 @@ pub struct FileWrite {
     _links: Vec<Link>,
 }
 
-impl FileWrite {
-    /// Create a new FileWrite that reuses existing traced_processes and ring buffer maps
-    ///
-    /// # Arguments
-    /// * `traced_processes` - External MapHandle for process filtering
-    /// * `rb` - External ring buffer MapHandle
-    pub fn new_with_maps(traced_processes: &MapHandle, rb: &MapHandle) -> Result<Self> {
-        Self::new_with_full_maps(traced_processes, rb, None, false)
-    }
+/// Maps filewrite reuses from the shared bundle: ring buffer, process filter,
+/// and (when cgroup filtering is enabled) the cgroup filter.
+const SHARED_MAPS: &[MapKind] = &[MapKind::Rb, MapKind::TracedProcesses, MapKind::CgroupFilter];
 
-    /// Create a new FileWrite with optional cgroup_filter map sharing.
-    pub fn new_with_full_maps(
-        traced_processes: &MapHandle,
-        rb: &MapHandle,
-        cgroup_filter: Option<&MapHandle>,
-        cgroup_filter_enabled: bool,
-    ) -> Result<Self> {
+impl FileWrite {
+    /// Create a new FileWrite that reuses the shared maps bundle.
+    ///
+    /// Reuses the ring buffer and process filter; the cgroup filter is reused
+    /// only when present in the bundle (i.e. when cgroup filtering is enabled).
+    pub fn new_with_shared(shared: &SharedMaps) -> Result<Self> {
         let mut builder = FilewriteSkelBuilder::default();
         builder.obj_builder.debug(config::verbose());
 
@@ -122,34 +117,16 @@ impl FileWrite {
             .context("failed to open filewrite BPF object")?;
 
         // Cgroup filter flag
-        open_skel.rodata_mut().filter_cgroup_enabled = cgroup_filter_enabled;
+        open_skel.rodata_mut().filter_cgroup_enabled = shared.cgroup_filter_enabled();
 
         // Detect cgroup v2 and pass to BPF via rodata.
         open_skel.rodata_mut().cgroup_v2_mode =
             std::path::Path::new("/sys/fs/cgroup/cgroup.controllers").exists();
 
-        // Reuse external traced_processes map
-        open_skel
-            .maps_mut()
-            .traced_processes()
-            .reuse_fd(traced_processes.as_fd())
-            .context("failed to reuse external traced_processes map for filewrite")?;
-
-        // Reuse external ring buffer
-        open_skel
-            .maps_mut()
-            .rb()
-            .reuse_fd(rb.as_fd())
-            .context("failed to reuse external rb map for filewrite")?;
-
-        // Reuse external cgroup_filter map (if provided)
-        if let Some(map) = cgroup_filter {
-            open_skel
-                .maps_mut()
-                .cgroup_filter()
-                .reuse_fd(map.as_fd())
-                .context("failed to reuse external cgroup_filter map for filewrite")?;
-        }
+        // Reuse the shared maps (cgroup_filter is skipped when not shared).
+        shared
+            .reuse_into(SHARED_MAPS, open_skel.open_object_mut())
+            .context("failed to reuse shared maps for filewrite")?;
 
         let skel = open_skel
             .load()
