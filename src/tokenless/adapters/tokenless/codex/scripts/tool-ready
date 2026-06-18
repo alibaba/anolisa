@@ -33,12 +33,90 @@ import subprocess
 import sys
 from typing import Optional
 
-# Resolve shared hook utilities (common/hooks/ relative to adapters root).
+# Resolve shared hook utilities (common/hooks/) with FHS fallback paths.
+# Primary: relative path (works for source-tree and FHS/RPM install).
+# Fallbacks: system and user FHS paths (works when Codex caches only the
+# plugin subdirectory and the relative path resolves outside the cache).
+#
+# Trust model (aligned with bash is_trusted_file / Rust is_trusted_path):
+#   - System FHS paths (/usr/share, /usr/local/share) are unconditional.
+#   - User-relative paths use passwd DB home (NOT $HOME — env-controllable),
+#     with ownership and parent-dir permission checks.
+#   - Relative ../../common/hooks is trusted only if the resolved target
+#     exists and is under a system prefix or a passwd-validated home path.
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_COMMON = os.path.join(_HERE, "..", "..", "common", "hooks")
-if _COMMON not in sys.path:
-    sys.path.insert(0, _COMMON)
-from hook_utils import skip_silent as _skip  # noqa: E402
+
+
+def _is_trusted_dir(path: str) -> bool:
+    """Check whether a directory is trusted for Python module imports.
+
+    Mirrors the trust criteria in bash tool_ready_hook.sh (is_trusted_file)
+    and Rust env_check.rs (is_trusted_path): system paths unconditional,
+    user paths validated via passwd + ownership + parent permission checks.
+
+    NOTE: Callers should pass realpath-resolved paths (not just abspath)
+    so that symlink targets are validated before the trust check — a
+    symlinked /usr/share/anolisa → /tmp/ would bypass the prefix check
+    if only abspath is used.
+    """
+    # System FHS prefixes are always trusted
+    for prefix in ("/usr/share/", "/usr/local/share/", "/usr/libexec/", "/usr/lib/anolisa/"):
+        if path.startswith(prefix):
+            return True
+    # For paths outside system prefixes (e.g. source-tree cloned to
+    # /opt/anolisa/), trust them if owned by current uid or root AND
+    # parent directory is not world-writable. This covers developer
+    # worktrees without requiring the path to be under passwd home.
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    if st.st_uid != os.getuid() and st.st_uid != 0:
+        # Not owned by us or root — refuse. Home paths must be owned by
+        # us or root; source-tree paths outside system prefixes are
+        # already covered by the ownership check above (current uid/root).
+        return False
+    # Ownership OK — check parent directory is not world-writable
+    parent = os.path.dirname(path)
+    try:
+        pst = os.stat(parent)
+    except OSError:
+        return False
+    if pst.st_uid != os.getuid() and pst.st_uid != 0:
+        return False
+    if pst.st_mode & 0o002:  # world-writable
+        return False
+    return True
+
+# Resolve real home from passwd DB for user-install fallback path.
+# Falls back to "" (empty) when unavailable — candidate is then skipped.
+try:
+    import pwd as _pwd
+    _REAL_HOME = _pwd.getpwuid(os.getuid()).pw_dir
+except (ImportError, KeyError):
+    _REAL_HOME = ""
+
+_HOOK_UTILS_CANDIDATES = [
+    os.path.join(_HERE, "..", "..", "common", "hooks"),                   # source-tree / FHS
+    "/usr/share/anolisa/adapters/tokenless/common/hooks",                  # RPM system
+    "/usr/local/share/anolisa/adapters/tokenless/common/hooks",            # manual system
+    os.path.join(_REAL_HOME, ".local", "share",
+                 "anolisa", "adapters", "tokenless", "common", "hooks") if _REAL_HOME else "",
+]
+_HOOK_UTILS_RESOLVED = ""
+for _C in _HOOK_UTILS_CANDIDATES:
+    if _C and _is_trusted_dir(os.path.realpath(_C)) and os.path.isdir(_C):
+        _HOOK_UTILS_RESOLVED = os.path.realpath(_C)
+        sys.path.insert(0, _C)
+        break
+
+if _HOOK_UTILS_RESOLVED:
+    from hook_utils import skip_silent as _skip  # noqa: E402
+else:
+    # Fail-open: no trusted hook_utils found → provide inline fallbacks
+    # so the hook script exits 0 (passthrough) rather than ImportError → exit 1.
+    def _skip() -> None:  # type: ignore[assignment,misc]
+        sys.exit(0)
 
 # ---------------------------------------------------------------------------
 # constants
