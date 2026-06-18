@@ -1,0 +1,22 @@
+[package]
+name = "skillfs-fuse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "FUSE virtual filesystem layer for SkillFS"
+
+[dependencies]
+skillfs-core = { workspace = true }
+fuser = "0.15"
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "macros"] }
