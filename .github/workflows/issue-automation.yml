@@ -7,10 +7,9 @@
 #   3. Title keyword fallback (cosh / agentsight / agent-sec / os-skills)
 #   4. Default maintainer if none of the above matches
 #
-# Component → label and label → owner mappings are read dynamically from
-# .github/CODEOWNERS (# auto-label: annotations) via the codeowners-labels
-# composite action. No hardcoded maps — adding a component to CODEOWNERS
-# is sufficient.
+# Component → label mappings are read dynamically from .github/CODEOWNERS
+# (# auto-label: annotations). Assignees are read from .github/maintainers.json
+# when present, with CODEOWNERS as fallback.
 #
 # Actions taken (all in one pass, no chained label events):
 #   - Apply component label (if not already present)
@@ -77,6 +76,30 @@ jobs:
               labelMap[short] = label;
               ownerMap[label] = owners;
             }
+
+            // ── Parse maintainers.json for issue assignees ────────────────
+            const maintainerMap = {};
+            let defaultMaintainers = [];
+            try {
+              const { data: maintainerFile } = await github.rest.repos.getContent(
+                { owner, repo, path: '.github/maintainers.json' }
+              );
+              const maintainerContent = Buffer.from(
+                maintainerFile.content,
+                'base64'
+              ).toString();
+              const config = JSON.parse(maintainerContent);
+              for (const scope of config.scopes || []) {
+                maintainerMap[scope.label] = (scope.maintainers || [])
+                  .map(m => m.github)
+                  .filter(Boolean);
+              }
+              defaultMaintainers = (config.default?.maintainers || [])
+                .map(m => m.github)
+                .filter(Boolean);
+            } catch (error) {
+              core.warning(`Failed to read .github/maintainers.json: ${error.message}`);
+            }
     
             const body  = context.payload.issue.body  || '';
             const title = context.payload.issue.title || '';
@@ -115,10 +138,23 @@ jobs:
               }
             }
             
-            // 4. Resolve maintainers from CODEOWNERS (fallback: global '*' rule owners)
-            const owners      = componentLabel ? (ownerMap[componentLabel] || []) : [];
-            const maintainers = owners.length > 0 ? owners : fallbackOwners;
-            const maintainerSource = owners.length > 0 ? `ownerMap[${componentLabel}]` : "CODEOWNERS '*' global fallback";
+            // 4. Resolve maintainers from maintainers.json (fallback: CODEOWNERS)
+            const configuredMaintainers = componentLabel ? (maintainerMap[componentLabel] || []) : [];
+            const owners = componentLabel ? (ownerMap[componentLabel] || []) : [];
+            const maintainers = configuredMaintainers.length > 0
+              ? configuredMaintainers
+              : owners.length > 0
+                ? owners
+                : defaultMaintainers.length > 0
+                  ? defaultMaintainers
+                  : fallbackOwners;
+            const maintainerSource = configuredMaintainers.length > 0
+              ? `maintainers.json[${componentLabel}]`
+              : owners.length > 0
+                ? `CODEOWNERS[${componentLabel}]`
+                : defaultMaintainers.length > 0
+                  ? 'maintainers.json default'
+                  : "CODEOWNERS '*' global fallback";
             
             core.info('=== Issue triage results ===');
             core.info(`  component: ${componentLabel || 'none'}  \u2190 ${labelSource || 'unresolved'}`);

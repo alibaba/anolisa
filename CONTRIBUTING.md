@@ -10,7 +10,7 @@ We welcome contributions! This document covers the basics of contributing to the
 
 - **Node.js** >= 20.0.0 (for copilot-shell)
 - **Python** >= 3.12.0 (for os-skills)
-- **Rust** stable toolchain (for agent-sec-core and agentsight, Linux only)
+- **Rust** stable toolchain (for Rust components, Linux only where noted)
 - **uv** (Python package manager for os-skills)
 - **clang** & **libbpf** (for compiling agentsight eBPF C code)
 
@@ -51,6 +51,8 @@ Each component has its own build workflow:
 
 - **agentsight** (Linux only, optional): `cd src/agentsight && make build`
 
+- **SkillFS** (Linux only): `cd src/skillfs && cargo build --workspace`
+
 ## Build & Test Commands
 
 ```bash
@@ -69,6 +71,7 @@ Each component has its own build workflow:
 cd src/copilot-shell && make lint && make test
 cd src/agent-sec-core && pytest tests/integration-test/ tests/unit-test/
 cd src/agentsight && cargo test
+cd src/skillfs && cargo test --workspace
 ```
 
 ## Contribution Process
@@ -85,6 +88,8 @@ cd src/agentsight && cargo test
    cd src/agent-sec-core && pytest tests/
    # agentsight
    cd src/agentsight && cargo clippy -- -D warnings && cargo test
+   # SkillFS
+   cd src/skillfs && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
    ```
 6. **Submit a PR** - Link it to the issue and provide a clear description.
 
@@ -106,7 +111,11 @@ docs(docs): update installation guide
 | `sec-core` | `src/agent-sec-core/` |
 | `skill` | `src/os-skills/` |
 | `sight` | `src/agentsight/` |
+| `tokenless` | `src/tokenless/` |
+| `ckpt` | `src/ws-ckpt/` |
 | `memory` | `src/agent-memory/` |
+| `anolisa` | `src/anolisa/` |
+| `skillfs` | `src/skillfs/` |
 | `ci` | `.github/workflows/` |
 | `docs` | `docs/` or documentation updates |
 | `deps` | Dependency version bumps (lock files) |
@@ -131,7 +140,7 @@ When you open a PR, the following checks run automatically:
 | Check | Level | How to fix |
 |-------|-------|------------|
 | Commit scope missing | **Error** (blocks merge) | Add `(scope)` to every commit message, e.g. `fix(cosh): ...` |
-| Commit scope not in allowed list | Warning | Use one of the scopes above: `cosh`, `sec-core`, `skill`, `sight`, `memory`, `ci`, `docs`, `deps`, `chore` |
+| Commit scope not in allowed list | Warning | Use one of the scopes above: `cosh`, `sec-core`, `skill`, `sight`, `tokenless`, `ckpt`, `memory`, `anolisa`, `skillfs`, `ci`, `docs`, `deps`, `chore` |
 | PR title format | Warning | Follow `type(scope): description` — same as commit messages |
 | Branch name convention | Warning | Follow `feature/<scope>/<desc>` — not required for forks |
 | PR not linked to an issue | Warning | Add `closes #<n>` to your PR description, or `no-issue: <reason>` |

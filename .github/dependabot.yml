@@ -105,6 +105,25 @@ updates:
       - "deps"
       - "agent-memory"
 
+  # SkillFS (cargo)
+  - package-ecosystem: "cargo"
+    directory: "/src/skillfs"
+    schedule:
+      interval: "weekly"
+    target-branch: "main"
+    open-pull-requests-limit: 0   # ← Toggle: 0 = off, 1 = on
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    groups:
+      cargo-minor-patch:
+        applies-to: "version-updates"
+        update-types:
+          - "minor"
+          - "patch"
+    labels:
+      - "deps"
+      - "skillfs"
 
   # GitHub Actions
   - package-ecosystem: "github-actions"

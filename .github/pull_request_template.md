@@ -42,6 +42,7 @@ closes #
 - [ ] `ckpt` (ws-ckpt)
 - [ ] `memory` (agent-memory)
 - [ ] `anolisa` (anolisa-cli)
+- [ ] `skillfs` (SkillFS)
 - [ ] Multiple / Project-wide
 
 ## Checklist
@@ -60,6 +61,7 @@ closes #
 - [ ] For `tokenless`: `cargo clippy -- -D warnings` and `cargo fmt --check` pass
 - [ ] For `memory` (Linux only): `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, and `cargo test` pass
 - [ ] For `anolisa`: `cargo clippy --all-targets --locked -- -D warnings`, `cargo fmt --all --check`, and `cargo test --locked` pass
+- [ ] For `skillfs`: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace` pass
 - [ ] Lock files are up to date (`package-lock.json` / `Cargo.lock`)
 
 ## Testing

@@ -23,6 +23,7 @@ body:
         - ckpt
         - memory
         - anolisa
+        - skillfs
         - other
     validations:
       required: true

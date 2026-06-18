@@ -45,3 +45,7 @@
 /scripts/                               @samchu-zsl                 # auto-label: scope:scripts
 /cliff.toml                             @samchu-zsl                 # auto-label: scope:ci
 /Makefile                               @casparant                  # auto-label: scope:scripts
+
+# SkillFS is listed after generic Markdown scope rules so all files under
+# src/skillfs request the default SkillFS reviewers.
+/src/skillfs/                           @kongche-jbw @yummypeng     # auto-label: component:skillfs

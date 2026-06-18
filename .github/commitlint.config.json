@@ -15,6 +15,7 @@
         "ckpt",
         "memory",
         "anolisa",
+        "skillfs",
         "deps",
         "ci",
         "docs",

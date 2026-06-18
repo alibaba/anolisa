@@ -93,6 +93,14 @@
                     "github": "ikunkun-sys"
                 }
             ]
+        },
+        {
+            "label": "component:skillfs",
+            "maintainers": [
+                {
+                    "github": "kongche-jbw"
+                }
+            ]
         }
     ],
     "default": {

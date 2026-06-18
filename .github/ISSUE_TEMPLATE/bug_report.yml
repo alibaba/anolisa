@@ -23,6 +23,7 @@ body:
         - tokenless
         - ckpt
         - memory
+        - skillfs
         - other
     validations:
       required: true

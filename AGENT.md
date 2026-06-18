@@ -15,8 +15,9 @@ This file provides context for AI coding assistants (Qoder, Claude, etc.) workin
 | **agent-memory** (`memory`) | `src/agent-memory/` | Rust | Linux only |
 | **os-skills** | `src/os-skills/` | Python / Shell | All |
 | **anolisa** | `src/anolisa/` | Rust | Linux + macOS (arm64) |
+| **SkillFS** (`skillfs`) | `src/skillfs/` | Rust / FUSE | Linux only |
 
-> `agent-sec-core`, `agentsight`, `tokenless`, and `agent-memory` require Linux. Do **not** attempt to build them on macOS or Windows.
+> `agent-sec-core`, `agentsight`, `tokenless`, `agent-memory`, and `skillfs` require Linux. Do **not** attempt to build them on macOS or Windows.
 
 ## Development Commands
 
@@ -69,6 +70,13 @@ cd src/anolisa
 cargo fmt --all --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
+
+# SkillFS (Linux only, per-component)
+cd src/skillfs
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+scripts/test.sh   # FUSE smoke test; skips itself if fuse3 or /dev/fuse is unavailable
 ```
 
 ## Commit Message Rules
@@ -139,8 +147,10 @@ When generating commits, detect the active tool and fill in the actual version. 
 | `src/os-skills/` | `skill` |
 | `src/agentsight/` | `sight` |
 | `src/tokenless/` | `tokenless` |
+| `src/ws-ckpt/` | `ckpt` |
 | `src/agent-memory/` | `memory` |
 | `src/anolisa/` | `anolisa` |
+| `src/skillfs/` | `skillfs` |
 | `.github/workflows/` | `ci` |
 | `docs/` | `docs` |
 | `**/package*.json`, `Cargo.lock`, `*.toml` (dep bumps) | `deps` |
@@ -218,8 +228,10 @@ When generating a PR description, use `.github/pull_request_template.md` as the 
 - `skill` → any file under `src/os-skills/`
 - `sight` → any file under `src/agentsight/`
 - `tokenless` → any file under `src/tokenless/`
+- `ckpt` → any file under `src/ws-ckpt/`
 - `memory` → any file under `src/agent-memory/`
 - `anolisa` → any file under `src/anolisa/`
+- `skillfs` → any file under `src/skillfs/`
 - `Multiple / Project-wide` → cross-component or root-level changes
 
 **Checklist** — mark items that actually apply to this PR; skip items for unaffected components.
