@@ -173,7 +173,8 @@ fn handle_component_update(component: &str, ctx: &CliContext) -> Result<(), CliE
 /// Core of [`handle_component_update`] with the package query, transaction, and
 /// root status injected so tests drive the RPM path without a live rpmdb/dnf or
 /// real privileges.
-fn update_component_with_deps(
+// pub(crate): driven by the cross-command MVP lifecycle test (#963).
+pub(crate) fn update_component_with_deps(
     target: &str,
     ctx: &CliContext,
     query: &dyn PackageQuery,

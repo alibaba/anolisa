@@ -237,10 +237,29 @@ pub fn handle(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
 ///   components (#959).
 /// - [`is_root`](Self::is_root) gates the privileged dnf transaction so the
 ///   user gets an actionable message instead of dnf's mid-transaction refusal.
-struct RpmExec<'a> {
+// pub(crate) with private fields + `new`: the cross-command MVP lifecycle test
+// (#963) builds this to inject its fake rpmdb world, but the internal
+// representation stays encapsulated — construction goes through `new`.
+pub(crate) struct RpmExec<'a> {
     query: &'a dyn PackageQuery,
     txn: &'a dyn PackageTransaction,
     is_root: bool,
+}
+
+impl<'a> RpmExec<'a> {
+    /// Bundle the rpm-path dependencies. The real entry point passes the
+    /// system rpm/dnf backends; tests pass fakes.
+    pub(crate) fn new(
+        query: &'a dyn PackageQuery,
+        txn: &'a dyn PackageTransaction,
+        is_root: bool,
+    ) -> Self {
+        Self {
+            query,
+            txn,
+            is_root,
+        }
+    }
 }
 
 fn handle_one(
@@ -254,18 +273,15 @@ fn handle_one(
     // the raw path costs nothing.
     let query = RpmPackageQuery::system();
     let txn = RpmTransaction::system();
-    let exec = RpmExec {
-        query: &query,
-        txn: &txn,
-        is_root: privilege::is_root(),
-    };
+    let exec = RpmExec::new(&query, &txn, privilege::is_root());
     handle_one_with_exec(component, args, ctx, &exec)
 }
 
 /// Core of [`handle_one`] with the RPM execution dependencies injected, so
 /// tests can drive the adopt and delegated-install paths without a live
 /// rpmdb/dnf or real privileges.
-fn handle_one_with_exec(
+// pub(crate): driven by the cross-command MVP lifecycle test (#963).
+pub(crate) fn handle_one_with_exec(
     component: String,
     args: InstallArgs,
     ctx: &CliContext,

@@ -108,7 +108,8 @@ pub fn handle(args: UninstallArgs, ctx: &CliContext) -> Result<(), CliError> {
 /// Core of [`handle`] with the package query, transaction, and root status
 /// injected so the RPM path is testable without a live rpmdb/dnf or real
 /// privileges. The raw and purge paths ignore the injected dependencies.
-fn handle_with_deps(
+// pub(crate): driven by the cross-command MVP lifecycle test (#963).
+pub(crate) fn handle_with_deps(
     args: UninstallArgs,
     ctx: &CliContext,
     query: &dyn PackageQuery,

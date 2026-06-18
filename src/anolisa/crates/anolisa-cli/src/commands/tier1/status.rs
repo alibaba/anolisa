@@ -277,7 +277,8 @@ fn observed_record(
 /// calls out: a `dnf update`/`downgrade` (or a same-name multi-version rpmdb)
 /// surfaces as [`Drifted`](RpmDrift::Drifted); an `rpm -e` surfaces as
 /// [`Missing`](RpmDrift::Missing).
-enum RpmDrift {
+// pub(crate): the cross-command MVP lifecycle test (#963) asserts on these variants.
+pub(crate) enum RpmDrift {
     /// rpmdb holds the package at a different version than ANOLISA recorded, or
     /// holds several versions at once. `reason` explains which.
     Drifted { reason: String },
@@ -292,7 +293,8 @@ enum RpmDrift {
 /// than crying drift on a read we cannot trust. A same-name multi-version rpmdb
 /// is a genuine divergence from the single recorded version, so it classifies
 /// as drift. `query` is injected so tests drive this without a live rpmdb.
-fn probe_rpm_drift(meta: &RpmMetadata, query: &dyn PackageQuery) -> Option<RpmDrift> {
+// pub(crate): driven by the cross-command MVP lifecycle test (#963).
+pub(crate) fn probe_rpm_drift(meta: &RpmMetadata, query: &dyn PackageQuery) -> Option<RpmDrift> {
     match query.query_installed(&meta.package_name) {
         Ok(Some(info)) => {
             let live = info.version.to_string();

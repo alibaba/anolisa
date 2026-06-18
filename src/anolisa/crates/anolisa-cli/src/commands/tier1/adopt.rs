@@ -50,7 +50,8 @@ pub fn handle(args: AdoptArgs, ctx: &CliContext) -> Result<(), CliError> {
 /// Core of [`handle`] with the package query injected so tests drive every
 /// branch without a live rpmdb. Adopt runs no dnf transaction, so only a
 /// [`PackageQuery`] is required.
-fn adopt_with_query(
+// pub(crate): driven by the cross-command MVP lifecycle test (#963).
+pub(crate) fn adopt_with_query(
     target: &str,
     cli_override: Option<&str>,
     ctx: &CliContext,
