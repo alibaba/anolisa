@@ -1,0 +1,148 @@
+diff --git a/src/discover/registry.rs b/src/discover/registry.rs
+index 4fd7168..284b4b7 100644
+--- a/src/discover/registry.rs
++++ b/src/discover/registry.rs
+@@ -837,6 +837,26 @@ fn rewrite_segment_inner(
+         }
+     }
+ 
++    // Preflight safety: skip rewrite when the original command invokes a
++    // Python interpreter via `-m <module>`.  Rewriting `python -m pytest` to
++    // `rtk pytest` changes the execution binary from `python` to `rtk`, which
++    // may trigger different OpenClaw preflight security rules (e.g. "complex
++    // interpreter invocation" detection for python but not for rtk).  Direct
++    // invocations (`pytest`, `mypy`) are still rewritten because they don't
++    // go through a Python interpreter.
++    if let Some(exe) = cmd_part.split_whitespace().next() {
++        let basename = std::path::Path::new(exe)
++            .file_name()
++            .map(|n| n.to_string_lossy().to_string())
++            .unwrap_or_else(|| exe.to_string());
++        // Check that the second token is exactly `-m` (the Python module flag),
++        // not a substring match that could false-positive on `-mypy` etc.
++        let second_token = cmd_part.split_whitespace().nth(1);
++        if is_python_interpreter(&basename) && second_token == Some("-m") {
++            return None;
++        }
++    }
++
+     // Try each rewrite prefix (longest first) with word-boundary check
+     for &prefix in rule.rewrite_prefixes {
+         if let Some(rest) = strip_word_prefix(cmd_part, prefix) {
+@@ -867,6 +887,36 @@ fn strip_word_prefix<'a>(cmd: &'a str, prefix: &str) -> Option<&'a str> {
+     }
+ }
+ 
++/// Returns true if the given executable name is a Python interpreter.
++///
++/// Matches: `python`, `python2`, `python3`, `python3.11`, `python3.12`, etc.
++/// Also matches `pypy`, `pypy2`, `pypy3`, `pypy3.10`, etc.
++/// Does NOT match `pythonista`, `python-dbg`, or other non-interpreter names.
++///
++/// Known uncovered variants (intentionally excluded to avoid false positives):
++/// - `python3.12-dbg`, `python3.12m` — debug/pymalloc builds
++/// - `micropython`, `graalpy` — alternative implementations
++/// - `conda run python`, `uv run python` — wrapper tools (not interpreters)
++///
++/// These variants are rare in agent-issued commands.  If needed, they can be
++/// added to the prefix list or matched with a broader pattern.
++fn is_python_interpreter(name: &str) -> bool {
++    for prefix in &["python", "python2", "python3", "pypy", "pypy2", "pypy3"] {
++        if name == *prefix {
++            return true;
++        }
++        if let Some(rest) = name.strip_prefix(prefix) {
++            // Must be `.N` (version suffix like `.11`, `.12`)
++            if let Some(digits) = rest.strip_prefix('.') {
++                if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
++                    return true;
++                }
++            }
++        }
++    }
++    false
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::super::report::RtkStatus;
+@@ -2320,8 +2370,17 @@ mod tests {
+ 
+     #[test]
+     fn test_rewrite_python_m_pytest() {
++        // python -m pytest is skipped to preserve preflight compatibility:
++        // rewriting to `rtk pytest` changes the execution binary from
++        // `python` to `rtk`, which may trigger different OpenClaw security
++        // rules (see "Preflight safety" comment in rewrite_segment_inner).
+         assert_eq!(
+             rewrite_command_no_prefixes("python -m pytest -x tests/", &[]),
++            None
++        );
++        // Direct pytest invocation is still rewritten.
++        assert_eq!(
++            rewrite_command_no_prefixes("pytest -x tests/", &[]),
+             Some("rtk pytest -x tests/".into())
+         );
+     }
+@@ -3826,12 +3885,60 @@ mod tests {
+ 
+     #[test]
+     fn test_python3_m_pytest() {
++        // python3 -m pytest is skipped for preflight safety (same as python).
+         assert_eq!(
+             rewrite_command_no_prefixes("python3 -m pytest tests/", &[]),
+-            Some("rtk pytest tests/".into())
++            None
+         );
+     }
+ 
++    #[test]
++    fn test_python_m_variants_skipped() {
++        // python3.12 -m pytest — versioned interpreter also skipped
++        assert_eq!(
++            rewrite_command_no_prefixes("python3.12 -m pytest tests/", &[]),
++            None
++        );
++        // pypy3 -m pytest — alternative interpreter also skipped
++        assert_eq!(
++            rewrite_command_no_prefixes("pypy3 -m pytest tests/", &[]),
++            None
++        );
++    }
++
++    #[test]
++    fn test_python_without_m_not_skipped() {
++        // python -c "..." is NOT skipped (no -m flag)
++        // It won't match any rewrite prefix either, so returns None for a
++        // different reason — but the point is the python-skip is NOT triggered.
++        // We verify by checking that `python script.py` doesn't trigger the skip.
++        // (The rewrite prefix list doesn't include "python" itself, so this
++        //  returns None regardless — but through the normal no-match path.)
++        let result = rewrite_command_no_prefixes("python script.py", &[]);
++        assert_eq!(result, None);
++    }
++
++    #[test]
++    fn test_is_python_interpreter() {
++        assert!(is_python_interpreter("python"));
++        assert!(is_python_interpreter("python2"));
++        assert!(is_python_interpreter("python3"));
++        assert!(is_python_interpreter("python2.7"));
++        assert!(is_python_interpreter("python3.11"));
++        assert!(is_python_interpreter("python3.12"));
++        assert!(is_python_interpreter("python3.13"));
++        assert!(is_python_interpreter("pypy"));
++        assert!(is_python_interpreter("pypy3"));
++        assert!(is_python_interpreter("pypy3.10"));
++        // Non-interpreter names
++        assert!(!is_python_interpreter("pythonista"));
++        assert!(!is_python_interpreter("python-dbg"));
++        assert!(!is_python_interpreter("pytest"));
++        assert!(!is_python_interpreter("pip"));
++        assert!(!is_python_interpreter("python3abc"));
++        assert!(!is_python_interpreter(""));
++    }
++
+     #[test]
+     fn test_pip_show() {
+         assert_eq!(

@@ -1,5 +1,5 @@
 diff --git a/src/cmds/system/grep_cmd.rs b/src/cmds/system/grep_cmd.rs
-index 3f7d9a3..57e59c4 100644
+index 3f7d9a3..35164e5 100644
 --- a/src/cmds/system/grep_cmd.rs
 +++ b/src/cmds/system/grep_cmd.rs
 @@ -54,7 +54,7 @@ pub fn run(
@@ -11,3 +11,185 @@ index 3f7d9a3..57e59c4 100644
              exec_capture(&mut grep_cmd)
          })
          .context("grep/rg failed")?;
+@@ -119,11 +119,18 @@ pub fn run(
+     }
+ 
+     let mut rtk_output = String::new();
+-    rtk_output.push_str(&format!(
+-        "{} matches in {} files:\n\n",
+-        total_matches,
+-        by_file.len()
+-    ));
++
++    // Emit match-count header only in verbose mode — for agents the
++    // raw file:line:content lines are already self-describing, and the
++    // header adds ~60% character overhead on typical single-file searches
++    // while providing no information the agent can't derive from the lines.
++    if verbose > 0 {
++        rtk_output.push_str(&format!(
++            "{} matches in {} files:\n\n",
++            total_matches,
++            by_file.len()
++        ));
++    }
+ 
+     let mut shown = 0;
+     let mut files: Vec<_> = by_file.iter().collect();
+@@ -135,7 +142,7 @@ pub fn run(
+             break;
+         }
+ 
+-        let file_display = compact_path(file);
++        let file_display = relative_path(file);
+         for (line_num, content) in matches.iter().take(per_file) {
+             if shown >= max_results {
+                 break;
+@@ -200,7 +207,9 @@ fn has_format_flag(extra_args: &[String]) -> bool {
+ }
+ 
+ fn clean_line(line: &str, max_len: usize, context_re: Option<&Regex>, pattern: &str) -> String {
+-    let trimmed = line.trim();
++    // Only trim trailing whitespace — leading whitespace is structurally
++    // meaningful in Python, YAML, and other indentation-sensitive languages.
++    let trimmed = line.trim_end();
+ 
+     if let Some(re) = context_re {
+         if let Some(m) = re.find(trimmed) {
+@@ -245,6 +254,60 @@ fn clean_line(line: &str, max_len: usize, context_re: Option<&Regex>, pattern: &
+     }
+ }
+ 
++/// Returns a compact display path for grep output.
++///
++/// For absolute paths, keeps the parent directory and filename
++/// (e.g. `/a/b/c/d.rs` → `c/d.rs`) to disambiguate same-named files in
++/// sibling directories.  Falls back to just the filename when the path has
++/// no parent component.
++///
++/// **Limitation**: only 1 level of parent is retained, so files like
++/// `x/src/a/config.py` and `y/src/a/config.py` both render as `a/config.py`.
++/// This is a deliberate trade-off between brevity and disambiguation —
++/// keeping more levels would inflate output for the common case.
++///
++/// For `./`-prefixed paths, strips the prefix.
++/// Relative paths are kept as-is.
++/// Falls back to `compact_path` for paths longer than 80 characters.
++fn relative_path(file: &str) -> String {
++    // Strip "./" prefix from rg's output when searching from "."
++    let stripped = file.strip_prefix("./").unwrap_or(file);
++    // Guard against trailing slashes (absent in rg/grep output, but defensive)
++    let stripped = stripped.trim_end_matches('/');
++
++    // For absolute paths, keep parent_dir/filename for disambiguation.
++    // E.g. /a/b/c/d.rs → c/d.rs
++    let display_path = if stripped.starts_with('/') {
++        let p = std::path::Path::new(stripped);
++        let file_name = p
++            .file_name()
++            .map(|n| n.to_string_lossy().to_string())
++            .unwrap_or_else(|| stripped.to_string());
++        match p.parent() {
++            Some(pp) => {
++                let pp_name = pp
++                    .file_name()
++                    .map(|n| n.to_string_lossy().to_string())
++                    .unwrap_or_default();
++                if pp_name.is_empty() {
++                    file_name
++                } else {
++                    format!("{}/{}", pp_name, file_name)
++                }
++            }
++            None => file_name,
++        }
++    } else {
++        stripped.to_string()
++    };
++
++    if display_path.chars().count() <= 80 {
++        display_path
++    } else {
++        compact_path(&display_path)
++    }
++}
++
+ fn compact_path(path: &str) -> String {
+     if path.len() <= 50 {
+         return path.to_string();
+@@ -271,7 +334,8 @@ mod tests {
+     fn test_clean_line() {
+         let line = "            const result = someFunction();";
+         let cleaned = clean_line(line, 50, None, "result");
+-        assert!(!cleaned.starts_with(' '));
++        // Leading whitespace is now preserved (trim_end only)
++        assert!(cleaned.starts_with("            "));
+         assert!(cleaned.len() <= 50);
+     }
+ 
+@@ -282,6 +346,66 @@ mod tests {
+         assert!(compact.len() <= 60);
+     }
+ 
++    // --- relative_path tests ---
++
++    #[test]
++    fn test_relative_path_absolute_keeps_parent_and_filename() {
++        // Absolute paths keep parent/filename for disambiguation
++        assert_eq!(
++            relative_path("/a/b/c/d.rs"),
++            "c/d.rs"
++        );
++    }
++
++    #[test]
++    fn test_relative_path_absolute_deep() {
++        assert_eq!(
++            relative_path("/home/user/project/src/utils/helper.rs"),
++            "utils/helper.rs"
++        );
++    }
++
++    #[test]
++    fn test_relative_path_absolute_shallow() {
++        // Only 1 parent component — still keep parent/filename
++        assert_eq!(relative_path("/a/b.rs"), "a/b.rs");
++    }
++
++    #[test]
++    fn test_relative_path_absolute_root_only() {
++        // Root-level file — just filename
++        assert_eq!(relative_path("/foo.rs"), "foo.rs");
++    }
++
++    #[test]
++    fn test_relative_path_strips_dot_slash() {
++        assert_eq!(relative_path("./src/main.rs"), "src/main.rs");
++    }
++
++    #[test]
++    fn test_relative_path_preserves_relative() {
++        assert_eq!(relative_path("src/main.rs"), "src/main.rs");
++        assert_eq!(relative_path("../other/file.rs"), "../other/file.rs");
++    }
++
++    #[test]
++    fn test_relative_path_disambiguates_same_filename() {
++        // Two different files named config.py — must produce different output
++        let a = relative_path("/project/src/a/config.py");
++        let b = relative_path("/project/src/b/config.py");
++        assert_ne!(a, b, "same-named files in different dirs must be distinguishable");
++        assert_eq!(a, "a/config.py");
++        assert_eq!(b, "b/config.py");
++    }
++
++    #[test]
++    fn test_relative_path_long_falls_back_to_compact() {
++        // Path > 80 chars after cleaning — should fall back to compact_path
++        let long = "/very/long/path/that/exceeds/eighty/characters/when/all/components/are/joined/together/filename.rs";
++        let result = relative_path(long);
++        assert!(result.chars().count() <= 80);
++    }
++
+     #[test]
+     fn test_extra_args_accepted() {
+         // Test that the function signature accepts extra_args
