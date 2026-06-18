@@ -185,7 +185,87 @@ static __always_inline bool is_http_payload(const char *buf, u32 len)
     return false;
 }
 
-// Emit a probe_SSL_data_t event given a pre-resolved user buffer pointer.
+// --- Tiered ring-buffer emit (shares sslsniff.h per-tier record types) ---
+// tcpsniff is a second EVENT_SOURCE_SSL producer on the SAME shared ring as
+// sslsniff. #1000 made sslsniff reserve the smallest per-tier record that fits
+// each payload, but tcpsniff still reserved the full 4 MiB probe_SSL_data_t per
+// event (sizeof(*data)) — so tcpsniff's reservations alone re-pad the shared ring
+// to the 4 MiB worst case and drop events under burst (#759). Reserve the
+// smallest tier here too. This IS sslsniff's proven SSL_EMIT_ONE idiom: a single
+// read at FIXED offset 0 with an asm-barrier clamp, plus the tcpsniff HTTP first-
+// payload gate. A writev() request (iov[0] headers + iov[1] body) is emitted as
+// TWO records (see trace_tcp_sendmsg), each a single fixed-offset read — a second
+// copy at a VARIABLE destination offset is rejected by the 6.6 verifier (it cannot
+// prove off+len <= tier when both vary), so we do not concatenate into one buf;
+// the downstream reassembles per-connection (by ssl_ptr) as it does for any
+// chunked stream. Top tier is MAX_BUF_SIZE (4 MiB), which also restores the full
+// capture cap the old `& 0xFFFFF` mask silently clipped to ~1 MiB (matches #1000's
+// SSL _ex fix); `truncated` is set when the payload exceeds the chosen tier.
+#define TCP_EMIT_ONE(TYPE, TIER, sk_, len_, rw_, ts_, delta_, pid_, tid_, uid_, src_) \
+    do {                                                                              \
+        struct TYPE *_d = bpf_ringbuf_reserve(&rb, sizeof(struct TYPE), 0);           \
+        if (!_d)                                                                      \
+            break;                                                                    \
+        _d->source = EVENT_SOURCE_SSL;                                                \
+        _d->timestamp_ns = (ts_);                                                     \
+        _d->delta_ns = (delta_);                                                      \
+        _d->pid = (pid_);                                                             \
+        _d->tid = (tid_);                                                             \
+        _d->uid = (uid_);                                                             \
+        _d->len = (u32)(len_);                                                        \
+        _d->rw = (rw_);                                                               \
+        _d->is_handshake = 0;                                                         \
+        _d->truncated = ((u32)(len_) > (u32)(TIER)) ? 1 : 0;                          \
+        _d->ssl_ptr = (u64)(sk_);                                                     \
+        bpf_get_current_comm(&_d->comm, sizeof(_d->comm));                            \
+        /* Re-clamp the copy length to the tier behind an asm barrier so clang       \
+         * cannot drop the clamp as dead code while the verifier still gets a fresh  \
+         * umax=TIER bound for the read (see #1000 SSL_EMIT_ONE / "R2 min value is   \
+         * negative"). Destination is FIXED offset 0 — the only variable-size access \
+         * shape the 6.6 verifier accepts here. */                                   \
+        u32 _n = (u32)(len_);                                                         \
+        asm volatile("" : "+r"(_n));                                                  \
+        if (_n > (u32)(TIER))                                                         \
+            _n = (u32)(TIER);                                                         \
+        int _rc = bpf_probe_read_user(&_d->buf, _n, (const char *)(src_));            \
+        if (_rc) {                                                                    \
+            _d->buf_filled = 0;                                                       \
+            _d->buf_size = 0;                                                         \
+            bpf_ringbuf_submit(_d, 0);                                                \
+            break;                                                                    \
+        }                                                                            \
+        /* HTTP gate: emit only connections whose first payload looks like HTTP;     \
+         * once confirmed, the LRU map lets later (non-keyword) chunks through. */    \
+        u64 _sk_key = (u64)(sk_);                                                     \
+        if (!bpf_map_lookup_elem(&tcp_http_conns, &_sk_key)) {                        \
+            if (!is_http_payload((const char *)_d->buf, _n)) {                        \
+                bpf_ringbuf_discard(_d, 0);                                           \
+                break;                                                                \
+            }                                                                        \
+            u8 _v = 1;                                                                \
+            bpf_map_update_elem(&tcp_http_conns, &_sk_key, &_v, BPF_ANY);             \
+        }                                                                            \
+        _d->buf_filled = 1;                                                           \
+        _d->buf_size = _n;                                                            \
+        bpf_ringbuf_submit(_d, 0);                                                    \
+    } while (0)
+
+// Pick the smallest tier (and its record type) that holds `len_`, then emit one.
+#define TCP_EMIT_TIERED(sk_, len_, rw_, ts_, delta_, pid_, tid_, uid_, src_)         \
+    do {                                                                             \
+        u32 _l = (u32)(len_);                                                        \
+        if (_l <= SSL_TIER_SMALL)                                                    \
+            TCP_EMIT_ONE(probe_SSL_data_small, SSL_TIER_SMALL, sk_, len_, rw_, ts_, delta_, pid_, tid_, uid_, src_);   \
+        else if (_l <= SSL_TIER_MEDIUM)                                              \
+            TCP_EMIT_ONE(probe_SSL_data_medium, SSL_TIER_MEDIUM, sk_, len_, rw_, ts_, delta_, pid_, tid_, uid_, src_); \
+        else if (_l <= SSL_TIER_LARGE)                                               \
+            TCP_EMIT_ONE(probe_SSL_data_large, SSL_TIER_LARGE, sk_, len_, rw_, ts_, delta_, pid_, tid_, uid_, src_);   \
+        else                                                                        \
+            TCP_EMIT_ONE(probe_SSL_data_t, MAX_BUF_SIZE, sk_, len_, rw_, ts_, delta_, pid_, tid_, uid_, src_);         \
+    } while (0)
+
+// Emit a tiered event for a single contiguous user buffer (recv / ubuf write, and
+// each writev segment emitted separately by trace_tcp_sendmsg).
 static __always_inline int emit_tcp_event_buf(
     struct sock *sk,
     void *user_buf,
@@ -196,57 +276,14 @@ static __always_inline int emit_tcp_event_buf(
     if (data_len == 0 || !user_buf)
         return 0;
 
-    // Reserve ring buffer event (same struct as sslsniff)
-    struct probe_SSL_data_t *data = bpf_ringbuf_reserve(&rb, sizeof(*data), 0);
-    if (!data)
-        return 0;
-
     u64 now = bpf_ktime_get_ns();
     u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 pid = current_ns_pid();
+    u32 tid = (u32)pid_tgid;
+    u32 uid = (u32)bpf_get_current_uid_gid();
+    u64 delta = (start_ns > 0) ? (now - start_ns) : 0;
 
-    data->source = EVENT_SOURCE_SSL;  // reuse SSL source for seamless pipeline
-    data->timestamp_ns = now;
-    data->delta_ns = (start_ns > 0) ? (now - start_ns) : 0;
-    data->pid = current_ns_pid();
-    data->tid = (u32)pid_tgid;
-    data->uid = bpf_get_current_uid_gid();
-    data->len = data_len;
-    data->rw = rw;
-    data->is_handshake = false;
-    /* Initialize the shared `truncated` header field. tcpsniff masks the payload
-     * to <=1 MiB (below) and never truncates against the 4 MiB cap, so it is 0.
-     * This MUST be set: every EVENT_SOURCE_SSL record shares this header and the
-     * consumer (sslsniff::from_bytes) reads `truncated`; bpf_ringbuf_reserve does
-     * not zero the reservation, so an omitted field reads stale ring bytes. */
-    data->truncated = 0;
-    data->ssl_ptr = (u64)sk;  // use sock pointer as connection identifier
-
-    // Clamp buffer size for verifier
-    u32 buf_copy_size = data_len & 0xFFFFF;
-    if (buf_copy_size > MAX_BUF_SIZE)
-        buf_copy_size = MAX_BUF_SIZE;
-
-    bpf_get_current_comm(&data->comm, sizeof(data->comm));
-
-    int ret = bpf_probe_read_user(&data->buf, buf_copy_size, user_buf);
-    if (ret == 0) {
-        u64 sk_key = (u64)sk;
-        if (!bpf_map_lookup_elem(&tcp_http_conns, &sk_key)) {
-            if (!is_http_payload((const char *)data->buf, buf_copy_size)) {
-                bpf_ringbuf_discard(data, 0);
-                return 0;
-            }
-            u8 val = 1;
-            bpf_map_update_elem(&tcp_http_conns, &sk_key, &val, BPF_ANY);
-        }
-        data->buf_filled = 1;
-        data->buf_size = buf_copy_size;
-    } else {
-        data->buf_filled = 0;
-        data->buf_size = 0;
-    }
-
-    bpf_ringbuf_submit(data, 0);
+    TCP_EMIT_TIERED(sk, data_len, rw, now, delta, pid, tid, uid, user_buf);
     return 0;
 }
 
@@ -285,8 +322,12 @@ int BPF_PROG(trace_tcp_sendmsg, struct sock *sk, struct msghdr *msg, size_t size
         }
     }
 
-    // ITER_IOVEC: scatter-gather from writev()/sendmsg()
-    // Read iov[0] and iov[1] into the event buffer concatenated.
+    // ITER_IOVEC: scatter-gather from writev()/sendmsg(). Emit iov[0] (HTTP
+    // headers) and iov[1] (body) as TWO separate records — each a single
+    // fixed-offset read (a variable-offset second copy into one buf is rejected
+    // by the 6.6 verifier). iov[0] goes FIRST so it marks the connection HTTP
+    // before iov[1] (a bare body) is gated; the downstream reassembles the
+    // request per-connection (by ssl_ptr), as it already does for chunked recv.
     const struct iovec *iov = get_iov_ptr(iter);
     if (!iov)
         return 0;
@@ -295,76 +336,16 @@ int BPF_PROG(trace_tcp_sendmsg, struct sock *sk, struct msghdr *msg, size_t size
     u64 iov0_len = BPF_CORE_READ(iov, iov_len);
     if (!iov0_base || iov0_len == 0)
         return 0;
+    emit_tcp_event_buf(sk, iov0_base, (u32)iov0_len, 1, 0);
 
-    // Reserve ring buffer event
-    struct probe_SSL_data_t *data = bpf_ringbuf_reserve(&rb, sizeof(*data), 0);
-    if (!data)
-        return 0;
-
-    u64 now = bpf_ktime_get_ns();
-    u64 pid_tgid = bpf_get_current_pid_tgid();
-    data->source = EVENT_SOURCE_SSL;
-    data->timestamp_ns = now;
-    data->delta_ns = 0;
-    data->pid = current_ns_pid();
-    data->tid = (u32)pid_tgid;
-    data->uid = bpf_get_current_uid_gid();
-    data->len = (u32)size;
-    data->rw = 1;
-    data->is_handshake = false;
-    data->truncated = 0;  /* see emit_tcp_event_buf: shared header field, never truncates against the 4 MiB cap */
-    data->ssl_ptr = (u64)sk;
-    bpf_get_current_comm(&data->comm, sizeof(data->comm));
-
-    // Copy iov[0] (HTTP headers)
-    u32 iov0_copy = (u32)iov0_len & 0xFFFFF;
-    if (iov0_copy > MAX_BUF_SIZE)
-        iov0_copy = MAX_BUF_SIZE;
-
-    int ret = bpf_probe_read_user(&data->buf[0], iov0_copy, iov0_base);
-    if (ret != 0) {
-        bpf_ringbuf_discard(data, 0);
-        return 0;
-    }
-
-    u64 sk_key = (u64)sk;
-    if (!bpf_map_lookup_elem(&tcp_http_conns, &sk_key)) {
-        if (!is_http_payload((const char *)data->buf, iov0_copy)) {
-            bpf_ringbuf_discard(data, 0);
-            return 0;
-        }
-        u8 val = 1;
-        bpf_map_update_elem(&tcp_http_conns, &sk_key, &val, BPF_ANY);
-    }
-
-    u32 total_copied = iov0_copy;
-
-    // Try to also copy iov[1] (JSON body) if there's space
     u32 nr_segs = (u32)BPF_CORE_READ(iter, nr_segs);
-    if (nr_segs >= 2 && total_copied < MAX_BUF_SIZE) {
+    if (nr_segs >= 2) {
         const struct iovec *iov1 = &iov[1];
         void *iov1_base = BPF_CORE_READ(iov1, iov_base);
         u64 iov1_len = BPF_CORE_READ(iov1, iov_len);
-
-        if (iov1_base && iov1_len > 0) {
-            u32 remaining = MAX_BUF_SIZE - total_copied;
-            u32 iov1_copy = (u32)iov1_len & 0xFFFFF;
-            if (iov1_copy > remaining)
-                iov1_copy = remaining;
-
-            // Verifier needs bounded offset
-            u32 offset = total_copied & 0xFFFFF;
-            if (offset + iov1_copy <= MAX_BUF_SIZE) {
-                ret = bpf_probe_read_user(&data->buf[offset], iov1_copy, iov1_base);
-                if (ret == 0)
-                    total_copied += iov1_copy;
-            }
-        }
+        if (iov1_base && iov1_len > 0)
+            emit_tcp_event_buf(sk, iov1_base, (u32)iov1_len, 1, 0);
     }
-
-    data->buf_filled = 1;
-    data->buf_size = total_copied;
-    bpf_ringbuf_submit(data, 0);
     return 0;
 }
 
