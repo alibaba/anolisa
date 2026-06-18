@@ -213,6 +213,12 @@ static __always_inline int emit_tcp_event_buf(
     data->len = data_len;
     data->rw = rw;
     data->is_handshake = false;
+    /* Initialize the shared `truncated` header field. tcpsniff masks the payload
+     * to <=1 MiB (below) and never truncates against the 4 MiB cap, so it is 0.
+     * This MUST be set: every EVENT_SOURCE_SSL record shares this header and the
+     * consumer (sslsniff::from_bytes) reads `truncated`; bpf_ringbuf_reserve does
+     * not zero the reservation, so an omitted field reads stale ring bytes. */
+    data->truncated = 0;
     data->ssl_ptr = (u64)sk;  // use sock pointer as connection identifier
 
     // Clamp buffer size for verifier
@@ -306,6 +312,7 @@ int BPF_PROG(trace_tcp_sendmsg, struct sock *sk, struct msghdr *msg, size_t size
     data->len = (u32)size;
     data->rw = 1;
     data->is_handshake = false;
+    data->truncated = 0;  /* see emit_tcp_event_buf: shared header field, never truncates against the 4 MiB cap */
     data->ssl_ptr = (u64)sk;
     bpf_get_current_comm(&data->comm, sizeof(data->comm));
 

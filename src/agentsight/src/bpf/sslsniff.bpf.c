@@ -78,8 +78,67 @@ int BPF_UPROBE(probe_SSL_rw_enter, void *ssl, void *buf, int num) {
     return 0;
 }
 
+/* Emit ONE SSL record using the per-tier record TYPE (e.g. probe_SSL_data_small)
+ * whose buf[] is exactly TIER bytes. The reservation is sizeof(struct TYPE) — a
+ * true compile-time constant — and the payload is clamped to TIER and copied
+ * WITHIN that type's buf: the only shape the verifier accepts. (Reserving fewer
+ * bytes than sizeof(struct) and then writing into a LARGER typed buf[] is
+ * REJECTED with EACCES at load — confirmed on 6.6.) A small SSL call reserves a
+ * small type, so it no longer pads the shared ring to the 4 MiB worst case
+ * (#759). `truncated` is set only when the payload exceeds the chosen tier
+ * (possible only at the top 4 MiB tier). */
+#define SSL_EMIT_ONE(TYPE, TIER, src_, len_, rw_, ts_, delta_, pid_, tid_, uid_, ssl_, ishs_) \
+    do {                                                                        \
+        struct TYPE *_d = bpf_ringbuf_reserve(&rb, sizeof(struct TYPE), 0);     \
+        if (!_d)                                                                \
+            break;                                                              \
+        _d->source = EVENT_SOURCE_SSL;                                          \
+        _d->timestamp_ns = (ts_);                                              \
+        _d->delta_ns = (delta_);                                               \
+        _d->pid = (pid_);                                                       \
+        _d->tid = (tid_);                                                       \
+        _d->uid = (uid_);                                                       \
+        _d->len = (u32)(len_);                                                  \
+        _d->rw = (rw_);                                                         \
+        _d->is_handshake = (ishs_);                                             \
+        _d->ssl_ptr = (ssl_);                                                   \
+        _d->truncated = ((u32)(len_) > (u32)(TIER)) ? 1 : 0;                    \
+        bpf_get_current_comm(&_d->comm, sizeof(_d->comm));                      \
+        /* Re-clamp the copy length to the tier right before the read. Two      \
+         * verifier traps must be dodged: (1) a length computed earlier is      \
+         * spilled across bpf_get_current_comm() and reloaded as an UNBOUNDED   \
+         * scalar; (2) the outer tier-selection already proved len_ <= TIER, so \
+         * clang folds a plain `if (_n > TIER)` away as dead code -- yet the     \
+         * verifier does NOT carry that bound across the spill, so the clamp     \
+         * still has to execute. The asm barrier makes _n opaque to clang so the \
+         * clamp is emitted, handing bpf_probe_read_user a fresh umax=TIER bound \
+         * (TIER is a compile-time constant). Without it the load is rejected:   \
+         * "R2 min value is negative, either use unsigned or 'var &= const'". */ \
+        u32 _n = (u32)(len_);                                                   \
+        asm volatile("" : "+r"(_n));                                            \
+        if (_n > (u32)(TIER))                                                   \
+            _n = (u32)(TIER);                                                   \
+        int _rc = (src_) ? bpf_probe_read_user(&_d->buf, _n, (const char *)(src_)) : -1; \
+        if (_rc) { _d->buf_filled = 0; _d->buf_size = 0; }                      \
+        else     { _d->buf_filled = 1; _d->buf_size = _n; }                     \
+        bpf_ringbuf_submit(_d, 0);                                              \
+    } while (0)
+
+/* Pick the smallest tier (and its record type) that holds `len_` and emit one. */
+#define SSL_EMIT_TIERED(src_, len_, rw_, ts_, delta_, pid_, tid_, uid_, ssl_, ishs_)       \
+    do {                                                                                   \
+        u32 _l = (u32)(len_);                                                              \
+        if (_l <= SSL_TIER_SMALL)                                                          \
+            SSL_EMIT_ONE(probe_SSL_data_small, SSL_TIER_SMALL, src_, len_, rw_, ts_, delta_, pid_, tid_, uid_, ssl_, ishs_);   \
+        else if (_l <= SSL_TIER_MEDIUM)                                                    \
+            SSL_EMIT_ONE(probe_SSL_data_medium, SSL_TIER_MEDIUM, src_, len_, rw_, ts_, delta_, pid_, tid_, uid_, ssl_, ishs_); \
+        else if (_l <= SSL_TIER_LARGE)                                                     \
+            SSL_EMIT_ONE(probe_SSL_data_large, SSL_TIER_LARGE, src_, len_, rw_, ts_, delta_, pid_, tid_, uid_, ssl_, ishs_);   \
+        else                                                                              \
+            SSL_EMIT_ONE(probe_SSL_data_t, MAX_BUF_SIZE, src_, len_, rw_, ts_, delta_, pid_, tid_, uid_, ssl_, ishs_);         \
+    } while (0)
+
 static int SSL_exit(struct pt_regs *ctx, int rw) {
-    int ret = 0;
     u64 pid_tgid = bpf_get_current_pid_tgid();
     u32 pid = pid_tgid >> 32;
     u32 tid = (u32)pid_tgid;
@@ -91,7 +150,7 @@ static int SSL_exit(struct pt_regs *ctx, int rw) {
         return 0;
     }
 
-    /* store arg info for later lookup */
+    /* fetch the buffer pointer + timing stored at enter */
     u64 *bufp = bpf_map_lookup_elem(&bufs, &tid);
     if (bufp == 0)
         return 0;
@@ -101,52 +160,22 @@ static int SSL_exit(struct pt_regs *ctx, int rw) {
         return 0;
     u64 delta_ns = ts - *tsp;
 
-    /* lookup ssl pointer for connection tracking */
     u64 *ssl_ptrp = bpf_map_lookup_elem(&ssl_ptrs, &tid);
     u64 ssl_ptr = ssl_ptrp ? *ssl_ptrp : 0;
 
     int len = PT_REGS_RC(ctx);
-    if (len <= 0)  // no data
-        return 0;
-
-    /* reserve space in ring buffer */
-    struct probe_SSL_data_t *data = bpf_ringbuf_reserve(&rb, sizeof(*data), 0);
-    if (!data)
-        return 0;
-
-    data->source = EVENT_SOURCE_SSL;
-    data->timestamp_ns = ts;
-    data->delta_ns = delta_ns;
-    data->pid = ns_pid;
-    data->tid = tid;
-    data->uid = uid;
-    data->len = (u32)len;
-    data->buf_filled = 0;
-    data->buf_size = 0;
-    data->rw = rw;
-    data->is_handshake = false;
-    data->ssl_ptr = ssl_ptr;
-    u32 buf_copy_size = min((size_t)MAX_BUF_SIZE, (size_t)len);
-
-    bpf_get_current_comm(&data->comm, sizeof(data->comm));
-
-    if (bufp != 0)
-        ret = bpf_probe_read_user(&data->buf, buf_copy_size, (char *)*bufp);
+    const char *src = (const char *)*bufp;
 
     bpf_map_delete_elem(&bufs, &tid);
     bpf_map_delete_elem(&start_ns, &tid);
     bpf_map_delete_elem(&ssl_ptrs, &tid);
 
-    if (!ret) {
-        data->buf_filled = 1;
-        data->buf_size = buf_copy_size;
-    } else {
-        data->buf_filled = 0;
-        data->buf_size = 0;
-    }
+    if (len <= 0)  // no data
+        return 0;
 
-    /* submit to ring buffer */
-    bpf_ringbuf_submit(data, 0);
+    /* Tiered emit: reserve the smallest tier that fits `len` (#759), capture up
+     * to 4 MiB whole (#763, no regression vs the prior single 4 MiB reserve). */
+    SSL_EMIT_TIERED(src, len, rw, ts, delta_ns, ns_pid, tid, uid, ssl_ptr, 0);
     return 0;
 }
 
@@ -207,7 +236,6 @@ int BPF_UPROBE(probe_SSL_read_ex_enter, void *ssl, void *buf, size_t num, size_t
 }
 
 static int ex_SSL_exit(struct pt_regs *ctx, int rw, int len) {
-    int ret = 0;
     u64 pid_tgid = bpf_get_current_pid_tgid();
     u32 pid = pid_tgid >> 32;
     u32 tid = (u32)pid_tgid;
@@ -233,53 +261,20 @@ static int ex_SSL_exit(struct pt_regs *ctx, int rw, int len) {
     u64 *ssl_ptrp = bpf_map_lookup_elem(&ssl_ptrs, &tid);
     u64 ssl_ptr = ssl_ptrp ? *ssl_ptrp : 0;
 
-    if (len <= 0)  // no data
-        return 0;
-
-    /* reserve space in ring buffer */
-    struct probe_SSL_data_t *data = bpf_ringbuf_reserve(&rb, sizeof(*data), 0);
-    if (!data)
-        return 0;
-
-    data->source = EVENT_SOURCE_SSL;
-    data->timestamp_ns = ts;
-    data->delta_ns = delta_ns;
-    data->pid = ns_pid;
-    data->tid = tid;
-    data->uid = uid;
-    data->len = (u32)len;
-    data->buf_filled = 0;
-    data->buf_size = 0;
-    data->rw = rw;
-    data->is_handshake = false;
-    data->ssl_ptr = ssl_ptr;
-    
-    /* Explicit bounds clamping to satisfy eBPF verifier
-     * Use bitmask first to ensure value range, then clamp to actual max */
-    u32 buf_copy_size = (u32)len & 0xFFFFF;  /* Mask to 20 bits (1MB-1) */
-    if (buf_copy_size > MAX_BUF_SIZE)
-        buf_copy_size = MAX_BUF_SIZE;
-
-    bpf_get_current_comm(&data->comm, sizeof(data->comm));
-
-    if (bufp != 0)
-        ret = bpf_probe_read_user(&data->buf, buf_copy_size, (char *)*bufp);
+    const char *src = (const char *)*bufp;
 
     bpf_map_delete_elem(&bufs, &tid);
     bpf_map_delete_elem(&start_ns, &tid);
     bpf_map_delete_elem(&ssl_ptrs, &tid);
 
-    if (!ret) {
-        data->buf_filled = 1;
-        data->buf_size = buf_copy_size;
-    } else {
-        data->buf_filled = 0;
-        data->buf_size = 0;
-    }
+    if (len <= 0)  // no data
+        return 0;
 
-    /* submit to ring buffer */
-    bpf_ringbuf_submit(data, 0);
-    
+    /* Tiered emit (same as SSL_exit). The old `& 0xFFFFF` mask silently capped
+     * the _ex path at 1 MiB; the tier clamp restores the full 4 MiB cap,
+     * consistent with the non-_ex path. The per-tier branch also narrows the
+     * (user-read-derived) len for the verifier. */
+    SSL_EMIT_TIERED(src, len, rw, ts, delta_ns, ns_pid, tid, uid, ssl_ptr, 0);
     return 0;
 }
 
@@ -364,8 +359,10 @@ int BPF_URETPROBE(probe_SSL_do_handshake_exit) {
     if (ret <= 0)  // handshake failed
         return 0;
 
-    /* reserve space in ring buffer */
-    struct probe_SSL_data_t *data = bpf_ringbuf_reserve(&rb, sizeof(*data), 0);
+    /* Handshake records carry no payload: reserve ONLY the header (no buf), so a
+     * handshake costs ~one header in the ring instead of the prior 4 MiB reserve. */
+    struct probe_SSL_data_t *data =
+        bpf_ringbuf_reserve(&rb, __builtin_offsetof(struct probe_SSL_data_t, buf), 0);
     if (!data)
         return 0;
 
@@ -379,7 +376,9 @@ int BPF_URETPROBE(probe_SSL_do_handshake_exit) {
     data->buf_filled = 0;
     data->buf_size = 0;
     data->rw = 2;
-    data->is_handshake = true;
+    data->is_handshake = 1;
+    data->truncated = 0;
+    data->ssl_ptr = 0;
     bpf_get_current_comm(&data->comm, sizeof(data->comm));
     bpf_map_delete_elem(&start_ns, &tid);
 
