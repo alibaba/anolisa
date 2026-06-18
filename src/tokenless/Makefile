@@ -29,6 +29,10 @@ ADAPTER_TEMPLATES := \
     $(ADAPTER_SRC_DIR)/claude-code/.claude-plugin/plugin.json \
     $(ADAPTER_SRC_DIR)/codex/.codex-plugin/plugin.json \
     $(ADAPTER_SRC_DIR)/qwencode/qwen-extension.json
+# Component contract (publishing/plugin metadata) — kept separate from the
+# adapter payload tree so the contract is not mixed with adapter resources.
+# Shipped to %{_datadir}/anolisa/components/tokenless/component.toml.
+COMPONENT_CONTRACT := .anolisa/component.toml
 TOON_VER := 0.4.6
 VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 
@@ -64,10 +68,14 @@ build-toon:
 	cargo install toon-format --version $(TOON_VER) --locked
 
 # Generate adapter config files from .in templates (VERSION from Cargo.toml).
-stamp-adapter-templates: $(ADAPTER_TEMPLATES)
+stamp-adapter-templates: $(ADAPTER_TEMPLATES) $(COMPONENT_CONTRACT)
 
 $(ADAPTER_SRC_DIR)/manifest.json: $(ADAPTER_SRC_DIR)/manifest.json.in Cargo.toml
 	@echo "==> Generating manifest.json (version=$(VERSION))..."
+	sed 's/@VERSION@/$(VERSION)/g' $< > $@
+
+$(COMPONENT_CONTRACT): $(COMPONENT_CONTRACT).in Cargo.toml
+	@echo "==> Generating component contract (version=$(VERSION))..."
 	sed 's/@VERSION@/$(VERSION)/g' $< > $@
 
 $(ADAPTER_SRC_DIR)/openclaw/package.json: $(ADAPTER_SRC_DIR)/openclaw/package.json.in Cargo.toml
@@ -185,7 +193,7 @@ clean:
 	cargo clean --release --manifest-path third_party/rtk/Cargo.toml 2>/dev/null || true
 	rm -rf $(OPENCLAW_PLUGIN_SRC_DIR)/dist $(OPENCLAW_PLUGIN_SRC_DIR)/node_modules
 	rm -f  $(OPENCLAW_PLUGIN_SRC_DIR)/package-lock.json
-	rm -f  $(ADAPTER_TEMPLATES)
+	rm -f  $(ADAPTER_TEMPLATES) $(COMPONENT_CONTRACT)
 
 # Create source tarball (excludes build artifacts)
 dist: clean

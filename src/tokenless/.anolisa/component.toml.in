@@ -1,0 +1,16 @@
+# Tokenless RPM component contract (source template).
+# The version field below is substituted from Cargo.toml by `make` (sed).
+# This is publishing/plugin metadata only — framework execution (config
+# writes, skill delivery, CLI argv, scripts) belongs to built-in framework
+# drivers, not generic manifest keys.
+# Installed to: %{_datadir}/anolisa/components/tokenless/component.toml
+[component]
+name = "tokenless"
+version = "@VERSION@"
+
+[[adapters]]
+framework = "openclaw"
+adapter_type = "plugin"
+plugin_id = "tokenless"
+source = "adapters/openclaw"
+dest = "{datadir}/adapters/{component}/openclaw/"

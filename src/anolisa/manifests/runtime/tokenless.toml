@@ -59,6 +59,7 @@ dest = "{datadir}/adapters/tokenless/cosh/"
 [[adapters]]
 framework = "openclaw"
 kind = "third-party"
+plugin_id = "tokenless"
 source = "target/release/openclaw-plugin/"
 dest = "{datadir}/adapters/tokenless/openclaw/"
 detect = { binary = "openclaw" }
