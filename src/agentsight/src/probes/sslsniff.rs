@@ -373,17 +373,16 @@ impl SslSniff {
         Ok(())
     }
 
-    /// Detach SSL probes for a process and clean up traced inodes.
+    /// Clean up per-pid bookkeeping when a traced process exits.
     ///
-    /// When a process exits, its inodes are removed from `traced_files` so that
-    /// a new process using the same binary can be re-attached.
+    /// Inodes are intentionally kept in `traced_files` because uprobes are
+    /// attached globally (`pid=-1`). The existing Links remain valid for all
+    /// processes using the same library, so re-attaching would only create
+    /// duplicate fds.
     pub fn detach_process(&mut self, pid: u32) {
         if let Some(inodes) = self.pid_inodes.remove(&pid) {
-            for inode in &inodes {
-                self.traced_files.remove(inode);
-            }
             log::debug!(
-                "[detach_process] pid={pid}: removed {} inodes from traced_files",
+                "[detach_process] pid={pid}: removed pid_inodes entry ({} inodes, kept in traced_files)",
                 inodes.len()
             );
         }

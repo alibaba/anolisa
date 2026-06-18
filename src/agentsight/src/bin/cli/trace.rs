@@ -78,7 +78,7 @@ impl TraceCommand {
         let mut sight = match AgentSight::new(config) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("Failed to create AgentSight: {e:#}");
+                eprintln!("Failed to create AgentSight: {e}");
                 std::process::exit(1);
             }
         };
