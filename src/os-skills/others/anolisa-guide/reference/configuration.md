@@ -1,3 +1,9 @@
+> **爬取时间**: 2026-06-17 16:29:17
+> **原文链接**: https://help.aliyun.com/zh/alinux/manage-configurations
+> **文档更新**: 2026-06-10T09:44:33+08:00
+
+---
+
 Alibaba Cloud Linux 4 Agentic Edition（ANOLISA）通过分层配置体系管理认证、模型、工具等设置，支持项目级与用户级配置文件多层覆盖。本文介绍了多种认证方式的接入方法、模型切换操作，以及配置文件的层级优先级和核心配置项说明。
 
 ## 1 认证方式

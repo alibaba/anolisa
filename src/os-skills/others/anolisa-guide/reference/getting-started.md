@@ -1,3 +1,9 @@
+> **爬取时间**: 2026-06-17 16:29:15
+> **原文链接**: https://help.aliyun.com/zh/alinux/agentic-os-getting-started
+> **文档更新**: 2026-05-27T18:40:32+08:00
+
+---
+
 Alibaba Cloud Linux 4 Agentic Edition（ANOLISA）是基于 Alibaba Cloud Linux 打造的 Agent 优先操作系统。本文帮助你几分钟内完成从创建实例到体验自然语言交互的完整流程。
 
 ## **第一步：创建ECS**实例

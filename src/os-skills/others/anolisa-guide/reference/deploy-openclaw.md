@@ -1,3 +1,9 @@
+> **爬取时间**: 2026-06-17 16:29:24
+> **原文链接**: https://help.aliyun.com/zh/alinux/deploy-openclaw-claude-code-in-one-step
+> **文档更新**: 2026-03-27T09:39:26+08:00
+
+---
+
 ## **背景信息**
 
 -   [OpenClaw](https://github.com/openclaw) 是一款开源 AI Agent 框架，支持通过插件机制接入钉钉等通信渠道和百炼 Qwen 等大语言模型。

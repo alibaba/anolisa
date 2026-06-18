@@ -1,3 +1,9 @@
+> **爬取时间**: 2026-06-17 16:29:23
+> **原文链接**: https://help.aliyun.com/zh/alinux/how-to-use-ws-ckpt
+> **文档更新**: 2026-06-15T09:40:24+08:00
+
+---
+
 ws-ckpt 是一个 AI Agent 工作区快照工具，为 AI Agent 提供毫秒级 checkpoint/rollback 能力。
 
 ## Harness Agent 使用

@@ -1,3 +1,9 @@
+> **爬取时间**: 2026-06-17 16:29:16
+> **原文链接**: https://help.aliyun.com/zh/alinux/how-to-use-alibaba-cloud-linux-4-agentic-edition
+> **文档更新**: 2026-05-28T10:06:03+08:00
+
+---
+
 Alibaba Cloud Linux 4 Agentic Edition（ANOLISA）以 Copilot Shell（cosh）替代传统 bash 作为系统登录后的第一入口，支持自然语言与命令双模交互，让人类用户和智能体都能以最自然的方式调用系统能力。本文介绍了 Copilot Shell 的交互设计理念、基础使用方法（自然语言模式、命令模式、YOLO 模式、文件引用）及完整的斜杠命令与快捷键参考。
 
 ## **交互入口**

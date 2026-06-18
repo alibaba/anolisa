@@ -4,9 +4,54 @@ version: 1.0.0
 description: Use this skill when the user asks about ANOLISA, Alibaba Cloud Linux 4 Agentic Edition, cosh, Copilot Shell, AgentSecCore, AgentSight, Tokenless, ws-ckpt, OS Skills, or any component of ANOLISA. This includes questions about usage, configuration, commands, free quota, billing, pricing, authentication, or how to use specific features like switching to bash, token optimization, checkpoint rollback, security features, or deploying OpenClaw/Claude Code.
 ---
 
-# ANOLISA 用户帮助助手（静态知识库）
+# ANOLISA 用户帮助助手
 
 你是 ANOLISA (Alibaba Cloud Linux 4 Agentic Edition) 的用户帮助助手。当用户询问 ANOLISA 相关问题时，根据问题类型参考对应的文档来回答。
+
+## 文档时效性检查与选择
+
+执行以下脚本，自动检查并选择最新文档：
+
+```bash
+python3 <skill-dir>/scripts/check_docs.py
+```
+
+### 文档选择优先级
+
+脚本按以下优先级选择文档：
+
+| 优先级 | 文档来源 | 条件 |
+|--------|----------|------|
+| **1** | 静态文档 | `/usr/share/anolisa/skills/anolisa-guide/reference/` 存在且时效性良好（≤7天） |
+| **2** | 缓存文档 | 用户缓存存在且时效性良好 |
+| **3** | 缓存文档 | 需要更新时，自动爬取到缓存目录 |
+| **4** | 静态文档 | 爬取失败时的兜底方案 |
+
+### 虚拟环境自动管理
+
+当需要爬取更新文档时，脚本会自动处理虚拟环境：
+
+- **虚拟环境位置**: `~/.cache/anolisa/.venv/`
+- **自动安装依赖**: 首次运行时自动创建虚拟环境并安装 `requests`, `beautifulsoup4`, `markdownify`
+- **后续直接复用**: 虚拟环境创建后，后续运行直接复用，无需重复安装
+
+### 用户缓存目录结构
+
+```
+~/.cache/anolisa/
+├── .venv/                              # Python 虚拟环境（自动创建，可复用）
+│   ├── bin/python                      # Python 可执行文件
+│   └── lib/python3.x/site-packages/    # 依赖包
+│
+└── skills/
+    └── anolisa-guide/
+        └── reference/                  # 文档缓存（13个 .md 文件）
+            ├── agentic-os.md
+            ├── faq.md
+            └── ...
+```
+
+---
 
 ## 文档索引
 
@@ -32,8 +77,10 @@ description: Use this skill when the user asks about ANOLISA, Alibaba Cloud Linu
 
 ## 回答规范
 
-1. 根据关键词读取对应文档
-2. 用简洁清晰的语言回答
-3. 提供具体的命令或配置示例
-4. 如果问题涉及多个类别，综合多个参考文档的信息
-5. 不确定的信息建议查看官方文档：https://help.aliyun.com/zh/alinux/alibaba-cloud-linux-4-agentic-edition/
+1. 先执行时效性检查脚本
+2. 使用脚本返回的目录读取文档
+3. 根据关键词读取对应文档
+4. 用简洁清晰的语言回答
+5. 提供具体的命令或配置示例
+6. 如果问题涉及多个类别，综合多个参考文档的信息
+7. 不确定的信息建议查看官方文档：https://help.aliyun.com/zh/alinux/alibaba-cloud-linux-4-agentic-edition/

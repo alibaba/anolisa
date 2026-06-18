@@ -1,3 +1,9 @@
+> **爬取时间**: 2026-06-17 16:29:13
+> **原文链接**: https://help.aliyun.com/zh/alinux/releasenotes
+> **文档更新**: 2026-06-04T08:31:48+08:00
+
+---
+
 阿里云定期发布 Alibaba Cloud Linux 4 Agentic Edition（ANOLISA）镜像的更新版本，以确保用户可以获取到最新的功能特性和安全补丁。您可以通过本文查看 Alibaba Cloud Linux 4 Agentic Edition 镜像最新的可用版本及更新内容。
 
 ## **Agentic OS (**ANOLISA**)** **0.5**

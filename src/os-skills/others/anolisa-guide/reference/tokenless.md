@@ -1,3 +1,9 @@
+> **爬取时间**: 2026-06-17 16:29:22
+> **原文链接**: https://help.aliyun.com/zh/alinux/how-to-use-tokenless
+> **文档更新**: 2026-05-28T10:06:46+08:00
+
+---
+
 Tokenless 是 ANOLISA 的 Token 优化组件，旨在不侵入业务逻辑的前提下，通过自动压缩工具定义与模型响应内容，显著降低 LLM 推理成本，并支持 cosh 与 OpenClaw 等主流 Agent 场景。本文介绍如何安装配置使用Tokenless组件。
 
 ## 如何使用Tokenless

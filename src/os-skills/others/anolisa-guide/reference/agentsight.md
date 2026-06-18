@@ -1,3 +1,9 @@
+> **爬取时间**: 2026-06-17 16:29:19
+> **原文链接**: https://help.aliyun.com/zh/alinux/how-to-use-agentsight
+> **文档更新**: 2026-05-20T21:02:26+08:00
+
+---
+
 AgentSight 是基于 eBPF 的 AI Agent 可观测性工具，在零侵入业务逻辑的前提下，实现对 Agent 运行全链路的细粒度数据采集与关联分析。
 
 ## 如何使用 AgentSight

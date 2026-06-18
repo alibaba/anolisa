@@ -1,3 +1,9 @@
+> **爬取时间**: 2026-06-17 16:29:14
+> **原文链接**: https://help.aliyun.com/zh/alinux/agentic-os
+> **文档更新**: 2026-05-28T10:31:10+08:00
+
+---
+
 Alibaba Cloud Linux 4 Agentic Edition，别名ANOLISA ，是阿里云一款 Agent-first 操作系统，专为 AI Agent 设计
 
 ## **镜像介绍**

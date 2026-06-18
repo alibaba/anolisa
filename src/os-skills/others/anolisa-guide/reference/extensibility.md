@@ -1,3 +1,9 @@
+> **爬取时间**: 2026-06-17 16:29:19
+> **原文链接**: https://help.aliyun.com/zh/alinux/extensibility-for-skill-and-mcp
+> **文档更新**: 2026-05-28T10:06:31+08:00
+
+---
+
 Alibaba Cloud Linux 4 Agentic Edition（ANOLISA）可以通过 Skill 和 MCP 两种机制扩展能力边界，支持一句话安装 Skill 包或接入第三方 MCP 服务。本文介绍了 Skill 的安装与管理方式、MCP 服务器的三种连接方式（stdio、HTTP Streamable、SSE）及其配置方法。
 
 ## 一句话安装 Skill
