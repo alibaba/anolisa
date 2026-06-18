@@ -97,6 +97,10 @@ pub enum ComponentCommands {
     Restart(tier1::restart::RestartArgs),
     /// Update a component (`update <component>`), the CLI binary (`self`), or everything (`all`)
     Update(tier1::update::UpdateArgs),
+    /// Reconcile a component's ANOLISA state with rpmdb after manual RPM changes
+    Repair(tier1::repair::RepairArgs),
+    /// Drop a component's ANOLISA state record without any package operation
+    Forget(tier1::forget::ForgetArgs),
     /// Manage component-to-framework adapters
     Adapter(adapter::AdapterArgs),
 }
@@ -196,6 +200,8 @@ pub fn dispatch(cli: Cli, ctx: &CliContext) -> Result<(), CliError> {
             ComponentCommands::Logs(args) => tier1::logs::handle(args, ctx),
             ComponentCommands::Restart(args) => tier1::restart::handle(args, ctx),
             ComponentCommands::Update(args) => tier1::update::handle(args, ctx),
+            ComponentCommands::Repair(args) => tier1::repair::handle(args, ctx),
+            ComponentCommands::Forget(args) => tier1::forget::handle(args, ctx),
             ComponentCommands::Adapter(args) => adapter::handle(args, ctx),
         },
         Commands::Management(cmd) => match cmd {

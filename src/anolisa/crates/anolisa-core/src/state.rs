@@ -138,6 +138,17 @@ impl Ownership {
     pub fn is_rpm(self) -> bool {
         matches!(self, Self::RpmManaged | Self::RpmObserved)
     }
+
+    /// Stable provenance label for wire output (`raw-managed`, `rpm-managed`,
+    /// `rpm-observed`). Centralized so every command renders the same string
+    /// and a future ownership class cannot be given two different labels.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::RawManaged => "raw-managed",
+            Self::RpmManaged => "rpm-managed",
+            Self::RpmObserved => "rpm-observed",
+        }
+    }
 }
 
 /// RPM package metadata recorded when a component is managed or observed

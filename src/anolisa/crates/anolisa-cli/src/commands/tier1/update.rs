@@ -241,13 +241,13 @@ fn update_rpm_component(
     let current = match query.query_installed(package) {
         Ok(Some(info)) => info,
         // State records the package but rpmdb no longer has it: a Missing drift.
-        // Drift adjudication / repair is #960; here we refuse rather than run
-        // dnf blindly, and point at the repair path.
+        // The package is gone, so `repair` cannot refresh it; point at `forget`
+        // (or reinstall) rather than running dnf blindly.
         Ok(None) => {
             return Err(CliError::Runtime {
                 command: command.to_string(),
                 reason: format!(
-                    "RPM package '{package}' for component '{component}' is recorded in ANOLISA state but is not present in rpmdb — it may have been removed with `rpm -e`; run `anolisa repair {component}` or reinstall before updating"
+                    "RPM package '{package}' for component '{component}' is recorded in ANOLISA state but is not present in rpmdb — it may have been removed with `rpm -e`; run `anolisa forget {component}` to drop the stale state, or reinstall before updating"
                 ),
             });
         }
@@ -273,7 +273,7 @@ fn update_rpm_component(
     //    the dry-run preview.
     let candidates = available_candidates(query, package, &current.arch, &mut warnings);
 
-    let ownership_label = ownership_label(ownership);
+    let ownership_label = ownership.label();
 
     // 3. Dry-run preview — never touches the filesystem, never needs root.
     if ctx.dry_run {
@@ -472,7 +472,7 @@ fn persist_rpm_update(
         severity: Severity::Info,
         message: format!(
             "updated RPM package {package} for component {component} to {to_evr} via dnf ({ownership_label})",
-            ownership_label = ownership_label(ownership),
+            ownership_label = ownership.label(),
         ),
         actor: "cli".to_string(),
         install_mode: Some(ctx.install_mode.as_str().to_string()),
@@ -627,15 +627,6 @@ fn txn_err(err: PackageTransactionError, command: &str) -> CliError {
 fn render_warnings(warnings: &[String], color: &Palette) {
     for w in warnings {
         eprintln!("{} {w}", color.warn("warning:"));
-    }
-}
-
-/// Stable provenance label for an [`Ownership`] value used in wire output.
-fn ownership_label(ownership: Ownership) -> &'static str {
-    match ownership {
-        Ownership::RawManaged => "raw-managed",
-        Ownership::RpmManaged => "rpm-managed",
-        Ownership::RpmObserved => "rpm-observed",
     }
 }
 
@@ -1388,9 +1379,10 @@ mod tests {
     }
 
     /// State records the RPM but rpmdb no longer has it (rpm -e drift): refuse
-    /// with a repair pointer rather than running dnf.
+    /// with a forget pointer rather than running dnf (the gone package cannot be
+    /// refreshed by repair).
     #[test]
-    fn missing_from_rpmdb_refuses_with_repair_hint() {
+    fn missing_from_rpmdb_refuses_with_forget_hint() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
         seed(
@@ -1409,8 +1401,8 @@ mod tests {
             .expect_err("drift must error");
         assert_eq!(err.code(), "EXECUTION_FAILED");
         assert!(
-            err.reason().contains("repair"),
-            "reason must point at repair: {}",
+            err.reason().contains("forget"),
+            "reason must point at forget: {}",
             err.reason()
         );
         assert_eq!(rpm.update_calls.get(), 0);

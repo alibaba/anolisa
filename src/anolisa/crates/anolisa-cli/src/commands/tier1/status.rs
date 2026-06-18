@@ -23,7 +23,7 @@ use anolisa_core::adapter::manager::ScanEntry;
 use anolisa_core::path_safety::{PathBoundaryError, validate_owned_path};
 use anolisa_core::{
     Catalog, ComponentManifest, HealthEntry, HealthSpec, InstalledObject, InstalledState,
-    IntegrityStatus, ObjectKind, ServiceState, check_owned_file,
+    IntegrityStatus, ObjectKind, RpmMetadata, ServiceState, check_owned_file,
     service_for_install_mode as service_factory,
 };
 
@@ -48,7 +48,7 @@ const SHELL_METACHARS: &[char] = &[
 ];
 use anolisa_env::EnvService;
 use anolisa_platform::fs_layout::FsLayout;
-use anolisa_platform::pkg_query::PackageQuery;
+use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError};
 use anolisa_platform::rpm_query::RpmPackageQuery;
 
 use crate::color::{Palette, pad_right};
@@ -161,6 +161,13 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
         }
     }
 
+    // Drift adjudication (#960): compare in-state RPM components against rpmdb
+    // and override the wire status with `drifted` / `missing` on divergence.
+    // Like the observed report above this stays strictly read-only — it adjusts
+    // only the wire records, never `installed.toml`.
+    let drift_query = RpmPackageQuery::system();
+    apply_rpm_drift(&mut records, &state, &drift_query);
+
     if ctx.json {
         let data = serde_json::json!({ "components": records });
         return render_json(COMMAND, data);
@@ -261,6 +268,124 @@ fn observed_record(
         });
     }
     None
+}
+
+/// Live rpmdb-drift classification for an in-state RPM component (#960).
+///
+/// `None` (from [`probe_rpm_drift`]) means "no drift to report" — the recorded
+/// status stands. The two variants are the manual-mutation cases the proposal
+/// calls out: a `dnf update`/`downgrade` (or a same-name multi-version rpmdb)
+/// surfaces as [`Drifted`](RpmDrift::Drifted); an `rpm -e` surfaces as
+/// [`Missing`](RpmDrift::Missing).
+enum RpmDrift {
+    /// rpmdb holds the package at a different version than ANOLISA recorded, or
+    /// holds several versions at once. `reason` explains which.
+    Drifted { reason: String },
+    /// rpmdb no longer holds the package at all.
+    Missing,
+}
+
+/// Compare an RPM component's recorded EVR against live rpmdb reality.
+///
+/// `status` is read-only and best-effort: an unrunnable or anomalous query
+/// (`rpm`/`dnf` missing, spawn/permission/parse failure) yields `None` rather
+/// than crying drift on a read we cannot trust. A same-name multi-version rpmdb
+/// is a genuine divergence from the single recorded version, so it classifies
+/// as drift. `query` is injected so tests drive this without a live rpmdb.
+fn probe_rpm_drift(meta: &RpmMetadata, query: &dyn PackageQuery) -> Option<RpmDrift> {
+    match query.query_installed(&meta.package_name) {
+        Ok(Some(info)) => {
+            let live = info.version.to_string();
+            match meta.evr.as_deref() {
+                // Recorded EVR diverges from rpmdb: a manual dnf update/downgrade.
+                Some(recorded) if recorded != live => Some(RpmDrift::Drifted {
+                    reason: format!(
+                        "rpmdb reports {live} for package {} but ANOLISA state records {recorded}",
+                        meta.package_name
+                    ),
+                }),
+                // EVR matches, or none recorded to compare against: no drift.
+                _ => None,
+            }
+        }
+        // State records the package but rpmdb no longer has it: an `rpm -e` drift.
+        Ok(None) => Some(RpmDrift::Missing),
+        // rpm returned output we can't reduce to a single installed version
+        // (several versions, a malformed `--qf` row, or none on a zero exit).
+        // The recorded version can no longer be trusted as-is, so surface it as
+        // drift carrying the backend's own detail rather than guessing the cause.
+        Err(PackageQueryError::UnexpectedOutput { detail, .. }) => Some(RpmDrift::Drifted {
+            reason: format!(
+                "rpmdb returned unexpected output for package {}: {detail}",
+                meta.package_name
+            ),
+        }),
+        // rpm/dnf absent, or a spawn/permission/query failure: cannot prove
+        // drift on an unrunnable query, so keep the recorded status untouched.
+        Err(_) => None,
+    }
+}
+
+/// Layer live rpmdb drift onto the projected records (#960).
+///
+/// For every record whose in-state object carries [`RpmMetadata`] *and* whose
+/// live projection is still clean (`installed` / `adopted`), compare against
+/// rpmdb and, on divergence, override the wire status with `drifted` / `missing`
+/// plus a `rpm:drift` health entry. Surfacing a manual `dnf update` / `rpm -e`
+/// is the point.
+///
+/// The clean-status gate is deliberate: integrity / manifest health may already
+/// have escalated an RPM object to `failed` / `degraded`, and a component may be
+/// deliberately `disabled` — those carry a more-severe signal that a drift label
+/// must not mask, so they are left untouched (the divergence still shows up in
+/// `repair`). Objects without RPM metadata (raw installs, legacy rows with no
+/// recorded package name) never reach the rpmdb probe.
+fn apply_rpm_drift(
+    records: &mut [ComponentRecord],
+    state: &InstalledState,
+    query: &dyn PackageQuery,
+) {
+    // Index RPM metadata by component name in a single pass so the per-record
+    // lookup is O(1) instead of re-scanning the object list for every record.
+    let rpm_meta: std::collections::HashMap<&str, &RpmMetadata> = state
+        .objects
+        .iter()
+        .filter(|o| o.kind == ObjectKind::Component)
+        .filter_map(|o| o.rpm_metadata.as_ref().map(|m| (o.name.as_str(), m)))
+        .collect();
+    if rpm_meta.is_empty() {
+        return;
+    }
+    let checked_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    for record in records.iter_mut() {
+        // Only adjudicate drift on a clean live projection; never demote a
+        // failed/degraded/disabled record (see fn doc). This also bounds the
+        // rpm -q probes below to the records that can actually drift.
+        if !matches!(record.status.as_str(), "installed" | "adopted") {
+            continue;
+        }
+        let Some(&meta) = rpm_meta.get(record.name.as_str()) else {
+            continue;
+        };
+        let (status, reason) = match probe_rpm_drift(meta, query) {
+            Some(RpmDrift::Drifted { reason }) => ("drifted", reason),
+            Some(RpmDrift::Missing) => (
+                "missing",
+                format!(
+                    "package {} recorded in ANOLISA state is no longer present in rpmdb",
+                    meta.package_name
+                ),
+            ),
+            None => continue,
+        };
+        record.status = status.to_string();
+        record.health.push(HealthEntry {
+            name: "rpm:drift".to_string(),
+            status: status.to_string(),
+            checked_at: checked_at.clone(),
+            reason: Some(reason),
+        });
+    }
 }
 
 /// Build adapter summary records for `component` from the scan entries.
@@ -847,6 +972,20 @@ fn render_human(records: &[ComponentRecord], verbose: bool, no_color: bool) {
                 "    {} run 'anolisa --install-mode system install {}' to adopt as rpm-observed",
                 color.label("hint:"),
                 record.name,
+            );
+        }
+        // Drift / missing point at the repair / forget remediation (#960).
+        if record.status == "drifted" {
+            println!(
+                "    {} run 'anolisa repair {}' to refresh ANOLISA state from rpmdb",
+                color.label("hint:"),
+                record.name,
+            );
+        } else if record.status == "missing" {
+            println!(
+                "    {} reinstall, or run 'anolisa forget {name}' to drop the stale state (repair cannot refresh a package gone from rpmdb)",
+                color.label("hint:"),
+                name = record.name,
             );
         }
         if verbose {
@@ -2364,5 +2503,243 @@ mod tests {
         let rec = observed_record("copilot-shell", backend, None, &q).expect("observed");
         assert_eq!(rec.rpm_package.as_deref(), Some("site-copilot"));
         assert_eq!(rec.rpm_source_repo, None);
+    }
+
+    // ── rpm drift adjudication (#960) ───────────────────────────────
+
+    /// Query whose `query_installed` always returns a preset anomalous error,
+    /// to exercise the drift classification of the non-`Ok` branches.
+    struct ErrQuery(PackageQueryError);
+
+    impl PackageQuery for ErrQuery {
+        fn query_installed(&self, _: &str) -> Result<Option<PackageInfo>, PackageQueryError> {
+            Err(match &self.0 {
+                PackageQueryError::UnexpectedOutput { command, detail } => {
+                    PackageQueryError::UnexpectedOutput {
+                        command: command.clone(),
+                        detail: detail.clone(),
+                    }
+                }
+                _ => PackageQueryError::CommandMissing {
+                    command: "rpm".to_string(),
+                },
+            })
+        }
+        fn query_available(&self, _: &str) -> Result<Vec<PackageInfo>, PackageQueryError> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn rpm_meta(package: &str, evr: &str) -> RpmMetadata {
+        RpmMetadata {
+            package_name: package.to_string(),
+            evr: Some(evr.to_string()),
+            arch: Some("x86_64".to_string()),
+            source_repo: Some("@System".to_string()),
+        }
+    }
+
+    /// rpmdb EVR matching the recorded one is not drift.
+    #[test]
+    fn probe_rpm_drift_none_when_evr_matches() {
+        let meta = rpm_meta("anolisa-copilot-shell", "2.3.0-1.al8");
+        let q = FakeQuery {
+            installed: vec![(
+                "anolisa-copilot-shell".to_string(),
+                pkg_info("anolisa-copilot-shell", "2.3.0", "1.al8"),
+            )],
+            origins: Vec::new(),
+        };
+        assert!(probe_rpm_drift(&meta, &q).is_none());
+    }
+
+    /// A newer rpmdb EVR than recorded (manual `dnf update`) is drift.
+    #[test]
+    fn probe_rpm_drift_detects_evr_mismatch() {
+        let meta = rpm_meta("anolisa-copilot-shell", "2.2.0-1.al8");
+        let q = FakeQuery {
+            installed: vec![(
+                "anolisa-copilot-shell".to_string(),
+                pkg_info("anolisa-copilot-shell", "2.3.0", "1.al8"),
+            )],
+            origins: Vec::new(),
+        };
+        assert!(matches!(
+            probe_rpm_drift(&meta, &q),
+            Some(RpmDrift::Drifted { .. })
+        ));
+    }
+
+    /// The package gone from rpmdb (manual `rpm -e`) is Missing.
+    #[test]
+    fn probe_rpm_drift_detects_missing() {
+        let meta = rpm_meta("anolisa-copilot-shell", "2.2.0-1.al8");
+        let q = FakeQuery::default();
+        assert!(matches!(
+            probe_rpm_drift(&meta, &q),
+            Some(RpmDrift::Missing)
+        ));
+    }
+
+    /// A same-name multi-version rpmdb is surfaced as drift, not a silent pass.
+    #[test]
+    fn probe_rpm_drift_multi_version_is_drifted() {
+        let meta = rpm_meta("anolisa-copilot-shell", "2.2.0-1.al8");
+        let q = ErrQuery(PackageQueryError::UnexpectedOutput {
+            command: "rpm".to_string(),
+            detail: "2 installed versions".to_string(),
+        });
+        assert!(matches!(
+            probe_rpm_drift(&meta, &q),
+            Some(RpmDrift::Drifted { .. })
+        ));
+    }
+
+    /// Missing rpm/dnf tooling cannot prove drift; the recorded status stands.
+    #[test]
+    fn probe_rpm_drift_tooling_missing_keeps_status() {
+        let meta = rpm_meta("anolisa-copilot-shell", "2.2.0-1.al8");
+        let q = ErrQuery(PackageQueryError::CommandMissing {
+            command: "rpm".to_string(),
+        });
+        assert!(probe_rpm_drift(&meta, &q).is_none());
+    }
+
+    /// `apply_rpm_drift` overrides an adopted rpm-observed row to `drifted` and
+    /// records a `rpm:drift` health entry when rpmdb has moved on.
+    #[test]
+    fn apply_rpm_drift_overrides_status_to_drifted() {
+        let mut state = InstalledState::default();
+        state.upsert_object(rpm_observed_object(
+            "copilot-shell",
+            "anolisa-copilot-shell",
+            "2.2.0-1.al8",
+        ));
+        let mut records = select_components(
+            &state,
+            &dummy_layout(),
+            None,
+            "system",
+            Some("copilot-shell"),
+            None,
+        );
+        assert_eq!(records[0].status, "adopted", "baseline before drift");
+
+        let q = FakeQuery {
+            installed: vec![(
+                "anolisa-copilot-shell".to_string(),
+                pkg_info("anolisa-copilot-shell", "2.3.0", "1.al8"),
+            )],
+            origins: Vec::new(),
+        };
+        apply_rpm_drift(&mut records, &state, &q);
+        assert_eq!(records[0].status, "drifted");
+        assert!(
+            records[0]
+                .health
+                .iter()
+                .any(|h| h.name == "rpm:drift" && h.status == "drifted"),
+            "a rpm:drift health entry must be recorded",
+        );
+    }
+
+    /// `apply_rpm_drift` overrides to `missing` when rpmdb no longer has the
+    /// package (the `rpm -e` case must not be silently reinstalled).
+    #[test]
+    fn apply_rpm_drift_overrides_status_to_missing() {
+        let mut state = InstalledState::default();
+        state.upsert_object(rpm_observed_object(
+            "copilot-shell",
+            "anolisa-copilot-shell",
+            "2.2.0-1.al8",
+        ));
+        let mut records = select_components(
+            &state,
+            &dummy_layout(),
+            None,
+            "system",
+            Some("copilot-shell"),
+            None,
+        );
+        let q = FakeQuery::default();
+        apply_rpm_drift(&mut records, &state, &q);
+        assert_eq!(records[0].status, "missing");
+        assert!(
+            records[0]
+                .health
+                .iter()
+                .any(|h| h.name == "rpm:drift" && h.status == "missing"),
+        );
+    }
+
+    /// A raw component (no RPM metadata) is never touched by drift adjudication,
+    /// even when the injected query would report the package absent.
+    #[test]
+    fn apply_rpm_drift_leaves_non_rpm_component_untouched() {
+        let mut state = InstalledState::default();
+        state.upsert_object(component_object(
+            "agentsight",
+            "0.1.0",
+            ObjectStatus::Installed,
+        ));
+        let mut records = select_components(
+            &state,
+            &dummy_layout(),
+            None,
+            "system",
+            Some("agentsight"),
+            None,
+        );
+        let q = FakeQuery::default();
+        apply_rpm_drift(&mut records, &state, &q);
+        assert_eq!(records[0].status, "installed", "raw row must not drift");
+        assert!(
+            !records[0].health.iter().any(|h| h.name == "rpm:drift"),
+            "no drift entry for a non-RPM component",
+        );
+    }
+
+    /// Drift never demotes a record that integrity/manifest health already
+    /// escalated past a clean projection: a `failed` RPM row keeps its
+    /// more-severe status even when rpmdb has moved on, and gains no drift entry.
+    #[test]
+    fn apply_rpm_drift_keeps_escalated_status() {
+        let mut state = InstalledState::default();
+        state.upsert_object(rpm_observed_object(
+            "copilot-shell",
+            "anolisa-copilot-shell",
+            "2.2.0-1.al8",
+        ));
+        // A record whose live projection already escalated past `installed`.
+        let mut records = vec![ComponentRecord {
+            name: "copilot-shell".to_string(),
+            status: "failed".to_string(),
+            version: Some("2.2.0-1.al8".to_string()),
+            installed_at: None,
+            last_operation_id: None,
+            enabled_features: Vec::new(),
+            health: Vec::new(),
+            adapters: Vec::new(),
+            rpm_package: None,
+            rpm_evr: None,
+            rpm_source_repo: None,
+        }];
+        // rpmdb has drifted, but the failed status must survive untouched.
+        let q = FakeQuery {
+            installed: vec![(
+                "anolisa-copilot-shell".to_string(),
+                pkg_info("anolisa-copilot-shell", "2.3.0", "1.al8"),
+            )],
+            origins: Vec::new(),
+        };
+        apply_rpm_drift(&mut records, &state, &q);
+        assert_eq!(
+            records[0].status, "failed",
+            "escalated status must not be demoted to drifted",
+        );
+        assert!(
+            !records[0].health.iter().any(|h| h.name == "rpm:drift"),
+            "no drift entry when the record is already escalated",
+        );
     }
 }
