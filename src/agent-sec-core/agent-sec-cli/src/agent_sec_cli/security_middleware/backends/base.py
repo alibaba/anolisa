@@ -20,10 +20,13 @@ class BaseBackend(ABC):
         self, result: ActionResult, kwargs: dict[str, Any]
     ) -> dict[str, Any]:
         """Build success audit details for the lifecycle event."""
-        return {
+        details = {
             "request": copy.deepcopy(kwargs),
             "result": copy.deepcopy(result.data),
         }
+        if not result.success and result.error:
+            details["error"] = result.error
+        return details
 
     def build_error_details(
         self, exception: Exception, kwargs: dict[str, Any]

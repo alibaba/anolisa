@@ -89,6 +89,8 @@ class TestPostAction(unittest.TestCase):
         self.assertEqual(event.category, "code_scan")
         self.assertEqual(event.result, "failed")
         self.assertEqual(event.details["result"], {"ok": False, "verdict": "error"})
+        self.assertEqual(event.details["error"], "scan error")
+        self.assertNotIn("error_type", event.details)
 
     @patch("agent_sec_cli.security_middleware.lifecycle.log_event")
     def test_post_action_maps_failed_result_to_event_result(self, mock_log):
