@@ -3,6 +3,8 @@
 import json
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -85,6 +87,32 @@ def test_writer_appends_existing_file(tmp_path: Path) -> None:
     assert list(tmp_path.glob("agent-sec-core.jsonl.*")) == []
 
 
+def test_writer_handles_short_os_writes(monkeypatch, tmp_path: Path) -> None:
+    path = tmp_path / "agent-sec-core.jsonl"
+    path.write_text("", encoding="utf-8")
+    writer = TelemetryWriter(path=path)
+    original_write = telemetry_writer.os.write
+    write_calls: list[bytes] = []
+
+    def short_write(fd: int, payload: bytes) -> int:
+        write_calls.append(payload)
+        if len(payload) > 1:
+            return original_write(fd, payload[: len(payload) // 2])
+        return original_write(fd, payload)
+
+    monkeypatch.setattr(telemetry_writer.os, "write", short_write)
+
+    writer.write({"component.name": "agent-sec-core", "seccore.event_id": "event-1"})
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert len(write_calls) > 1
+    assert len(lines) == 1
+    assert json.loads(lines[0]) == {
+        "component.name": "agent-sec-core",
+        "seccore.event_id": "event-1",
+    }
+
+
 def test_writer_uses_short_lived_flock_on_target_fd(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -101,11 +129,44 @@ def test_writer_uses_short_lived_flock_on_target_fd(
     writer.write({"seq": 1})
 
     assert [operation for _, operation in flock_calls] == [
-        telemetry_writer.fcntl.LOCK_EX,
+        telemetry_writer.fcntl.LOCK_EX | telemetry_writer.fcntl.LOCK_NB,
         telemetry_writer.fcntl.LOCK_UN,
     ]
     assert flock_calls[0][0] == flock_calls[1][0]
     assert not Path(f"{path}.lock").exists()
+
+
+def test_writer_skips_when_target_flock_is_busy(monkeypatch, tmp_path: Path) -> None:
+    path = tmp_path / "agent-sec-core.jsonl"
+    path.write_text("", encoding="utf-8")
+    writer = TelemetryWriter(path=path)
+    log_failure = MagicMock()
+    monkeypatch.setattr(telemetry_writer, "_log_telemetry_write_failure", log_failure)
+
+    def busy_flock(fd: int, operation: int) -> None:
+        if operation & telemetry_writer.fcntl.LOCK_EX:
+            raise BlockingIOError
+
+    monkeypatch.setattr(telemetry_writer.fcntl, "flock", busy_flock)
+
+    writer.write({"seq": 1})
+
+    assert path.read_text(encoding="utf-8") == ""
+    log_failure.assert_not_called()
+
+
+def test_writer_skips_when_process_lock_is_busy(tmp_path: Path) -> None:
+    path = tmp_path / "agent-sec-core.jsonl"
+    path.write_text("", encoding="utf-8")
+    writer = TelemetryWriter(path=path)
+
+    writer._lock.acquire()
+    try:
+        writer.write({"seq": 1})
+    finally:
+        writer._lock.release()
+
+    assert path.read_text(encoding="utf-8") == ""
 
 
 def test_writer_reopens_target_path_after_rename_rotation(tmp_path: Path) -> None:
@@ -207,3 +268,44 @@ def test_get_writer_returns_singleton(monkeypatch, tmp_path: Path) -> None:
 
     assert first is second
     assert first.path == path
+
+
+def test_get_writer_initializes_singleton_once_under_concurrency(
+    monkeypatch, tmp_path: Path
+) -> None:
+    path = tmp_path / "agent-sec-core.jsonl"
+    monkeypatch.setenv("AGENT_SEC_TELEMETRY_LOG_PATH", str(path))
+    monkeypatch.setattr(telemetry_writer, "_writer", None)
+    created: list[TelemetryWriter] = []
+
+    class SlowTelemetryWriter(TelemetryWriter):
+        def __init__(self) -> None:
+            time.sleep(0.01)
+            super().__init__()
+            created.append(self)
+
+    monkeypatch.setattr(telemetry_writer, "TelemetryWriter", SlowTelemetryWriter)
+    barrier = threading.Barrier(8)
+    writers: list[TelemetryWriter] = []
+    errors: list[Exception] = []
+
+    def get_concurrent_writer() -> None:
+        try:
+            barrier.wait()
+            writers.append(get_writer())
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=get_concurrent_writer) for _ in range(barrier.parties)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert len(created) == 1
+    assert len(writers) == barrier.parties
+    assert all(writer is writers[0] for writer in writers)
+    assert writers[0].path == path

@@ -1,5 +1,6 @@
 """Best-effort telemetry JSONL writer."""
 
+import errno
 import fcntl
 import json
 import logging
@@ -15,6 +16,7 @@ from agent_sec_cli.telemetry.schema import build_telemetry_security_event
 
 _logger = logging.getLogger("agent_sec_cli.telemetry.writer")
 _writer: "TelemetryWriter | None" = None
+_writer_lock = threading.Lock()
 
 
 def _log_telemetry_write_failure(exc: Exception) -> None:
@@ -58,24 +60,39 @@ class TelemetryWriter:
 
     def write(self, record: Mapping[str, Any]) -> None:
         """Best-effort append of a telemetry record as one JSONL line."""
-        with self._lock:
-            try:
-                line = json.dumps(record, ensure_ascii=False) + "\n"
-                self._append_line(line)
-            except FileNotFoundError:
-                pass
-            except Exception as exc:  # noqa: BLE001
-                _log_telemetry_write_failure(exc)
+        try:
+            payload = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
+        except Exception as exc:  # noqa: BLE001
+            _log_telemetry_write_failure(exc)
+            return
 
-    def _append_line(self, line: str) -> None:
+        if not self._lock.acquire(blocking=False):
+            return
+        try:
+            self._append_line(payload)
+        except FileNotFoundError:
+            pass
+        except BlockingIOError:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            _log_telemetry_write_failure(exc)
+        finally:
+            self._lock.release()
+
+    def _append_line(self, payload: bytes) -> None:
         """Open, lock, append, unlock, then close the target path for this write."""
         flags = os.O_WRONLY | os.O_APPEND | getattr(os, "O_CLOEXEC", 0)
         fd = os.open(self._path, flags)
         lock_acquired = False
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                    raise BlockingIOError from exc
+                raise
             lock_acquired = True
-            os.write(fd, line.encode("utf-8"))
+            self._write_all(fd, payload)
         finally:
             if lock_acquired:
                 try:
@@ -84,12 +101,23 @@ class TelemetryWriter:
                     pass
             os.close(fd)
 
+    def _write_all(self, fd: int, payload: bytes) -> None:
+        """Write the complete payload, handling short writes."""
+        remaining = payload
+        while remaining:
+            written = os.write(fd, remaining)
+            if written <= 0:
+                raise OSError("os.write returned no bytes")
+            remaining = remaining[written:]
+
 
 def get_writer() -> TelemetryWriter:
     """Return the module-level telemetry writer singleton."""
     global _writer  # noqa: PLW0603
     if _writer is None:
-        _writer = TelemetryWriter()
+        with _writer_lock:
+            if _writer is None:
+                _writer = TelemetryWriter()
     return _writer
 
 
