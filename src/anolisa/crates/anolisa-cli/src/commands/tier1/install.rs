@@ -3933,6 +3933,9 @@ scope = "@anolisa"
         fn update(&self, _package: &str) -> Result<(), PackageTransactionError> {
             panic!("adopt-path test reached a dnf update");
         }
+        fn remove(&self, _package: &str) -> Result<(), PackageTransactionError> {
+            panic!("adopt-path test reached a dnf remove");
+        }
     }
 
     /// Test seam that drives [`handle_one_with_exec`] with only a query (no
@@ -4040,6 +4043,9 @@ scope = "@anolisa"
         }
         fn update(&self, _package: &str) -> Result<(), PackageTransactionError> {
             panic!("delegated-install test must not run a dnf update");
+        }
+        fn remove(&self, _package: &str) -> Result<(), PackageTransactionError> {
+            panic!("delegated-install test must not run a dnf remove");
         }
     }
 

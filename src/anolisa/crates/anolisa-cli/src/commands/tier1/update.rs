@@ -1030,6 +1030,11 @@ mod tests {
             }
             Ok(())
         }
+
+        fn remove(&self, _package: &str) -> Result<(), PackageTransactionError> {
+            // The update flow never removes; a call here is a routing bug.
+            panic!("update path must not delegate a dnf remove");
+        }
     }
 
     fn pkg_info(name: &str, version: &str, release: Option<&str>, arch: &str) -> PackageInfo {

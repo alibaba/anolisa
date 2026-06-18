@@ -3,9 +3,9 @@
 //! [`PackageTransaction`] is the write-side counterpart to
 //! [`PackageQuery`](crate::pkg_query::PackageQuery): where the query contract
 //! only reads rpmdb / repo metadata, this one runs the package-manager
-//! transactions ANOLISA delegates to dnf/rpm. The MVP exposes a single
-//! operation — `update` — used by `anolisa update` for `rpm-observed` and
-//! `rpm-managed` components.
+//! transactions ANOLISA delegates to dnf/rpm — `install`, `update`, and
+//! `remove`, used by `anolisa install` / `update` / `uninstall` for
+//! `rpm-observed` and `rpm-managed` components.
 //!
 //! The trait is object-safe so the CLI can hold a `&dyn PackageTransaction`
 //! and inject a fake in tests instead of shelling out to a live `dnf`.
@@ -85,4 +85,22 @@ pub trait PackageTransaction {
     /// is responsible for the privilege precondition and for refreshing
     /// ANOLISA state from rpmdb after a successful update.
     fn update(&self, package: &str) -> Result<(), PackageTransactionError>;
+
+    /// Remove `package`, delegating the file transaction (scriptlets, rpmdb
+    /// write) to the package manager — ANOLISA never deletes RPM-owned files
+    /// directly. A package that is already absent is reported by the backend as
+    /// a hard failure (no match), so the caller should confirm presence first
+    /// when it wants to treat "already gone" as success.
+    ///
+    /// This method is only the spawn/exit mechanism; **whether** a removal is
+    /// authorized is the caller's decision. For an `rpm-observed` package
+    /// (`Ownership::owns_removal()` is `false`) the caller must require an
+    /// explicit `--remove-system-package` override before invoking this, so a
+    /// preinstalled system RPM is never dropped by a default uninstall.
+    ///
+    /// # Errors
+    /// See [`PackageTransactionError`] for the failure conditions. The caller
+    /// owns the privilege precondition and drops ANOLISA state after a
+    /// successful removal.
+    fn remove(&self, package: &str) -> Result<(), PackageTransactionError>;
 }

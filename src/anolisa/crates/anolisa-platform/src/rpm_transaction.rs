@@ -1,9 +1,9 @@
 //! RPM/DNF backend for [`PackageTransaction`].
 //!
-//! Runs `dnf <verb> -y <package>` (`install`/`update`) through the injectable
-//! [`CommandRunner`] so the transaction can be tested with a fake runner
-//! instead of a live `dnf`. Only the spawn/exit classification lives here;
-//! privilege checks and state refresh stay in the CLI consumer.
+//! Runs `dnf <verb> -y <package>` (`install`/`update`/`remove`) through the
+//! injectable [`CommandRunner`] so the transaction can be tested with a fake
+//! runner instead of a live `dnf`. Only the spawn/exit classification lives
+//! here; privilege checks and state refresh stay in the CLI consumer.
 
 use crate::command::{CommandRunner, SystemCommandRunner};
 use crate::pkg_transaction::{PackageTransaction, PackageTransactionError};
@@ -36,8 +36,9 @@ impl<R: CommandRunner> RpmTransaction<R> {
 
     /// Run `dnf <verb> -y <package>` and classify the outcome.
     ///
-    /// Shared by [`install`](PackageTransaction::install) and
-    /// [`update`](PackageTransaction::update) since they differ only in the
+    /// Shared by [`install`](PackageTransaction::install),
+    /// [`update`](PackageTransaction::update), and
+    /// [`remove`](PackageTransaction::remove) since they differ only in the
     /// dnf verb; `verb` is echoed into the [`TransactionFailed`] operation so
     /// the caller can tell which transaction failed.
     fn run_dnf(&self, verb: &str, package: &str) -> Result<(), PackageTransactionError> {
@@ -76,6 +77,10 @@ impl<R: CommandRunner> PackageTransaction for RpmTransaction<R> {
 
     fn update(&self, package: &str) -> Result<(), PackageTransactionError> {
         self.run_dnf("update", package)
+    }
+
+    fn remove(&self, package: &str) -> Result<(), PackageTransactionError> {
+        self.run_dnf("remove", package)
     }
 }
 
@@ -188,6 +193,41 @@ mod tests {
             ok_out(Some(0), "Installed:\n  anolisa-copilot-shell\n", ""),
         );
         t.install("anolisa-copilot-shell").expect("install ok");
+    }
+
+    #[test]
+    fn remove_success_returns_ok() {
+        let t = txn(
+            "remove",
+            "anolisa-copilot-shell",
+            ok_out(Some(0), "Removed:\n  anolisa-copilot-shell\n", ""),
+        );
+        t.remove("anolisa-copilot-shell").expect("remove ok");
+    }
+
+    #[test]
+    fn remove_nonzero_exit_records_remove_operation() {
+        // The failed-operation label must follow the verb so callers can tell a
+        // remove failure apart from an install/update failure.
+        let t = txn(
+            "remove",
+            "anolisa-copilot-shell",
+            ok_out(
+                Some(1),
+                "",
+                "Error: No match for argument: anolisa-copilot-shell",
+            ),
+        );
+        let err = t.remove("anolisa-copilot-shell").unwrap_err();
+        match err {
+            PackageTransactionError::TransactionFailed {
+                operation, stderr, ..
+            } => {
+                assert_eq!(operation, "remove");
+                assert!(stderr.contains("No match for argument"));
+            }
+            other => panic!("expected TransactionFailed, got {other:?}"),
+        }
     }
 
     #[test]
