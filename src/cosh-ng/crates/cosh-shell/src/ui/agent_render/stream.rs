@@ -11,8 +11,8 @@ use super::buffer_to_styled_lines;
 use super::card::StreamingCardFrame;
 use super::markdown::{is_table_row, is_table_separator_row, MarkdownRenderModel};
 use super::wrap::{
-    char_width, display_width, is_line_closing_punctuation, line_to_string,
-    should_buffer_word_char, strip_ansi_escape, wrap_plain_line,
+    display_width, is_line_closing_punctuation, line_to_string, should_buffer_word_char,
+    strip_ansi_escape, wrap_plain_line,
 };
 use super::RatatuiInlineRenderer;
 
@@ -21,6 +21,7 @@ pub struct StreamingAgentBlock {
     plain: bool,
     title: String,
     current_width: usize,
+    current_line: String,
     started: bool,
     seen_text: bool,
     line_has_visible: bool,
@@ -43,6 +44,7 @@ impl StreamingAgentBlock {
             plain,
             title: title.to_string(),
             current_width: 0,
+            current_line: String::new(),
             started: false,
             seen_text: false,
             line_has_visible: false,
@@ -65,6 +67,7 @@ impl StreamingAgentBlock {
                     self.skip_until_newline = false;
                     self.line_has_visible = false;
                     self.current_width = 0;
+                    self.current_line.clear();
                 }
                 continue;
             }
@@ -128,6 +131,7 @@ impl StreamingAgentBlock {
         self.seen_text = false;
         self.line_has_visible = false;
         self.current_width = 0;
+        self.current_line.clear();
         Ok(true)
     }
 
@@ -180,6 +184,7 @@ impl StreamingAgentBlock {
             write!(output, "│ ")?;
         }
         self.current_width = 0;
+        self.current_line.clear();
         self.line_has_visible = false;
         Ok(())
     }
@@ -234,22 +239,29 @@ impl StreamingAgentBlock {
             return self.write_line_break(output);
         }
 
-        let width = char_width(ch);
-        if width > 0
+        let next_width = self.current_line_width_with(ch);
+        if next_width > 0
             && self.current_width > 0
-            && self.current_width + width > self.width
+            && next_width > self.width
             && !is_line_closing_punctuation(ch)
         {
             self.write_line_break(output)?;
         }
 
         write!(output, "{ch}")?;
-        self.current_width += width;
+        self.current_line.push(ch);
+        self.current_width = display_width(&self.current_line);
         if !ch.is_whitespace() {
             self.seen_text = true;
             self.line_has_visible = true;
         }
         Ok(())
+    }
+
+    fn current_line_width_with(&self, ch: char) -> usize {
+        let mut line = self.current_line.clone();
+        line.push(ch);
+        display_width(&line)
     }
 
     fn frame(&self) -> StreamingCardFrame {

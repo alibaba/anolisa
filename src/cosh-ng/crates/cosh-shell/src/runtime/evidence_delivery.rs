@@ -269,7 +269,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use crate::runtime::prelude::{
-        AgentEvent, AgentRunHandle, AgentRunPoll, CoshApprovalMode, CoshTuiAdapter, Language,
+        AgentEvent, AgentRunHandle, AgentRunPoll, CoshApprovalMode, CoshCoreAdapter, Language,
         OutputRefs, RatatuiInlineRenderer,
     };
 
@@ -381,7 +381,7 @@ mod tests {
     #[test]
     fn host_executed_delivery_channel_closed_records_recovery_and_releases_claim() {
         let request = test_request();
-        let handle = closed_cosh_tui_control_handle(&request);
+        let handle = closed_cosh_core_control_handle(&request);
         assert!(
             handle
                 .control_capabilities()
@@ -448,7 +448,7 @@ mod tests {
     #[test]
     fn host_executed_delivery_refreshes_active_run_idle_clock() {
         let request = test_request();
-        let (dir, handle) = open_cosh_tui_control_handle(&request);
+        let (dir, handle) = open_cosh_core_control_handle(&request);
 
         let mut state = InlineState::default();
         state.agent_run.active = Some(test_active_run(request, handle));
@@ -509,7 +509,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    fn open_cosh_tui_control_handle(request: &AgentRequest) -> (PathBuf, AgentRunHandle) {
+    fn open_cosh_core_control_handle(request: &AgentRequest) -> (PathBuf, AgentRunHandle) {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system time")
@@ -519,13 +519,13 @@ mod tests {
             std::process::id(),
         ));
         std::fs::create_dir_all(&dir).expect("create temp dir");
-        let program = dir.join("cosh-tui-open-control.sh");
+        let program = dir.join("cosh-core-open-control.sh");
         std::fs::write(
             &program,
             r#"#!/bin/sh
 read -r init
 printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
-printf '%s\n' '{"type":"system","subtype":"init","model":"mock-cosh-tui","session_id":"mock-open-control"}'
+printf '%s\n' '{"type":"system","subtype":"init","model":"mock-cosh-core","session_id":"mock-open-control"}'
 read -r user_message
 printf '%s\n' '{"type":"control_request","request_id":"ctrl-open","request":{"subtype":"can_use_tool","tool_name":"run_shell_command","input":{"command":"df -h"},"tool_use_id":"toolu-open"}}'
 if IFS= read -r response; then
@@ -541,13 +541,13 @@ printf '%s\n' '{"type":"result","subtype":"error","session_id":"mock-open-contro
 exit 1
 "#,
         )
-        .expect("write mock cosh-tui");
+        .expect("write mock cosh-core");
         let mut permissions = std::fs::metadata(&program)
             .expect("mock metadata")
             .permissions();
         permissions.set_mode(0o700);
-        std::fs::set_permissions(&program, permissions).expect("chmod mock cosh-tui");
-        let adapter = CoshTuiAdapter {
+        std::fs::set_permissions(&program, permissions).expect("chmod mock cosh-core");
+        let adapter = CoshCoreAdapter {
             program: program.to_string_lossy().to_string(),
             allow_model_call: true,
             session_id: Arc::default(),
@@ -564,7 +564,7 @@ exit 1
                 }
                 Ok(AgentRunPoll::Event(_)) | Ok(AgentRunPoll::Timeout) => continue,
                 Ok(AgentRunPoll::Finished) => break,
-                Err(err) => panic!("mock cosh-tui control run failed: {err:?}"),
+                Err(err) => panic!("mock cosh-core control run failed: {err:?}"),
             }
         }
         assert!(saw_request, "mock provider did not emit tool permission");
@@ -577,9 +577,9 @@ exit 1
         (dir, handle)
     }
 
-    fn closed_cosh_tui_control_handle(request: &AgentRequest) -> AgentRunHandle {
+    fn closed_cosh_core_control_handle(request: &AgentRequest) -> AgentRunHandle {
         let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let adapter = CoshTuiAdapter {
+        let adapter = CoshCoreAdapter {
             program: manifest_dir
                 .join("tests")
                 .join("fixtures")
@@ -599,7 +599,7 @@ exit 1
                 Ok(AgentRunPoll::Event(AgentEvent::AgentCompleted { .. })) => break,
                 Ok(AgentRunPoll::Event(_)) | Ok(AgentRunPoll::Timeout) => continue,
                 Ok(AgentRunPoll::Finished) => break,
-                Err(err) => panic!("mock cosh-tui control run failed: {err:?}"),
+                Err(err) => panic!("mock cosh-core control run failed: {err:?}"),
             }
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -611,7 +611,7 @@ exit 1
         ActiveAgentRun {
             request,
             handle,
-            provider_name: "cosh-tui",
+            provider_name: "cosh-core",
             language: Language::EnUs,
             renderer: renderer.clone(),
             status_animation: renderer.status_animation(),

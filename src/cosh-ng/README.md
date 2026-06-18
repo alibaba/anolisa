@@ -4,7 +4,7 @@
 
 **Computable Operating System Harness** — a deterministic Agent-OS interface with a single `cosh` entry point that provides dual-mode behavior:
 
-- **Interactive mode**: Run `cosh` with no arguments to launch the TUI (equivalent to `cosh-tui`)
+- **Interactive mode**: Run `cosh` with no arguments to launch the TUI (equivalent to `cosh-core`)
 - **CLI mode**: Run `cosh <subsystem> <action>` for structured JSON output consumed by Agents and scripts
 
 One command (`cosh pkg install nginx`) works across dnf/apt/zypper and returns structured JSON — no text parsing, no distro guessing.
@@ -169,7 +169,7 @@ cargo test --package cosh-cli --test cli_integration  # integration only
 | Phase | Stage | Form | Status |
 |-------|-------|------|--------|
 | 1 | NLP human interaction | copilot-shell (TypeScript TUI) | Done |
-| 1.5 | Rust TUI | cosh-tui (ratatui) | In Progress |
+| 1.5 | Rust Core | cosh-core (ratatui) | In Progress |
 | 2 | Agent command wrapping | cosh CLI (Rust + JSON) | **Current** |
 
 ## License

@@ -1,51 +1,51 @@
 use super::*;
 
 #[test]
-fn raw_cli_cosh_tui_host_executed_shell_result_continues_same_provider_turn() {
-    let home = temp_shell_home("cosh-tui-host-executed-shell");
+fn raw_cli_cosh_core_host_executed_shell_result_continues_same_provider_turn() {
+    let home = temp_shell_home("cosh-core-host-executed-shell");
     let bin_dir = home.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
-    let cosh_tui_path = bin_dir.join("cosh-tui");
+    let cosh_core_path = bin_dir.join("cosh-core");
     write_executable(
-        &cosh_tui_path,
+        &cosh_core_path,
         r#"#!/bin/sh
 read -r init
 printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-tui-host-executed","model":"cosh-tui-test"}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-host-executed","model":"cosh-core-test"}'
 read -r user_message
 case "$user_message" in
-  *cosh-tui-provider-host-executed-shell*)
-    printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-tui-1","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"df -h"},"tool_use_id":"toolu-cosh-tui-1"}}'
+  *cosh-core-provider-host-executed-shell*)
+    printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-1","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"df -h"},"tool_use_id":"toolu-cosh-core-1"}}'
     if IFS= read -r response; then
       case "$response" in
         *'"behavior":"host_executed_shell"'*bounded_output_summary*'df -h'*)
-          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-tui-host-executed","message":{"content":[{"type":"text","text":"Cosh-tui host-executed shell result received in same provider turn."}]}}'
-          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-host-executed","is_error":false,"result":"done"}'
+          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-host-executed","message":{"content":[{"type":"text","text":"Cosh-core host-executed shell result received in same provider turn."}]}}'
+          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-host-executed","is_error":false,"result":"done"}'
           exit 0
           ;;
       esac
     fi
-    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-tui-host-executed","is_error":true,"result":"missing cosh-tui host_executed_shell result"}'
+    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-host-executed","is_error":true,"result":"missing cosh-core host_executed_shell result"}'
     exit 1
     ;;
 esac
-printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-host-executed","is_error":false,"result":"ignored"}'
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-host-executed","is_error":false,"result":"ignored"}'
 "#,
     );
     let home_str = home.to_string_lossy().to_string();
-    let cosh_tui_path_str = cosh_tui_path.to_string_lossy().to_string();
+    let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
     let output = run_raw_cli_with_args_env_and_delayed_input(
-        "cosh-tui",
+        "cosh-core",
         &[],
         &[
             ("HOME", &home_str),
-            ("COSH_TUI_PATH", &cosh_tui_path_str),
+            ("COSH_CORE_PATH", &cosh_core_path_str),
             ("COSH_SHELL_DEBUG", "1"),
         ],
         vec![
             (b"/mode approval auto\n".to_vec(), Duration::ZERO),
             (
-                b"?? cosh-tui-provider-host-executed-shell\n".to_vec(),
+                b"?? cosh-core-provider-host-executed-shell\n".to_vec(),
                 Duration::from_millis(500),
             ),
             (
@@ -63,7 +63,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-
     assert!(output.contains("$ df -h"), "{output}");
     assert!(output.contains("Filesystem"), "{output}");
     assert!(
-        output.contains("Cosh-tui host-executed shell result received in same provider turn."),
+        output.contains("Cosh-core host-executed shell result received in same provider turn."),
         "{output}"
     );
     assert!(
@@ -91,67 +91,67 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-
         "{output}"
     );
     assert!(
-        output.contains("latest provider request: ctrl-cosh-tui-1"),
+        output.contains("latest provider request: ctrl-cosh-core-1"),
         "{output}"
     );
     assert!(
-        output.contains("latest tool use id: toolu-cosh-tui-1"),
+        output.contains("latest tool use id: toolu-cosh-core-1"),
         "{output}"
     );
     assert!(output.contains("output_id: terminal-output://"), "{output}");
     assert!(
-        !output.contains("missing cosh-tui host_executed_shell result"),
+        !output.contains("missing cosh-core host_executed_shell result"),
         "{output}"
     );
     assert!(
-        !output.contains("bash: cosh-tui-provider-host-executed-shell: command not found"),
+        !output.contains("bash: cosh-core-provider-host-executed-shell: command not found"),
         "{output}"
     );
     assert!(!output.contains("Agent timed out:"), "{output}");
 }
 
 #[test]
-fn raw_cli_cosh_tui_auto_safe_shell_auto_approves_host_executed() {
-    let home = temp_shell_home("cosh-tui-auto-safe-shell");
+fn raw_cli_cosh_core_auto_safe_shell_auto_approves_host_executed() {
+    let home = temp_shell_home("cosh-core-auto-safe-shell");
     let bin_dir = home.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
-    let cosh_tui_path = bin_dir.join("cosh-tui");
+    let cosh_core_path = bin_dir.join("cosh-core");
     write_executable(
-        &cosh_tui_path,
+        &cosh_core_path,
         r#"#!/bin/sh
 read -r init
 printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-tui-auto-safe","model":"cosh-tui-test"}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-auto-safe","model":"cosh-core-test"}'
 read -r user_message
 case "$user_message" in
-  *cosh-tui-auto-safe-shell*)
+  *cosh-core-auto-safe-shell*)
     printf '%s\n' '{"type":"control_request","request_id":"ctrl-auto-safe","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"df -h"},"tool_use_id":"toolu-auto-safe"}}'
     if IFS= read -r response; then
       case "$response" in
         *'"behavior":"host_executed_shell"'*'df -h'*'Filesystem'*)
-          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-tui-auto-safe","message":{"content":[{"type":"text","text":"AUTO SAFE HOSTEXEC RECEIVED"}]}}'
-          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-auto-safe","is_error":false,"result":"done"}'
+          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-auto-safe","message":{"content":[{"type":"text","text":"AUTO SAFE HOSTEXEC RECEIVED"}]}}'
+          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-auto-safe","is_error":false,"result":"done"}'
           exit 0
           ;;
       esac
     fi
-    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-tui-auto-safe","is_error":true,"result":"missing auto host_executed_shell result"}'
+    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-auto-safe","is_error":true,"result":"missing auto host_executed_shell result"}'
     exit 1
     ;;
 esac
-printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-auto-safe","is_error":false,"result":"ignored"}'
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-auto-safe","is_error":false,"result":"ignored"}'
 "#,
     );
     let home_str = home.to_string_lossy().to_string();
-    let cosh_tui_path_str = cosh_tui_path.to_string_lossy().to_string();
+    let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
     let output = run_raw_cli_with_args_env_and_delayed_input(
-        "cosh-tui",
+        "cosh-core",
         &[],
-        &[("HOME", &home_str), ("COSH_TUI_PATH", &cosh_tui_path_str)],
+        &[("HOME", &home_str), ("COSH_CORE_PATH", &cosh_core_path_str)],
         vec![
             (b"/mode approval auto\n".to_vec(), Duration::ZERO),
             (
-                b"?? cosh-tui-auto-safe-shell\n".to_vec(),
+                b"?? cosh-core-auto-safe-shell\n".to_vec(),
                 Duration::from_millis(500),
             ),
             (b"exit 0\n".to_vec(), Duration::from_millis(1_500)),
@@ -172,47 +172,47 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-
 }
 
 #[test]
-fn raw_cli_cosh_tui_sysctl_non_ascii_shell_handoff_is_not_intercepted() {
-    let home = temp_shell_home("cosh-tui-sysctl-non-ascii-shell");
+fn raw_cli_cosh_core_sysctl_non_ascii_shell_handoff_is_not_intercepted() {
+    let home = temp_shell_home("cosh-core-sysctl-non-ascii-shell");
     let bin_dir = home.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
-    let cosh_tui_path = bin_dir.join("cosh-tui");
+    let cosh_core_path = bin_dir.join("cosh-core");
     write_executable(
-        &cosh_tui_path,
+        &cosh_core_path,
         r#"#!/bin/sh
 read -r init
 printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-tui-sysctl-non-ascii","model":"cosh-tui-test"}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-sysctl-non-ascii","model":"cosh-core-test"}'
 read -r user_message
 case "$user_message" in
-  *cosh-tui-sysctl-non-ascii-shell*)
+  *cosh-core-sysctl-non-ascii-shell*)
     printf '%s\n' '{"type":"control_request","request_id":"ctrl-sysctl-non-ascii","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"sysctl -n kernel.ostype 2>/dev/null || printf sysctl-fallback; printf '\'' 内存总计\\n'\''"},"tool_use_id":"toolu-sysctl-non-ascii"}}'
     if IFS= read -r response; then
       case "$response" in
         *'"behavior":"host_executed_shell"'*'sysctl-fallback'*'内存总计'*)
-          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-tui-sysctl-non-ascii","message":{"content":[{"type":"text","text":"SYSCTL NON ASCII HOSTEXEC RECEIVED"}]}}'
-          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-sysctl-non-ascii","is_error":false,"result":"done"}'
+          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-sysctl-non-ascii","message":{"content":[{"type":"text","text":"SYSCTL NON ASCII HOSTEXEC RECEIVED"}]}}'
+          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-sysctl-non-ascii","is_error":false,"result":"done"}'
           exit 0
           ;;
       esac
     fi
-    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-tui-sysctl-non-ascii","is_error":true,"result":"missing sysctl non-ascii host_executed_shell result"}'
+    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-sysctl-non-ascii","is_error":true,"result":"missing sysctl non-ascii host_executed_shell result"}'
     exit 1
     ;;
 esac
-printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-sysctl-non-ascii","is_error":false,"result":"ignored"}'
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-sysctl-non-ascii","is_error":false,"result":"ignored"}'
 "#,
     );
     let home_str = home.to_string_lossy().to_string();
-    let cosh_tui_path_str = cosh_tui_path.to_string_lossy().to_string();
+    let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
     let output = run_raw_cli_with_args_env_and_delayed_input(
-        "cosh-tui",
+        "cosh-core",
         &[],
-        &[("HOME", &home_str), ("COSH_TUI_PATH", &cosh_tui_path_str)],
+        &[("HOME", &home_str), ("COSH_CORE_PATH", &cosh_core_path_str)],
         vec![
             (b"/mode approval trust confirm\n".to_vec(), Duration::ZERO),
             (
-                b"?? cosh-tui-sysctl-non-ascii-shell\n".to_vec(),
+                b"?? cosh-core-sysctl-non-ascii-shell\n".to_vec(),
                 Duration::from_millis(500),
             ),
             (b"exit\n".to_vec(), Duration::from_millis(1_500)),
@@ -236,47 +236,47 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-
 }
 
 #[test]
-fn raw_cli_cosh_tui_trust_confirm_shell_auto_approves_host_executed() {
-    let home = temp_shell_home("cosh-tui-trust-confirm-shell");
+fn raw_cli_cosh_core_trust_confirm_shell_auto_approves_host_executed() {
+    let home = temp_shell_home("cosh-core-trust-confirm-shell");
     let bin_dir = home.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
-    let cosh_tui_path = bin_dir.join("cosh-tui");
+    let cosh_core_path = bin_dir.join("cosh-core");
     write_executable(
-        &cosh_tui_path,
+        &cosh_core_path,
         r#"#!/bin/sh
 read -r init
 printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-tui-trust-confirm","model":"cosh-tui-test"}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-trust-confirm","model":"cosh-core-test"}'
 read -r user_message
 case "$user_message" in
-  *cosh-tui-trust-confirm-shell*)
+  *cosh-core-trust-confirm-shell*)
     printf '%s\n' '{"type":"control_request","request_id":"ctrl-trust-confirm","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"printf trust-confirm-hostexec"},"tool_use_id":"toolu-trust-confirm"}}'
     if IFS= read -r response; then
       case "$response" in
         *'"behavior":"host_executed_shell"'*'printf trust-confirm-hostexec'*'trust-confirm-hostexec'*)
-          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-tui-trust-confirm","message":{"content":[{"type":"text","text":"TRUST CONFIRM HOSTEXEC RECEIVED"}]}}'
-          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-trust-confirm","is_error":false,"result":"done"}'
+          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-trust-confirm","message":{"content":[{"type":"text","text":"TRUST CONFIRM HOSTEXEC RECEIVED"}]}}'
+          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-trust-confirm","is_error":false,"result":"done"}'
           exit 0
           ;;
       esac
     fi
-    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-tui-trust-confirm","is_error":true,"result":"missing trust host_executed_shell result"}'
+    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-trust-confirm","is_error":true,"result":"missing trust host_executed_shell result"}'
     exit 1
     ;;
 esac
-printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-trust-confirm","is_error":false,"result":"ignored"}'
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-trust-confirm","is_error":false,"result":"ignored"}'
 "#,
     );
     let home_str = home.to_string_lossy().to_string();
-    let cosh_tui_path_str = cosh_tui_path.to_string_lossy().to_string();
+    let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
     let output = run_raw_cli_with_args_env_and_delayed_input(
-        "cosh-tui",
+        "cosh-core",
         &[],
-        &[("HOME", &home_str), ("COSH_TUI_PATH", &cosh_tui_path_str)],
+        &[("HOME", &home_str), ("COSH_CORE_PATH", &cosh_core_path_str)],
         vec![
             (b"/mode approval trust confirm\n".to_vec(), Duration::ZERO),
             (
-                b"?? cosh-tui-trust-confirm-shell\n".to_vec(),
+                b"?? cosh-core-trust-confirm-shell\n".to_vec(),
                 Duration::from_millis(500),
             ),
             (b"exit\n".to_vec(), Duration::from_millis(1_500)),
@@ -303,52 +303,52 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-
 }
 
 #[test]
-fn raw_cli_cosh_tui_duplicate_host_executed_shell_request_is_not_executed_twice() {
-    let home = temp_shell_home("cosh-tui-host-executed-duplicate");
+fn raw_cli_cosh_core_duplicate_host_executed_shell_request_is_not_executed_twice() {
+    let home = temp_shell_home("cosh-core-host-executed-duplicate");
     let bin_dir = home.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
-    let cosh_tui_path = bin_dir.join("cosh-tui");
+    let cosh_core_path = bin_dir.join("cosh-core");
     write_executable(
-        &cosh_tui_path,
+        &cosh_core_path,
         r#"#!/bin/sh
 read -r init
 printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-tui-host-executed-duplicate","model":"cosh-tui-test"}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-host-executed-duplicate","model":"cosh-core-test"}'
 read -r user_message
 case "$user_message" in
-  *cosh-tui-provider-host-executed-duplicate*)
-    printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-tui-dup","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"df -h"},"tool_use_id":"toolu-cosh-tui-dup"}}'
+  *cosh-core-provider-host-executed-duplicate*)
+    printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-dup","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"df -h"},"tool_use_id":"toolu-cosh-core-dup"}}'
     IFS= read -r response1 || exit 2
     case "$response1" in
       *'"behavior":"host_executed_shell"'*'df -h'*) ;;
-      *) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-tui-host-executed-duplicate","is_error":true,"result":"missing first host result"}'; exit 1 ;;
+      *) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-host-executed-duplicate","is_error":true,"result":"missing first host result"}'; exit 1 ;;
     esac
-    printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-tui-dup","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"df -h"},"tool_use_id":"toolu-cosh-tui-dup"}}'
+    printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-dup","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"df -h"},"tool_use_id":"toolu-cosh-core-dup"}}'
     IFS= read -r response2 || exit 2
     case "$response2" in
       *'"behavior":"deny"'*'Duplicate shell tool request was already completed'*)
-        printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-tui-host-executed-duplicate","message":{"content":[{"type":"text","text":"Duplicate host-executed shell request denied without second execution."}]}}'
-        printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-host-executed-duplicate","is_error":false,"result":"done"}'
+        printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-host-executed-duplicate","message":{"content":[{"type":"text","text":"Duplicate host-executed shell request denied without second execution."}]}}'
+        printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-host-executed-duplicate","is_error":false,"result":"done"}'
         exit 0
         ;;
     esac
-    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-tui-host-executed-duplicate","is_error":true,"result":"duplicate request was not denied"}'
+    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-host-executed-duplicate","is_error":true,"result":"duplicate request was not denied"}'
     exit 1
     ;;
 esac
-printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-host-executed-duplicate","is_error":false,"result":"ignored"}'
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-host-executed-duplicate","is_error":false,"result":"ignored"}'
 "#,
     );
     let home_str = home.to_string_lossy().to_string();
-    let cosh_tui_path_str = cosh_tui_path.to_string_lossy().to_string();
+    let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
     let output = run_raw_cli_with_args_env_and_delayed_input(
-        "cosh-tui",
+        "cosh-core",
         &[],
-        &[("HOME", &home_str), ("COSH_TUI_PATH", &cosh_tui_path_str)],
+        &[("HOME", &home_str), ("COSH_CORE_PATH", &cosh_core_path_str)],
         vec![
             (b"/mode approval auto\n".to_vec(), Duration::ZERO),
             (
-                b"?? cosh-tui-provider-host-executed-duplicate\n".to_vec(),
+                b"?? cosh-core-provider-host-executed-duplicate\n".to_vec(),
                 Duration::from_millis(500),
             ),
             (b"/debug session\n".to_vec(), Duration::from_millis(7_000)),
@@ -375,58 +375,58 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-
         "{output}"
     );
     assert!(
-        output.contains("latest provider request: ctrl-cosh-tui-dup"),
+        output.contains("latest provider request: ctrl-cosh-core-dup"),
         "{output}"
     );
     assert!(
-        output.contains("latest tool use id: toolu-cosh-tui-dup"),
+        output.contains("latest tool use id: toolu-cosh-core-dup"),
         "{output}"
     );
     assert!(!output.contains("Agent timed out:"), "{output}");
 }
 
 #[test]
-fn raw_cli_cosh_tui_host_executed_nonzero_returns_normal_tool_result() {
-    let home = temp_shell_home("cosh-tui-host-executed-nonzero");
+fn raw_cli_cosh_core_host_executed_nonzero_returns_normal_tool_result() {
+    let home = temp_shell_home("cosh-core-host-executed-nonzero");
     let bin_dir = home.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
-    let cosh_tui_path = bin_dir.join("cosh-tui");
+    let cosh_core_path = bin_dir.join("cosh-core");
     write_executable(
-        &cosh_tui_path,
+        &cosh_core_path,
         r#"#!/bin/sh
 read -r init
 printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-tui-host-executed-nonzero","model":"cosh-tui-test"}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-host-executed-nonzero","model":"cosh-core-test"}'
 read -r user_message
 case "$user_message" in
-  *cosh-tui-provider-host-executed-nonzero*)
-    printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-tui-nonzero","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"false"},"tool_use_id":"toolu-cosh-tui-nonzero"}}'
+  *cosh-core-provider-host-executed-nonzero*)
+    printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-nonzero","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"false"},"tool_use_id":"toolu-cosh-core-nonzero"}}'
     if IFS= read -r response; then
       case "$response" in
         *'"behavior":"host_executed_shell"'*'"exit_code":1'*)
-          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-tui-host-executed-nonzero","message":{"content":[{"type":"text","text":"Cosh-tui nonzero host-executed result received as normal tool result."}]}}'
-          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-host-executed-nonzero","is_error":false,"result":"done"}'
+          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-host-executed-nonzero","message":{"content":[{"type":"text","text":"Cosh-core nonzero host-executed result received as normal tool result."}]}}'
+          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-host-executed-nonzero","is_error":false,"result":"done"}'
           exit 0
           ;;
       esac
     fi
-    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-tui-host-executed-nonzero","is_error":true,"result":"missing nonzero host result"}'
+    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-host-executed-nonzero","is_error":true,"result":"missing nonzero host result"}'
     exit 1
     ;;
 esac
-printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-host-executed-nonzero","is_error":false,"result":"ignored"}'
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-host-executed-nonzero","is_error":false,"result":"ignored"}'
 "#,
     );
     let home_str = home.to_string_lossy().to_string();
-    let cosh_tui_path_str = cosh_tui_path.to_string_lossy().to_string();
+    let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
     let output = run_raw_cli_with_args_env_and_delayed_input(
-        "cosh-tui",
+        "cosh-core",
         &[],
-        &[("HOME", &home_str), ("COSH_TUI_PATH", &cosh_tui_path_str)],
+        &[("HOME", &home_str), ("COSH_CORE_PATH", &cosh_core_path_str)],
         vec![
             (b"/mode approval auto\n".to_vec(), Duration::ZERO),
             (
-                b"?? cosh-tui-provider-host-executed-nonzero\n".to_vec(),
+                b"?? cosh-core-provider-host-executed-nonzero\n".to_vec(),
                 Duration::from_millis(500),
             ),
             (b"\n".to_vec(), Duration::from_millis(2_000)),
@@ -445,7 +445,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-
     assert!(output.contains("$ false"), "{output}");
     assert!(output.contains("Shell: failed · req-1"), "{output}");
     assert!(
-        output.contains("Cosh-tui nonzero host-executed result received as normal tool result."),
+        output.contains("Cosh-core nonzero host-executed result received as normal tool result."),
         "{output}"
     );
     assert!(
@@ -460,47 +460,47 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-
 }
 
 #[test]
-fn raw_cli_cosh_tui_host_executed_long_command_continues_same_turn() {
-    let home = temp_shell_home("cosh-tui-host-executed-long");
+fn raw_cli_cosh_core_host_executed_long_command_continues_same_turn() {
+    let home = temp_shell_home("cosh-core-host-executed-long");
     let bin_dir = home.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
-    let cosh_tui_path = bin_dir.join("cosh-tui");
+    let cosh_core_path = bin_dir.join("cosh-core");
     write_executable(
-        &cosh_tui_path,
+        &cosh_core_path,
         r#"#!/bin/sh
 read -r init
 printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-tui-host-executed-long","model":"cosh-tui-test"}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-host-executed-long","model":"cosh-core-test"}'
 read -r user_message
 case "$user_message" in
-  *cosh-tui-provider-host-executed-long*)
-    printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-tui-long","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"sleep 1; echo hostexec-done"},"tool_use_id":"toolu-cosh-tui-long"}}'
+  *cosh-core-provider-host-executed-long*)
+    printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-long","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"sleep 1; echo hostexec-done"},"tool_use_id":"toolu-cosh-core-long"}}'
     if IFS= read -r response; then
       case "$response" in
         *'"behavior":"host_executed_shell"'*'sleep 1; echo hostexec-done'*'hostexec-done'*)
-          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-tui-host-executed-long","message":{"content":[{"type":"text","text":"Cosh-tui long host-executed command continued in same provider turn."}]}}'
-          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-host-executed-long","is_error":false,"result":"done"}'
+          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-host-executed-long","message":{"content":[{"type":"text","text":"Cosh-core long host-executed command continued in same provider turn."}]}}'
+          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-host-executed-long","is_error":false,"result":"done"}'
           exit 0
           ;;
       esac
     fi
-    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-tui-host-executed-long","is_error":true,"result":"missing long host result"}'
+    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-host-executed-long","is_error":true,"result":"missing long host result"}'
     exit 1
     ;;
 esac
-printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-host-executed-long","is_error":false,"result":"ignored"}'
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-host-executed-long","is_error":false,"result":"ignored"}'
 "#,
     );
     let home_str = home.to_string_lossy().to_string();
-    let cosh_tui_path_str = cosh_tui_path.to_string_lossy().to_string();
+    let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
     let output = run_raw_cli_with_args_env_and_delayed_input(
-        "cosh-tui",
+        "cosh-core",
         &[],
-        &[("HOME", &home_str), ("COSH_TUI_PATH", &cosh_tui_path_str)],
+        &[("HOME", &home_str), ("COSH_CORE_PATH", &cosh_core_path_str)],
         vec![
             (b"/mode approval auto\n".to_vec(), Duration::ZERO),
             (
-                b"?? cosh-tui-provider-host-executed-long\n".to_vec(),
+                b"?? cosh-core-provider-host-executed-long\n".to_vec(),
                 Duration::from_millis(500),
             ),
             (b"\n".to_vec(), Duration::from_millis(2_000)),
@@ -518,7 +518,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-
     assert!(output.contains("$ sleep 1; echo hostexec-done"), "{output}");
     assert!(output.contains("hostexec-done"), "{output}");
     assert!(
-        output.contains("Cosh-tui long host-executed command continued in same provider turn."),
+        output.contains("Cosh-core long host-executed command continued in same provider turn."),
         "{output}"
     );
     assert!(
@@ -530,52 +530,52 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-
 }
 
 #[test]
-fn raw_cli_cosh_tui_host_executed_large_output_is_bounded() {
-    let home = temp_shell_home("cosh-tui-host-executed-large");
+fn raw_cli_cosh_core_host_executed_large_output_is_bounded() {
+    let home = temp_shell_home("cosh-core-host-executed-large");
     let bin_dir = home.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
-    let cosh_tui_path = bin_dir.join("cosh-tui");
+    let cosh_core_path = bin_dir.join("cosh-core");
     write_executable(
-        &cosh_tui_path,
+        &cosh_core_path,
         r#"#!/bin/sh
 read -r init
 printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-tui-host-executed-large","model":"cosh-tui-test"}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-host-executed-large","model":"cosh-core-test"}'
 read -r user_message
 case "$user_message" in
-  *cosh-tui-provider-host-executed-large*)
-    printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-tui-large","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"printf %08000d 0"},"tool_use_id":"toolu-cosh-tui-large"}}'
+  *cosh-core-provider-host-executed-large*)
+    printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-large","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"printf %08000d 0"},"tool_use_id":"toolu-cosh-core-large"}}'
     if IFS= read -r response; then
       response_len=${#response}
       case "$response" in
         *'"behavior":"host_executed_shell"'*'bounded_output_summary'*)
           if [ "$response_len" -gt 7000 ]; then
-            printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-tui-host-executed-large","is_error":true,"result":"host result was not bounded"}'
+            printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-host-executed-large","is_error":true,"result":"host result was not bounded"}'
             exit 1
           fi
-          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-tui-host-executed-large","message":{"content":[{"type":"text","text":"Cosh-tui large host-executed output was bounded for provider."}]}}'
-          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-host-executed-large","is_error":false,"result":"done"}'
+          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-host-executed-large","message":{"content":[{"type":"text","text":"Cosh-core large host-executed output was bounded for provider."}]}}'
+          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-host-executed-large","is_error":false,"result":"done"}'
           exit 0
           ;;
       esac
     fi
-    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-tui-host-executed-large","is_error":true,"result":"missing bounded large host result"}'
+    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-host-executed-large","is_error":true,"result":"missing bounded large host result"}'
     exit 1
     ;;
 esac
-printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-host-executed-large","is_error":false,"result":"ignored"}'
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-host-executed-large","is_error":false,"result":"ignored"}'
 "#,
     );
     let home_str = home.to_string_lossy().to_string();
-    let cosh_tui_path_str = cosh_tui_path.to_string_lossy().to_string();
+    let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
     let output = run_raw_cli_with_args_env_and_delayed_input(
-        "cosh-tui",
+        "cosh-core",
         &[],
-        &[("HOME", &home_str), ("COSH_TUI_PATH", &cosh_tui_path_str)],
+        &[("HOME", &home_str), ("COSH_CORE_PATH", &cosh_core_path_str)],
         vec![
             (b"/mode approval auto\n".to_vec(), Duration::ZERO),
             (
-                b"?? cosh-tui-provider-host-executed-large\n".to_vec(),
+                b"?? cosh-core-provider-host-executed-large\n".to_vec(),
                 Duration::from_millis(500),
             ),
             (b"\n".to_vec(), Duration::from_millis(2_000)),
@@ -592,7 +592,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-
     assert!(output.contains("Bash tool sent to shell"), "{output}");
     assert!(output.contains("$ printf %08000d 0"), "{output}");
     assert!(
-        output.contains("Cosh-tui large host-executed output was bounded for provider."),
+        output.contains("Cosh-core large host-executed output was bounded for provider."),
         "{output}"
     );
     assert!(
@@ -609,56 +609,56 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-
 }
 
 #[test]
-fn raw_cli_cosh_tui_host_executed_multi_tool_keeps_single_turn_boundary() {
-    let home = temp_shell_home("cosh-tui-host-executed-multi-tool");
+fn raw_cli_cosh_core_host_executed_multi_tool_keeps_single_turn_boundary() {
+    let home = temp_shell_home("cosh-core-host-executed-multi-tool");
     let bin_dir = home.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
-    let cosh_tui_path = bin_dir.join("cosh-tui");
+    let cosh_core_path = bin_dir.join("cosh-core");
     write_executable(
-        &cosh_tui_path,
+        &cosh_core_path,
         r#"#!/bin/sh
 read -r init
 printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-tui-host-executed-multi","model":"cosh-tui-test"}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-host-executed-multi","model":"cosh-core-test"}'
 read -r user_message
 case "$user_message" in
-  *cosh-tui-provider-host-executed-multi-tool*)
-    printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-tui-multi-1","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"df -h"},"tool_use_id":"toolu-cosh-tui-multi-1"}}'
+  *cosh-core-provider-host-executed-multi-tool*)
+    printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-multi-1","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"df -h"},"tool_use_id":"toolu-cosh-core-multi-1"}}'
     IFS= read -r response1 || exit 2
     case "$response1" in
       *'"behavior":"host_executed_shell"'*'df -h'*) ;;
-      *) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-tui-host-executed-multi","is_error":true,"result":"missing first cosh-tui host result"}'; exit 1 ;;
+      *) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-host-executed-multi","is_error":true,"result":"missing first cosh-core host result"}'; exit 1 ;;
     esac
-    printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-tui-host-executed-multi","message":{"content":[{"type":"text","text":"FIRST COSH-TUI TOOL ANALYSIS TEXT"}]}}'
-    printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-tui-multi-2","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"du -sh ."},"tool_use_id":"toolu-cosh-tui-multi-2"}}'
+    printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-host-executed-multi","message":{"content":[{"type":"text","text":"FIRST COSH-CORE TOOL ANALYSIS TEXT"}]}}'
+    printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-multi-2","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"du -sh ."},"tool_use_id":"toolu-cosh-core-multi-2"}}'
     IFS= read -r response2 || exit 2
     case "$response2" in
       *'"behavior":"host_executed_shell"'*'du -sh .'*) ;;
-      *) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-tui-host-executed-multi","is_error":true,"result":"missing second cosh-tui host result"}'; exit 1 ;;
+      *) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-host-executed-multi","is_error":true,"result":"missing second cosh-core host result"}'; exit 1 ;;
     esac
     sleep 2
-    printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-tui-host-executed-multi","message":{"content":[{"type":"text","text":"FINAL COSH-TUI MULTI TOOL REPORT"}]}}'
-    printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-host-executed-multi","is_error":false,"result":"done"}'
+    printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-host-executed-multi","message":{"content":[{"type":"text","text":"FINAL COSH-CORE MULTI TOOL REPORT"}]}}'
+    printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-host-executed-multi","is_error":false,"result":"done"}'
     exit 0
     ;;
 esac
-printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-host-executed-multi","is_error":false,"result":"ignored"}'
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-host-executed-multi","is_error":false,"result":"ignored"}'
 "#,
     );
     let home_str = home.to_string_lossy().to_string();
-    let cosh_tui_path_str = cosh_tui_path.to_string_lossy().to_string();
+    let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
     let output = run_raw_cli_with_args_env_and_delayed_input(
-        "cosh-tui",
+        "cosh-core",
         &[],
-        &[("HOME", &home_str), ("COSH_TUI_PATH", &cosh_tui_path_str)],
+        &[("HOME", &home_str), ("COSH_CORE_PATH", &cosh_core_path_str)],
         vec![
             (b"/mode approval auto\n".to_vec(), Duration::ZERO),
             (
-                b"?? cosh-tui-provider-host-executed-multi-tool\n".to_vec(),
+                b"?? cosh-core-provider-host-executed-multi-tool\n".to_vec(),
                 Duration::from_millis(500),
             ),
             (
-                b"echo AFTER_COSH_TUI_PROVIDER_INPUT\n".to_vec(),
+                b"echo AFTER_COSH_CORE_PROVIDER_INPUT\n".to_vec(),
                 Duration::from_millis(1_500),
             ),
             (b"exit\n".to_vec(), Duration::from_millis(3_500)),
@@ -670,19 +670,19 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-
     assert!(output.contains("Auto-approved req-1"), "{output}");
     assert!(output.contains("Auto-approved req-2"), "{output}");
     assert!(
-        output.contains("FIRST COSH-TUI TOOL ANALYSIS TEXT"),
+        output.contains("FIRST COSH-CORE TOOL ANALYSIS TEXT"),
         "{output}"
     );
     assert!(
-        output.contains("FINAL COSH-TUI MULTI TOOL REPORT"),
+        output.contains("FINAL COSH-CORE MULTI TOOL REPORT"),
         "{output}"
     );
     assert!(
-        !output.contains("missing first cosh-tui host result"),
+        !output.contains("missing first cosh-core host result"),
         "{output}"
     );
     assert!(
-        !output.contains("missing second cosh-tui host result"),
+        !output.contains("missing second cosh-core host result"),
         "{output}"
     );
     assert!(!output.contains("Agent timed out:"), "{output}");
@@ -694,7 +694,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-
         count_occurrences_between(
             &normalized,
             "\t.\n",
-            "FINAL COSH-TUI MULTI TOOL REPORT",
+            "FINAL COSH-CORE MULTI TOOL REPORT",
             "cosh-osc$"
         ),
         0,
@@ -702,7 +702,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-
     );
     assert_inline_before_followup(
         &normalized,
-        "FINAL COSH-TUI MULTI TOOL REPORT",
-        "AFTER_COSH_TUI_PROVIDER_INPUT",
+        "FINAL COSH-CORE MULTI TOOL REPORT",
+        "AFTER_COSH_CORE_PROVIDER_INPUT",
     );
 }

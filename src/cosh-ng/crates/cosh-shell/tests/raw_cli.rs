@@ -20,8 +20,8 @@ mod approval;
 mod cancellation;
 #[path = "raw_cli/config.rs"]
 mod config;
-#[path = "raw_cli/cosh_tui/mod.rs"]
-mod cosh_tui;
+#[path = "raw_cli/cosh_core/mod.rs"]
+mod cosh_core;
 #[path = "raw_cli/evidence_request.rs"]
 mod evidence_request;
 #[path = "raw_cli/failed_command.rs"]

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cosh_shell::adapter::{
-    AgentRunHandle, AgentRunPoll, ClaudeCodeAdapter, CoshTuiAdapter, QwenCliAdapter,
+    AgentRunHandle, AgentRunPoll, ClaudeCodeAdapter, CoshCoreAdapter, QwenCliAdapter,
 };
 use cosh_shell::types::{AgentEvent, AgentRequest};
 
@@ -28,8 +28,8 @@ pub(crate) fn mock_cli_path(name: &str) -> String {
 fn provider_fixture_dir(name: &str) -> &'static str {
     if name.starts_with("mock_qwen_") {
         "qwen"
-    } else if name.starts_with("mock_cosh_tui_") {
-        "cosh_tui"
+    } else if name.starts_with("mock_cosh_core_") {
+        "cosh_core"
     } else {
         "claude"
     }
@@ -113,8 +113,8 @@ pub(crate) fn make_qwen_adapter(mock_script: &str) -> QwenCliAdapter {
     }
 }
 
-pub(crate) fn make_cosh_tui_adapter(mock_script: &str) -> CoshTuiAdapter {
-    CoshTuiAdapter {
+pub(crate) fn make_cosh_core_adapter(mock_script: &str) -> CoshCoreAdapter {
+    CoshCoreAdapter {
         program: mock_cli_path(mock_script),
         allow_model_call: true,
         session_id: Arc::default(),

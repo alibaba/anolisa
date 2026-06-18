@@ -127,46 +127,46 @@ fn raw_cli_missing_send_to_shell_uses_zh_language_env() {
 
 #[test]
 fn raw_cli_approved_shell_handoff_command_not_found_does_not_intercept() {
-    let home = temp_shell_home("cosh-tui-handoff-command-not-found");
+    let home = temp_shell_home("cosh-core-handoff-command-not-found");
     let bin_dir = home.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
-    let cosh_tui_path = bin_dir.join("cosh-tui");
+    let cosh_core_path = bin_dir.join("cosh-core");
     write_executable(
-        &cosh_tui_path,
+        &cosh_core_path,
         r#"#!/bin/sh
 read -r init
 printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-tui-handoff-command-not-found","model":"cosh-tui-test"}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-handoff-command-not-found","model":"cosh-core-test"}'
 read -r user_message
 case "$user_message" in
-  *cosh-tui-handoff-command-not-found*)
+  *cosh-core-handoff-command-not-found*)
     printf '%s\n' '{"type":"control_request","request_id":"ctrl-handoff-command-not-found","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"/help"},"tool_use_id":"toolu-handoff-command-not-found"}}'
     if IFS= read -r response; then
       case "$response" in
         *'"behavior":"host_executed_shell"'*'/help'*'"exit_code":127'*)
-          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-tui-handoff-command-not-found","message":{"content":[{"type":"text","text":"HANDOFF COMMAND NOT FOUND HOSTEXEC RECEIVED"}]}}'
-          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-handoff-command-not-found","is_error":false,"result":"done"}'
+          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-handoff-command-not-found","message":{"content":[{"type":"text","text":"HANDOFF COMMAND NOT FOUND HOSTEXEC RECEIVED"}]}}'
+          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-handoff-command-not-found","is_error":false,"result":"done"}'
           exit 0
           ;;
       esac
     fi
-    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-tui-handoff-command-not-found","is_error":true,"result":"missing command-not-found host_executed_shell result"}'
+    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-handoff-command-not-found","is_error":true,"result":"missing command-not-found host_executed_shell result"}'
     exit 1
     ;;
 esac
-printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-handoff-command-not-found","is_error":false,"result":"ignored"}'
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-handoff-command-not-found","is_error":false,"result":"ignored"}'
 "#,
     );
     let home_str = home.to_string_lossy().to_string();
-    let cosh_tui_path_str = cosh_tui_path.to_string_lossy().to_string();
+    let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
     let output = run_raw_cli_with_args_env_and_delayed_input(
-        "cosh-tui",
+        "cosh-core",
         &[],
-        &[("HOME", &home_str), ("COSH_TUI_PATH", &cosh_tui_path_str)],
+        &[("HOME", &home_str), ("COSH_CORE_PATH", &cosh_core_path_str)],
         vec![
             (b"/mode approval trust confirm\n".to_vec(), Duration::ZERO),
             (
-                b"?? cosh-tui-handoff-command-not-found\n".to_vec(),
+                b"?? cosh-core-handoff-command-not-found\n".to_vec(),
                 Duration::from_millis(500),
             ),
             (b"exit 0\n".to_vec(), Duration::from_millis(1_500)),
@@ -190,46 +190,46 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-
 
 #[test]
 fn raw_cli_approved_shell_handoff_bypasses_marker_intercepts() {
-    let home = temp_shell_home("cosh-tui-handoff-bypass-marker");
+    let home = temp_shell_home("cosh-core-handoff-bypass-marker");
     let bin_dir = home.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
-    let cosh_tui_path = bin_dir.join("cosh-tui");
+    let cosh_core_path = bin_dir.join("cosh-core");
     write_executable(
-        &cosh_tui_path,
+        &cosh_core_path,
         r#"#!/bin/sh
 read -r init
 printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-tui-handoff-bypass-marker","model":"cosh-tui-test"}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-handoff-bypass-marker","model":"cosh-core-test"}'
 read -r user_message
 case "$user_message" in
-  *cosh-tui-handoff-bypass-marker*)
+  *cosh-core-handoff-bypass-marker*)
     printf '%s\n' '{"type":"control_request","request_id":"ctrl-handoff-bypass-marker","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"?? should-run-as-shell"},"tool_use_id":"toolu-handoff-bypass-marker"}}'
     if IFS= read -r response; then
       case "$response" in
         *'"behavior":"host_executed_shell"'*'?? should-run-as-shell'*'"exit_code":127'*)
-          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-tui-handoff-bypass-marker","message":{"content":[{"type":"text","text":"HANDOFF BYPASS MARKER HOSTEXEC RECEIVED"}]}}'
-          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-handoff-bypass-marker","is_error":false,"result":"done"}'
+          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-handoff-bypass-marker","message":{"content":[{"type":"text","text":"HANDOFF BYPASS MARKER HOSTEXEC RECEIVED"}]}}'
+          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-handoff-bypass-marker","is_error":false,"result":"done"}'
           exit 0
           ;;
       esac
     fi
-    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-tui-handoff-bypass-marker","is_error":true,"result":"missing marker-bypass host_executed_shell result"}'
+    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-handoff-bypass-marker","is_error":true,"result":"missing marker-bypass host_executed_shell result"}'
     exit 1
     ;;
 esac
-printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-handoff-bypass-marker","is_error":false,"result":"ignored"}'
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-handoff-bypass-marker","is_error":false,"result":"ignored"}'
 "#,
     );
     let home_str = home.to_string_lossy().to_string();
-    let cosh_tui_path_str = cosh_tui_path.to_string_lossy().to_string();
+    let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
     let output = run_raw_cli_with_args_env_and_delayed_input(
-        "cosh-tui",
+        "cosh-core",
         &[],
-        &[("HOME", &home_str), ("COSH_TUI_PATH", &cosh_tui_path_str)],
+        &[("HOME", &home_str), ("COSH_CORE_PATH", &cosh_core_path_str)],
         vec![
             (b"/mode approval trust confirm\n".to_vec(), Duration::ZERO),
             (
-                b"?? cosh-tui-handoff-bypass-marker\n".to_vec(),
+                b"?? cosh-core-handoff-bypass-marker\n".to_vec(),
                 Duration::from_millis(500),
             ),
             (b"exit 0\n".to_vec(), Duration::from_millis(1_500)),
@@ -254,46 +254,46 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-
 
 #[test]
 fn raw_cli_zsh_approved_shell_handoff_bypasses_marker_intercepts() {
-    let home = temp_shell_home("cosh-tui-zsh-handoff-bypass-marker");
+    let home = temp_shell_home("cosh-core-zsh-handoff-bypass-marker");
     let bin_dir = home.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
-    let cosh_tui_path = bin_dir.join("cosh-tui");
+    let cosh_core_path = bin_dir.join("cosh-core");
     write_executable(
-        &cosh_tui_path,
+        &cosh_core_path,
         r#"#!/bin/sh
 read -r init
 printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-tui-zsh-handoff-bypass-marker","model":"cosh-tui-test"}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-zsh-handoff-bypass-marker","model":"cosh-core-test"}'
 read -r user_message
 case "$user_message" in
-  *cosh-tui-zsh-handoff-bypass-marker*)
+  *cosh-core-zsh-handoff-bypass-marker*)
     printf '%s\n' '{"type":"control_request","request_id":"ctrl-zsh-handoff-bypass-marker","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"?? should-run-as-zsh-shell"},"tool_use_id":"toolu-zsh-handoff-bypass-marker"}}'
     if IFS= read -r response; then
       case "$response" in
         *'"behavior":"host_executed_shell"'*'?? should-run-as-zsh-shell'*'"exit_code":127'*)
-          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-tui-zsh-handoff-bypass-marker","message":{"content":[{"type":"text","text":"ZSH HANDOFF BYPASS MARKER HOSTEXEC RECEIVED"}]}}'
-          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-zsh-handoff-bypass-marker","is_error":false,"result":"done"}'
+          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-zsh-handoff-bypass-marker","message":{"content":[{"type":"text","text":"ZSH HANDOFF BYPASS MARKER HOSTEXEC RECEIVED"}]}}'
+          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-zsh-handoff-bypass-marker","is_error":false,"result":"done"}'
           exit 0
           ;;
       esac
     fi
-    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-tui-zsh-handoff-bypass-marker","is_error":true,"result":"missing zsh marker-bypass host_executed_shell result"}'
+    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-zsh-handoff-bypass-marker","is_error":true,"result":"missing zsh marker-bypass host_executed_shell result"}'
     exit 1
     ;;
 esac
-printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-zsh-handoff-bypass-marker","is_error":false,"result":"ignored"}'
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-zsh-handoff-bypass-marker","is_error":false,"result":"ignored"}'
 "#,
     );
     let home_str = home.to_string_lossy().to_string();
-    let cosh_tui_path_str = cosh_tui_path.to_string_lossy().to_string();
+    let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
     let output = run_raw_cli_with_args_env_and_delayed_input(
-        "cosh-tui",
+        "cosh-core",
         &["--shell", "zsh"],
-        &[("HOME", &home_str), ("COSH_TUI_PATH", &cosh_tui_path_str)],
+        &[("HOME", &home_str), ("COSH_CORE_PATH", &cosh_core_path_str)],
         vec![
             (b"/mode approval trust confirm\n".to_vec(), Duration::ZERO),
             (
-                b"?? cosh-tui-zsh-handoff-bypass-marker\n".to_vec(),
+                b"?? cosh-core-zsh-handoff-bypass-marker\n".to_vec(),
                 Duration::from_millis(500),
             ),
             (b"exit 0\n".to_vec(), Duration::from_millis(1_500)),
@@ -318,46 +318,46 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-
 
 #[test]
 fn raw_cli_approved_shell_handoff_wrapper_does_not_leak() {
-    let home = temp_shell_home("cosh-tui-handoff-wrapper-leak");
+    let home = temp_shell_home("cosh-core-handoff-wrapper-leak");
     let bin_dir = home.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
-    let cosh_tui_path = bin_dir.join("cosh-tui");
+    let cosh_core_path = bin_dir.join("cosh-core");
     write_executable(
-        &cosh_tui_path,
+        &cosh_core_path,
         r#"#!/bin/sh
 read -r init
 printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-tui-handoff-wrapper-leak","model":"cosh-tui-test"}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-handoff-wrapper-leak","model":"cosh-core-test"}'
 read -r user_message
 case "$user_message" in
-  *cosh-tui-handoff-wrapper-leak*)
+  *cosh-core-handoff-wrapper-leak*)
     printf '%s\n' '{"type":"control_request","request_id":"ctrl-handoff-wrapper-leak","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"printf wrapper-visible"},"tool_use_id":"toolu-handoff-wrapper-leak"}}'
     if IFS= read -r response; then
       case "$response" in
         *'"behavior":"host_executed_shell"'*'printf wrapper-visible'*'wrapper-visible'*)
-          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-tui-handoff-wrapper-leak","message":{"content":[{"type":"text","text":"HANDOFF WRAPPER LEAK HOSTEXEC RECEIVED"}]}}'
-          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-handoff-wrapper-leak","is_error":false,"result":"done"}'
+          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-handoff-wrapper-leak","message":{"content":[{"type":"text","text":"HANDOFF WRAPPER LEAK HOSTEXEC RECEIVED"}]}}'
+          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-handoff-wrapper-leak","is_error":false,"result":"done"}'
           exit 0
           ;;
       esac
     fi
-    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-tui-handoff-wrapper-leak","is_error":true,"result":"missing wrapper-leak host_executed_shell result"}'
+    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-handoff-wrapper-leak","is_error":true,"result":"missing wrapper-leak host_executed_shell result"}'
     exit 1
     ;;
 esac
-printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-handoff-wrapper-leak","is_error":false,"result":"ignored"}'
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-handoff-wrapper-leak","is_error":false,"result":"ignored"}'
 "#,
     );
     let home_str = home.to_string_lossy().to_string();
-    let cosh_tui_path_str = cosh_tui_path.to_string_lossy().to_string();
+    let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
     let output = run_raw_cli_with_args_env_and_delayed_input(
-        "cosh-tui",
+        "cosh-core",
         &[],
-        &[("HOME", &home_str), ("COSH_TUI_PATH", &cosh_tui_path_str)],
+        &[("HOME", &home_str), ("COSH_CORE_PATH", &cosh_core_path_str)],
         vec![
             (b"/mode approval trust confirm\n".to_vec(), Duration::ZERO),
             (
-                b"?? cosh-tui-handoff-wrapper-leak\n".to_vec(),
+                b"?? cosh-core-handoff-wrapper-leak\n".to_vec(),
                 Duration::from_millis(500),
             ),
             (b"exit\n".to_vec(), Duration::from_millis(1_500)),

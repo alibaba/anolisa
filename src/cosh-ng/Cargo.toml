@@ -3,7 +3,7 @@ members = [
     "crates/cosh-types",
     "crates/cosh-platform",
     "crates/cosh-cli",
-    "crates/cosh-tui",
+    "crates/cosh-core",
     "crates/cosh-shell",
 ]
 resolver = "2"

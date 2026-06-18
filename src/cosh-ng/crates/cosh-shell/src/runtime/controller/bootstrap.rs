@@ -21,8 +21,8 @@ fn build_adapter(kind: AdapterKind) -> AdapterInstance {
         AdapterInstance::QwenCli(adapter) => {
             AdapterInstance::QwenCli(adapter.with_model_call(true))
         }
-        AdapterInstance::CoshTui(adapter) => {
-            AdapterInstance::CoshTui(adapter.with_model_call(true))
+        AdapterInstance::CoshCore(adapter) => {
+            AdapterInstance::CoshCore(adapter.with_model_call(true))
         }
         other => other,
     }

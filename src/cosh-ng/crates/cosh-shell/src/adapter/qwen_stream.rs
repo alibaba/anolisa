@@ -69,15 +69,15 @@ impl QwenStreamParser {
             }],
             AgentEvent::AgentCompleted { run_id, .. } => vec![AgentEvent::AgentCompleted {
                 run_id,
-                summary: "co analysis completed".to_string(),
+                summary: "analysis completed".to_string(),
             }],
             AgentEvent::AgentFailed { run_id, error } => vec![AgentEvent::AgentFailed {
                 run_id,
                 error: error
-                    .replace("Claude Code", "co")
-                    .replace("Claude", "co")
-                    .replace("claude-code", "co")
-                    .replace("claude code", "co"),
+                    .replace("Claude Code", "model")
+                    .replace("Claude", "model")
+                    .replace("claude-code", "model")
+                    .replace("claude code", "model"),
             }],
             AgentEvent::TextDelta { run_id, text } => self.localize_text_delta(run_id, text),
             other => vec![other],
@@ -143,10 +143,10 @@ impl QwenStreamParser {
 
     fn localize_status_message(&self, message: &str) -> String {
         message
-            .replace("Claude Code", "co")
-            .replace("Claude", "co")
-            .replace("claude-code", "co")
-            .replace("claude code", "co")
+            .replace("Claude Code", "model")
+            .replace("Claude", "model")
+            .replace("claude-code", "model")
+            .replace("claude code", "model")
     }
 }
 
@@ -301,7 +301,7 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, AgentEvent::TextDelta { text, .. } if text == "done")));
-        assert!(events.iter().any(|e| matches!(e, AgentEvent::AgentCompleted { summary, .. } if summary == "co analysis completed")));
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::AgentCompleted { summary, .. } if summary == "analysis completed")));
     }
 
     #[test]
@@ -320,7 +320,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(
             matches!(&events[0], AgentEvent::StatusChanged { phase, message, .. }
-            if phase == "thinking" && message == "co thinking")
+            if phase == "thinking" && message == "thinking")
         );
     }
 
@@ -334,7 +334,7 @@ mod tests {
         });
         assert!(
             matches!(&events[..], [AgentEvent::StatusChanged { message, .. }]
-            if message == "Starting co backend")
+            if message == "Starting model backend")
         );
     }
 
@@ -358,7 +358,7 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        assert!(events.iter().any(|e| matches!(e, AgentEvent::AgentCompleted { summary, .. } if summary == "co analysis completed")));
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::AgentCompleted { summary, .. } if summary == "analysis completed")));
     }
 
     #[test]

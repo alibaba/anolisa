@@ -8,6 +8,7 @@ use super::{
 use crate::types::{
     AgentEvent, GovernanceDecision, GovernancePolicyDecision, GovernedEvent, QuestionSelectionMode,
 };
+use ratatui::text::Span;
 
 mod approval;
 mod markdown;
@@ -1024,6 +1025,52 @@ fn streaming_snapshot_keeps_footer_within_width() {
     }
 }
 
+#[test]
+fn streaming_card_keeps_ambiguous_and_combining_widths_aligned() {
+    let renderer = RatatuiInlineRenderer::with_width(54);
+    let mut stream = renderer.stream_agent();
+    let mut output = Vec::new();
+
+    stream
+        .write_delta(
+            &mut output,
+            "status · waiting → café e\u{301} ⚠️ 🤦🏽‍♂️ 中文 🧪 done",
+        )
+        .unwrap();
+    stream.finish(&mut output, None).unwrap();
+    let text = String::from_utf8(output).unwrap();
+
+    assert!(text.contains("status · waiting"), "{text}");
+    assert!(text.contains("café"), "{text}");
+    for line in text.lines().filter(|line| !line.is_empty()) {
+        assert_eq!(
+            snapshot_width(line),
+            54,
+            "streaming card line should keep a stable right border: {line:?}\n{text}"
+        );
+    }
+}
+
+#[test]
+fn markdown_stream_keeps_ambiguous_and_combining_widths_aligned() {
+    let renderer = RatatuiInlineRenderer::with_width(54);
+    let mut stream = renderer.stream_markdown_agent();
+    let mut output = Vec::new();
+
+    stream
+        .write_delta(
+            &mut output,
+            "渲染检查\n\n- status · waiting → café e\u{301}\n- warning ⚠️ and emoji 🤦🏽‍♂️\n\n",
+        )
+        .unwrap();
+    stream.finish(&mut output, None).unwrap();
+    let text = String::from_utf8(output).unwrap();
+
+    assert!(text.contains("status · waiting"), "{text}");
+    assert!(text.contains("warning"), "{text}");
+    assert_box_lines_aligned(&text, 54);
+}
+
 fn assert_rendered_width(output: &str, max_width: usize) {
     for line in output.lines() {
         let width = snapshot_width(line);
@@ -1055,15 +1102,7 @@ fn assert_box_lines_same_width(output: &str) -> usize {
 }
 
 fn snapshot_width(line: &str) -> usize {
-    line.chars()
-        .map(|ch| match ch {
-            '╭' | '╮' | '╰' | '╯' | '┌' | '┐' | '└' | '┘' | '─' | '│' => 1,
-            '•' | '◦' => 1,
-            ch if ch.is_control() => 0,
-            ch if ch.is_ascii() => 1,
-            _ => 2,
-        })
-        .sum()
+    Span::raw(strip_ansi_escape(line)).width()
 }
 
 fn line_index(lines: &[String], needle: &str) -> usize {

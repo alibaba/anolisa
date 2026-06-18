@@ -40,7 +40,7 @@ fn claude_stream_parser_maps_thinking_delta_to_transient_status() {
     assert!(matches!(
         &events[..],
         [AgentEvent::StatusChanged { phase, message, .. }]
-            if phase == "thinking" && message == "claude-code thinking"
+            if phase == "thinking" && message == "thinking"
     ));
     assert!(!matches!(
         &events[..],
@@ -87,7 +87,7 @@ fn claude_stream_parser_extracts_system_status() {
     assert!(matches!(
         &events[..],
         [AgentEvent::StatusChanged { phase, message, .. }]
-            if phase == "requesting" && message.contains("claude-code status")
+            if phase == "requesting" && message == "model status: requesting"
     ));
 }
 

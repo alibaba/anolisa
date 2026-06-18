@@ -771,7 +771,7 @@ impl CoshCore {
 
         if response.persist {
             if let Err(e) = config::persist_config(&self.config) {
-                eprintln!("[cosh-tui] Warning: failed to persist config: {e}");
+                eprintln!("[cosh-core] Warning: failed to persist config: {e}");
             }
         }
 

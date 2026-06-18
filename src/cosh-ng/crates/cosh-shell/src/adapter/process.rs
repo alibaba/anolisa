@@ -517,7 +517,7 @@ mod tests {
             &AgentEvent::StatusChanged {
                 run_id: "run".to_string(),
                 phase: "thinking".to_string(),
-                message: "co thinking".to_string(),
+                message: "thinking".to_string(),
             }
         ));
         assert!(agent_event_is_provider_progress(&AgentEvent::TextDelta {

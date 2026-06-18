@@ -19,7 +19,7 @@ pub(super) fn extract_claude_thinking_delta(value: &serde_json::Value) -> Option
         .or_else(|| value.pointer("/message/delta/thinking"))
         .and_then(|value| value.as_str())
         .filter(|text| !text.is_empty())
-        .map(|_| "claude-code thinking".to_string())
+        .map(|_| "thinking".to_string())
 }
 
 pub(super) fn extract_claude_assistant_text(value: &serde_json::Value) -> Option<String> {

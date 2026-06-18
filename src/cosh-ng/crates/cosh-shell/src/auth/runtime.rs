@@ -293,8 +293,8 @@ fn send_auth_response<W: std::io::Write>(
     Ok(())
 }
 
-/// Directly persist auth credentials to cosh-tui's config file.
-/// Used when `/auth` is triggered without an active cosh-tui process.
+/// Directly persist auth credentials to cosh-core's config file.
+/// Used when `/auth` is triggered without an active cosh-core process.
 fn persist_auth_credentials(response: &AuthResponse) {
     let home = match std::env::var("HOME") {
         Ok(h) => std::path::PathBuf::from(h),

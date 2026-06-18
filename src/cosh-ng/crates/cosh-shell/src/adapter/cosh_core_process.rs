@@ -10,7 +10,7 @@ use super::claude::{
     is_terminal_agent_event, line_progress, send_agent_event, terminate_process,
     update_completion_flags,
 };
-use super::cosh_tui::commit_pending_session_for_scope;
+use super::cosh_core::commit_pending_session_for_scope;
 use super::{
     agent_event_is_provider_progress, control_protocol, record_cancellation_pending_session,
     run_provider_process_loop, spawn_provider_child, AdapterError, AgentRunHandle,
@@ -19,7 +19,7 @@ use super::{
     ProviderRunOutcome, ProviderStdinMode,
 };
 
-pub(super) fn start_control_protocol_cosh_tui_process(
+pub(super) fn start_control_protocol_cosh_core_process(
     run_id: String,
     prepared: PreparedInvocation,
     session_state: Arc<Mutex<Option<String>>>,
@@ -58,13 +58,13 @@ pub(super) fn start_control_protocol_cosh_tui_process(
             AgentEvent::StatusChanged {
                 run_id: run_id.clone(),
                 phase: "starting".to_string(),
-                message: "starting cosh-tui control protocol backend".to_string(),
+                message: "starting cosh-core control protocol backend".to_string(),
             },
         );
 
         let mut child = match spawn_provider_child(
             &prepared,
-            "cosh-tui",
+            "cosh-core",
             ProviderStdinMode::Piped,
             ProviderPromptArgMode::None,
         ) {
@@ -157,7 +157,7 @@ pub(super) fn start_control_protocol_cosh_tui_process(
         let mut terminal_events = Vec::new();
         let outcome = run_provider_process_loop(
             run_id.clone(),
-            "cosh-tui",
+            "cosh-core",
             &mut child,
             Arc::clone(&child_pid),
             Arc::clone(&cancelled),
@@ -278,7 +278,7 @@ pub(super) fn start_control_protocol_cosh_tui_process(
                 writer_done.store(true, Ordering::SeqCst);
                 record_cancellation_pending_session(
                     &cancellation_artifacts_for_thread,
-                    "cosh-tui",
+                    "cosh-core",
                     &run_id,
                     pending_session_for_thread
                         .lock()

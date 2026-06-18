@@ -44,7 +44,7 @@ fn default_config_values() {
     assert_eq!(cfg.shell_default, "auto");
     assert_eq!(cfg.analysis_mode, "smart");
     assert_eq!(cfg.approval_mode, "auto");
-    assert_eq!(cfg.adapter_default, "cosh-tui");
+    assert_eq!(cfg.adapter_default, "cosh-core");
     assert_eq!(cfg.language, "auto");
     assert!(cfg.startup_banner);
     assert!(!cfg.startup_hooks);

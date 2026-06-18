@@ -365,34 +365,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "cosh-platform"
-version = "0.7.0"
-dependencies = [
- "bincode",
- "chrono",
- "cosh-types",
- "nix",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "toml",
-]
-
-[[package]]
-name = "cosh-shell"
-version = "0.7.0"
-dependencies = [
- "nix",
- "ratatui",
- "serde",
- "serde_json",
- "toml",
- "wait-timeout",
-]
-
-[[package]]
-name = "cosh-tui"
+name = "cosh-core"
 version = "0.7.0"
 dependencies = [
  "aes-gcm",
@@ -417,6 +390,33 @@ dependencies = [
  "toml",
  "uuid",
  "which",
+]
+
+[[package]]
+name = "cosh-platform"
+version = "0.7.0"
+dependencies = [
+ "bincode",
+ "chrono",
+ "cosh-types",
+ "nix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
+name = "cosh-shell"
+version = "0.7.0"
+dependencies = [
+ "nix",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "toml",
+ "wait-timeout",
 ]
 
 [[package]]

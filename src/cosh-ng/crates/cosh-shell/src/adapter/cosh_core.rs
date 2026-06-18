@@ -10,7 +10,7 @@ use super::claude::{
     is_terminal_agent_event, join_reader_thread, line_progress, read_lossy, send_agent_event,
     terminate_process, update_completion_flags,
 };
-use super::cosh_tui_process::start_control_protocol_cosh_tui_process;
+use super::cosh_core_process::start_control_protocol_cosh_core_process;
 use super::{
     agent_event_is_provider_progress, control_protocol, prompt_from_request,
     record_cancellation_pending_session, run_provider_process_loop, spawn_provider_child,
@@ -21,25 +21,25 @@ use super::{
 };
 
 #[derive(Debug, Clone)]
-pub struct CoshTuiAdapter {
+pub struct CoshCoreAdapter {
     pub program: String,
     pub allow_model_call: bool,
     pub session_id: Arc<Mutex<Option<String>>>,
     pub session_cwd: Arc<Mutex<Option<String>>>,
 }
 
-impl Default for CoshTuiAdapter {
+impl Default for CoshCoreAdapter {
     fn default() -> Self {
-        let program = std::env::var("COSH_TUI_PATH").unwrap_or_else(|_| {
+        let program = std::env::var("COSH_CORE_PATH").unwrap_or_else(|_| {
             if let Ok(exe) = std::env::current_exe() {
                 if let Some(dir) = exe.parent() {
-                    let sibling = dir.join("cosh-tui");
+                    let sibling = dir.join("cosh-core");
                     if sibling.is_file() {
                         return sibling.to_string_lossy().into_owned();
                     }
                 }
             }
-            "cosh-tui".to_string()
+            "cosh-core".to_string()
         });
         Self {
             program,
@@ -50,7 +50,7 @@ impl Default for CoshTuiAdapter {
     }
 }
 
-impl CoshTuiAdapter {
+impl CoshCoreAdapter {
     pub fn with_model_call(mut self, allow: bool) -> Self {
         self.allow_model_call = allow;
         self
@@ -92,7 +92,7 @@ impl CoshTuiAdapter {
         PreparedInvocation {
             program: self.program.clone(),
             args,
-            prompt: cosh_tui_prompt_from_request(request, mode),
+            prompt: cosh_core_prompt_from_request(request, mode),
         }
     }
 
@@ -104,12 +104,12 @@ impl CoshTuiAdapter {
         let session_scope = session_scope_from_request(&request);
         let prepared = self.prepare_invocation(&request, mode);
         if !self.allow_model_call {
-            let adapter = AdapterInstance::CoshTui(self.clone());
+            let adapter = AdapterInstance::CoshCore(self.clone());
             return start_threaded_adapter_run(adapter, request);
         }
 
         if mode.uses_control_protocol() {
-            return start_control_protocol_cosh_tui_process(
+            return start_control_protocol_cosh_core_process(
                 request.id,
                 prepared,
                 Arc::clone(&self.session_id),
@@ -118,7 +118,7 @@ impl CoshTuiAdapter {
             );
         }
 
-        start_cancellable_cosh_tui_process(
+        start_cancellable_cosh_core_process(
             request.id,
             prepared,
             Arc::clone(&self.session_id),
@@ -128,9 +128,9 @@ impl CoshTuiAdapter {
     }
 }
 
-impl AgentAdapter for CoshTuiAdapter {
+impl AgentAdapter for CoshCoreAdapter {
     fn name(&self) -> &'static str {
-        "cosh-tui"
+        "cosh-core"
     }
 
     fn capabilities(&self) -> AgentBackendCapabilities {
@@ -161,7 +161,7 @@ impl AgentAdapter for CoshTuiAdapter {
     ) -> Result<(), AdapterError> {
         let prepared = self.prepare_invocation(request, CoshApprovalMode::Recommend);
         if !self.allow_model_call {
-            for event in cosh_tui_dry_run_events(request, &prepared) {
+            for event in cosh_core_dry_run_events(request, &prepared) {
                 sink(event)?;
             }
             return Ok(());
@@ -170,7 +170,7 @@ impl AgentAdapter for CoshTuiAdapter {
         sink(AgentEvent::StatusChanged {
             run_id: request.id.clone(),
             phase: "starting".to_string(),
-            message: "starting cosh-tui headless backend".to_string(),
+            message: "starting cosh-core headless backend".to_string(),
         })?;
 
         let mut child = Command::new(&prepared.program)
@@ -180,14 +180,14 @@ impl AgentAdapter for CoshTuiAdapter {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|err| AdapterError {
-                message: format!("failed to run cosh-tui: {err}"),
+                message: format!("failed to run cosh-core: {err}"),
             })?;
 
         let stdout = child.stdout.take().ok_or_else(|| AdapterError {
-            message: "failed to capture cosh-tui stdout".to_string(),
+            message: "failed to capture cosh-core stdout".to_string(),
         })?;
         let stderr = child.stderr.take().ok_or_else(|| AdapterError {
-            message: "failed to capture cosh-tui stderr".to_string(),
+            message: "failed to capture cosh-core stderr".to_string(),
         })?;
         let stderr_handle = thread::spawn(move || read_lossy(stderr));
 
@@ -199,7 +199,7 @@ impl AgentAdapter for CoshTuiAdapter {
         let mut terminal_events = Vec::new();
         for line in BufReader::new(stdout).lines() {
             let line = line.map_err(|err| AdapterError {
-                message: format!("failed to read cosh-tui stream: {err}"),
+                message: format!("failed to read cosh-core stream: {err}"),
             })?;
             for event in parser.parse_line(&line) {
                 update_completion_flags(&event, &mut completed, &mut failed);
@@ -212,10 +212,10 @@ impl AgentAdapter for CoshTuiAdapter {
         }
 
         let status = child.wait().map_err(|err| AdapterError {
-            message: format!("failed to wait for cosh-tui: {err}"),
+            message: format!("failed to wait for cosh-core: {err}"),
         })?;
         if !status.success() {
-            let error = join_reader_thread(stderr_handle, "cosh-tui stderr")?;
+            let error = join_reader_thread(stderr_handle, "cosh-core stderr")?;
             sink(AgentEvent::AgentFailed {
                 run_id: request.id.clone(),
                 error: error.trim().to_string(),
@@ -223,7 +223,7 @@ impl AgentAdapter for CoshTuiAdapter {
             return Ok(());
         }
 
-        let _stderr = join_reader_thread(stderr_handle, "cosh-tui stderr")?;
+        let _stderr = join_reader_thread(stderr_handle, "cosh-core stderr")?;
         parser.finish(&mut |event| {
             update_completion_flags(&event, &mut completed, &mut failed);
             if is_terminal_agent_event(&event) {
@@ -248,11 +248,11 @@ impl AgentAdapter for CoshTuiAdapter {
     }
 }
 
-fn cosh_tui_prompt_from_request(request: &AgentRequest, _mode: CoshApprovalMode) -> String {
+fn cosh_core_prompt_from_request(request: &AgentRequest, _mode: CoshApprovalMode) -> String {
     prompt_from_request(request)
 }
 
-fn cosh_tui_dry_run_events(
+fn cosh_core_dry_run_events(
     request: &AgentRequest,
     prepared: &PreparedInvocation,
 ) -> Vec<AgentEvent> {
@@ -261,14 +261,14 @@ fn cosh_tui_dry_run_events(
             run_id: request.id.clone(),
             phase: "prepared".to_string(),
             message: format!(
-                "cosh-tui invocation prepared: {} {}",
+                "cosh-core invocation prepared: {} {}",
                 prepared.program,
                 prepared.args.join(" ")
             ),
         },
         AgentEvent::Recommendation {
             run_id: request.id.clone(),
-            summary: "cosh-tui adapter is configured but model calls are disabled in dry-run mode."
+            summary: "cosh-core adapter is configured but model calls are disabled in dry-run mode."
                 .to_string(),
             commands: vec![format!("{} {}", prepared.program, prepared.args.join(" "))],
             auto_execute: false,
@@ -306,7 +306,7 @@ pub(super) fn commit_pending_session_for_scope(
     }
 }
 
-fn start_cancellable_cosh_tui_process(
+fn start_cancellable_cosh_core_process(
     run_id: String,
     prepared: PreparedInvocation,
     session_state: Arc<Mutex<Option<String>>>,
@@ -337,13 +337,13 @@ fn start_cancellable_cosh_tui_process(
             AgentEvent::StatusChanged {
                 run_id: run_id.clone(),
                 phase: "starting".to_string(),
-                message: "starting cosh-tui headless backend".to_string(),
+                message: "starting cosh-core headless backend".to_string(),
             },
         );
 
         let mut child = match spawn_provider_child(
             &prepared,
-            "cosh-tui",
+            "cosh-core",
             ProviderStdinMode::Null,
             ProviderPromptArgMode::TrailingArgIfNonEmpty,
         ) {
@@ -370,7 +370,7 @@ fn start_cancellable_cosh_tui_process(
         let mut terminal_events = Vec::new();
         let outcome = run_provider_process_loop(
             run_id.clone(),
-            "cosh-tui",
+            "cosh-core",
             &mut child,
             Arc::clone(&child_pid),
             Arc::clone(&cancelled),
@@ -402,7 +402,7 @@ fn start_cancellable_cosh_tui_process(
             ProviderRunOutcome::Cancelled | ProviderRunOutcome::Failed => {
                 record_cancellation_pending_session(
                     &cancellation_artifacts_for_thread,
-                    "cosh-tui",
+                    "cosh-core",
                     &run_id,
                     pending_session_for_thread
                         .lock()

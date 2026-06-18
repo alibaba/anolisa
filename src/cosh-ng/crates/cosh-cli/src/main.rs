@@ -44,60 +44,60 @@ enum Commands {
     },
 }
 
-/// Locate the `cosh-tui` binary: first check adjacent to the current executable,
+/// Locate the `cosh-core` binary: first check adjacent to the current executable,
 /// then fall back to PATH lookup.
-fn find_cosh_tui() -> Option<PathBuf> {
+fn find_cosh_core() -> Option<PathBuf> {
     // Try sibling directory of the current executable.
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let sibling = dir.join("cosh-tui");
+            let sibling = dir.join("cosh-core");
             if sibling.is_file() {
                 return Some(sibling);
             }
         }
     }
     // Fall back to PATH lookup via `which`-style resolution.
-    which::which("cosh-tui").ok()
+    which::which("cosh-core").ok()
 }
 
-/// Attempt to exec into `cosh-tui` when invoked with no arguments.
-fn dispatch_tui() -> ! {
-    match find_cosh_tui() {
-        Some(tui_path) => {
-            exec_tui(&tui_path);
+/// Attempt to exec into `cosh-core` when invoked with no arguments.
+fn dispatch_core() -> ! {
+    match find_cosh_core() {
+        Some(core_path) => {
+            exec_core(&core_path);
         }
         None => {
-            eprintln!("cosh: no subcommand provided and `cosh-tui` was not found.");
-            eprintln!("  Install cosh-tui or run `cosh --help` for available subcommands.");
+            eprintln!("cosh: no subcommand provided and `cosh-core` was not found.");
+            eprintln!("  Install cosh-core or run `cosh --help` for available subcommands.");
             std::process::exit(127);
         }
     }
 }
 
-/// Platform-specific exec into the TUI binary.
+/// Platform-specific exec into the core binary.
 #[cfg(unix)]
-fn exec_tui(path: &PathBuf) -> ! {
+fn exec_core(path: &PathBuf) -> ! {
     use std::os::unix::process::CommandExt;
     let err = std::process::Command::new(path).exec();
-    eprintln!("cosh: failed to exec cosh-tui: {err}");
+    eprintln!("cosh: failed to exec cosh-core: {err}");
     std::process::exit(1);
 }
 
 #[cfg(not(unix))]
-fn exec_tui(path: &PathBuf) -> ! {
+fn exec_core(path: &PathBuf) -> ! {
     let status = std::process::Command::new(path)
         .status()
         .unwrap_or_else(|e| {
-            eprintln!("cosh: failed to launch cosh-tui: {e}");
+            eprintln!("cosh: failed to launch cosh-core: {e}");
             std::process::exit(1);
         });
     std::process::exit(status.code().unwrap_or(1));
 }
 
 fn main() {
-    // If invoked with zero arguments (only the binary name), dispatch to cosh-tui.
+    // If invoked with zero arguments (only the binary name), dispatch to cosh-core.
     if std::env::args().count() == 1 {
-        dispatch_tui();
+        dispatch_core();
     }
 
     let cli = Cli::parse();

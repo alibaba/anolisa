@@ -1,37 +1,37 @@
 use super::*;
 
 #[test]
-fn raw_cli_cosh_tui_malformed_provider_event_failure_is_contained() {
-    let home = temp_shell_home("cosh-tui-malformed-provider");
+fn raw_cli_cosh_core_malformed_provider_event_failure_is_contained() {
+    let home = temp_shell_home("cosh-core-malformed-provider");
     let bin_dir = home.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
-    let cosh_tui_path = bin_dir.join("cosh-tui");
+    let cosh_core_path = bin_dir.join("cosh-core");
     write_executable(
-        &cosh_tui_path,
+        &cosh_core_path,
         r#"#!/bin/sh
 read -r init
 printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-tui-malformed","model":"cosh-tui-test"}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-malformed","model":"cosh-core-test"}'
 read -r user_message
 case "$user_message" in
-  *cosh-tui-malformed-provider-event*)
+  *cosh-core-malformed-provider-event*)
     printf '%s\n' '{"type":"assistant","session_id":'
-    printf '%s\n' 'cosh-tui malformed provider fixture stderr' >&2
+    printf '%s\n' 'cosh-core malformed provider fixture stderr' >&2
     exit 17
     ;;
 esac
-printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-malformed","is_error":false,"result":"ignored"}'
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-malformed","is_error":false,"result":"ignored"}'
 "#,
     );
     let home_str = home.to_string_lossy().to_string();
-    let cosh_tui_path_str = cosh_tui_path.to_string_lossy().to_string();
+    let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
     let output = run_raw_cli_with_args_env_and_delayed_input(
-        "cosh-tui",
+        "cosh-core",
         &[],
-        &[("HOME", &home_str), ("COSH_TUI_PATH", &cosh_tui_path_str)],
+        &[("HOME", &home_str), ("COSH_CORE_PATH", &cosh_core_path_str)],
         vec![
             (
-                b"?? cosh-tui-malformed-provider-event\n".to_vec(),
+                b"?? cosh-core-malformed-provider-event\n".to_vec(),
                 Duration::ZERO,
             ),
             (
@@ -43,60 +43,60 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-
     let _ = fs::remove_dir_all(&home);
 
     assert!(
-        output.contains("cosh-tui malformed provider fixture stderr"),
+        output.contains("cosh-core malformed provider fixture stderr"),
         "{output}"
     );
     assert!(output.contains("after-malformed-provider"), "{output}");
     assert!(
-        !output.contains("bash: cosh-tui-malformed-provider-event: command not found"),
+        !output.contains("bash: cosh-core-malformed-provider-event: command not found"),
         "{output}"
     );
     assert!(!output.contains("Agent timed out:"), "{output}");
 }
 
 #[test]
-fn raw_cli_cosh_tui_dumb_terminal_uses_plain_blocks() {
-    let home = temp_shell_home("cosh-tui-dumb-terminal");
+fn raw_cli_cosh_core_dumb_terminal_uses_plain_blocks() {
+    let home = temp_shell_home("cosh-core-dumb-terminal");
     let bin_dir = home.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
-    let cosh_tui_path = bin_dir.join("cosh-tui");
+    let cosh_core_path = bin_dir.join("cosh-core");
     write_executable(
-        &cosh_tui_path,
+        &cosh_core_path,
         r#"#!/bin/sh
 read -r init
 printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-tui-dumb","model":"cosh-tui-test"}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-dumb","model":"cosh-core-test"}'
 read -r user_message
 case "$user_message" in
-  *cosh-tui-dumb-terminal*)
-    printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-tui-dumb","message":{"content":[{"type":"text","text":"Cosh-tui dumb terminal response."}]}}'
-    printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-dumb","is_error":false,"result":"done"}'
+  *cosh-core-dumb-terminal*)
+    printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-dumb","message":{"content":[{"type":"text","text":"Cosh-core dumb terminal response."}]}}'
+    printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-dumb","is_error":false,"result":"done"}'
     exit 0
     ;;
 esac
-printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-dumb","is_error":false,"result":"ignored"}'
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-dumb","is_error":false,"result":"ignored"}'
 "#,
     );
     let home_str = home.to_string_lossy().to_string();
-    let cosh_tui_path_str = cosh_tui_path.to_string_lossy().to_string();
+    let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
     let output = run_raw_cli_with_args_env_and_delayed_input(
-        "cosh-tui",
+        "cosh-core",
         &[],
         &[
             ("HOME", &home_str),
-            ("COSH_TUI_PATH", &cosh_tui_path_str),
+            ("COSH_CORE_PATH", &cosh_core_path_str),
             ("NO_COLOR", "1"),
             ("TERM", "dumb"),
         ],
         vec![
-            (b"?? cosh-tui-dumb-terminal\n".to_vec(), Duration::ZERO),
+            (b"?? cosh-core-dumb-terminal\n".to_vec(), Duration::ZERO),
             (b"exit\n".to_vec(), Duration::from_millis(2_000)),
         ],
     );
     let _ = fs::remove_dir_all(&home);
 
     assert!(
-        output.contains("Cosh-tui dumb terminal response."),
+        output.contains("Cosh-core dumb terminal response."),
         "{output}"
     );
     assert!(output.contains("Agent:"), "{output}");
@@ -107,23 +107,23 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-
 }
 
 #[test]
-fn raw_cli_cosh_tui_cancel_then_exit_cleans_up_active_provider_process() {
-    let home = temp_shell_home("cosh-tui-process-cleanup");
+fn raw_cli_cosh_core_cancel_then_exit_cleans_up_active_provider_process() {
+    let home = temp_shell_home("cosh-core-process-cleanup");
     let bin_dir = home.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
-    let cosh_tui_path = bin_dir.join("cosh-tui");
-    let pid_file = home.join("cosh-tui.pid");
+    let cosh_core_path = bin_dir.join("cosh-core");
+    let pid_file = home.join("cosh-core.pid");
     write_executable(
-        &cosh_tui_path,
+        &cosh_core_path,
         r#"#!/bin/sh
-printf '%s\n' "$$" > "$COSH_TUI_PID_FILE"
+printf '%s\n' "$$" > "$COSH_CORE_PID_FILE"
 trap 'exit 0' TERM INT HUP
 read -r init
 printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-tui-process-cleanup","model":"cosh-tui-test"}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-process-cleanup","model":"cosh-core-test"}'
 read -r user_message
 case "$user_message" in
-  *cosh-tui-process-cleanup*)
+  *cosh-core-process-cleanup*)
     sleep 60
     ;;
 esac
@@ -133,16 +133,16 @@ sleep 60
 
     let binary = env!("CARGO_BIN_EXE_cosh-shell");
     let home_str = home.to_string_lossy().to_string();
-    let cosh_tui_path_str = cosh_tui_path.to_string_lossy().to_string();
+    let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
     let pid_file_str = pid_file.to_string_lossy().to_string();
     let mut child = Command::new(binary)
-        .args(["raw", "cosh-tui"])
+        .args(["raw", "cosh-core"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("HOME", &home_str)
-        .env("COSH_TUI_PATH", &cosh_tui_path_str)
-        .env("COSH_TUI_PID_FILE", &pid_file_str)
+        .env("COSH_CORE_PATH", &cosh_core_path_str)
+        .env("COSH_CORE_PID_FILE", &pid_file_str)
         .env("COSH_SHELL_ISOLATED", "1")
         .env("COSH_SHELL_RAW_SHELL", "bash")
         .env("COSH_SHELL_DEFAULT_SHELL", "bash")
@@ -155,7 +155,7 @@ sleep 60
     let mut stdin = child.stdin.take().expect("child stdin");
     let writer = thread::spawn(move || {
         stdin
-            .write_all(b"?? cosh-tui-process-cleanup\n")
+            .write_all(b"?? cosh-core-process-cleanup\n")
             .expect("write prompt");
         stdin.flush().expect("flush prompt");
         thread::sleep(Duration::from_millis(1_200));
@@ -205,49 +205,49 @@ sleep 60
     let _ = fs::remove_dir_all(&home);
 
     assert!(status.success(), "status={status:?}\n{text}");
-    assert!(text.contains("cosh-tui-process-cleanup"), "{text}");
+    assert!(text.contains("cosh-core-process-cleanup"), "{text}");
     assert!(!alive, "provider pid {provider_pid} survived\n{text}");
 }
 
 #[test]
-fn raw_cli_cosh_tui_completed_run_exit_leaves_no_provider_process() {
-    let home = temp_shell_home("cosh-tui-process-cleanup-completed");
+fn raw_cli_cosh_core_completed_run_exit_leaves_no_provider_process() {
+    let home = temp_shell_home("cosh-core-process-cleanup-completed");
     let bin_dir = home.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
-    let cosh_tui_path = bin_dir.join("cosh-tui");
-    let pid_file = home.join("cosh-tui.pid");
+    let cosh_core_path = bin_dir.join("cosh-core");
+    let pid_file = home.join("cosh-core.pid");
     write_executable(
-        &cosh_tui_path,
+        &cosh_core_path,
         r#"#!/bin/sh
-printf '%s\n' "$$" > "$COSH_TUI_PID_FILE"
+printf '%s\n' "$$" > "$COSH_CORE_PID_FILE"
 read -r init
 printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-tui-process-cleanup-completed","model":"cosh-tui-test"}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-process-cleanup-completed","model":"cosh-core-test"}'
 read -r user_message
 case "$user_message" in
-  *cosh-tui-process-cleanup-completed*)
-    printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-tui-process-cleanup-completed","message":{"content":[{"type":"text","text":"Cosh-tui cleanup completed run."}]}}'
-    printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-process-cleanup-completed","is_error":false,"result":"done"}'
+  *cosh-core-process-cleanup-completed*)
+    printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-process-cleanup-completed","message":{"content":[{"type":"text","text":"Cosh-core cleanup completed run."}]}}'
+    printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-process-cleanup-completed","is_error":false,"result":"done"}'
     exit 0
     ;;
 esac
-printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-process-cleanup-completed","is_error":false,"result":"ignored"}'
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-process-cleanup-completed","is_error":false,"result":"ignored"}'
 "#,
     );
     let home_str = home.to_string_lossy().to_string();
-    let cosh_tui_path_str = cosh_tui_path.to_string_lossy().to_string();
+    let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
     let pid_file_str = pid_file.to_string_lossy().to_string();
     let output = run_raw_cli_with_args_env_and_delayed_input(
-        "cosh-tui",
+        "cosh-core",
         &[],
         &[
             ("HOME", &home_str),
-            ("COSH_TUI_PATH", &cosh_tui_path_str),
-            ("COSH_TUI_PID_FILE", &pid_file_str),
+            ("COSH_CORE_PATH", &cosh_core_path_str),
+            ("COSH_CORE_PID_FILE", &pid_file_str),
         ],
         vec![
             (
-                b"?? cosh-tui-process-cleanup-completed\n".to_vec(),
+                b"?? cosh-core-process-cleanup-completed\n".to_vec(),
                 Duration::ZERO,
             ),
             (b"exit\n".to_vec(), Duration::from_millis(2_500)),
@@ -263,44 +263,44 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-
     let _ = fs::remove_dir_all(&home);
 
     assert!(
-        output.contains("Cosh-tui cleanup completed run."),
+        output.contains("Cosh-core cleanup completed run."),
         "{output}"
     );
     assert!(!alive, "provider pid {provider_pid} survived\n{output}");
 }
 
 #[test]
-fn raw_cli_cosh_tui_host_executed_provider_disconnect_marks_recovery_reason() {
-    let home = temp_shell_home("cosh-tui-host-executed-disconnect");
+fn raw_cli_cosh_core_host_executed_provider_disconnect_marks_recovery_reason() {
+    let home = temp_shell_home("cosh-core-host-executed-disconnect");
     let bin_dir = home.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
-    let cosh_tui_path = bin_dir.join("cosh-tui");
+    let cosh_core_path = bin_dir.join("cosh-core");
     write_executable(
-        &cosh_tui_path,
+        &cosh_core_path,
         r#"#!/bin/sh
 read -r init
 printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-tui-host-executed-disconnect","model":"cosh-tui-test"}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-host-executed-disconnect","model":"cosh-core-test"}'
 read -r user_message
 case "$user_message" in
-  *cosh-tui-provider-host-executed-disconnect*)
-    printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-tui-disconnect","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"df -h"},"tool_use_id":"toolu-cosh-tui-disconnect"}}'
+  *cosh-core-provider-host-executed-disconnect*)
+    printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-disconnect","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"df -h"},"tool_use_id":"toolu-cosh-core-disconnect"}}'
     exit 0
     ;;
 esac
-printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-host-executed-disconnect","is_error":false,"result":"ignored"}'
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-host-executed-disconnect","is_error":false,"result":"ignored"}'
 "#,
     );
     let home_str = home.to_string_lossy().to_string();
-    let cosh_tui_path_str = cosh_tui_path.to_string_lossy().to_string();
+    let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
     let output = run_raw_cli_with_args_env_and_delayed_input(
-        "cosh-tui",
+        "cosh-core",
         &[],
-        &[("HOME", &home_str), ("COSH_TUI_PATH", &cosh_tui_path_str)],
+        &[("HOME", &home_str), ("COSH_CORE_PATH", &cosh_core_path_str)],
         vec![
             (b"/mode approval auto\n".to_vec(), Duration::ZERO),
             (
-                b"?? cosh-tui-provider-host-executed-disconnect\n".to_vec(),
+                b"?? cosh-core-provider-host-executed-disconnect\n".to_vec(),
                 Duration::from_millis(500),
             ),
             (
@@ -341,11 +341,11 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-
         "{output}"
     );
     assert!(
-        output.contains("latest provider request: ctrl-cosh-tui-disconnect"),
+        output.contains("latest provider request: ctrl-cosh-core-disconnect"),
         "{output}"
     );
     assert!(
-        output.contains("latest tool use id: toolu-cosh-tui-disconnect"),
+        output.contains("latest tool use id: toolu-cosh-core-disconnect"),
         "{output}"
     );
     assert!(
@@ -353,7 +353,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-
         "{output}"
     );
     assert!(
-        !output.contains("bash: cosh-tui-provider-host-executed-disconnect: command not found"),
+        !output.contains("bash: cosh-core-provider-host-executed-disconnect: command not found"),
         "{output}"
     );
 }

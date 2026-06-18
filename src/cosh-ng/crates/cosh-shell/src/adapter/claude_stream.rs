@@ -95,12 +95,12 @@ impl ClaudeStreamParser {
                     run_id: self.run_id.clone(),
                     error: extract_claude_error_text(&value)
                         .or_else(|| extract_claude_result_text(&value))
-                        .unwrap_or_else(|| "claude code returned an error".to_string()),
+                        .unwrap_or_else(|| "analysis returned an error".to_string()),
                 });
             } else {
                 events.push(AgentEvent::AgentCompleted {
                     run_id: self.run_id.clone(),
-                    summary: "claude code analysis completed".to_string(),
+                    summary: "analysis completed".to_string(),
                 });
             }
         }
@@ -245,7 +245,7 @@ impl ClaudeStreamParser {
                 self.emitted_startup_status = true;
                 Some((
                     "initializing".to_string(),
-                    "preparing claude-code session".to_string(),
+                    "preparing model session".to_string(),
                 ))
             }
             Some("init") => {
@@ -255,7 +255,7 @@ impl ClaudeStreamParser {
                     .unwrap_or("model");
                 Some((
                     "initialized".to_string(),
-                    format!("claude-code initialized {model}"),
+                    format!("model initialized {model}"),
                 ))
             }
             Some("status") => {
@@ -263,7 +263,7 @@ impl ClaudeStreamParser {
                     .get("status")
                     .and_then(|value| value.as_str())
                     .filter(|status| !status.is_empty())?;
-                Some((status.to_string(), format!("claude-code status: {status}")))
+                Some((status.to_string(), format!("model status: {status}")))
             }
             _ => None,
         }
@@ -346,7 +346,7 @@ impl ClaudeStreamParser {
         if !self.completed {
             sink(AgentEvent::AgentCompleted {
                 run_id: self.run_id.clone(),
-                summary: "claude code analysis completed".to_string(),
+                summary: "analysis completed".to_string(),
             })?;
         }
         Ok(())

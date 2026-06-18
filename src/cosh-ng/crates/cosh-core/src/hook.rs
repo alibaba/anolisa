@@ -181,7 +181,7 @@ impl HookSystem {
         ];
         for (name, groups) in unsupported {
             if !groups.is_empty() {
-                eprintln!("[cosh-tui] Warning: extension hook event '{name}' is not yet supported and will be ignored");
+                eprintln!("[cosh-core] Warning: extension hook event '{name}' is not yet supported and will be ignored");
             }
         }
     }

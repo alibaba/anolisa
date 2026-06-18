@@ -1,13 +1,13 @@
 [package]
-name = "cosh-tui"
+name = "cosh-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Unified TUI component for cosh — agent core + interactive TUI + headless JSONL backend"
+description = "Unified core component for cosh — agent core + interactive TUI + headless JSONL backend"
 
 [[bin]]
-name = "cosh-tui"
+name = "cosh-core"
 path = "src/main.rs"
 
 [dependencies]

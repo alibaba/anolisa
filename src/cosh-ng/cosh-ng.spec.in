@@ -34,7 +34,7 @@ rm -rf %{buildroot}
 
 # Install internal binaries to libexec
 install -d %{buildroot}%{_libexecdir_cosh}
-install -m 0755 target/release/cosh-tui %{buildroot}%{_libexecdir_cosh}/cosh-tui
+install -m 0755 target/release/cosh-core %{buildroot}%{_libexecdir_cosh}/cosh-core
 install -m 0755 target/release/cosh-shell %{buildroot}%{_libexecdir_cosh}/cosh-shell
 
 # Install CLI binary
@@ -44,7 +44,7 @@ install -m 0755 target/release/cosh %{buildroot}%{_bindir}/cosh
 # Install launcher script
 cat > %{buildroot}%{_bindir}/cosh-shell << 'EOF'
 #!/bin/bash
-exec %{_libexecdir}/anolisa/cosh-ng/cosh-shell raw cosh-tui "$@"
+exec %{_libexecdir}/anolisa/cosh-ng/cosh-shell raw cosh-core "$@"
 EOF
 chmod 0755 %{buildroot}%{_bindir}/cosh-shell
 
@@ -59,7 +59,7 @@ install -m 0644 README.md %{buildroot}%{_docdir}/%{name}/README.md
 %{_bindir}/cosh
 %{_bindir}/cosh-shell
 %dir %{_libexecdir_cosh}
-%{_libexecdir_cosh}/cosh-tui
+%{_libexecdir_cosh}/cosh-core
 %{_libexecdir_cosh}/cosh-shell
 
 %post -p <lua>

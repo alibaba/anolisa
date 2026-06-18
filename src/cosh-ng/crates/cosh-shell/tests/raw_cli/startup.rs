@@ -161,45 +161,45 @@ fn raw_cli_default_agent_mode_defers_safe_fallback_tool() {
 }
 
 #[test]
-fn raw_cli_raw_run_without_adapter_uses_cosh_tui_default_adapter() {
-    let home = temp_shell_home("cosh-tui-default-adapter");
+fn raw_cli_raw_run_without_adapter_uses_cosh_core_default_adapter() {
+    let home = temp_shell_home("cosh-core-default-adapter");
     let bin_dir = home.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
-    let cosh_tui_path = bin_dir.join("cosh-tui");
+    let cosh_core_path = bin_dir.join("cosh-core");
     write_executable(
-        &cosh_tui_path,
+        &cosh_core_path,
         r#"#!/bin/sh
 read -r init
 case "$init" in
   *'"subtype":"initialize"'*) ;;
-  *) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-tui-default","is_error":true,"result":"missing initialize"}'; exit 1 ;;
+  *) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-default","is_error":true,"result":"missing initialize"}'; exit 1 ;;
 esac
 printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-tui-default","model":"cosh-tui-test"}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-default","model":"cosh-core-test"}'
 read -r user_message
 case "$user_message" in
-  *cosh-tui-default-adapter-smoke*)
-    printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-tui-default","message":{"content":[{"type":"text","text":"Cosh-tui default adapter reached via implicit raw."}]}}'
-    printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-tui-default","is_error":false,"result":"done"}'
+  *cosh-core-default-adapter-smoke*)
+    printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-default","message":{"content":[{"type":"text","text":"Cosh-core default adapter reached via implicit raw."}]}}'
+    printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-default","is_error":false,"result":"done"}'
     exit 0
     ;;
 esac
-printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-tui-default","is_error":true,"result":"unexpected prompt"}'
+printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-default","is_error":true,"result":"unexpected prompt"}'
 "#,
     );
 
     let home_str = home.to_string_lossy().to_string();
-    let cosh_tui_path_str = cosh_tui_path.to_string_lossy().to_string();
+    let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
     let output = run_raw_cli_default_with_args_env_and_delayed_input(
         &["--run"],
         &[
             ("HOME", &home_str),
-            ("COSH_TUI_PATH", &cosh_tui_path_str),
+            ("COSH_CORE_PATH", &cosh_core_path_str),
             ("COSH_SHELL_STARTUP_BANNER", "1"),
         ],
         vec![
             (
-                b"?? cosh-tui-default-adapter-smoke\n".to_vec(),
+                b"?? cosh-core-default-adapter-smoke\n".to_vec(),
                 Duration::from_millis(500),
             ),
             (b"/debug session\n".to_vec(), Duration::from_millis(500)),
@@ -208,20 +208,20 @@ printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-tui-de
     );
     let _ = fs::remove_dir_all(&home);
 
-    assert!(output.contains("Adapter: cosh-tui"), "{output}");
+    assert!(output.contains("Adapter: cosh-core"), "{output}");
     assert!(
-        output.contains("Cosh-tui default adapter reached via implicit raw."),
+        output.contains("Cosh-core default adapter reached via implicit raw."),
         "{output}"
     );
     assert!(output.contains("provider invocation:"), "{output}");
     assert!(
-        output.contains("cosh-raw-cli-cosh-tui-default-adapter"),
+        output.contains("cosh-raw-cli-cosh-core-default-adapter"),
         "{output}"
     );
-    assert!(output.contains("/bin/cosh-tui"), "{output}");
+    assert!(output.contains("/bin/cosh-core"), "{output}");
     assert!(!output.contains("Adapter: fake"), "{output}");
     assert!(!output.contains("unexpected prompt"), "{output}");
-    assert!(!output.contains("failed to run cosh-tui"), "{output}");
+    assert!(!output.contains("failed to run cosh-core"), "{output}");
 }
 
 #[test]

@@ -12,7 +12,7 @@ pub(crate) use cosh_shell::types::{AgentEvent, CoshApprovalMode};
 mod support_control_protocol;
 
 pub(crate) use support_control_protocol::{
-    collect_events_until, make_adapter, make_cosh_tui_adapter, make_qwen_adapter, make_request,
+    collect_events_until, make_adapter, make_cosh_core_adapter, make_qwen_adapter, make_request,
 };
 
 fn wait_for_session_id(

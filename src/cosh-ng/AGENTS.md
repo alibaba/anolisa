@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 cosh-ng (Computable Operating System Harness) is a deterministic Agent-OS interface. It provides a unified `cosh` binary with dual-mode behavior:
 - **CLI mode** (`cosh <subsystem> <action>`): structured JSON output for AI Agents
-- **Interactive mode** (`cosh` with no args): launches `cosh-tui` via exec
+- **Interactive mode** (`cosh` with no args): launches `cosh-core` via exec
 
 ## Build & Test Commands
 
@@ -65,17 +65,17 @@ Prerequisites: Linux (or macOS for limited functionality), Rust 1.70+. pkg/svc c
 
 ## Architecture
 
-5-crate workspace with strict dependency direction: `cosh-cli` / `cosh-tui` / `cosh-shell` → `cosh-platform` → `cosh-types`
+5-crate workspace with strict dependency direction: `cosh-cli` / `cosh-core` / `cosh-shell` → `cosh-platform` → `cosh-types`
 
 - **cosh-types**: Pure types, zero side effects. Defines `CoshResponse<T>` envelope, `CoshError` (with error codes, recoverable flag, hint), and ws-ckpt IPC protocol types.
 - **cosh-platform**: Platform abstraction layer. Distro detection from `/etc/os-release`, package manager routing (dnf/apt/zypper/brew), systemd service adapter, ws-ckpt daemon Unix socket IPC client.
 - **cosh-cli**: CLI entry point (binary: `cosh`). 4 command domains: `pkg`, `svc`, `checkpoint`, `audit`. All output is JSON via `CoshResponse<T>`. Uses clap derive for argument parsing.
-- **cosh-tui**: Interactive TUI (binary: `cosh-tui`). Uses ratatui + crossterm. Has slash commands, optional LLM chat, theme system.
+- **cosh-core**: Interactive TUI (binary: `cosh-core`). Uses ratatui + crossterm. Has slash commands, optional LLM chat, theme system.
 - **cosh-shell**: AI-augmented interactive shell (binary: `cosh-shell`). PTY wrapper over bash/zsh with OSC marker-based command boundary detection, streaming AI analysis (Claude/Qwen adapters), inline card rendering, tool approval control protocol. See [`docs/cosh-shell-architecture.md`](docs/cosh-shell-architecture.md) for detailed architecture.
 
 ### cosh-shell Code Organization
 
-cosh-shell 代码组织必须遵循 `../../../specs/cosh-ng-code-organization/standard.md` 和 `../../../specs/cosh-shell-joint-execution-plan.md`。本轮改造只允许动 `crates/cosh-shell/`；不要顺手修改 `cosh-types`、`cosh-platform`、`cosh-cli`、`cosh-tui`、lockfile、`.env` 或 workspace 外代码。
+cosh-shell 代码组织必须遵循 `../../../specs/cosh-ng-code-organization/standard.md` 和 `../../../specs/cosh-shell-joint-execution-plan.md`。本轮改造只允许动 `crates/cosh-shell/`；不要顺手修改 `cosh-types`、`cosh-platform`、`cosh-cli`、`cosh-core`、lockfile、`.env` 或 workspace 外代码。
 
 长期 owner 约定：
 
@@ -105,7 +105,7 @@ cosh-shell 代码组织必须遵循 `../../../specs/cosh-ng-code-organization/st
 
 ## Security Heuristics
 
-When writing safety gates that auto-approve commands, don't pattern-match substrings of the *raw* command — shell metas don't need spaces, and Tab/newline are word separators. Tokenize first (split on whitespace including `\t`/`\n`/`\r`), reject metacharacters anywhere (`;` `|` `&` `>` `<` `$` `` ` `` `(` `)` `{` `}`), then dispatch on tokens. When in doubt, fall through to user approval rather than auto-allow. New regression tests must cover Tab-separated, newline-separated, and unspaced-meta variants. Reference: `crates/cosh-tui/src/tools/shell.rs::is_safe_command`.
+When writing safety gates that auto-approve commands, don't pattern-match substrings of the *raw* command — shell metas don't need spaces, and Tab/newline are word separators. Tokenize first (split on whitespace including `\t`/`\n`/`\r`), reject metacharacters anywhere (`;` `|` `&` `>` `<` `$` `` ` `` `(` `)` `{` `}`), then dispatch on tokens. When in doubt, fall through to user approval rather than auto-allow. New regression tests must cover Tab-separated, newline-separated, and unspaced-meta variants. Reference: `crates/cosh-core/src/tools/shell.rs::is_safe_command`.
 
 ## Debugging Guidelines
 

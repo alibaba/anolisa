@@ -1,7 +1,7 @@
 use clap::Parser;
 
 #[derive(Parser, Debug)]
-#[command(name = "cosh-tui", about = "cosh TUI — agent core + interactive terminal")]
+#[command(name = "cosh-core", about = "cosh core — agent core + interactive terminal")]
 pub struct CliArgs {
     /// Force headless JSONL mode (otherwise auto-detected via TTY)
     #[arg(long)]

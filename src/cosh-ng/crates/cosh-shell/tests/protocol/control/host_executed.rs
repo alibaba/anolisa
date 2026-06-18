@@ -1,10 +1,10 @@
 use super::*;
 
 #[test]
-fn cosh_tui_host_executed_shell_result_uses_control_response() {
-    let adapter = make_cosh_tui_adapter("mock_cosh_tui_host_executed_cli.sh");
+fn cosh_core_host_executed_shell_result_uses_control_response() {
+    let adapter = make_cosh_core_adapter("mock_cosh_core_host_executed_cli.sh");
     let session_state = Arc::clone(&adapter.session_id);
-    let request = make_request("cosh-tui-test-host-executed");
+    let request = make_request("cosh-core-test-host-executed");
     let handle = adapter.start_cancellable(request, CoshApprovalMode::Auto);
 
     let events = collect_events_until(&handle, Duration::from_secs(5), |event| {
@@ -13,7 +13,7 @@ fn cosh_tui_host_executed_shell_result_uses_control_response() {
     let tool_req = events
         .iter()
         .find(|event| matches!(event, AgentEvent::ToolPermissionRequest { .. }))
-        .expect("expected cosh-tui ToolPermissionRequest");
+        .expect("expected cosh-core ToolPermissionRequest");
 
     if let AgentEvent::ToolPermissionRequest {
         request_id,
@@ -48,7 +48,7 @@ fn cosh_tui_host_executed_shell_result_uses_control_response() {
                     }),
                 },
             })
-            .expect("cosh-tui host-executed approval response should succeed");
+            .expect("cosh-core host-executed approval response should succeed");
     }
 
     let remaining = collect_events_until(&handle, Duration::from_secs(5), |event| {
@@ -58,15 +58,15 @@ fn cosh_tui_host_executed_shell_result_uses_control_response() {
         remaining
             .iter()
             .any(|event| matches!(event, AgentEvent::AgentCompleted { .. })),
-        "expected cosh-tui host-executed completion, got: {remaining:?}"
+        "expected cosh-core host-executed completion, got: {remaining:?}"
     );
     assert!(
         wait_for_session_id(
             &session_state,
-            "mock-cosh-tui-host-executed",
+            "mock-cosh-core-host-executed",
             Duration::from_secs(1)
         ),
-        "session_id should be committed after cosh-tui host-executed completion"
+        "session_id should be committed after cosh-core host-executed completion"
     );
     let capabilities = handle.control_capabilities();
     assert!(capabilities.provider_initialize_seen);
@@ -75,10 +75,10 @@ fn cosh_tui_host_executed_shell_result_uses_control_response() {
 }
 
 #[test]
-fn cosh_tui_multi_host_executed_shell_results_stay_in_same_control_turn() {
-    let adapter = make_cosh_tui_adapter("mock_cosh_tui_host_executed_multi_cli.sh");
+fn cosh_core_multi_host_executed_shell_results_stay_in_same_control_turn() {
+    let adapter = make_cosh_core_adapter("mock_cosh_core_host_executed_multi_cli.sh");
     let session_state = Arc::clone(&adapter.session_id);
-    let request = make_request("cosh-tui-test-host-executed-multi");
+    let request = make_request("cosh-core-test-host-executed-multi");
     let handle = adapter.start_cancellable(request, CoshApprovalMode::Auto);
 
     let first = collect_events_until(&handle, Duration::from_secs(5), |event| {
@@ -112,12 +112,12 @@ fn cosh_tui_multi_host_executed_shell_results_stay_in_same_control_turn() {
         remaining
             .iter()
             .any(|event| matches!(event, AgentEvent::AgentCompleted { .. })),
-        "expected cosh-tui multi host-executed completion, got: {remaining:?}"
+        "expected cosh-core multi host-executed completion, got: {remaining:?}"
     );
     assert!(
         wait_for_session_id(
             &session_state,
-            "mock-cosh-tui-host-executed-multi",
+            "mock-cosh-core-host-executed-multi",
             Duration::from_secs(1)
         ),
         "session_id should be committed after multi host-executed completion"
@@ -125,10 +125,10 @@ fn cosh_tui_multi_host_executed_shell_results_stay_in_same_control_turn() {
 }
 
 #[test]
-fn cosh_tui_analysis_continuation_denies_reentrant_shell_request() {
-    let adapter = make_cosh_tui_adapter("mock_cosh_tui_analysis_continuation_shell_request.sh");
+fn cosh_core_analysis_continuation_denies_reentrant_shell_request() {
+    let adapter = make_cosh_core_adapter("mock_cosh_core_analysis_continuation_shell_request.sh");
     let session_state = Arc::clone(&adapter.session_id);
-    let mut request = make_request("cosh-tui-analysis-continuation-deny");
+    let mut request = make_request("cosh-core-analysis-continuation-deny");
     request.user_input =
         Some("ShellCommandCompleted evidence\ncommand: df -h\nstatus: completed".to_string());
     request
@@ -146,15 +146,15 @@ fn cosh_tui_analysis_continuation_denies_reentrant_shell_request() {
         events.iter().any(|event| matches!(
             event,
             AgentEvent::TextDelta { text, .. }
-                if text.contains("Cosh-tui analysis continuation shell request was denied.")
+                if text.contains("Cosh-core analysis continuation shell request was denied.")
         )),
-        "expected cosh-tui provider to receive deny response, got: {events:?}"
+        "expected cosh-core provider to receive deny response, got: {events:?}"
     );
     assert!(
         events
             .iter()
             .any(|event| matches!(event, AgentEvent::AgentCompleted { .. })),
-        "expected cosh-tui analysis continuation completion, got: {events:?}"
+        "expected cosh-core analysis continuation completion, got: {events:?}"
     );
     assert!(
         events
@@ -165,10 +165,10 @@ fn cosh_tui_analysis_continuation_denies_reentrant_shell_request() {
     assert!(
         wait_for_session_id(
             &session_state,
-            "mock-cosh-tui-analysis-continuation",
+            "mock-cosh-core-analysis-continuation",
             Duration::from_secs(1)
         ),
-        "session_id should be committed after cosh-tui analysis continuation completion"
+        "session_id should be committed after cosh-core analysis continuation completion"
     );
 }
 

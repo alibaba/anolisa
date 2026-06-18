@@ -6,7 +6,7 @@ pub use implementation::{
     adapter_for_kind, AdapterError, AdapterInstance, AdapterKind, AgentAdapter,
     AgentBackendCapabilities, AgentRunHandle, AgentRunPoll, ApprovalDecision, ApprovalResponse,
     AuthFieldInfo, AuthProviderInfo, AuthResponse, ClaudeCodeAdapter, ControlProtocolCapabilities,
-    CoshTuiAdapter, FakeAgentAdapter, HostExecutedShellMetadata, HostExecutedShellResult,
+    CoshCoreAdapter, FakeAgentAdapter, HostExecutedShellMetadata, HostExecutedShellResult,
     ProviderCancellationArtifact, ProviderCancellationArtifactKind,
     ProviderCancellationArtifactStore, QwenCliAdapter,
 };

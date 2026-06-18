@@ -327,6 +327,10 @@ fn governance_display_text_uses_requested_language_for_shell_owned_fallbacks() {
             run_id: "run-1".to_string(),
             reason: "user requested cancellation".to_string(),
         },
+        AgentEvent::AgentFailed {
+            run_id: "run-1".to_string(),
+            error: "analysis returned an error".to_string(),
+        },
     ];
 
     let governed = govern_agent_events_with_language(&events, &Policy::default(), Language::ZhCn);
@@ -354,7 +358,9 @@ fn governance_display_text_uses_requested_language_for_shell_owned_fallbacks() {
     assert!(text.contains("问题: Agent 需要你的输入"), "{text}");
     assert!(text.contains("Agent 已取消"), "{text}");
     assert!(text.contains("原因: 用户请求取消"), "{text}");
+    assert!(text.contains("分析返回错误"), "{text}");
     assert!(!text.contains("Approval required:"), "{text}");
+    assert!(!text.contains("analysis returned an error"), "{text}");
     assert!(!text.contains("Blocked: user approval required"), "{text}");
     assert!(!text.contains("recommended commands:"), "{text}");
     assert!(!text.contains("Skill loading:"), "{text}");

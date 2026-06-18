@@ -277,7 +277,7 @@ pub(crate) fn print_usage_help() {
          AI-augmented interactive shell wrapper.\n\
          \n\
          Modes:\n\
-          raw [adapter] [--run]   Interactive mode with AI (adapters: fake, claude, co, qwen, cosh-tui)\n\
+          raw [adapter] [--run]   Interactive mode with AI (adapters: fake, claude, co, qwen, cosh-core)\n\
            demo                    Demo with synthetic events\n\
          \n\
          Options:\n\

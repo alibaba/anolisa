@@ -192,7 +192,7 @@ pub async fn wait_for_auth_response<R: AsyncBufReadExt + Unpin>(
             buffered_lines,
         },
         Err(_) => {
-            eprintln!("[cosh-tui] Auth timeout after {}s", AUTH_TIMEOUT.as_secs());
+            eprintln!("[cosh-core] Auth timeout after {}s", AUTH_TIMEOUT.as_secs());
             AuthWaitResult {
                 response: None,
                 buffered_lines,

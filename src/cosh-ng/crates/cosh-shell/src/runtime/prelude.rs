@@ -67,7 +67,7 @@ pub(crate) use crate::ui::{
 };
 
 #[cfg(test)]
-pub(crate) use crate::adapter::{CoshTuiAdapter, QwenCliAdapter};
+pub(crate) use crate::adapter::{CoshCoreAdapter, QwenCliAdapter};
 #[cfg(test)]
 pub(crate) use crate::hooks::model::{HookMatcher, HookTrigger};
 #[cfg(test)]

@@ -125,7 +125,7 @@ where
     let msg: InputMessage = match serde_json::from_str(line) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("[cosh-tui] Failed to parse input: {e}");
+            eprintln!("[cosh-core] Failed to parse input: {e}");
             return true;
         }
     };
@@ -289,7 +289,7 @@ where
     // Persist if requested
     if response.persist {
         if let Err(e) = config::persist_config(config) {
-            eprintln!("[cosh-tui] Warning: failed to persist config: {e}");
+            eprintln!("[cosh-core] Warning: failed to persist config: {e}");
         }
     }
 

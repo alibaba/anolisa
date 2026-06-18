@@ -1,4 +1,4 @@
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 
 pub(super) fn line_is_empty(line: &Line<'static>) -> bool {
     line.spans.iter().all(|span| span.content.trim().is_empty())
@@ -211,25 +211,12 @@ pub(super) fn strip_ansi_escape(text: &str) -> String {
 }
 
 pub(super) fn display_width(text: &str) -> usize {
-    strip_ansi_escape(text).chars().map(char_width).sum()
+    Span::raw(strip_ansi_escape(text)).width()
 }
 
 pub(super) fn char_width(ch: char) -> usize {
-    match ch {
-        '\t' => 4,
-        '•' | '◦' => 1,
-        ch if is_box_or_block_drawing(ch) => 1,
-        ch if ch.is_control() => 0,
-        ch if ch.is_ascii() => 1,
-        _ => 2,
-    }
-}
-
-fn is_box_or_block_drawing(ch: char) -> bool {
-    matches!(
-        ch,
-        '\u{2500}'..='\u{257f}' | '\u{2580}'..='\u{259f}'
-    )
+    let mut text = [0; 4];
+    display_width(ch.encode_utf8(&mut text))
 }
 
 pub(super) fn should_buffer_word_char(ch: char) -> bool {

@@ -13,10 +13,10 @@ mod claude_stream_tests;
 mod control_protocol;
 #[cfg(test)]
 mod control_protocol_tests;
-mod cosh_tui;
-mod cosh_tui_process;
+mod cosh_core;
+mod cosh_core_process;
 #[cfg(test)]
-mod cosh_tui_tests;
+mod cosh_core_tests;
 mod fake;
 mod process;
 mod prompt;
@@ -28,7 +28,7 @@ mod qwen_stream;
 pub use claude::ClaudeCodeAdapter;
 use claude_stream::ClaudeStreamParser;
 pub use control_protocol::*;
-pub use cosh_tui::CoshTuiAdapter;
+pub use cosh_core::CoshCoreAdapter;
 pub use fake::FakeAgentAdapter;
 pub(crate) use process::{
     agent_event_is_provider_progress, record_cancellation_pending_session,
@@ -218,7 +218,7 @@ pub enum AdapterKind {
     Fake,
     ClaudeCode,
     QwenCli,
-    CoshTui,
+    CoshCore,
 }
 
 impl AdapterKind {
@@ -227,7 +227,7 @@ impl AdapterKind {
             "fake" => Some(Self::Fake),
             "claude" | "claude-code" => Some(Self::ClaudeCode),
             "co" | "qwen" | "qwen-cli" => Some(Self::QwenCli),
-            "cosh-tui" | "tui" => Some(Self::CoshTui),
+            "cosh-core" | "core" => Some(Self::CoshCore),
             _ => None,
         }
     }
@@ -238,7 +238,7 @@ pub enum AdapterInstance {
     Fake(FakeAgentAdapter),
     ClaudeCode(ClaudeCodeAdapter),
     QwenCli(QwenCliAdapter),
-    CoshTui(CoshTuiAdapter),
+    CoshCore(CoshCoreAdapter),
 }
 
 impl AgentAdapter for AdapterInstance {
@@ -247,7 +247,7 @@ impl AgentAdapter for AdapterInstance {
             Self::Fake(adapter) => adapter.name(),
             Self::ClaudeCode(adapter) => adapter.name(),
             Self::QwenCli(adapter) => adapter.name(),
-            Self::CoshTui(adapter) => adapter.name(),
+            Self::CoshCore(adapter) => adapter.name(),
         }
     }
 
@@ -256,7 +256,7 @@ impl AgentAdapter for AdapterInstance {
             Self::Fake(adapter) => adapter.capabilities(),
             Self::ClaudeCode(adapter) => adapter.capabilities(),
             Self::QwenCli(adapter) => adapter.capabilities(),
-            Self::CoshTui(adapter) => adapter.capabilities(),
+            Self::CoshCore(adapter) => adapter.capabilities(),
         }
     }
 
@@ -265,7 +265,7 @@ impl AgentAdapter for AdapterInstance {
             Self::Fake(adapter) => adapter.run(request),
             Self::ClaudeCode(adapter) => adapter.run(request),
             Self::QwenCli(adapter) => adapter.run(request),
-            Self::CoshTui(adapter) => adapter.run(request),
+            Self::CoshCore(adapter) => adapter.run(request),
         }
     }
 
@@ -278,7 +278,7 @@ impl AgentAdapter for AdapterInstance {
             Self::Fake(adapter) => adapter.run_stream(request, sink),
             Self::ClaudeCode(adapter) => adapter.run_stream(request, sink),
             Self::QwenCli(adapter) => adapter.run_stream(request, sink),
-            Self::CoshTui(adapter) => adapter.run_stream(request, sink),
+            Self::CoshCore(adapter) => adapter.run_stream(request, sink),
         }
     }
 }
@@ -292,7 +292,7 @@ impl AdapterInstance {
         match self {
             Self::ClaudeCode(adapter) => adapter.start_cancellable(request, mode),
             Self::QwenCli(adapter) => adapter.start_cancellable(request, mode),
-            Self::CoshTui(adapter) => adapter.start_cancellable(request, mode),
+            Self::CoshCore(adapter) => adapter.start_cancellable(request, mode),
             _ => start_threaded_adapter_run(self.clone(), request),
         }
     }
@@ -301,7 +301,7 @@ impl AdapterInstance {
         match self {
             Self::ClaudeCode(adapter) => adapter.session_id.lock().ok().and_then(|id| id.clone()),
             Self::QwenCli(adapter) => adapter.session_id.lock().ok().and_then(|id| id.clone()),
-            Self::CoshTui(adapter) => adapter.session_id.lock().ok().and_then(|id| id.clone()),
+            Self::CoshCore(adapter) => adapter.session_id.lock().ok().and_then(|id| id.clone()),
             Self::Fake(_) => None,
         }
     }
@@ -310,7 +310,7 @@ impl AdapterInstance {
         match self {
             Self::ClaudeCode(adapter) => Some(adapter.program.clone()),
             Self::QwenCli(adapter) => Some(adapter.program.clone()),
-            Self::CoshTui(adapter) => Some(adapter.program.clone()),
+            Self::CoshCore(adapter) => Some(adapter.program.clone()),
             Self::Fake(_) => None,
         }
     }
@@ -348,7 +348,7 @@ pub fn adapter_for_kind(kind: AdapterKind) -> AdapterInstance {
         AdapterKind::Fake => AdapterInstance::Fake(FakeAgentAdapter),
         AdapterKind::ClaudeCode => AdapterInstance::ClaudeCode(ClaudeCodeAdapter::default()),
         AdapterKind::QwenCli => AdapterInstance::QwenCli(QwenCliAdapter::default()),
-        AdapterKind::CoshTui => AdapterInstance::CoshTui(CoshTuiAdapter::default()),
+        AdapterKind::CoshCore => AdapterInstance::CoshCore(CoshCoreAdapter::default()),
     }
 }
 

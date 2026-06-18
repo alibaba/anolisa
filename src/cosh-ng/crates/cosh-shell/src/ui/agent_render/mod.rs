@@ -518,48 +518,7 @@ fn symbol_display_width(symbol: &str) -> usize {
     if symbol.is_empty() {
         return 0;
     }
-    symbol.chars().map(render_char_width).sum::<usize>().max(1)
-}
-
-fn render_char_width(ch: char) -> usize {
-    match ch {
-        '\t' => 4,
-        ch if ch.is_control() => 0,
-        ch if ch.is_ascii() => 1,
-        ch if is_box_drawing(ch) => 1,
-        ch if is_cjk_wide(ch) => 2,
-        ch if is_wide_symbol(ch) => 2,
-        _ => 1,
-    }
-}
-
-fn is_box_drawing(ch: char) -> bool {
-    matches!(
-        ch,
-        '\u{2500}'..='\u{257f}' | '\u{2580}'..='\u{259f}'
-    )
-}
-
-fn is_cjk_wide(ch: char) -> bool {
-    matches!(
-        ch,
-        '\u{1100}'..='\u{115f}'
-            | '\u{2e80}'..='\u{a4cf}'
-            | '\u{ac00}'..='\u{d7a3}'
-            | '\u{f900}'..='\u{faff}'
-            | '\u{fe10}'..='\u{fe19}'
-            | '\u{fe30}'..='\u{fe6f}'
-            | '\u{ff00}'..='\u{ff60}'
-            | '\u{ffe0}'..='\u{ffe6}'
-    )
-}
-
-fn is_wide_symbol(ch: char) -> bool {
-    matches!(
-        ch,
-        '\u{2600}'..='\u{27bf}'
-            | '\u{1f000}'..='\u{1faff}'
-    )
+    display_width(symbol).max(1)
 }
 
 fn lines_from_governed_events(

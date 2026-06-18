@@ -115,7 +115,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: cosh-shell <demo|host-demo|raw|interactive|interactive-demo|adapter-demo [fake|claude|co|qwen|cosh-tui] [--shell bash|zsh]>"
+                "usage: cosh-shell <demo|host-demo|raw|interactive|interactive-demo|adapter-demo [fake|claude|co|qwen|cosh-core] [--shell bash|zsh]>"
             );
             2
         }

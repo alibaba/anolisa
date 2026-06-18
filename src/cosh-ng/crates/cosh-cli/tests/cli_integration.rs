@@ -328,7 +328,7 @@ fn test_audit_policy_explain_returns_match_decision() {
     assert_eq!(json["data"]["decision"]["matched_rule"], "shell-deny-git-mutating");
 }
 
-// --- 17+ bypass regressions migrated from cosh-tui::is_safe_command ---
+// --- 17+ bypass regressions migrated from cosh-core::is_safe_command ---
 //
 // Each of these inputs previously fooled the substring-based safety list
 // but is rejected by the audit pipeline either at parse-time (shell metas)

@@ -28,7 +28,7 @@ use provider::profile;
 fn create_provider(config: &CoreConfig) -> Box<dyn provider::ContentGenerator> {
     let resolved = config.resolve_provider();
     if resolved.api_key.is_empty() {
-        eprintln!("[cosh-tui] Warning: no API key configured, using mock provider");
+        eprintln!("[cosh-core] Warning: no API key configured, using mock provider");
         return Box::new(provider::mock::MockProvider::text_only(
             "No API key configured. Please set DASHSCOPE_API_KEY or configure [ai.providers] in config.toml.",
         ));

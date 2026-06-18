@@ -24,7 +24,7 @@ impl Default for CoshConfig {
             shell_default: "auto".into(),
             analysis_mode: "smart".into(),
             approval_mode: "auto".into(),
-            adapter_default: "cosh-tui".into(),
+            adapter_default: "cosh-core".into(),
             language: "auto".into(),
             startup_banner: true,
             startup_hooks: false,

@@ -8,6 +8,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use nix::libc;
+use ratatui::text::Span;
 use wait_timeout::ChildExt;
 
 const RAW_CLI_TIMEOUT: Duration = Duration::from_secs(30);
@@ -518,14 +519,5 @@ pub(crate) fn compact_terminal_words(text: &str) -> String {
 }
 
 fn display_width(text: &str) -> usize {
-    text.chars()
-        .map(|ch| match ch {
-            '\t' => 4,
-            '─' | '│' | '┌' | '┐' | '└' | '┘' | '╭' | '╮' | '╰' | '╯' | '├' | '┤' | '┬' | '┴'
-            | '┼' | '•' | '◦' => 1,
-            ch if ch.is_control() => 0,
-            ch if ch.is_ascii() => 1,
-            _ => 2,
-        })
-        .sum()
+    Span::raw(text).width()
 }

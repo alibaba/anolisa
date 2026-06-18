@@ -1,6 +1,6 @@
 # Built-in audit policy: balanced (factory default).
 #
-# Translates the shell heuristics formerly in cosh-tui's `is_safe_command`
+# Translates the shell heuristics formerly in cosh-core's `is_safe_command`
 # into declarative rules. Rule order is significant — the FIRST matching rule
 # wins. See `docs/audit-design.md` §7.
 

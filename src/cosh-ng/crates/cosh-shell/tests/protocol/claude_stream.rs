@@ -93,7 +93,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id
     assert!(streamed.iter().any(|event| matches!(
         event,
         AgentEvent::AgentCompleted { summary, .. }
-            if summary.contains("claude code analysis completed")
+            if summary.contains("analysis completed")
     )));
 }
 

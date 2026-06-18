@@ -84,8 +84,9 @@ pub(crate) fn remember_agent_activity(active_run: &mut ActiveAgentRun, governed:
     for event in governed {
         match &event.event {
             AgentEvent::StatusChanged { phase, message, .. } => {
-                active_run.current_phase = phase.clone();
-                active_run.current_message = message.clone();
+                let (phase, message) = display_status_changed(phase, message, &i18n);
+                active_run.current_phase = phase;
+                active_run.current_message = message;
             }
             AgentEvent::TextDelta { .. } => {
                 active_run.current_phase = i18n.t(MessageId::AgentStatusStreaming).to_string();
@@ -144,11 +145,11 @@ pub(crate) fn remember_agent_activity(active_run: &mut ActiveAgentRun, governed:
             }
             AgentEvent::AgentCompleted { summary, .. } => {
                 active_run.current_phase = i18n.t(MessageId::AgentStatusCompleted).to_string();
-                active_run.current_message = summary.clone();
+                active_run.current_message = display_agent_summary(summary, &i18n);
             }
             AgentEvent::AgentFailed { error, .. } => {
                 active_run.current_phase = i18n.t(MessageId::AgentStatusFailed).to_string();
-                active_run.current_message = error.clone();
+                active_run.current_message = display_agent_error(error, &i18n);
             }
             AgentEvent::AgentCancelled { reason, .. } => {
                 active_run.current_phase = i18n.t(MessageId::AgentStatusCancelled).to_string();
@@ -179,6 +180,70 @@ fn display_question_text(question: &str, i18n: &I18n) -> String {
         i18n.t(MessageId::QuestionDefaultPrompt).to_string()
     } else {
         question.to_string()
+    }
+}
+
+fn display_status_changed(phase: &str, message: &str, i18n: &I18n) -> (String, String) {
+    let phase = if phase == "thinking" {
+        i18n.t(MessageId::AgentStatusThinking).to_string()
+    } else {
+        phase.to_string()
+    };
+    let message = display_status_message(message, i18n);
+    (phase, message)
+}
+
+fn display_status_message(message: &str, i18n: &I18n) -> String {
+    if message == "thinking" {
+        return i18n.t(MessageId::AgentStatusThinking).to_string();
+    }
+    if message == "preparing model session" {
+        return i18n
+            .t(MessageId::AgentStatusPreparingModelSession)
+            .to_string();
+    }
+    if is_starting_model_backend_message(message) {
+        return i18n
+            .t(MessageId::AgentStatusStartingModelBackend)
+            .to_string();
+    }
+    if let Some(model) = message.strip_prefix("model initialized ") {
+        return i18n.format(MessageId::AgentStatusModelInitialized, &[("model", model)]);
+    }
+    if let Some(status) = message.strip_prefix("model status: ") {
+        return i18n.format(MessageId::AgentStatusModelStatus, &[("status", status)]);
+    }
+    message.to_string()
+}
+
+fn is_starting_model_backend_message(message: &str) -> bool {
+    matches!(
+        message,
+        "Starting model backend"
+            | "starting model backend"
+            | "starting claude-code stream-json backend"
+            | "starting claude-code control protocol backend"
+            | "starting co stream-json backend"
+            | "starting co control protocol backend"
+            | "starting cosh-tui headless backend"
+            | "starting cosh-tui control protocol backend"
+    )
+}
+
+fn display_agent_summary(summary: &str, i18n: &I18n) -> String {
+    if summary == "analysis completed" {
+        i18n.t(MessageId::AgentStatusAnalysisCompleted).to_string()
+    } else {
+        summary.to_string()
+    }
+}
+
+fn display_agent_error(error: &str, i18n: &I18n) -> String {
+    if error == "analysis returned an error" {
+        i18n.t(MessageId::AgentStatusAnalysisReturnedError)
+            .to_string()
+    } else {
+        error.to_string()
     }
 }
 
@@ -298,5 +363,76 @@ mod tests {
         assert!(!active_run
             .current_message
             .contains("Agent needs your input"));
+    }
+
+    #[test]
+    fn provider_status_activity_localizes_neutral_tokens() {
+        let mut active_run = test_active_run();
+        active_run.language = Language::ZhCn;
+        remember_agent_activity(
+            &mut active_run,
+            &[GovernedEvent {
+                decision: GovernanceDecision::Display,
+                policy_decision: GovernancePolicyDecision::DisplayOnly,
+                event: AgentEvent::StatusChanged {
+                    run_id: "run-1".to_string(),
+                    phase: "thinking".to_string(),
+                    message: "thinking".to_string(),
+                },
+                reason: "agent status is display-only".to_string(),
+                display_text: String::new(),
+                auto_execute: false,
+            }],
+        );
+
+        assert_eq!(active_run.current_phase, "正在思考");
+        assert_eq!(active_run.current_message, "正在思考");
+    }
+
+    #[test]
+    fn agent_completion_activity_localizes_neutral_summary() {
+        let mut active_run = test_active_run();
+        active_run.language = Language::ZhCn;
+        remember_agent_activity(
+            &mut active_run,
+            &[GovernedEvent {
+                decision: GovernanceDecision::Display,
+                policy_decision: GovernancePolicyDecision::DisplayOnly,
+                event: AgentEvent::AgentCompleted {
+                    run_id: "run-1".to_string(),
+                    summary: "analysis completed".to_string(),
+                },
+                reason: "agent completion is display-only".to_string(),
+                display_text: String::new(),
+                auto_execute: false,
+            }],
+        );
+
+        assert_eq!(active_run.current_phase, "已完成");
+        assert_eq!(active_run.current_message, "分析完成");
+    }
+
+    #[test]
+    fn provider_startup_activity_hides_adapter_name_in_zh() {
+        let mut active_run = test_active_run();
+        active_run.language = Language::ZhCn;
+        remember_agent_activity(
+            &mut active_run,
+            &[GovernedEvent {
+                decision: GovernanceDecision::Display,
+                policy_decision: GovernancePolicyDecision::DisplayOnly,
+                event: AgentEvent::StatusChanged {
+                    run_id: "run-1".to_string(),
+                    phase: "starting".to_string(),
+                    message: "starting cosh-tui headless backend".to_string(),
+                },
+                reason: "agent status is display-only".to_string(),
+                display_text: String::new(),
+                auto_execute: false,
+            }],
+        );
+
+        assert_eq!(active_run.current_message, "正在启动模型后端");
+        assert!(!active_run.current_message.contains("cosh-tui"));
     }
 }

@@ -20,7 +20,7 @@ fn qwen_recommend_uses_stream_prompt_with_closed_stdin() {
             AgentEvent::TextDelta { text, .. } if text.contains("qwen stream completed")
         ) || matches!(
             event,
-            AgentEvent::AgentCompleted { summary, .. } if summary.contains("co analysis completed")
+            AgentEvent::AgentCompleted { summary, .. } if summary.contains("analysis completed")
         )),
         "expected qwen stream completion, got: {events:?}"
     );
@@ -101,10 +101,10 @@ fn qwen_auto_uses_control_approval_channel() {
 }
 
 #[test]
-fn cosh_tui_auto_uses_control_approval_channel() {
-    let adapter = make_cosh_tui_adapter("mock_qwen_control_cli.sh");
+fn cosh_core_auto_uses_control_approval_channel() {
+    let adapter = make_cosh_core_adapter("mock_qwen_control_cli.sh");
     let session_state = Arc::clone(&adapter.session_id);
-    let request = make_request("cosh-tui-test-auto-stream");
+    let request = make_request("cosh-core-test-auto-stream");
     let handle = adapter.start_cancellable(request, CoshApprovalMode::Auto);
 
     let events = collect_events_until(&handle, Duration::from_secs(5), |event| {
@@ -115,7 +115,7 @@ fn cosh_tui_auto_uses_control_approval_channel() {
         .find(|event| matches!(event, AgentEvent::ToolPermissionRequest { .. }));
     assert!(
         tool_req.is_some(),
-        "expected cosh-tui ToolPermissionRequest"
+        "expected cosh-core ToolPermissionRequest"
     );
 
     if let AgentEvent::ToolPermissionRequest {
@@ -131,7 +131,7 @@ fn cosh_tui_auto_uses_control_approval_channel() {
                 tool_input: None,
                 decision: ApprovalDecision::Allow,
             })
-            .expect("cosh-tui approval response should succeed");
+            .expect("cosh-core approval response should succeed");
     }
 
     let remaining = collect_events_until(&handle, Duration::from_secs(5), |event| {
@@ -141,10 +141,10 @@ fn cosh_tui_auto_uses_control_approval_channel() {
         remaining
             .iter()
             .any(|event| matches!(event, AgentEvent::AgentCompleted { .. })),
-        "expected cosh-tui control completion, got: {remaining:?}"
+        "expected cosh-core control completion, got: {remaining:?}"
     );
     assert!(
         wait_for_session_id(&session_state, "mock-qwen-control", Duration::from_secs(1)),
-        "session_id should be committed after cosh-tui control completion"
+        "session_id should be committed after cosh-core control completion"
     );
 }
