@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-06-18
+
+### Added
+
+- `anolisa adopt <component>` can track a pre-installed system RPM without installing it.
+- `anolisa repair <component>` can refresh RPM component state after package details change.
+- `anolisa forget <component>` can stop tracking a component without removing packages or files.
+
+### Changed
+
+- `anolisa status <component>` now reports drifted RPM components when system package details change.
+- `anolisa uninstall` now keeps observed system RPMs unless `--remove-system-package` is used.
+- `anolisa install` now preserves adapter package resources when adopting RPM components.
+
 ## [0.1.10] - 2026-06-17
 
 ### Added
@@ -194,6 +208,20 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.1.11] - 2026-06-18
+
+### 新增
+
+- `anolisa adopt <component>` 可接管预装 RPM。
+- `anolisa repair <component>` 可刷新漂移的 RPM 状态。
+- `anolisa forget <component>` 可停止跟踪组件。
+
+### 变更
+
+- `anolisa status <component>` 现报告 RPM 状态漂移。
+- `anolisa uninstall` 默认保留观察到的系统 RPM。
+- `anolisa install` 接管 RPM 时保留适配器资源。
 
 ## [0.1.10] - 2026-06-17
 
