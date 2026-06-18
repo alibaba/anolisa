@@ -422,8 +422,9 @@ impl ProcTrace {
 
         let mut skel = open_skel.load().context("failed to load BPF object")?;
 
-        // Populate traced_processes map with target PIDs (only if not reusing external map)
-        // If target_pids is empty, all processes will be traced (BPF side skips filter)
+        // Populate traced_processes and child_pids maps with target PIDs
+        // (only if not reusing external map).
+        // Both maps must contain the PID so that trace_process_exit can clean up.
         if traced_processes.is_none() {
             for &pid in target_pids {
                 let key = pid.to_ne_bytes();
@@ -432,6 +433,10 @@ impl ProcTrace {
                     .traced_processes()
                     .update(&key, &val, libbpf_rs::MapFlags::ANY)
                     .with_context(|| format!("failed to add pid {pid} to traced_processes"))?;
+                skel.maps_mut()
+                    .child_pids()
+                    .update(&key, &val, libbpf_rs::MapFlags::ANY)
+                    .with_context(|| format!("failed to add pid {pid} to child_pids"))?;
             }
         }
 
@@ -456,7 +461,10 @@ impl ProcTrace {
         Self::new_with_target(&[], None)
     }
 
-    /// Add a PID to the traced_processes map at runtime
+    /// Add a PID to the traced_processes and child_pids maps at runtime.
+    ///
+    /// Both maps must contain the PID so that `trace_process_exit` in BPF can
+    /// clean up via either lookup path.
     pub fn add_traced_pid(&mut self, pid: u32) -> Result<()> {
         let key = pid.to_ne_bytes();
         let val = 1u32.to_ne_bytes();
@@ -464,12 +472,18 @@ impl ProcTrace {
             .maps_mut()
             .traced_processes()
             .update(&key, &val, libbpf_rs::MapFlags::ANY)
-            .with_context(|| format!("failed to add pid {pid} to traced_processes"))
+            .with_context(|| format!("failed to add pid {pid} to traced_processes"))?;
+        self.skel
+            .maps_mut()
+            .child_pids()
+            .update(&key, &val, libbpf_rs::MapFlags::ANY)
+            .with_context(|| format!("failed to add pid {pid} to child_pids"))
     }
 
-    /// Remove a PID from the traced_processes map at runtime
+    /// Remove a PID from the traced_processes and child_pids maps at runtime
     pub fn remove_traced_pid(&mut self, pid: u32) -> Result<()> {
         let key = pid.to_ne_bytes();
+        let _ = self.skel.maps_mut().child_pids().delete(&key);
         self.skel
             .maps_mut()
             .traced_processes()

@@ -346,14 +346,15 @@ int trace_process_exit(void *ctx)
     u32 uid = bpf_get_current_uid_gid();
     u64 ts = bpf_ktime_get_ns();
     
-    // Check if this process should be traced
-    u8 *traced = bpf_map_lookup_elem(&child_pids, &pid);
-    if (!traced)
+    // Gate on traced_processes (covers both BPF-inserted and user-space-inserted PIDs)
+    u32 *in_traced = bpf_map_lookup_elem(&traced_processes, &pid);
+    if (!in_traced)
         return 0;
     u64 cg_id = get_cgroup_id_compat();
-    
-    bpf_map_delete_elem(&child_pids, &pid);
+
+    // Clean up both maps unconditionally (delete on missing key is a no-op)
     bpf_map_delete_elem(&traced_processes, &pid);
+    bpf_map_delete_elem(&child_pids, &pid);
     // Reserve space in ring buffer for exit event (fixed size)
     struct proc_event_header *event = bpf_ringbuf_reserve(
         &rb, 
