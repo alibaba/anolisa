@@ -65,34 +65,6 @@ pub struct SslEvent {
 }
 
 impl SslEvent {
-    /// Create SslEvent from BPF raw event, copying only the actual data
-    ///
-    /// Note: BPF timestamp_ns is from bpf_ktime_get_ns() which returns
-    /// nanoseconds since system boot. We convert it to Unix timestamp.
-    pub fn from_bpf(raw: &bpf::probe_SSL_data_t) -> Self {
-        let buf_size = raw.buf_size as usize;
-        let buf = raw.buf[..buf_size.min(MAX_BUF_SIZE)].to_vec();
-
-        // Convert ktime (nanoseconds since boot) to Unix timestamp
-        let ktime_ns = raw.timestamp_ns;
-        let unix_ts_ns = config::ktime_to_unix_ns(ktime_ns);
-
-        Self {
-            source: raw.source,
-            timestamp_ns: unix_ts_ns,
-            delta_ns: raw.delta_ns,
-            pid: raw.pid,
-            tid: raw.tid,
-            uid: raw.uid,
-            len: raw.len,
-            rw: raw.rw,
-            comm: Self::parse_comm(&raw.comm),
-            buf,
-            is_handshake: raw.is_handshake != 0,
-            ssl_ptr: raw.ssl_ptr,
-        }
-    }
-
     /// Create SslEvent from a raw ring-buffer sample of VARIABLE length.
     ///
     /// SSL records are tiered: the BPF side reserves only
@@ -110,9 +82,27 @@ impl SslEvent {
         if data.len() < hdr {
             return None;
         }
-        let u32_at = |off: usize| u32::from_ne_bytes(data[off..off + 4].try_into().unwrap());
-        let u64_at = |off: usize| u64::from_ne_bytes(data[off..off + 8].try_into().unwrap());
-        let i32_at = |off: usize| i32::from_ne_bytes(data[off..off + 4].try_into().unwrap());
+        // Build the byte arrays directly (no `.unwrap()`; see AGENTS.md §0). Every `off`
+        // is a header field offset < `hdr`, and the guard above proves `data.len() >= hdr`,
+        // so each index is in-bounds (`buf` is the last struct member).
+        let u32_at = |off: usize| {
+            u32::from_ne_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
+        };
+        let u64_at = |off: usize| {
+            u64::from_ne_bytes([
+                data[off],
+                data[off + 1],
+                data[off + 2],
+                data[off + 3],
+                data[off + 4],
+                data[off + 5],
+                data[off + 6],
+                data[off + 7],
+            ])
+        };
+        let i32_at = |off: usize| {
+            i32::from_ne_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
+        };
 
         let len = u32_at(mem::offset_of!(R, len)) as usize;
         let buf_size = (u32_at(mem::offset_of!(R, buf_size)) as usize)

@@ -137,7 +137,7 @@ All probes share one ring buffer, distinguished by `common_event_hdr.source` fie
 | source value | Event type | Parse method |
 |-------------|-----------|-------------|
 | 1 (EVENT_SOURCE_PROC) | proctrace event | `VariableEvent::from_bytes()` |
-| 2 (EVENT_SOURCE_SSL) | sslsniff event | `SslEvent::from_bpf()` |
+| 2 (EVENT_SOURCE_SSL) | sslsniff event | `SslEvent::from_bytes()` |
 | 3 (EVENT_SOURCE_PROCMON) | procmon event | `procmon::Event::from_bytes()` |
 | 4 (EVENT_SOURCE_FILEWATCH) | filewatch event | `FileWatchEvent::from_bytes()` |
 | 5 (EVENT_SOURCE_FILEWRITE) | filewrite event | `FileWriteEvent::from_bytes()` |
