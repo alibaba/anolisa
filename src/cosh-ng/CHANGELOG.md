@@ -4,6 +4,18 @@ All notable changes to the cosh-ng project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] — 2026-06-18
+
+### Changed
+- Rename `cosh-tui` crate and binary to `cosh-core` across the entire workspace
+- Update adapter system: `CoshTuiAdapter` → `CoshCoreAdapter`, `AdapterKind::CoshTui` → `CoshCore`
+- Update environment variable `COSH_TUI_PATH` → `COSH_CORE_PATH`
+- Update RPM spec, documentation, and all test fixtures
+
+### Fixed
+- Neutralize agent status text in streaming cards
+- Align streaming card widths in cosh-shell
+
 ## [0.7.0] — 2026-06-17
 
 ### Added
