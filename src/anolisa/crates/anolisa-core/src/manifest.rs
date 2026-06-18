@@ -357,8 +357,9 @@ pub struct AdapterSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     /// Adapter type within the framework (`plugin`, `extension`,
-    /// `service`, ...). Informational; driver behavior is not keyed on
-    /// this value.
+    /// `service`, `skill_bundle`, ...). The adapter manager gates on this
+    /// value: only `"plugin"` (or absent/`None`, defaulting to plugin) is
+    /// supported; all other values are rejected at enable time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter_type: Option<String>,
     /// Trust level (`first-party`, `third-party`, `protocol`). Separate

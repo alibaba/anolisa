@@ -771,6 +771,12 @@ fn execute_adopt(
         reason: format!("failed to save state: {err}"),
     })?;
 
+    // Best-effort: snapshot the datadir component contract so adapter commands
+    // can discover declared adapters. Missing or unwritable contracts produce
+    // warnings, never failures.
+    let snapshot_warnings = snapshot_datadir_contract(layout, component, command);
+    warnings.extend(snapshot_warnings);
+
     // Audit log is best-effort: the adopt already persisted, so a log failure
     // downgrades to a warning instead of unwinding.
     let log = CentralLog::open(layout.central_log.clone());
@@ -799,6 +805,7 @@ fn execute_adopt(
     }
 
     payload.operation_id = Some(operation_id);
+    payload.warnings = warnings;
     render_adopt(ctx, &payload);
     Ok(InstallOutcome::Adopted)
 }
@@ -975,7 +982,7 @@ fn execute_delegated_install(
         }
     };
 
-    let operation_id = persist_delegated_install(
+    let (operation_id, snapshot_warnings) = persist_delegated_install(
         ctx,
         layout,
         command,
@@ -985,6 +992,7 @@ fn execute_delegated_install(
         source_repo.as_deref(),
         &warnings,
     )?;
+    warnings.extend(snapshot_warnings);
 
     let payload = DelegatedInstallPayload {
         component: component.to_string(),
@@ -1020,7 +1028,7 @@ fn persist_delegated_install(
     info: &PackageInfo,
     source_repo: Option<&str>,
     warnings: &[String],
-) -> Result<String, CliError> {
+) -> Result<(String, Vec<String>), CliError> {
     let evr = info.version.to_string();
     let started_at = now_iso8601();
 
@@ -1097,6 +1105,13 @@ fn persist_delegated_install(
         reason: format!("failed to save state: {err}"),
     })?;
 
+    // Best-effort: snapshot the datadir component contract so adapter commands
+    // can discover declared adapters. Missing or unwritable contracts produce
+    // warnings, never failures.
+    let snapshot_warnings = snapshot_datadir_contract(layout, component, command);
+    let mut all_warnings = warnings.to_vec();
+    all_warnings.extend(snapshot_warnings.clone());
+
     // Audit log is best-effort: the install already persisted, so a log failure
     // downgrades to a warning instead of unwinding.
     let log = CentralLog::open(layout.central_log.clone());
@@ -1117,14 +1132,14 @@ fn persist_delegated_install(
         status: Some(LogStatus::Ok),
         objects: vec![component.to_string()],
         backup_ids: Vec::new(),
-        warnings: warnings.to_vec(),
+        warnings: all_warnings,
         details: serde_json::Value::Null,
     };
     if let Err(err) = log.append(&record) {
         eprintln!("warning: failed to write central log: {err}");
     }
 
-    Ok(operation_id)
+    Ok((operation_id, snapshot_warnings))
 }
 
 /// Render a delegated-install result (JSON envelope or human text). Silent in
@@ -2596,6 +2611,93 @@ fn write_installed_component_manifest(
         ),
     })?;
     Ok(path)
+}
+
+/// Best-effort snapshot of the datadir component contract for RPM paths.
+///
+/// After an RPM adopt or delegated install the package-owned contract lives
+/// at `{datadir}/components/<component>/component.toml`. Real RPMs install
+/// to `%{_datadir}` (`/usr/share/anolisa/`), which may differ from the CLI
+/// install prefix (`/usr/local/share/anolisa/`). To handle both, this
+/// function probes the packaged datadir root first (exe-sibling /
+/// `ANOLISA_DATA_DIR` / `layout.datadir`), then falls back to
+/// `layout.datadir` if the packaged root differs. The first existing
+/// contract wins.
+///
+/// The contract is copied verbatim (no TOML parsing) to the state snapshot
+/// at `{state_dir}/component-manifests/<component>/component.toml` so that
+/// later `adapter enable` can discover the component's declared adapters.
+///
+/// Returns any warning messages that should be surfaced to the user.
+/// Neither a missing contract nor a write failure is fatal — both produce
+/// a warning instead of an error.
+fn snapshot_datadir_contract(layout: &FsLayout, component: &str, command: &str) -> Vec<String> {
+    let mut warnings: Vec<String> = Vec::new();
+
+    // Build the set of datadir roots to search, deduped, in priority
+    // order.  packaged_datadir_root already covers env override →
+    // exe-sibling → layout.datadir, but its last probe is is_dir()
+    // gated.  We always include layout.datadir as the final fallback
+    // so the path appears in the "not found" warning.
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(packaged) = crate::packaged::packaged_datadir_root(layout) {
+        roots.push(packaged);
+    }
+    if !roots.iter().any(|r| r == &layout.datadir) {
+        roots.push(layout.datadir.clone());
+    }
+
+    let mut content: Option<String> = None;
+    let mut searched: Vec<PathBuf> = Vec::new();
+    for root in &roots {
+        let source = FsLayout::component_contract_path(root, component);
+        match std::fs::read_to_string(&source) {
+            Ok(c) => {
+                content = Some(c);
+                break;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                searched.push(source);
+            }
+            Err(err) => {
+                warnings.push(format!(
+                    "could not read datadir component contract at {}: {err}",
+                    source.display()
+                ));
+                return warnings;
+            }
+        }
+    }
+
+    let Some(content) = content else {
+        let paths: Vec<String> = searched.iter().map(|p| p.display().to_string()).collect();
+        warnings.push(format!(
+            "component '{component}' does not publish an ANOLISA component contract at {}",
+            paths.join(" or ")
+        ));
+        return warnings;
+    };
+
+    let dest = match common::installed_component_manifest_path(layout, component, command) {
+        Ok(p) => p,
+        Err(err) => {
+            warnings.push(format!(
+                "could not resolve snapshot path for component '{component}': {err}"
+            ));
+            return warnings;
+        }
+    };
+
+    if let Err(err) = write_atomic_text(&dest, &content) {
+        let msg = format!(
+            "failed to snapshot component contract to {}: {err}",
+            dest.display()
+        );
+        eprintln!("warning: {msg}");
+        warnings.push(msg);
+    }
+
+    warnings
 }
 
 fn write_atomic_text(path: &Path, content: &str) -> std::io::Result<()> {
@@ -4661,5 +4763,187 @@ scope = "@anolisa"
         assert_eq!(batch_status(InstallOutcome::Installed, true), "planned");
         assert_eq!(batch_status(InstallOutcome::Adopted, false), "adopted");
         assert_eq!(batch_status(InstallOutcome::Adopted, true), "adopt-planned");
+    }
+
+    // ── contract snapshot tests ────────────────────────────────────────
+
+    /// Place a component contract in the datadir so RPM adopt/delegated-install
+    /// can discover it.
+    fn seed_datadir_contract(layout: &FsLayout, component: &str, toml: &str) {
+        let dir = layout.datadir.join("components").join(component);
+        std::fs::create_dir_all(&dir).expect("create datadir component dir");
+        std::fs::write(dir.join("component.toml"), toml).expect("write datadir contract");
+    }
+
+    #[test]
+    fn adopt_snapshots_datadir_contract() {
+        let _env_guard = crate::packaged::DataDirEnvGuard::clear();
+        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        let layout = common::resolve_layout(&ctx);
+        let contract = component_manifest_toml("copilot-shell", "2.3.0", &["system"]);
+        seed_datadir_contract(&layout, "copilot-shell", &contract);
+
+        let q = FakeQuery {
+            installed: vec![(
+                "anolisa-copilot-shell".to_string(),
+                pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+            )],
+            origins: vec![("anolisa-copilot-shell".to_string(), "@System".to_string())],
+            ..Default::default()
+        };
+        let outcome =
+            handle_one_with_query("copilot-shell".to_string(), args("copilot-shell"), &ctx, &q)
+                .expect("adopt ok");
+        assert_eq!(outcome, InstallOutcome::Adopted);
+
+        let snapshot = common::installed_component_manifest_path(&layout, "copilot-shell", COMMAND)
+            .expect("snapshot path");
+        assert!(
+            snapshot.exists(),
+            "adopt must snapshot the datadir contract to {snapshot:?}"
+        );
+        let content = std::fs::read_to_string(&snapshot).expect("read snapshot");
+        assert_eq!(content, contract, "snapshot must be a verbatim copy");
+    }
+
+    #[test]
+    fn adopt_without_datadir_contract_succeeds_with_warning() {
+        let _env_guard = crate::packaged::DataDirEnvGuard::clear();
+        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        let layout = common::resolve_layout(&ctx);
+        // Deliberately do NOT seed a datadir contract.
+
+        let q = FakeQuery {
+            installed: vec![(
+                "anolisa-copilot-shell".to_string(),
+                pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+            )],
+            origins: vec![("anolisa-copilot-shell".to_string(), "@System".to_string())],
+            ..Default::default()
+        };
+        let outcome =
+            handle_one_with_query("copilot-shell".to_string(), args("copilot-shell"), &ctx, &q)
+                .expect("adopt must succeed even without a contract");
+        assert_eq!(outcome, InstallOutcome::Adopted);
+
+        let snapshot = common::installed_component_manifest_path(&layout, "copilot-shell", COMMAND)
+            .expect("snapshot path");
+        assert!(
+            !snapshot.exists(),
+            "no snapshot when the datadir contract is absent"
+        );
+    }
+
+    #[test]
+    fn delegated_install_snapshots_datadir_contract() {
+        let _env_guard = crate::packaged::DataDirEnvGuard::clear();
+        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        let layout = common::resolve_layout(&ctx);
+        let contract = component_manifest_toml("copilot-shell", "2.3.0", &["system"]);
+        seed_datadir_contract(&layout, "copilot-shell", &contract);
+
+        let fake = FakeInstaller::new(
+            "anolisa-copilot-shell",
+            pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+        )
+        .with_origin("anolisa");
+        let exec = RpmExec {
+            query: &fake,
+            txn: &fake,
+            is_root: true,
+        };
+        let mut a = args("copilot-shell");
+        a.backend = Some("rpm".to_string());
+
+        let outcome = handle_one_with_exec("copilot-shell".to_string(), a, &ctx, &exec)
+            .expect("delegated install ok");
+        assert_eq!(outcome, InstallOutcome::Installed);
+
+        let snapshot = common::installed_component_manifest_path(&layout, "copilot-shell", COMMAND)
+            .expect("snapshot path");
+        assert!(
+            snapshot.exists(),
+            "delegated install must snapshot the datadir contract to {snapshot:?}"
+        );
+        let content = std::fs::read_to_string(&snapshot).expect("read snapshot");
+        assert_eq!(content, contract, "snapshot must be a verbatim copy");
+    }
+
+    #[test]
+    fn delegated_install_without_datadir_contract_succeeds() {
+        let _env_guard = crate::packaged::DataDirEnvGuard::clear();
+        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        let layout = common::resolve_layout(&ctx);
+        // No datadir contract seeded.
+
+        let fake = FakeInstaller::new(
+            "anolisa-copilot-shell",
+            pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+        )
+        .with_origin("anolisa");
+        let exec = RpmExec {
+            query: &fake,
+            txn: &fake,
+            is_root: true,
+        };
+        let mut a = args("copilot-shell");
+        a.backend = Some("rpm".to_string());
+
+        let outcome = handle_one_with_exec("copilot-shell".to_string(), a, &ctx, &exec)
+            .expect("delegated install must succeed without a contract");
+        assert_eq!(outcome, InstallOutcome::Installed);
+
+        let snapshot = common::installed_component_manifest_path(&layout, "copilot-shell", COMMAND)
+            .expect("snapshot path");
+        assert!(
+            !snapshot.exists(),
+            "no snapshot when the datadir contract is absent"
+        );
+    }
+
+    /// Regression: when the contract lives only in the packaged datadir
+    /// (simulated via `ANOLISA_DATA_DIR`), not in `layout.datadir`,
+    /// adopt must still write the snapshot.
+    #[test]
+    fn adopt_snapshots_packaged_datadir_contract() {
+        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        let layout = common::resolve_layout(&ctx);
+
+        // Seed the contract in a separate "packaged" dir (not layout.datadir).
+        let packaged = _tmp.path().join("packaged_share_anolisa");
+        let contract = component_manifest_toml("copilot-shell", "2.3.0", &["system"]);
+        let contract_dir = packaged.join("components").join("copilot-shell");
+        std::fs::create_dir_all(&contract_dir).expect("mkdir packaged contract");
+        std::fs::write(contract_dir.join("component.toml"), &contract)
+            .expect("write packaged contract");
+
+        // Guard sets ANOLISA_DATA_DIR and restores on drop (panic-safe).
+        let _env_guard = crate::packaged::DataDirEnvGuard::set(&packaged);
+
+        let q = FakeQuery {
+            installed: vec![(
+                "anolisa-copilot-shell".to_string(),
+                pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+            )],
+            origins: vec![("anolisa-copilot-shell".to_string(), "@System".to_string())],
+            ..Default::default()
+        };
+        let outcome =
+            handle_one_with_query("copilot-shell".to_string(), args("copilot-shell"), &ctx, &q)
+                .expect("adopt ok");
+
+        assert_eq!(outcome, InstallOutcome::Adopted);
+
+        let snapshot = common::installed_component_manifest_path(&layout, "copilot-shell", COMMAND)
+            .expect("snapshot path");
+        assert!(
+            snapshot.exists(),
+            "adopt must snapshot from packaged datadir to {snapshot:?}"
+        );
+        let content = std::fs::read_to_string(&snapshot).expect("read snapshot");
+        assert_eq!(
+            content, contract,
+            "snapshot must be a verbatim copy of the packaged contract"
+        );
     }
 }

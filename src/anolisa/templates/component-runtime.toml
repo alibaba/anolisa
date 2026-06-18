@@ -1,5 +1,17 @@
 # Template: runtime component manifest v2.
 # Copy to src/anolisa/manifests/runtime/<component>.toml.
+#
+# Packaged components that expose this contract to ANOLISA install it at:
+#
+#   /usr/share/anolisa/components/<component>/component.toml
+#
+# RPM specs should use the %{_datadir} macro:
+#
+#   %{_datadir}/anolisa/components/<component>/component.toml
+#
+# Raw archives may carry the source contract at .anolisa/component.toml. During
+# install or adopt, ANOLISA may copy the resolved contract into its state
+# snapshot at {state_dir}/component-manifests/<component>/component.toml.
 
 manifest_version = 2
 anolisa_min_version = "0.1.0"

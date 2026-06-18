@@ -21,6 +21,15 @@ use std::path::{Path, PathBuf};
 
 /// Application namespace folder appended to most FHS / file-hierarchy roots.
 const NS: &str = "anolisa";
+/// Subdirectory under `datadir` where package-owned component contracts
+/// are installed (e.g. `{datadir}/components/<component>/component.toml`).
+const COMPONENTS_SUBDIR: &str = "components";
+/// Subdirectory under `state_dir` where ANOLISA stores its runtime copy of
+/// component contracts after install/adopt.
+const COMPONENT_MANIFESTS_SUBDIR: &str = "component-manifests";
+/// Filename used for both the package-owned component contract and the
+/// runtime state snapshot.
+const COMPONENT_MANIFEST_FILE: &str = "component.toml";
 /// Audit-log file name written under `log_dir`.
 const CENTRAL_LOG_NAME: &str = "central.jsonl";
 /// Lock file name written under `state_dir`.
@@ -269,6 +278,48 @@ impl FsLayout {
             manifests_overlay,
             systemd_unit_dir,
         }
+    }
+
+    /// Package-owned component contract path under this layout's datadir:
+    /// `{datadir}/components/<component>/component.toml`.
+    ///
+    /// RPM packages and raw archives install the ANOLISA component
+    /// contract at this location. The path derives from [`Self::datadir`],
+    /// so it respects system-mode prefixes and user-mode XDG overrides.
+    pub fn contract_path(&self, component: &str) -> PathBuf {
+        Self::component_contract_path(&self.datadir, component)
+    }
+
+    /// Installed-state snapshot path under this layout's state_dir:
+    /// `{state_dir}/component-manifests/<component>/component.toml`.
+    ///
+    /// ANOLISA copies the resolved contract into this location after
+    /// install or adopt. Commands such as `adapter enable` read from here
+    /// first, falling back to the package-owned contract when absent.
+    pub fn snapshot_path(&self, component: &str) -> PathBuf {
+        Self::component_manifest_snapshot_path(&self.state_dir, component)
+    }
+
+    /// Package-owned component contract path under an arbitrary datadir root.
+    ///
+    /// Use this when computing candidates across multiple roots; for a
+    /// single layout prefer [`Self::contract_path`].
+    pub fn component_contract_path(datadir_root: &Path, component: &str) -> PathBuf {
+        datadir_root
+            .join(COMPONENTS_SUBDIR)
+            .join(component)
+            .join(COMPONENT_MANIFEST_FILE)
+    }
+
+    /// Installed-state snapshot path under an arbitrary state root.
+    ///
+    /// Use this when computing candidates across multiple roots; for a
+    /// single layout prefer [`Self::snapshot_path`].
+    pub fn component_manifest_snapshot_path(state_root: &Path, component: &str) -> PathBuf {
+        state_root
+            .join(COMPONENT_MANIFESTS_SUBDIR)
+            .join(component)
+            .join(COMPONENT_MANIFEST_FILE)
     }
 }
 
@@ -538,6 +589,79 @@ mod tests {
         assert_eq!(
             with_runtime.runtime_dir,
             PathBuf::from("/run/user/42/anolisa")
+        );
+    }
+
+    // ---- component contract paths ----------------------------------------
+
+    #[test]
+    fn system_component_contract_path_derives_from_datadir() {
+        let layout = FsLayout::system(None);
+        assert_eq!(
+            layout.contract_path("sec-core"),
+            PathBuf::from("/usr/local/share/anolisa/components/sec-core/component.toml")
+        );
+    }
+
+    #[test]
+    fn system_component_manifest_snapshot_path_derives_from_state_dir() {
+        let layout = FsLayout::system(None);
+        assert_eq!(
+            layout.snapshot_path("sec-core"),
+            PathBuf::from("/var/lib/anolisa/component-manifests/sec-core/component.toml")
+        );
+    }
+
+    #[test]
+    fn system_component_contract_path_with_prefix() {
+        let layout = FsLayout::system(Some(PathBuf::from("/opt/x")));
+        assert_eq!(
+            layout.contract_path("tokenless"),
+            PathBuf::from("/opt/x/usr/local/share/anolisa/components/tokenless/component.toml")
+        );
+        assert_eq!(
+            layout.snapshot_path("tokenless"),
+            PathBuf::from("/opt/x/var/lib/anolisa/component-manifests/tokenless/component.toml")
+        );
+    }
+
+    #[test]
+    fn user_component_contract_path_derives_from_datadir() {
+        let layout = user_no_overrides("/tmp/h");
+        assert_eq!(
+            layout.contract_path("os-skills"),
+            PathBuf::from("/tmp/h/.local/share/anolisa/components/os-skills/component.toml")
+        );
+    }
+
+    #[test]
+    fn user_component_manifest_snapshot_path_derives_from_state_dir() {
+        let layout = user_no_overrides("/tmp/h");
+        assert_eq!(
+            layout.snapshot_path("os-skills"),
+            PathBuf::from(
+                "/tmp/h/.local/state/anolisa/component-manifests/os-skills/component.toml"
+            )
+        );
+    }
+
+    #[test]
+    fn user_component_contract_path_honors_xdg_overrides() {
+        let layout = FsLayout::user_with_overrides(
+            PathBuf::from("/tmp/h"),
+            Some(PathBuf::from("/data")),
+            None,
+            Some(PathBuf::from("/state")),
+            None,
+            None,
+        );
+        assert_eq!(
+            layout.contract_path("sec-core"),
+            PathBuf::from("/data/anolisa/components/sec-core/component.toml")
+        );
+        assert_eq!(
+            layout.snapshot_path("sec-core"),
+            PathBuf::from("/state/anolisa/component-manifests/sec-core/component.toml")
         );
     }
 }

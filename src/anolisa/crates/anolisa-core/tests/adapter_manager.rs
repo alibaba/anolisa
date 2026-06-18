@@ -302,8 +302,10 @@ fn user_layout_enable_accepts_system_installed_component() {
 
     let mut manager =
         AdapterManager::new(user_layout.clone(), Some(user_home), "tester".to_string());
-    manager.push_datadir_root(system_layout.datadir.clone());
-    manager.push_state_root(system_layout.state_dir.clone());
+    manager.push_visible_root(anolisa_core::adapter::manager::VisibleRoot {
+        state_dir: system_layout.state_dir.clone(),
+        contract_datadir_roots: vec![system_layout.datadir.clone()],
+    });
 
     manager
         .enable(COMPONENT, Some(FRAMEWORK), false)
@@ -580,7 +582,10 @@ fn user_scan_includes_system_state_declaration() {
     std::fs::create_dir_all(&user_home).expect("home");
     let user_layout = FsLayout::user(user_home.clone());
     let mut manager = AdapterManager::new(user_layout, Some(user_home), "tester".to_string());
-    manager.push_state_root(system_layout.state_dir.clone());
+    manager.push_visible_root(anolisa_core::adapter::manager::VisibleRoot {
+        state_dir: system_layout.state_dir.clone(),
+        contract_datadir_roots: vec![system_layout.datadir.clone()],
+    });
 
     let report = manager.scan().expect("scan");
     let entry = report

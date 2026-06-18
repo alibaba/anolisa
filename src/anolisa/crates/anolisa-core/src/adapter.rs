@@ -21,6 +21,7 @@ use anolisa_platform::fs_layout::FsLayout;
 use crate::manifest::AdapterSpec;
 
 pub mod claim;
+pub mod contract;
 pub mod driver;
 pub mod manager;
 pub mod openclaw;
@@ -88,6 +89,21 @@ pub enum AdapterError {
         component: String,
         /// Framework absent from the installed component manifest.
         framework: String,
+    },
+
+    /// The manifest declares an `adapter_type` that is not yet supported
+    /// by any built-in driver (e.g. `skill_bundle`, `extension`). Only
+    /// `plugin` (or absent, defaulting to plugin) is implemented.
+    #[error(
+        "adapter type '{adapter_type}' for {component}/{framework} is not supported; only 'plugin' is implemented"
+    )]
+    UnsupportedAdapterType {
+        /// Component whose adapter was requested.
+        component: String,
+        /// Framework the adapter targets.
+        framework: String,
+        /// The unsupported `adapter_type` value from the manifest.
+        adapter_type: String,
     },
 
     /// The installed component manifest required by adapter enable is

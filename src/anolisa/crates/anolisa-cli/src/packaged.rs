@@ -67,82 +67,98 @@ pub fn packaged_datadir_root(layout: &FsLayout) -> Option<PathBuf> {
     None
 }
 
+/// Crate-wide mutex for tests that mutate `ANOLISA_DATA_DIR`. Cargo runs
+/// tests within a crate concurrently, and `ANOLISA_DATA_DIR` is
+/// process-global, so every test that sets or reads it must hold this lock.
+#[cfg(test)]
+pub(crate) static DATA_DIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// RAII guard that sets `ANOLISA_DATA_DIR` on creation and restores (or
+/// removes) the original value on drop — even if the test panics.
+#[cfg(test)]
+pub(crate) struct DataDirEnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    saved: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl DataDirEnvGuard {
+    /// Acquire the env lock, save the current `ANOLISA_DATA_DIR`, and set
+    /// the new value.
+    pub(crate) fn set(value: &std::path::Path) -> Self {
+        let lock = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var_os(DATA_DIR_ENV);
+        // SAFETY: guarded by DATA_DIR_ENV_LOCK.
+        unsafe {
+            std::env::set_var(DATA_DIR_ENV, value);
+        }
+        Self { _lock: lock, saved }
+    }
+
+    /// Acquire the env lock and remove `ANOLISA_DATA_DIR` so the test
+    /// runs as if no env override is set. The original value is restored
+    /// on drop.
+    pub(crate) fn clear() -> Self {
+        let lock = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var_os(DATA_DIR_ENV);
+        // SAFETY: guarded by DATA_DIR_ENV_LOCK.
+        unsafe {
+            std::env::remove_var(DATA_DIR_ENV);
+        }
+        Self { _lock: lock, saved }
+    }
+}
+
+#[cfg(test)]
+impl Drop for DataDirEnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: guarded by the lock held in self._lock.
+        unsafe {
+            match &self.saved {
+                Some(v) => std::env::set_var(DATA_DIR_ENV, v),
+                None => std::env::remove_var(DATA_DIR_ENV),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
 
-    /// `ANOLISA_DATA_DIR` takes precedence over every other probe. We
-    /// scope the env mutation to this test only — and use a tmpdir we
-    /// know exists so the `is_dir()` guard passes deterministically.
-    ///
-    /// `std::env::set_var` is not thread-safe; we run the env-mutating
-    /// tests in a single module-level mutex to avoid racing other
-    /// tests that read env vars. Cargo test runs tests in the same
-    /// crate concurrently so this matters.
+    /// `ANOLISA_DATA_DIR` takes precedence over every other probe.
     #[test]
     fn env_override_wins() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempdir().expect("tmp");
-        // Layout that points at a non-existent path so we can prove env
-        // wins rather than just matching layout.datadir.
         let layout = FsLayout::system(Some(PathBuf::from("/nonexistent-anolisa-prefix")));
-        // SAFETY: env mutation guarded by ENV_LOCK.
-        unsafe {
-            std::env::set_var(DATA_DIR_ENV, tmp.path());
-        }
+        let _guard = DataDirEnvGuard::set(tmp.path());
         let got = packaged_datadir_root(&layout);
-        unsafe {
-            std::env::remove_var(DATA_DIR_ENV);
-        }
         assert_eq!(got.as_deref(), Some(tmp.path()));
     }
 
     /// When `ANOLISA_DATA_DIR` points at a path that does not exist,
-    /// we fall through to the next probe instead of returning the
-    /// missing path. Pins that the env override is gated on
-    /// `is_dir()`, not blindly returned.
+    /// we fall through to the next probe.
     #[test]
     fn env_override_falls_through_when_missing() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let layout = FsLayout::system(Some(PathBuf::from("/nonexistent-anolisa-prefix")));
-        unsafe {
-            std::env::set_var(DATA_DIR_ENV, "/definitely/does/not/exist/anolisa");
-        }
+        let _guard =
+            DataDirEnvGuard::set(std::path::Path::new("/definitely/does/not/exist/anolisa"));
         let got = packaged_datadir_root(&layout);
-        unsafe {
-            std::env::remove_var(DATA_DIR_ENV);
-        }
-        // Layout.datadir is also missing, and current_exe() in test
-        // builds points at the test runner under target/, whose
-        // ../share/anolisa is unlikely to exist on the host — so we
-        // assert None instead of pinning a specific fallback.
         assert!(got.is_none(), "expected fallthrough, got {got:?}");
     }
 
     /// Without env override, an existing layout.datadir wins over a
-    /// missing exe-sibling probe. The exe-sibling probe is gated on
-    /// `is_dir()`, so we can rely on it failing for a test binary.
+    /// missing exe-sibling probe.
     #[test]
     fn layout_datadir_used_when_it_exists() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = DataDirEnvGuard::clear();
         let tmp = tempdir().expect("tmp");
         let prefix = tmp.path().to_path_buf();
         let layout = FsLayout::system(Some(prefix.clone()));
-        // System layout under prefix → datadir = prefix/usr/local/share/anolisa.
         fs::create_dir_all(&layout.datadir).expect("mkdir datadir");
-        // Clear env to make sure step 1 falls through.
-        unsafe {
-            std::env::remove_var(DATA_DIR_ENV);
-        }
         let got = packaged_datadir_root(&layout);
         assert_eq!(got.as_deref(), Some(layout.datadir.as_path()));
     }
-
-    /// A serial-execution mutex so the env-mutating tests above can
-    /// share a single `set_var` / `remove_var` window without racing.
-    /// Plain `Mutex<()>` instead of `OnceLock<Mutex>` because the
-    /// tests are few and ordering is not load-bearing.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }

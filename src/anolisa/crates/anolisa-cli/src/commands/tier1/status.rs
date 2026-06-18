@@ -2008,6 +2008,7 @@ mod tests {
             ))),
             driver_available: true,
             framework_detected: true,
+            adapter_type: Some("plugin".to_string()),
             enabled,
             claim_status: if enabled {
                 Some(ClaimStatus::Enabled)

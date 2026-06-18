@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -42,12 +42,6 @@ const LOG_SOURCE: &str = "anolisa-cli";
 /// Output beyond this is drained (so the child never blocks on a full
 /// pipe) but discarded before logging.
 const OUTPUT_CAP: usize = 64 * 1024;
-/// State subdirectory where install stores component manifests used for
-/// future adapter enable checks.
-const INSTALLED_COMPONENT_MANIFESTS_SUBDIR: &str = "component-manifests";
-/// Filename used for each saved installed component contract.
-const INSTALLED_COMPONENT_MANIFEST_FILE: &str = "component.toml";
-
 /// Outcome of [`AdapterManager::enable`].
 #[derive(Debug, Clone)]
 pub enum EnableOutcome {
@@ -88,6 +82,10 @@ pub struct ScanEntry {
     /// Whether the framework was detected on the host (best-effort;
     /// `false` when no driver is available to probe).
     pub framework_detected: bool,
+    /// The `adapter_type` declared in the component manifest for this
+    /// adapter entry, when the manifest was readable (`None` when the
+    /// entry came from resource-directory discovery only).
+    pub adapter_type: Option<String>,
     /// Whether a receipt for `(component, framework)` exists in state.
     pub enabled: bool,
     /// Lifecycle status of the receipt, when one exists.
@@ -127,6 +125,22 @@ pub struct StatusReport {
 struct AdapterDecl {
     component: String,
     framework: String,
+    /// The `adapter_type` from the manifest entry, if present.
+    adapter_type: Option<String>,
+}
+
+/// A state root paired with the datadir roots it may use for component
+/// contract resolution. Contract lookup for a component found in this
+/// state root searches only the paired datadir roots — not datadirs
+/// from other visible roots — so a user-scope component cannot
+/// silently fall back to a system-scope contract.
+#[derive(Debug, Clone)]
+pub struct VisibleRoot {
+    /// State directory containing `installed.toml`.
+    pub state_dir: PathBuf,
+    /// Datadir roots searched for component contracts when a component
+    /// is found in this state root. Searched in order; first match wins.
+    pub contract_datadir_roots: Vec<PathBuf>,
 }
 
 /// Trusted orchestrator for adapter enable/disable/status/scan.
@@ -134,54 +148,83 @@ pub struct AdapterManager {
     layout: FsLayout,
     registry: DriverRegistry,
     state_path: PathBuf,
-    /// State roots searched for installed component records/manifests, in
-    /// preference order. Receipts are always written only to
-    /// [`Self::state_path`].
-    state_roots: Vec<PathBuf>,
-    /// Datadir roots searched for `adapters/<component>/<framework>/`, in
-    /// preference order (first match wins).
-    datadir_roots: Vec<PathBuf>,
+    /// Paired visible roots, in preference order. Each pairs a state root
+    /// with its contract-visible datadir roots. Receipts are always
+    /// written only to [`Self::state_path`] (the primary root's state).
+    visible_roots: Vec<VisibleRoot>,
+    /// All datadir roots (across all visible roots, deduped), used for
+    /// resource-directory discovery (`adapters/<component>/<framework>/`).
+    /// Resource discovery is scope-independent: a user-mode enable may
+    /// use adapter resources from a system-installed package.
+    all_datadir_roots: Vec<PathBuf>,
     user_home: Option<PathBuf>,
     /// Identity recorded as the central-log actor.
     actor: String,
 }
 
 impl AdapterManager {
-    /// Build a manager for the given layout. The state file is
-    /// `{state_dir}/installed.toml`; the primary datadir root is
-    /// `layout.datadir`, and the primary component-manifest root is
-    /// `layout.state_dir`. Use [`Self::push_datadir_root`] and
-    /// [`Self::push_state_root`] to add fallbacks (e.g. system roots when
-    /// running in user mode).
+    /// Build a manager for the given layout. The primary visible root
+    /// pairs `layout.state_dir` with `layout.datadir`. Use
+    /// [`Self::push_visible_root`] to add fallback roots (e.g. system
+    /// roots when running in user mode).
     pub fn new(layout: FsLayout, user_home: Option<PathBuf>, actor: String) -> Self {
         let state_path = layout.state_dir.join("installed.toml");
-        let state_roots = vec![layout.state_dir.clone()];
-        let datadir_roots = vec![layout.datadir.clone()];
+        let primary = VisibleRoot {
+            state_dir: layout.state_dir.clone(),
+            contract_datadir_roots: vec![layout.datadir.clone()],
+        };
+        let all_datadir_roots = vec![layout.datadir.clone()];
         Self {
             layout,
             registry: DriverRegistry::builtin(),
             state_path,
-            state_roots,
-            datadir_roots,
+            visible_roots: vec![primary],
+            all_datadir_roots,
             user_home,
             actor,
         }
     }
 
-    /// Append an additional datadir root to search after the ones already
-    /// registered. Ignored if already present.
-    pub fn push_datadir_root(&mut self, root: PathBuf) {
-        if !self.datadir_roots.contains(&root) {
-            self.datadir_roots.push(root);
+    /// Add a visible root with explicit contract-scope datadir pairing.
+    ///
+    /// The state root is appended to the search order (lower priority
+    /// than roots registered earlier). Its `contract_datadir_roots` are
+    /// only used for contract resolution when a component is found in
+    /// this state root — they are not mixed into other roots' contract
+    /// scope.
+    ///
+    /// All datadir roots are also added to the global resource-discovery
+    /// set (for `adapters/<component>/<framework>/` lookups), since
+    /// adapter resource directories are scope-independent.
+    pub fn push_visible_root(&mut self, root: VisibleRoot) {
+        if self
+            .visible_roots
+            .iter()
+            .any(|r| r.state_dir == root.state_dir)
+        {
+            return;
         }
+        for dd in &root.contract_datadir_roots {
+            if !self.all_datadir_roots.contains(dd) {
+                self.all_datadir_roots.push(dd.clone());
+            }
+        }
+        self.visible_roots.push(root);
     }
 
-    /// Append an additional installed-state root to search for component
-    /// installation records and saved component manifests. Receipts still
-    /// belong to the manager's primary state root.
-    pub fn push_state_root(&mut self, root: PathBuf) {
-        if !self.state_roots.contains(&root) {
-            self.state_roots.push(root);
+    /// Add a datadir root to the primary visible root's contract scope
+    /// and to the global resource-discovery set. Use this when the
+    /// system-mode packaged datadir differs from `layout.datadir`
+    /// (e.g. exe-sibling `/usr/share/anolisa/` vs install prefix
+    /// `/usr/local/share/anolisa/`).
+    pub fn push_primary_datadir_root(&mut self, root: PathBuf) {
+        if let Some(primary) = self.visible_roots.first_mut() {
+            if !primary.contract_datadir_roots.contains(&root) {
+                primary.contract_datadir_roots.push(root.clone());
+            }
+        }
+        if !self.all_datadir_roots.contains(&root) {
+            self.all_datadir_roots.push(root);
         }
     }
 
@@ -225,6 +268,7 @@ impl AdapterManager {
                     resource_root: Some(resource_root),
                     driver_available,
                     framework_detected,
+                    adapter_type: None,
                     enabled: claim.is_some(),
                     claim_status: claim.map(|c| c.status),
                 },
@@ -236,6 +280,7 @@ impl AdapterManager {
             let key = (declaration.component.clone(), declaration.framework.clone());
             if let Some(entry) = entries.get_mut(&key) {
                 entry.declared = true;
+                entry.adapter_type = declaration.adapter_type.clone();
                 continue;
             }
             let driver = self.registry.get(&declaration.framework);
@@ -258,6 +303,7 @@ impl AdapterManager {
                     resource_root: None,
                     driver_available,
                     framework_detected,
+                    adapter_type: declaration.adapter_type,
                     enabled: claim.is_some(),
                     claim_status: claim.map(|c| c.status),
                 },
@@ -282,7 +328,8 @@ impl AdapterManager {
     ///
     /// [`AdapterError::ComponentNotInstalled`], [`AdapterError::AdapterNotDeclared`],
     /// [`AdapterError::AdapterManifest`], [`AdapterError::UnknownFramework`],
-    /// [`AdapterError::AmbiguousFramework`], [`AdapterError::ResourceRootNotFound`],
+    /// [`AdapterError::AmbiguousFramework`], [`AdapterError::UnsupportedAdapterType`],
+    /// [`AdapterError::ResourceRootNotFound`],
     /// [`AdapterError::FrameworkNotDetected`], [`AdapterError::BundleInvalid`],
     /// [`AdapterError::FrameworkCli`], [`AdapterError::ClaimValidation`], or
     /// state/lock/log errors.
@@ -297,6 +344,21 @@ impl AdapterManager {
 
         let manifest = self.load_visible_component_manifest(component, &state)?;
         let framework = self.resolve_framework(component, framework, &manifest)?;
+
+        // Fail-closed: only `plugin` (or absent/None, defaulting to
+        // plugin) is supported. Any other adapter_type must be rejected
+        // before we invoke a driver.
+        let adapter_type = declared_adapter_type(&manifest, &framework);
+        if let Some(ref at) = adapter_type {
+            if at != "plugin" {
+                return Err(AdapterError::UnsupportedAdapterType {
+                    component: component.to_string(),
+                    framework: framework.clone(),
+                    adapter_type: at.clone(),
+                });
+            }
+        }
+
         let declared_plugin_id = declared_plugin_id(&manifest, &framework);
         let driver =
             self.registry
@@ -626,73 +688,89 @@ impl AdapterManager {
         }
     }
 
-    /// Load the installed component manifest from the first visible state
-    /// root that records `component` as installed.
+    /// Load the component contract for an installed component.
+    ///
+    /// The component must be recorded as installed in a visible state root.
+    /// Once that gate passes, the contract is resolved using only the
+    /// matched visible root's paired state and datadir roots — a user-scope
+    /// component never falls back to a system-scope contract.
     fn load_visible_component_manifest(
         &self,
         component: &str,
         current_state: &InstalledState,
     ) -> Result<ComponentManifest, AdapterError> {
-        let Some(state_dir) = self.find_component_state_dir(component, current_state)? else {
-            return Err(AdapterError::ComponentNotInstalled {
+        let vr = self
+            .find_component_visible_root(component, current_state)?
+            .ok_or_else(|| AdapterError::ComponentNotInstalled {
                 component: component.to_string(),
-            });
-        };
-        let path = installed_component_manifest_path(&state_dir, component);
-        let manifest =
-            ComponentManifest::from_file(&path).map_err(|err| AdapterError::AdapterManifest {
-                component: component.to_string(),
-                path: path.clone(),
-                reason: err.to_string(),
             })?;
+
+        let manifest = super::contract::resolve_component_contract(
+            component,
+            &[vr.state_dir.clone()],
+            &vr.contract_datadir_roots,
+        )
+        .map_err(|err| map_contract_error(component, err))?;
+
         if manifest.component.name != component {
             return Err(AdapterError::AdapterManifest {
                 component: component.to_string(),
-                path,
+                path: PathBuf::new(),
                 reason: format!("manifest declares component '{}'", manifest.component.name),
             });
         }
         Ok(manifest)
     }
 
-    /// First visible state root whose installed state contains `component`.
-    fn find_component_state_dir(
+    /// First visible root whose installed state contains `component` in
+    /// an adapter-visible status ([`Installed`](ObjectStatus::Installed) or
+    /// [`Adopted`](ObjectStatus::Adopted)). Returns the full
+    /// [`VisibleRoot`] so callers can scope contract resolution to the
+    /// paired datadir roots.
+    fn find_component_visible_root(
         &self,
         component: &str,
         current_state: &InstalledState,
-    ) -> Result<Option<PathBuf>, AdapterError> {
-        for state_dir in &self.state_roots {
-            let installed = if state_dir == &self.layout.state_dir {
+    ) -> Result<Option<&VisibleRoot>, AdapterError> {
+        for vr in &self.visible_roots {
+            let visible = if vr.state_dir == self.layout.state_dir {
                 current_state
                     .find_object(ObjectKind::Component, component)
-                    .is_some()
+                    .is_some_and(|obj| is_adapter_visible_status(obj.status))
             } else {
-                let state_path = state_dir.join("installed.toml");
+                let state_path = vr.state_dir.join("installed.toml");
                 InstalledState::load(&state_path)?
                     .find_object(ObjectKind::Component, component)
-                    .is_some()
+                    .is_some_and(|obj| is_adapter_visible_status(obj.status))
             };
-            if installed {
-                return Ok(Some(state_dir.clone()));
+            if visible {
+                return Ok(Some(vr));
             }
         }
         Ok(None)
     }
 
-    /// Adapter declarations from installed component manifests in visible
-    /// state roots. Earlier roots shadow later roots for the same component,
-    /// matching enable's user-before-system resolution.
+    /// Adapter declarations from component contracts visible to the
+    /// manager. Uses the same scope-paired contract resolution as `enable`
+    /// so scan and enable agree.
+    ///
+    /// When a component appears in multiple visible roots (e.g. user and
+    /// system), only the first (highest-priority) root owns the
+    /// resolution — its paired state snapshot and datadir roots are
+    /// searched. A lower-priority root's contract is never used as a
+    /// fallback.
     fn load_visible_adapter_declarations(
         &self,
         current_state: &InstalledState,
     ) -> (Vec<AdapterDecl>, Vec<String>) {
         let mut declarations = BTreeSet::new();
-        let mut seen_components = BTreeSet::new();
+        // Map component name → the VisibleRoot where it was first seen.
+        let mut component_vr: BTreeMap<String, &VisibleRoot> = BTreeMap::new();
         let mut warnings = Vec::new();
 
-        for state_dir in &self.state_roots {
-            let state_path = state_dir.join("installed.toml");
-            let state = if state_dir == &self.layout.state_dir {
+        for vr in &self.visible_roots {
+            let state_path = vr.state_dir.join("installed.toml");
+            let state = if vr.state_dir == self.layout.state_dir {
                 current_state.clone()
             } else {
                 match InstalledState::load(&state_path) {
@@ -711,46 +789,63 @@ impl AdapterManager {
                 .objects
                 .iter()
                 .filter(|object| object.kind == ObjectKind::Component)
-                .filter(|object| object.status == ObjectStatus::Installed)
+                .filter(|object| is_adapter_visible_status(object.status))
             {
-                if !seen_components.insert(object.name.clone()) {
-                    continue;
-                }
+                component_vr.entry(object.name.clone()).or_insert(vr);
+            }
+        }
 
-                let path = installed_component_manifest_path(state_dir, &object.name);
-                if !path.exists() {
-                    warnings.push(format!(
-                        "installed component '{}' has no local component manifest at {}",
-                        object.name,
-                        path.display()
-                    ));
-                    continue;
-                }
-                let manifest = match ComponentManifest::from_file(&path) {
-                    Ok(manifest) => manifest,
-                    Err(err) => {
+        for (component, vr) in &component_vr {
+            let manifest = match super::contract::resolve_component_contract(
+                component,
+                &[vr.state_dir.clone()],
+                &vr.contract_datadir_roots,
+            ) {
+                Ok(m) => m,
+                Err(super::contract::ContractError::Unavailable { .. }) => {
+                    let other_scope_exists = self.visible_roots.iter().any(|other| {
+                        other.state_dir != vr.state_dir
+                            && super::contract::resolve_component_contract(
+                                component,
+                                &[other.state_dir.clone()],
+                                &other.contract_datadir_roots,
+                            )
+                            .is_ok()
+                    });
+                    if other_scope_exists {
                         warnings.push(format!(
-                            "failed to read installed component manifest for '{}' at {}: {err}",
-                            object.name,
-                            path.display()
+                            "installed component '{component}' has no component contract in its scope; a contract exists in another scope but was not used because the component is scoped to {}", vr.state_dir.display()
                         ));
-                        continue;
+                    } else {
+                        warnings.push(format!(
+                            "installed component '{component}' has no component contract; adapter declarations unavailable"
+                        ));
                     }
-                };
-                if manifest.component.name != object.name {
+                    continue;
+                }
+                Err(err) => {
                     warnings.push(format!(
-                        "installed component manifest at {} declares component '{}', expected '{}'",
-                        path.display(),
-                        manifest.component.name,
-                        object.name
+                        "failed to read component contract for '{component}': {err}"
                     ));
                     continue;
                 }
+            };
+            if manifest.component.name != component.as_str() {
+                warnings.push(format!(
+                    "component contract for '{component}' declares component '{}', expected '{component}'",
+                    manifest.component.name,
+                ));
+                continue;
+            }
 
-                for framework in declared_frameworks(&manifest) {
+            for adapter in &manifest.adapters {
+                if let Some(framework) = adapter.framework.as_deref().map(str::trim)
+                    && !framework.is_empty()
+                {
                     declarations.insert(AdapterDecl {
-                        component: object.name.clone(),
-                        framework,
+                        component: component.clone(),
+                        framework: framework.to_string(),
+                        adapter_type: adapter.adapter_type.clone(),
                     });
                 }
             }
@@ -762,7 +857,7 @@ impl AdapterManager {
     /// First datadir root that contains
     /// `adapters/<component>/<framework>/` as a directory.
     fn discover_resource_root(&self, component: &str, framework: &str) -> Option<PathBuf> {
-        for root in &self.datadir_roots {
+        for root in &self.all_datadir_roots {
             let candidate = root.join("adapters").join(component).join(framework);
             if candidate.is_dir() {
                 return Some(candidate);
@@ -776,7 +871,7 @@ impl AdapterManager {
     fn discover_all(&self) -> Vec<(String, String, PathBuf)> {
         let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
         let mut out: Vec<(String, String, PathBuf)> = Vec::new();
-        for root in &self.datadir_roots {
+        for root in &self.all_datadir_roots {
             let adapters = root.join("adapters");
             let Ok(components) = adapters.read_dir() else {
                 continue;
@@ -1053,11 +1148,30 @@ fn install_mode_str(mode: InstallMode) -> &'static str {
     }
 }
 
-fn installed_component_manifest_path(state_dir: &Path, component: &str) -> PathBuf {
-    state_dir
-        .join(INSTALLED_COMPONENT_MANIFESTS_SUBDIR)
-        .join(component)
-        .join(INSTALLED_COMPONENT_MANIFEST_FILE)
+/// Map a [`super::contract::ContractError`] to the existing [`AdapterError`]
+/// family for backward-compatible CLI rendering.
+fn map_contract_error(component: &str, err: super::contract::ContractError) -> AdapterError {
+    match err {
+        super::contract::ContractError::Unavailable { searched, .. } => {
+            AdapterError::AdapterManifest {
+                component: component.to_string(),
+                path: searched.into_iter().next().unwrap_or_default(),
+                reason: "component contract not found in the matched component scope".to_string(),
+            }
+        }
+        super::contract::ContractError::ParseError { path, reason } => {
+            AdapterError::AdapterManifest {
+                component: component.to_string(),
+                path,
+                reason,
+            }
+        }
+        super::contract::ContractError::Io { path, source } => AdapterError::AdapterManifest {
+            component: component.to_string(),
+            path,
+            reason: source.to_string(),
+        },
+    }
 }
 
 fn declared_frameworks(manifest: &ComponentManifest) -> Vec<String> {
@@ -1070,6 +1184,26 @@ fn declared_frameworks(manifest: &ComponentManifest) -> Vec<String> {
         }
     }
     set.into_iter().collect()
+}
+
+/// Extract the `adapter_type` from the first `[[adapters]]` entry whose
+/// `framework` matches. Returns `None` when the manifest omits the field
+/// (which the caller treats as defaulting to `"plugin"`).
+fn declared_adapter_type(manifest: &ComponentManifest, framework: &str) -> Option<String> {
+    manifest
+        .adapters
+        .iter()
+        .find(|adapter| adapter.framework.as_deref().map(str::trim) == Some(framework))
+        .and_then(|adapter| adapter.adapter_type.as_deref())
+        .map(str::trim)
+        .filter(|at| !at.is_empty())
+        .map(str::to_string)
+}
+
+/// Whether a component status makes it visible to adapter scan/enable.
+/// Both fully-installed and adopted components should be adapter-visible.
+fn is_adapter_visible_status(status: ObjectStatus) -> bool {
+    matches!(status, ObjectStatus::Installed | ObjectStatus::Adopted)
 }
 
 fn declared_plugin_id(manifest: &ComponentManifest, framework: &str) -> Option<String> {
@@ -1180,5 +1314,420 @@ mod tests {
         };
         let err = run_capture(&cmd).expect_err("spawn must fail");
         assert!(matches!(err, AdapterError::FrameworkCli { .. }));
+    }
+
+    // -- declared_adapter_type ------------------------------------------------
+
+    fn manifest_with_adapter_type(adapter_type: Option<&str>) -> ComponentManifest {
+        use crate::manifest::*;
+        ComponentManifest {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            component: ComponentMeta {
+                name: "test-comp".to_string(),
+                version: "0.1.0".to_string(),
+                layer: "runtime".to_string(),
+                domain: None,
+                display_name: None,
+                owner: None,
+                license: None,
+                repository: None,
+            },
+            contract: ContractSpec::default(),
+            artifact: ArtifactSpec::default(),
+            source: SourceSpec::default(),
+            distribution_selectors: Vec::new(),
+            build: BuildSpec::default(),
+            install: InstallSpec::default(),
+            backends: ManifestBackends::default(),
+            env_requirements: EnvRequirements::default(),
+            dependencies: DependenciesSpec::default(),
+            features: Vec::new(),
+            adapters: vec![AdapterSpec {
+                framework: Some("openclaw".to_string()),
+                adapter_type: adapter_type.map(str::to_string),
+                ..Default::default()
+            }],
+            health_check: None,
+            health_checks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn declared_adapter_type_returns_plugin() {
+        let manifest = manifest_with_adapter_type(Some("plugin"));
+        assert_eq!(
+            declared_adapter_type(&manifest, "openclaw"),
+            Some("plugin".to_string())
+        );
+    }
+
+    #[test]
+    fn declared_adapter_type_returns_none_when_absent() {
+        let manifest = manifest_with_adapter_type(None);
+        assert_eq!(declared_adapter_type(&manifest, "openclaw"), None);
+    }
+
+    #[test]
+    fn declared_adapter_type_returns_skill_bundle() {
+        let manifest = manifest_with_adapter_type(Some("skill_bundle"));
+        assert_eq!(
+            declared_adapter_type(&manifest, "openclaw"),
+            Some("skill_bundle".to_string())
+        );
+    }
+
+    #[test]
+    fn declared_adapter_type_returns_none_for_wrong_framework() {
+        let manifest = manifest_with_adapter_type(Some("plugin"));
+        assert_eq!(declared_adapter_type(&manifest, "hermes"), None);
+    }
+
+    #[test]
+    fn unsupported_adapter_type_error_contains_details() {
+        let err = AdapterError::UnsupportedAdapterType {
+            component: "tokenless".to_string(),
+            framework: "openclaw".to_string(),
+            adapter_type: "skill_bundle".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("skill_bundle"));
+        assert!(msg.contains("tokenless"));
+        assert!(msg.contains("openclaw"));
+        assert!(msg.contains("only 'plugin' is implemented"));
+    }
+
+    #[test]
+    fn unsupported_adapter_type_extension() {
+        let err = AdapterError::UnsupportedAdapterType {
+            component: "agentsight".to_string(),
+            framework: "openclaw".to_string(),
+            adapter_type: "extension".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("extension"));
+        assert!(msg.contains("agentsight"));
+    }
+
+    #[test]
+    fn unsupported_adapter_type_unknown_value() {
+        let err = AdapterError::UnsupportedAdapterType {
+            component: "agentsight".to_string(),
+            framework: "openclaw".to_string(),
+            adapter_type: "magic".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("magic"));
+        assert!(msg.contains("only 'plugin' is implemented"));
+    }
+
+    #[test]
+    fn plugin_adapter_type_passes_gate() {
+        let manifest = manifest_with_adapter_type(Some("plugin"));
+        let at = declared_adapter_type(&manifest, "openclaw");
+        let should_reject = at.as_ref().is_some_and(|t| t != "plugin");
+        assert!(!should_reject, "plugin must pass the gate");
+    }
+
+    #[test]
+    fn absent_adapter_type_passes_gate() {
+        let manifest = manifest_with_adapter_type(None);
+        let at = declared_adapter_type(&manifest, "openclaw");
+        let should_reject = at.as_ref().is_some_and(|t| t != "plugin");
+        assert!(!should_reject, "absent adapter_type must pass the gate");
+    }
+
+    #[test]
+    fn skill_bundle_adapter_type_fails_gate() {
+        let manifest = manifest_with_adapter_type(Some("skill_bundle"));
+        let at = declared_adapter_type(&manifest, "openclaw");
+        let should_reject = at.as_ref().is_some_and(|t| t != "plugin");
+        assert!(should_reject, "skill_bundle must be rejected");
+    }
+
+    // -- scan with Adopted + datadir-only contract ----------------------------
+
+    /// Regression: an RPM-adopted component with no state snapshot but a
+    /// datadir contract must still appear as `declared=true` in scan, and
+    /// its `adapter_type` must be surfaced.
+    #[test]
+    fn scan_adopted_component_with_datadir_only_contract() {
+        use crate::state::{InstalledObject, ObjectKind, ObjectStatus, Ownership};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        let datadir = tmp.path().join("data");
+
+        // Write installed.toml with an Adopted component, no snapshot.
+        let mut state = InstalledState::default();
+        state.upsert_object(InstalledObject {
+            kind: ObjectKind::Component,
+            name: "sec-core".to_string(),
+            version: "0.1.0".to_string(),
+            status: ObjectStatus::Adopted,
+            manifest_digest: None,
+            distribution_source: None,
+            install_backend: Some("rpm".to_string()),
+            ownership: Some(Ownership::RpmObserved),
+            rpm_metadata: None,
+            installed_at: "2026-06-18T00:00:00Z".to_string(),
+            last_operation_id: None,
+            managed: false,
+            adopted: true,
+            subscription_scope: crate::state::SubscriptionScope::None,
+            enabled_features: Vec::new(),
+            component_refs: Vec::new(),
+            files: Vec::new(),
+            external_modified_files: Vec::new(),
+            services: Vec::new(),
+            health: Vec::new(),
+        });
+        std::fs::create_dir_all(&state_dir).expect("mkdir state");
+        state
+            .save(&state_dir.join("installed.toml"))
+            .expect("save state");
+
+        // Write a datadir contract (no state snapshot).
+        let contract = r#"
+[component]
+name = "sec-core"
+version = "0.1.0"
+layer = "runtime"
+
+[[adapters]]
+framework = "openclaw"
+adapter_type = "plugin"
+plugin_id = "sec-core"
+source = "adapters/openclaw"
+dest = "{datadir}/adapters/{component}/openclaw/"
+"#;
+        let contract_dir = datadir.join("components").join("sec-core");
+        std::fs::create_dir_all(&contract_dir).expect("mkdir contract");
+        std::fs::write(contract_dir.join("component.toml"), contract).expect("write contract");
+
+        // Build a manager pointing at our temp dirs.
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let mut manager =
+            AdapterManager::new(layout, Some(tmp.path().to_path_buf()), "test".into());
+        manager.state_path = state_dir.join("installed.toml");
+        manager.visible_roots = vec![VisibleRoot {
+            state_dir: state_dir.clone(),
+            contract_datadir_roots: vec![datadir.clone()],
+        }];
+        manager.all_datadir_roots = vec![datadir.clone()];
+
+        let report = manager.scan().expect("scan");
+
+        let entry = report
+            .entries
+            .iter()
+            .find(|e| e.component == "sec-core" && e.framework == "openclaw")
+            .expect("sec-core/openclaw should be in scan results");
+        assert!(
+            entry.declared,
+            "adopted component with datadir contract must be declared"
+        );
+        assert_eq!(
+            entry.adapter_type.as_deref(),
+            Some("plugin"),
+            "adapter_type must be surfaced from the contract"
+        );
+    }
+
+    // -- user/system scope isolation ------------------------------------------
+
+    fn valid_contract_toml(name: &str) -> String {
+        format!(
+            r#"
+[component]
+name = "{name}"
+version = "0.1.0"
+layer = "runtime"
+
+[[adapters]]
+framework = "openclaw"
+adapter_type = "plugin"
+plugin_id = "{name}"
+source = "adapters/openclaw"
+dest = "{{datadir}}/adapters/{{component}}/openclaw/"
+"#
+        )
+    }
+
+    fn seed_installed_state(state_dir: &std::path::Path, component: &str, status: ObjectStatus) {
+        use crate::state::{InstalledObject, ObjectKind, Ownership, SubscriptionScope};
+
+        let mut state = InstalledState::default();
+        state.upsert_object(InstalledObject {
+            kind: ObjectKind::Component,
+            name: component.to_string(),
+            version: "0.1.0".to_string(),
+            status,
+            manifest_digest: None,
+            distribution_source: None,
+            install_backend: Some(if status == ObjectStatus::Adopted {
+                "rpm".to_string()
+            } else {
+                "raw".to_string()
+            }),
+            ownership: Some(if status == ObjectStatus::Adopted {
+                Ownership::RpmObserved
+            } else {
+                Ownership::RawManaged
+            }),
+            rpm_metadata: None,
+            installed_at: "2026-06-18T00:00:00Z".to_string(),
+            last_operation_id: None,
+            managed: status != ObjectStatus::Adopted,
+            adopted: status == ObjectStatus::Adopted,
+            subscription_scope: SubscriptionScope::None,
+            enabled_features: Vec::new(),
+            component_refs: Vec::new(),
+            files: Vec::new(),
+            external_modified_files: Vec::new(),
+            services: Vec::new(),
+            health: Vec::new(),
+        });
+        std::fs::create_dir_all(state_dir).expect("mkdir state");
+        state
+            .save(&state_dir.join("installed.toml"))
+            .expect("save state");
+    }
+
+    fn write_contract(datadir: &std::path::Path, component: &str) {
+        let dir = datadir.join("components").join(component);
+        std::fs::create_dir_all(&dir).expect("mkdir contract");
+        std::fs::write(dir.join("component.toml"), valid_contract_toml(component))
+            .expect("write contract");
+    }
+
+    /// User component must NOT fall back to system datadir contract.
+    #[test]
+    fn user_component_does_not_fallback_to_system_contract() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let user_state = tmp.path().join("user_state");
+        let user_data = tmp.path().join("user_data");
+        let sys_state = tmp.path().join("sys_state");
+        let sys_data = tmp.path().join("sys_data");
+
+        // User state has tokenless installed, no contract anywhere in user scope.
+        seed_installed_state(&user_state, "tokenless", ObjectStatus::Installed);
+        // System datadir has a valid contract.
+        write_contract(&sys_data, "tokenless");
+
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let mut manager =
+            AdapterManager::new(layout, Some(tmp.path().to_path_buf()), "test".into());
+        manager.state_path = user_state.join("installed.toml");
+        manager.visible_roots = vec![
+            VisibleRoot {
+                state_dir: user_state.clone(),
+                contract_datadir_roots: vec![user_data.clone()],
+            },
+            VisibleRoot {
+                state_dir: sys_state.clone(),
+                contract_datadir_roots: vec![sys_data.clone()],
+            },
+        ];
+        manager.all_datadir_roots = vec![user_data, sys_data];
+
+        // Scan: tokenless must NOT be declared (no user contract).
+        let report = manager.scan().expect("scan");
+        let entry = report
+            .entries
+            .iter()
+            .find(|e| e.component == "tokenless" && e.framework == "openclaw");
+        assert!(
+            entry.is_none() || !entry.unwrap().declared,
+            "user component must not use system contract"
+        );
+        assert!(
+            report.warnings.iter().any(|w| w.contains("tokenless")
+                && w.contains("no component contract")
+                && w.contains("another scope")),
+            "scan must warn that user contract is missing and system exists, got: {:?}",
+            report.warnings
+        );
+    }
+
+    /// System component can use system/packaged datadir contract.
+    #[test]
+    fn system_component_uses_system_datadir_contract() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sys_state = tmp.path().join("sys_state");
+        let sys_data = tmp.path().join("sys_data");
+        let pkg_data = tmp.path().join("pkg_data");
+
+        seed_installed_state(&sys_state, "tokenless", ObjectStatus::Installed);
+        // Contract in pkg_data (simulates /usr/share vs /usr/local/share).
+        write_contract(&pkg_data, "tokenless");
+
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let mut manager =
+            AdapterManager::new(layout, Some(tmp.path().to_path_buf()), "test".into());
+        manager.state_path = sys_state.join("installed.toml");
+        manager.visible_roots = vec![VisibleRoot {
+            state_dir: sys_state.clone(),
+            contract_datadir_roots: vec![sys_data, pkg_data.clone()],
+        }];
+        manager.all_datadir_roots = vec![pkg_data];
+
+        let report = manager.scan().expect("scan");
+        let entry = report
+            .entries
+            .iter()
+            .find(|e| e.component == "tokenless" && e.framework == "openclaw")
+            .expect("tokenless/openclaw should be declared");
+        assert!(
+            entry.declared,
+            "system component must find contract in packaged datadir"
+        );
+    }
+
+    /// User-mode scan includes system-installed component via system
+    /// visible root (contract resolved from system datadir).
+    #[test]
+    fn user_scan_includes_system_component_via_system_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let user_state = tmp.path().join("user_state");
+        let user_data = tmp.path().join("user_data");
+        let sys_state = tmp.path().join("sys_state");
+        let sys_data = tmp.path().join("sys_data");
+
+        // Only system state has tokenless; contract in system datadir.
+        seed_installed_state(&sys_state, "tokenless", ObjectStatus::Installed);
+        write_contract(&sys_data, "tokenless");
+
+        // User state is empty.
+        std::fs::create_dir_all(&user_state).expect("mkdir user_state");
+        InstalledState::default()
+            .save(&user_state.join("installed.toml"))
+            .expect("save empty user state");
+
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let mut manager =
+            AdapterManager::new(layout, Some(tmp.path().to_path_buf()), "test".into());
+        manager.state_path = user_state.join("installed.toml");
+        manager.visible_roots = vec![
+            VisibleRoot {
+                state_dir: user_state,
+                contract_datadir_roots: vec![user_data],
+            },
+            VisibleRoot {
+                state_dir: sys_state,
+                contract_datadir_roots: vec![sys_data],
+            },
+        ];
+
+        // scan must find tokenless via the system root.
+        let report = manager.scan().expect("scan");
+        let entry = report
+            .entries
+            .iter()
+            .find(|e| e.component == "tokenless" && e.framework == "openclaw")
+            .expect("tokenless/openclaw should be in scan");
+        assert!(
+            entry.declared,
+            "system component must be declared via system root"
+        );
     }
 }
