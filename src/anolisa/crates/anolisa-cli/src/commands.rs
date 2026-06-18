@@ -101,6 +101,8 @@ pub enum ComponentCommands {
     Repair(tier1::repair::RepairArgs),
     /// Drop a component's ANOLISA state record without any package operation
     Forget(tier1::forget::ForgetArgs),
+    /// Record an already-installed system RPM as rpm-observed (system scope)
+    Adopt(tier1::adopt::AdoptArgs),
     /// Manage component-to-framework adapters
     Adapter(adapter::AdapterArgs),
 }
@@ -202,6 +204,7 @@ pub fn dispatch(cli: Cli, ctx: &CliContext) -> Result<(), CliError> {
             ComponentCommands::Update(args) => tier1::update::handle(args, ctx),
             ComponentCommands::Repair(args) => tier1::repair::handle(args, ctx),
             ComponentCommands::Forget(args) => tier1::forget::handle(args, ctx),
+            ComponentCommands::Adopt(args) => tier1::adopt::handle(args, ctx),
             ComponentCommands::Adapter(args) => adapter::handle(args, ctx),
         },
         Commands::Management(cmd) => match cmd {

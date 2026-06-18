@@ -737,6 +737,48 @@ mod tests {
         assert_ne!(obj.last_operation_id.as_deref(), Some("op-prior"));
     }
 
+    /// The "keeping ownership / does not switch backend" criterion holds for the
+    /// rpm-managed lifecycle too, not just observed: a drifted rpm-managed
+    /// component refreshes its EVR while ownership stays `rpm-managed`.
+    #[test]
+    fn repair_refreshes_rpm_managed_keeping_ownership() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(
+            &c,
+            rpm_object(
+                "copilot-shell",
+                "anolisa-copilot-shell",
+                "2.2.0-1.al8",
+                Ownership::RpmManaged,
+                ObjectStatus::Installed,
+            ),
+        );
+        let rpm = FakeQuery::new(
+            "anolisa-copilot-shell",
+            Some(pkg_info(
+                "anolisa-copilot-shell",
+                "2.3.0",
+                Some("1.al8"),
+                "x86_64",
+            )),
+        );
+        repair_with_query("copilot-shell", &c, &rpm).expect("repair ok");
+
+        let obj = load_state(&c)
+            .find_object(ObjectKind::Component, "copilot-shell")
+            .cloned()
+            .expect("present");
+        assert_eq!(obj.version, "2.3.0-1.al8", "version reconciled to rpmdb");
+        assert_eq!(
+            obj.ownership,
+            Some(Ownership::RpmManaged),
+            "rpm-managed ownership kept across refresh",
+        );
+        assert_eq!(obj.install_backend.as_deref(), Some("rpm"), "backend kept");
+        assert_eq!(obj.status, ObjectStatus::Installed, "status unchanged");
+    }
+
     /// A failed origin lookup must not erase a previously-good source_repo.
     #[test]
     fn repair_keeps_prior_source_repo_when_origin_unknown() {

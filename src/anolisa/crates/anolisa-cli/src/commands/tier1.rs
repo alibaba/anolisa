@@ -1,5 +1,6 @@
 //! Primary commands — component lifecycle and operations.
 
+pub mod adopt;
 pub mod bug;
 pub mod doctor;
 pub mod env;

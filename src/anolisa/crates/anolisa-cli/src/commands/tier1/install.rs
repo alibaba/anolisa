@@ -186,7 +186,7 @@ struct InstallResultPayload {
 /// RPM adopt in its batch summary (§7.5). The dry-run vs real distinction is
 /// layered on by the caller from [`CliContext::dry_run`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InstallOutcome {
+pub(crate) enum InstallOutcome {
     /// A raw install (downloaded + placed files, or its dry-run preview).
     Installed,
     /// An existing system RPM recorded as `rpm-observed` (or its dry-run
@@ -301,8 +301,14 @@ fn handle_one_with_exec(
             // layer 2, rather than being rejected by the raw trunk.
             (label.to_string(), BackendSource::ExistingState)
         } else if ctx.install_mode == InstallMode::System {
-            let situation =
-                probe_rpm_situation(&component, &args, &repo_config, ctx, exec.query, &command)?;
+            let situation = probe_rpm_situation(
+                &component,
+                args.package.as_deref(),
+                repo_config.backends.get("rpm"),
+                ctx,
+                exec.query,
+                &command,
+            )?;
             if matches!(situation, RpmSituation::Absent { .. }) {
                 // Absent + no `--backend`: fall through to the default backend.
                 // If that is `rpm`, layer 2 re-probes and delegates a `dnf
@@ -435,7 +441,7 @@ fn handle_raw_install(
 // ── rpm adopt path (#958) ───────────────────────────────────────────
 
 /// Result of probing whether `component` is present as a system RPM (§5/§7.1).
-enum RpmSituation {
+pub(crate) enum RpmSituation {
     /// Exactly one candidate package name, installed once — ready to adopt.
     Adoptable {
         /// Resolved package name (the candidate that hit rpmdb).
@@ -469,18 +475,17 @@ enum RpmSituation {
 /// back to raw rather than treat it as [`Absent`].
 ///
 /// [`Absent`]: RpmSituation::Absent
-fn probe_rpm_situation(
+pub(crate) fn probe_rpm_situation(
     component: &str,
-    args: &InstallArgs,
-    repo_config: &RepoConfig,
+    cli_override: Option<&str>,
+    rpm_backend: Option<&BackendConfig>,
     ctx: &CliContext,
     query: &dyn PackageQuery,
     command: &str,
 ) -> Result<RpmSituation, CliError> {
     let manifest = load_optional_manifest(ctx, component);
-    let rpm_backend = repo_config.backends.get("rpm");
     let candidates = match rpm_package_candidates(
-        args.package.as_deref(),
+        cli_override,
         manifest.as_ref(),
         rpm_backend,
         query,
@@ -601,7 +606,14 @@ fn route_rpm_adopt(
 
     let situation = match situation {
         Some(s) => s,
-        None => probe_rpm_situation(component, args, repo_config, ctx, exec.query, command)?,
+        None => probe_rpm_situation(
+            component,
+            args.package.as_deref(),
+            repo_config.backends.get("rpm"),
+            ctx,
+            exec.query,
+            command,
+        )?,
     };
 
     match situation {
@@ -646,11 +658,47 @@ struct AdoptResultPayload {
     warnings: Vec<String>,
 }
 
+/// Refuse re-adopting an existing `rpm-observed` component under a *different*
+/// RPM package — a package-identity migration, not an idempotent refresh.
+///
+/// Shared by the dry-run preview (non-locked) and the locked write path so the
+/// preview can never promise an adopt the real run would reject. Returns
+/// `Ok(())` when there is no existing record, it is not rpm-observed, its
+/// recorded package name is empty, or the package is unchanged.
+fn refuse_observed_repoint(
+    state: &InstalledState,
+    component: &str,
+    new_package: &str,
+    command: &str,
+) -> Result<(), CliError> {
+    let Some(existing) = state.find_object(ObjectKind::Component, component) else {
+        return Ok(());
+    };
+    if !matches!(existing.effective_ownership(), Ownership::RpmObserved) {
+        return Ok(());
+    }
+    if let Some(prev) = existing
+        .rpm_metadata
+        .as_ref()
+        .map(|m| m.package_name.as_str())
+        && !prev.is_empty()
+        && prev != new_package
+    {
+        return Err(CliError::InvalidArgument {
+            command: command.to_string(),
+            reason: format!(
+                "component '{component}' is already adopted from RPM package '{prev}', not '{new_package}'; adopt will not silently repoint it to a different package — run `anolisa forget {component}` first, then adopt the new package"
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Record an installed system RPM as `rpm-observed` state (§7.2). Fetches
 /// nothing, writes no owned files, touches no RPM-owned paths — only rpmdb
 /// reads plus a state write. On `--dry-run` it renders the plan without
 /// writing.
-fn execute_adopt(
+pub(crate) fn execute_adopt(
     ctx: &CliContext,
     layout: &FsLayout,
     command: &str,
@@ -687,8 +735,20 @@ fn execute_adopt(
         warnings: warnings.clone(),
     };
 
+    // Package-identity guard, evaluated *before* the dry-run return so the preview
+    // never promises an adopt the real run would reject. A re-adopt of an existing
+    // rpm-observed component must target the same RPM; `--package` pointing at a
+    // different one is a migration, not a refresh. This non-locked read is the
+    // preview / pre-lock fast-fail; the locked path below re-checks for TOCTOU.
+    let preview_state =
+        common::load_installed_state(ctx, command).map_err(|err| CliError::Runtime {
+            command: command.to_string(),
+            reason: format!("failed to load installed state: {err}"),
+        })?;
+    refuse_observed_repoint(&preview_state, component, &info.name, command)?;
+
     if ctx.dry_run {
-        render_adopt(ctx, &payload);
+        render_adopt(ctx, command, &payload);
         return Ok(InstallOutcome::Adopted);
     }
 
@@ -710,6 +770,30 @@ fn execute_adopt(
     // lock and record it first. Without this check the adopt would clobber the
     // raw provenance; with it, the loser is rejected rather than overwriting.
     ensure_component_backend_compatible(&state, component, "rpm", command)?;
+
+    // Backend compatibility is necessary but not sufficient: rpm-managed and
+    // rpm-observed share the "rpm" backend label, so the check above passes for
+    // a component ANOLISA actively manages. Adopt may only create a new record
+    // or refresh an existing rpm-observed one — it must never downgrade a managed
+    // component to observed and silently drop ANOLISA's removal authority
+    // (`owns_removal`). `adopt`'s pre-lock gate refuses this for the common case;
+    // re-checking here under the lock closes the window where a concurrent
+    // managed install lands between that read and this acquisition.
+    if let Some(existing) = state.find_object(ObjectKind::Component, component)
+        && !matches!(existing.effective_ownership(), Ownership::RpmObserved)
+    {
+        return Err(CliError::InvalidArgument {
+            command: command.to_string(),
+            reason: format!(
+                "component '{component}' is already tracked as {} and will not be downgraded to rpm-observed; run `anolisa repair {component}` to refresh a managed RPM component, or `anolisa uninstall {component}` first",
+                existing.effective_ownership().label()
+            ),
+        });
+    }
+    // Re-check the package-identity guard under the lock (TOCTOU): a concurrent
+    // re-adopt could have repointed the recorded package between the pre-lock
+    // preview above and this acquisition.
+    refuse_observed_repoint(&state, component, &info.name, command)?;
 
     let started_at = now_iso8601();
     let lock_ts = Utc::now();
@@ -806,17 +890,29 @@ fn execute_adopt(
 
     payload.operation_id = Some(operation_id);
     payload.warnings = warnings;
-    render_adopt(ctx, &payload);
+    render_adopt(ctx, command, &payload);
     Ok(InstallOutcome::Adopted)
 }
 
 /// Render an adopt result (JSON envelope or the proposal §6.1 human text).
 /// Silent in quiet mode; the `--all` batch path drives its own summary.
-fn render_adopt(ctx: &CliContext, payload: &AdoptResultPayload) {
+/// Bare verb for an adopt JSON envelope. `command` is the rich
+/// `"<verb> <component>"` form, so the envelope takes its first token (matching
+/// repair/forget's bare-verb envelopes). Because `execute_adopt` is shared, this
+/// is "install" through the install trunk and "adopt" through the explicit
+/// command — not a hardcoded "install".
+fn adopt_envelope_verb(command: &str) -> &str {
+    match command.split(' ').next() {
+        Some(verb) if !verb.is_empty() => verb,
+        _ => COMMAND,
+    }
+}
+
+fn render_adopt(ctx: &CliContext, command: &str, payload: &AdoptResultPayload) {
     if ctx.json {
         // Errors here are unreachable for a plain Serialize struct; ignore the
         // Result so the (already-persisted) adopt is not reported as failed.
-        let _ = render_json(COMMAND, payload);
+        let _ = render_json(adopt_envelope_verb(command), payload);
         return;
     }
     if ctx.quiet {
@@ -837,10 +933,14 @@ fn render_adopt(ctx: &CliContext, payload: &AdoptResultPayload) {
         repo,
         color.muted(suffix),
     );
-    println!(
-        "{}",
-        color.ok("Adopted as rpm-observed. ANOLISA will not replace it with raw.")
-    );
+    // Dry-run records nothing, so the action line must read as conditional —
+    // "Adopted" here would contradict the "nothing recorded" suffix above.
+    let action_line = if payload.dry_run {
+        "Would adopt as rpm-observed. ANOLISA will not replace it with raw."
+    } else {
+        "Adopted as rpm-observed. ANOLISA will not replace it with raw."
+    };
+    println!("{}", color.ok(action_line));
     render_warnings(&payload.warnings, &color);
 }
 
@@ -4141,8 +4241,8 @@ scope = "@anolisa"
         };
         let situation = probe_rpm_situation(
             "copilot-shell",
-            &args("copilot-shell"),
-            &repo,
+            None,
+            repo.backends.get("rpm"),
             &ctx,
             &q,
             "install",
@@ -4167,8 +4267,8 @@ scope = "@anolisa"
         let q = FakeQuery::default();
         let situation = probe_rpm_situation(
             "copilot-shell",
-            &args("copilot-shell"),
-            &repo,
+            None,
+            repo.backends.get("rpm"),
             &ctx,
             &q,
             "install",
@@ -4190,8 +4290,8 @@ scope = "@anolisa"
         };
         let situation = probe_rpm_situation(
             "copilot-shell",
-            &args("copilot-shell"),
-            &repo,
+            None,
+            repo.backends.get("rpm"),
             &ctx,
             &q,
             "install",
@@ -4210,8 +4310,8 @@ scope = "@anolisa"
         };
         let situation = probe_rpm_situation(
             "copilot-shell",
-            &args("copilot-shell"),
-            &repo,
+            None,
+            repo.backends.get("rpm"),
             &ctx,
             &q,
             "install",
@@ -4421,6 +4521,150 @@ scope = "@anolisa"
             .expect("raw record preserved");
         assert_eq!(installed_backend_label(obj), Some("raw"));
         assert!(obj.rpm_metadata.is_none(), "raw record must stay raw");
+    }
+
+    #[test]
+    fn adopt_refuses_to_downgrade_concurrent_rpm_managed_install() {
+        // rpm-managed and rpm-observed share the "rpm" backend label, so
+        // ensure_component_backend_compatible alone cannot tell them apart. A
+        // concurrent delegated `dnf install` can record the component rpm-managed
+        // (owns_removal=true) after a pre-lock read saw it absent. After
+        // reloading under the lock, execute_adopt must refuse rather than
+        // overwrite the managed record with rpm-observed (which would silently
+        // drop ANOLISA's removal authority).
+        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        let layout = common::resolve_layout(&ctx);
+        let mut state = InstalledState {
+            install_mode: StateInstallMode::System,
+            prefix: layout.prefix.clone(),
+            ..Default::default()
+        };
+        state.upsert_object(InstalledObject {
+            kind: ObjectKind::Component,
+            name: "copilot-shell".to_string(),
+            version: "2.3.0-1.al8".to_string(),
+            status: ObjectStatus::Installed,
+            manifest_digest: None,
+            distribution_source: None,
+            install_backend: Some("rpm".to_string()),
+            ownership: Some(Ownership::RpmManaged),
+            rpm_metadata: Some(RpmMetadata {
+                package_name: "anolisa-copilot-shell".to_string(),
+                evr: Some("2.3.0-1.al8".to_string()),
+                arch: Some("x86_64".to_string()),
+                source_repo: Some("alinux-updates".to_string()),
+            }),
+            installed_at: "2026-06-01T10:00:00Z".to_string(),
+            last_operation_id: Some("op-install-prior".to_string()),
+            managed: true,
+            adopted: false,
+            subscription_scope: Default::default(),
+            enabled_features: Vec::new(),
+            component_refs: Vec::new(),
+            files: Vec::new(),
+            external_modified_files: Vec::new(),
+            services: Vec::new(),
+            health: Vec::new(),
+        });
+        state
+            .save(&layout.state_dir.join("installed.toml"))
+            .expect("seed rpm-managed record");
+
+        let q = FakeQuery::default();
+        let err = execute_adopt(
+            &ctx,
+            &layout,
+            "adopt copilot-shell",
+            "copilot-shell",
+            "anolisa-copilot-shell".to_string(),
+            pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+            &q,
+        )
+        .expect_err("must refuse to downgrade an rpm-managed component");
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert!(err.reason().contains("repair"), "got: {}", err.reason());
+
+        // The managed record survives untouched: removal authority is preserved.
+        let state = load_state(&ctx);
+        let obj = state
+            .find_object(ObjectKind::Component, "copilot-shell")
+            .expect("managed record preserved");
+        assert_eq!(obj.ownership, Some(Ownership::RpmManaged));
+        assert!(obj.managed, "managed flag must stay true");
+    }
+
+    #[test]
+    fn reinstall_of_rpm_managed_refuses_instead_of_downgrading() {
+        // Full install entrypoint (not execute_adopt directly): re-running
+        // `install` on an already rpm-managed component routes ExistingState ->
+        // route_rpm_adopt -> execute_adopt. The downgrade guard must refuse here
+        // too, rather than silently overwriting the managed record with observed.
+        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        let layout = common::resolve_layout(&ctx);
+        let mut state = InstalledState {
+            install_mode: StateInstallMode::System,
+            prefix: layout.prefix.clone(),
+            ..Default::default()
+        };
+        state.upsert_object(InstalledObject {
+            kind: ObjectKind::Component,
+            name: "copilot-shell".to_string(),
+            version: "2.3.0-1.al8".to_string(),
+            status: ObjectStatus::Installed,
+            manifest_digest: None,
+            distribution_source: None,
+            install_backend: Some("rpm".to_string()),
+            ownership: Some(Ownership::RpmManaged),
+            rpm_metadata: Some(RpmMetadata {
+                package_name: "anolisa-copilot-shell".to_string(),
+                evr: Some("2.3.0-1.al8".to_string()),
+                arch: Some("x86_64".to_string()),
+                source_repo: Some("alinux-updates".to_string()),
+            }),
+            installed_at: "2026-06-01T10:00:00Z".to_string(),
+            last_operation_id: Some("op-install-prior".to_string()),
+            managed: true,
+            adopted: false,
+            subscription_scope: Default::default(),
+            enabled_features: Vec::new(),
+            component_refs: Vec::new(),
+            files: Vec::new(),
+            external_modified_files: Vec::new(),
+            services: Vec::new(),
+            health: Vec::new(),
+        });
+        state
+            .save(&layout.state_dir.join("installed.toml"))
+            .expect("seed rpm-managed record");
+
+        // rpmdb still has the package, so the re-probe yields Adoptable.
+        let q = FakeQuery {
+            installed: vec![(
+                "anolisa-copilot-shell".to_string(),
+                pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+            )],
+            ..Default::default()
+        };
+        let err =
+            handle_one_with_query("copilot-shell".to_string(), args("copilot-shell"), &ctx, &q)
+                .expect_err("re-install of rpm-managed must refuse");
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert!(err.reason().contains("repair"), "got: {}", err.reason());
+
+        let obj = load_state(&ctx)
+            .find_object(ObjectKind::Component, "copilot-shell")
+            .cloned()
+            .expect("managed record preserved");
+        assert_eq!(obj.ownership, Some(Ownership::RpmManaged));
+    }
+
+    #[test]
+    fn adopt_envelope_verb_is_the_bare_command() {
+        // The success JSON envelope reports the bare verb, so an explicit adopt
+        // is not mislabelled "install" (the shared execute_adopt's module COMMAND).
+        assert_eq!(adopt_envelope_verb("adopt copilot-shell"), "adopt");
+        assert_eq!(adopt_envelope_verb("install copilot-shell"), "install");
+        assert_eq!(adopt_envelope_verb(""), COMMAND);
     }
 
     #[test]
