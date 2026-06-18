@@ -13,3 +13,6 @@ rusqlite.workspace = true
 thiserror.workspace = true
 dirs.workspace = true
 libc.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

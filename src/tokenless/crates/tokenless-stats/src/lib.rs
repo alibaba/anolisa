@@ -9,6 +9,7 @@ pub mod home;
 pub mod query;
 pub mod record;
 pub mod recorder;
+pub mod sls;
 pub mod tokenizer;
 
 pub use record::{OperationType, StatsRecord};
@@ -22,6 +23,8 @@ pub use tokenizer::{Tokenizer, count_chars, estimate_tokens, estimate_tokens_fro
 pub use config::TokenlessConfig;
 
 pub use home::get_home_dir;
+
+pub use sls::{SlsRecord, SlsWriter};
 
 /// Library version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

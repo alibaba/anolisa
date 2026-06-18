@@ -436,27 +436,42 @@ fn run() -> Result<(), (String, i32)> {
                     println!("Statistics cleared.");
                 }
                 StatsCommands::Status => {
-                    let env_set = std::env::var("TOKENLESS_STATS_ENABLED").ok();
+                    let stats_env_set = std::env::var("TOKENLESS_STATS_ENABLED")
+                        .ok()
+                        .filter(|v| !v.is_empty());
+                    let sls_env_set = std::env::var("TOKENLESS_SLS_ENABLED")
+                        .ok()
+                        .filter(|v| !v.is_empty());
                     let config = TokenlessConfig::load();
-                    if config.is_stats_enabled() {
-                        let source = if env_set.is_some() {
-                            "env override"
-                        } else if TokenlessConfig::config_file_exists() {
-                            "config file"
-                        } else {
-                            "default"
-                        };
-                        println!("Stats recording: ENABLED (via {})", source);
+                    let file_exists = TokenlessConfig::config_file_exists();
+
+                    let stats_state = if config.is_stats_enabled() {
+                        "ENABLED"
                     } else {
-                        let source = if env_set.is_some() {
-                            "env override"
-                        } else if TokenlessConfig::config_file_exists() {
-                            "config file"
-                        } else {
-                            "default"
-                        };
-                        println!("Stats recording: DISABLED (via {})", source);
-                    }
+                        "DISABLED"
+                    };
+                    let stats_source = if stats_env_set.is_some() {
+                        "env override"
+                    } else if file_exists {
+                        "config file"
+                    } else {
+                        "default"
+                    };
+                    println!("Stats recording: {} (via {})", stats_state, stats_source);
+
+                    let sls_state = if config.is_sls_enabled() {
+                        "ENABLED"
+                    } else {
+                        "DISABLED"
+                    };
+                    let sls_source = if sls_env_set.is_some() {
+                        "env override"
+                    } else if file_exists {
+                        "config file"
+                    } else {
+                        "default"
+                    };
+                    println!("SLS recording:   {} (via {})", sls_state, sls_source);
                 }
                 StatsCommands::Enable => {
                     let mut config = TokenlessConfig::load();
@@ -550,7 +565,10 @@ fn record_compression_stats(
     before_text: String,
     after_text: String,
 ) {
-    if !TokenlessConfig::load().is_stats_enabled() {
+    let config = TokenlessConfig::load();
+
+    // Short-circuit only if both stats and SLS are disabled.
+    if !config.is_stats_enabled() && !config.is_sls_enabled() {
         return;
     }
 
@@ -587,9 +605,17 @@ fn record_compression_stats(
     }
     record = record.with_source_pid(pid as i64);
 
-    // Record silently — stats failures must not break compression
-    if let Ok(recorder) = open_recorder() {
+    // SQLite stats recording — gated by stats_enabled
+    if config.is_stats_enabled()
+        && let Ok(recorder) = open_recorder()
+    {
         let _ = recorder.record(&record);
+    }
+
+    // SLS recording — fail-silent, independent of SQLite
+    if config.is_sls_enabled() {
+        let writer = tokenless_stats::SlsWriter::new();
+        writer.write(&record);
     }
 }
 
