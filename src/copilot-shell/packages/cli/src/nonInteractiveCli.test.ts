@@ -899,6 +899,74 @@ describe('runNonInteractive', () => {
     expect(processStderrSpy).toHaveBeenCalled();
   });
 
+  it('should not leave an unterminated assistant message on API error in stream-json with partial messages', async () => {
+    // Regression for the #801 review: with stream-json + includePartialMessages,
+    // an API error must neither be fed to the adapter (which would emit fresh
+    // partial blocks) nor skip finalize on the partial message already streamed
+    // this turn — either leaves consumers with an open content_block / missing
+    // message_stop right before the error result.
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(true);
+    setupMetricsMock();
+
+    const events: ServerGeminiStreamEvent[] = [
+      // Assistant text streams first (opens message_start + a content block)...
+      { type: GeminiEventType.Content, value: 'Partial answer before failure' },
+      // ...then the API errors mid-stream.
+      {
+        type: GeminiEventType.Error,
+        value: { error: { message: '429 rate limit exceeded', status: 429 } },
+      },
+    ];
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(events),
+    );
+
+    let thrownError: Error | null = null;
+    try {
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Test input',
+        'prompt-id-stream-partial-error',
+      );
+      expect.fail('Expected error to be thrown');
+    } catch (error) {
+      thrownError = error as Error;
+    }
+    expect(thrownError).toBeTruthy();
+    expect(processStderrSpy).toHaveBeenCalled();
+
+    // Collect the emitted partial stream events from stdout.
+    const streamEvents = processStdoutSpy.mock.calls
+      .map((c) => String(c[0]))
+      .join('')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return null;
+        }
+      })
+      .filter((m) => m && m.type === 'stream_event')
+      .map((m) => m.event);
+
+    const count = (t: string) =>
+      streamEvents.filter((e) => e && e.type === t).length;
+
+    // The partial-message path is actually exercised...
+    expect(count('content_block_start')).toBeGreaterThan(0);
+    // ...and every opened block / message is terminated (no dangling message
+    // before the error result). Reverting the fix leaves content_block_start /
+    // message_start without their matching stop events.
+    expect(count('content_block_stop')).toBe(count('content_block_start'));
+    expect(count('message_stop')).toBe(count('message_start'));
+  });
+
   it('should handle FatalInputError with custom exit code in JSON format', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
     setupMetricsMock();

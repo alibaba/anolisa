@@ -275,20 +275,28 @@ export async function runNonInteractive(
           if (abortController.signal.aborted) {
             handleCancellationError(config);
           }
-          // Use adapter for all event processing
-          adapter.processEvent(event);
-          if (event.type === GeminiEventType.ToolCallRequest) {
-            toolCallRequests.push(event.value);
-          }
+          // Handle an API error BEFORE feeding it to the adapter. Passing an
+          // Error event to processEvent() would emit fresh partial assistant
+          // stream events (message_start / content_block_*), and the throw
+          // below would then skip finalizeAssistantMessage(), leaving an
+          // unterminated assistant message for stream-json consumers
+          // (--include-partial-messages). Finalize first to close any blocks
+          // already streamed this turn, then throw to reach the catch block,
+          // which emits isError:true in all output formats
+          // (text/json/stream-json).
           if (event.type === GeminiEventType.Error) {
+            adapter.finalizeAssistantMessage();
             const errorText = parseAndFormatApiError(
               event.value.error,
               config.getContentGeneratorConfig()?.authType,
             );
             process.stderr.write(`${errorText}\n`);
-            // Throw to reach the catch block which correctly emits
-            // isError:true in all output formats (text/json/stream-json).
             throw new Error(errorText);
+          }
+          // Use adapter for all (non-error) event processing
+          adapter.processEvent(event);
+          if (event.type === GeminiEventType.ToolCallRequest) {
+            toolCallRequests.push(event.value);
           }
         }
 
