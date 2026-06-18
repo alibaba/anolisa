@@ -1,5 +1,6 @@
 pub(crate) mod approval_bridge;
 pub(crate) mod continuation;
+mod display;
 pub(crate) mod events;
 pub(crate) mod failed_command;
 pub(crate) mod finish;

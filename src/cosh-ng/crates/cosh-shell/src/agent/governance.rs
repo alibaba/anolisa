@@ -7,6 +7,8 @@ use crate::{
     },
 };
 
+use super::display::display_agent_error;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GovernanceOutput {
     pub events: Vec<GovernedEvent>,
@@ -226,15 +228,6 @@ fn render_recommended_commands(commands: &[String], i18n: &I18n) -> String {
         "\n{}{rendered}",
         i18n.t(MessageId::AgentRecommendedCommandsLabel)
     )
-}
-
-fn display_agent_error(error: &str, i18n: &I18n) -> String {
-    if error == "analysis returned an error" {
-        i18n.t(MessageId::AgentStatusAnalysisReturnedError)
-            .to_string()
-    } else {
-        error.to_string()
-    }
 }
 
 fn render_blocked_tool_request(name: &str, input: &str, i18n: &I18n) -> String {

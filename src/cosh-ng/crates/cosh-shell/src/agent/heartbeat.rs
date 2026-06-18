@@ -3,6 +3,8 @@ use std::time::{Duration, Instant};
 use crate::agent::run::ActiveAgentRun;
 use crate::runtime::prelude::*;
 
+use super::display::display_agent_error;
+
 const AGENT_HEARTBEAT_AFTER: Duration = Duration::from_secs(6);
 const AGENT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -228,15 +230,6 @@ fn display_agent_summary(summary: &str, i18n: &I18n) -> String {
         i18n.t(MessageId::AgentStatusAnalysisCompleted).to_string()
     } else {
         summary.to_string()
-    }
-}
-
-fn display_agent_error(error: &str, i18n: &I18n) -> String {
-    if error == "analysis returned an error" {
-        i18n.t(MessageId::AgentStatusAnalysisReturnedError)
-            .to_string()
-    } else {
-        error.to_string()
     }
 }
 

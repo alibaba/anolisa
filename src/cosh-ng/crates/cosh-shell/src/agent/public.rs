@@ -1,3 +1,6 @@
+#[path = "display.rs"]
+mod display;
+
 #[path = "governance.rs"]
 mod governance;
 
