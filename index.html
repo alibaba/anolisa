@@ -540,7 +540,32 @@ h1 span{color:var(--accent-light)}
 
       <div class="release-list" id="release-list">
         <!-- ANOLISA_CLI_CHANGELOG_START -->
-        <article class="release reveal reveal-d1" id="anolisa-cli-0-1-10">
+        <article class="release reveal reveal-d1" id="anolisa-cli-0-1-11">
+          <div class="release-meta">
+            <div class="release-version">0.1.11</div>
+            <div class="release-date">2026-06-18</div>
+          </div>
+          <div class="release-body">
+          <div class="release-body-section">
+            <h3>Added</h3>
+            <ul>
+              <li><code>anolisa adopt &lt;component&gt;</code> can track a pre-installed system RPM without installing it.</li>
+              <li><code>anolisa repair &lt;component&gt;</code> can refresh RPM component state after package details change.</li>
+              <li><code>anolisa forget &lt;component&gt;</code> can stop tracking a component without removing packages or files.</li>
+            </ul>
+          </div>
+          <div class="release-body-section">
+            <h3>Changed</h3>
+            <ul>
+              <li><code>anolisa status &lt;component&gt;</code> now reports drifted RPM components when system package details change.</li>
+              <li><code>anolisa uninstall</code> now keeps observed system RPMs unless <code>--remove-system-package</code> is used.</li>
+              <li><code>anolisa install</code> now preserves adapter package resources when adopting RPM components.</li>
+            </ul>
+          </div>
+          </div>
+        </article>
+
+        <article class="release reveal reveal-d2" id="anolisa-cli-0-1-10">
           <div class="release-meta">
             <div class="release-version">0.1.10</div>
             <div class="release-date">2026-06-17</div>
@@ -575,7 +600,7 @@ h1 span{color:var(--accent-light)}
           </div>
         </article>
 
-        <article class="release reveal reveal-d2" id="anolisa-cli-0-1-9">
+        <article class="release reveal reveal-d3" id="anolisa-cli-0-1-9">
           <div class="release-meta">
             <div class="release-version">0.1.9</div>
             <div class="release-date">2026-06-16</div>
@@ -599,7 +624,7 @@ h1 span{color:var(--accent-light)}
           </div>
         </article>
 
-        <article class="release reveal reveal-d3" id="anolisa-cli-0-1-8">
+        <article class="release reveal reveal-d4" id="anolisa-cli-0-1-8">
           <div class="release-meta">
             <div class="release-version">0.1.8</div>
             <div class="release-date">2026-06-15</div>
@@ -624,7 +649,7 @@ h1 span{color:var(--accent-light)}
           </div>
         </article>
 
-        <article class="release reveal reveal-d4" id="anolisa-cli-0-1-7">
+        <article class="release reveal reveal-d5" id="anolisa-cli-0-1-7">
           <div class="release-meta">
             <div class="release-version">0.1.7</div>
             <div class="release-date">2026-06-13</div>
@@ -645,35 +670,6 @@ h1 span{color:var(--accent-light)}
           </div>
           </div>
         </article>
-
-        <article class="release reveal reveal-d5" id="anolisa-cli-0-1-6">
-          <div class="release-meta">
-            <div class="release-version">0.1.6</div>
-            <div class="release-date">2026-06-12</div>
-          </div>
-          <div class="release-body">
-          <div class="release-body-section">
-            <h3>Added</h3>
-            <ul>
-              <li><code>anolisa osbase sandbox install gvisor</code> now supports standalone, containerd, and substrate deployments. (#851)</li>
-              <li><code>anolisa list</code> can derive the component catalog from <code>repo.toml</code> configuration. (#854)</li>
-            </ul>
-          </div>
-          <div class="release-body-section">
-            <h3>Changed</h3>
-            <ul>
-              <li>Replaced the legacy &quot;capability&quot; model with a unified component lifecycle; old state auto-migrates on next write. (#876)</li>
-            </ul>
-          </div>
-          <div class="release-body-section">
-            <h3>Fixed</h3>
-            <ul>
-              <li><code>anolisa list --enabled</code> now correctly shows installed components instead of an empty list. (#872)</li>
-              <li><code>anolisa list</code> no longer requires a separate local catalog file when <code>repo.toml</code> is configured. (#854)</li>
-            </ul>
-          </div>
-          </div>
-        </article>
         <!-- ANOLISA_CLI_CHANGELOG_END -->
       </div>
 
@@ -684,7 +680,7 @@ h1 span{color:var(--accent-light)}
         <!-- ANOLISA_CHANGELOG_DATA_START -->
         <script type="application/json" id="changelog-data">{
   "limit": 5,
-  "latestVersion": "0.1.10",
+  "latestVersion": "0.1.11",
   "components": [
     {
       "id": "anolisa",
@@ -695,6 +691,28 @@ h1 span{color:var(--accent-light)}
         "en": {
           "label": "EN",
           "releases": [
+            {
+              "version": "0.1.11",
+              "date": "2026-06-18",
+              "sections": [
+                {
+                  "title": "Added",
+                  "items": [
+                    "`anolisa adopt \u003ccomponent>` can track a pre-installed system RPM without installing it.",
+                    "`anolisa repair \u003ccomponent>` can refresh RPM component state after package details change.",
+                    "`anolisa forget \u003ccomponent>` can stop tracking a component without removing packages or files."
+                  ]
+                },
+                {
+                  "title": "Changed",
+                  "items": [
+                    "`anolisa status \u003ccomponent>` now reports drifted RPM components when system package details change.",
+                    "`anolisa uninstall` now keeps observed system RPMs unless `--remove-system-package` is used.",
+                    "`anolisa install` now preserves adapter package resources when adopting RPM components."
+                  ]
+                }
+              ]
+            },
             {
               "version": "0.1.10",
               "date": "2026-06-17",
@@ -788,38 +806,34 @@ h1 span{color:var(--accent-light)}
                   ]
                 }
               ]
-            },
-            {
-              "version": "0.1.6",
-              "date": "2026-06-12",
-              "sections": [
-                {
-                  "title": "Added",
-                  "items": [
-                    "`anolisa osbase sandbox install gvisor` now supports standalone, containerd, and substrate deployments. (#851)",
-                    "`anolisa list` can derive the component catalog from `repo.toml` configuration. (#854)"
-                  ]
-                },
-                {
-                  "title": "Changed",
-                  "items": [
-                    "Replaced the legacy \"capability\" model with a unified component lifecycle; old state auto-migrates on next write. (#876)"
-                  ]
-                },
-                {
-                  "title": "Fixed",
-                  "items": [
-                    "`anolisa list --enabled` now correctly shows installed components instead of an empty list. (#872)",
-                    "`anolisa list` no longer requires a separate local catalog file when `repo.toml` is configured. (#854)"
-                  ]
-                }
-              ]
             }
           ]
         },
         "zh": {
           "label": "中文",
           "releases": [
+            {
+              "version": "0.1.11",
+              "date": "2026-06-18",
+              "sections": [
+                {
+                  "title": "新增",
+                  "items": [
+                    "`anolisa adopt \u003ccomponent>` 可接管预装 RPM。",
+                    "`anolisa repair \u003ccomponent>` 可刷新漂移的 RPM 状态。",
+                    "`anolisa forget \u003ccomponent>` 可停止跟踪组件。"
+                  ]
+                },
+                {
+                  "title": "变更",
+                  "items": [
+                    "`anolisa status \u003ccomponent>` 现报告 RPM 状态漂移。",
+                    "`anolisa uninstall` 默认保留观察到的系统 RPM。",
+                    "`anolisa install` 接管 RPM 时保留适配器资源。"
+                  ]
+                }
+              ]
+            },
             {
               "version": "0.1.10",
               "date": "2026-06-17",
@@ -910,32 +924,6 @@ h1 span{color:var(--accent-light)}
                   "items": [
                     "`anolisa install` 不再要求本地已有组件目录条目即可从远程仓库下载安装。",
                     "`anolisa install --dry-run` 无需下载完整安装包即可预览文件和服务列表。"
-                  ]
-                }
-              ]
-            },
-            {
-              "version": "0.1.6",
-              "date": "2026-06-12",
-              "sections": [
-                {
-                  "title": "新增",
-                  "items": [
-                    "`anolisa osbase sandbox install gvisor` 支持 standalone、containerd 和 substrate 三种部署形态。(#851)",
-                    "`anolisa list` 可从 `repo.toml` 配置自动发现组件目录。(#854)"
-                  ]
-                },
-                {
-                  "title": "变更",
-                  "items": [
-                    "废弃旧版\"能力\"模型，统一为组件生命周期；旧状态在下次写入时自动迁移。(#876)"
-                  ]
-                },
-                {
-                  "title": "修复",
-                  "items": [
-                    "`anolisa list --enabled` 现在正确显示已安装组件，而非空列表。(#872)",
-                    "`anolisa list` 在已配置 `repo.toml` 时不再要求额外的本地目录文件。(#854)"
                   ]
                 }
               ]
