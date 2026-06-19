@@ -319,15 +319,23 @@ impl GenAIBuilder {
         )
         .or_else(|| Some(request.source_event.comm_str()));
 
-        // 双层兑底计算 session_id / conversation_id（详见上方注释）。
-        // 这里不使用 unwrap_or_else(|| “”) 是为了让“同 PID 同 agent”上下文下
+        // 从 request body.metadata 提取 session_id（复用 types.rs 共享函数）
+        let metadata_session: Option<String> = body
+            .as_ref()
+            .and_then(|b| b.get("metadata"))
+            .and_then(crate::analyzer::message::types::session_id_from_metadata);
+
+        // 双层兜底计算 session_id / conversation_id（详见上方注释）。
+        // 这里不使用 unwrap_or_else(|| "") 是为了让“同 PID 同 agent”上下文下
         // crash_fallback_id 输入始终相同。
         let agent_name_str = agent_name.as_deref().unwrap_or("");
         let pid_i32 = conn_id.pid as i32;
 
-        let session_id = self
-            .id_resolver
-            .peek_session_id(agent_name_str, pid_i32, &first_user_text)
+        let session_id = metadata_session
+            .or_else(|| {
+                self.id_resolver
+                    .peek_session_id(agent_name_str, pid_i32, &first_user_text)
+            })
             .or_else(|| {
                 Some(super::id_resolver::crash_fallback_id(
                     "session",

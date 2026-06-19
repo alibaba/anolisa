@@ -104,8 +104,12 @@ impl GenAIBuilder {
             .unwrap_or_else(|| http.comm.clone());
         let pid_i32 = http.pid as i32;
 
-        // session_id: 优先从 agent 自身的 session 获取（通过 response ID → .jsonl UUID 映射），
-        // 未命中时 fallback 到 `SHA256("session" + 该 session 内最早 response_id)`。
+        // session_id: 优先从 request metadata 获取（Claude Code），
+        // 次优先 response ID → .jsonl UUID 映射，
+        // 兜底 hash。
+        let metadata_session = parsed_message
+            .as_ref()
+            .and_then(|m| m.request_metadata_session_id());
         let parsed_response_id = parsed_message
             .as_ref()
             .and_then(|m| m.response_id())
@@ -114,15 +118,10 @@ impl GenAIBuilder {
             .as_deref()
             .and_then(|rid| response_mapper.get_session_by_response_id(rid))
             .map(|s| s.to_string());
-        let session_id = match mapper_session {
-            Some(uuid) => Some(uuid),
-            None => self.id_resolver.resolve_session_id(
-                &agent_name,
-                pid_i32,
-                &first_user_raw,
-                &response_id,
-            ),
-        };
+        let session_id = metadata_session.or(mapper_session).or_else(|| {
+            self.id_resolver
+                .resolve_session_id(&agent_name, pid_i32, &first_user_raw, &response_id)
+        });
 
         // conversation_id: SHA256("conversation" + 该 conversation 内最早 response_id)
         let conversation_id = self.id_resolver.resolve_conversation_id(
