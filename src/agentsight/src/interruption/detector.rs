@@ -7,6 +7,19 @@
 use super::types::{InterruptionEvent, InterruptionType};
 use crate::genai::semantic::LLMCall;
 
+/// Whether the finish reason indicates a normal (non-truncated) end of generation.
+fn is_normal_finish(reason: Option<&str>) -> bool {
+    matches!(
+        reason,
+        Some("stop" | "tool_calls" | "end_turn" | "tool_use" | "stop_sequence")
+    )
+}
+
+/// Whether the finish reason indicates a token-limit stop (handled by rules 9/10).
+fn is_token_limit_finish(reason: Option<&str>) -> bool {
+    matches!(reason, Some("length" | "max_tokens"))
+}
+
 /// Configuration for the interruption detector
 pub struct DetectorConfig {
     /// Ratio of output_tokens / max_tokens that triggers token_limit (default: 0.95)
@@ -264,17 +277,19 @@ impl InterruptionDetector {
         }
 
         // ── 8. SSE truncated ──────────────────────────────────────────────────
-        // 严格条件：SSE 流 + 持续时间 >= 阈值 + 无正常终止标志
-        // 正常终止标志：finish_reason 为 stop/tool_calls，或收到 [DONE]
+        // 严格条件：SSE 流 + 持续时间 >= 阈值 + 无正常终止标志 + 非 token-limit
+        // 正常终止标志：finish_reason 为 stop/tool_calls/end_turn/tool_use/stop_sequence
+        // token-limit (length/max_tokens) 由 rule 9/10 单独处理
         let is_sse = call
             .metadata
             .get("is_sse")
             .map(|s| s == "true")
             .unwrap_or(false);
-        let has_normal_finish = finish_reason == Some("stop")
-            || finish_reason == Some("tool_calls")
-            || finish_reason == Some("end_turn");
-        if is_sse && !has_normal_finish && call.duration_ns >= self.config.sse_min_duration_ns {
+        if is_sse
+            && !is_normal_finish(finish_reason)
+            && !is_token_limit_finish(finish_reason)
+            && call.duration_ns >= self.config.sse_min_duration_ns
+        {
             let detail = serde_json::json!({
                 "model": call.model,
                 "duration_ms": call.duration_ns / 1_000_000,
@@ -816,6 +831,108 @@ mod tests {
             events
                 .iter()
                 .all(|e| e.interruption_type != InterruptionType::SseTruncated)
+        );
+    }
+
+    #[test]
+    fn test_sse_tool_use_not_truncated() {
+        // SSE + finish_reason="tool_use" → 不产生 SseTruncated
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
+        call.duration_ns = 2_000_000_000;
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("tool_use".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .all(|e| e.interruption_type != InterruptionType::SseTruncated),
+            "tool_use should not trigger SseTruncated"
+        );
+    }
+
+    #[test]
+    fn test_sse_stop_sequence_not_truncated() {
+        // SSE + finish_reason="stop_sequence" → 不产生 SseTruncated
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
+        call.duration_ns = 2_000_000_000;
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("stop_sequence".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .all(|e| e.interruption_type != InterruptionType::SseTruncated),
+            "stop_sequence should not trigger SseTruncated"
+        );
+    }
+
+    #[test]
+    fn test_sse_length_not_truncated_but_token_limit_fires() {
+        // SSE + finish_reason="length" → 不产生 SseTruncated
+        // 但 rule 9 的 TokenLimit 逻辑仍正常触发
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
+        call.duration_ns = 2_000_000_000;
+        call.request.max_tokens = Some(4096);
+        call.token_usage = Some(TokenUsage {
+            input_tokens: 1000,
+            output_tokens: 3900, // 3900/4096 = 0.952 >= 0.95
+            total_tokens: 4900,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        });
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("length".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .all(|e| e.interruption_type != InterruptionType::SseTruncated),
+            "length should not trigger SseTruncated (handled by rule 9/10)"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::TokenLimit),
+            "length should still trigger TokenLimit via rule 9"
+        );
+    }
+
+    #[test]
+    fn test_sse_none_finish_still_truncated() {
+        // SSE + finish_reason=None + duration > sse_min_duration → 仍产生 SseTruncated
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
+        call.duration_ns = 2_000_000_000;
+        // response.messages is empty → finish_reason = None
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::SseTruncated),
+            "None finish_reason with SSE should still trigger SseTruncated"
         );
     }
 
