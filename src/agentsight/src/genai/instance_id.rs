@@ -11,10 +11,14 @@
 
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// ECS metadata 请求超时（连接 + 读取均为 1 秒）
 const METADATA_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// 连续失败上限：超过此次数后不再重试，避免非 ECS 环境反复 1s 超时
+const MAX_RETRIES: usize = 3;
 
 /// owner-account-id 缓存：只缓存成功（非空）的 fetch 结果。
 ///
@@ -22,24 +26,32 @@ const METADATA_TIMEOUT: Duration = Duration::from_secs(1);
 /// 避免一次 metadata 抖动让 owner-account-id 永久变空（SLS 多租户归属 key 丢失）。
 struct CachedUid {
     cell: Mutex<Option<String>>,
+    failures: AtomicUsize,
 }
 
 impl CachedUid {
     const fn new() -> Self {
         Self {
             cell: Mutex::new(None),
+            failures: AtomicUsize::new(0),
         }
     }
 
     /// 命中缓存直接返回；否则运行 `fetch`，仅缓存非空结果，空结果返回但不缓存。
+    /// 连续失败达到 `MAX_RETRIES` 后不再调用 `fetch`，直接返回空。
     fn get_or_fetch(&self, fetch: impl FnOnce() -> String) -> String {
         let mut guard = self.cell.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(v) = guard.as_ref() {
             return v.clone();
         }
+        if self.failures.load(Ordering::Relaxed) >= MAX_RETRIES {
+            return String::new();
+        }
         let v = fetch();
         if !v.is_empty() {
             *guard = Some(v.clone());
+        } else {
+            self.failures.fetch_add(1, Ordering::Relaxed);
         }
         v
     }
@@ -124,7 +136,6 @@ fn fetch_instance_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn cached_uid_caches_success_only() {
@@ -149,5 +160,29 @@ mod tests {
         assert_eq!(cache.get_or_fetch(fetch), "uid-42");
         // Exactly 2 fetches happened (3rd call served from cache).
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn cached_uid_stops_after_max_retries() {
+        let cache = CachedUid::new();
+        let calls = AtomicUsize::new(0);
+        let fetch = || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            String::new()
+        };
+
+        // First MAX_RETRIES calls each invoke fetch and return empty.
+        for _ in 0..MAX_RETRIES {
+            assert_eq!(cache.get_or_fetch(fetch), "");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), MAX_RETRIES);
+
+        // After the cap, the next call MUST short-circuit:
+        assert_eq!(cache.get_or_fetch(fetch), "");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            MAX_RETRIES,
+            "must not fetch after MAX_RETRIES cap"
+        );
     }
 }

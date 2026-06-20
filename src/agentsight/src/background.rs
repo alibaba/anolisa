@@ -223,7 +223,7 @@ pub(crate) fn start_config_watcher(
                 let action = handle_config_event(
                     &content,
                     &sls_activated,
-                    || crate::genai::instance_id::get_owner_account_id().to_string(),
+                    crate::genai::instance_id::get_owner_account_id,
                     encryption_pem.as_deref(),
                     trace_enabled,
                     &pending_logtail,
