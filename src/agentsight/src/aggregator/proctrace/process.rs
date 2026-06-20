@@ -54,9 +54,27 @@ impl AggregatedProcess {
     }
 
     /// Add exec event data
+    ///
+    /// A process can execve multiple times (e.g., bash exec-ing into sleep).
+    /// We preserve the first exec's args (the user-initiated command) and mark
+    /// subsequent execs with "..." to indicate truncation. The filename is
+    /// updated to reflect the final exec state for compatibility.
     pub fn add_exec(&mut self, filename: String, args: String, timestamp_ns: u64) {
-        self.filename = Some(filename);
-        self.args = Some(args);
+        if self.filename.is_none() {
+            // First exec: record complete information
+            self.filename = Some(filename);
+            self.args = Some(args);
+        } else {
+            // Subsequent exec: mark that additional execs occurred, but preserve
+            // the first args (the original command matters most for correlation)
+            if let Some(ref mut existing_args) = self.args {
+                if !existing_args.ends_with(" ...") {
+                    existing_args.push_str(" ...");
+                }
+            }
+            // Update filename to reflect final state (for backward compatibility)
+            self.filename = Some(filename);
+        }
         self.end_timestamp_ns = timestamp_ns;
     }
 
@@ -205,5 +223,73 @@ impl ToChromeTraceEvent for AggregatedProcess {
         }
 
         events
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_add_exec_single() {
+        let mut proc = AggregatedProcess::new(100, 100, 50, 50, "test".to_string(), 1000);
+        proc.add_exec("bash".to_string(), "bash -lc 'echo test'".to_string(), 2000);
+
+        assert_eq!(proc.filename, Some("bash".to_string()));
+        assert_eq!(proc.args, Some("bash -lc 'echo test'".to_string()));
+        // Single exec: no "..." suffix
+        assert!(!proc.args.as_ref().unwrap().ends_with(" ..."));
+    }
+
+    #[test]
+    fn test_add_exec_multiple_preserves_first_args() {
+        let mut proc = AggregatedProcess::new(100, 100, 50, 50, "test".to_string(), 1000);
+
+        // First exec
+        proc.add_exec(
+            "bash".to_string(),
+            "bash -lc 'echo test && sleep 1'".to_string(),
+            2000,
+        );
+        assert_eq!(
+            proc.args,
+            Some("bash -lc 'echo test && sleep 1'".to_string())
+        );
+
+        // Second exec (bash exec-ing into sleep)
+        proc.add_exec("sleep".to_string(), "sleep 1".to_string(), 3000);
+
+        // Args should preserve first command with "..." marker
+        assert_eq!(
+            proc.args,
+            Some("bash -lc 'echo test && sleep 1' ...".to_string())
+        );
+        // Filename should be updated to final state
+        assert_eq!(proc.filename, Some("sleep".to_string()));
+    }
+
+    #[test]
+    fn test_add_exec_multiple_appends_marker_once() {
+        let mut proc = AggregatedProcess::new(100, 100, 50, 50, "test".to_string(), 1000);
+
+        proc.add_exec("bash".to_string(), "bash script.sh".to_string(), 2000);
+        proc.add_exec("cmd1".to_string(), "cmd1 arg".to_string(), 3000);
+        proc.add_exec("cmd2".to_string(), "cmd2 arg".to_string(), 4000);
+
+        // "..." should only appear once, not multiple times
+        let args = proc.args.unwrap();
+        assert_eq!(args, "bash script.sh ...");
+        assert_eq!(args.matches(" ...").count(), 1);
+    }
+
+    #[test]
+    fn test_add_exec_empty_first_args() {
+        let mut proc = AggregatedProcess::new(100, 100, 50, 50, "test".to_string(), 1000);
+
+        proc.add_exec("bash".to_string(), "".to_string(), 2000);
+        proc.add_exec("sleep".to_string(), "sleep 1".to_string(), 3000);
+
+        // Empty first args should have "..." appended
+        assert_eq!(proc.args, Some(" ...".to_string()));
     }
 }
