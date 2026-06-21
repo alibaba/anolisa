@@ -1,3 +1,5 @@
+use serde_json::Value;
+
 use crate::hooks::state::{HookFeedback, RuntimeHookDisplayEvent, RuntimeHookFinding};
 use crate::runtime::prelude::*;
 use crate::slash::panel::render_notice_panel;
@@ -15,12 +17,42 @@ pub(crate) fn render_hooks_command<W: Write>(
         (None, _, _) => {
             let i18n = state.i18n();
             let hooks = state.hooks.engine.registered_hook_infos();
-            let body = hooks_status_body(state, &hooks, &i18n);
+            let shell_body = hooks_status_body(state, &hooks, &i18n);
+
+            // Agent Hooks section (only available with CoshCore backend)
+            let (agent_body, agent_hook_count) =
+                if let AdapterInstance::CoshCore(cosh_core) = adapter {
+                    match cosh_core.registry_query("hooks", "list", Value::Null) {
+                        Ok(data) => {
+                            let list = format_agent_hooks_list(&data);
+                            let count = data.as_array().map(|a| a.len()).unwrap_or(0);
+                            (list, count)
+                        }
+                        Err(e) => (vec![format!("  Error: {e}")], 0),
+                    }
+                } else {
+                    (
+                        vec![format!(
+                            "  {}",
+                            i18n.t(MessageId::SlashHooksAgentUnavailable)
+                        )],
+                        0,
+                    )
+                };
+
+            let mut body = Vec::new();
+            body.push(format!("── {} ──", i18n.t(MessageId::SlashHooksShellSection)));
+            body.extend(shell_body);
+            body.push(String::new());
+            body.push(format!("── {} ──", i18n.t(MessageId::SlashHooksAgentSection)));
+            body.extend(agent_body);
+
+            let total_hook_count = hooks.len() + agent_hook_count;
             render_notice_panel(
                 output,
                 i18n.t(MessageId::SlashHooksRegisteredTitle),
                 body,
-                Some(&hooks_footer(state, hooks.len(), &i18n)),
+                Some(&hooks_footer(state, total_hook_count, &i18n)),
             )
         }
         (Some("history"), None, None) => render_hooks_history(state, output),
@@ -575,4 +607,21 @@ fn hook_severity_label(severity: FindingSeverity) -> &'static str {
         FindingSeverity::Warning => "warning",
         FindingSeverity::Critical => "critical",
     }
+}
+
+fn format_agent_hooks_list(data: &Value) -> Vec<String> {
+    let Some(arr) = data.as_array() else {
+        return vec!["  (none)".to_string()];
+    };
+    if arr.is_empty() {
+        return vec!["  (none)".to_string()];
+    }
+    arr.iter()
+        .filter_map(|hook| {
+            let name = hook.get("name")?.as_str()?;
+            let event = hook.get("event").and_then(|v| v.as_str()).unwrap_or("?");
+            let ext = hook.get("extension").and_then(|v| v.as_str()).unwrap_or("?");
+            Some(format!("  • {name} [{event}] (ext: {ext})"))
+        })
+        .collect()
 }

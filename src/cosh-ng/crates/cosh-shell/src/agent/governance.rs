@@ -103,51 +103,7 @@ pub fn govern_agent_events_with_language(
                     false,
                 )
             }
-            AgentEvent::SkillLoadStarted { skill, reason, .. } => (
-                GovernanceDecision::Display,
-                GovernancePolicyDecision::DisplayOnly,
-                "skill activity is display-only".to_string(),
-                format!(
-                    "{}\n{}",
-                    i18n.format(
-                        MessageId::AgentGovernanceSkillLoadingLine,
-                        &[("skill", skill)]
-                    ),
-                    i18n.format(MessageId::AgentGovernanceReasonLine, &[("reason", reason)])
-                ),
-                false,
-            ),
-            AgentEvent::SkillLoadCompleted { skill, summary, .. } => (
-                GovernanceDecision::Display,
-                GovernancePolicyDecision::DisplayOnly,
-                "skill activity is display-only".to_string(),
-                format!(
-                    "{}\n{}",
-                    i18n.format(
-                        MessageId::AgentGovernanceSkillLoadedLine,
-                        &[("skill", skill)]
-                    ),
-                    i18n.format(
-                        MessageId::AgentGovernanceSummaryLine,
-                        &[("summary", summary)]
-                    )
-                ),
-                false,
-            ),
-            AgentEvent::SkillLoadFailed { skill, error, .. } => (
-                GovernanceDecision::Display,
-                GovernancePolicyDecision::DisplayOnly,
-                "skill activity is display-only".to_string(),
-                format!(
-                    "{}\n{}",
-                    i18n.format(
-                        MessageId::AgentGovernanceSkillFailedLine,
-                        &[("skill", skill)]
-                    ),
-                    i18n.format(MessageId::AgentGovernanceErrorLine, &[("error", error)])
-                ),
-                false,
-            ),
+
             AgentEvent::ToolOutputDelta {
                 tool_id,
                 stream,

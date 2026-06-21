@@ -166,7 +166,6 @@ pub(crate) fn render_activity_details_by_id<W: Write>(
 
 fn should_render_activity_row(row: &RuntimeActivityRow, approval_mode: CoshApprovalMode) -> bool {
     match row.kind {
-        ActivityKind::Skill => row.status == "failed",
         ActivityKind::ShellHandoff => row.status != "completed",
         ActivityKind::ToolOutput => false,
         ActivityKind::Tool => {
@@ -250,7 +249,6 @@ fn activity_detail_for_render(row: &RuntimeActivityRow, debug: bool) -> String {
 impl ActivityKind {
     fn label(self) -> &'static str {
         match self {
-            Self::Skill => "skill",
             Self::ToolOutput => "output",
             Self::Tool => "tool",
             Self::ShellHandoff => "shell",

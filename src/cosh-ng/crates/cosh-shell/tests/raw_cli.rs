@@ -50,6 +50,8 @@ mod question;
 mod recommendation;
 #[path = "raw_cli/renderer.rs"]
 mod renderer;
+#[path = "raw_cli/registry.rs"]
+mod registry;
 #[path = "raw_cli/slash.rs"]
 mod slash;
 #[path = "raw_cli/startup.rs"]

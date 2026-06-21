@@ -68,6 +68,15 @@ pub enum InputMessage {
 
     #[serde(rename = "control_response")]
     ControlResponse { response: ControlResponsePayload },
+
+    #[serde(rename = "registry_request")]
+    RegistryRequest {
+        request_id: String,
+        domain: String,
+        action: String,
+        #[serde(default)]
+        params: Value,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -202,6 +211,16 @@ pub enum OutputMessage {
         env_delta: Option<EnvDelta>,
         #[serde(skip_serializing_if = "Option::is_none")]
         duration_ms: Option<u64>,
+    },
+
+    #[serde(rename = "registry_response")]
+    RegistryResponse {
+        request_id: String,
+        success: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        data: Option<Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
 }
 

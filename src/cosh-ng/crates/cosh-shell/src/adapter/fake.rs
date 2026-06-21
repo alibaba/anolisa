@@ -104,21 +104,6 @@ impl AgentAdapter for FakeAgentAdapter {
                         .any(|hint| hint.contains("disable provider resume"))
                 {
                     return Ok(vec![
-                        AgentEvent::SkillLoadStarted {
-                            run_id: run_id.clone(),
-                            skill: "recovery-context".to_string(),
-                            reason: "captured before resume timeout".to_string(),
-                        },
-                        AgentEvent::SkillLoadCompleted {
-                            run_id: run_id.clone(),
-                            skill: "recovery-context".to_string(),
-                            summary: "structured context before recovery".to_string(),
-                        },
-                        AgentEvent::SkillLoadFailed {
-                            run_id: run_id.clone(),
-                            skill: "recovery-context".to_string(),
-                            error: "structured context failed before recovery".to_string(),
-                        },
                         AgentEvent::AgentFailed {
                             run_id,
                             error: "Agent timed out: No provider response within 20s".to_string(),
@@ -539,16 +524,6 @@ impl AgentAdapter for FakeAgentAdapter {
                     AgentEvent::TextDelta {
                         run_id: run_id.clone(),
                         text: format!("Received shell prompt request: {input}"),
-                    },
-                    AgentEvent::SkillLoadStarted {
-                        run_id: run_id.clone(),
-                        skill: "git-project".to_string(),
-                        reason: "project directory contains git metadata".to_string(),
-                    },
-                    AgentEvent::SkillLoadCompleted {
-                        run_id: run_id.clone(),
-                        skill: "git-project".to_string(),
-                        summary: "loaded git troubleshooting guidance".to_string(),
                     },
                     AgentEvent::ToolCall {
                         run_id: run_id.clone(),

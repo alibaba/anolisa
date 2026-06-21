@@ -41,7 +41,6 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::HelpSummaryDebug => "show session debug details",
         MessageId::HelpSummaryClear => "clear local shell state",
         MessageId::HelpSummaryShell => "return to shell input",
-        MessageId::HelpSummarySkill => "show skill routing hints",
         MessageId::HelpSummaryApprovalModeRemoved => "removed approval-mode alias",
         MessageId::SlashHintTitle => "Slash command hint",
         MessageId::SlashHintPrefix => "Prefix: {prefix}",
@@ -78,16 +77,6 @@ pub(super) fn message(id: MessageId) -> &'static str {
         }
         MessageId::SlashInfoConfigFooter => {
             "Use /config language [auto|en-US|zh-CN]. Saved language takes effect next startup."
-        }
-        MessageId::SlashInfoSkillTitle => "Skill",
-        MessageId::SlashInfoSkillHookRoutingBody => {
-            "Hook routing hints can route Agent analysis toward a skill."
-        }
-        MessageId::SlashInfoSkillRegistryBody => {
-            "No external skill registry is configured for this shell session."
-        }
-        MessageId::SlashInfoSkillFooter => {
-            "Skill hooks are advisory and still go through governance."
         }
         MessageId::ConfigInvalidLanguageBody => "Invalid language: {language}",
         MessageId::ConfigSupportedLanguagesFooter => "Supported: auto, en-US, zh-CN.",
@@ -360,8 +349,6 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::AgentStatusAnalysisReturnedError => "analysis returned an error",
         MessageId::AgentStatusStreaming => "streaming",
         MessageId::AgentStatusReceivingResponse => "receiving Agent response",
-        MessageId::AgentStatusSkill => "skill",
-        MessageId::AgentStatusLoadingSkill => "loading skill {skill}",
         MessageId::AgentStatusApproval => "approval",
         MessageId::AgentStatusWaitingApprovalTool => "waiting for approval: tool {tool}",
         MessageId::AgentStatusQuestion => "question",
@@ -374,7 +361,6 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::AgentStatusFailed => "failed",
         MessageId::AgentStatusCancelled => "cancelled",
         MessageId::AgentStatusRunningApprovedProviderTool => "running approved provider tool",
-        MessageId::AgentStatusSkillFailed => "{skill} failed: {error}",
         MessageId::AgentProviderTimeoutDroppedQueuedBody => {
             "{dropped} queued requests skipped after provider timeout"
         }
@@ -388,9 +374,6 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::AgentGovernanceReasonLine => "Reason: {reason}",
         MessageId::AgentGovernanceSummaryLine => "Summary: {summary}",
         MessageId::AgentGovernanceErrorLine => "Error: {error}",
-        MessageId::AgentGovernanceSkillLoadingLine => "Skill loading: {skill}",
-        MessageId::AgentGovernanceSkillLoadedLine => "Skill loaded: {skill}",
-        MessageId::AgentGovernanceSkillFailedLine => "Skill failed: {skill}",
         MessageId::AgentGovernanceToolOutputLine => "Tool output: {tool_id} {stream}",
         MessageId::AgentGovernanceToolCompletedLine => "Tool completed: {tool_id}",
         MessageId::AgentGovernanceApprovalRequiredLine => "Approval required: {subject}",
@@ -538,9 +521,6 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::ActivityStatusCompleted => "completed",
         MessageId::ActivityStatusError => "error",
         MessageId::ActivityStatusInterrupted => "interrupted",
-        MessageId::ActivitySkillLoadingSummary => "{skill} loading",
-        MessageId::ActivitySkillLoadedSummary => "{skill} loaded",
-        MessageId::ActivitySkillFailedSummary => "{skill} failed",
         MessageId::ActivityToolCalledSummary => "{tool} called: {preview}; [Details] {id}",
         MessageId::ActivityToolRequestedSummary => "{tool} requested: {preview}; [Details] {id}",
         MessageId::ActivityToolOutputCapturedSummary => "{stream} captured; [Details] {id}",
@@ -607,6 +587,20 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::QuestionInstructionNoAnswer => "No selectable answer is available.",
         MessageId::QuestionNoPendingTitle => "No pending question",
         MessageId::QuestionNoPendingBody => "There is no Agent question waiting for an answer.",
+        // Registry slash commands
+        MessageId::HelpGroupRegistry => "Registry",
+        MessageId::HelpSummaryExtensions => "list/manage cosh-core extensions",
+        MessageId::HelpSummarySkills => "list/inspect cosh-core skills",
+        MessageId::SlashExtensionsTitle => "Extensions",
+        MessageId::SlashSkillsTitle => "Skills",
+        MessageId::SlashRegistryUnavailable => {
+            "This feature requires cosh-core backend."
+        }
+        MessageId::SlashHooksShellSection => "Shell Hooks",
+        MessageId::SlashHooksAgentSection => "Agent Hooks",
+        MessageId::SlashHooksAgentUnavailable => "(cosh-core backend unavailable)",
+        MessageId::SlashExtensionsEmptyBody => "No extensions installed.",
+        MessageId::SlashSkillsEmptyBody => "No skills found.",
         _ => super::en_approval::message(id),
     }
 }

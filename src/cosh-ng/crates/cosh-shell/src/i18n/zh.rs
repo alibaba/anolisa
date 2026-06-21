@@ -35,7 +35,6 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::HelpSummaryDebug => "显示会话调试详情",
         MessageId::HelpSummaryClear => "清理本地 shell 状态",
         MessageId::HelpSummaryShell => "返回 shell 输入",
-        MessageId::HelpSummarySkill => "显示 skill 路由提示",
         MessageId::HelpSummaryApprovalModeRemoved => "已移除的 approval-mode 别名",
         MessageId::SlashHintTitle => "Slash 命令提示",
         MessageId::SlashHintPrefix => "前缀: {prefix}",
@@ -67,10 +66,6 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::SlashInfoConfigFooter => {
             "使用 /config language [auto|en-US|zh-CN]。保存的语言会在下次启动时生效。"
         }
-        MessageId::SlashInfoSkillTitle => "Skill",
-        MessageId::SlashInfoSkillHookRoutingBody => "Hook 路由提示可将 Agent 分析导向某个 skill。",
-        MessageId::SlashInfoSkillRegistryBody => "此 shell 会话未配置外部 skill registry。",
-        MessageId::SlashInfoSkillFooter => "Skill hooks 仅提供建议，仍会经过治理。",
         MessageId::ConfigInvalidLanguageBody => "无效语言: {language}",
         MessageId::ConfigSupportedLanguagesFooter => "支持: auto, en-US, zh-CN。",
         MessageId::ConfigUnknownKeyBody => "未知配置项: {key}",
@@ -288,8 +283,6 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::AgentStatusAnalysisReturnedError => "分析返回错误",
         MessageId::AgentStatusStreaming => "正在流式输出",
         MessageId::AgentStatusReceivingResponse => "正在接收 Agent 响应",
-        MessageId::AgentStatusSkill => "技能",
-        MessageId::AgentStatusLoadingSkill => "正在加载技能 {skill}",
         MessageId::AgentStatusApproval => "审批",
         MessageId::AgentStatusWaitingApprovalTool => "正在等待审批: tool {tool}",
         MessageId::AgentStatusQuestion => "问题",
@@ -302,7 +295,6 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::AgentStatusFailed => "已失败",
         MessageId::AgentStatusCancelled => "已取消",
         MessageId::AgentStatusRunningApprovedProviderTool => "正在运行已批准的 provider tool",
-        MessageId::AgentStatusSkillFailed => "{skill} 失败: {error}",
         MessageId::AgentProviderTimeoutDroppedQueuedBody => {
             "provider 超时后已跳过 {dropped} 个排队请求"
         }
@@ -316,9 +308,6 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::AgentGovernanceReasonLine => "原因: {reason}",
         MessageId::AgentGovernanceSummaryLine => "摘要: {summary}",
         MessageId::AgentGovernanceErrorLine => "错误: {error}",
-        MessageId::AgentGovernanceSkillLoadingLine => "正在加载技能: {skill}",
-        MessageId::AgentGovernanceSkillLoadedLine => "技能已加载: {skill}",
-        MessageId::AgentGovernanceSkillFailedLine => "技能失败: {skill}",
         MessageId::AgentGovernanceToolOutputLine => "Tool 输出: {tool_id} {stream}",
         MessageId::AgentGovernanceToolCompletedLine => "Tool 已完成: {tool_id}",
         MessageId::AgentGovernanceApprovalRequiredLine => "需要审批: {subject}",
@@ -448,9 +437,6 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::ActivityStatusCompleted => "已完成",
         MessageId::ActivityStatusError => "错误",
         MessageId::ActivityStatusInterrupted => "已中断",
-        MessageId::ActivitySkillLoadingSummary => "{skill} 加载中",
-        MessageId::ActivitySkillLoadedSummary => "{skill} 已加载",
-        MessageId::ActivitySkillFailedSummary => "{skill} 失败",
         MessageId::ActivityToolCalledSummary => "{tool} 已调用：{preview}；[Details] {id}",
         MessageId::ActivityToolRequestedSummary => "{tool} 请求审批：{preview}；[Details] {id}",
         MessageId::ActivityToolOutputCapturedSummary => "{stream} 已捕获；[Details] {id}",
@@ -607,5 +593,19 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::ApprovalReceiptProviderNativeAllowedMessage => {
             "已允许 provider-native shell tool 执行"
         }
+        // Registry slash commands
+        MessageId::HelpGroupRegistry => "Registry",
+        MessageId::HelpSummaryExtensions => "列出/管理 cosh-core 扩展",
+        MessageId::HelpSummarySkills => "列出/查看 cosh-core 技能",
+        MessageId::SlashExtensionsTitle => "扩展",
+        MessageId::SlashSkillsTitle => "技能",
+        MessageId::SlashRegistryUnavailable => {
+            "此功能需要 cosh-core 后端支持。"
+        }
+        MessageId::SlashHooksShellSection => "Shell Hooks",
+        MessageId::SlashHooksAgentSection => "Agent Hooks",
+        MessageId::SlashHooksAgentUnavailable => "(cosh-core 后端不可用)",
+        MessageId::SlashExtensionsEmptyBody => "未安装扩展。",
+        MessageId::SlashSkillsEmptyBody => "未发现技能。",
     }
 }

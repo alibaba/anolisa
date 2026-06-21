@@ -194,11 +194,6 @@ fn governance_outputs_executable_policy_decisions() {
             commands: vec!["systemctl status demo".to_string()],
             auto_execute: true,
         },
-        AgentEvent::SkillLoadCompleted {
-            run_id: "run-1".to_string(),
-            skill: "service-debug".to_string(),
-            summary: "loaded service debugging guidance".to_string(),
-        },
         AgentEvent::ToolOutputDelta {
             run_id: "run-1".to_string(),
             tool_id: "tool-1".to_string(),
@@ -230,7 +225,6 @@ fn governance_outputs_executable_policy_decisions() {
     );
     assert_eq!(governed.events[4].decision, GovernanceDecision::Display);
     assert_eq!(governed.events[5].decision, GovernanceDecision::Display);
-    assert_eq!(governed.events[6].decision, GovernanceDecision::Display);
     assert!(governed.events.iter().all(|event| !event.auto_execute));
     assert!(governed.events[0]
         .display_text
@@ -250,11 +244,8 @@ fn governance_outputs_executable_policy_decisions() {
         .all(|event| !event.display_text.contains("Decision: blocked by")));
     assert!(governed.events[4]
         .display_text
-        .contains("Skill loaded: service-debug"));
-    assert!(governed.events[5]
-        .display_text
         .contains("Tool output: tool-1 stdout"));
-    assert!(governed.events[6].display_text.contains("Agent cancelled"));
+    assert!(governed.events[5].display_text.contains("Agent cancelled"));
 }
 
 #[test]
@@ -280,21 +271,6 @@ fn governance_display_text_uses_requested_language_for_shell_owned_fallbacks() {
             summary: "建议只读检查".to_string(),
             commands: vec!["pwd".to_string()],
             auto_execute: true,
-        },
-        AgentEvent::SkillLoadStarted {
-            run_id: "run-1".to_string(),
-            skill: "service-debug".to_string(),
-            reason: "diagnostic".to_string(),
-        },
-        AgentEvent::SkillLoadCompleted {
-            run_id: "run-1".to_string(),
-            skill: "service-debug".to_string(),
-            summary: "ready".to_string(),
-        },
-        AgentEvent::SkillLoadFailed {
-            run_id: "run-1".to_string(),
-            skill: "service-debug".to_string(),
-            error: "missing".to_string(),
         },
         AgentEvent::ToolOutputDelta {
             run_id: "run-1".to_string(),
@@ -346,12 +322,6 @@ fn governance_display_text_uses_requested_language_for_shell_owned_fallbacks() {
     assert!(text.contains("需要审批: Shell 命令"), "{text}");
     assert!(text.contains("已阻止: 需要用户审批"), "{text}");
     assert!(text.contains("推荐命令:"), "{text}");
-    assert!(text.contains("正在加载技能: service-debug"), "{text}");
-    assert!(text.contains("原因: diagnostic"), "{text}");
-    assert!(text.contains("技能已加载: service-debug"), "{text}");
-    assert!(text.contains("摘要: ready"), "{text}");
-    assert!(text.contains("技能失败: service-debug"), "{text}");
-    assert!(text.contains("错误: missing"), "{text}");
     assert!(text.contains("Tool 输出: tool-1 stdout"), "{text}");
     assert!(text.contains("Tool 已完成: tool-1"), "{text}");
     assert!(text.contains("问题: 继续吗？"), "{text}");
@@ -363,9 +333,6 @@ fn governance_display_text_uses_requested_language_for_shell_owned_fallbacks() {
     assert!(!text.contains("analysis returned an error"), "{text}");
     assert!(!text.contains("Blocked: user approval required"), "{text}");
     assert!(!text.contains("recommended commands:"), "{text}");
-    assert!(!text.contains("Skill loading:"), "{text}");
-    assert!(!text.contains("Skill loaded:"), "{text}");
-    assert!(!text.contains("Skill failed:"), "{text}");
     assert!(!text.contains("Tool output:"), "{text}");
     assert!(!text.contains("Question: Agent needs your input"), "{text}");
 }

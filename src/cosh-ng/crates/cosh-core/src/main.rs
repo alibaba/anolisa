@@ -14,6 +14,7 @@ mod loop_detect;
 mod migrate;
 mod protocol;
 mod provider;
+mod registry;
 mod session;
 mod skill;
 mod tool;
@@ -57,7 +58,9 @@ async fn main() {
     let args = cli::CliArgs::parse();
     let config = CoreConfig::load();
 
-    if args.is_headless() {
+    if args.is_registry() {
+        registry::run(&args, config).await;
+    } else if args.is_headless() {
         headless::run(&args, config).await;
     } else {
         interactive::run(&args, config).await;

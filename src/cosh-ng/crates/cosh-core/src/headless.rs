@@ -235,6 +235,9 @@ where
         }
 
         InputMessage::ControlResponse { .. } => {}
+        InputMessage::RegistryRequest { .. } => {
+            // Registry requests are handled in registry mode, ignore here
+        }
     }
     true
 }

@@ -397,21 +397,7 @@ pub enum AgentEvent {
         tool_input: serde_json::Value,
         tool_use_id: String,
     },
-    SkillLoadStarted {
-        run_id: String,
-        skill: String,
-        reason: String,
-    },
-    SkillLoadCompleted {
-        run_id: String,
-        skill: String,
-        summary: String,
-    },
-    SkillLoadFailed {
-        run_id: String,
-        skill: String,
-        error: String,
-    },
+
     ToolOutputDelta {
         run_id: String,
         tool_id: String,

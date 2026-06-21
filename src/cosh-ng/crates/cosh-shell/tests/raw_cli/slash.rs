@@ -84,16 +84,16 @@ fn raw_cli_unknown_slash_uses_zh_language_env() {
 fn raw_cli_informational_slash_commands_render_feedback() {
     let output = run_raw_cli_with_input(
         "fake",
-        "/skill\n\
+        "/extensions\n\
          /config\n\
          /audit\n\
          echo after-info-slash\n\
          exit\n",
     );
 
-    assert!(output.contains("Skill"), "{output}");
+    // /extensions with fake adapter shows degradation message
     assert!(
-        output.contains("No external skill registry is configured"),
+        output.contains("cosh-core") || output.contains("后端"),
         "{output}"
     );
     assert!(output.contains("Config"), "{output}");

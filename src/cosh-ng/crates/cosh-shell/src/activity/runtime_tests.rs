@@ -880,31 +880,6 @@ fn shell_handoff_activity_ignores_stale_same_command_block_before_request() {
 }
 
 #[test]
-fn activity_skill_summary_uses_state_language() {
-    let mut state = InlineState {
-        language: Language::ZhCn,
-        ..InlineState::default()
-    };
-    record_activity_rows(
-        &mut state,
-        &[governed(AgentEvent::SkillLoadFailed {
-            run_id: "run-1".to_string(),
-            skill: "memory".to_string(),
-            error: "missing file".to_string(),
-        })],
-    );
-
-    let row = state
-        .activity
-        .rows
-        .iter()
-        .find(|row| row.id == "skill-1")
-        .expect("activity row");
-    assert_eq!(row.summary, "memory 失败");
-    assert!(row.detail.contains("status: failed"));
-}
-
-#[test]
 fn activity_interactive_handoff_summary_uses_state_language() {
     let mut state = InlineState {
         language: Language::ZhCn,

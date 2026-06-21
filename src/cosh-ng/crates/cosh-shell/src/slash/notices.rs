@@ -137,14 +137,6 @@ pub(super) fn render_info<W: Write>(
             render_config_body(state),
             i18n.t(MessageId::SlashInfoConfigFooter).to_string(),
         ),
-        SlashInfoCommand::Skill => (
-            i18n.t(MessageId::SlashInfoSkillTitle).to_string(),
-            vec![
-                i18n.t(MessageId::SlashInfoSkillHookRoutingBody).to_string(),
-                i18n.t(MessageId::SlashInfoSkillRegistryBody).to_string(),
-            ],
-            i18n.t(MessageId::SlashInfoSkillFooter).to_string(),
-        ),
     };
 
     render_notice_panel(output, &title, body, Some(&footer))
@@ -277,12 +269,11 @@ mod tests {
     }
 
     #[test]
-    fn slash_info_audit_and_skill_use_zh_catalog_text() {
+    fn slash_info_audit_uses_zh_catalog_text() {
         let state = zh_state();
         let mut output = Vec::new();
 
         render_info(SlashInfoCommand::Audit, &state, &mut output).expect("render audit info");
-        render_info(SlashInfoCommand::Skill, &state, &mut output).expect("render skill info");
 
         let output = String::from_utf8(output).expect("utf8 output");
         assert!(output.contains("审计"), "{output}");
@@ -294,15 +285,6 @@ mod tests {
             output.contains("审计视图是只读的；不会运行 shell 命令。"),
             "{output}"
         );
-        assert!(
-            output.contains("Hook 路由提示可将 Agent 分析导向某个 skill。"),
-            "{output}"
-        );
-        assert!(
-            output.contains("此 shell 会话未配置外部 skill registry。"),
-            "{output}"
-        );
         assert!(!output.contains("Audit views are read-only"), "{output}");
-        assert!(!output.contains("No external skill registry"), "{output}");
     }
 }

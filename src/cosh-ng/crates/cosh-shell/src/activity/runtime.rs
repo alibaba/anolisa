@@ -22,7 +22,6 @@ pub(crate) struct RuntimeActivityRow {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ActivityKind {
-    Skill,
     ToolOutput,
     Tool,
     ShellHandoff,
@@ -56,57 +55,7 @@ pub(crate) fn record_activity_rows_with_policy(
         .collect::<HashSet<_>>();
     for event in governed_events {
         let row = match &event.event {
-            AgentEvent::SkillLoadStarted {
-                run_id,
-                skill,
-                reason,
-            } => Some(RuntimeActivityRow {
-                id: next_activity_id(state, "skill"),
-                run_id: run_id.clone(),
-                kind: ActivityKind::Skill,
-                status: "loading".to_string(),
-                subject: skill.clone(),
-                summary: activity_summary_message(
-                    state,
-                    MessageId::ActivitySkillLoadingSummary,
-                    &[("skill", skill)],
-                ),
-                detail: format!("skill: {skill}\nstatus: loading\nreason: {reason}"),
-            }),
-            AgentEvent::SkillLoadCompleted {
-                run_id,
-                skill,
-                summary,
-            } => Some(RuntimeActivityRow {
-                id: next_activity_id(state, "skill"),
-                run_id: run_id.clone(),
-                kind: ActivityKind::Skill,
-                status: "loaded".to_string(),
-                subject: skill.clone(),
-                summary: activity_summary_message(
-                    state,
-                    MessageId::ActivitySkillLoadedSummary,
-                    &[("skill", skill)],
-                ),
-                detail: format!("skill: {skill}\nstatus: loaded\nsummary: {summary}"),
-            }),
-            AgentEvent::SkillLoadFailed {
-                run_id,
-                skill,
-                error,
-            } => Some(RuntimeActivityRow {
-                id: next_activity_id(state, "skill"),
-                run_id: run_id.clone(),
-                kind: ActivityKind::Skill,
-                status: "failed".to_string(),
-                subject: skill.clone(),
-                summary: activity_summary_message(
-                    state,
-                    MessageId::ActivitySkillFailedSummary,
-                    &[("skill", skill)],
-                ),
-                detail: format!("skill: {skill}\nstatus: failed\nerror: {error}"),
-            }),
+
             AgentEvent::ToolCall {
                 run_id,
                 tool_id,

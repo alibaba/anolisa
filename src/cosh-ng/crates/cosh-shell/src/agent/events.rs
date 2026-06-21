@@ -258,10 +258,7 @@ fn should_render_governance_block(event: &GovernedEvent) -> bool {
         | AgentEvent::Action { .. }
         | AgentEvent::ToolPermissionRequest { .. } => false,
         AgentEvent::AgentFailed { .. } | AgentEvent::AgentCancelled { .. } => true,
-        AgentEvent::SkillLoadStarted { .. }
-        | AgentEvent::SkillLoadCompleted { .. }
-        | AgentEvent::SkillLoadFailed { .. }
-        | AgentEvent::ToolOutputDelta { .. }
+        AgentEvent::ToolOutputDelta { .. }
         | AgentEvent::ToolCompleted { .. } => false,
         AgentEvent::TextDelta { .. } | AgentEvent::AgentCompleted { .. } => false,
         AgentEvent::AuthRequired { .. } => false,

@@ -93,11 +93,7 @@ pub(crate) fn remember_agent_activity(active_run: &mut ActiveAgentRun, governed:
                 active_run.current_message =
                     i18n.t(MessageId::AgentStatusReceivingResponse).to_string();
             }
-            AgentEvent::SkillLoadStarted { skill, .. } => {
-                active_run.current_phase = i18n.t(MessageId::AgentStatusSkill).to_string();
-                active_run.current_message =
-                    i18n.format(MessageId::AgentStatusLoadingSkill, &[("skill", skill)]);
-            }
+
             AgentEvent::ToolCall { name, .. } => {
                 active_run.current_phase = i18n.t(MessageId::AgentStatusTool).to_string();
                 active_run.current_message = format!(
@@ -155,17 +151,10 @@ pub(crate) fn remember_agent_activity(active_run: &mut ActiveAgentRun, governed:
                 active_run.current_phase = i18n.t(MessageId::AgentStatusCancelled).to_string();
                 active_run.current_message = reason.clone();
             }
-            AgentEvent::Recommendation { summary, .. }
-            | AgentEvent::SkillLoadCompleted { summary, .. } => {
+            AgentEvent::Recommendation { summary, .. } => {
                 active_run.current_message = summary.clone();
             }
-            AgentEvent::SkillLoadFailed { skill, error, .. } => {
-                active_run.current_phase = i18n.t(MessageId::AgentStatusSkill).to_string();
-                active_run.current_message = i18n.format(
-                    MessageId::AgentStatusSkillFailed,
-                    &[("skill", skill), ("error", error)],
-                );
-            }
+
             AgentEvent::AuthRequired { .. } => {
                 active_run.current_phase = "auth".to_string();
                 active_run.current_message = "Authentication credentials required".to_string();

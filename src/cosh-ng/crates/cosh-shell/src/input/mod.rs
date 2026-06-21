@@ -384,7 +384,10 @@ mod tests {
         );
         assert_eq!(
             classifier.classify("/sk"),
-            InputDecision::SendToShell("/sk".to_string())
+            InputDecision::Intercept {
+                input: "/sk".to_string(),
+                reason: InterceptReason::Slash
+            }
         );
         assert_eq!(
             classifier.classify("/cancel"),

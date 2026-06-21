@@ -15,6 +15,9 @@ mod control_protocol;
 mod control_protocol_tests;
 mod cosh_core;
 mod cosh_core_process;
+mod cosh_core_registry;
+#[cfg(test)]
+mod cosh_core_registry_tests;
 #[cfg(test)]
 mod cosh_core_tests;
 mod fake;

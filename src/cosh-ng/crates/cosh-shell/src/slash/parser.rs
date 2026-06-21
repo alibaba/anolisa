@@ -24,6 +24,8 @@ pub(super) enum SlashCommand<'a> {
     Removed(RemovedCommand<'a>),
     Hint(&'a str),
     Unknown(&'a str),
+    Extensions(Option<&'a str>, Option<&'a str>),
+    Skills(Option<&'a str>, Option<&'a str>),
 }
 
 impl<'a> SlashCommand<'a> {
@@ -57,7 +59,16 @@ impl<'a> SlashCommand<'a> {
                 Some(Self::Config(sub, value))
             }
             "/debug" => Some(Self::Debug(parts.next())),
-            "/skill" => Some(Self::Info(SlashInfoCommand::Skill)),
+            "/extensions" => {
+                let sub = parts.next();
+                let arg = parts.next();
+                Some(Self::Extensions(sub, arg))
+            }
+            "/skills" => {
+                let sub = parts.next();
+                let arg = parts.next();
+                Some(Self::Skills(sub, arg))
+            }
             "/agent" | "/cancel" | "/clear" | "/copy" | "/details" | "/explain" | "/select"
             | "/send-to-shell" | "/shell" => None,
             "/" => Some(Self::Noop),
@@ -77,7 +88,6 @@ impl<'a> SlashCommand<'a> {
 pub(super) enum SlashInfoCommand {
     Audit,
     Config,
-    Skill,
 }
 
 pub(super) enum RemovedCommand<'a> {
@@ -117,17 +127,23 @@ mod tests {
     fn hidden_and_contextual_commands_are_not_public_hints() {
         assert!(slash_hints("/co").iter().any(|hint| hint.name == "/config"));
         for prefix in [
-            "/ag", "/ex", "/ca", "/de", "/au", "/se", "/co", "/send", "/debug", "/skill",
+            "/ag", "/ca", "/de", "/au", "/se", "/co", "/send", "/debug",
         ] {
             let hints = slash_hints(prefix);
             assert!(
                 hints
                     .iter()
-                    .all(|hint| matches!(hint.name, "/config" | "/mode" | "/hooks")),
+                    .all(|hint| matches!(
+                        hint.name,
+                        "/config" | "/mode" | "/hooks" | "/extensions" | "/skills"
+                    )),
                 "{prefix} returned non-public hints: {:?}",
                 hints.iter().map(|hint| hint.name).collect::<Vec<_>>()
             );
         }
+        // /ex and /skill now match public commands
+        assert!(slash_hints("/ex").iter().any(|hint| hint.name == "/extensions"));
+        assert!(slash_hints("/skill").iter().any(|hint| hint.name == "/skills"));
     }
 
     fn slash_hints(prefix: &str) -> Vec<&'static SlashCommandSpec> {

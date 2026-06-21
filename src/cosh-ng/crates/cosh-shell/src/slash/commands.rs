@@ -2,11 +2,13 @@ use crate::runtime::mode::render_mode_command;
 use crate::runtime::prelude::*;
 use crate::slash::config::render_config_command;
 use crate::slash::debug::render_debug_command;
+use crate::slash::extensions::render_extensions_command;
 use crate::slash::hooks::render_hooks_command;
 use crate::slash::notices::{
     render_help, render_hint, render_info, render_removed_command, render_unknown,
 };
 use crate::slash::parser::SlashCommand;
+use crate::slash::skills::render_skills_command;
 
 pub(super) fn render_slash_command<W: Write>(
     command: SlashCommand<'_>,
@@ -51,6 +53,14 @@ pub(super) fn render_slash_command<W: Write>(
         }
         SlashCommand::Unknown(command) => {
             render_unknown(command, state, output)?;
+            Ok(true)
+        }
+        SlashCommand::Extensions(sub, arg) => {
+            render_extensions_command(sub, arg, adapter, state, output)?;
+            Ok(true)
+        }
+        SlashCommand::Skills(sub, arg) => {
+            render_skills_command(sub, arg, adapter, state, output)?;
             Ok(true)
         }
     }

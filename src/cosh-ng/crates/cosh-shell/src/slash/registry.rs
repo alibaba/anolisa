@@ -129,6 +129,22 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
             state: SlashCommandState::PublicMinimal,
         },
         SlashCommandSpec {
+            name: "/extensions",
+            usage: "/extensions [list|detail] [name]",
+            summary_id: MessageId::HelpSummaryExtensions,
+            group: Some("Registry"),
+            scope: "config",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
+            name: "/skills",
+            usage: "/skills [list|detail] [name]",
+            summary_id: MessageId::HelpSummarySkills,
+            group: Some("Registry"),
+            scope: "read-only",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
             name: "/select",
             usage: "/select N",
             summary_id: MessageId::HelpSummarySelect,
@@ -176,14 +192,7 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
             scope: "session",
             state: SlashCommandState::Hidden,
         },
-        SlashCommandSpec {
-            name: "/skill",
-            usage: "/skill",
-            summary_id: MessageId::HelpSummarySkill,
-            group: None,
-            scope: "advisory",
-            state: SlashCommandState::Diagnostic,
-        },
+
         SlashCommandSpec {
             name: "/approval-mode",
             usage: "/approval-mode [recommend|auto|trust]",

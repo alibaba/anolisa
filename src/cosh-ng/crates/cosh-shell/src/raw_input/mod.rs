@@ -71,7 +71,10 @@ mod tests {
             Some("/mode approval [recommend|auto|trust]".to_string())
         );
         assert_eq!(candidate_inline_hint("/approval"), None);
-        assert_eq!(candidate_inline_hint("/sk"), None);
+        assert_eq!(
+            candidate_inline_hint("/sk"),
+            Some("/skills [list|detail] [name]".to_string())
+        );
     }
 
     #[test]

@@ -373,9 +373,6 @@ pub(crate) fn agent_event_is_provider_progress(event: &AgentEvent) -> bool {
         ),
         AgentEvent::TextDelta { text, .. } => !text.trim().is_empty(),
         AgentEvent::Recommendation { .. }
-        | AgentEvent::SkillLoadStarted { .. }
-        | AgentEvent::SkillLoadCompleted { .. }
-        | AgentEvent::SkillLoadFailed { .. }
         | AgentEvent::ToolCall { .. }
         | AgentEvent::UserQuestion { .. }
         | AgentEvent::Action { .. }

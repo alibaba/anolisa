@@ -27,6 +27,10 @@ pub struct CliArgs {
     #[arg(long)]
     pub verbose: bool,
 
+    /// Registry-only mode: respond to one registry_request then exit
+    #[arg(long)]
+    pub registry: bool,
+
     // Compatibility flags — accepted but ignored
     #[arg(long, value_name = "FMT", hide = true)]
     pub output_format: Option<String>,
@@ -44,5 +48,9 @@ pub struct CliArgs {
 impl CliArgs {
     pub fn is_headless(&self) -> bool {
         self.headless || !atty::is(atty::Stream::Stdin)
+    }
+
+    pub fn is_registry(&self) -> bool {
+        self.registry
     }
 }
