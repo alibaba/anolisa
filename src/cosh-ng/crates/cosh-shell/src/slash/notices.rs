@@ -59,6 +59,7 @@ pub(super) fn render_help<W: Write>(state: &InlineState, output: &mut W) -> std:
         ("Config", MessageId::HelpGroupConfig),
         ("Modes", MessageId::HelpGroupModes),
         ("Hooks", MessageId::HelpGroupHooks),
+        ("Registry", MessageId::HelpGroupRegistry),
     ] {
         body.push(state.i18n().t(label_id).to_string());
         body.extend(

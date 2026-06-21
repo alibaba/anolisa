@@ -8,7 +8,7 @@ fn raw_cli_help_renders_slash_command_reference() {
     assert!(output.contains("Config"), "{output}");
     assert!(output.contains("Modes"), "{output}");
     assert!(output.contains("Hooks"), "{output}");
-    assert!(!output.contains("Agent"), "{output}");
+    assert!(output.contains("Registry"), "{output}");
     assert!(!output.contains("Inspect"), "{output}");
     assert!(!output.contains("Recommendations"), "{output}");
     assert!(
@@ -23,6 +23,14 @@ fn raw_cli_help_renders_slash_command_reference() {
         output.contains("/mode analysis [smart|auto|manual]"),
         "{output}"
     );
+    assert!(
+        output.contains("/extensions [list|detail] [name]"),
+        "{output}"
+    );
+    assert!(
+        output.contains("/skills [list|detail] [name]"),
+        "{output}"
+    );
     assert!(!output.contains("/agent"), "{output}");
     assert!(!output.contains("/explain"), "{output}");
     assert!(!output.contains("/cancel"), "{output}");
@@ -31,7 +39,6 @@ fn raw_cli_help_renders_slash_command_reference() {
     assert!(!output.contains("/select N"), "{output}");
     assert!(!output.contains("/copy N"), "{output}");
     assert!(!output.contains("/mode [recommend|auto|trust]"), "{output}");
-    assert!(!output.contains("/skill"), "{output}");
     assert!(
         !output.contains("/approval-mode [suggest|ask|auto|trust]"),
         "{output}"
