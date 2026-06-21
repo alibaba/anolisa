@@ -1054,6 +1054,8 @@ export default {
     '来自阿里云 ModelStudio 的最新 Qwen Coder 模型（版本：qwen3-coder-plus-2025-09-23）',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     '来自阿里云 ModelStudio 的最新 Qwen Vision 模型（版本：qwen3-vl-plus-2025-09-23）',
+  'Current /auth model': '当前 /auth 模型',
+  'Verified via /auth': '已通过 /auth 验证',
 
   // ============================================================================
   // Dialogs - Permissions

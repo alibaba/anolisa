@@ -1113,6 +1113,8 @@ export default {
     'The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)',
+  'Current /auth model': 'Current /auth model',
+  'Verified via /auth': 'Verified via /auth',
 
   // ============================================================================
   // Dialogs - Permissions

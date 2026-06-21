@@ -126,14 +126,23 @@ describe('useAuthCommand', () => {
     const openaiModelCall = calls.find(
       ([, key]) => key === 'security.auth.openaiModel',
     );
+    const openaiModelsCall = calls.find(
+      ([, key]) => key === 'security.auth.openaiModels',
+    );
     expect(modelNameCall).toBeDefined();
     expect(modelNameCall![2]).toBe('my-model');
     expect(openaiModelCall).toBeDefined();
     expect(openaiModelCall![2]).toBe('my-model');
+    expect(openaiModelsCall).toBeDefined();
+    expect(openaiModelsCall![2]).toEqual(['my-model']);
   });
 
   it('should persist validated fallback model over submitted model', async () => {
     const settings = createMockSettings();
+    settings.merged.security!.auth!.openaiModels = [
+      'qwen3.5-plus',
+      'qwen3-coder-plus',
+    ];
     const config = createMockConfig();
     const addItem = vi.fn();
     vi.mocked(config.refreshAuth).mockResolvedValue(undefined);
@@ -162,10 +171,15 @@ describe('useAuthCommand', () => {
     const openaiModelCall = calls.find(
       ([, key]) => key === 'security.auth.openaiModel',
     );
+    const openaiModelsCall = calls.find(
+      ([, key]) => key === 'security.auth.openaiModels',
+    );
     expect(modelNameCall).toBeDefined();
     expect(modelNameCall![2]).toBe('qwen3-coder-plus');
     expect(openaiModelCall).toBeDefined();
     expect(openaiModelCall![2]).toBe('qwen3-coder-plus');
+    expect(openaiModelsCall).toBeDefined();
+    expect(openaiModelsCall![2]).toEqual(['qwen3-coder-plus', 'qwen3.5-plus']);
   });
 
   it('should set authError and keep isAuthenticating for OpenAI on failure', async () => {

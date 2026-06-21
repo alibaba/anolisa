@@ -359,4 +359,313 @@ describe('<ModelDialog />', () => {
     expect(mockedSelect).toHaveBeenCalledTimes(2);
     expect(mockedSelect.mock.calls[1][0].initialIndex).toBe(1);
   });
+
+  it('shows the /auth configured OpenAI-compatible model when registry is empty', () => {
+    const mockSettings = {
+      isTrusted: true,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      merged: {
+        security: {
+          auth: {
+            openaiModel: 'qwen3-max',
+          },
+        },
+      },
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+
+    const mockConfig = {
+      getModel: vi.fn(() => 'qwen3-max'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getAvailableModelsForAuthType: vi.fn(() => []),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen3-max',
+      })),
+      switchModel: vi.fn().mockResolvedValue(undefined),
+    } as unknown as Config;
+
+    render(
+      <SettingsContext.Provider value={mockSettings}>
+        <ConfigContext.Provider value={mockConfig}>
+          <ModelDialog onClose={vi.fn()} />
+        </ConfigContext.Provider>
+      </SettingsContext.Provider>,
+    );
+
+    expect(mockedSelect).toHaveBeenCalledTimes(1);
+    const items = mockedSelect.mock.calls[0][0].items;
+    expect(items).toHaveLength(1);
+    expect(items[0].value).toBe(`${AuthType.USE_OPENAI}::qwen3-max`);
+    expect(items[0].description).toBe('Current /auth model');
+  });
+
+  it('combines registered models with the /auth configured OpenAI-compatible model', () => {
+    const mockSettings = {
+      isTrusted: true,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      merged: {
+        security: {
+          auth: {
+            openaiModel: 'qwen3.6-plus',
+            openaiModels: ['qwen3.6-plus', 'qwen3.5-plus'],
+          },
+        },
+      },
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+
+    const mockConfig = {
+      getModel: vi.fn(() => 'qwen3.6-plus'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getAvailableModelsForAuthType: vi.fn((t: AuthType) => {
+        if (t === AuthType.USE_OPENAI) {
+          return [
+            {
+              id: 'qwen3-max',
+              label: 'qwen3-max',
+              authType: AuthType.USE_OPENAI,
+            },
+          ];
+        }
+        return [];
+      }),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen3.6-plus',
+      })),
+      switchModel: vi.fn().mockResolvedValue(undefined),
+    } as unknown as Config;
+
+    render(
+      <SettingsContext.Provider value={mockSettings}>
+        <ConfigContext.Provider value={mockConfig}>
+          <ModelDialog onClose={vi.fn()} />
+        </ConfigContext.Provider>
+      </SettingsContext.Provider>,
+    );
+
+    expect(mockedSelect).toHaveBeenCalledTimes(1);
+    const items = mockedSelect.mock.calls[0][0].items;
+    expect(items.map((item) => item.value)).toEqual([
+      `${AuthType.USE_OPENAI}::qwen3-max`,
+      `${AuthType.USE_OPENAI}::qwen3.6-plus`,
+      `${AuthType.USE_OPENAI}::qwen3.5-plus`,
+    ]);
+    expect(items[1].description).toBe('Current /auth model');
+    expect(items[2].description).toBe('Verified via /auth');
+  });
+
+  it('does not duplicate the /auth configured model when it is already registered', () => {
+    const mockSettings = {
+      isTrusted: true,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      merged: {
+        security: {
+          auth: {
+            openaiModel: 'qwen3-max',
+          },
+        },
+      },
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+
+    const mockConfig = {
+      getModel: vi.fn(() => 'qwen3-max'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getAvailableModelsForAuthType: vi.fn((t: AuthType) => {
+        if (t === AuthType.USE_OPENAI) {
+          return [
+            {
+              id: 'qwen3-max',
+              label: 'qwen3-max',
+              authType: AuthType.USE_OPENAI,
+            },
+          ];
+        }
+        return [];
+      }),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen3-max',
+      })),
+      switchModel: vi.fn().mockResolvedValue(undefined),
+    } as unknown as Config;
+
+    render(
+      <SettingsContext.Provider value={mockSettings}>
+        <ConfigContext.Provider value={mockConfig}>
+          <ModelDialog onClose={vi.fn()} />
+        </ConfigContext.Provider>
+      </SettingsContext.Provider>,
+    );
+
+    expect(mockedSelect).toHaveBeenCalledTimes(1);
+    const items = mockedSelect.mock.calls[0][0].items;
+    expect(items.map((item) => item.value)).toEqual([
+      `${AuthType.USE_OPENAI}::qwen3-max`,
+    ]);
+  });
+
+  it('does not overwrite the /auth configured model when selecting a registered model', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const mockSettings = {
+      isTrusted: true,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      merged: {
+        security: {
+          auth: {
+            openaiModel: 'qwen3.6-plus',
+          },
+        },
+      },
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+
+    const mockConfig = {
+      getModel: vi.fn(() => 'qwen3-max'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getAvailableModelsForAuthType: vi.fn((t: AuthType) => {
+        if (t === AuthType.USE_OPENAI) {
+          return [
+            {
+              id: 'qwen3-max',
+              label: 'qwen3-max',
+              authType: AuthType.USE_OPENAI,
+            },
+          ];
+        }
+        return [];
+      }),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen3-max',
+      })),
+      getUsageStatisticsEnabled: vi.fn(() => false),
+      getSessionId: vi.fn(() => 'mock-session-id'),
+      getDebugMode: vi.fn(() => false),
+      getProxy: vi.fn(() => undefined),
+      switchModel,
+    } as unknown as Config;
+
+    render(
+      <SettingsContext.Provider value={mockSettings}>
+        <ConfigContext.Provider value={mockConfig}>
+          <ModelDialog onClose={vi.fn()} />
+        </ConfigContext.Provider>
+      </SettingsContext.Provider>,
+    );
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await childOnSelect(`${AuthType.USE_OPENAI}::qwen3-max`);
+
+    expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'security.auth.openaiModel',
+      expect.anything(),
+    );
+  });
+
+  it('selecting an /auth configured model does not call startNewSession or resetChat', async () => {
+    const startNewSession = vi.fn();
+    const resetChat = vi.fn();
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+
+    const mockSettings = {
+      isTrusted: true,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      merged: {
+        security: {
+          auth: {
+            openaiModel: 'qwen3.6-plus',
+          },
+        },
+      },
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+
+    const mockConfig = {
+      getModel: vi.fn(() => 'qwen3.6-plus'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getAvailableModelsForAuthType: vi.fn(() => []),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen3.6-plus',
+      })),
+      getUsageStatisticsEnabled: vi.fn(() => false),
+      getSessionId: vi.fn(() => 'mock-session-id'),
+      getDebugMode: vi.fn(() => false),
+      getProxy: vi.fn(() => undefined),
+      switchModel,
+      startNewSession,
+      resetChat,
+    } as unknown as Config;
+
+    render(
+      <SettingsContext.Provider value={mockSettings}>
+        <ConfigContext.Provider value={mockConfig}>
+          <ModelDialog onClose={vi.fn()} />
+        </ConfigContext.Provider>
+      </SettingsContext.Provider>,
+    );
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await childOnSelect(`${AuthType.USE_OPENAI}::qwen3.6-plus`);
+
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      'qwen3.6-plus',
+      undefined,
+      expect.objectContaining({ reason: 'user_manual' }),
+    );
+    expect(startNewSession).not.toHaveBeenCalled();
+    expect(resetChat).not.toHaveBeenCalled();
+  });
+
+  it('shows only the /auth configured model for non-registered OpenAI-compatible providers', () => {
+    const mockSettings = {
+      isTrusted: true,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      merged: {
+        security: {
+          auth: {
+            openaiModel: 'gpt-4o',
+            baseUrl: 'https://api.openai.com/v1',
+          },
+        },
+      },
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+
+    const mockConfig = {
+      getModel: vi.fn(() => 'gpt-4o'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getAvailableModelsForAuthType: vi.fn(() => []),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4o',
+        baseUrl: 'https://api.openai.com/v1',
+      })),
+      switchModel: vi.fn().mockResolvedValue(undefined),
+    } as unknown as Config;
+
+    render(
+      <SettingsContext.Provider value={mockSettings}>
+        <ConfigContext.Provider value={mockConfig}>
+          <ModelDialog onClose={vi.fn()} />
+        </ConfigContext.Provider>
+      </SettingsContext.Provider>,
+    );
+
+    expect(mockedSelect).toHaveBeenCalledTimes(1);
+    const items = mockedSelect.mock.calls[0][0].items;
+    expect(items.length).toBe(1);
+    expect(items[0].value).toBe(`${AuthType.USE_OPENAI}::gpt-4o`);
+  });
 });

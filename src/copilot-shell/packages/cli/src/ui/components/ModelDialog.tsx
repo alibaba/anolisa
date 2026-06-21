@@ -22,6 +22,7 @@ import { ConfigContext } from '../contexts/ConfigContext.js';
 import { UIStateContext } from '../contexts/UIStateContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import {
+  type AvailableModel,
   getAvailableModelsForAuthType,
   MAINLINE_CODER,
 } from '../models/availableModels.js';
@@ -138,6 +139,41 @@ function ConfigRow({
   );
 }
 
+function appendConfiguredModel(
+  models: AvailableModel[],
+  modelId: string | undefined,
+  description: string,
+): AvailableModel[] {
+  const id = modelId?.trim();
+  if (!id || models.some((model) => model.id === id)) {
+    return models;
+  }
+  return [
+    ...models,
+    {
+      id,
+      label: id,
+      description,
+    },
+  ];
+}
+
+function appendConfiguredModels(
+  models: AvailableModel[],
+  currentModelId: string | undefined,
+  recentModelIds: Array<string | undefined> | undefined,
+): AvailableModel[] {
+  let result = appendConfiguredModel(
+    models,
+    currentModelId,
+    t('Current /auth model'),
+  );
+  for (const modelId of recentModelIds ?? []) {
+    result = appendConfiguredModel(result, modelId, t('Verified via /auth'));
+  }
+  return result;
+}
+
 export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
   const config = useContext(ConfigContext);
   const uiState = useContext(UIStateContext);
@@ -162,32 +198,21 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
           config ?? undefined,
         );
 
-        // modelProviders 注册表中无模型时的降级处理：
-        // 通过 /auth 对话框配置的 OpenAI 和 Aliyun 模型保存在
-        // 按认证方式隔离的 settings 字段中，而非注册在 modelProviders/modelRegistry。
-        if (models.length === 0 && config) {
+        // modelProviders 是显式注册模型；/auth 保存的是用户已经验证并
+        // 实际使用过的当前模型。两者合并展示，避免凭端点猜测模型清单。
+        if (config) {
           if (authTypeEntry === AuthType.USE_OPENAI) {
-            const storedModel = settings.merged?.security?.auth?.openaiModel;
-            if (storedModel) {
-              models = [
-                {
-                  id: storedModel,
-                  label: storedModel,
-                  description: '已通过 /auth 配置',
-                },
-              ];
-            }
+            models = appendConfiguredModels(
+              models,
+              settings.merged?.security?.auth?.openaiModel,
+              settings.merged?.security?.auth?.openaiModels,
+            );
           } else if (authTypeEntry === AuthType.USE_ALIYUN) {
-            const storedModel = settings.merged?.security?.auth?.aliyunModel;
-            if (storedModel) {
-              models = [
-                {
-                  id: storedModel,
-                  label: storedModel,
-                  description: '已通过 /auth 配置',
-                },
-              ];
-            }
+            models = appendConfiguredModels(
+              models,
+              settings.merged?.security?.auth?.aliyunModel,
+              settings.merged?.security?.auth?.aliyunModels,
+            );
           }
         }
 

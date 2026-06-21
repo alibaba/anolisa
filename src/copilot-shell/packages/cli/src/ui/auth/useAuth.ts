@@ -27,6 +27,22 @@ import { AuthState, MessageType } from '../types.js';
 import type { HistoryItem } from '../types.js';
 import { t } from '../../i18n/index.js';
 
+const RECENT_AUTH_MODELS_LIMIT = 10;
+
+function prependRecentModel(
+  existing: string[] | undefined,
+  model: string,
+): string[] {
+  const trimmed = model.trim();
+  if (!trimmed) {
+    return existing ?? [];
+  }
+  return [
+    trimmed,
+    ...(existing ?? []).filter((item) => item.trim() !== trimmed),
+  ].slice(0, RECENT_AUTH_MODELS_LIMIT);
+}
+
 export const useAuthCommand = (
   settings: LoadedSettings,
   config: Config,
@@ -162,11 +178,27 @@ export const useAuthCommand = (
               'security.auth.openaiModel',
               resolvedModel,
             );
+            settings.setValue(
+              authTypeScope,
+              'security.auth.openaiModels',
+              prependRecentModel(
+                settings.merged.security?.auth?.openaiModels,
+                resolvedModel,
+              ),
+            );
           } else if (authType === AuthType.USE_ALIYUN) {
             settings.setValue(
               authTypeScope,
               'security.auth.aliyunModel',
               resolvedModel,
+            );
+            settings.setValue(
+              authTypeScope,
+              'security.auth.aliyunModels',
+              prependRecentModel(
+                settings.merged.security?.auth?.aliyunModels,
+                resolvedModel,
+              ),
             );
           }
         }
@@ -392,6 +424,14 @@ export const useAuthCommand = (
                 authTypeScope,
                 'security.auth.aliyunModel',
                 credentials.model.trim(),
+              );
+              settings.setValue(
+                authTypeScope,
+                'security.auth.aliyunModels',
+                prependRecentModel(
+                  settings.merged.security?.auth?.aliyunModels,
+                  credentials.model.trim(),
+                ),
               );
             }
 

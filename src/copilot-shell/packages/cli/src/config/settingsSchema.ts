@@ -1091,6 +1091,16 @@ const SETTINGS_SCHEMA = {
             description: 'Last used model name for OpenAI authentication.',
             showInDialog: false,
           },
+          openaiModels: {
+            type: 'array',
+            label: 'OpenAI Models',
+            category: 'Security',
+            requiresRestart: false,
+            default: [] as string[],
+            description:
+              'Recently authenticated model names for OpenAI compatible authentication.',
+            showInDialog: false,
+          },
           aliyunModel: {
             type: 'string',
             label: 'Aliyun Model',
@@ -1098,6 +1108,16 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: undefined as string | undefined,
             description: 'Last used model name for Aliyun authentication.',
+            showInDialog: false,
+          },
+          aliyunModels: {
+            type: 'array',
+            label: 'Aliyun Models',
+            category: 'Security',
+            requiresRestart: false,
+            default: [] as string[],
+            description:
+              'Recently authenticated model names for Aliyun authentication.',
             showInDialog: false,
           },
         },
