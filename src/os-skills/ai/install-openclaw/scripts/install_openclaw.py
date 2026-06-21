@@ -10,9 +10,12 @@ and starts the local gateway service.
 import argparse
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 
@@ -395,13 +398,135 @@ def build_config(args):
         "base_url": base_url,
         "api": args.provider_api,
         "primary_model": primary_ref,
+        "model_id": model_id,
+        "api_key": api_key,
         "api_key_url": plan["api_key_url"],
         "model_catalog_url": plan["model_catalog_url"],
     }
 
 
-def apply_config(config, config_path):
+def anthropic_messages_url(base_url):
+    base = base_url.rstrip("/")
+    if base.endswith("/v1/messages"):
+        return base
+    if base.endswith("/v1"):
+        return f"{base}/messages"
+    return f"{base}/v1/messages"
+
+
+def extract_error_message(body):
+    if not body:
+        return ""
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        return body.strip()[:500]
+    error = parsed.get("error") if isinstance(parsed, dict) else None
+    if isinstance(error, dict):
+        for key in ("message", "msg", "description"):
+            if error.get(key):
+                return str(error[key])
+    for key in ("message", "msg", "description", "request_id"):
+        if isinstance(parsed, dict) and parsed.get(key):
+            return str(parsed[key])
+    return json.dumps(parsed, ensure_ascii=False)[:500]
+
+
+def preflight_hint(status, metadata):
+    plan_name = BILLING_PLANS[metadata["billing"]]["name"]
+    if status in (401, 403):
+        return (
+            "Authentication failed. Check that the API key belongs to "
+            f"{plan_name} and matches baseUrl {metadata['base_url']}. "
+            f"Get the correct key from: {metadata['api_key_url']}"
+        )
+    if status == 404:
+        return (
+            "Endpoint or model was not found. Check --base-url and --model-id; "
+            f"model catalog: {metadata['model_catalog_url']}"
+        )
+    if status == 400:
+        return (
+            "The endpoint rejected the request shape or model id. Check that "
+            f"model {metadata['model_id']} is available for {plan_name}."
+        )
+    if status == 429:
+        return (
+            "The endpoint is reachable but returned rate limit or quota errors. "
+            "Check quota, billing status, or retry later."
+        )
+    return "Check API key, baseUrl, model id, and network reachability."
+
+
+def preflight_model_call(args, metadata):
+    if args.skip_preflight:
+        print("\n--- Skipping model pre-flight check (--skip-preflight) ---\n")
+        return
+    if metadata["api"] != "anthropic-messages":
+        print(
+            "\n--- Skipping model pre-flight check "
+            f"(unsupported provider api: {metadata['api']}) ---\n"
+        )
+        return
+
+    print("\n--- Model endpoint pre-flight check ---\n")
+    url = anthropic_messages_url(metadata["base_url"])
+    payload = {
+        "model": metadata["model_id"],
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "ping"}],
+    }
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "install-openclaw-preflight/1.0",
+            "anthropic-version": "2023-06-01",
+            "x-api-key": metadata["api_key"],
+        },
+    )
+
+    print(f"  endpoint={url}")
+    print(f"  model={metadata['model_id']}")
+    try:
+        with urllib.request.urlopen(request, timeout=args.preflight_timeout) as response:
+            response.read(1024)
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        message = extract_error_message(error_body)
+        hint = preflight_hint(exc.code, metadata)
+        detail = f"\n  provider message: {message}" if message else ""
+        raise SystemExit(
+            "Model pre-flight check failed before writing OpenClaw config.\n"
+            f"  HTTP {exc.code} from {url}{detail}\n"
+            f"  hint: {hint}\n"
+            "Fix the values or rerun with --skip-preflight only if you want "
+            "to defer validation to OpenClaw Gateway startup."
+        ) from exc
+    except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
+        reason = getattr(exc, "reason", exc)
+        raise SystemExit(
+            "Model pre-flight check failed before writing OpenClaw config.\n"
+            f"  endpoint: {url}\n"
+            f"  error: {reason}\n"
+            "Check --base-url, DNS/proxy/network access, or rerun with "
+            "--skip-preflight to defer validation."
+        ) from exc
+
+    print("  [OK] API key, baseUrl, and model id accepted by endpoint")
+
+
+def apply_config(config, config_path, *, dry_run=False):
     print("\n--- Writing OpenClaw config ---\n")
+    if dry_run:
+        print(f"  # dry-run: would write OpenClaw config to {config_path}")
+        for key in config:
+            print(f"  [OK] {key}")
+        return
 
     existing = {}
     if config_path.exists():
@@ -1042,7 +1167,14 @@ def parse_args():
         default=str(Path("~/.openclaw/setup-gateway-start.log").expanduser()),
     )
     parser.add_argument("--doctor-fix", action="store_true")
-    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Preview the full flow without local changes. Model pre-flight "
+            "still runs unless --skip-preflight is set."
+        ),
+    )
     parser.add_argument(
         "--precheck-only",
         action="store_true",
@@ -1052,6 +1184,17 @@ def parse_args():
         "--skip-tokenless",
         action="store_true",
         help="Do not install the tokenless OpenClaw plugin after OpenClaw installation.",
+    )
+    parser.add_argument(
+        "--skip-preflight",
+        action="store_true",
+        help="Skip the model endpoint API check before writing config and starting Gateway.",
+    )
+    parser.add_argument(
+        "--preflight-timeout",
+        type=int,
+        default=20,
+        help="Seconds to wait for the model endpoint pre-flight API call.",
     )
 
     parser.add_argument("--dingtalk-client-id", default="")
@@ -1072,12 +1215,14 @@ def main():
         print_api_key_guidance(args)
         return
 
+    config, metadata = build_config(args)
+    preflight_model_call(args, metadata)
+
     if not args.skip_install_openclaw:
         install_openclaw(args)
         install_tokenless_plugin(args)
 
-    config, metadata = build_config(args)
-    apply_config(config, Path(args.config).expanduser())
+    apply_config(config, Path(args.config).expanduser(), dry_run=args.dry_run)
 
     if args.install_dingtalk_plugin:
         install_dingtalk_plugin(args)
