@@ -540,7 +540,45 @@ h1 span{color:var(--accent-light)}
 
       <div class="release-list" id="release-list">
         <!-- ANOLISA_CLI_CHANGELOG_START -->
-        <article class="release reveal reveal-d1" id="anolisa-cli-0-1-11">
+        <article class="release reveal reveal-d1" id="anolisa-cli-0-1-12">
+          <div class="release-meta">
+            <div class="release-version">0.1.12</div>
+            <div class="release-date">2026-06-22</div>
+          </div>
+          <div class="release-body">
+          <div class="release-body-section">
+            <h3>Added</h3>
+            <ul>
+              <li><code>anolisa update &lt;component&gt;</code> can update raw-managed components from the raw backend.</li>
+              <li><code>anolisa osbase sandbox list</code> shows scenarios from <code>sandbox.toml</code>.</li>
+              <li><code>anolisa osbase sandbox uninstall &lt;scenario&gt;</code> can remove packages for a sandbox scenario.</li>
+              <li><code>anolisa system setup</code> can install the helper service for non-root osbase commands.</li>
+              <li><code>anolisa system status</code> can show helper health, version, uptime, and last operation.</li>
+              <li><code>anolisa system teardown</code> can remove the helper service and sandbox config.</li>
+              <li><code>anolisa env --json</code> includes distro identity fields.</li>
+            </ul>
+          </div>
+          <div class="release-body-section">
+            <h3>Changed</h3>
+            <ul>
+              <li><code>anolisa osbase sandbox install &lt;scenario&gt;</code> now installs scenarios defined in <code>sandbox.toml</code>.</li>
+              <li>Omitting <code>--install-mode</code> now selects <code>system</code> for root and <code>user</code> otherwise.</li>
+              <li><code>anolisa update &lt;component&gt; --dry-run</code> now lists raw backend candidate versions.</li>
+            </ul>
+          </div>
+          <div class="release-body-section">
+            <h3>Fixed</h3>
+            <ul>
+              <li>Legacy <code>yum</code> backend names in <code>repo.toml</code> and <code>--backend</code> now resolve to <code>rpm</code>.</li>
+              <li>Raw components installed with <code>--package</code> now update from the same package name.</li>
+              <li><code>anolisa update &lt;component&gt;</code> now refuses raw updates that would downgrade a component.</li>
+              <li><code>anolisa update &lt;component&gt;</code> now refuses raw updates when versions cannot be safely compared.</li>
+            </ul>
+          </div>
+          </div>
+        </article>
+
+        <article class="release reveal reveal-d2" id="anolisa-cli-0-1-11">
           <div class="release-meta">
             <div class="release-version">0.1.11</div>
             <div class="release-date">2026-06-18</div>
@@ -565,7 +603,7 @@ h1 span{color:var(--accent-light)}
           </div>
         </article>
 
-        <article class="release reveal reveal-d2" id="anolisa-cli-0-1-10">
+        <article class="release reveal reveal-d3" id="anolisa-cli-0-1-10">
           <div class="release-meta">
             <div class="release-version">0.1.10</div>
             <div class="release-date">2026-06-17</div>
@@ -600,7 +638,7 @@ h1 span{color:var(--accent-light)}
           </div>
         </article>
 
-        <article class="release reveal reveal-d3" id="anolisa-cli-0-1-9">
+        <article class="release reveal reveal-d4" id="anolisa-cli-0-1-9">
           <div class="release-meta">
             <div class="release-version">0.1.9</div>
             <div class="release-date">2026-06-16</div>
@@ -624,7 +662,7 @@ h1 span{color:var(--accent-light)}
           </div>
         </article>
 
-        <article class="release reveal reveal-d4" id="anolisa-cli-0-1-8">
+        <article class="release reveal reveal-d5" id="anolisa-cli-0-1-8">
           <div class="release-meta">
             <div class="release-version">0.1.8</div>
             <div class="release-date">2026-06-15</div>
@@ -648,28 +686,6 @@ h1 span{color:var(--accent-light)}
           </div>
           </div>
         </article>
-
-        <article class="release reveal reveal-d5" id="anolisa-cli-0-1-7">
-          <div class="release-meta">
-            <div class="release-version">0.1.7</div>
-            <div class="release-date">2026-06-13</div>
-          </div>
-          <div class="release-body">
-          <div class="release-body-section">
-            <h3>Changed</h3>
-            <ul>
-              <li>User-mode library paths now resolve to <code>~/.local/lib/anolisa</code>; other directories continue to follow <code>XDG_*</code> overrides.</li>
-            </ul>
-          </div>
-          <div class="release-body-section">
-            <h3>Fixed</h3>
-            <ul>
-              <li><code>anolisa install</code> no longer requires a local catalog entry before downloading from the remote repository.</li>
-              <li><code>anolisa install --dry-run</code> can preview files and services without downloading the full package.</li>
-            </ul>
-          </div>
-          </div>
-        </article>
         <!-- ANOLISA_CLI_CHANGELOG_END -->
       </div>
 
@@ -680,7 +696,7 @@ h1 span{color:var(--accent-light)}
         <!-- ANOLISA_CHANGELOG_DATA_START -->
         <script type="application/json" id="changelog-data">{
   "limit": 5,
-  "latestVersion": "0.1.11",
+  "latestVersion": "0.1.12",
   "components": [
     {
       "id": "anolisa",
@@ -691,6 +707,41 @@ h1 span{color:var(--accent-light)}
         "en": {
           "label": "EN",
           "releases": [
+            {
+              "version": "0.1.12",
+              "date": "2026-06-22",
+              "sections": [
+                {
+                  "title": "Added",
+                  "items": [
+                    "`anolisa update \u003ccomponent>` can update raw-managed components from the raw backend.",
+                    "`anolisa osbase sandbox list` shows scenarios from `sandbox.toml`.",
+                    "`anolisa osbase sandbox uninstall \u003cscenario>` can remove packages for a sandbox scenario.",
+                    "`anolisa system setup` can install the helper service for non-root osbase commands.",
+                    "`anolisa system status` can show helper health, version, uptime, and last operation.",
+                    "`anolisa system teardown` can remove the helper service and sandbox config.",
+                    "`anolisa env --json` includes distro identity fields."
+                  ]
+                },
+                {
+                  "title": "Changed",
+                  "items": [
+                    "`anolisa osbase sandbox install \u003cscenario>` now installs scenarios defined in `sandbox.toml`.",
+                    "Omitting `--install-mode` now selects `system` for root and `user` otherwise.",
+                    "`anolisa update \u003ccomponent> --dry-run` now lists raw backend candidate versions."
+                  ]
+                },
+                {
+                  "title": "Fixed",
+                  "items": [
+                    "Legacy `yum` backend names in `repo.toml` and `--backend` now resolve to `rpm`.",
+                    "Raw components installed with `--package` now update from the same package name.",
+                    "`anolisa update \u003ccomponent>` now refuses raw updates that would downgrade a component.",
+                    "`anolisa update \u003ccomponent>` now refuses raw updates when versions cannot be safely compared."
+                  ]
+                }
+              ]
+            },
             {
               "version": "0.1.11",
               "date": "2026-06-18",
@@ -787,31 +838,47 @@ h1 span{color:var(--accent-light)}
                   ]
                 }
               ]
-            },
-            {
-              "version": "0.1.7",
-              "date": "2026-06-13",
-              "sections": [
-                {
-                  "title": "Changed",
-                  "items": [
-                    "User-mode library paths now resolve to `~/.local/lib/anolisa`; other directories continue to follow `XDG_*` overrides."
-                  ]
-                },
-                {
-                  "title": "Fixed",
-                  "items": [
-                    "`anolisa install` no longer requires a local catalog entry before downloading from the remote repository.",
-                    "`anolisa install --dry-run` can preview files and services without downloading the full package."
-                  ]
-                }
-              ]
             }
           ]
         },
         "zh": {
           "label": "中文",
           "releases": [
+            {
+              "version": "0.1.12",
+              "date": "2026-06-22",
+              "sections": [
+                {
+                  "title": "新增",
+                  "items": [
+                    "`anolisa update \u003ccomponent>` 可更新 raw 组件。",
+                    "`anolisa osbase sandbox list` 可显示 `sandbox.toml` 场景。",
+                    "`anolisa osbase sandbox uninstall \u003cscenario>` 可移除场景软件包。",
+                    "`anolisa system setup` 可为非 root osbase 命令安装助手服务。",
+                    "`anolisa system status` 可显示助手健康状态。",
+                    "`anolisa system teardown` 可移除助手服务和沙箱配置。",
+                    "`anolisa env --json` 现包含发行版身份字段。"
+                  ]
+                },
+                {
+                  "title": "变更",
+                  "items": [
+                    "`anolisa osbase sandbox install \u003cscenario>` 现按 `sandbox.toml` 安装场景。",
+                    "未指定 `--install-mode` 时，root 用 `system`，普通用户用 `user`。",
+                    "`anolisa update \u003ccomponent> --dry-run` 现显示 raw 候选版本。"
+                  ]
+                },
+                {
+                  "title": "修复",
+                  "items": [
+                    "旧 `yum` 后端名现会作为 `rpm` 处理。",
+                    "用 `--package` 安装的 raw 组件更新时复用包名。",
+                    "`anolisa update \u003ccomponent>` 不再允许 raw 降级。",
+                    "`anolisa update \u003ccomponent>` 无法比较版本时不再替换文件。"
+                  ]
+                }
+              ]
+            },
             {
               "version": "0.1.11",
               "date": "2026-06-18",
@@ -905,25 +972,6 @@ h1 span{color:var(--accent-light)}
                   "items": [
                     "`anolisa install` 现会放置后续启用所需的适配器资源。",
                     "`anolisa uninstall` 现会阻止移除仍有启用适配器的组件。"
-                  ]
-                }
-              ]
-            },
-            {
-              "version": "0.1.7",
-              "date": "2026-06-13",
-              "sections": [
-                {
-                  "title": "变更",
-                  "items": [
-                    "用户态库路径调整为 `~/.local/lib/anolisa`；其余目录继续遵循 `XDG_*` 环境变量覆盖。"
-                  ]
-                },
-                {
-                  "title": "修复",
-                  "items": [
-                    "`anolisa install` 不再要求本地已有组件目录条目即可从远程仓库下载安装。",
-                    "`anolisa install --dry-run` 无需下载完整安装包即可预览文件和服务列表。"
                   ]
                 }
               ]
