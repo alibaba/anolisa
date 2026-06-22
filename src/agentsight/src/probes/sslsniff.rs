@@ -326,30 +326,44 @@ impl SslSniff {
 
             log::debug!("[attach_process] pid={pid}: attaching {kind:?} → {path}");
 
+            // uprobe attach requires host filesystem paths, not /proc/{pid}/root/... paths.
+            // canonicalize resolves /proc/{pid}/root symlink to the real host path,
+            // handling both container (overlay rootfs) and non-container (/ symlink) cases.
+            // Falls back to original path if the process has already exited.
+            let uprobe_path = std::fs::canonicalize(&path)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| path.clone());
+
             let result = match kind {
                 // Use pid=-1 for global attach (all processes), avoiding per-process duplicate attaches
-                SslLibKind::OpenSsl => attach_openssl(&mut self.skel, &path, -1),
-                SslLibKind::GnuTls => attach_gnutls(&mut self.skel, &path, -1),
-                SslLibKind::Nss => attach_nss(&mut self.skel, &path, -1),
-                SslLibKind::Boring => match attach_boringssl_by_symbol(&mut self.skel, &path, -1) {
-                    Ok(ls) => Ok(ls),
-                    Err(sym_err) => {
-                        log::debug!(
-                            "[attach_process] pid={pid}: BoringSSL symbol attach failed for {path} ({sym_err:#}), falling back to byte-pattern"
-                        );
-                        match find_boringssl_offsets(&path) {
-                            Some(off) => {
-                                attach_boringssl_by_offset(&mut self.skel, &path, &off, false, -1)
-                            }
-                            None => {
-                                log::warn!(
-                                    "[attach_process] pid={pid}: BoringSSL detection failed for {path} (no SSL_* in .dynsym and no byte-pattern match), skipping"
-                                );
-                                continue;
+                SslLibKind::OpenSsl => attach_openssl(&mut self.skel, &uprobe_path, -1),
+                SslLibKind::GnuTls => attach_gnutls(&mut self.skel, &uprobe_path, -1),
+                SslLibKind::Nss => attach_nss(&mut self.skel, &uprobe_path, -1),
+                SslLibKind::Boring => {
+                    match attach_boringssl_by_symbol(&mut self.skel, &uprobe_path, -1) {
+                        Ok(ls) => Ok(ls),
+                        Err(sym_err) => {
+                            log::debug!(
+                                "[attach_process] pid={pid}: BoringSSL symbol attach failed for {path} ({sym_err:#}), falling back to byte-pattern"
+                            );
+                            match find_boringssl_offsets(&path) {
+                                Some(off) => attach_boringssl_by_offset(
+                                    &mut self.skel,
+                                    &uprobe_path,
+                                    &off,
+                                    false,
+                                    -1,
+                                ),
+                                None => {
+                                    log::warn!(
+                                        "[attach_process] pid={pid}: BoringSSL detection failed for {path} (no SSL_* in .dynsym and no byte-pattern match), skipping"
+                                    );
+                                    continue;
+                                }
                             }
                         }
                     }
-                },
+                }
             };
 
             match result {
@@ -1086,6 +1100,47 @@ mod tests {
             ev.buf.len(),
             payload.len(),
             "buf_size clamped to available bytes"
+        );
+    }
+
+    #[test]
+    fn uprobe_path_canonicalize_resolves_real_path() {
+        // Test canonicalize-based path resolution for uprobe attach.
+        // canonicalize follows symlinks, resolving /proc/{pid}/root/... to host paths.
+
+        // Case 1: Real path on host filesystem is resolved to itself
+        let host_path = "/usr/lib/x86_64-linux-gnu/libssl.so.3";
+        if std::path::Path::new(host_path).exists() {
+            let resolved = std::fs::canonicalize(host_path)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| host_path.to_string());
+            // canonicalize of an existing absolute path returns the real path
+            assert!(
+                !resolved.contains("/proc/"),
+                "resolved path should not contain /proc/ prefix: {resolved}"
+            );
+        }
+
+        // Case 2: /proc/self/root/... resolves to host path (self is always valid)
+        let self_root_path = "/proc/self/root/etc/hosts";
+        if std::path::Path::new(self_root_path).exists() {
+            let resolved = std::fs::canonicalize(self_root_path)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| self_root_path.to_string());
+            assert_eq!(
+                resolved, "/etc/hosts",
+                "/proc/self/root/etc/hosts should resolve to /etc/hosts"
+            );
+        }
+
+        // Case 3: Non-existent path falls back to original (simulates exited process)
+        let dead_proc_path = "/proc/999999999/root/usr/lib/libssl.so";
+        let resolved = std::fs::canonicalize(dead_proc_path)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| dead_proc_path.to_string());
+        assert_eq!(
+            resolved, dead_proc_path,
+            "non-existent path should fall back to original"
         );
     }
 }
