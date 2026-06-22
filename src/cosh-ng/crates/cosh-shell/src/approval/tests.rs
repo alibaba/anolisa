@@ -376,6 +376,7 @@ fn control_shell_permission_uses_same_command_assessment_risk() {
             tool_name: "run_shell_command".to_string(),
             tool_input: serde_json::json!({ "command": "ps aux --sort=-%mem | head -20" }),
             tool_use_id: "toolu-1".to_string(),
+            hook_requires_approval: false,
         },
     };
 
@@ -403,6 +404,7 @@ fn control_shell_permission_missing_command_blocks_as_unsafe_binding() {
             tool_name: "run_shell_command".to_string(),
             tool_input: serde_json::json!({ "description": "missing command" }),
             tool_use_id: "toolu-1".to_string(),
+            hook_requires_approval: false,
         },
     };
 
@@ -492,6 +494,8 @@ fn provider_tool_request(
         command_block_id: None,
         redaction_status: None,
         assessment: None,
+        hook_requires_approval: false,
+        hook_warnings: Vec::new(),
     }
 }
 
@@ -551,6 +555,7 @@ fn active_run_for_approval_test() -> ActiveAgentRun {
         current_message: String::new(),
         has_visible_text_delta: false,
         completed: false,
+        pending_hook_notifications: Vec::new(),
     }
 }
 
@@ -567,6 +572,7 @@ fn governed_provider_tool_permission(request_id: &str, tool_use_id: &str) -> Gov
             tool_name: "run_shell_command".to_string(),
             tool_input: serde_json::json!({ "command": "df -h" }),
             tool_use_id: tool_use_id.to_string(),
+            hook_requires_approval: false,
         },
     }
 }

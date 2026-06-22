@@ -53,6 +53,10 @@ impl ClaudeStreamParser {
         self.remember_stream_boundary(&value);
 
         let mut events = Vec::new();
+        if let Some(hook_event) = self.extract_hook_notification(&value) {
+            events.push(hook_event);
+            return events;
+        }
         if let Some((phase, message)) = self.extract_claude_status(&value) {
             events.push(AgentEvent::StatusChanged {
                 run_id: self.run_id.clone(),
@@ -267,6 +271,35 @@ impl ClaudeStreamParser {
             }
             _ => None,
         }
+    }
+
+    fn extract_hook_notification(&self, value: &serde_json::Value) -> Option<AgentEvent> {
+        if value.get("type").and_then(|v| v.as_str()) != Some("system") {
+            return None;
+        }
+        if value.get("subtype").and_then(|v| v.as_str()) != Some("hook_notification") {
+            return None;
+        }
+        let hook_name = value
+            .get("hook_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let message = value
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let tool_use_id = value
+            .get("tool_use_id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        Some(AgentEvent::HookNotification {
+            run_id: self.run_id.clone(),
+            hook_name,
+            message,
+            tool_use_id,
+        })
     }
 
     fn extract_tool_result_events(&mut self, value: &serde_json::Value) -> Vec<AgentEvent> {

@@ -228,6 +228,8 @@ mod tests {
             command_block_id: None,
             redaction_status: None,
             assessment: None,
+            hook_requires_approval: false,
+            hook_warnings: Vec::new(),
         }
     }
 

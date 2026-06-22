@@ -21,6 +21,7 @@ pub enum ControlRequest {
         tool_name: String,
         tool_input: Value,
         tool_use_id: String,
+        hook_requires_approval: bool,
     },
     AskUser {
         request_id: String,
@@ -110,6 +111,12 @@ impl PendingControlProtocolToolCall {
                 events.append(&mut self.held_events);
             }
             return events;
+        }
+
+        // HookNotifications must never be held - they need to be available in
+        // pending_hook_notifications before the corresponding ToolPermissionRequest arrives.
+        if matches!(&event, AgentEvent::HookNotification { .. }) {
+            return vec![event];
         }
 
         if !self.pending_shell_tool_calls.is_empty() {
@@ -206,11 +213,16 @@ pub fn parse_control_request(line: &str) -> Option<ControlRequest> {
             let tool_name = request.get("tool_name")?.as_str()?.to_string();
             let tool_input = request.get("input")?.clone();
             let tool_use_id = request.get("tool_use_id")?.as_str()?.to_string();
+            let hook_requires_approval = request
+                .get("hook_requires_approval")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             Some(ControlRequest::CanUseTool {
                 request_id,
                 tool_name,
                 tool_input,
                 tool_use_id,
+                hook_requires_approval,
             })
         }
         "ask_user" => {

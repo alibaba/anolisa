@@ -464,6 +464,7 @@ mod tests {
             current_message: String::new(),
             has_visible_text_delta: false,
             completed: false,
+            pending_hook_notifications: Vec::new(),
         }
     }
 

@@ -20,6 +20,7 @@ pub(crate) struct ActiveAgentRun {
     pub(crate) cosh_request_filter: CoshRequestStreamFilter,
     pub(crate) pending_cosh_requests: Vec<ParsedCoshRequest>,
     pub(crate) pending_cosh_request_audits: Vec<CoshRequestAuditRecord>,
+    pub(crate) pending_hook_notifications: Vec<PendingHookNotification>,
     pub(crate) rendered_governed_event_count: usize,
     pub(crate) selectable_after_event_index: Option<usize>,
     pub(crate) started_at: Instant,
@@ -29,6 +30,13 @@ pub(crate) struct ActiveAgentRun {
     pub(crate) current_message: String,
     pub(crate) has_visible_text_delta: bool,
     pub(crate) completed: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PendingHookNotification {
+    pub(crate) tool_use_id: Option<String>,
+    pub(crate) hook_name: String,
+    pub(crate) message: String,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +114,7 @@ fn start_agent_run_with_queue_policy<W: Write>(
         cosh_request_filter: CoshRequestStreamFilter::default(),
         pending_cosh_requests: Vec::new(),
         pending_cosh_request_audits: Vec::new(),
+        pending_hook_notifications: Vec::new(),
         rendered_governed_event_count: 0,
         selectable_after_event_index,
         started_at: now,

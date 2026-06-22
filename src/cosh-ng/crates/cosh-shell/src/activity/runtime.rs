@@ -150,6 +150,7 @@ pub(crate) fn record_activity_rows_with_policy(
                 tool_name,
                 tool_input,
                 tool_use_id,
+                ..
             } => {
                 state.control.record_provider_tool_command_from_input(
                     run_id,

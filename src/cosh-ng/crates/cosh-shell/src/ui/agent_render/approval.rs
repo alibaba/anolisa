@@ -29,6 +29,7 @@ pub struct ApprovalPanelModel<'a> {
     pub next_label: Option<&'a str>,
     pub selected_action: ApprovalPanelAction,
     pub expanded: bool,
+    pub hook_warnings: Vec<&'a str>,
 }
 
 impl RatatuiInlineRenderer {
@@ -86,6 +87,9 @@ impl RatatuiInlineRenderer {
                 i18n.t(crate::MessageId::ApprovalRequiredTitle).to_string(),
                 command_request_heading(model.subject, i18n).to_string(),
             ];
+            for warning in &model.hook_warnings {
+                lines.push(format!("\u{26a0} {warning}"));
+            }
             if let Some(reason) = model.reason {
                 lines.push(approval_reason_line(reason, i18n));
             }
@@ -132,13 +136,16 @@ impl RatatuiInlineRenderer {
                 crate::MessageId::ApprovalQueueFullLine,
                 &[("position", position.as_str()), ("total", total.as_str())],
             ),
-            format!(
-                "{}{}",
-                i18n.t(crate::MessageId::ApprovalSubjectLabel),
-                model.subject
-            ),
-            format!("{}: {}", model.preview_label, model.preview),
         ];
+        for warning in &model.hook_warnings {
+            lines.push(format!("⚠ {warning}"));
+        }
+        lines.push(format!(
+            "{}{}",
+            i18n.t(crate::MessageId::ApprovalSubjectLabel),
+            model.subject
+        ));
+        lines.push(format!("{}: {}", model.preview_label, model.preview));
         if let Some(reason) = model.reason {
             lines.push(approval_reason_line(reason, i18n));
         }
@@ -166,6 +173,7 @@ impl RatatuiInlineRenderer {
 
 fn approval_panel_height(model: &ApprovalPanelModel<'_>, width: u16) -> u16 {
     let content_width = approval_content_width(width);
+    let hook_warning_rows = model.hook_warnings.len() as u16;
     if is_command_approval_request(model) {
         let command_rows = command_preview_rows(
             model.preview,
@@ -187,7 +195,7 @@ fn approval_panel_height(model: &ApprovalPanelModel<'_>, width: u16) -> u16 {
             })
             .unwrap_or(0);
         let expanded_rows = if model.expanded { 2 } else { 0 };
-        return 4 + command_rows + queue_rows + reason_rows + expanded_rows;
+        return 4 + command_rows + queue_rows + reason_rows + expanded_rows + hook_warning_rows;
     }
 
     let preview_rows = wrapped_preview_rows(
@@ -210,7 +218,7 @@ fn approval_panel_height(model: &ApprovalPanelModel<'_>, width: u16) -> u16 {
         })
         .unwrap_or(0);
     let policy_rows = if model.expanded { 2 } else { 0 };
-    7 + preview_rows + next_rows + reason_rows + policy_rows
+    7 + preview_rows + next_rows + reason_rows + policy_rows + hook_warning_rows
 }
 
 fn render_approval_panel(
@@ -255,8 +263,10 @@ fn render_approval_panel(
         .map(|reason| approval_reason_rows(reason, inner.width.saturating_sub(2) as usize, i18n))
         .unwrap_or_default();
     let reason_height = reason_rows.len() as u16;
+    let hook_warning_height = model.hook_warnings.len() as u16;
     let mut constraints = vec![
         Constraint::Length(1),
+        Constraint::Length(hook_warning_height),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(preview_height),
@@ -293,6 +303,20 @@ fn render_approval_panel(
     ]))
     .render(chunks[0], buffer);
 
+    if !model.hook_warnings.is_empty() {
+        let warning_lines: Vec<Line<'_>> = model
+            .hook_warnings
+            .iter()
+            .map(|w| {
+                Line::from(Span::styled(
+                    format!("⚠ {w}"),
+                    Style::default().fg(Color::Yellow),
+                ))
+            })
+            .collect();
+        Paragraph::new(Text::from(warning_lines)).render(chunks[1], buffer);
+    }
+
     Paragraph::new(Line::from(vec![
         Span::styled(
             i18n.t(crate::MessageId::ApprovalSubjectLabel),
@@ -300,7 +324,7 @@ fn render_approval_panel(
         ),
         Span::raw(model.subject),
     ]))
-    .render(chunks[1], buffer);
+    .render(chunks[2], buffer);
 
     Paragraph::new(Line::from(Span::styled(
         format!("{}:", model.preview_label),
@@ -308,13 +332,13 @@ fn render_approval_panel(
             .fg(Color::DarkGray)
             .add_modifier(Modifier::BOLD),
     )))
-    .render(chunks[2], buffer);
+    .render(chunks[3], buffer);
 
     let preview_lines = preview_rows
         .into_iter()
         .map(|line| Line::from(Span::styled(line, Style::default().fg(Color::White))))
         .collect::<Vec<_>>();
-    Paragraph::new(Text::from(preview_lines)).render(chunks[3], buffer);
+    Paragraph::new(Text::from(preview_lines)).render(chunks[4], buffer);
 
     if let Some(next) = model.next_label {
         Paragraph::new(Line::from(vec![
@@ -324,7 +348,7 @@ fn render_approval_panel(
             ),
             Span::raw(next.to_string()),
         ]))
-        .render(chunks[4], buffer);
+        .render(chunks[5], buffer);
     }
 
     if !reason_rows.is_empty() {
@@ -334,10 +358,10 @@ fn render_approval_panel(
                 .map(|line| Line::from(Span::raw(line)))
                 .collect::<Vec<_>>(),
         ))
-        .render(chunks[5], buffer);
+        .render(chunks[6], buffer);
     }
 
-    Paragraph::new(approval_action_spans(model.selected_action, i18n)).render(chunks[6], buffer);
+    Paragraph::new(approval_action_spans(model.selected_action, i18n)).render(chunks[7], buffer);
 
     Paragraph::new(Line::from(vec![
         Span::styled(
@@ -346,7 +370,7 @@ fn render_approval_panel(
         ),
         Span::raw(i18n.t(crate::MessageId::ApprovalKeysText)),
     ]))
-    .render(chunks[7], buffer);
+    .render(chunks[8], buffer);
 
     if model.expanded {
         Paragraph::new(Text::from(vec![
@@ -354,7 +378,7 @@ fn render_approval_panel(
             Line::from(i18n.t(crate::MessageId::ApprovalExecutableToolPolicyExtra)),
         ]))
         .wrap(Wrap { trim: true })
-        .render(chunks[8], buffer);
+        .render(chunks[9], buffer);
     }
 }
 
@@ -391,9 +415,11 @@ fn render_command_tool_approval_panel(
         .reason
         .map(|reason| approval_reason_rows(reason, inner.width.saturating_sub(2) as usize, i18n))
         .unwrap_or_default();
+    let hook_warning_height = model.hook_warnings.len() as u16;
     let queue_height = u16::from(model.queue_total > 1);
     let mut constraints = vec![
         Constraint::Length(1),
+        Constraint::Length(hook_warning_height),
         Constraint::Length(reason_rows.len() as u16),
         Constraint::Length(command_rows.len().max(1) as u16),
         Constraint::Length(queue_height),
@@ -404,9 +430,9 @@ fn render_command_tool_approval_panel(
         constraints.push(Constraint::Length(1));
     }
     let chunks = Layout::vertical(constraints).split(inner);
-    let action_index = 4;
-    let keys_index = 5;
-    let policy_index = 6;
+    let action_index = 5;
+    let keys_index = 6;
+    let policy_index = 7;
 
     Paragraph::new(Line::from(Span::styled(
         command_request_heading(model.subject, i18n),
@@ -416,6 +442,20 @@ fn render_command_tool_approval_panel(
     )))
     .render(chunks[0], buffer);
 
+    if !model.hook_warnings.is_empty() {
+        let warning_lines: Vec<Line<'_>> = model
+            .hook_warnings
+            .iter()
+            .map(|w| {
+                Line::from(Span::styled(
+                    format!("⚠ {w}"),
+                    Style::default().fg(Color::Yellow),
+                ))
+            })
+            .collect();
+        Paragraph::new(Text::from(warning_lines)).render(chunks[1], buffer);
+    }
+
     if !reason_rows.is_empty() {
         Paragraph::new(Text::from(
             reason_rows
@@ -423,14 +463,14 @@ fn render_command_tool_approval_panel(
                 .map(|line| Line::from(Span::raw(line)))
                 .collect::<Vec<_>>(),
         ))
-        .render(chunks[1], buffer);
+        .render(chunks[2], buffer);
     }
 
     let command_lines = command_rows
         .into_iter()
         .map(|line| Line::from(Span::styled(line, Style::default().fg(Color::White))))
         .collect::<Vec<_>>();
-    Paragraph::new(Text::from(command_lines)).render(chunks[2], buffer);
+    Paragraph::new(Text::from(command_lines)).render(chunks[3], buffer);
 
     if model.queue_total > 1 {
         let position = model.queue_position.to_string();
@@ -448,7 +488,7 @@ fn render_command_tool_approval_panel(
             queue,
             Style::default().fg(Color::DarkGray),
         )))
-        .render(chunks[3], buffer);
+        .render(chunks[4], buffer);
     }
 
     Paragraph::new(approval_action_spans(model.selected_action, i18n))

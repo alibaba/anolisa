@@ -46,6 +46,8 @@ fn approval_state_generates_request_ids_from_owned_queue() {
         command_block_id: None,
         redaction_status: None,
         assessment: None,
+        hook_requires_approval: false,
+        hook_warnings: Vec::new(),
     });
 
     assert_eq!(state.next_request_id(), "req-2");

@@ -15,11 +15,13 @@ fn parse_can_use_tool() {
             tool_name,
             tool_input,
             tool_use_id,
+            hook_requires_approval,
         } => {
             assert_eq!(request_id, "req-1");
             assert_eq!(tool_name, "Bash");
             assert_eq!(tool_input["command"], "echo hello");
             assert_eq!(tool_use_id, "toolu_xxx");
+            assert!(!hook_requires_approval);
         }
         _ => panic!("expected CanUseTool"),
     }

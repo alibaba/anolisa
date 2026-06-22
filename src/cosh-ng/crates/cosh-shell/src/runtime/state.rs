@@ -595,6 +595,8 @@ pub(crate) struct RuntimeApprovalRequest {
     pub(crate) command_block_id: Option<String>,
     pub(crate) redaction_status: Option<&'static str>,
     pub(crate) assessment: Option<RuntimeCommandAssessmentSummary>,
+    pub(crate) hook_requires_approval: bool,
+    pub(crate) hook_warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

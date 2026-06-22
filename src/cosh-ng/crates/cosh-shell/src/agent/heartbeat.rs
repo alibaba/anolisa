@@ -159,6 +159,10 @@ pub(crate) fn remember_agent_activity(active_run: &mut ActiveAgentRun, governed:
                 active_run.current_phase = "auth".to_string();
                 active_run.current_message = "Authentication credentials required".to_string();
             }
+            AgentEvent::HookNotification { hook_name, message, .. } => {
+                active_run.current_phase = "hook".to_string();
+                active_run.current_message = format!("[{hook_name}] {message}");
+            }
         }
     }
 }
@@ -296,6 +300,7 @@ mod tests {
             current_message: String::new(),
             has_visible_text_delta: false,
             completed: false,
+            pending_hook_notifications: Vec::new(),
         }
     }
 

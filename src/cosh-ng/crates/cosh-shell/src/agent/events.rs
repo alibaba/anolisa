@@ -71,6 +71,25 @@ pub(crate) fn render_active_agent_event<W: Write>(
     output: &mut W,
     text_hold_reason: Option<TextHoldReason>,
 ) -> std::io::Result<()> {
+    // If this is a HookNotification with a tool_use_id, store it in pending_hook_notifications
+    // for later association with the corresponding ToolPermissionRequest.
+    if let AgentEvent::HookNotification { ref tool_use_id, ref hook_name, ref message, .. } = event {
+        if tool_use_id.is_some() {
+            active_run.pending_hook_notifications.push(
+                crate::agent::run::PendingHookNotification {
+                    tool_use_id: tool_use_id.clone(),
+                    hook_name: hook_name.clone(),
+                    message: message.clone(),
+                },
+            );
+            // Still record in governed_events for audit, but don't defer for rendering
+            let governed =
+                govern_agent_events_with_language(&[event], &Policy::default(), active_run.language).events;
+            active_run.governed_events.extend(governed);
+            return Ok(());
+        }
+    }
+
     let mut governed =
         govern_agent_events_with_language(&[event], &Policy::default(), active_run.language).events;
     filter_cosh_request_text_deltas(active_run, &mut governed);
@@ -262,6 +281,7 @@ fn should_render_governance_block(event: &GovernedEvent) -> bool {
         | AgentEvent::ToolCompleted { .. } => false,
         AgentEvent::TextDelta { .. } | AgentEvent::AgentCompleted { .. } => false,
         AgentEvent::AuthRequired { .. } => false,
+        AgentEvent::HookNotification { .. } => true,
     }
 }
 
@@ -396,6 +416,7 @@ mod tests {
             current_message: String::new(),
             has_visible_text_delta: false,
             completed: false,
+            pending_hook_notifications: Vec::new(),
         }
     }
 }

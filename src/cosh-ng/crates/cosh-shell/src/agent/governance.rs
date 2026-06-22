@@ -180,6 +180,13 @@ pub fn govern_agent_events_with_language(
                 "Authentication credentials required".to_string(),
                 false,
             ),
+            AgentEvent::HookNotification { hook_name, message, .. } => (
+                GovernanceDecision::Display,
+                GovernancePolicyDecision::DisplayOnly,
+                "hook notification is display-only".to_string(),
+                format!("[{hook_name}] {message}"),
+                false,
+            ),
         };
 
         let governed_event = GovernedEvent {

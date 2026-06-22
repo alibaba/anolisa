@@ -30,6 +30,10 @@ pub(crate) fn render_trusted_tool<W: Write>(
         ) else {
             continue;
         };
+        // Hook ask decisions must never be auto-approved
+        if request.hook_requires_approval {
+            continue;
+        }
         if provider_tool_call_fallback && !request_is_executable_bash_tool(&request) {
             continue;
         }
@@ -94,6 +98,10 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
         ) else {
             continue;
         };
+        // Hook ask decisions must never be auto-approved
+        if request.hook_requires_approval {
+            continue;
+        }
         if provider_tool_call_fallback && !request_is_executable_bash_tool(&request) {
             continue;
         }
@@ -679,6 +687,8 @@ mod tests {
             command_block_id: None,
             redaction_status: None,
             assessment: None,
+            hook_requires_approval: false,
+            hook_warnings: Vec::new(),
         }
     }
 }

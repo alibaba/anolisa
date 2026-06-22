@@ -52,6 +52,23 @@ pub(crate) fn finish_active_agent_run<W: Write>(
         )?;
         return Ok(());
     }
+    // Drain any unconsumed pending hook notifications into deferred_events
+    // (orphan case: hook returned block, so no ToolPermissionRequest was emitted)
+    for notification in active_run.pending_hook_notifications.drain(..) {
+        active_run.deferred_events.push(GovernedEvent {
+            decision: GovernanceDecision::Display,
+            policy_decision: GovernancePolicyDecision::DisplayOnly,
+            event: AgentEvent::HookNotification {
+                run_id: active_run.request.id.clone(),
+                hook_name: notification.hook_name,
+                message: notification.message,
+                tool_use_id: notification.tool_use_id,
+            },
+            reason: "orphan hook notification".to_string(),
+            display_text: String::new(),
+            auto_execute: false,
+        });
+    }
     if !active_run.deferred_events.is_empty() {
         active_run
             .renderer

@@ -18,6 +18,7 @@ fn approval_panel_renders_active_request_with_queue_summary() {
             next_label: Some("req-2 tool Bash"),
             selected_action: ApprovalPanelAction::Approve,
             expanded: false,
+            hook_warnings: Vec::new(),
         })
         .join("\n");
 
@@ -62,6 +63,7 @@ fn approval_panel_uses_zh_labels_without_translating_command() {
             next_label: Some("req-2 tool Bash"),
             selected_action: ApprovalPanelAction::Approve,
             expanded: true,
+            hook_warnings: Vec::new(),
         })
         .join("\n");
 
@@ -99,6 +101,7 @@ fn approval_panel_keeps_focus_visible_and_caps_long_preview() {
             next_label: None,
             selected_action: ApprovalPanelAction::Deny,
             expanded: false,
+            hook_warnings: Vec::new(),
         })
         .join("\n");
 
@@ -126,6 +129,7 @@ fn approval_panel_keeps_cjk_and_emoji_borders_aligned() {
             next_label: Some("req-2 tool Bash"),
             selected_action: ApprovalPanelAction::Details,
             expanded: true,
+            hook_warnings: Vec::new(),
         })
         .join("\n");
 
@@ -154,6 +158,7 @@ fn approval_panel_renders_shell_command_request_as_compact_command() {
             next_label: None,
             selected_action: ApprovalPanelAction::Deny,
             expanded: false,
+            hook_warnings: Vec::new(),
         })
         .join("\n");
 
@@ -197,6 +202,7 @@ fn approval_panel_write_preserves_ratatui_styles_for_terminal_output() {
                 next_label: None,
                 selected_action: ApprovalPanelAction::Deny,
                 expanded: false,
+                hook_warnings: Vec::new(),
             },
         )
         .expect("render approval panel");
@@ -232,6 +238,7 @@ fn approval_panel_styles_selected_actions_by_decision_kind() {
             next_label: None,
             selected_action: ApprovalPanelAction::Deny,
             expanded: false,
+            hook_warnings: Vec::new(),
         },
     )
     .expect("render deny approval panel");
@@ -259,6 +266,7 @@ fn approval_panel_styles_selected_actions_by_decision_kind() {
             next_label: None,
             selected_action: ApprovalPanelAction::Details,
             expanded: false,
+            hook_warnings: Vec::new(),
         },
     )
     .expect("render details approval panel");
@@ -288,6 +296,7 @@ fn plain_approval_panel_keeps_queue_before_actions() {
         next_label: Some("req-2 shell command"),
         selected_action: ApprovalPanelAction::Approve,
         expanded: false,
+        hook_warnings: Vec::new(),
     });
     let text = lines.join("\n");
 

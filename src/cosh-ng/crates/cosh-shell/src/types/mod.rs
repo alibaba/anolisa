@@ -396,6 +396,7 @@ pub enum AgentEvent {
         tool_name: String,
         tool_input: serde_json::Value,
         tool_use_id: String,
+        hook_requires_approval: bool,
     },
 
     ToolOutputDelta {
@@ -427,6 +428,12 @@ pub enum AgentEvent {
         reason: String,
         error_message: Option<String>,
         providers: Vec<crate::adapter::AuthProviderInfo>,
+    },
+    HookNotification {
+        run_id: String,
+        hook_name: String,
+        message: String,
+        tool_use_id: Option<String>,
     },
 }
 

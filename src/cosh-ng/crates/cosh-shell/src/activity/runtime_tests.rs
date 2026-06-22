@@ -469,6 +469,7 @@ fn control_permission_tool_request_is_hidden_when_approval_card_handles_it() {
                 "content": "ok"
             }),
             tool_use_id: "toolu-write".to_string(),
+            hook_requires_approval: false,
         })],
     );
 
@@ -509,6 +510,7 @@ fn matching_tool_call_is_hidden_when_control_permission_card_handles_it() {
                     "content": "ok"
                 }),
                 tool_use_id: "toolu-write".to_string(),
+                hook_requires_approval: false,
             }),
         ],
     );
@@ -544,6 +546,7 @@ fn recommend_mode_keeps_only_control_permission_row_for_matching_tool_call() {
                 tool_name: "Read".to_string(),
                 tool_input: serde_json::json!({ "file_path": "Cargo.toml" }),
                 tool_use_id: "toolu-read".to_string(),
+                hook_requires_approval: false,
             }),
         ],
     );
@@ -577,6 +580,7 @@ fn recommend_mode_keeps_control_permission_tool_request_activity() {
                 "content": "ok"
             }),
             tool_use_id: "toolu-write".to_string(),
+            hook_requires_approval: false,
         })],
     );
 
@@ -644,6 +648,7 @@ fn control_permission_shell_output_is_not_rendered_as_provider_native_transcript
                 tool_name: "run_shell_command".to_string(),
                 tool_input: serde_json::json!({ "command": "ssh -V" }),
                 tool_use_id: "toolu-shell".to_string(),
+                hook_requires_approval: false,
             }),
             governed(AgentEvent::ToolOutputDelta {
                 run_id: "run-1".to_string(),

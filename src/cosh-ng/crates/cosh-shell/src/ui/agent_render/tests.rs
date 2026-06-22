@@ -632,6 +632,7 @@ fn zh_cards_keep_40_and_80_column_widths() {
                 next_label: None,
                 selected_action: ApprovalPanelAction::Approve,
                 expanded: true,
+                hook_warnings: Vec::new(),
             })
             .join("\n");
         assert!(approval.contains("审批"), "{approval}");

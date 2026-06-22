@@ -25,7 +25,7 @@ pub(crate) fn record_approval_requests(
             ignore_tool_calls,
         );
 
-        if let Some(request) = request {
+        if let Some(mut request) = request {
             if state
                 .approvals
                 .requests
@@ -33,6 +33,21 @@ pub(crate) fn record_approval_requests(
                 .any(|existing| same_approval_request_identity(existing, &request))
             {
                 continue;
+            }
+            // Associate pending hook notifications by tool_use_id
+            if let Some(ref tool_use_id) = request.tool_use_id {
+                if let Some(active_run) = state.agent_run.active.as_mut() {
+                    let mut warnings = Vec::new();
+                    active_run.pending_hook_notifications.retain(|n| {
+                        if n.tool_use_id.as_deref() == Some(tool_use_id) {
+                            warnings.push(format!("[{}] {}", n.hook_name, n.message));
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                    request.hook_warnings = warnings;
+                }
             }
             ids.push(request.id.clone());
             state.approvals.requests.push(request);
@@ -135,6 +150,8 @@ fn approval_request_from_event(
                 command_block_id: None,
                 redaction_status: None,
                 assessment: assessment.as_ref().map(runtime_assessment_summary),
+                hook_requires_approval: false,
+                hook_warnings: Vec::new(),
             })
         }
         AgentEvent::Action { run_id, command } => {
@@ -159,6 +176,8 @@ fn approval_request_from_event(
                 command_block_id: None,
                 redaction_status: None,
                 assessment: Some(runtime_assessment_summary(&assessment)),
+                hook_requires_approval: false,
+                hook_warnings: Vec::new(),
             })
         }
         AgentEvent::ToolPermissionRequest {
@@ -167,7 +186,7 @@ fn approval_request_from_event(
             tool_name,
             tool_input,
             tool_use_id,
-            ..
+            hook_requires_approval,
         } => {
             let input_str = serde_json::to_string(tool_input).unwrap_or_default();
             let info = display_for_tool(tool_name, &input_str);
@@ -196,6 +215,8 @@ fn approval_request_from_event(
                 command_block_id: None,
                 redaction_status: None,
                 assessment: assessment.as_ref().map(runtime_assessment_summary),
+                hook_requires_approval: *hook_requires_approval,
+                hook_warnings: Vec::new(),
             })
         }
         _ => None,

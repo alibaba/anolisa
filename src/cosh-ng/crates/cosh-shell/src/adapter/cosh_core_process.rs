@@ -178,6 +178,7 @@ pub(super) fn start_control_protocol_cosh_core_process(
                             tool_name,
                             tool_input,
                             tool_use_id,
+                            hook_requires_approval,
                         } => {
                             let _ = pending_control_tool_call
                                 .borrow_mut()
@@ -202,6 +203,7 @@ pub(super) fn start_control_protocol_cosh_core_process(
                                     tool_name,
                                     tool_input,
                                     tool_use_id,
+                                    hook_requires_approval,
                                 },
                             );
                             return Ok(ProviderLineProgress::AwaitingApproval);

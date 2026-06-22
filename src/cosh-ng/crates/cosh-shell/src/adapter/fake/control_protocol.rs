@@ -27,6 +27,7 @@ pub(super) fn emit_fake_control_protocol_stream(
             tool_name: "run_shell_command".to_string(),
             tool_input: serde_json::json!({ "command": "printf 'provider-shell-handoff\\n'" }),
             tool_use_id: "toolu-1".to_string(),
+            hook_requires_approval: false,
         })?;
         thread::sleep(Duration::from_millis(800));
         sink(AgentEvent::ToolOutputDelta {
@@ -54,6 +55,7 @@ pub(super) fn emit_fake_control_protocol_stream(
             tool_name: "run_shell_command".to_string(),
             tool_input: serde_json::json!({ "command": "free -m" }),
             tool_use_id: "toolu-memory-hook-1".to_string(),
+            hook_requires_approval: false,
         })?;
         thread::sleep(Duration::from_millis(800));
         sink(AgentEvent::ToolOutputDelta {
@@ -86,6 +88,7 @@ pub(super) fn emit_fake_control_protocol_stream(
             tool_name: "run_shell_command".to_string(),
             tool_input: serde_json::json!({ "command": command }),
             tool_use_id: "toolu-timeout-1".to_string(),
+            hook_requires_approval: false,
         })?;
         return Ok(true);
     }
@@ -97,6 +100,7 @@ pub(super) fn emit_fake_control_protocol_stream(
             tool_name: "run_shell_command".to_string(),
             tool_input: serde_json::json!({ "command": "df -h" }),
             tool_use_id: "toolu-auto-1".to_string(),
+            hook_requires_approval: false,
         })?;
         thread::sleep(Duration::from_millis(800));
         sink(AgentEvent::ToolOutputDelta {
@@ -124,6 +128,7 @@ pub(super) fn emit_fake_control_protocol_stream(
             tool_name: "run_shell_command".to_string(),
             tool_input: serde_json::json!({ "command": "ssh -V" }),
             tool_use_id: "toolu-tty-risk-1".to_string(),
+            hook_requires_approval: false,
         })?;
         thread::sleep(Duration::from_millis(800));
         sink(AgentEvent::ToolOutputDelta {
