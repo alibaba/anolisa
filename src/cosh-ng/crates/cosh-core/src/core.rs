@@ -79,9 +79,9 @@ impl CoshCore {
         }
     }
 
-    fn emit_hook_notifications<W: Write>(&self, writer: &mut W, notifications: &[HookNotification]) {
+    fn emit_hook_notifications<W: Write>(&self, writer: &mut W, notifications: &[HookNotification], tool_use_id: Option<&str>) {
         for n in notifications {
-            self.emit(writer, &OutputMessage::hook_notification(&n.hook_name, &n.message));
+            self.emit(writer, &OutputMessage::hook_notification(&n.hook_name, &n.message, tool_use_id));
         }
     }
 
@@ -150,7 +150,7 @@ impl CoshCore {
             .hook_system
             .fire_user_prompt_submit(&self.session_id, &cwd_str, content)
             .await;
-        self.emit_hook_notifications(writer, &prompt_result.notifications);
+        self.emit_hook_notifications(writer, &prompt_result.notifications, None);
         if let HookDecision::Block(reason) = &prompt_result.decision {
             self.emit(
                 writer,
@@ -187,6 +187,13 @@ impl CoshCore {
         let max_turns = self.config.agent.max_turns;
 
         for _turn in 0..max_turns {
+            // ─── Hook: BeforeModel ───
+            let before_model_result = self
+                .hook_system
+                .fire_before_model(&self.session_id, &cwd_str, self.messages.len())
+                .await;
+            self.emit_hook_notifications(writer, &before_model_result.notifications, None);
+
             let mut msgs_with_system = vec![Message::system(&system_prompt)];
             msgs_with_system.extend(self.messages.clone());
 
@@ -308,6 +315,13 @@ impl CoshCore {
             }
             drop(stream);
 
+            // ─── Hook: AfterModel ───
+            let after_model_result = self
+                .hook_system
+                .fire_after_model(&self.session_id, &cwd_str, !tool_calls.is_empty())
+                .await;
+            self.emit_hook_notifications(writer, &after_model_result.notifications, None);
+
             if thinking_block_started {
                 self.emit(writer, &OutputMessage::stream_block_stop(block_index));
                 block_index += 1;
@@ -358,7 +372,7 @@ impl CoshCore {
                     .hook_system
                     .fire_stop(&self.session_id, &cwd_str, &text_buf)
                     .await;
-                self.emit_hook_notifications(writer, &stop_result.notifications);
+                self.emit_hook_notifications(writer, &stop_result.notifications, None);
                 if stop_result.reject {
                     let reason = stop_result.reject_reason.unwrap_or_else(|| "rejected by hook".to_string());
                     self.messages.push(Message::assistant(&text_buf));
@@ -423,7 +437,7 @@ impl CoshCore {
                     .hook_system
                     .fire_pre_tool_use(&self.session_id, &cwd_str, &tc.name, &params)
                     .await;
-                self.emit_hook_notifications(writer, &hook_result.notifications);
+                self.emit_hook_notifications(writer, &hook_result.notifications, Some(&tc.id));
 
                 let (outcome, params) = match hook_result.decision {
                     HookDecision::Block(reason) => {
@@ -455,6 +469,7 @@ impl CoshCore {
                         result
                     }
                     Outcome::RequireApproval => {
+                        let hook_requires_approval = matches!(hook_result.decision, HookDecision::Ask);
                         let request_id = self.next_request_id();
                         self.emit(
                             writer,
@@ -463,6 +478,7 @@ impl CoshCore {
                                 &tc.name,
                                 params.clone(),
                                 &tc.id,
+                                hook_requires_approval,
                             ),
                         );
 
@@ -509,7 +525,7 @@ impl CoshCore {
                         &result.output,
                     )
                     .await;
-                self.emit_hook_notifications(writer, &post_hook.notifications);
+                self.emit_hook_notifications(writer, &post_hook.notifications, None);
 
                 let result = if post_hook.deny {
                     let reason = post_hook.deny_reason.unwrap_or_else(|| "denied by hook".to_string());
@@ -522,6 +538,21 @@ impl CoshCore {
                 } else {
                     result
                 };
+
+                // ─── Hook: PostToolUseFailure ───
+                if result.is_error {
+                    let failure_hook = self
+                        .hook_system
+                        .fire_post_tool_use_failure(
+                            &self.session_id,
+                            &cwd_str,
+                            &tc.name,
+                            &params_for_post_hook,
+                            &result.output,
+                        )
+                        .await;
+                    self.emit_hook_notifications(writer, &failure_hook.notifications, None);
+                }
 
                 self.messages.push(Message::tool_result(
                     &tc.id,

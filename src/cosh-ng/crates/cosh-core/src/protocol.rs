@@ -253,6 +253,10 @@ pub struct SystemPayload {
     pub tools: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hook_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_use_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -300,6 +304,8 @@ pub enum CoreControlRequest {
         #[serde(skip_serializing_if = "Option::is_none")]
         description: Option<String>,
         tool_use_id: String,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        hook_requires_approval: bool,
     },
 
     #[serde(rename = "ask_user")]
@@ -390,7 +396,7 @@ impl OutputMessage {
                 session_id: Some(session_id.to_string()),
                 model: Some(model.to_string()),
                 tools: Some(tools),
-                status: None,
+                ..Default::default()
             },
         }
     }
@@ -421,11 +427,13 @@ impl OutputMessage {
         }
     }
 
-    pub fn hook_notification(hook_name: &str, message: &str) -> Self {
+    pub fn hook_notification(hook_name: &str, message: &str, tool_use_id: Option<&str>) -> Self {
         Self::System {
             subtype: "hook_notification".to_string(),
             payload: SystemPayload {
-                status: Some(format!("[{hook_name}] {message}")),
+                status: Some(message.to_string()),
+                hook_name: Some(hook_name.to_string()),
+                tool_use_id: tool_use_id.map(String::from),
                 ..Default::default()
             },
         }
@@ -566,6 +574,7 @@ impl OutputMessage {
         tool_name: &str,
         input: Value,
         tool_use_id: &str,
+        hook_requires_approval: bool,
     ) -> Self {
         Self::ControlRequest {
             request_id: request_id.to_string(),
@@ -574,6 +583,7 @@ impl OutputMessage {
                 input,
                 description: None,
                 tool_use_id: tool_use_id.to_string(),
+                hook_requires_approval,
             },
         }
     }
@@ -742,6 +752,7 @@ mod tests {
             "Bash",
             serde_json::json!({"command": "echo hello"}),
             "toolu_001",
+            false,
         );
         let json = serde_json::to_string(&msg).unwrap();
         let v: Value = serde_json::from_str(&json).unwrap();
@@ -761,6 +772,7 @@ mod tests {
             "Bash",
             serde_json::json!({"command": "echo hello"}),
             "toolu_mock001",
+            false,
         );
         let json = serde_json::to_string(&msg).unwrap();
         let v: Value = serde_json::from_str(&json).unwrap();

@@ -153,7 +153,7 @@ where
                 for n in &ss_result.notifications {
                     engine.emit(
                         writer,
-                        &OutputMessage::hook_notification(&n.hook_name, &n.message),
+                        &OutputMessage::hook_notification(&n.hook_name, &n.message, None),
                     );
                 }
                 if let Some(ref ctx) = ss_result.additional_context {

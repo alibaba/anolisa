@@ -13,9 +13,12 @@ use crate::config::{HookDefinition, HooksConfig};
 pub enum HookEventName {
     PreToolUse,
     PostToolUse,
+    PostToolUseFailure,
     UserPromptSubmit,
     SessionStart,
     Stop,
+    BeforeModel,
+    AfterModel,
 }
 
 impl HookEventName {
@@ -23,9 +26,12 @@ impl HookEventName {
         match self {
             Self::PreToolUse => "PreToolUse",
             Self::PostToolUse => "PostToolUse",
+            Self::PostToolUseFailure => "PostToolUseFailure",
             Self::UserPromptSubmit => "UserPromptSubmit",
             Self::SessionStart => "SessionStart",
             Self::Stop => "Stop",
+            Self::BeforeModel => "BeforeModel",
+            Self::AfterModel => "AfterModel",
         }
     }
 }
@@ -46,7 +52,9 @@ pub struct HookInput {
 pub struct HookOutput {
     pub decision: Option<String>,
     pub reason: Option<String>,
+    #[serde(alias = "systemMessage")]
     pub system_message: Option<String>,
+    #[serde(alias = "hookSpecificOutput")]
     pub hook_specific_output: Option<Value>,
 }
 
@@ -102,6 +110,21 @@ pub struct StopResult {
     pub notifications: Vec<HookNotification>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PostToolUseFailureResult {
+    pub notifications: Vec<HookNotification>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BeforeModelResult {
+    pub notifications: Vec<HookNotification>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AfterModelResult {
+    pub notifications: Vec<HookNotification>,
+}
+
 // ─── HookSystem ──────────────────────────────────────────────────────
 
 pub struct HookSystem {
@@ -118,9 +141,12 @@ impl HookSystem {
         let mut hooks: HashMap<HookEventName, Vec<HookDefinition>> = HashMap::new();
         hooks.insert(HookEventName::PreToolUse, config.pre_tool_use.clone());
         hooks.insert(HookEventName::PostToolUse, config.post_tool_use.clone());
+        hooks.insert(HookEventName::PostToolUseFailure, config.post_tool_use_failure.clone());
         hooks.insert(HookEventName::UserPromptSubmit, config.user_prompt_submit.clone());
         hooks.insert(HookEventName::SessionStart, config.session_start.clone());
         hooks.insert(HookEventName::Stop, config.stop.clone());
+        hooks.insert(HookEventName::BeforeModel, config.before_model.clone());
+        hooks.insert(HookEventName::AfterModel, config.after_model.clone());
 
         Self { enabled, disabled, hooks }
     }
@@ -173,17 +199,18 @@ impl HookSystem {
             .entry(HookEventName::Stop)
             .or_default()
             .extend(flatten_hook_groups(&hooks.stop));
-
-        let unsupported: &[(&str, &[_])] = &[
-            ("PostToolUseFailure", &hooks.post_tool_use_failure),
-            ("BeforeModel", &hooks.before_model),
-            ("AfterModel", &hooks.after_model),
-        ];
-        for (name, groups) in unsupported {
-            if !groups.is_empty() {
-                eprintln!("[cosh-core] Warning: extension hook event '{name}' is not yet supported and will be ignored");
-            }
-        }
+        self.hooks
+            .entry(HookEventName::PostToolUseFailure)
+            .or_default()
+            .extend(flatten_hook_groups(&hooks.post_tool_use_failure));
+        self.hooks
+            .entry(HookEventName::BeforeModel)
+            .or_default()
+            .extend(flatten_hook_groups(&hooks.before_model));
+        self.hooks
+            .entry(HookEventName::AfterModel)
+            .or_default()
+            .extend(flatten_hook_groups(&hooks.after_model));
     }
 
     fn active_hooks(&self, event: HookEventName) -> Vec<&HookDefinition> {
@@ -397,6 +424,102 @@ impl HookSystem {
         let outputs = self.run_hooks(&defs, &input).await;
 
         self.aggregate_stop(outputs, &defs)
+    }
+
+    pub async fn fire_post_tool_use_failure(
+        &self,
+        session_id: &str,
+        cwd: &str,
+        tool_name: &str,
+        tool_input: &Value,
+        error: &str,
+    ) -> PostToolUseFailureResult {
+        if !self.enabled {
+            return PostToolUseFailureResult { notifications: vec![] };
+        }
+
+        let defs: Vec<&HookDefinition> = self
+            .active_hooks(HookEventName::PostToolUseFailure)
+            .into_iter()
+            .filter(|d| Self::matches_tool(d, tool_name))
+            .collect();
+
+        if defs.is_empty() {
+            return PostToolUseFailureResult { notifications: vec![] };
+        }
+
+        let event_data = serde_json::json!({
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+            "error": error,
+        });
+        let input = self.build_input(session_id, cwd, HookEventName::PostToolUseFailure, event_data);
+        let outputs = self.run_hooks(&defs, &input).await;
+
+        let mut notifications = Vec::new();
+        for (i, out) in outputs {
+            let name = Self::hook_name(defs[i], i);
+            self.collect_notifications(&out, &name, &mut notifications);
+        }
+        PostToolUseFailureResult { notifications }
+    }
+
+    pub async fn fire_before_model(
+        &self,
+        session_id: &str,
+        cwd: &str,
+        messages_count: usize,
+    ) -> BeforeModelResult {
+        if !self.enabled {
+            return BeforeModelResult { notifications: vec![] };
+        }
+
+        let defs = self.active_hooks(HookEventName::BeforeModel);
+        if defs.is_empty() {
+            return BeforeModelResult { notifications: vec![] };
+        }
+
+        let event_data = serde_json::json!({
+            "messages_count": messages_count,
+        });
+        let input = self.build_input(session_id, cwd, HookEventName::BeforeModel, event_data);
+        let outputs = self.run_hooks(&defs, &input).await;
+
+        let mut notifications = Vec::new();
+        for (i, out) in outputs {
+            let name = Self::hook_name(defs[i], i);
+            self.collect_notifications(&out, &name, &mut notifications);
+        }
+        BeforeModelResult { notifications }
+    }
+
+    pub async fn fire_after_model(
+        &self,
+        session_id: &str,
+        cwd: &str,
+        has_tool_calls: bool,
+    ) -> AfterModelResult {
+        if !self.enabled {
+            return AfterModelResult { notifications: vec![] };
+        }
+
+        let defs = self.active_hooks(HookEventName::AfterModel);
+        if defs.is_empty() {
+            return AfterModelResult { notifications: vec![] };
+        }
+
+        let event_data = serde_json::json!({
+            "has_tool_calls": has_tool_calls,
+        });
+        let input = self.build_input(session_id, cwd, HookEventName::AfterModel, event_data);
+        let outputs = self.run_hooks(&defs, &input).await;
+
+        let mut notifications = Vec::new();
+        for (i, out) in outputs {
+            let name = Self::hook_name(defs[i], i);
+            self.collect_notifications(&out, &name, &mut notifications);
+        }
+        AfterModelResult { notifications }
     }
 
     // ─── Internal helpers ────────────────────────────────────────────
@@ -845,9 +968,12 @@ mod tests {
                 sequential: None,
             }],
             post_tool_use: vec![],
+            post_tool_use_failure: vec![],
             user_prompt_submit: vec![],
             session_start: vec![],
             stop: vec![],
+            before_model: vec![],
+            after_model: vec![],
         };
         let sys = HookSystem::from_config(&config);
         let result = sys
@@ -870,9 +996,12 @@ mod tests {
                 sequential: None,
             }],
             post_tool_use: vec![],
+            post_tool_use_failure: vec![],
             user_prompt_submit: vec![],
             session_start: vec![],
             stop: vec![],
+            before_model: vec![],
+            after_model: vec![],
         };
         let sys = HookSystem::from_config(&config);
         let result = sys
@@ -894,9 +1023,12 @@ mod tests {
                 sequential: None,
             }],
             post_tool_use: vec![],
+            post_tool_use_failure: vec![],
             user_prompt_submit: vec![],
             session_start: vec![],
             stop: vec![],
+            before_model: vec![],
+            after_model: vec![],
         };
         let sys = HookSystem::from_config(&config);
         let result = sys

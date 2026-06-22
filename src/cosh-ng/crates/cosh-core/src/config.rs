@@ -88,12 +88,18 @@ pub struct HooksConfig {
     pub pre_tool_use: Vec<HookDefinition>,
     #[serde(default, rename = "PostToolUse")]
     pub post_tool_use: Vec<HookDefinition>,
+    #[serde(default, rename = "PostToolUseFailure")]
+    pub post_tool_use_failure: Vec<HookDefinition>,
     #[serde(default, rename = "UserPromptSubmit")]
     pub user_prompt_submit: Vec<HookDefinition>,
     #[serde(default, rename = "SessionStart")]
     pub session_start: Vec<HookDefinition>,
     #[serde(default, rename = "Stop")]
     pub stop: Vec<HookDefinition>,
+    #[serde(default, rename = "BeforeModel")]
+    pub before_model: Vec<HookDefinition>,
+    #[serde(default, rename = "AfterModel")]
+    pub after_model: Vec<HookDefinition>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
