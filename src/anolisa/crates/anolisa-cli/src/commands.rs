@@ -40,9 +40,10 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 
-    /// Install scope: user (~/.local) or system (/usr/local)
-    #[arg(long, global = true, value_enum, default_value_t = InstallMode::User)]
-    pub install_mode: InstallMode,
+    /// Install scope: user (~/.local) or system (/usr/local).
+    /// When omitted, defaults to system if running as root, user otherwise.
+    #[arg(long, global = true, value_enum)]
+    pub install_mode: Option<InstallMode>,
 
     /// Custom install prefix (system-mode only)
     #[arg(long, global = true, value_name = "PATH")]
@@ -248,6 +249,8 @@ fn has_dot_segment(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use clap::FromArgMatches as _;
+
     use super::*;
 
     fn ctx_with_prefix(prefix: PathBuf) -> CliContext {
@@ -321,5 +324,23 @@ mod tests {
             help.contains("ls"),
             "visible alias `ls` should appear in help output"
         );
+    }
+
+    #[test]
+    fn install_mode_is_none_when_omitted() {
+        let cmd = build_cli();
+        let matches = cmd.try_get_matches_from(["anolisa", "status"]).unwrap();
+        let cli = Cli::from_arg_matches(&matches).unwrap();
+        assert_eq!(cli.install_mode, None);
+    }
+
+    #[test]
+    fn install_mode_is_some_when_explicitly_set() {
+        let cmd = build_cli();
+        let matches = cmd
+            .try_get_matches_from(["anolisa", "--install-mode=system", "status"])
+            .unwrap();
+        let cli = Cli::from_arg_matches(&matches).unwrap();
+        assert_eq!(cli.install_mode, Some(InstallMode::System));
     }
 }
