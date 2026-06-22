@@ -1463,7 +1463,7 @@ fn finalize_journal_with_warnings(
 
 /// What [`prepare_backup`] wrote at the backup path.
 #[derive(Debug)]
-enum BackupArtifact {
+pub enum BackupArtifact {
     /// Regular file copied byte-for-byte; sha256 of those bytes.
     File {
         /// Content hash recorded on the `RestoreFile` rollback action.
@@ -1476,7 +1476,7 @@ enum BackupArtifact {
 
 impl BackupArtifact {
     /// Hash to record on the rollback action; `None` for symlinks.
-    fn into_sha256(self) -> Option<String> {
+    pub fn into_sha256(self) -> Option<String> {
         match self {
             Self::File { sha256 } => Some(sha256),
             Self::Symlink => None,
@@ -1505,7 +1505,7 @@ impl BackupArtifact {
 ///
 /// Returns `Ok(None)` only if `src` is `NotFound`; other errors are
 /// surfaced as [`LifecycleError::Filesystem`].
-fn prepare_backup(src: &Path, backup: &Path) -> Result<Option<BackupArtifact>, LifecycleError> {
+pub fn prepare_backup(src: &Path, backup: &Path) -> Result<Option<BackupArtifact>, LifecycleError> {
     use std::io::{Read, Write};
 
     match fs::symlink_metadata(src) {
@@ -1875,6 +1875,7 @@ mod tests {
             status: ObjectStatus::Installed,
             manifest_digest: None,
             distribution_source: Some("file:///fake".to_string()),
+            raw_package: None,
             install_backend: Some("raw".to_string()),
             ownership: None,
             rpm_metadata: None,
@@ -2397,6 +2398,7 @@ mod tests {
             status: ObjectStatus::Installed,
             manifest_digest: None,
             distribution_source: Some("file:///fake".to_string()),
+            raw_package: None,
             install_backend: Some("raw".to_string()),
             ownership: None,
             rpm_metadata: None,
@@ -2461,6 +2463,7 @@ mod tests {
             status: ObjectStatus::Installed,
             manifest_digest: None,
             distribution_source: Some("file:///fake".to_string()),
+            raw_package: None,
             install_backend: Some("raw".to_string()),
             ownership: None,
             rpm_metadata: None,
@@ -2483,6 +2486,7 @@ mod tests {
             status: ObjectStatus::Installed,
             manifest_digest: None,
             distribution_source: None,
+            raw_package: None,
             install_backend: None,
             ownership: None,
             rpm_metadata: None,
@@ -2559,6 +2563,7 @@ mod tests {
             status: ObjectStatus::Installed,
             manifest_digest: None,
             distribution_source: Some("file:///fake".to_string()),
+            raw_package: None,
             install_backend: Some("raw".to_string()),
             ownership: None,
             rpm_metadata: None,

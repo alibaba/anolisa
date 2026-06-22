@@ -619,6 +619,7 @@ mod tests {
             status,
             manifest_digest: None,
             distribution_source: None,
+            raw_package: None,
             install_backend: Some("rpm".to_string()),
             ownership: Some(ownership),
             rpm_metadata: Some(RpmMetadata {
@@ -650,6 +651,7 @@ mod tests {
             status: ObjectStatus::Installed,
             manifest_digest: None,
             distribution_source: Some("https://example.com/x".to_string()),
+            raw_package: None,
             install_backend: Some("raw".to_string()),
             ownership: Some(Ownership::RawManaged),
             rpm_metadata: None,

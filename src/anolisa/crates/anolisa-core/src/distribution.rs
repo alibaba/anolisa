@@ -313,6 +313,34 @@ impl DistributionIndex {
             )),
         }
     }
+
+    /// All distinct versions that pass the same component / channel / os / arch
+    /// / libc / pkg_base / install_mode filters as [`resolve`](Self::resolve),
+    /// highest-first by semver (lexicographic fallback). Ignores `q.version`
+    /// and the preferred-type tiebreaker — it answers "what could this query
+    /// resolve to", for dry-run previews that must agree with `resolve`.
+    pub fn matching_versions(&self, q: &ResolveQuery<'_>) -> Vec<String> {
+        let want_channel = q.channel.unwrap_or("stable");
+        let mut versions: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|e| e.component == q.component)
+            .filter(|e| e.channel == want_channel)
+            .filter(|e| e.os == q.os)
+            .filter(|e| e.arch == q.arch || e.arch == "any")
+            .filter(|e| matches_optional(e.libc.as_deref(), q.libc))
+            .filter(|e| matches_optional(e.pkg_base.as_deref(), q.pkg_base))
+            .filter(|e| e.install_modes.iter().any(|m| m.as_str() == q.install_mode))
+            .map(|e| e.version.clone())
+            .collect();
+        // Highest-first so the head of the list is the version `resolve` picks.
+        versions.sort_by(|a, b| match (Version::parse(a), Version::parse(b)) {
+            (Ok(va), Ok(vb)) => vb.cmp(&va),
+            _ => b.cmp(a),
+        });
+        versions.dedup();
+        versions
+    }
 }
 
 /// Optional selector match: entry None => wildcard accept; entry Some =>

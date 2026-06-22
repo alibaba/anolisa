@@ -177,6 +177,25 @@ impl CliError {
             hint: Some(hint.into()),
         }
     }
+
+    /// Override the command label, preserving the variant and payload.
+    ///
+    /// Used when a helper shared across commands (e.g. install's raw resolver
+    /// reused by `update`) returns an error tagged with the wrong command
+    /// verb; the calling command re-stamps it so the JSON envelope and message
+    /// name the command the user actually ran.
+    pub fn with_command(mut self, command: impl Into<String>) -> Self {
+        let command = command.into();
+        match &mut self {
+            Self::NotImplemented { command: c, .. }
+            | Self::InvalidArgument { command: c, .. }
+            | Self::Runtime { command: c, .. }
+            | Self::Degraded { command: c, .. }
+            | Self::PermissionDenied { command: c, .. }
+            | Self::BatchPartial { command: c } => *c = command,
+        }
+        self
+    }
 }
 
 /// Print a successful JSON envelope to stdout. Callers should only invoke

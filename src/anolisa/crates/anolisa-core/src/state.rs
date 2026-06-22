@@ -268,6 +268,15 @@ pub struct InstalledObject {
     /// Distribution entry URL or backend-specific source that supplied bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distribution_source: Option<String>,
+    /// Raw backend package this component resolved to at install time.
+    ///
+    /// Preserves a `--package` override (or any package that differs from the
+    /// component name) so a later `update` re-fetches the same package instead
+    /// of re-deriving a possibly different one from repo.toml. `None` for
+    /// non-raw installs and for raw state written before this field existed;
+    /// update then falls back to deriving the package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_package: Option<String>,
     /// Backend that resolved and installed this object.
     ///
     /// Install refuses a later attempt through a different backend so a
@@ -715,6 +724,7 @@ mod tests {
             status: ObjectStatus::Installed,
             manifest_digest: Some("sha256:abc".to_string()),
             distribution_source: Some("builtin".to_string()),
+            raw_package: None,
             install_backend: Some("raw".to_string()),
             ownership: Some(Ownership::RawManaged),
             rpm_metadata: None,

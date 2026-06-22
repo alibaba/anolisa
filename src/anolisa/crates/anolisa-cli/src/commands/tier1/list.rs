@@ -323,6 +323,7 @@ mod tests {
             status,
             manifest_digest: None,
             distribution_source: None,
+            raw_package: None,
             install_backend: None,
             ownership: None,
             rpm_metadata: None,

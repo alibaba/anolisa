@@ -18,9 +18,13 @@
 //! `rpm-observed` and `rpm-managed` components it runs the flow
 //! `rpmdb query -> dnf repo query -> dnf update -> refresh ANOLISA state`,
 //! gated on root for the real run. It never switches backend —
-//! ownership/`install_backend` are preserved. Raw components stay on the
-//! not-yet-implemented planner boundary, and `update all` remains
-//! `NOT_IMPLEMENTED` pending the raw distribution resolver.
+//! ownership/`install_backend` are preserved.
+//!
+//! `update <component>` also implements the **raw** update path (issue #1037):
+//! for `raw-managed` components it resolves the latest published version from
+//! the raw distribution index and replaces the owned files transactionally
+//! (backup → remove → install → refresh state, rolling back on failure).
+//! `update all` remains `NOT_IMPLEMENTED`.
 
 use std::io::Read;
 use std::path::Path;
@@ -31,15 +35,29 @@ use clap::{Parser, Subcommand};
 use serde::Serialize;
 
 use anolisa_core::central_log::{CentralLog, LogKind, LogRecord, LogStatus, Severity};
+use anolisa_core::install_runner::InstallRunner;
+use anolisa_core::lifecycle::prepare_backup;
 use anolisa_core::lock::InstallLock;
+use anolisa_core::path_safety::validate_owned_path;
 use anolisa_core::self_update::{self, ProgressFn, SelfUpdateOutcome};
-use anolisa_core::state::{ObjectKind, OperationRecord, Ownership};
+use anolisa_core::state::{
+    FileOwner, ObjectKind, ObjectStatus, OperationRecord, OwnedFile, Ownership, ServiceRef,
+};
+use anolisa_core::transaction::{
+    RollbackAction, RollbackActionKind, Transaction, TransactionOutcomeStatus, TransactionStep,
+    TransactionStepStatus,
+};
+use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError};
 use anolisa_platform::pkg_transaction::{PackageTransaction, PackageTransactionError};
 use anolisa_platform::privilege;
 use anolisa_platform::rpm_query::RpmPackageQuery;
 use anolisa_platform::rpm_transaction::RpmTransaction;
 
+use super::install::{
+    PreparedInstall, artifact_type_wire, available_raw_versions, prepare_raw_execution,
+    resolve_raw, resolve_raw_inputs_for_component, write_installed_component_manifest,
+};
 use crate::color::Palette;
 use crate::commands::common;
 use crate::context::CliContext;
@@ -139,10 +157,11 @@ pub fn handle(args: UpdateArgs, ctx: &CliContext) -> Result<(), CliError> {
 struct ComponentUpdatePayload {
     component: String,
     package: String,
-    /// Always `rpm`: update never switches backend. The raw path is a
-    /// separate, not-yet-implemented branch.
+    /// Backend that owns the component (`rpm` or `raw`); update never switches
+    /// it, so this echoes the recorded backend.
     backend: &'static str,
-    /// `rpm-observed` or `rpm-managed`; preserved across the update.
+    /// `rpm-observed` / `rpm-managed` / `raw-managed`; preserved across the
+    /// update.
     ownership: &'static str,
     install_mode: String,
     /// EVR recorded before the update (rpmdb truth).
@@ -194,13 +213,30 @@ pub(crate) fn update_component_with_deps(
         })?;
 
     match obj.effective_ownership() {
-        // Raw update still needs the distribution-resolver planner; #959 only
-        // wires the RPM path. Keep raw on the same not-implemented boundary as
-        // before so behavior is unchanged for raw components.
-        Ownership::RawManaged => Err(CliError::not_implemented_with_hint(
-            command,
-            "raw component update is not implemented yet (update planner / distribution resolver pending); only RPM-backed components update today",
-        )),
+        Ownership::RawManaged => {
+            // Snapshot what the raw update path needs, then drop the immutable
+            // borrow so the transactional write path can reload state under the
+            // install lock.
+            let backend_name = obj
+                .install_backend
+                .clone()
+                .unwrap_or_else(|| "raw".to_string());
+            // The owned-file list is intentionally NOT snapshotted here: the
+            // write path re-reads it from state under the install lock so a
+            // concurrent update cannot be driven by a stale file list. Only the
+            // version (to re-validate under the lock) and the recorded raw
+            // package (to reuse a `--package` override) are carried.
+            let from_version = obj.version.clone();
+            let recorded_package = obj.raw_package.clone();
+            update_raw_component(
+                target,
+                &backend_name,
+                &from_version,
+                recorded_package.as_deref(),
+                ctx,
+                &command,
+            )
+        }
         ownership @ (Ownership::RpmManaged | Ownership::RpmObserved) => {
             // Snapshot the package identity, then drop the immutable borrow so
             // the write path can re-acquire the lock and reload state.
@@ -219,6 +255,695 @@ pub(crate) fn update_component_with_deps(
                 target, &package, ownership, ctx, query, txn, is_root, &command,
             )
         }
+    }
+}
+
+// ── raw component update (#1037): backup + transactional file replacement ──
+
+/// Ordering of a resolved candidate version relative to the installed one,
+/// used to gate raw updates. Unlike [`std::cmp::Ordering`] it carries a fourth
+/// state for versions that cannot be ordered, so the downgrade guard can refuse
+/// rather than guess a direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VersionRelation {
+    /// Candidate is strictly older than installed (a downgrade).
+    Older,
+    /// Candidate equals installed (a no-op).
+    Same,
+    /// Candidate is strictly newer than installed (an upgrade).
+    Newer,
+    /// The two cannot be ordered: at least one is not valid semver and the
+    /// normalized strings differ. Neither direction may be assumed.
+    Indeterminate,
+}
+
+/// Classify a resolved `candidate` version against the `installed` one,
+/// semver-aware (tolerating a leading `v`).
+///
+/// When either side is not valid semver, equal normalized strings are
+/// [`VersionRelation::Same`] and anything else is
+/// [`VersionRelation::Indeterminate`] — a non-semver version is never silently
+/// treated as an upgrade, so the downgrade guard stays effective for it (a
+/// non-semver installed version that is actually newer must not be replaced by
+/// an older published one).
+fn version_relation(installed: &str, candidate: &str) -> VersionRelation {
+    fn norm(s: &str) -> &str {
+        let t = s.trim();
+        t.strip_prefix('v').unwrap_or(t)
+    }
+    match (
+        semver::Version::parse(norm(installed)),
+        semver::Version::parse(norm(candidate)),
+    ) {
+        (Ok(installed), Ok(candidate)) => match candidate.cmp(&installed) {
+            std::cmp::Ordering::Less => VersionRelation::Older,
+            std::cmp::Ordering::Equal => VersionRelation::Same,
+            std::cmp::Ordering::Greater => VersionRelation::Newer,
+        },
+        _ if norm(installed) == norm(candidate) => VersionRelation::Same,
+        _ => VersionRelation::Indeterminate,
+    }
+}
+
+/// Update a raw-managed component to the latest version published in its raw
+/// distribution index.
+///
+/// Mirrors the RPM path's shape (resolve → dry-run preview → apply → refresh
+/// state) but, because the raw backend owns the files directly, the apply step
+/// backs up the existing owned files, removes them, installs the new artifact,
+/// and rewrites state inside a [`Transaction`] so any failure rolls back to the
+/// previous version. Backend/ownership are never switched.
+///
+/// # Errors
+///
+/// Returns [`CliError`] when repo.toml or the index cannot resolve the
+/// component, the new artifact cannot be downloaded/verified, or the
+/// transactional replacement fails (after rolling back to the prior version).
+fn update_raw_component(
+    component: &str,
+    backend_name: &str,
+    from_version: &str,
+    recorded_package: Option<&str>,
+    ctx: &CliContext,
+    command: &str,
+) -> Result<(), CliError> {
+    let env = anolisa_env::EnvService::detect();
+    let layout = common::resolve_layout(ctx);
+    let repo_config = RepoConfig::load(&layout).map_err(|err| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("failed to load repo config: {err}"),
+    })?;
+
+    // Rebuild the resolve inputs from recorded state (update has no CLI args),
+    // then resolve the latest published entry. base_url/package are cloned out
+    // because `resolve_raw` consumes the inputs.
+    let inputs = resolve_raw_inputs_for_component(
+        component.to_string(),
+        backend_name,
+        recorded_package,
+        &env,
+        &repo_config,
+        command,
+    )?;
+    let base_url = inputs.base_url.clone();
+    let package = inputs.package.clone();
+
+    let resolution =
+        resolve_raw(ctx, &layout, &env, inputs).map_err(|e| e.with_command(command))?;
+    let to_version = resolution.entry.version.clone();
+    let warnings = resolution.warnings.clone();
+    let ownership_label = Ownership::RawManaged.label();
+    let install_mode = ctx.install_mode.as_str().to_string();
+
+    // Gate the replacement on how the resolved version relates to what is
+    // installed. Evaluated here as a fast path (so a no-op/downgrade never
+    // downloads); the same version is re-validated under the install lock in
+    // execute_raw_update before any file is touched.
+    match version_relation(from_version, &to_version) {
+        // The newest published version is older than installed: refuse rather
+        // than replacing forward state with a stale artifact.
+        VersionRelation::Older => {
+            return Err(CliError::InvalidArgument {
+                command: command.to_string(),
+                reason: format!(
+                    "the latest version published for '{component}' is {to_version}, older than the installed {from_version}; refusing to downgrade (raw update only moves forward)"
+                ),
+            });
+        }
+        // Order cannot be determined (non-semver): refuse rather than risk an
+        // accidental downgrade by optimistically assuming an upgrade.
+        VersionRelation::Indeterminate => {
+            return Err(CliError::InvalidArgument {
+                command: command.to_string(),
+                reason: format!(
+                    "cannot tell whether the published {to_version} is newer than the installed {from_version} for '{component}' (non-semver version); refusing to replace it to avoid an accidental downgrade"
+                ),
+            });
+        }
+        // Already on (or semver-equal to) the latest: clean no-op, never
+        // touches files. Semver-aware so a cosmetic leading `v` does not force
+        // a needless reinstall.
+        VersionRelation::Same => {
+            let payload = ComponentUpdatePayload {
+                component: component.to_string(),
+                package,
+                backend: "raw",
+                ownership: ownership_label,
+                install_mode,
+                from_version: from_version.to_string(),
+                to_version: Some(to_version),
+                updated: false,
+                dry_run: ctx.dry_run,
+                available_candidates: Vec::new(),
+                operation_id: None,
+                warnings,
+            };
+            render_component_update(ctx, &payload);
+            return Ok(());
+        }
+        // A genuine upgrade — fall through to the download + apply path.
+        VersionRelation::Newer => {}
+    }
+
+    // Dry-run: surface the available versions, never touch the filesystem.
+    if ctx.dry_run {
+        let candidates = available_raw_versions(
+            &layout,
+            &base_url,
+            &package,
+            &env,
+            ctx.install_mode.as_str(),
+        );
+        let payload = ComponentUpdatePayload {
+            component: component.to_string(),
+            package,
+            backend: "raw",
+            ownership: ownership_label,
+            install_mode,
+            from_version: from_version.to_string(),
+            to_version: Some(to_version.clone()),
+            updated: false,
+            dry_run: true,
+            available_candidates: candidates,
+            operation_id: None,
+            warnings,
+        };
+        render_component_update(ctx, &payload);
+        return Ok(());
+    }
+
+    // Download + verify the new artifact before taking the lock; a download
+    // failure must leave the current install untouched.
+    let prepared =
+        prepare_raw_execution(ctx, &layout, resolution).map_err(|e| e.with_command(command))?;
+    let operation_id = execute_raw_update(
+        ctx,
+        &layout,
+        component,
+        from_version,
+        prepared,
+        command,
+        &warnings,
+    )?;
+
+    let payload = ComponentUpdatePayload {
+        component: component.to_string(),
+        package,
+        backend: "raw",
+        ownership: ownership_label,
+        install_mode,
+        from_version: from_version.to_string(),
+        to_version: Some(to_version),
+        updated: true,
+        dry_run: false,
+        available_candidates: Vec::new(),
+        operation_id: Some(operation_id),
+        warnings,
+    };
+    render_component_update(ctx, &payload);
+    Ok(())
+}
+
+/// Apply a prepared raw update transactionally: back up and remove the old
+/// owned files, install the new artifact, rewrite the component manifest, and
+/// refresh state — rolling everything back to the previous version on failure.
+/// Returns the operation id recorded against the refreshed state.
+///
+/// `from_version` is the version the lock-free resolve planned against. Because
+/// resolve + download ran outside the lock, this aborts (before any mutation)
+/// if the component drifted to a different version under the lock — the owned
+/// files to back up are likewise taken from the freshly loaded state, never a
+/// pre-lock snapshot.
+#[allow(clippy::too_many_arguments)]
+fn execute_raw_update(
+    ctx: &CliContext,
+    layout: &FsLayout,
+    component: &str,
+    from_version: &str,
+    prepared: PreparedInstall,
+    command: &str,
+    warnings: &[String],
+) -> Result<String, CliError> {
+    let PreparedInstall {
+        resolution,
+        artifact_path,
+        files,
+        services,
+        manifest_toml,
+    } = prepared;
+    let started_at = now_iso8601();
+
+    // Acquire the lock, then load state under it so a concurrent writer is not
+    // clobbered and a stale read cannot drive the replacement.
+    let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("failed to acquire install lock: {err}"),
+    })?;
+    let mut state = common::load_installed_state(ctx, command)?;
+
+    // Re-validate under the lock: the component must still exist, still be
+    // raw-managed, AND still be at the version the lock-free resolve planned
+    // against. The expensive resolve + download ran outside the lock (so the
+    // global lock is never held across network I/O), which opens a window for a
+    // concurrent update/uninstall/repair; aborting on any drift keeps this now
+    // stale plan from clobbering newer state or stranding unowned files. The
+    // owned-file list is read here, from the freshly loaded state, never from a
+    // pre-lock snapshot.
+    let old_files: Vec<OwnedFile> = match state.find_object(ObjectKind::Component, component) {
+        Some(obj) if obj.effective_ownership() == Ownership::RawManaged => {
+            if obj.version != from_version {
+                return Err(CliError::Runtime {
+                    command: command.to_string(),
+                    reason: format!(
+                        "component '{component}' changed from {from_version} to {} while this update was resolving/downloading; nothing was changed — re-run `anolisa update {component}`",
+                        obj.version
+                    ),
+                });
+            }
+            obj.files.clone()
+        }
+        Some(_) => {
+            return Err(CliError::Runtime {
+                command: command.to_string(),
+                reason: format!(
+                    "component '{component}' is no longer raw-managed in state; refusing to record a raw update"
+                ),
+            });
+        }
+        None => {
+            return Err(CliError::Runtime {
+                command: command.to_string(),
+                reason: format!(
+                    "component '{component}' disappeared from state during update; no changes recorded"
+                ),
+            });
+        }
+    };
+
+    let to_version = resolution.entry.version.clone();
+    let artifact_url = resolution.artifact_url.clone();
+    let artifact_type = artifact_type_wire(&resolution.entry.artifact_type);
+
+    let state_path = layout.state_dir.join("installed.toml");
+    let journal_dir = layout.state_dir.join("journal");
+    let mut tx = Transaction::begin("update", state_path.clone(), &journal_dir).map_err(|err| {
+        CliError::Runtime {
+            command: command.to_string(),
+            reason: format!("failed to begin update transaction: {err}"),
+        }
+    })?;
+    let operation_id = tx.operation_id.clone();
+    let backup_root = layout.backup_dir.join(&operation_id);
+    // One context for every rollback exit below, so a failed update both
+    // surfaces rollback problems and lands a failure record in the audit log.
+    let rbx = RollbackCtx {
+        ctx,
+        layout,
+        warnings,
+        component: component.to_string(),
+        command: command.to_string(),
+        operation_id: operation_id.clone(),
+        started_at: started_at.clone(),
+    };
+
+    // Phase 1 — back up then remove every old owned file so the install runner
+    // (which refuses to overwrite) can write the new version into place.
+    for (backup_idx, f) in old_files.iter().enumerate() {
+        if let Err(boundary) = validate_owned_path(layout, &f.path) {
+            return Err(raw_update_rollback(
+                &rbx,
+                &mut tx,
+                CliError::Runtime {
+                    command: command.to_string(),
+                    reason: format!(
+                        "recorded owned file {} is outside ANOLISA-owned roots: {boundary}",
+                        f.path.display()
+                    ),
+                },
+            ));
+        }
+        let backup_path = backup_root.join(format!("{backup_idx}.bak"));
+        match prepare_backup(&f.path, &backup_path) {
+            Ok(Some(artifact)) => {
+                let rb = RollbackAction::restore_file(
+                    backup_path.clone(),
+                    f.path.clone(),
+                    artifact.into_sha256(),
+                );
+                let step = TransactionStep::planned(
+                    "backup_remove",
+                    f.path.display().to_string(),
+                    "remove",
+                    Some(rb),
+                );
+                let idx = tx.steps.len();
+                if let Err(err) = tx.record_step(step) {
+                    return Err(raw_update_rollback(&rbx, &mut tx, tx_runtime(err, command)));
+                }
+                match std::fs::remove_file(&f.path) {
+                    Ok(()) => {
+                        let _ = tx.mark_done(idx);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        let _ = tx.mark_skipped(idx, "file vanished between backup and unlink");
+                    }
+                    Err(e) => {
+                        let _ = tx.mark_failed(idx, &e.to_string());
+                        return Err(raw_update_rollback(
+                            &rbx,
+                            &mut tx,
+                            CliError::Runtime {
+                                command: command.to_string(),
+                                reason: format!(
+                                    "failed to remove old file {}: {e}",
+                                    f.path.display()
+                                ),
+                            },
+                        ));
+                    }
+                }
+            }
+            // Old file already gone — nothing to back up; the new install
+            // recreates it.
+            Ok(None) => {}
+            Err(err) => {
+                return Err(raw_update_rollback(
+                    &rbx,
+                    &mut tx,
+                    CliError::Runtime {
+                        command: command.to_string(),
+                        reason: format!("failed to back up old file {}: {err}", f.path.display()),
+                    },
+                ));
+            }
+        }
+    }
+
+    // Phase 2 — install the new artifact's files.
+    let runner = InstallRunner::new(layout);
+    let outcome = match runner.install_files(artifact_type, &artifact_path, &files) {
+        Ok(o) => o,
+        Err(err) => {
+            return Err(raw_update_rollback(
+                &rbx,
+                &mut tx,
+                CliError::Runtime {
+                    command: command.to_string(),
+                    reason: format!("installing the new version failed: {err}"),
+                },
+            ));
+        }
+    };
+    for installed in &outcome.files {
+        let step = TransactionStep::planned(
+            "write_file",
+            installed.path.display().to_string(),
+            "write",
+            Some(RollbackAction::remove_file(installed.path.clone())),
+        );
+        let idx = tx.steps.len();
+        if let Err(err) = tx.record_step(step) {
+            return Err(raw_update_rollback(&rbx, &mut tx, tx_runtime(err, command)));
+        }
+        let _ = tx.mark_done(idx);
+    }
+
+    // Phase 3 — rewrite the local component manifest snapshot.
+    let manifest_path = match write_installed_component_manifest(layout, component, &manifest_toml)
+    {
+        Ok(p) => p,
+        Err(err) => {
+            return Err(raw_update_rollback(
+                &rbx,
+                &mut tx,
+                err.with_command(command),
+            ));
+        }
+    };
+    {
+        let step = TransactionStep::planned(
+            "write_manifest",
+            manifest_path.display().to_string(),
+            "write",
+            Some(RollbackAction::remove_file(manifest_path.clone())),
+        );
+        let idx = tx.steps.len();
+        if let Err(err) = tx.record_step(step) {
+            return Err(raw_update_rollback(&rbx, &mut tx, tx_runtime(err, command)));
+        }
+        let _ = tx.mark_done(idx);
+    }
+
+    // Phase 4 — refresh state in place and persist. Ownership / install_backend
+    // are deliberately preserved; version, distribution source, owned files,
+    // services, status, health, and the operation pointer move to the new
+    // version.
+    let persist_step = TransactionStep::planned(
+        "persist_state",
+        state_path.display().to_string(),
+        "write",
+        Some(RollbackAction {
+            kind: RollbackActionKind::RestoreState,
+            source: None,
+            dest: None,
+            sha256: None,
+        }),
+    );
+    let persist_idx = tx.steps.len();
+    if let Err(err) = tx.record_step(persist_step) {
+        return Err(raw_update_rollback(&rbx, &mut tx, tx_runtime(err, command)));
+    }
+
+    let mut owned_files: Vec<OwnedFile> = outcome
+        .files
+        .iter()
+        .map(|f| OwnedFile {
+            path: f.path.clone(),
+            owner: FileOwner::Anolisa,
+            sha256: Some(f.sha256.clone()),
+        })
+        .collect();
+    owned_files.push(OwnedFile {
+        path: manifest_path.clone(),
+        owner: FileOwner::Anolisa,
+        sha256: None,
+    });
+
+    let obj = match state.find_object_mut(ObjectKind::Component, component) {
+        Some(obj) => obj,
+        None => {
+            return Err(raw_update_rollback(
+                &rbx,
+                &mut tx,
+                CliError::Runtime {
+                    command: command.to_string(),
+                    reason: format!("component '{component}' vanished from state mid-update"),
+                },
+            ));
+        }
+    };
+    obj.version = to_version.clone();
+    obj.distribution_source = Some(artifact_url);
+    obj.files = owned_files;
+    obj.last_operation_id = Some(operation_id.clone());
+    // A clean replacement matches a fresh install of the new version: services
+    // come from the new manifest, status returns to Installed, and stale health
+    // / external-modification rows from the old version no longer apply. The
+    // ServiceRef shaping mirrors the install path (enablement is deferred).
+    let service_manager = match ctx.install_mode {
+        crate::context::InstallMode::System => "systemd",
+        crate::context::InstallMode::User => "systemd-user",
+    };
+    obj.services = services
+        .iter()
+        .map(|svc| ServiceRef {
+            name: svc.clone(),
+            manager: service_manager.to_string(),
+            restartable: true,
+            enabled: false,
+        })
+        .collect();
+    obj.status = ObjectStatus::Installed;
+    obj.health = Vec::new();
+    obj.external_modified_files = Vec::new();
+
+    state.operations.push(OperationRecord {
+        id: operation_id.clone(),
+        command: command.to_string(),
+        status: "ok".to_string(),
+        started_at: started_at.clone(),
+        finished_at: Some(now_iso8601()),
+    });
+
+    if let Err(err) = state.save(&state_path) {
+        let _ = tx.mark_failed(persist_idx, &err.to_string());
+        return Err(raw_update_rollback(
+            &rbx,
+            &mut tx,
+            CliError::Runtime {
+                command: command.to_string(),
+                reason: format!("failed to save state: {err}"),
+            },
+        ));
+    }
+    let _ = tx.mark_done(persist_idx);
+    let _ = tx.finish(TransactionOutcomeStatus::Ok);
+
+    // The transaction committed; per-operation backups are rollback scratch
+    // (as in uninstall), so prune them once the new version is in place.
+    let _ = std::fs::remove_dir_all(&backup_root);
+
+    // Audit is best-effort: the update already persisted, so a log failure
+    // downgrades to a warning rather than unwinding the transaction.
+    let log = CentralLog::open(layout.central_log.clone());
+    let record = LogRecord {
+        kind: LogKind::Operation,
+        operation_id: Some(operation_id.clone()),
+        command: command.to_string(),
+        source: "anolisa-cli".to_string(),
+        component: Some(component.to_string()),
+        severity: Severity::Info,
+        message: format!("updated raw component {component} to {to_version}"),
+        actor: "cli".to_string(),
+        install_mode: Some(ctx.install_mode.as_str().to_string()),
+        started_at,
+        finished_at: Some(now_iso8601()),
+        status: Some(LogStatus::Ok),
+        objects: vec![component.to_string()],
+        // Backups are pruned on success (the new version is in place), so no
+        // backup set is retained for this operation.
+        backup_ids: Vec::new(),
+        warnings: warnings.to_vec(),
+        details: serde_json::Value::Null,
+    };
+    if let Err(err) = log.append(&record)
+        && !ctx.quiet
+    {
+        eprintln!("warning: failed to append audit log: {err}");
+    }
+
+    Ok(operation_id)
+}
+
+/// Everything a rollback exit needs to report the failure, built once in
+/// [`execute_raw_update`] so each `return Err(raw_update_rollback(&rbx,...))` stays
+/// terse. Owns its strings to avoid borrowing locals that the success path
+/// later moves.
+struct RollbackCtx<'a> {
+    ctx: &'a CliContext,
+    layout: &'a FsLayout,
+    warnings: &'a [String],
+    component: String,
+    command: String,
+    operation_id: String,
+    started_at: String,
+}
+
+/// Roll back a failed raw update: walk the journal backwards restoring every
+/// completed step (old files from backup, new files removed, state from
+/// snapshot), finish the journal as `RolledBack`, write a failure record to the
+/// central log, and return the original error so the caller surfaces the
+/// failure rather than the rollback mechanics.
+///
+/// A rollback step that itself fails is collected and surfaced (to stderr and
+/// in the audit record) rather than silently swallowed — a half-restored
+/// component must never look like a clean revert.
+fn raw_update_rollback(rbx: &RollbackCtx<'_>, tx: &mut Transaction, err: CliError) -> CliError {
+    let mut rollback_failures: Vec<String> = Vec::new();
+    for idx in (0..tx.steps.len()).rev() {
+        if tx.steps[idx].status != TransactionStepStatus::Done {
+            continue;
+        }
+        let Some(rb) = tx.steps[idx].rollback.clone() else {
+            continue;
+        };
+        let restored = match rb.kind {
+            RollbackActionKind::RestoreFile => match tx.restore_file(&rb) {
+                Ok(()) => true,
+                Err(e) => {
+                    rollback_failures.push(format!(
+                        "restore {}: {e}",
+                        rb.dest
+                            .as_deref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default()
+                    ));
+                    false
+                }
+            },
+            RollbackActionKind::RemoveFile => match rb.dest.as_deref() {
+                None => true,
+                Some(dest) => match tx.remove_file(dest) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        rollback_failures.push(format!("remove {}: {e}", dest.display()));
+                        false
+                    }
+                },
+            },
+            RollbackActionKind::RestoreState => match tx.restore_state() {
+                Ok(()) => true,
+                Err(e) => {
+                    rollback_failures.push(format!("restore state: {e}"));
+                    false
+                }
+            },
+            _ => true,
+        };
+        if restored {
+            let _ = tx.mark_rolled_back(idx);
+        }
+    }
+    let _ = tx.finish(TransactionOutcomeStatus::RolledBack);
+
+    // A failed rollback can leave files missing; always surface it (it is more
+    // serious than the original error it accompanies).
+    if !rollback_failures.is_empty() && !rbx.ctx.quiet {
+        eprintln!(
+            "warning: rollback of update for '{}' did not fully complete: {}",
+            rbx.component,
+            rollback_failures.join("; ")
+        );
+    }
+
+    // Best-effort failure audit so a failed-and-rolled-back update is visible to
+    // `anolisa log`, not just as an orphaned journal file. The backup tree is
+    // retained here (unlike the success path) for forensics/recovery.
+    let mut log_warnings = rbx.warnings.to_vec();
+    log_warnings.extend(rollback_failures);
+    let log = CentralLog::open(rbx.layout.central_log.clone());
+    let record = LogRecord {
+        kind: LogKind::Operation,
+        operation_id: Some(rbx.operation_id.clone()),
+        command: rbx.command.clone(),
+        source: "anolisa-cli".to_string(),
+        component: Some(rbx.component.clone()),
+        severity: Severity::Error,
+        message: format!(
+            "raw update of {} failed and rolled back: {}",
+            rbx.component,
+            err.reason()
+        ),
+        actor: "cli".to_string(),
+        install_mode: Some(rbx.ctx.install_mode.as_str().to_string()),
+        started_at: rbx.started_at.clone(),
+        finished_at: Some(now_iso8601()),
+        status: Some(LogStatus::RolledBack),
+        objects: vec![rbx.component.clone()],
+        backup_ids: vec![rbx.operation_id.clone()],
+        warnings: log_warnings,
+        details: serde_json::Value::Null,
+    };
+    let _ = log.append(&record);
+
+    err
+}
+
+/// Wrap a transaction-journal error as a `CliError::Runtime` for `command`.
+fn tx_runtime(err: anolisa_core::transaction::TransactionError, command: &str) -> CliError {
+    CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("update transaction journal error: {err}"),
     }
 }
 
@@ -557,7 +1282,17 @@ fn render_component_update(ctx: &CliContext, payload: &ComponentUpdatePayload) {
                 payload.available_candidates.join(", "),
             );
         }
-        println!("  would run: dnf update -y {}", payload.package);
+        match payload.backend {
+            "rpm" => println!("  would run: dnf update -y {}", payload.package),
+            _ => println!(
+                "  would replace files with {} from the {} backend",
+                payload
+                    .to_version
+                    .as_deref()
+                    .unwrap_or("the latest version"),
+                payload.backend,
+            ),
+        }
     } else if payload.updated {
         println!(
             "{} {} {} → {}",
@@ -1078,6 +1813,7 @@ mod tests {
             status,
             manifest_digest: None,
             distribution_source: None,
+            raw_package: None,
             install_backend: Some("rpm".to_string()),
             ownership: Some(ownership),
             rpm_metadata: Some(RpmMetadata {
@@ -1109,6 +1845,7 @@ mod tests {
             status: ObjectStatus::Installed,
             manifest_digest: None,
             distribution_source: Some("https://example.com/x".to_string()),
+            raw_package: None,
             install_backend: Some("raw".to_string()),
             ownership: Some(Ownership::RawManaged),
             rpm_metadata: None,
@@ -1414,14 +2151,591 @@ mod tests {
         assert_eq!(rpm.update_calls.get(), 0);
     }
 
-    /// AC4: a user-mode raw override updates only the user raw component and
-    /// never touches the shadowed system RPM. The raw path is not implemented,
-    /// so it surfaces NOT_IMPLEMENTED — crucially without running dnf.
+    // ── raw update fixtures (#1037) ──
+
+    fn tar_gz(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use tar::{Builder, Header};
+        let enc = GzEncoder::new(Vec::new(), Compression::default());
+        let mut tar = Builder::new(enc);
+        for (path, data) in entries {
+            let mut header = Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append_data(&mut header, *path, *data)
+                .expect("append tar entry");
+        }
+        tar.into_inner()
+            .expect("finish tar")
+            .finish()
+            .expect("finish gzip")
+    }
+
+    fn raw_manifest(component: &str, version: &str) -> String {
+        format!(
+            r#"[component]
+name = "{component}"
+version = "{version}"
+
+[component.layout]
+modes = ["system", "user"]
+
+[[component.layout.files]]
+source = "bin/{component}"
+target = "{{bindir}}/{component}"
+mode = "0755"
+type = "executable"
+"#
+        )
+    }
+
+    /// tar.gz carrying the embedded manifest plus the binary it declares.
+    fn raw_artifact(component: &str, version: &str, body: &[u8]) -> Vec<u8> {
+        let manifest = raw_manifest(component, version);
+        tar_gz(&[
+            (".anolisa/component.toml", manifest.as_bytes()),
+            (format!("bin/{component}").as_str(), body),
+        ])
+    }
+
+    /// tar.gz whose manifest declares the binary but omits it, so the install
+    /// runner fails after the old files have been backed up and removed.
+    fn raw_artifact_missing_binary(component: &str, version: &str) -> Vec<u8> {
+        let manifest = raw_manifest(component, version);
+        tar_gz(&[(".anolisa/component.toml", manifest.as_bytes())])
+    }
+
+    /// Publish one version of `component` to a local file:// raw repo under
+    /// `root` and point `layout`'s repo.toml at it. Returns the repo base URL.
+    fn publish_raw_repo(
+        root: &Path,
+        layout: &FsLayout,
+        component: &str,
+        version: &str,
+        artifact: &[u8],
+    ) -> String {
+        use sha2::{Digest, Sha256};
+        let v1 = root.join("v1");
+        std::fs::create_dir_all(&v1).expect("create repo dirs");
+        let artifact_name = format!("{component}.tar.gz");
+        std::fs::write(v1.join(&artifact_name), artifact).expect("write artifact");
+        let sha = format!("{:x}", Sha256::digest(artifact));
+        let env = anolisa_env::EnvService::detect();
+        let index = format!(
+            r#"schema_version = 1
+channel = "stable"
+publisher = "test"
+
+[[entries]]
+component = "{component}"
+version = "{version}"
+channel = "stable"
+artifact_type = "tar_gz"
+backend = "raw"
+url = "{artifact_name}"
+os = "{os}"
+arch = "{arch}"
+install_modes = ["system", "user"]
+sha256 = "{sha}"
+"#,
+            os = env.os,
+            arch = env.arch,
+        );
+        std::fs::write(v1.join("index.toml"), index).expect("write index");
+        let base_url = format!("file://{}", v1.display());
+
+        std::fs::create_dir_all(&layout.etc_dir).expect("etc dir");
+        std::fs::write(
+            layout.etc_dir.join("repo.toml"),
+            format!(
+                "schema_version = 1\ndefault_backend = \"raw\"\n\n[backends.raw]\nbase_url = \"{base_url}\"\n"
+            ),
+        )
+        .expect("write repo.toml");
+        base_url
+    }
+
+    /// Seed an installed raw component at `version` with one owned binary
+    /// holding `body` plus its manifest snapshot. Returns the recorded owned
+    /// files (as the dispatcher would hand them to the raw update path).
+    fn seed_installed_raw(
+        ctx: &CliContext,
+        component: &str,
+        version: &str,
+        body: &[u8],
+    ) -> Vec<OwnedFile> {
+        use sha2::{Digest, Sha256};
+        let layout = common::resolve_layout(ctx);
+        std::fs::create_dir_all(&layout.bin_dir).expect("bin dir");
+        let bin = layout.bin_dir.join(component);
+        std::fs::write(&bin, body).expect("write bin");
+        let bin_sha = format!("{:x}", Sha256::digest(body));
+
+        let manifest_path = common::installed_component_manifest_path(&layout, component, "update")
+            .expect("manifest path");
+        if let Some(parent) = manifest_path.parent() {
+            std::fs::create_dir_all(parent).expect("manifest dir");
+        }
+        std::fs::write(&manifest_path, raw_manifest(component, version)).expect("write manifest");
+
+        let files = vec![
+            OwnedFile {
+                path: bin,
+                owner: FileOwner::Anolisa,
+                sha256: Some(bin_sha),
+            },
+            OwnedFile {
+                path: manifest_path,
+                owner: FileOwner::Anolisa,
+                sha256: None,
+            },
+        ];
+        let mut obj = raw_object(component, version);
+        obj.files = files.clone();
+        seed(ctx, obj);
+        files
+    }
+
+    /// Raw update resolves the latest published version, replaces the owned
+    /// files, preserves ownership/backend, and records the operation.
     #[test]
-    fn user_raw_override_does_not_touch_system_rpm() {
+    fn raw_update_upgrades_to_latest_and_preserves_ownership() {
         let tmp = tempfile::tempdir().expect("tmpdir");
-        let c = ctx(tmp.path().to_path_buf(), InstallMode::User, false);
-        seed(&c, raw_object("copilot-shell", "9.9.9"));
+        let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
+        seed_installed_raw(&c, "foo", "0.1.0", b"old v1 binary\n");
+        let new_body: &[u8] = b"#!/bin/sh\necho foo v2\n";
+        publish_raw_repo(
+            &tmp.path().join("repo"),
+            &common::resolve_layout(&c),
+            "foo",
+            "0.2.0",
+            &raw_artifact("foo", "0.2.0", new_body),
+        );
+
+        update_raw_component("foo", "raw", "0.1.0", None, &c, "update foo")
+            .expect("raw update must succeed");
+
+        let layout = common::resolve_layout(&c);
+        assert_eq!(
+            std::fs::read(layout.bin_dir.join("foo")).expect("read bin"),
+            new_body,
+            "binary must be replaced with the v2 payload"
+        );
+        let state = load_state(&c);
+        let obj = state
+            .find_object(ObjectKind::Component, "foo")
+            .expect("component object");
+        assert_eq!(obj.version, "0.2.0");
+        assert_eq!(
+            obj.effective_ownership(),
+            Ownership::RawManaged,
+            "ownership preserved"
+        );
+        assert_eq!(
+            obj.install_backend.as_deref(),
+            Some("raw"),
+            "backend preserved"
+        );
+        assert!(obj.last_operation_id.is_some());
+        assert!(
+            state.operations.iter().any(|o| o.command == "update foo"),
+            "update operation must be recorded"
+        );
+        assert!(
+            layout
+                .backup_dir
+                .read_dir()
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(true),
+            "backups must be pruned after a successful update"
+        );
+        assert!(
+            obj.last_operation_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("op-update-")),
+            "operation id must carry the update verb, got {:?}",
+            obj.last_operation_id
+        );
+    }
+
+    /// When the recorded version already matches the latest published version,
+    /// update is a clean no-op: no file or state change, no operation recorded.
+    #[test]
+    fn raw_update_already_latest_is_noop() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
+        let body: &[u8] = b"current binary\n";
+        seed_installed_raw(&c, "foo", "0.2.0", body);
+        publish_raw_repo(
+            &tmp.path().join("repo"),
+            &common::resolve_layout(&c),
+            "foo",
+            "0.2.0",
+            &raw_artifact("foo", "0.2.0", b"unused\n"),
+        );
+
+        update_raw_component("foo", "raw", "0.2.0", None, &c, "update foo")
+            .expect("no-op must succeed");
+
+        let layout = common::resolve_layout(&c);
+        assert_eq!(
+            std::fs::read(layout.bin_dir.join("foo")).expect("read bin"),
+            body,
+            "no-op must not touch the binary"
+        );
+        assert!(
+            load_state(&c).operations.is_empty(),
+            "no-op records no operation"
+        );
+    }
+
+    /// Dry-run reports without touching the filesystem or recorded state.
+    #[test]
+    fn raw_update_dry_run_does_not_touch_files_or_state() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().join("sys"), InstallMode::System, true);
+        let body: &[u8] = b"old binary\n";
+        seed_installed_raw(&c, "foo", "0.1.0", body);
+        publish_raw_repo(
+            &tmp.path().join("repo"),
+            &common::resolve_layout(&c),
+            "foo",
+            "0.2.0",
+            &raw_artifact("foo", "0.2.0", b"new\n"),
+        );
+
+        update_raw_component("foo", "raw", "0.1.0", None, &c, "update foo")
+            .expect("dry-run must succeed");
+
+        let layout = common::resolve_layout(&c);
+        assert_eq!(
+            std::fs::read(layout.bin_dir.join("foo")).expect("read bin"),
+            body,
+            "dry-run must not touch the binary"
+        );
+        assert_eq!(
+            load_state(&c)
+                .find_object(ObjectKind::Component, "foo")
+                .map(|o| o.version.clone())
+                .as_deref(),
+            Some("0.1.0"),
+            "dry-run must not change the recorded version"
+        );
+    }
+
+    /// A failure while installing the new version rolls back: the old files are
+    /// restored from backup and the recorded version is unchanged.
+    #[test]
+    fn raw_update_rolls_back_on_install_failure() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
+        let body: &[u8] = b"original v1 binary\n";
+        seed_installed_raw(&c, "foo", "0.1.0", body);
+        publish_raw_repo(
+            &tmp.path().join("repo"),
+            &common::resolve_layout(&c),
+            "foo",
+            "0.2.0",
+            &raw_artifact_missing_binary("foo", "0.2.0"),
+        );
+
+        let err = update_raw_component("foo", "raw", "0.1.0", None, &c, "update foo")
+            .expect_err("install of the new version must fail");
+        assert_eq!(err.code(), "EXECUTION_FAILED");
+
+        let layout = common::resolve_layout(&c);
+        assert_eq!(
+            std::fs::read(layout.bin_dir.join("foo")).expect("read bin"),
+            body,
+            "old binary must be restored from backup"
+        );
+        assert_eq!(
+            load_state(&c)
+                .find_object(ObjectKind::Component, "foo")
+                .map(|o| o.version.clone())
+                .as_deref(),
+            Some("0.1.0"),
+            "failed update must not change the recorded version"
+        );
+    }
+
+    /// resolve_raw always selects the highest published version; if the index
+    /// only offers an older release, update must refuse rather than downgrade.
+    #[test]
+    fn raw_update_refuses_downgrade() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
+        let body: &[u8] = b"installed 0.2.0\n";
+        seed_installed_raw(&c, "foo", "0.2.0", body);
+        // The repo only publishes the older 0.1.0.
+        publish_raw_repo(
+            &tmp.path().join("repo"),
+            &common::resolve_layout(&c),
+            "foo",
+            "0.1.0",
+            &raw_artifact("foo", "0.1.0", b"older\n"),
+        );
+
+        let err = update_raw_component("foo", "raw", "0.2.0", None, &c, "update foo")
+            .expect_err("a downgrade must be refused");
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+
+        let layout = common::resolve_layout(&c);
+        assert_eq!(
+            std::fs::read(layout.bin_dir.join("foo")).expect("read bin"),
+            body,
+            "refused downgrade must not touch the binary"
+        );
+        assert_eq!(
+            load_state(&c)
+                .find_object(ObjectKind::Component, "foo")
+                .map(|o| o.version.clone())
+                .as_deref(),
+            Some("0.2.0"),
+            "refused downgrade must not change the recorded version"
+        );
+    }
+
+    /// A successful update resets transient state: status returns to Installed
+    /// and stale service rows from the old version are cleared (the new
+    /// manifest declares no services here).
+    #[test]
+    fn raw_update_resets_status_and_clears_stale_state() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
+        seed_installed_raw(&c, "foo", "0.1.0", b"old\n");
+        // Poison transient state as if a prior op had failed and left rows.
+        {
+            let layout = common::resolve_layout(&c);
+            let path = layout.state_dir.join("installed.toml");
+            let mut state = InstalledState::load(&path).expect("load state");
+            let obj = state
+                .find_object_mut(ObjectKind::Component, "foo")
+                .expect("seeded object");
+            obj.status = ObjectStatus::Failed;
+            obj.services = vec![ServiceRef {
+                name: "stale.service".to_string(),
+                manager: "systemd".to_string(),
+                restartable: true,
+                enabled: false,
+            }];
+            state.save(&path).expect("save poisoned state");
+        }
+        publish_raw_repo(
+            &tmp.path().join("repo"),
+            &common::resolve_layout(&c),
+            "foo",
+            "0.2.0",
+            &raw_artifact("foo", "0.2.0", b"new\n"),
+        );
+
+        update_raw_component("foo", "raw", "0.1.0", None, &c, "update foo")
+            .expect("update must succeed");
+
+        let state = load_state(&c);
+        let obj = state
+            .find_object(ObjectKind::Component, "foo")
+            .expect("component object");
+        assert_eq!(obj.version, "0.2.0");
+        assert_eq!(
+            obj.status,
+            ObjectStatus::Installed,
+            "status must reset to Installed after a clean update"
+        );
+        assert!(
+            obj.services.is_empty(),
+            "stale services must be cleared when the new manifest declares none"
+        );
+    }
+
+    /// version_relation classifies semver pairs and, crucially, refuses to
+    /// guess a direction for non-semver versions so the downgrade guard holds.
+    #[test]
+    fn version_relation_classifies_semver_and_non_semver() {
+        // Plain semver precedence.
+        assert_eq!(version_relation("0.1.0", "0.2.0"), VersionRelation::Newer);
+        assert_eq!(version_relation("0.2.0", "0.1.0"), VersionRelation::Older);
+        assert_eq!(version_relation("1.0.0", "1.0.0"), VersionRelation::Same);
+        // A leading `v` is normalized away before comparison.
+        assert_eq!(version_relation("v1.2.3", "1.2.3"), VersionRelation::Same);
+        // Non-semver: equal normalized strings are Same, anything else is
+        // Indeterminate — never silently treated as an upgrade.
+        assert_eq!(
+            version_relation("2026.06", "2026.06"),
+            VersionRelation::Same
+        );
+        assert_eq!(
+            version_relation("2026.06", "0.5.0"),
+            VersionRelation::Indeterminate
+        );
+        assert_eq!(
+            version_relation("0.5.0", "nightly"),
+            VersionRelation::Indeterminate
+        );
+    }
+
+    /// A non-semver installed version cannot be ordered against the published
+    /// one, so update refuses rather than risk replacing a newer custom build
+    /// with an older published release (P2).
+    #[test]
+    fn raw_update_refuses_non_semver_version() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
+        let body: &[u8] = b"calver build\n";
+        seed_installed_raw(&c, "foo", "2026.06", body);
+        publish_raw_repo(
+            &tmp.path().join("repo"),
+            &common::resolve_layout(&c),
+            "foo",
+            "0.5.0",
+            &raw_artifact("foo", "0.5.0", b"older semver\n"),
+        );
+
+        let err = update_raw_component("foo", "raw", "2026.06", None, &c, "update foo")
+            .expect_err("a non-orderable version must be refused");
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+
+        let layout = common::resolve_layout(&c);
+        assert_eq!(
+            std::fs::read(layout.bin_dir.join("foo")).expect("read bin"),
+            body,
+            "refused update must not touch the binary"
+        );
+        assert_eq!(
+            load_state(&c)
+                .find_object(ObjectKind::Component, "foo")
+                .map(|o| o.version.clone())
+                .as_deref(),
+            Some("2026.06"),
+            "refused update must not change the recorded version"
+        );
+    }
+
+    /// The target version is re-validated under the install lock: if the
+    /// component drifted to another version after the lock-free resolve/download
+    /// (a concurrent update), the now-stale plan aborts without touching files
+    /// (P1).
+    #[test]
+    fn raw_update_aborts_on_concurrent_version_drift() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
+        // State is already at 0.2.0 (as if a concurrent update landed it), but
+        // this invocation carries the stale snapshot version 0.1.0.
+        let body: &[u8] = b"already at 0.2.0\n";
+        seed_installed_raw(&c, "foo", "0.2.0", body);
+        publish_raw_repo(
+            &tmp.path().join("repo"),
+            &common::resolve_layout(&c),
+            "foo",
+            "0.2.0",
+            &raw_artifact("foo", "0.2.0", b"new payload\n"),
+        );
+
+        let err = update_raw_component("foo", "raw", "0.1.0", None, &c, "update foo")
+            .expect_err("a drifted snapshot must abort under the lock");
+        assert_eq!(err.code(), "EXECUTION_FAILED");
+
+        let layout = common::resolve_layout(&c);
+        assert_eq!(
+            std::fs::read(layout.bin_dir.join("foo")).expect("read bin"),
+            body,
+            "aborted update must not touch the binary"
+        );
+        assert_eq!(
+            load_state(&c)
+                .find_object(ObjectKind::Component, "foo")
+                .map(|o| o.version.clone())
+                .as_deref(),
+            Some("0.2.0"),
+            "aborted update must not change the recorded version"
+        );
+    }
+
+    /// A component installed with `--package` (recorded as `raw_package`)
+    /// updates against that package, not one re-derived from the component
+    /// name. Published only under the non-default key `altpkg`, so a re-derived
+    /// `foo` would resolve nothing (P1 --package).
+    #[test]
+    fn raw_update_reuses_recorded_package() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
+        seed_installed_raw(&c, "foo", "0.1.0", b"old foo\n");
+        let new_body: &[u8] = b"new foo fetched via altpkg\n";
+        publish_raw_repo(
+            &tmp.path().join("repo"),
+            &common::resolve_layout(&c),
+            "altpkg",
+            "0.2.0",
+            &raw_artifact("foo", "0.2.0", new_body),
+        );
+
+        update_raw_component("foo", "raw", "0.1.0", Some("altpkg"), &c, "update foo")
+            .expect("update must resolve via the recorded package");
+
+        let layout = common::resolve_layout(&c);
+        assert_eq!(
+            std::fs::read(layout.bin_dir.join("foo")).expect("read bin"),
+            new_body,
+            "binary must be replaced with the version fetched via the recorded package"
+        );
+        assert_eq!(
+            load_state(&c)
+                .find_object(ObjectKind::Component, "foo")
+                .map(|o| o.version.clone())
+                .as_deref(),
+            Some("0.2.0"),
+            "version must advance via the recorded-package resolution"
+        );
+    }
+
+    /// With no recorded package, update derives it from the component name; if
+    /// the index only publishes a non-default package the resolve fails. This
+    /// is the failing half that proves the recorded package is what made
+    /// [`raw_update_reuses_recorded_package`] succeed.
+    #[test]
+    fn raw_update_without_recorded_package_cannot_find_alt_package() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
+        seed_installed_raw(&c, "foo", "0.1.0", b"old foo\n");
+        publish_raw_repo(
+            &tmp.path().join("repo"),
+            &common::resolve_layout(&c),
+            "altpkg",
+            "0.2.0",
+            &raw_artifact("foo", "0.2.0", b"unreachable\n"),
+        );
+
+        update_raw_component("foo", "raw", "0.1.0", None, &c, "update foo")
+            .expect_err("deriving 'foo' must not resolve the 'altpkg'-only index");
+
+        let layout = common::resolve_layout(&c);
+        assert_eq!(
+            std::fs::read(layout.bin_dir.join("foo")).expect("read bin"),
+            b"old foo\n",
+            "a failed resolve must not touch the binary"
+        );
+    }
+
+    /// A raw-managed component dispatches to the raw backend and never runs
+    /// dnf — `update_component_with_deps` must route `RawManaged` ownership
+    /// away from the RPM path even when an RPM of the same name is installed.
+    ///
+    /// Uses System mode: `resolve_layout` honours `prefix` only for System
+    /// mode, so a User-mode test would read and mutate the real user home.
+    #[test]
+    fn raw_component_update_never_runs_dnf() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
+        seed_installed_raw(&c, "copilot-shell", "0.1.0", b"old\n");
+        publish_raw_repo(
+            &tmp.path().join("repo"),
+            &common::resolve_layout(&c),
+            "copilot-shell",
+            "0.2.0",
+            &raw_artifact("copilot-shell", "0.2.0", b"new\n"),
+        );
         let rpm = FakeRpm::new(
             "anolisa-copilot-shell",
             Some(pkg_info(
@@ -1431,13 +2745,22 @@ mod tests {
                 "x86_64",
             )),
         );
-        let err = update_component_with_deps("copilot-shell", &c, &rpm, &rpm, true)
-            .expect_err("raw update is not implemented");
-        assert_eq!(err.code(), "NOT_IMPLEMENTED");
+
+        update_component_with_deps("copilot-shell", &c, &rpm, &rpm, true)
+            .expect("raw update must succeed");
+
         assert_eq!(
             rpm.update_calls.get(),
             0,
-            "user raw update must never run dnf on the system RPM"
+            "raw update must never run dnf on the system RPM"
+        );
+        assert_eq!(
+            load_state(&c)
+                .find_object(ObjectKind::Component, "copilot-shell")
+                .map(|o| o.version.clone())
+                .as_deref(),
+            Some("0.2.0"),
+            "the raw component must be updated to the published version"
         );
     }
 

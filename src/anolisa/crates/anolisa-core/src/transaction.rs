@@ -311,7 +311,7 @@ impl Transaction {
         journal_dir: &Path,
     ) -> Result<Self, TransactionError> {
         let now = Utc::now();
-        let operation_id = build_operation_id(&now);
+        let operation_id = build_operation_id(operation, &now);
         let started_at = now.to_rfc3339_opts(SecondsFormat::Secs, true);
 
         // Snapshot the state file. Missing file is OK — first-run case.
@@ -590,13 +590,15 @@ impl Transaction {
 /// `op-YYYYMMDDHHMMSS-<6-hex>` — matches the operation-id format used by
 /// the rest of anolisa so journal ids round-trip 1:1 with
 /// `installed.toml::operations[].id` and the central log.
-fn build_operation_id(now: &DateTime<Utc>) -> String {
+fn build_operation_id(operation: &str, now: &DateTime<Utc>) -> String {
     let ts = now.format("%Y%m%d%H%M%S").to_string();
     let nanos = now.timestamp_nanos_opt().unwrap_or_else(|| now.timestamp());
     let mut hasher = DefaultHasher::new();
     nanos.hash(&mut hasher);
     let suffix = hasher.finish() & 0xff_ffff;
-    format!("op-{ts}-{suffix:06x}")
+    // Embed the operation verb so ids self-classify (op-update-…, op-uninstall-…)
+    // and audit-log prefix filters can group by operation.
+    format!("op-{operation}-{ts}-{suffix:06x}")
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

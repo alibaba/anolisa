@@ -242,6 +242,7 @@ mod tests {
             status,
             manifest_digest: None,
             distribution_source: None,
+            raw_package: None,
             install_backend: Some(if is_rpm { "rpm" } else { "raw" }.to_string()),
             ownership: Some(ownership),
             rpm_metadata: is_rpm.then(|| RpmMetadata {

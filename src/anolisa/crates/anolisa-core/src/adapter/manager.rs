@@ -1466,6 +1466,7 @@ mod tests {
             status: ObjectStatus::Adopted,
             manifest_digest: None,
             distribution_source: None,
+            raw_package: None,
             install_backend: Some("rpm".to_string()),
             ownership: Some(Ownership::RpmObserved),
             rpm_metadata: None,
@@ -1564,6 +1565,7 @@ dest = "{{datadir}}/adapters/{{component}}/openclaw/"
             status,
             manifest_digest: None,
             distribution_source: None,
+            raw_package: None,
             install_backend: Some(if status == ObjectStatus::Adopted {
                 "rpm".to_string()
             } else {

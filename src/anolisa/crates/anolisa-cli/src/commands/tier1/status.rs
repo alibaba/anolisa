@@ -1097,6 +1097,7 @@ mod tests {
             status,
             manifest_digest: Some("sha256:abc".to_string()),
             distribution_source: Some("builtin".to_string()),
+            raw_package: None,
             install_backend: None,
             ownership: None,
             rpm_metadata: None,
@@ -2340,6 +2341,7 @@ mod tests {
             status: ObjectStatus::Adopted,
             manifest_digest: None,
             distribution_source: None,
+            raw_package: None,
             install_backend: Some("rpm".to_string()),
             ownership: Some(Ownership::RpmObserved),
             rpm_metadata: Some(RpmMetadata {

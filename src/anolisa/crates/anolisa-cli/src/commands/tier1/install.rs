@@ -101,14 +101,17 @@ pub struct InstallArgs {
 }
 
 /// Raw backend resolution shared by dry-run preview and real execution.
-struct RawResolution {
-    component: String,
-    package: String,
-    backend: String,
-    base_url: String,
-    entry: DistributionEntry,
-    artifact_url: String,
-    warnings: Vec<String>,
+///
+/// `pub(crate)` so the `update` command can reuse the same resolution shape
+/// when refreshing a raw-managed component to the latest published version.
+pub(crate) struct RawResolution {
+    pub(crate) component: String,
+    pub(crate) package: String,
+    pub(crate) backend: String,
+    pub(crate) base_url: String,
+    pub(crate) entry: DistributionEntry,
+    pub(crate) artifact_url: String,
+    pub(crate) warnings: Vec<String>,
 }
 
 /// Dry-run preview after optional lightweight metadata expansion.
@@ -120,12 +123,15 @@ struct InstallPreview {
 
 /// Execution input after the artifact has been verified and its install
 /// contract has been resolved.
-struct PreparedInstall {
-    resolution: RawResolution,
-    artifact_path: PathBuf,
-    files: Vec<ResolvedInstallFile>,
-    services: Vec<String>,
-    manifest_toml: String,
+///
+/// `pub(crate)` so the `update` command can drive the same download-verify
+/// step and then replace the on-disk files transactionally.
+pub(crate) struct PreparedInstall {
+    pub(crate) resolution: RawResolution,
+    pub(crate) artifact_path: PathBuf,
+    pub(crate) files: Vec<ResolvedInstallFile>,
+    pub(crate) services: Vec<String>,
+    pub(crate) manifest_toml: String,
 }
 
 /// Parsed install contract plus the TOML persisted as the local install fact.
@@ -833,6 +839,7 @@ pub(crate) fn execute_adopt(
         manifest_digest: None,
         // Not an ANOLISA-delivered artifact.
         distribution_source: None,
+        raw_package: None,
         install_backend: Some("rpm".to_string()),
         ownership: Some(Ownership::RpmObserved),
         rpm_metadata: Some(RpmMetadata {
@@ -1184,6 +1191,7 @@ fn persist_delegated_install(
         manifest_digest: None,
         // Not an ANOLISA-delivered raw artifact; dnf resolved the source.
         distribution_source: None,
+        raw_package: None,
         install_backend: Some("rpm".to_string()),
         ownership: Some(Ownership::RpmManaged),
         rpm_metadata: Some(RpmMetadata {
@@ -1653,13 +1661,13 @@ fn resolve_all_components(ctx: &CliContext) -> Result<Vec<String>, CliError> {
 }
 
 /// Caller-side inputs to [`resolve_raw`], grouped to keep the signature flat.
-struct ResolveInputs<'a> {
-    component: String,
-    package: String,
-    backend: String,
-    base_url: String,
-    version: Option<&'a str>,
-    warnings: Vec<String>,
+pub(crate) struct ResolveInputs<'a> {
+    pub(crate) component: String,
+    pub(crate) package: String,
+    pub(crate) backend: String,
+    pub(crate) base_url: String,
+    pub(crate) version: Option<&'a str>,
+    pub(crate) warnings: Vec<String>,
 }
 
 /// Resolve raw backend metadata without fetching the artifact.
@@ -1668,7 +1676,7 @@ struct ResolveInputs<'a> {
 /// supported artifact, and derives the artifact URL. Execution later
 /// downloads the artifact and reads its install contract; dry-run may read
 /// lightweight `meta.toml` metadata for a richer preview.
-fn resolve_raw(
+pub(crate) fn resolve_raw(
     ctx: &CliContext,
     layout: &FsLayout,
     env: &anolisa_env::EnvFacts,
@@ -1775,6 +1783,99 @@ fn resolve_raw(
     })
 }
 
+/// Rebuild [`ResolveInputs`] for an already-installed component from its
+/// recorded backend plus repo.toml, for the `update` path (which has no CLI
+/// `--backend` / `--repo` / `--version` to read). Always targets the latest
+/// published version (`version: None`).
+///
+/// `recorded_package` is the package captured at install time
+/// ([`InstalledObject::raw_package`](anolisa_core::state::InstalledObject::raw_package));
+/// when present it takes precedence over repo.toml derivation, so a component
+/// installed with `--package` updates against the same package rather than a
+/// re-derived (possibly different) one.
+///
+/// # Errors
+///
+/// Returns [`CliError`] when `backend_name` is unknown or unconfigured in
+/// repo.toml, when its `base_url` variables cannot be resolved, or — until a
+/// non-raw raw-like executor exists — when the backend is not `raw`.
+pub(crate) fn resolve_raw_inputs_for_component(
+    component: String,
+    backend_name: &str,
+    recorded_package: Option<&str>,
+    env: &anolisa_env::EnvFacts,
+    repo_config: &RepoConfig,
+    command: &str,
+) -> Result<ResolveInputs<'static>, CliError> {
+    let (backend_name, backend) = repo_config
+        .select_backend(Some(backend_name))
+        .map_err(|err| repo_config_err(err, true).with_command(command))?;
+    if backend_name != "raw" {
+        return Err(CliError::not_implemented_with_hint(
+            command.to_string(),
+            format!(
+                "the '{backend_name}' backend has no update executor yet — only 'raw' updates today"
+            ),
+        ));
+    }
+    let host = HostVars {
+        os: env.os.clone(),
+        arch: env.arch.clone(),
+    };
+    let base_url = repo_config
+        .resolved_base_url(backend_name, backend, &host)
+        .map_err(|err| repo_config_err(err, true).with_command(command))?;
+    // recorded_package wins via package_name's CLI-override slot, so a
+    // `--package` install resolves the same package on update; None falls
+    // through to repo.toml's package_map / component-name derivation.
+    let package = repo_config.package_name(backend, &component, recorded_package);
+    Ok(ResolveInputs {
+        component,
+        package,
+        backend: backend_name.to_string(),
+        base_url,
+        version: None,
+        warnings: Vec::new(),
+    })
+}
+
+/// Best-effort list of versions published for `package` under the current
+/// host selectors, highest-first. Returns empty on any fetch/parse failure:
+/// candidates only enrich the dry-run preview and must never block an update.
+///
+/// Uses [`DistributionIndex::matching_versions`] with the same [`ResolveQuery`]
+/// shape as [`resolve_raw`] so the preview list agrees with what an actual
+/// update would resolve (same channel / libc / pkg_base / install_mode
+/// filtering and semver ordering).
+pub(crate) fn available_raw_versions(
+    layout: &FsLayout,
+    base_url: &str,
+    package: &str,
+    env: &anolisa_env::EnvFacts,
+    install_mode: &str,
+) -> Vec<String> {
+    let index_url = raw_index_url(base_url);
+    let cache = DownloadCache::new(layout.cache_dir.clone());
+    let Ok(downloaded) = cache.fetch(&index_url, None) else {
+        return Vec::new();
+    };
+    let Ok(index) = DistributionIndex::load(&downloaded.cached_path) else {
+        return Vec::new();
+    };
+    let query = ResolveQuery {
+        component: package,
+        version: None,
+        channel: None,
+        install_mode,
+        os: &env.os,
+        arch: &env.arch,
+        libc: env.libc.as_deref(),
+        pkg_base: env.pkg_base.as_deref(),
+        preferred_types: &[],
+    };
+    index.matching_versions(&query)
+}
+
 impl InstallContractSource {
     fn label(self) -> &'static str {
         match self {
@@ -1834,7 +1935,7 @@ fn build_install_preview(
     })
 }
 
-fn prepare_raw_execution(
+pub(crate) fn prepare_raw_execution(
     ctx: &CliContext,
     layout: &FsLayout,
     resolution: RawResolution,
@@ -2384,6 +2485,9 @@ fn execute_raw(
         // an unverified digest would overstate what install checked.
         manifest_digest: None,
         distribution_source: Some(resolution.artifact_url.clone()),
+        // Record the resolved package so update reuses it verbatim, preserving
+        // any `--package` override instead of re-deriving from repo.toml.
+        raw_package: Some(resolution.package.clone()),
         install_backend: Some(resolution.backend.clone()),
         ownership: Some(Ownership::RawManaged),
         rpm_metadata: None,
@@ -2694,7 +2798,7 @@ fn artifact_ext(t: &ArtifactType) -> &'static str {
 }
 
 /// Wire-form artifact type string for the install runner.
-fn artifact_type_wire(t: &ArtifactType) -> &'static str {
+pub(crate) fn artifact_type_wire(t: &ArtifactType) -> &'static str {
     match t {
         ArtifactType::TarGz => "tar_gz",
         ArtifactType::Binary => "binary",
@@ -2713,7 +2817,7 @@ fn rollback_installed_files(files: &[anolisa_core::InstalledFile]) {
     }
 }
 
-fn write_installed_component_manifest(
+pub(crate) fn write_installed_component_manifest(
     layout: &FsLayout,
     component: &str,
     toml: &str,
@@ -3613,6 +3717,11 @@ scope = "@anolisa"
             "distribution_source must record the resolved artifact URL"
         );
         assert_eq!(
+            obj.raw_package.as_deref(),
+            Some("agentsight"),
+            "raw_package must record the resolved package so update can reuse it"
+        );
+        assert_eq!(
             obj.install_backend.as_deref(),
             Some("raw"),
             "install_backend must record the selected backend"
@@ -3690,6 +3799,7 @@ scope = "@anolisa"
             status: ObjectStatus::Installed,
             manifest_digest: None,
             distribution_source: Some("file:///repo/v1/agentsight-bin".to_string()),
+            raw_package: None,
             install_backend: Some("raw".to_string()),
             ownership: None,
             rpm_metadata: None,
@@ -4426,6 +4536,7 @@ scope = "@anolisa"
             status: ObjectStatus::Adopted,
             manifest_digest: None,
             distribution_source: None,
+            raw_package: None,
             install_backend: Some("rpm".to_string()),
             ownership: Some(Ownership::RpmObserved),
             rpm_metadata: Some(RpmMetadata {
@@ -4503,6 +4614,7 @@ scope = "@anolisa"
             status: ObjectStatus::Installed,
             manifest_digest: None,
             distribution_source: None,
+            raw_package: None,
             install_backend: Some("raw".to_string()),
             ownership: Some(Ownership::RawManaged),
             rpm_metadata: None,
@@ -4568,6 +4680,7 @@ scope = "@anolisa"
             status: ObjectStatus::Installed,
             manifest_digest: None,
             distribution_source: None,
+            raw_package: None,
             install_backend: Some("rpm".to_string()),
             ownership: Some(Ownership::RpmManaged),
             rpm_metadata: Some(RpmMetadata {
@@ -4635,6 +4748,7 @@ scope = "@anolisa"
             status: ObjectStatus::Installed,
             manifest_digest: None,
             distribution_source: None,
+            raw_package: None,
             install_backend: Some("rpm".to_string()),
             ownership: Some(Ownership::RpmManaged),
             rpm_metadata: Some(RpmMetadata {
@@ -4985,6 +5099,7 @@ scope = "@anolisa"
             status: ObjectStatus::Installed,
             manifest_digest: None,
             distribution_source: Some("https://example.com/raw".to_string()),
+            raw_package: None,
             install_backend: Some("raw".to_string()),
             ownership: Some(Ownership::RawManaged),
             rpm_metadata: None,
