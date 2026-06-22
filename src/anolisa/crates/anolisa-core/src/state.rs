@@ -33,6 +33,10 @@ use crate::adapter::claim::AdapterClaim;
 /// older files load unchanged and gain the new fields on next save.
 pub const STATE_SCHEMA_VERSION: u32 = 3;
 
+fn is_legacy_rpm_backend(backend: Option<&str>) -> bool {
+    matches!(backend, Some("rpm" | "yum"))
+}
+
 /// Default for `bool` fields that should serialise to `true` when absent.
 fn default_true() -> bool {
     true
@@ -347,11 +351,13 @@ impl InstalledObject {
         // both imply rpm-observed when the backend is RPM. This cannot
         // misclassify future writes: they never reach the heuristic.
         // (adopted || !managed) + RPM → rpm-observed; managed + RPM →
-        // rpm-managed; otherwise raw-managed.
-        if (self.adopted || !self.managed) && self.install_backend.as_deref() == Some("rpm") {
+        // rpm-managed; otherwise raw-managed. `yum` is accepted only for
+        // legacy files written before the RPM backend spelling was finalized.
+        let rpm_backend = is_legacy_rpm_backend(self.install_backend.as_deref());
+        if (self.adopted || !self.managed) && rpm_backend {
             return Ownership::RpmObserved;
         }
-        if self.install_backend.as_deref() == Some("rpm") {
+        if rpm_backend {
             return Ownership::RpmManaged;
         }
         Ownership::RawManaged
@@ -1176,6 +1182,23 @@ mod tests {
         obj.managed = false;
         obj.adopted = true;
         obj.install_backend = Some("rpm".to_string());
+        assert_eq!(obj.effective_ownership(), Ownership::RpmObserved);
+        assert!(obj.is_rpm_observed());
+        assert!(!obj.owns_removal());
+    }
+
+    #[test]
+    fn effective_ownership_legacy_yum_backend_maps_to_rpm() {
+        let mut obj = sample_object(ObjectKind::Component, "test", "1.0.0");
+        obj.ownership = None;
+        obj.managed = true;
+        obj.adopted = false;
+        obj.install_backend = Some("yum".to_string());
+        assert_eq!(obj.effective_ownership(), Ownership::RpmManaged);
+        assert!(obj.owns_removal());
+
+        obj.managed = false;
+        obj.adopted = true;
         assert_eq!(obj.effective_ownership(), Ownership::RpmObserved);
         assert!(obj.is_rpm_observed());
         assert!(!obj.owns_removal());

@@ -313,7 +313,13 @@ pub(crate) fn handle_one_with_exec(
     let mut adopt_situation: Option<RpmSituation> = None;
     let (backend_name, source): (String, BackendSource) =
         if let Some(explicit) = args.backend.as_deref() {
-            (explicit.to_string(), BackendSource::Explicit)
+            if let Some(warning) = RepoConfig::backend_name_deprecation_warning(explicit) {
+                eprintln!("warning: {warning}");
+            }
+            (
+                RepoConfig::canonical_backend_name(explicit).to_string(),
+                BackendSource::Explicit,
+            )
         } else if let Some(label) = installed
             .find_object(ObjectKind::Component, &component)
             .and_then(installed_backend_label)
@@ -2639,6 +2645,7 @@ fn ensure_component_backend_compatible(
 fn installed_backend_label(obj: &InstalledObject) -> Option<&str> {
     obj.install_backend
         .as_deref()
+        .map(RepoConfig::canonical_backend_name)
         .or_else(|| infer_backend_from_distribution_source(obj.distribution_source.as_deref()))
 }
 
@@ -4655,6 +4662,35 @@ scope = "@anolisa"
             .expect("raw record preserved");
         assert_eq!(installed_backend_label(obj), Some("raw"));
         assert!(obj.rpm_metadata.is_none(), "raw record must stay raw");
+    }
+
+    #[test]
+    fn installed_backend_label_migrates_legacy_yum_to_rpm() {
+        let obj = InstalledObject {
+            kind: ObjectKind::Component,
+            name: "copilot-shell".to_string(),
+            version: "2.3.0".to_string(),
+            status: ObjectStatus::Installed,
+            manifest_digest: None,
+            distribution_source: None,
+            raw_package: None,
+            install_backend: Some("yum".to_string()),
+            ownership: None,
+            rpm_metadata: None,
+            installed_at: "2026-06-01T10:00:00Z".to_string(),
+            last_operation_id: Some("op-legacy-yum".to_string()),
+            managed: true,
+            adopted: false,
+            subscription_scope: Default::default(),
+            enabled_features: Vec::new(),
+            component_refs: Vec::new(),
+            files: Vec::new(),
+            external_modified_files: Vec::new(),
+            services: Vec::new(),
+            health: Vec::new(),
+        };
+
+        assert_eq!(installed_backend_label(&obj), Some("rpm"));
     }
 
     #[test]

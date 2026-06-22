@@ -71,10 +71,19 @@ pub const RAW_ARTIFACT_DIR: &str = "{component}/{version}/{os}/{arch}";
 /// configuration-valid before their executors land so a site can stage
 /// config ahead of the rollout).
 ///
-/// `rpm` is the RPM-backend name; the pre-release `yum` spelling was retired
-/// (no released CLI, no site-config compatibility burden) so only `rpm` is
-/// accepted here — see the adopt design doc, §3.1.
-pub const KNOWN_BACKENDS: &[&str] = &["raw", "rpm", "npm"];
+/// `yum` was the first spelling used for the RPM backend in generated
+/// `repo.toml` files. Disk configs using that spelling are normalized to
+/// `rpm` before validation so callers never need to handle both names.
+pub const KNOWN_BACKENDS: &[&str] = &["raw", RPM_BACKEND, "npm"];
+
+const RPM_BACKEND: &str = "rpm";
+const LEGACY_RPM_BACKEND: &str = "yum";
+const LEGACY_RPM_BACKEND_WARNING: &str = concat!(
+    "uses deprecated backend name 'yum'; treating it as 'rpm'. ",
+    "Rename default_backend to 'rpm' and [backends.yum] to [backends.rpm]."
+);
+const LEGACY_RPM_BACKEND_NAME_WARNING: &str =
+    "backend name 'yum' is deprecated; treating it as 'rpm'. Use 'rpm' instead.";
 
 /// Errors surfaced while loading, parsing, or resolving `repo.toml`.
 #[derive(Debug, thiserror::Error)]
@@ -163,6 +172,8 @@ pub struct RepoConfig {
     pub vars: RepoVars,
     #[serde(default)]
     pub backends: BTreeMap<String, BackendConfig>,
+    #[serde(skip)]
+    legacy_rpm_backend: bool,
 }
 
 /// `[vars]` overrides for `base_url` substitution. Every field is
@@ -237,11 +248,15 @@ impl RepoConfig {
             if let Some(path) = candidate.as_deref()
                 && path.is_file()
             {
-                return Self::from_path(path);
+                let config = Self::from_path(path)?;
+                config.emit_deprecation_warnings(path);
+                return Ok(config);
             }
         }
         if let Some(embedded) = sources.embedded {
-            return Self::parse_with_path(embedded, Path::new("<embedded>"));
+            let config = Self::parse_with_path(embedded, Path::new("<embedded>"))?;
+            config.emit_deprecation_warnings(Path::new("<embedded>"));
+            return Ok(config);
         }
         Err(RepoConfigError::NotFound)
     }
@@ -264,12 +279,53 @@ impl RepoConfig {
     }
 
     fn parse_with_path(s: &str, path: &Path) -> Result<Self, RepoConfigError> {
-        let parsed: RepoConfig = toml::from_str(s).map_err(|source| RepoConfigError::Parse {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        let mut parsed: RepoConfig =
+            toml::from_str(s).map_err(|source| RepoConfigError::Parse {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        parsed.normalize_legacy_backend_names();
         parsed.validate()?;
         Ok(parsed)
+    }
+
+    pub(crate) fn canonical_backend_name(name: &str) -> &str {
+        if name == LEGACY_RPM_BACKEND {
+            RPM_BACKEND
+        } else {
+            name
+        }
+    }
+
+    pub(crate) fn backend_name_deprecation_warning(name: &str) -> Option<&'static str> {
+        (name == LEGACY_RPM_BACKEND).then_some(LEGACY_RPM_BACKEND_NAME_WARNING)
+    }
+
+    fn normalize_legacy_backend_names(&mut self) {
+        let default_was_legacy = self.default_backend == LEGACY_RPM_BACKEND;
+        let legacy_backend = self.backends.remove(LEGACY_RPM_BACKEND);
+        let backend_was_legacy = legacy_backend.is_some();
+
+        if self.default_backend == LEGACY_RPM_BACKEND {
+            self.default_backend = RPM_BACKEND.to_string();
+        }
+        if let Some(legacy) = legacy_backend {
+            self.backends
+                .entry(RPM_BACKEND.to_string())
+                .or_insert(legacy);
+        }
+        self.legacy_rpm_backend = default_was_legacy || backend_was_legacy;
+    }
+
+    pub(crate) fn deprecation_warning(&self) -> Option<&'static str> {
+        self.legacy_rpm_backend
+            .then_some(LEGACY_RPM_BACKEND_WARNING)
+    }
+
+    fn emit_deprecation_warnings(&self, path: &Path) {
+        if let Some(warning) = self.deprecation_warning() {
+            eprintln!("warning: repo config at {} {warning}", path.display());
+        }
     }
 
     /// Structural validation run on every successful parse:
@@ -312,7 +368,7 @@ impl RepoConfig {
         &self,
         cli_override: Option<&str>,
     ) -> Result<(&str, &BackendConfig), RepoConfigError> {
-        let name = cli_override.unwrap_or(&self.default_backend);
+        let name = Self::canonical_backend_name(cli_override.unwrap_or(&self.default_backend));
         if !KNOWN_BACKENDS.contains(&name) {
             return Err(RepoConfigError::UnknownBackend {
                 name: name.to_string(),
@@ -688,6 +744,38 @@ base_url = "file:///srv/repo"
     }
 
     #[test]
+    fn legacy_yum_backend_table_is_migrated_to_rpm() {
+        let cfg = RepoConfig::from_toml_str(
+            r#"schema_version = 1
+default_backend = "yum"
+[backends.yum]
+base_url = "https://mirrors.openanolis.cn/anolis/23/agents/$basearch/"
+[backends.yum.package_map]
+agentsight = "anolis-agentsight"
+"#,
+        )
+        .expect("legacy yum spelling must load");
+
+        assert_eq!(cfg.default_backend, "rpm");
+        assert!(
+            cfg.deprecation_warning()
+                .is_some_and(|warning| warning.contains("deprecated backend name 'yum'"))
+        );
+        assert!(!cfg.backends.contains_key("yum"));
+        assert!(cfg.backends.contains_key("rpm"));
+        let (name, backend) = cfg.select_backend(None).expect("default backend");
+        assert_eq!(name, "rpm");
+        assert_eq!(
+            cfg.resolved_base_url(name, backend, &host()).expect("url"),
+            "https://mirrors.openanolis.cn/anolis/23/agents/x86_64"
+        );
+        assert_eq!(
+            cfg.package_name(backend, "agentsight", None),
+            "anolis-agentsight"
+        );
+    }
+
+    #[test]
     fn http_without_insecure_is_rejected_and_with_insecure_accepted() {
         let body = |insecure: &str| {
             format!(
@@ -798,6 +886,14 @@ base_url = "https://example.com/$typo_var/repo"
         let cfg = rpm_cfg("[vars]\nreleasever = \"23\"");
         let (name, _) = cfg.select_backend(Some("rpm")).expect("explicit rpm");
         assert_eq!(name, "rpm");
+        let (name, _) = cfg
+            .select_backend(Some("yum"))
+            .expect("legacy explicit yum");
+        assert_eq!(name, "rpm");
+        assert!(
+            RepoConfig::backend_name_deprecation_warning("yum")
+                .is_some_and(|warning| warning.contains("deprecated"))
+        );
         let err = cfg
             .select_backend(Some("npm"))
             .expect_err("npm not configured");
