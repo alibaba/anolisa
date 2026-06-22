@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-06-22
+
+### Added
+
+- `anolisa update <component>` can update raw-managed components from the raw backend.
+- `anolisa osbase sandbox list` shows scenarios from `sandbox.toml`.
+- `anolisa osbase sandbox uninstall <scenario>` can remove packages for a sandbox scenario.
+- `anolisa system setup` can install the helper service for non-root osbase commands.
+- `anolisa system status` can show helper health, version, uptime, and last operation.
+- `anolisa system teardown` can remove the helper service and sandbox config.
+- `anolisa env --json` includes distro identity fields.
+
+### Changed
+
+- `anolisa osbase sandbox install <scenario>` now installs scenarios defined in `sandbox.toml`.
+- Omitting `--install-mode` now selects `system` for root and `user` otherwise.
+- `anolisa update <component> --dry-run` now lists raw backend candidate versions.
+
+### Fixed
+
+- Legacy `yum` backend names in `repo.toml` and `--backend` now resolve to `rpm`.
+- Raw components installed with `--package` now update from the same package name.
+- `anolisa update <component>` now refuses raw updates that would downgrade a component.
+- `anolisa update <component>` now refuses raw updates when versions cannot be safely compared.
+
 ## [0.1.11] - 2026-06-18
 
 ### Added
@@ -208,6 +233,31 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.1.12] - 2026-06-22
+
+### 新增
+
+- `anolisa update <component>` 可更新 raw 组件。
+- `anolisa osbase sandbox list` 可显示 `sandbox.toml` 场景。
+- `anolisa osbase sandbox uninstall <scenario>` 可移除场景软件包。
+- `anolisa system setup` 可为非 root osbase 命令安装助手服务。
+- `anolisa system status` 可显示助手健康状态。
+- `anolisa system teardown` 可移除助手服务和沙箱配置。
+- `anolisa env --json` 现包含发行版身份字段。
+
+### 变更
+
+- `anolisa osbase sandbox install <scenario>` 现按 `sandbox.toml` 安装场景。
+- 未指定 `--install-mode` 时，root 用 `system`，普通用户用 `user`。
+- `anolisa update <component> --dry-run` 现显示 raw 候选版本。
+
+### 修复
+
+- 旧 `yum` 后端名现会作为 `rpm` 处理。
+- 用 `--package` 安装的 raw 组件更新时复用包名。
+- `anolisa update <component>` 不再允许 raw 降级。
+- `anolisa update <component>` 无法比较版本时不再替换文件。
 
 ## [0.1.11] - 2026-06-18
 
