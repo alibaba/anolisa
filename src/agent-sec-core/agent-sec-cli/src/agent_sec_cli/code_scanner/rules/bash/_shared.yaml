@@ -15,3 +15,13 @@ sensitive_file_paths:
   - /boot/
   - /usr/lib/systemd/
   - /etc/systemd/system/
+  - /etc/group
+  - /etc/hostname
+  - /etc/hosts
+  - /etc/crontab
+  - /etc/cron\.d/
+  - /var/spool/cron/
+  - ~/\.bash_history
+  - ~/\.zsh_history
+  - /etc/kubernetes/
+  - kubeconfig
