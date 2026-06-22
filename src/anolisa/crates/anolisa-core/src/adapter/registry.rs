@@ -5,6 +5,7 @@
 //! no runtime plugin loading. MVP registers only the OpenClaw driver.
 
 use super::driver::FrameworkDriver;
+use super::hermes::HermesDriver;
 use super::openclaw::OpenClawDriver;
 
 /// Immutable collection of the built-in framework drivers.
@@ -16,7 +17,10 @@ impl DriverRegistry {
     /// Build the registry of all built-in drivers.
     pub fn builtin() -> Self {
         Self {
-            drivers: vec![Box::new(OpenClawDriver::new())],
+            drivers: vec![
+                Box::new(OpenClawDriver::new()),
+                Box::new(HermesDriver::new()),
+            ],
         }
     }
 
@@ -50,16 +54,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtin_registers_openclaw_only() {
+    fn builtin_registers_openclaw_and_hermes() {
         let reg = DriverRegistry::builtin();
         assert!(reg.contains("openclaw"));
-        assert!(!reg.contains("cosh"), "MVP ships OpenClaw only");
-        assert_eq!(reg.names(), vec!["openclaw"]);
+        assert!(reg.contains("hermes"));
+        assert!(!reg.contains("cosh"), "cosh driver not yet shipped");
+        assert_eq!(reg.names(), vec!["openclaw", "hermes"]);
     }
 
     #[test]
     fn get_unknown_framework_is_none() {
         let reg = DriverRegistry::builtin();
-        assert!(reg.get("hermes").is_none());
+        assert!(reg.get("qoder").is_none());
     }
 }

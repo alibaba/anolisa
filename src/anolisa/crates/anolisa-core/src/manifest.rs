@@ -386,6 +386,23 @@ pub struct AdapterSpec {
     /// Framework-specific detection hints preserved as TOML values.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub detect: BTreeMap<String, toml::Value>,
+    /// Skill names this adapter delivers into the framework.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
+    /// Post-install config key/value pairs the driver should apply.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config: Vec<AdapterConfigSetSpec>,
+    /// Semver constraint on the target framework version, e.g. `">=1.2"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framework_version_req: Option<String>,
+    /// OpenClaw-specific adapter configuration, when this adapter targets
+    /// the `openclaw` framework.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openclaw: Option<OpenClawAdapterSpec>,
+    /// Hermes-specific adapter configuration, when this adapter targets
+    /// the `hermes` framework.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hermes: Option<HermesAdapterSpec>,
 }
 
 /// Bundle description for an adapter resource directory. The driver uses
@@ -424,6 +441,61 @@ pub struct AdapterCompatSpec {
 impl AdapterCompatSpec {
     fn is_empty(&self) -> bool {
         self.driver_schema.is_none() && self.framework_version.is_none()
+    }
+}
+
+/// A post-install config key/value pair that the driver should apply to
+/// the framework's configuration. The driver interprets `key` as a
+/// framework-specific config path; `value` is the TOML value to set.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AdapterConfigSetSpec {
+    /// Framework-specific config key path.
+    pub key: String,
+    /// Value to set.
+    pub value: toml::Value,
+}
+
+/// OpenClaw-specific adapter configuration. When present on an
+/// `[[adapters]]` entry whose `framework = "openclaw"`, the driver uses
+/// these fields instead of the generic adapter-level ones.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct OpenClawAdapterSpec {
+    /// OpenClaw-specific bundle description (overrides generic
+    /// `[adapters.bundle]` when present).
+    #[serde(default, skip_serializing_if = "AdapterBundleSpec::is_empty")]
+    pub bundle: AdapterBundleSpec,
+    /// Skills delivered into OpenClaw's skill directory.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
+    /// Post-install config key/value pairs for OpenClaw.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config: Vec<AdapterConfigSetSpec>,
+}
+
+impl OpenClawAdapterSpec {
+    /// Whether no framework-specific data is present.
+    pub fn is_empty(&self) -> bool {
+        self.bundle.is_empty() && self.skills.is_empty() && self.config.is_empty()
+    }
+}
+
+/// Hermes-specific adapter configuration. When present on an
+/// `[[adapters]]` entry whose `framework = "hermes"`, the driver uses
+/// these fields instead of the generic adapter-level ones.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct HermesAdapterSpec {
+    /// Hermes-specific bundle description.
+    #[serde(default, skip_serializing_if = "AdapterBundleSpec::is_empty")]
+    pub bundle: AdapterBundleSpec,
+    /// Skills delivered into Hermes's skill directory.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
+}
+
+impl HermesAdapterSpec {
+    /// Whether no framework-specific data is present.
+    pub fn is_empty(&self) -> bool {
+        self.bundle.is_empty() && self.skills.is_empty()
     }
 }
 
@@ -698,6 +770,16 @@ struct AdapterRaw {
     compat: AdapterCompatRaw,
     #[serde(default)]
     detect: BTreeMap<String, toml::Value>,
+    #[serde(default)]
+    skills: Vec<String>,
+    #[serde(default)]
+    config: Vec<AdapterConfigSetSpec>,
+    #[serde(default)]
+    framework_version_req: Option<String>,
+    #[serde(default)]
+    openclaw: Option<OpenClawAdapterSpec>,
+    #[serde(default)]
+    hermes: Option<HermesAdapterSpec>,
 }
 
 #[derive(Deserialize, Default)]
@@ -897,6 +979,11 @@ impl From<ComponentManifestRaw> for ComponentManifest {
                     framework_version: a.compat.framework_version,
                 },
                 detect: a.detect,
+                skills: a.skills,
+                config: a.config,
+                framework_version_req: a.framework_version_req,
+                openclaw: a.openclaw,
+                hermes: a.hermes,
             })
             .collect();
 
@@ -1905,5 +1992,247 @@ mod tests {
         )
         .expect("parse explicit empty");
         assert_eq!(explicit_empty.component.domain.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn adapter_skills_and_config_parse() {
+        let toml_text = r#"
+            [component]
+            name = "agent-sec-core"
+            version = "2.1.0"
+
+            [[adapters]]
+            framework = "openclaw"
+            adapter_type = "plugin"
+            plugin_id = "agent-sec"
+            skills = ["sec-audit", "cred-scan"]
+            framework_version_req = ">=1.2"
+
+            [adapters.bundle]
+            entry = "openclaw.plugin.json"
+
+            [[adapters.config]]
+            key = "plugins.entries.agent-sec.hooks.allowConversationAccess"
+            value = true
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        assert_eq!(m.adapters.len(), 1);
+        let a = &m.adapters[0];
+        assert_eq!(a.skills, vec!["sec-audit", "cred-scan"]);
+        assert_eq!(a.framework_version_req.as_deref(), Some(">=1.2"));
+        assert_eq!(a.config.len(), 1);
+        assert_eq!(
+            a.config[0].key,
+            "plugins.entries.agent-sec.hooks.allowConversationAccess"
+        );
+        assert_eq!(a.config[0].value, toml::Value::Boolean(true));
+    }
+
+    #[test]
+    fn adapter_openclaw_specific_section_parses() {
+        let toml_text = r#"
+            [component]
+            name = "sec-core"
+            version = "0.1.0"
+
+            [[adapters]]
+            framework = "openclaw"
+            plugin_id = "sec-core"
+
+            [adapters.openclaw]
+            skills = ["sec-audit"]
+
+            [adapters.openclaw.bundle]
+            entry = "openclaw.plugin.json"
+
+            [[adapters.openclaw.config]]
+            key = "plugins.entries.sec-core.enabled"
+            value = true
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let a = &m.adapters[0];
+        let oc = a.openclaw.as_ref().expect("openclaw section");
+        assert_eq!(oc.skills, vec!["sec-audit"]);
+        assert_eq!(oc.bundle.entry.as_deref(), Some("openclaw.plugin.json"));
+        assert_eq!(oc.config.len(), 1);
+        assert_eq!(oc.config[0].key, "plugins.entries.sec-core.enabled");
+    }
+
+    #[test]
+    fn adapter_hermes_specific_section_parses() {
+        let toml_text = r#"
+            [component]
+            name = "sec-core"
+            version = "0.1.0"
+
+            [[adapters]]
+            framework = "hermes"
+            skills = ["sec-audit"]
+
+            [adapters.hermes]
+            skills = ["sec-audit"]
+
+            [adapters.hermes.bundle]
+            entry = "hermes.manifest.yaml"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let a = &m.adapters[0];
+        let h = a.hermes.as_ref().expect("hermes section");
+        assert_eq!(h.skills, vec!["sec-audit"]);
+        assert_eq!(h.bundle.entry.as_deref(), Some("hermes.manifest.yaml"));
+    }
+
+    #[test]
+    fn adapter_skills_config_round_trip() {
+        let toml_text = r#"
+            [component]
+            name = "roundtrip"
+            version = "1.0.0"
+
+            [[adapters]]
+            framework = "openclaw"
+            plugin_id = "rt"
+            skills = ["skill-a", "skill-b"]
+            framework_version_req = ">=1.0"
+
+            [[adapters.config]]
+            key = "some.key"
+            value = "hello"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let serialized = toml::to_string_pretty(&m).expect("serialize");
+        let m2 = ComponentManifest::from_toml_str(&serialized).expect("re-parse");
+        assert_eq!(m.adapters[0].skills, m2.adapters[0].skills);
+        assert_eq!(m.adapters[0].config, m2.adapters[0].config);
+        assert_eq!(
+            m.adapters[0].framework_version_req,
+            m2.adapters[0].framework_version_req
+        );
+    }
+
+    #[test]
+    fn adapter_empty_skills_config_skip_serializing() {
+        let toml_text = r#"
+            [component]
+            name = "skiptest"
+            version = "1.0.0"
+
+            [[adapters]]
+            framework = "openclaw"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let serialized = toml::to_string_pretty(&m).expect("serialize");
+        assert!(
+            !serialized.contains("skills"),
+            "empty skills must be skipped: {serialized}"
+        );
+        assert!(
+            !serialized.contains("config"),
+            "empty config must be skipped: {serialized}"
+        );
+        assert!(
+            !serialized.contains("[openclaw]"),
+            "absent openclaw section must be skipped: {serialized}"
+        );
+        assert!(
+            !serialized.contains("[hermes]"),
+            "absent hermes section must be skipped: {serialized}"
+        );
+    }
+
+    #[test]
+    fn component_md_example_parses() {
+        let toml_text = r#"
+            schema_version = 1
+
+            [component]
+            name         = "agent-sec-core"
+            version      = "2.1.0"
+            display_name = "Agent Security Core"
+            owner        = "security-team"
+            license      = "Apache-2.0"
+            repository   = "https://github.com/example/agent-sec-core"
+            layer        = "runtime"
+            domain       = "security"
+
+            [component.contract]
+            schema_version      = "1"
+            min_anolisa_version = "0.6.0"
+
+            [[adapters]]
+            name         = "agent-sec-openclaw"
+            display_name = "Agent Sec (OpenClaw)"
+            framework    = "openclaw"
+            kind         = "first-party"
+            adapter_type = "plugin"
+            plugin_id    = "agent-sec"
+            skills       = ["sec-audit", "cred-scan"]
+            framework_version_req = ">=1.2"
+
+            [adapters.bundle]
+            entry = "openclaw.plugin.json"
+
+            [[adapters.config]]
+            key   = "plugins.entries.agent-sec.hooks.allowConversationAccess"
+            value = true
+
+            [[adapters]]
+            name         = "agent-sec-hermes"
+            display_name = "Agent Sec (hermes)"
+            framework    = "hermes"
+            kind         = "first-party"
+            skills       = ["sec-audit"]
+            framework_version_req = ">=0.4"
+
+            [adapters.bundle]
+            entry = "hermes.manifest.yaml"
+
+            [[adapters.config]]
+            key   = "security.conversation_access"
+            value = true
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse component.md example");
+        assert_eq!(m.adapters.len(), 2);
+
+        let oc = &m.adapters[0];
+        assert_eq!(oc.framework.as_deref(), Some("openclaw"));
+        assert_eq!(oc.plugin_id.as_deref(), Some("agent-sec"));
+        assert_eq!(oc.skills, vec!["sec-audit", "cred-scan"]);
+        assert_eq!(oc.bundle.entry.as_deref(), Some("openclaw.plugin.json"));
+        assert_eq!(oc.config.len(), 1);
+
+        let hm = &m.adapters[1];
+        assert_eq!(hm.framework.as_deref(), Some("hermes"));
+        assert_eq!(hm.skills, vec!["sec-audit"]);
+        assert_eq!(hm.bundle.entry.as_deref(), Some("hermes.manifest.yaml"));
+        assert_eq!(hm.config.len(), 1);
+    }
+
+    #[test]
+    fn existing_manifests_still_parse_after_schema_extension() {
+        let toml_text = r#"
+            [component]
+            name = "agentsight"
+            version = "0.2.0"
+            layer = "runtime"
+
+            [[adapters]]
+            framework = "openclaw"
+            kind = "third-party"
+            plugin_id = "agentsight-openclaw"
+            source = "adapters/agentsight/openclaw"
+            dest = "{datadir}/adapters/{component}/openclaw/"
+
+            [adapters.detect]
+            config_path = "~/.openclaw/config.toml"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let a = &m.adapters[0];
+        assert!(a.skills.is_empty());
+        assert!(a.config.is_empty());
+        assert!(a.framework_version_req.is_none());
+        assert!(a.openclaw.is_none());
+        assert!(a.hermes.is_none());
+        assert_eq!(a.plugin_id.as_deref(), Some("agentsight-openclaw"));
     }
 }

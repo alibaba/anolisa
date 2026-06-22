@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -360,6 +360,39 @@ impl AdapterManager {
         }
 
         let declared_plugin_id = declared_plugin_id(&manifest, &framework);
+        let skills = declared_skills(&manifest, &framework);
+        let config = declared_config(&manifest, &framework);
+        let bundle_entry = declared_bundle_entry(&manifest, &framework);
+
+        for skill in &skills {
+            super::claim::validate_skill_name(skill).map_err(|mut err| {
+                if let AdapterError::InvalidAdapterInput {
+                    component: ref mut c,
+                    framework: ref mut f,
+                    ..
+                } = err
+                {
+                    *c = component.to_string();
+                    *f = framework.clone();
+                }
+                err
+            })?;
+        }
+        for cfg in &config {
+            super::claim::validate_config_key(&cfg.key).map_err(|mut err| {
+                if let AdapterError::InvalidAdapterInput {
+                    component: ref mut c,
+                    framework: ref mut f,
+                    ..
+                } = err
+                {
+                    *c = component.to_string();
+                    *f = framework.clone();
+                }
+                err
+            })?;
+        }
+
         let driver =
             self.registry
                 .get(&framework)
@@ -375,12 +408,43 @@ impl AdapterManager {
         )?;
 
         let label = format!("adapter enable {component} {framework}");
+        // Two-phase ManagerOps: first build a read-only ops (no allowed
+        // roots) to construct the DriverCtx needed for
+        // allowed_external_roots; then rebuild with the computed roots
+        // for the mutable phase.
+        let probe_ops = ManagerOps::new(
+            self.central_log(),
+            self.actor.clone(),
+            install_mode_str(self.layout.mode).to_string(),
+            component.to_string(),
+            label.clone(),
+            vec![resource_root.clone()],
+        );
+        let probe_ctx = DriverCtx {
+            component: component.to_string(),
+            framework: framework.clone(),
+            layout: &self.layout,
+            resource_root: resource_root.clone(),
+            user_home: self.user_home.clone(),
+            declared_plugin_id: declared_plugin_id.clone(),
+            declared_skills: Vec::new(),
+            declared_config: Vec::new(),
+            declared_bundle_entry: None,
+            dry_run,
+            ops: &probe_ops,
+        };
+        let mut allowed_roots = driver.allowed_external_roots(&probe_ctx);
+        allowed_roots.push(resource_root.clone());
+        drop(probe_ctx);
+        drop(probe_ops);
+
         let ops = ManagerOps::new(
             self.central_log(),
             self.actor.clone(),
             install_mode_str(self.layout.mode).to_string(),
             component.to_string(),
             label.clone(),
+            allowed_roots,
         );
         let ctx = DriverCtx {
             component: component.to_string(),
@@ -389,6 +453,9 @@ impl AdapterManager {
             resource_root: resource_root.clone(),
             user_home: self.user_home.clone(),
             declared_plugin_id,
+            declared_skills: skills,
+            declared_config: config,
+            declared_bundle_entry: bundle_entry,
             dry_run,
             ops: &ops,
         };
@@ -536,12 +603,39 @@ impl AdapterManager {
             .unwrap_or_else(|| claim.resource_root.clone());
 
         let label = format!("adapter disable {component} {framework}");
+        let probe_ops = ManagerOps::new(
+            self.central_log(),
+            self.actor.clone(),
+            install_mode_str(self.layout.mode).to_string(),
+            component.to_string(),
+            label.clone(),
+            vec![resource_root.clone()],
+        );
+        let probe_ctx = DriverCtx {
+            component: component.to_string(),
+            framework: framework.clone(),
+            layout: &self.layout,
+            resource_root: resource_root.clone(),
+            user_home: self.user_home.clone(),
+            declared_plugin_id: None,
+            declared_skills: Vec::new(),
+            declared_config: Vec::new(),
+            declared_bundle_entry: None,
+            dry_run: false,
+            ops: &probe_ops,
+        };
+        let mut allowed_roots = driver.allowed_external_roots(&probe_ctx);
+        allowed_roots.push(resource_root.clone());
+        drop(probe_ctx);
+        drop(probe_ops);
+
         let ops = ManagerOps::new(
             self.central_log(),
             self.actor.clone(),
             install_mode_str(self.layout.mode).to_string(),
             component.to_string(),
             label.clone(),
+            allowed_roots,
         );
         let ctx = DriverCtx {
             component: component.to_string(),
@@ -550,6 +644,9 @@ impl AdapterManager {
             resource_root,
             user_home: self.user_home.clone(),
             declared_plugin_id: None,
+            declared_skills: Vec::new(),
+            declared_config: Vec::new(),
+            declared_bundle_entry: None,
             dry_run: false,
             ops: &ops,
         };
@@ -630,6 +727,7 @@ impl AdapterManager {
                 install_mode_str(self.layout.mode).to_string(),
                 claim.component.clone(),
                 label,
+                vec![resource_root.clone()],
             );
             let ctx = DriverCtx {
                 component: claim.component.clone(),
@@ -638,6 +736,9 @@ impl AdapterManager {
                 resource_root,
                 user_home: self.user_home.clone(),
                 declared_plugin_id: None,
+                declared_skills: Vec::new(),
+                declared_config: Vec::new(),
+                declared_bundle_entry: None,
                 dry_run: false,
                 ops: &ops,
             };
@@ -959,6 +1060,10 @@ struct ManagerOps {
     component: String,
     /// Human-readable operation label for the log `command` field.
     label: String,
+    /// Roots that `copy_tree` / `remove_tree` destinations must fall
+    /// under. Populated from the driver's `allowed_external_roots` plus
+    /// the resource root.
+    allowed_roots: Vec<PathBuf>,
 }
 
 impl ManagerOps {
@@ -968,6 +1073,7 @@ impl ManagerOps {
         install_mode: String,
         component: String,
         label: String,
+        allowed_roots: Vec<PathBuf>,
     ) -> Self {
         Self {
             log,
@@ -975,6 +1081,7 @@ impl ManagerOps {
             install_mode,
             component,
             label,
+            allowed_roots,
         }
     }
 
@@ -1025,6 +1132,58 @@ impl AdapterOps for ManagerOps {
         let output = run_capture(&cmd)?;
         self.record(&cmd, &output);
         Ok(output)
+    }
+
+    fn copy_tree(&self, src: &Path, dst: &Path) -> Result<(), AdapterError> {
+        validate_ops_path(src, &self.allowed_roots)?;
+        validate_ops_path(dst, &self.allowed_roots)?;
+        reject_symlink(src)?;
+        if !src.is_dir() {
+            return Err(AdapterError::Io {
+                path: src.to_path_buf(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "source directory does not exist",
+                ),
+            });
+        }
+        std::fs::create_dir_all(dst).map_err(|source| AdapterError::Io {
+            path: dst.to_path_buf(),
+            source,
+        })?;
+        copy_dir_recursive(src, dst).map_err(|source| AdapterError::Io {
+            path: dst.to_path_buf(),
+            source,
+        })
+    }
+
+    fn copy_file(&self, src: &Path, dst: &Path) -> Result<(), AdapterError> {
+        validate_ops_path(src, &self.allowed_roots)?;
+        validate_ops_path(dst, &self.allowed_roots)?;
+        reject_symlink(src)?;
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| AdapterError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        std::fs::copy(src, dst).map_err(|source| AdapterError::Io {
+            path: dst.to_path_buf(),
+            source,
+        })?;
+        Ok(())
+    }
+
+    fn remove_tree(&self, path: &Path) -> Result<bool, AdapterError> {
+        validate_ops_path(path, &self.allowed_roots)?;
+        if !path.exists() {
+            return Ok(false);
+        }
+        std::fs::remove_dir_all(path).map_err(|source| AdapterError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Ok(true)
     }
 }
 
@@ -1103,6 +1262,68 @@ fn prepend_path(prepend: &[PathBuf]) -> std::ffi::OsString {
     // which our dirs do not; fall back to the prepend dirs alone.
     std::env::join_paths(&parts)
         .unwrap_or_else(|_| std::env::join_paths(prepend).unwrap_or_default())
+}
+
+/// Validate that `path` is under one of `allowed_roots` and contains no
+/// traversal segments. Used by `copy_tree` / `remove_tree` to enforce the
+/// Manager's IO boundary before any filesystem mutation.
+fn validate_ops_path(path: &Path, allowed_roots: &[PathBuf]) -> Result<(), AdapterError> {
+    use super::claim::validate_external_path;
+
+    validate_external_path(path, allowed_roots).map_err(|source| {
+        AdapterError::ClaimValidation(super::claim::ClaimValidationError::ExternalPath {
+            id: format!("ops:{}", path.display()),
+            source,
+        })
+    })
+}
+
+/// Reject a path that is a symlink. Used by `copy_file` and
+/// `copy_dir_recursive` to prevent following a symlink that escapes the
+/// allowed roots.
+fn reject_symlink(path: &Path) -> Result<(), AdapterError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(AdapterError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "symlink rejected in adapter resource tree: {}",
+                    path.display()
+                ),
+            ),
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// Recursively copy regular files and subdirectories from `src` into
+/// `dst`. Symlinks are rejected — a symlink inside the resource tree
+/// could point outside the allowed roots, bypassing the boundary check
+/// on the top-level `src` path.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "symlink rejected in adapter resource tree: {}",
+                    entry.path().display()
+                ),
+            ));
+        }
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if ft.is_dir() {
+            std::fs::create_dir_all(&dst_path)?;
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
 }
 
 /// Drain a child pipe to EOF on its own thread, keeping at most `cap`
@@ -1215,6 +1436,92 @@ fn declared_plugin_id(manifest: &ComponentManifest, framework: &str) -> Option<S
         .map(str::trim)
         .filter(|plugin_id| !plugin_id.is_empty())
         .map(str::to_string)
+}
+
+/// Extract declared skills for a framework, checking the framework-specific
+/// section first (e.g. `adapters.openclaw.skills`) then falling back to
+/// the generic `adapters.skills`.
+fn declared_skills(manifest: &ComponentManifest, framework: &str) -> Vec<String> {
+    let adapter = manifest
+        .adapters
+        .iter()
+        .find(|a| a.framework.as_deref().map(str::trim) == Some(framework));
+    let adapter = match adapter {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    // Framework-specific section takes precedence.
+    match framework {
+        "openclaw" => {
+            if let Some(ref oc) = adapter.openclaw {
+                if !oc.skills.is_empty() {
+                    return oc.skills.clone();
+                }
+            }
+        }
+        "hermes" => {
+            if let Some(ref h) = adapter.hermes {
+                if !h.skills.is_empty() {
+                    return h.skills.clone();
+                }
+            }
+        }
+        _ => {}
+    }
+    adapter.skills.clone()
+}
+
+/// Extract declared config entries for a framework, checking the
+/// framework-specific section first then falling back to the generic one.
+fn declared_config(
+    manifest: &ComponentManifest,
+    framework: &str,
+) -> Vec<crate::manifest::AdapterConfigSetSpec> {
+    let adapter = manifest
+        .adapters
+        .iter()
+        .find(|a| a.framework.as_deref().map(str::trim) == Some(framework));
+    let adapter = match adapter {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    // Framework-specific section takes precedence.
+    if framework == "openclaw" {
+        if let Some(ref oc) = adapter.openclaw {
+            if !oc.config.is_empty() {
+                return oc.config.clone();
+            }
+        }
+    }
+    adapter.config.clone()
+}
+
+/// Extract the bundle entry-point from the manifest, checking the
+/// framework-specific section first then falling back to the generic
+/// `[adapters.bundle].entry`.
+fn declared_bundle_entry(manifest: &ComponentManifest, framework: &str) -> Option<String> {
+    let adapter = manifest
+        .adapters
+        .iter()
+        .find(|a| a.framework.as_deref().map(str::trim) == Some(framework))?;
+    match framework {
+        "openclaw" => {
+            if let Some(ref oc) = adapter.openclaw {
+                if let Some(ref entry) = oc.bundle.entry {
+                    return Some(entry.clone());
+                }
+            }
+        }
+        "hermes" => {
+            if let Some(ref h) = adapter.hermes {
+                if let Some(ref entry) = h.bundle.entry {
+                    return Some(entry.clone());
+                }
+            }
+        }
+        _ => {}
+    }
+    adapter.bundle.entry.clone()
 }
 
 /// A status report for a receipt that cannot be verified at all (e.g. no
@@ -1731,5 +2038,149 @@ dest = "{{datadir}}/adapters/{{component}}/openclaw/"
             entry.declared,
             "system component must be declared via system root"
         );
+    }
+
+    // -- copy_tree / remove_tree boundary ------------------------------------
+
+    #[test]
+    fn copy_tree_rejects_source_outside_allowed_roots() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let allowed = tmp.path().join("allowed");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(allowed.join("dst")).expect("mkdir");
+        std::fs::create_dir_all(&outside).expect("mkdir");
+        std::fs::write(outside.join("x.txt"), b"data").expect("write");
+
+        let ops = ManagerOps::new(
+            CentralLog::open(tmp.path().join("log.jsonl")),
+            "test".into(),
+            "user".into(),
+            "comp".into(),
+            "test".into(),
+            vec![allowed.clone()],
+        );
+        let err = ops
+            .copy_tree(&outside, &allowed.join("dst/target"))
+            .expect_err("source outside allowed roots must fail");
+        assert!(
+            matches!(err, AdapterError::ClaimValidation(_)),
+            "expected ClaimValidation, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn copy_tree_accepts_source_inside_allowed_roots() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let allowed = tmp.path().join("allowed");
+        let src = allowed.join("src");
+        let dst = allowed.join("dst");
+        std::fs::create_dir_all(&src).expect("mkdir src");
+        std::fs::write(src.join("f.txt"), b"ok").expect("write");
+
+        let ops = ManagerOps::new(
+            CentralLog::open(tmp.path().join("log.jsonl")),
+            "test".into(),
+            "user".into(),
+            "comp".into(),
+            "test".into(),
+            vec![allowed],
+        );
+        ops.copy_tree(&src, &dst)
+            .expect("source inside root must succeed");
+        assert!(dst.join("f.txt").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_tree_rejects_symlink_inside_source() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let allowed = tmp.path().join("allowed");
+        let src = allowed.join("src");
+        let dst = allowed.join("dst");
+        std::fs::create_dir_all(&src).expect("mkdir src");
+        std::fs::write(src.join("ok.txt"), b"ok").expect("write");
+        std::os::unix::fs::symlink("/etc/passwd", src.join("link")).expect("symlink");
+
+        let ops = ManagerOps::new(
+            CentralLog::open(tmp.path().join("log.jsonl")),
+            "test".into(),
+            "user".into(),
+            "comp".into(),
+            "test".into(),
+            vec![allowed],
+        );
+        let err = ops
+            .copy_tree(&src, &dst)
+            .expect_err("symlink inside source must be rejected");
+        assert!(
+            matches!(err, AdapterError::Io { .. }),
+            "expected Io error, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("symlink rejected"),
+            "error should mention symlink: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_tree_rejects_symlink_source_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path().canonicalize().expect("canonicalize");
+        let allowed = base.join("allowed");
+        let real_dir = allowed.join("real");
+        std::fs::create_dir_all(&real_dir).expect("mkdir");
+        std::fs::write(real_dir.join("f.txt"), b"data").expect("write");
+        let link_dir = allowed.join("link_to_dir");
+        std::os::unix::fs::symlink(&real_dir, &link_dir).expect("symlink");
+
+        let ops = ManagerOps::new(
+            CentralLog::open(base.join("log.jsonl")),
+            "test".into(),
+            "user".into(),
+            "comp".into(),
+            "test".into(),
+            vec![allowed.clone()],
+        );
+        let err = ops
+            .copy_tree(&link_dir, &allowed.join("dst"))
+            .expect_err("symlink-to-dir source must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("symlink rejected"),
+            "error should mention symlink: {msg}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_file_rejects_symlink_source() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path().canonicalize().expect("canonicalize tmp");
+        let allowed = base.join("allowed");
+        std::fs::create_dir_all(&allowed).expect("mkdir");
+        std::fs::write(allowed.join("real.txt"), b"ok").expect("write");
+        std::os::unix::fs::symlink("/etc/passwd", allowed.join("link.txt")).expect("symlink");
+
+        let ops = ManagerOps::new(
+            CentralLog::open(base.join("log.jsonl")),
+            "test".into(),
+            "user".into(),
+            "comp".into(),
+            "test".into(),
+            vec![allowed.clone()],
+        );
+        let err = ops
+            .copy_file(&allowed.join("link.txt"), &allowed.join("dst.txt"))
+            .expect_err("symlink source must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("symlink rejected") || msg.contains("boundary check"),
+            "error should reject symlink via boundary or explicit check: {msg}"
+        );
+
+        ops.copy_file(&allowed.join("real.txt"), &allowed.join("dst.txt"))
+            .expect("regular file must succeed");
+        assert!(allowed.join("dst.txt").is_file());
     }
 }

@@ -116,6 +116,19 @@ impl AdapterClaim {
         }
         for resource in &self.resources {
             resource.validate(layout, allowed_external_roots)?;
+            match &resource.kind {
+                ClaimResourceKind::FrameworkPlugin { framework, .. }
+                | ClaimResourceKind::FrameworkConfig { framework, .. }
+                    if framework != &self.framework =>
+                {
+                    return Err(ClaimValidationError::FrameworkMismatch {
+                        id: resource.id.clone(),
+                        resource_framework: framework.clone(),
+                        claim_framework: self.framework.clone(),
+                    });
+                }
+                _ => {}
+            }
         }
         Ok(())
     }
@@ -175,6 +188,18 @@ impl ClaimResource {
                 })
             }
             ClaimResourceKind::FrameworkPlugin { plugin_id, .. } => validate_plugin_id(plugin_id),
+            ClaimResourceKind::FrameworkConfig { key, .. } => {
+                if key.is_empty() {
+                    return Err(ClaimValidationError::ConfigKey {
+                        id: self.id.clone(),
+                        reason: "config key must not be empty".to_string(),
+                    });
+                }
+                validate_config_key(key).map_err(|_| ClaimValidationError::ConfigKey {
+                    id: self.id.clone(),
+                    reason: format!("config key '{key}' contains unsafe characters"),
+                })
+            }
         }
     }
 }
@@ -213,6 +238,15 @@ pub enum ClaimResourceKind {
         /// Native plugin id.
         plugin_id: String,
     },
+    /// A framework configuration key/value pair that ANOLISA applied.
+    /// The key path is framework-specific; the value is the TOML
+    /// representation of what was set.
+    FrameworkConfig {
+        /// Framework that owns the config (e.g. `openclaw`).
+        framework: String,
+        /// Config key path.
+        key: String,
+    },
 }
 
 /// Framework-specific typed payload. Closed enum — there is no runtime
@@ -224,6 +258,9 @@ pub enum DriverPayload {
     /// OpenClaw driver payload.
     #[serde(rename = "openclaw")]
     OpenClaw(OpenClawClaim),
+    /// Hermes driver payload.
+    #[serde(rename = "hermes")]
+    Hermes(HermesClaim),
 }
 
 /// OpenClaw driver payload. Holds only [`ClaimResource::id`] references —
@@ -237,6 +274,26 @@ pub struct OpenClawClaim {
     /// Resource id of the registered plugin
     /// ([`ClaimResourceKind::FrameworkPlugin`]).
     pub plugin_resource: String,
+    /// Resource ids of delivered skill directories.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skill_resources: Vec<String>,
+    /// Resource ids of applied config key/value pairs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_resources: Vec<String>,
+}
+
+/// Hermes driver payload. Holds only [`ClaimResource::id`] references.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HermesClaim {
+    /// Resource id of the Hermes home directory
+    /// ([`ClaimResourceKind::ExternalPath`]).
+    pub home_resource: String,
+    /// Resource id of the installed plugin directory
+    /// ([`ClaimResourceKind::ExternalPath`]).
+    pub plugin_resource: String,
+    /// Resource ids of delivered skill directories.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skill_resources: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +330,27 @@ pub enum ClaimValidationError {
         plugin_id: String,
         /// Why it was rejected.
         reason: String,
+    },
+    /// A config key in a [`ClaimResourceKind::FrameworkConfig`] resource
+    /// is empty or contains unsafe characters.
+    #[error("invalid config key in resource '{id}': {reason}")]
+    ConfigKey {
+        /// Offending resource id.
+        id: String,
+        /// Why it was rejected.
+        reason: String,
+    },
+    /// A resource declares a framework that differs from the claim's.
+    #[error(
+        "resource '{id}' declares framework '{resource_framework}' but claim targets '{claim_framework}'"
+    )]
+    FrameworkMismatch {
+        /// Offending resource id.
+        id: String,
+        /// Framework in the resource.
+        resource_framework: String,
+        /// Framework in the claim.
+        claim_framework: String,
     },
 }
 
@@ -372,6 +450,61 @@ pub fn validate_plugin_id(plugin_id: &str) -> Result<(), ClaimValidationError> {
     Ok(())
 }
 
+/// Reject a skill name that is empty, `.`/`..`, starts with `-`, or
+/// contains characters outside `[A-Za-z0-9._-]`. Same whitelist as
+/// [`validate_plugin_id`] — a skill name becomes a directory name under
+/// the framework's skill root, so it must be path-component-safe.
+pub fn validate_skill_name(name: &str) -> Result<(), super::AdapterError> {
+    let reject = |reason: String| {
+        Err(super::AdapterError::InvalidAdapterInput {
+            component: String::new(),
+            framework: String::new(),
+            reason: format!("invalid skill name '{name}': {reason}"),
+        })
+    };
+    if name.is_empty() {
+        return reject("must not be empty".to_string());
+    }
+    if name == "." || name == ".." {
+        return reject("must not be '.' or '..'".to_string());
+    }
+    if name.starts_with('-') {
+        return reject("must not start with '-'".to_string());
+    }
+    if let Some(bad) = name
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')))
+    {
+        return reject(format!("contains disallowed character '{bad}'"));
+    }
+    Ok(())
+}
+
+/// Reject a config key that is empty or contains shell metacharacters.
+/// Allowed: printable ASCII minus `` ` `` `$` `;` `|` `&` `(` `)` `{`
+/// `}` `[` `]` `<` `>` `\` `!` `#` `~`. This prevents injection when
+/// the key is passed as a CLI argument to `config set`.
+pub fn validate_config_key(key: &str) -> Result<(), super::AdapterError> {
+    let reject = |reason: String| {
+        Err(super::AdapterError::InvalidAdapterInput {
+            component: String::new(),
+            framework: String::new(),
+            reason: format!("invalid config key '{key}': {reason}"),
+        })
+    };
+    if key.is_empty() {
+        return reject("must not be empty".to_string());
+    }
+    const BANNED: &[char] = &[
+        '`', '$', ';', '|', '&', '(', ')', '{', '}', '[', ']', '<', '>', '\\', '!', '#', '~', '\'',
+        '"', ' ', '\t', '\n', '\r',
+    ];
+    if let Some(bad) = key.chars().find(|c| BANNED.contains(c) || !c.is_ascii()) {
+        return reject(format!("contains disallowed character '{bad}'"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,6 +540,8 @@ mod tests {
             driver_payload: DriverPayload::OpenClaw(OpenClawClaim {
                 state_dir_resource: "openclaw_state_dir".to_string(),
                 plugin_resource: "openclaw_plugin".to_string(),
+                skill_resources: Vec::new(),
+                config_resources: Vec::new(),
             }),
         }
     }
@@ -496,5 +631,190 @@ mod tests {
         };
         let err = claim.validate(&layout, &allowed).expect_err("must reject");
         assert!(matches!(err, ClaimValidationError::ExternalPath { .. }));
+    }
+
+    fn sample_hermes_claim() -> AdapterClaim {
+        AdapterClaim {
+            claim_schema: CLAIM_SCHEMA_VERSION,
+            component: "agent-sec".to_string(),
+            framework: "hermes".to_string(),
+            plugin_id: Some("agent-sec".to_string()),
+            enabled_at: "2026-06-22T10:30:45Z".to_string(),
+            resource_root: PathBuf::from("/usr/local/share/anolisa/adapters/agent-sec/hermes"),
+            bundle_digest: Some("sha256:def".to_string()),
+            driver_schema: DRIVER_SCHEMA_VERSION,
+            status: ClaimStatus::Enabled,
+            resources: vec![
+                ClaimResource {
+                    id: "hermes_home".to_string(),
+                    purpose: "hermes_home".to_string(),
+                    kind: ClaimResourceKind::ExternalPath {
+                        path: PathBuf::from("/home/alice/.hermes"),
+                    },
+                },
+                ClaimResource {
+                    id: "hermes_plugin".to_string(),
+                    purpose: "hermes_plugin_dir".to_string(),
+                    kind: ClaimResourceKind::ExternalPath {
+                        path: PathBuf::from("/home/alice/.hermes/plugins/agent-sec"),
+                    },
+                },
+            ],
+            driver_payload: DriverPayload::Hermes(HermesClaim {
+                home_resource: "hermes_home".to_string(),
+                plugin_resource: "hermes_plugin".to_string(),
+                skill_resources: Vec::new(),
+            }),
+        }
+    }
+
+    #[test]
+    fn hermes_claim_toml_round_trip() {
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct Wrapper {
+            adapter_claims: Vec<AdapterClaim>,
+        }
+        let wrapper = Wrapper {
+            adapter_claims: vec![sample_hermes_claim()],
+        };
+        let text = toml::to_string_pretty(&wrapper).expect("serialize Hermes to TOML");
+        let parsed: Wrapper = toml::from_str(&text).expect("parse Hermes from TOML");
+        assert_eq!(wrapper, parsed, "Hermes round-trip mismatch; TOML:\n{text}");
+    }
+
+    #[test]
+    fn hermes_claim_json_round_trip() {
+        let claim = sample_hermes_claim();
+        let json = serde_json::to_string(&claim).expect("serialize Hermes JSON");
+        let parsed: AdapterClaim = serde_json::from_str(&json).expect("parse Hermes JSON");
+        assert_eq!(claim, parsed);
+    }
+
+    #[test]
+    fn framework_config_resource_validates() {
+        let layout = FsLayout::system(None);
+        let allowed = vec![PathBuf::from("/home/alice/.openclaw")];
+        let resource = ClaimResource {
+            id: "config_touch".to_string(),
+            purpose: "openclaw_config".to_string(),
+            kind: ClaimResourceKind::FrameworkConfig {
+                framework: "openclaw".to_string(),
+                key: "plugins.entries.sec.enabled".to_string(),
+            },
+        };
+        resource
+            .validate(&layout, &allowed)
+            .expect("config resource should pass");
+    }
+
+    #[test]
+    fn openclaw_claim_with_skills_and_config_round_trips() {
+        let claim = AdapterClaim {
+            claim_schema: CLAIM_SCHEMA_VERSION,
+            component: "sec-core".to_string(),
+            framework: "openclaw".to_string(),
+            plugin_id: Some("sec-core".to_string()),
+            enabled_at: "2026-06-22T12:00:00Z".to_string(),
+            resource_root: PathBuf::from("/data/adapters/sec-core/openclaw"),
+            bundle_digest: None,
+            driver_schema: DRIVER_SCHEMA_VERSION,
+            status: ClaimStatus::Enabled,
+            resources: vec![
+                ClaimResource {
+                    id: "state_dir".to_string(),
+                    purpose: "openclaw_state_dir".to_string(),
+                    kind: ClaimResourceKind::ExternalPath {
+                        path: PathBuf::from("/home/alice/.openclaw"),
+                    },
+                },
+                ClaimResource {
+                    id: "plugin".to_string(),
+                    purpose: "openclaw_plugin".to_string(),
+                    kind: ClaimResourceKind::FrameworkPlugin {
+                        framework: "openclaw".to_string(),
+                        plugin_id: "sec-core".to_string(),
+                    },
+                },
+                ClaimResource {
+                    id: "skill_sec_audit".to_string(),
+                    purpose: "openclaw_skill".to_string(),
+                    kind: ClaimResourceKind::ExternalPath {
+                        path: PathBuf::from("/home/alice/.openclaw/skills/sec-audit"),
+                    },
+                },
+                ClaimResource {
+                    id: "config_enabled".to_string(),
+                    purpose: "openclaw_config".to_string(),
+                    kind: ClaimResourceKind::FrameworkConfig {
+                        framework: "openclaw".to_string(),
+                        key: "plugins.entries.sec-core.enabled".to_string(),
+                    },
+                },
+            ],
+            driver_payload: DriverPayload::OpenClaw(OpenClawClaim {
+                state_dir_resource: "state_dir".to_string(),
+                plugin_resource: "plugin".to_string(),
+                skill_resources: vec!["skill_sec_audit".to_string()],
+                config_resources: vec!["config_enabled".to_string()],
+            }),
+        };
+        let json = serde_json::to_string(&claim).expect("serialize");
+        let parsed: AdapterClaim = serde_json::from_str(&json).expect("parse");
+        assert_eq!(claim, parsed);
+    }
+
+    #[test]
+    fn validate_skill_name_accepts_safe_names() {
+        validate_skill_name("sec-audit").expect("dash");
+        validate_skill_name("cred_scan").expect("underscore");
+        validate_skill_name("skill.v2").expect("dot");
+        validate_skill_name("a1").expect("short");
+    }
+
+    #[test]
+    fn validate_skill_name_rejects_unsafe_names() {
+        assert!(validate_skill_name("").is_err(), "empty");
+        assert!(validate_skill_name("..").is_err(), "dotdot");
+        assert!(validate_skill_name(".").is_err(), "dot");
+        assert!(validate_skill_name("-rf").is_err(), "leading dash");
+        assert!(validate_skill_name("a/b").is_err(), "slash");
+        assert!(validate_skill_name("a b").is_err(), "space");
+        assert!(validate_skill_name("../x").is_err(), "traversal");
+    }
+
+    #[test]
+    fn validate_config_key_accepts_safe_keys() {
+        validate_config_key("plugins.entries.sec.enabled").expect("dotted path");
+        validate_config_key("foo.bar_baz-1").expect("mixed");
+    }
+
+    #[test]
+    fn validate_config_key_rejects_unsafe_keys() {
+        assert!(validate_config_key("").is_err(), "empty");
+        assert!(validate_config_key("a;b").is_err(), "semicolon");
+        assert!(validate_config_key("a$b").is_err(), "dollar");
+        assert!(validate_config_key("a`b").is_err(), "backtick");
+        assert!(validate_config_key("a b").is_err(), "space");
+        assert!(validate_config_key("a|b").is_err(), "pipe");
+    }
+
+    #[test]
+    fn framework_mismatch_rejected_by_claim_validate() {
+        let layout = FsLayout::system(None);
+        let allowed = vec![PathBuf::from("/home/alice/.openclaw")];
+        let mut claim = sample_claim();
+        claim.resources.push(ClaimResource {
+            id: "wrong_framework".to_string(),
+            purpose: "test".to_string(),
+            kind: ClaimResourceKind::FrameworkPlugin {
+                framework: "hermes".to_string(),
+                plugin_id: "tokenless".to_string(),
+            },
+        });
+        let err = claim.validate(&layout, &allowed).expect_err("must reject");
+        assert!(
+            matches!(err, ClaimValidationError::FrameworkMismatch { .. }),
+            "got {err:?}"
+        );
     }
 }

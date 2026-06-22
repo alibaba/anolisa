@@ -431,6 +431,7 @@ fn map_err(command: &str, err: AdapterError) -> CliError {
         | AdapterError::UnknownFramework { .. }
         | AdapterError::AmbiguousFramework { .. }
         | AdapterError::UnsupportedAdapterType { .. }
+        | AdapterError::InvalidAdapterInput { .. }
         | AdapterError::ComponentNotInstalled { .. }
         | AdapterError::AdapterNotDeclared { .. }
         | AdapterError::ResourceRootNotFound { .. }

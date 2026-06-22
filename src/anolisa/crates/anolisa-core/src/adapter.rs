@@ -23,6 +23,7 @@ use crate::manifest::AdapterSpec;
 pub mod claim;
 pub mod contract;
 pub mod driver;
+pub mod hermes;
 pub mod manager;
 pub mod openclaw;
 pub mod registry;
@@ -104,6 +105,18 @@ pub enum AdapterError {
         framework: String,
         /// The unsupported `adapter_type` value from the manifest.
         adapter_type: String,
+    },
+
+    /// A skill name or config key from the manifest failed validation
+    /// (empty, contains path traversal, or has unsafe characters).
+    #[error("invalid adapter input for {component}/{framework}: {reason}")]
+    InvalidAdapterInput {
+        /// Component whose manifest declared the invalid input.
+        component: String,
+        /// Framework the adapter targets.
+        framework: String,
+        /// What was wrong.
+        reason: String,
     },
 
     /// The installed component manifest required by adapter enable is

@@ -1505,6 +1505,8 @@ mod tests {
             driver_payload: DriverPayload::OpenClaw(OpenClawClaim {
                 state_dir_resource: "state".to_string(),
                 plugin_resource: "plugin".to_string(),
+                skill_resources: Vec::new(),
+                config_resources: Vec::new(),
             }),
         }
     }

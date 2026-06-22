@@ -127,6 +127,10 @@ fn write_fake_openclaw(dir: &Path) -> PathBuf {
 sub="$1"; action="$2"; arg3="$3"
 reg="$OPENCLAW_STATE_DIR/registry"
 mkdir -p "$reg" 2>/dev/null
+if [ "$sub" = "config" ] && [ "$action" = "set" ]; then
+  echo "config set $arg3 $4"
+  exit 0
+fi
 if [ "$sub" != "plugins" ]; then echo "unknown subcommand: $sub" >&2; exit 2; fi
 case "$action" in
   install)
