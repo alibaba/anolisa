@@ -24,6 +24,11 @@ A FUSE-backed virtual filesystem for local agent skills. SkillFS parses
 - Supports both normal mount and in-place mount.
 - Supports write passthrough after mount, and syncs `SKILL.md` changes
   back into the store.
+- Provides a Linux POSIX compatibility baseline for ordinary
+  passthrough paths, including fd-backed I/O, create/mkdir mode
+  handling, long-path fallbacks, post-unlink handles, safe symlink and
+  hardlink policy, FIFO creation, and conservative `user.*` xattr
+  passthrough.
 
 ## Feature Matrix
 
@@ -39,7 +44,10 @@ A FUSE-backed virtual filesystem for local agent skills. SkillFS parses
 | `unlink` `SKILL.md` | removed from store | removed from store | skill disappears from the virtual view |
 | `rmdir` skill dir | removed from store | removed from store | inode mappings are cleaned up recursively |
 | `setattr(size)` | truncate supported | truncate supported | other control attributes are not a focus |
-| `mknod` / `symlink` / `link` | `EROFS` | `EROFS` | always rejected |
+| `symlink` | restricted passthrough | restricted passthrough | relative same-skill targets only |
+| `link` | restricted passthrough | restricted passthrough | regular files inside the same skill |
+| `mkfifo` | passthrough | passthrough | FIFO only; device nodes remain rejected |
+| `xattr user.*` | passthrough | passthrough | ordinary passthrough paths only |
 
 ## Scope
 
@@ -188,10 +196,11 @@ small amount of heuristic command normalisation, for example:
 ```text
 crates/
   skillfs-core/   parser, store, views, compiler, env, watcher
-  skillfs-fuse/   FUSE filesystem
+  skillfs-fuse/   FUSE filesystem and POSIX passthrough layer
   skillfs-cli/    mount / classify / validate / list
 docs/specs/       implementation specifications
-scripts/          build.sh and test.sh
+docs/testing/     POSIX acceptance and external harness docs
+scripts/          build.sh, test.sh, and optional POSIX harness
 ```
 
 ## Test Scripts
@@ -215,7 +224,21 @@ scripts/          build.sh and test.sh
   does not revive the old name.
 - in-place mount: immediate visibility of `mkdir`, no-gap `rename`,
   post-rename stale frontmatter does not revive the old name.
-- Rejected operations: `mknod` / `symlink` / `link` return `EROFS`.
+- Metadata guard rails around `.skill-meta/**` and virtual paths.
+
+Additional FUSE integration suites cover POSIX passthrough behavior:
+
+- open/read/write flag handling and fd-backed I/O;
+- create/mkdir mode and umask behavior;
+- PATH_MAX fallback behavior and open-after-unlink handles;
+- same-skill symlink and hardlink policy;
+- FIFO creation and device-node rejection;
+- `user.*` xattr get/list/set/remove behavior.
+
+The optional pjdfstest harness lives in
+[scripts/posix/run_pjdfstest.sh](scripts/posix/run_pjdfstest.sh), with
+operator docs in
+[docs/testing/posix-external-harness.md](docs/testing/posix-external-harness.md).
 
 `skillfs-core` covers parser, store, and watcher with both unit and
 integration tests.
@@ -240,12 +263,19 @@ integration tests.
   implementation.
 - [docs/specs/fuse-spec.md](docs/specs/fuse-spec.md) — `skillfs-fuse`
   implementation.
+- [docs/specs/posix-phase1-spec.md](docs/specs/posix-phase1-spec.md) —
+  POSIX passthrough baseline.
+- [docs/testing/posix-phase1-acceptance.md](docs/testing/posix-phase1-acceptance.md) —
+  acceptance checklist.
+- [POSIX_FS_TEST_MATRIX.csv](POSIX_FS_TEST_MATRIX.csv) — POSIX test
+  matrix and current coverage.
 
 ## Verification
 
 The commands below are the CI-equivalent checks. Run them locally
 before opening a pull request to keep the feedback loop short; a
-change that fails any of them is not ready to merge.
+change that fails any of them is not ready to merge. Formatting and
+clippy are mandatory before committing SkillFS code changes.
 
 ```bash
 # 1. Formatting — must produce no diff.

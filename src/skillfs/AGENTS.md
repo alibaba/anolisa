@@ -169,8 +169,12 @@ Any new exception must be justified in the PR description.
 
 ## 6. Pre-submission checks
 
-Before opening a PR, run the following from the workspace root; every
-command must pass (this is the same checklist as
+Before committing or opening a PR, run the following from the
+workspace root. `cargo fmt --all --check` and
+`cargo clippy --workspace --all-targets -- -D warnings` are mandatory
+for every code change; do not rely on CI to discover formatting or
+lint failures. Every command below must pass before the change is
+ready for review (this is the same checklist as
 [README §Verification](README.md#verification)):
 
 ```bash

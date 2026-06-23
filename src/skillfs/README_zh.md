@@ -18,6 +18,10 @@
 - 透传 skill 目录内的物理文件和子目录。
 - 支持 normal mount 与 in-place mount。
 - 支持挂载后的物理写入透传，并把 `SKILL.md` 变化同步回 store。
+- 为普通 passthrough 路径提供 Linux POSIX 兼容基线，包括
+  fd-backed I/O、create/mkdir mode 处理、长路径 fallback、
+  open-after-unlink 句柄、受限 symlink/hardlink 策略、FIFO 创建、
+  以及保守的 `user.*` xattr 透传。
 
 ## 功能矩阵
 
@@ -33,7 +37,10 @@
 | `unlink` `SKILL.md` | 从 store 移除 | 从 store 移除 | skill 从虚拟视图消失 |
 | `rmdir` skill 目录 | 从 store 移除 | 从 store 移除 | 递归清理 inode 映射 |
 | `setattr(size)` | 支持 truncate | 支持 truncate | 其他控制属性不作为主要能力 |
-| `mknod` / `symlink` / `link` | `EROFS` | `EROFS` | 保持拒绝 |
+| `symlink` | 受限透传 | 受限透传 | 仅允许同 skill 内的相对目标 |
+| `link` | 受限透传 | 受限透传 | 仅允许同 skill 内普通文件 |
+| `mkfifo` | 透传 | 透传 | 仅 FIFO；device node 仍拒绝 |
+| `xattr user.*` | 透传 | 透传 | 仅普通 passthrough 路径 |
 
 ## 范围
 
@@ -165,10 +172,11 @@ FUSE 读取 `SKILL.md` 时会执行 `compiler::compile`，支持：
 ```text
 crates/
   skillfs-core/   parser, store, views, compiler, env, watcher
-  skillfs-fuse/   FUSE 文件系统
+  skillfs-fuse/   FUSE 文件系统与 POSIX passthrough 层
   skillfs-cli/    mount / classify / validate / list
 docs/specs/       实现说明
-scripts/          保留 build.sh 与 test.sh
+docs/testing/     POSIX 验收与外部 harness 文档
+scripts/          build.sh、test.sh 与可选 POSIX harness
 ```
 
 ## 测试脚本
@@ -189,7 +197,21 @@ scripts/          保留 build.sh 与 test.sh
 
 - normal mount：读 `SKILL.md`、写透传、`mkdir` 立即可见、`rename` 无空窗、post-rename stale frontmatter 不复活旧名。
 - in-place mount：`mkdir` 立即可见、`rename` 无空窗、post-rename stale frontmatter 不复活旧名。
-- 拒绝操作：`mknod` / `symlink` / `link` 返回 `EROFS`。
+- `.skill-meta/**` 与虚拟路径的元数据保护边界。
+
+额外 FUSE integration suites 覆盖 POSIX passthrough 行为：
+
+- open/read/write flag 处理与 fd-backed I/O；
+- create/mkdir mode 与 umask 行为；
+- PATH_MAX fallback 与 open-after-unlink 句柄；
+- 同 skill 内 symlink / hardlink 策略；
+- FIFO 创建与 device node 拒绝；
+- `user.*` xattr get/list/set/remove 行为。
+
+可选 pjdfstest harness 位于
+[scripts/posix/run_pjdfstest.sh](scripts/posix/run_pjdfstest.sh)，
+操作说明见
+[docs/testing/posix-external-harness.md](docs/testing/posix-external-harness.md)。
 
 `skillfs-core` 当前覆盖：
 
@@ -207,11 +229,15 @@ scripts/          保留 build.sh 与 test.sh
 - [docs/specs/skillfs-spec.md](docs/specs/skillfs-spec.md) - 整体架构、运行时一致性边界、场景对比
 - [docs/specs/core-spec.md](docs/specs/core-spec.md) - `skillfs-core` 实现
 - [docs/specs/fuse-spec.md](docs/specs/fuse-spec.md) - `skillfs-fuse` 实现
+- [docs/specs/posix-phase1-spec.md](docs/specs/posix-phase1-spec.md) - POSIX passthrough 基线
+- [docs/testing/posix-phase1-acceptance.md](docs/testing/posix-phase1-acceptance.md) - POSIX 验收清单
+- [POSIX_FS_TEST_MATRIX.csv](POSIX_FS_TEST_MATRIX.csv) - POSIX 测试矩阵与当前覆盖
 
 ## 验证
 
 下列命令是 CI 等价检查；本地在提交 PR 前跑一遍可以缩短反馈环。
-任何一条不通过的改动都不应被合入。
+任何一条不通过的改动都不应被合入。SkillFS 代码改动提交前必须
+先通过格式检查和 clippy。
 
 ```bash
 # 1. 格式化 — 必须无 diff。
