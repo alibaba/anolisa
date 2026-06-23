@@ -910,7 +910,9 @@ mod tests {
     #[test]
     fn repair_raw_component_is_not_implemented() {
         let tmp = tempfile::tempdir().expect("tmpdir");
-        let c = ctx(tmp.path().to_path_buf(), InstallMode::User, false);
+        // User mode ignores `prefix` and resolves from the process home, so
+        // this test uses system mode to keep the seeded state under `tmp`.
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
         seed(&c, raw_object("copilot-shell", "9.9.9"));
         let rpm = FakeQuery::new("anolisa-copilot-shell", None);
         let err = repair_with_query("copilot-shell", &c, &rpm)

@@ -9,12 +9,14 @@
 //! The fake CLI is controlled entirely through the same env contract the
 //! real driver uses (`OPENCLAW_BIN`, `OPENCLAW_HOME`, plus a test-only
 //! `FAKE_OPENCLAW_FAIL` knob). Because those are process-global, every test
-//! serializes on [`ENV_LOCK`].
+//! serializes on [`ENV_LOCK`], starts from a clean env contract, and
+//! restores the prior environment on exit.
 #![cfg(unix)]
 
+use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use anolisa_core::adapter::AdapterError;
 use anolisa_core::adapter::claim::{ClaimResourceKind, ClaimStatus};
@@ -49,10 +51,9 @@ impl World {
         )
     }
 
-    /// Apply this world's env contract. Must be called while holding
-    /// [`ENV_LOCK`].
-    fn apply_env(&self, fail: Option<&str>) {
-        apply_openclaw_env(&self.fake_bin, &self.openclaw_home, fail);
+    /// Apply this world's env contract through the process-env guard.
+    fn apply_env(&self, guard: &OpenClawEnvGuard, fail: Option<&str>) {
+        guard.apply(&self.fake_bin, &self.openclaw_home, fail);
     }
 
     fn load_state(&self) -> InstalledState {
@@ -60,15 +61,71 @@ impl World {
     }
 }
 
-fn apply_openclaw_env(fake_bin: &Path, openclaw_home: &Path, fail: Option<&str>) {
-    // SAFETY: callers hold ENV_LOCK, so no other test thread in this
-    // binary reads these vars concurrently.
+struct OpenClawEnvGuard {
+    _lock: MutexGuard<'static, ()>,
+    saved_bin: Option<OsString>,
+    saved_home: Option<OsString>,
+    saved_fail: Option<OsString>,
+}
+
+impl OpenClawEnvGuard {
+    fn acquire() -> Self {
+        let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = Self {
+            _lock: lock,
+            saved_bin: std::env::var_os("OPENCLAW_BIN"),
+            saved_home: std::env::var_os("OPENCLAW_HOME"),
+            saved_fail: std::env::var_os("FAKE_OPENCLAW_FAIL"),
+        };
+        guard.clear();
+        guard
+    }
+
+    fn clear(&self) {
+        // SAFETY: this guard holds ENV_LOCK, so tests in this binary cannot
+        // observe a half-mutated OpenClaw env contract.
+        unsafe {
+            std::env::remove_var("OPENCLAW_BIN");
+            std::env::remove_var("OPENCLAW_HOME");
+            std::env::remove_var("FAKE_OPENCLAW_FAIL");
+        }
+    }
+
+    fn apply(&self, fake_bin: &Path, openclaw_home: &Path, fail: Option<&str>) {
+        // SAFETY: this guard holds ENV_LOCK, so no other test thread in this
+        // binary reads these vars concurrently.
+        unsafe {
+            std::env::set_var("OPENCLAW_BIN", fake_bin);
+            std::env::set_var("OPENCLAW_HOME", openclaw_home);
+            match fail {
+                Some(stage) => std::env::set_var("FAKE_OPENCLAW_FAIL", stage),
+                None => std::env::remove_var("FAKE_OPENCLAW_FAIL"),
+            }
+        }
+    }
+
+    fn set_openclaw_bin(&self, value: &Path) {
+        // SAFETY: this guard holds ENV_LOCK.
+        unsafe {
+            std::env::set_var("OPENCLAW_BIN", value);
+        }
+    }
+}
+
+impl Drop for OpenClawEnvGuard {
+    fn drop(&mut self) {
+        restore_env("OPENCLAW_BIN", self.saved_bin.as_ref());
+        restore_env("OPENCLAW_HOME", self.saved_home.as_ref());
+        restore_env("FAKE_OPENCLAW_FAIL", self.saved_fail.as_ref());
+    }
+}
+
+fn restore_env(key: &str, value: Option<&OsString>) {
+    // SAFETY: callers hold ENV_LOCK until after the saved values are restored.
     unsafe {
-        std::env::set_var("OPENCLAW_BIN", fake_bin);
-        std::env::set_var("OPENCLAW_HOME", openclaw_home);
-        match fail {
-            Some(stage) => std::env::set_var("FAKE_OPENCLAW_FAIL", stage),
-            None => std::env::remove_var("FAKE_OPENCLAW_FAIL"),
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
         }
     }
 }
@@ -216,9 +273,9 @@ dest = "{{datadir}}/adapters/{{component}}/{framework}/"
 
 #[test]
 fn enable_status_disable_happy_path() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = OpenClawEnvGuard::acquire();
     let world = stage();
-    world.apply_env(None);
+    world.apply_env(&guard, None);
     let manager = world.manager();
 
     // enable
@@ -278,14 +335,15 @@ fn enable_status_disable_happy_path() {
 
 #[test]
 fn user_layout_enable_accepts_system_installed_component() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = OpenClawEnvGuard::acquire();
     let root = tempfile::tempdir().expect("tempdir");
     let prefix = root.path().to_path_buf();
     let system_prefix = prefix.join("system");
     let system_layout = FsLayout::system(Some(system_prefix.clone()));
     let user_home = prefix.join("home");
     std::fs::create_dir_all(&user_home).expect("home");
-    let user_layout = FsLayout::user(user_home.clone());
+    let user_layout =
+        FsLayout::user_with_overrides(user_home.clone(), None, None, None, None, None);
 
     let openclaw_home = prefix.join("openclaw-home");
     std::fs::create_dir_all(&openclaw_home).expect("openclaw home");
@@ -302,7 +360,7 @@ fn user_layout_enable_accepts_system_installed_component() {
     .expect("plugin manifest");
     seed_state(&system_layout, &system_prefix);
     let fake_bin = write_fake_openclaw(&prefix);
-    apply_openclaw_env(&fake_bin, &openclaw_home, None);
+    guard.apply(&fake_bin, &openclaw_home, None);
 
     let mut manager =
         AdapterManager::new(user_layout.clone(), Some(user_home), "tester".to_string());
@@ -335,10 +393,10 @@ fn user_layout_enable_accepts_system_installed_component() {
 
 #[test]
 fn enable_rejects_resource_directory_not_declared_by_manifest() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = OpenClawEnvGuard::acquire();
     let world = stage();
     write_installed_manifest(&world.layout, "hermes");
-    world.apply_env(None);
+    world.apply_env(&guard, None);
     let manager = world.manager();
 
     let err = manager
@@ -367,9 +425,9 @@ fn enable_rejects_resource_directory_not_declared_by_manifest() {
 
 #[test]
 fn failed_enable_keeps_cleanup_receipt_for_retry() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = OpenClawEnvGuard::acquire();
     let world = stage();
-    world.apply_env(Some("install"));
+    world.apply_env(&guard, Some("install"));
     let manager = world.manager();
 
     let err = manager
@@ -389,9 +447,9 @@ fn failed_enable_keeps_cleanup_receipt_for_retry() {
 
 #[test]
 fn failed_enable_after_framework_side_effect_keeps_visible_receipt() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = OpenClawEnvGuard::acquire();
     let world = stage();
-    world.apply_env(Some("install_after_register"));
+    world.apply_env(&guard, Some("install_after_register"));
     let manager = world.manager();
 
     let err = manager
@@ -419,9 +477,9 @@ fn failed_enable_after_framework_side_effect_keeps_visible_receipt() {
 
 #[test]
 fn dry_run_enable_does_not_register_or_persist() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = OpenClawEnvGuard::acquire();
     let world = stage();
-    world.apply_env(None);
+    world.apply_env(&guard, None);
     let manager = world.manager();
 
     let outcome = manager
@@ -454,16 +512,16 @@ fn dry_run_enable_does_not_register_or_persist() {
 
 #[test]
 fn disable_keeps_receipt_when_uninstall_fails() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = OpenClawEnvGuard::acquire();
     let world = stage();
-    world.apply_env(None);
+    world.apply_env(&guard, None);
     let manager = world.manager();
     manager
         .enable(COMPONENT, Some(FRAMEWORK), false)
         .expect("enable");
 
     // Now force uninstall to fail.
-    world.apply_env(Some("uninstall"));
+    world.apply_env(&guard, Some("uninstall"));
     let disabled = manager
         .disable(COMPONENT, Some(FRAMEWORK))
         .expect("disable runs");
@@ -483,9 +541,9 @@ fn disable_keeps_receipt_when_uninstall_fails() {
 
 #[test]
 fn disable_without_cli_keeps_receipt_for_retry() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = OpenClawEnvGuard::acquire();
     let world = stage();
-    world.apply_env(None);
+    world.apply_env(&guard, None);
     let manager = world.manager();
     manager
         .enable(COMPONENT, Some(FRAMEWORK), false)
@@ -495,10 +553,7 @@ fn disable_without_cli_keeps_receipt_for_retry() {
     // the CLI, so it must keep the receipt for a later retry instead of
     // pretending cleanup completed.
     let missing = world._root.path().join("no-such-openclaw");
-    // SAFETY: ENV_LOCK held.
-    unsafe {
-        std::env::set_var("OPENCLAW_BIN", &missing);
-    }
+    guard.set_openclaw_bin(&missing);
     let disabled = manager
         .disable(COMPONENT, Some(FRAMEWORK))
         .expect("disable");
@@ -513,9 +568,9 @@ fn disable_without_cli_keeps_receipt_for_retry() {
 
 #[test]
 fn forged_external_path_receipt_is_rejected_by_status() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = OpenClawEnvGuard::acquire();
     let world = stage();
-    world.apply_env(None);
+    world.apply_env(&guard, None);
     let manager = world.manager();
     manager
         .enable(COMPONENT, Some(FRAMEWORK), false)
@@ -550,7 +605,7 @@ fn forged_external_path_receipt_is_rejected_by_status() {
 
 #[test]
 fn scan_includes_manifest_declaration_without_resource_directory() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = OpenClawEnvGuard::acquire();
     let root = tempfile::tempdir().expect("tempdir");
     let prefix = root.path().to_path_buf();
     let layout = FsLayout::system(Some(prefix.clone()));
@@ -575,7 +630,7 @@ fn scan_includes_manifest_declaration_without_resource_directory() {
 
 #[test]
 fn user_scan_includes_system_state_declaration() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = OpenClawEnvGuard::acquire();
     let root = tempfile::tempdir().expect("tempdir");
     let prefix = root.path().to_path_buf();
     let system_prefix = prefix.join("system");
@@ -584,7 +639,8 @@ fn user_scan_includes_system_state_declaration() {
 
     let user_home = prefix.join("home");
     std::fs::create_dir_all(&user_home).expect("home");
-    let user_layout = FsLayout::user(user_home.clone());
+    let user_layout =
+        FsLayout::user_with_overrides(user_home.clone(), None, None, None, None, None);
     let mut manager = AdapterManager::new(user_layout, Some(user_home), "tester".to_string());
     manager.push_visible_root(anolisa_core::adapter::manager::VisibleRoot {
         state_dir: system_layout.state_dir.clone(),
@@ -604,9 +660,9 @@ fn user_scan_includes_system_state_declaration() {
 
 #[test]
 fn scan_lists_resource_with_detection_and_receipt_state() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = OpenClawEnvGuard::acquire();
     let world = stage();
-    world.apply_env(None);
+    world.apply_env(&guard, None);
     let manager = world.manager();
 
     // Before enable: discovered, driver available, detected, not enabled.

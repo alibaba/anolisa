@@ -1254,8 +1254,15 @@ fn run_capture(cmd: &FrameworkCommand) -> Result<CliOutput, AdapterError> {
 
 /// Build a `PATH` value with `prepend` dirs in front of the current one.
 fn prepend_path(prepend: &[PathBuf]) -> std::ffi::OsString {
+    prepend_path_with_existing(prepend, std::env::var_os("PATH"))
+}
+
+fn prepend_path_with_existing(
+    prepend: &[PathBuf],
+    existing: Option<std::ffi::OsString>,
+) -> std::ffi::OsString {
     let mut parts: Vec<PathBuf> = prepend.to_vec();
-    if let Some(existing) = std::env::var_os("PATH") {
+    if let Some(existing) = existing {
         parts.extend(std::env::split_paths(&existing));
     }
     // join_paths only fails if a component contains the path separator,
@@ -1545,22 +1552,14 @@ mod tests {
 
     #[test]
     fn prepend_path_puts_dirs_in_front() {
-        // SAFETY: single-threaded test mutating PATH; restored after.
-        let saved = std::env::var_os("PATH");
-        unsafe {
-            std::env::set_var("PATH", "/usr/bin:/bin");
-        }
-        let joined = prepend_path(&[PathBuf::from("/opt/a"), PathBuf::from("/opt/b")]);
+        let joined = prepend_path_with_existing(
+            &[PathBuf::from("/opt/a"), PathBuf::from("/opt/b")],
+            Some(std::ffi::OsString::from("/usr/bin:/bin")),
+        );
         let dirs: Vec<PathBuf> = std::env::split_paths(&joined).collect();
         assert_eq!(dirs[0], PathBuf::from("/opt/a"));
         assert_eq!(dirs[1], PathBuf::from("/opt/b"));
         assert!(dirs.contains(&PathBuf::from("/usr/bin")));
-        unsafe {
-            match saved {
-                Some(v) => std::env::set_var("PATH", v),
-                None => std::env::remove_var("PATH"),
-            }
-        }
     }
 
     #[test]

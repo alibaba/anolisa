@@ -210,7 +210,7 @@ impl FsLayout {
     ///
     /// Each `Option` is one home-root override; `None` selects the
     /// `$HOME`-based home root that `file-hierarchy(7)` defines.
-    pub(crate) fn user_with_overrides(
+    pub fn user_with_overrides(
         home: PathBuf,
         data_override: Option<PathBuf>,
         config_override: Option<PathBuf>,

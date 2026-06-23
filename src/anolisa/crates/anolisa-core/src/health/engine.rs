@@ -507,7 +507,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn layout_for(home: &Path) -> FsLayout {
-        FsLayout::user(home.to_path_buf())
+        FsLayout::user_with_overrides(home.to_path_buf(), None, None, None, None, None)
     }
 
     /// Write a 0755 shell script under `dir` and return its absolute path.
