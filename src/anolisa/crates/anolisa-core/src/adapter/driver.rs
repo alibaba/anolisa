@@ -26,6 +26,17 @@ pub struct HostEnv {
     pub user_home: Option<PathBuf>,
 }
 
+/// A skill declared in the component manifest, with an optional resolved
+/// source path for the skill bundle.
+#[derive(Debug, Clone)]
+pub struct DeclaredSkill {
+    /// Skill name.
+    pub name: String,
+    /// Resolved source directory. When `None`, the driver falls back to
+    /// `<resource_root>/skills/<name>/`.
+    pub source: Option<PathBuf>,
+}
+
 /// Detection outcome for a framework.
 #[derive(Debug, Clone, Serialize)]
 pub struct DetectResult {
@@ -51,9 +62,10 @@ pub struct DriverCtx<'a> {
     /// Plugin id declared in the component's adapter manifest, if any.
     /// A driver may fall back to it when the bundle does not name one.
     pub declared_plugin_id: Option<String>,
-    /// Skill names declared in the component's adapter manifest. The
-    /// driver delivers these into the framework's skill directory.
-    pub declared_skills: Vec<String>,
+    /// Skills declared in the component's adapter manifest. Each entry
+    /// carries an optional resolved `source` path; when absent, the driver
+    /// falls back to `<resource_root>/skills/<name>/`.
+    pub declared_skills: Vec<DeclaredSkill>,
     /// Post-install config key/value pairs declared in the component's
     /// adapter manifest. The driver applies these via the framework CLI.
     pub declared_config: Vec<crate::manifest::AdapterConfigSetSpec>,

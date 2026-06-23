@@ -386,9 +386,14 @@ pub struct AdapterSpec {
     /// Framework-specific detection hints preserved as TOML values.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub detect: BTreeMap<String, toml::Value>,
-    /// Skill names this adapter delivers into the framework.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub skills: Vec<String>,
+    /// Skills this adapter delivers into the framework.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_skills",
+        serialize_with = "serialize_skills"
+    )]
+    pub skills: Vec<AdapterSkillSpec>,
     /// Post-install config key/value pairs the driver should apply.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config: Vec<AdapterConfigSetSpec>,
@@ -455,6 +460,64 @@ pub struct AdapterConfigSetSpec {
     pub value: toml::Value,
 }
 
+/// One skill entry in an `[[adapters]]` or framework-specific section.
+///
+/// Two TOML forms are accepted (via [`deserialize_skills`]):
+///
+/// * **String array** (legacy): `skills = ["code-scanner", "prompt-scanner"]`
+///   — normalised to `AdapterSkillSpec { name, source: None }`.
+/// * **Table array** (recommended):
+///   ```toml
+///   [[adapters.openclaw.skills]]
+///   name   = "code-scanner"
+///   source = "{datadir}/skills/code-scanner/"
+///   ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AdapterSkillSpec {
+    /// Skill name.
+    pub name: String,
+    /// Source directory for the skill bundle. When absent, the driver
+    /// falls back to `<resource_root>/skills/<name>/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+/// Deserialise `skills` from either a string array or a table array.
+fn deserialize_skills<'de, D>(deserializer: D) -> Result<Vec<AdapterSkillSpec>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Item {
+        Simple(String),
+        Full(AdapterSkillSpec),
+    }
+
+    let items: Vec<Item> = Vec::deserialize(deserializer)?;
+    Ok(items
+        .into_iter()
+        .map(|item| match item {
+            Item::Simple(name) => AdapterSkillSpec { name, source: None },
+            Item::Full(spec) => spec,
+        })
+        .collect())
+}
+
+/// Serialise `skills` as a string array when all sources are `None`,
+/// preserving backward-compatible TOML output.
+fn serialize_skills<S>(skills: &[AdapterSkillSpec], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if skills.iter().all(|s| s.source.is_none()) {
+        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        names.serialize(serializer)
+    } else {
+        skills.serialize(serializer)
+    }
+}
+
 /// OpenClaw-specific adapter configuration. When present on an
 /// `[[adapters]]` entry whose `framework = "openclaw"`, the driver uses
 /// these fields instead of the generic adapter-level ones.
@@ -465,8 +528,13 @@ pub struct OpenClawAdapterSpec {
     #[serde(default, skip_serializing_if = "AdapterBundleSpec::is_empty")]
     pub bundle: AdapterBundleSpec,
     /// Skills delivered into OpenClaw's skill directory.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub skills: Vec<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_skills",
+        serialize_with = "serialize_skills"
+    )]
+    pub skills: Vec<AdapterSkillSpec>,
     /// Post-install config key/value pairs for OpenClaw.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config: Vec<AdapterConfigSetSpec>,
@@ -488,8 +556,13 @@ pub struct HermesAdapterSpec {
     #[serde(default, skip_serializing_if = "AdapterBundleSpec::is_empty")]
     pub bundle: AdapterBundleSpec,
     /// Skills delivered into Hermes's skill directory.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub skills: Vec<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_skills",
+        serialize_with = "serialize_skills"
+    )]
+    pub skills: Vec<AdapterSkillSpec>,
 }
 
 impl HermesAdapterSpec {
@@ -770,8 +843,8 @@ struct AdapterRaw {
     compat: AdapterCompatRaw,
     #[serde(default)]
     detect: BTreeMap<String, toml::Value>,
-    #[serde(default)]
-    skills: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_skills")]
+    skills: Vec<AdapterSkillSpec>,
     #[serde(default)]
     config: Vec<AdapterConfigSetSpec>,
     #[serde(default)]
@@ -1278,6 +1351,16 @@ pub enum ManifestError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn skill_names(names: &[&str]) -> Vec<AdapterSkillSpec> {
+        names
+            .iter()
+            .map(|n| AdapterSkillSpec {
+                name: n.to_string(),
+                source: None,
+            })
+            .collect()
+    }
 
     #[test]
     fn component_manifest_parses_existing_fixture() {
@@ -2018,7 +2101,7 @@ mod tests {
         let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
         assert_eq!(m.adapters.len(), 1);
         let a = &m.adapters[0];
-        assert_eq!(a.skills, vec!["sec-audit", "cred-scan"]);
+        assert_eq!(a.skills, skill_names(&["sec-audit", "cred-scan"]));
         assert_eq!(a.framework_version_req.as_deref(), Some(">=1.2"));
         assert_eq!(a.config.len(), 1);
         assert_eq!(
@@ -2052,7 +2135,7 @@ mod tests {
         let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
         let a = &m.adapters[0];
         let oc = a.openclaw.as_ref().expect("openclaw section");
-        assert_eq!(oc.skills, vec!["sec-audit"]);
+        assert_eq!(oc.skills, skill_names(&["sec-audit"]));
         assert_eq!(oc.bundle.entry.as_deref(), Some("openclaw.plugin.json"));
         assert_eq!(oc.config.len(), 1);
         assert_eq!(oc.config[0].key, "plugins.entries.sec-core.enabled");
@@ -2078,7 +2161,7 @@ mod tests {
         let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
         let a = &m.adapters[0];
         let h = a.hermes.as_ref().expect("hermes section");
-        assert_eq!(h.skills, vec!["sec-audit"]);
+        assert_eq!(h.skills, skill_names(&["sec-audit"]));
         assert_eq!(h.bundle.entry.as_deref(), Some("hermes.manifest.yaml"));
     }
 
@@ -2197,13 +2280,13 @@ mod tests {
         let oc = &m.adapters[0];
         assert_eq!(oc.framework.as_deref(), Some("openclaw"));
         assert_eq!(oc.plugin_id.as_deref(), Some("agent-sec"));
-        assert_eq!(oc.skills, vec!["sec-audit", "cred-scan"]);
+        assert_eq!(oc.skills, skill_names(&["sec-audit", "cred-scan"]));
         assert_eq!(oc.bundle.entry.as_deref(), Some("openclaw.plugin.json"));
         assert_eq!(oc.config.len(), 1);
 
         let hm = &m.adapters[1];
         assert_eq!(hm.framework.as_deref(), Some("hermes"));
-        assert_eq!(hm.skills, vec!["sec-audit"]);
+        assert_eq!(hm.skills, skill_names(&["sec-audit"]));
         assert_eq!(hm.bundle.entry.as_deref(), Some("hermes.manifest.yaml"));
         assert_eq!(hm.config.len(), 1);
     }
@@ -2234,5 +2317,160 @@ mod tests {
         assert!(a.openclaw.is_none());
         assert!(a.hermes.is_none());
         assert_eq!(a.plugin_id.as_deref(), Some("agentsight-openclaw"));
+    }
+
+    // -- AdapterSkillSpec dual-format ------------------------------------------
+
+    #[test]
+    fn adapter_skills_table_array_parses() {
+        let toml_text = r#"
+            [component]
+            name = "sec-core"
+            version = "0.1.0"
+            layer = "runtime"
+
+            [[adapters]]
+            framework = "openclaw"
+
+            [[adapters.openclaw.skills]]
+            name = "code-scanner"
+            source = "{datadir}/skills/code-scanner/"
+
+            [[adapters.openclaw.skills]]
+            name = "prompt-scanner"
+            source = "{datadir}/skills/prompt-scanner/"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let oc = m.adapters[0].openclaw.as_ref().expect("openclaw section");
+        assert_eq!(oc.skills.len(), 2);
+        assert_eq!(oc.skills[0].name, "code-scanner");
+        assert_eq!(
+            oc.skills[0].source.as_deref(),
+            Some("{datadir}/skills/code-scanner/")
+        );
+        assert_eq!(oc.skills[1].name, "prompt-scanner");
+    }
+
+    #[test]
+    fn adapter_skills_string_array_still_parses() {
+        let toml_text = r#"
+            [component]
+            name = "sec-core"
+            version = "0.1.0"
+            layer = "runtime"
+
+            [[adapters]]
+            framework = "openclaw"
+
+            [adapters.openclaw]
+            skills = ["code-scanner", "prompt-scanner"]
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let oc = m.adapters[0].openclaw.as_ref().expect("openclaw section");
+        assert_eq!(oc.skills, skill_names(&["code-scanner", "prompt-scanner"]));
+        assert!(
+            oc.skills.iter().all(|s| s.source.is_none()),
+            "string-form skills must have no source"
+        );
+    }
+
+    #[test]
+    fn adapter_skills_table_array_hermes_parses() {
+        let toml_text = r#"
+            [component]
+            name = "sec-core"
+            version = "0.1.0"
+            layer = "runtime"
+
+            [[adapters]]
+            framework = "hermes"
+
+            [[adapters.hermes.skills]]
+            name = "code-scanner"
+            source = "{datadir}/skills/code-scanner/"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let h = m.adapters[0].hermes.as_ref().expect("hermes section");
+        assert_eq!(h.skills.len(), 1);
+        assert_eq!(h.skills[0].name, "code-scanner");
+        assert_eq!(
+            h.skills[0].source.as_deref(),
+            Some("{datadir}/skills/code-scanner/")
+        );
+    }
+
+    #[test]
+    fn adapter_skills_generic_table_array_parses() {
+        let toml_text = r#"
+            [component]
+            name = "sec-core"
+            version = "0.1.0"
+            layer = "runtime"
+
+            [[adapters]]
+            framework = "openclaw"
+
+            [[adapters.skills]]
+            name = "code-scanner"
+            source = "{datadir}/skills/code-scanner/"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let a = &m.adapters[0];
+        assert_eq!(a.skills.len(), 1);
+        assert_eq!(a.skills[0].name, "code-scanner");
+        assert_eq!(
+            a.skills[0].source.as_deref(),
+            Some("{datadir}/skills/code-scanner/")
+        );
+    }
+
+    #[test]
+    fn adapter_skills_string_array_round_trips() {
+        let toml_text = r#"
+            [component]
+            name = "roundtrip"
+            version = "1.0.0"
+            layer = "runtime"
+
+            [[adapters]]
+            framework = "openclaw"
+            skills = ["a", "b"]
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let serialized = toml::to_string_pretty(&m).expect("serialize");
+        // The serializer uses a multi-line format; just check the values
+        // appear and no `source` or `name` key is emitted (i.e. it
+        // serialized as a string array, not a table array).
+        assert!(
+            !serialized.contains("source ="),
+            "string-form skills must not produce 'source =' keys: {serialized}"
+        );
+        let m2 = ComponentManifest::from_toml_str(&serialized).expect("re-parse");
+        assert_eq!(m.adapters[0].skills, m2.adapters[0].skills);
+    }
+
+    #[test]
+    fn adapter_skills_table_array_serialises_with_source() {
+        let toml_text = r#"
+            [component]
+            name = "sec-core"
+            version = "0.1.0"
+            layer = "runtime"
+
+            [[adapters]]
+            framework = "openclaw"
+
+            [[adapters.skills]]
+            name = "code-scanner"
+            source = "{datadir}/skills/code-scanner/"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let serialized = toml::to_string_pretty(&m).expect("serialize");
+        assert!(
+            serialized.contains("code-scanner"),
+            "must contain skill name: {serialized}"
+        );
+        let m2 = ComponentManifest::from_toml_str(&serialized).expect("re-parse");
+        assert_eq!(m.adapters[0].skills, m2.adapters[0].skills);
     }
 }

@@ -435,6 +435,7 @@ fn map_err(command: &str, err: AdapterError) -> CliError {
         | AdapterError::ComponentNotInstalled { .. }
         | AdapterError::AdapterNotDeclared { .. }
         | AdapterError::ResourceRootNotFound { .. }
+        | AdapterError::ContractResourceRootNotFound { .. }
         | AdapterError::FrameworkNotDetected { .. }
         | AdapterError::BundleInvalid { .. }
         | AdapterError::ClaimValidation(_) => CliError::InvalidArgument {

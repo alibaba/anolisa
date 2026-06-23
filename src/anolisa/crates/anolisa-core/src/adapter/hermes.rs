@@ -147,9 +147,16 @@ impl FrameworkDriver for HermesDriver {
         ];
 
         for skill in &ctx.declared_skills {
+            let src_display = match skill.source {
+                Some(ref s) => s.display().to_string(),
+                None => format!("{}/skills/{}", bundle.resource_root.display(), skill.name,),
+            };
             actions.push(format!(
-                "deliver skill '{skill}' to {}/skills/{skill}",
-                home.display()
+                "deliver skill '{}' from {} to {}/skills/{}",
+                skill.name,
+                src_display,
+                home.display(),
+                skill.name,
             ));
         }
 
@@ -187,12 +194,12 @@ impl FrameworkDriver for HermesDriver {
 
         let mut skill_resource_ids = Vec::new();
         for skill in &ctx.declared_skills {
-            let res_id = format!("hermes_skill_{skill}");
+            let res_id = format!("hermes_skill_{}", skill.name);
             resources.push(ClaimResource {
                 id: res_id.clone(),
                 purpose: "hermes_skill".to_string(),
                 kind: ClaimResourceKind::ExternalPath {
-                    path: home.join("skills").join(skill),
+                    path: home.join("skills").join(&skill.name),
                 },
             });
             skill_resource_ids.push(res_id);
@@ -244,8 +251,11 @@ impl FrameworkDriver for HermesDriver {
 
         // 3. Deliver skills through the Manager's controlled IO.
         for skill in &ctx.declared_skills {
-            let src = claim.resource_root.join("skills").join(skill);
-            let dst = home.join("skills").join(skill);
+            let src = skill
+                .source
+                .clone()
+                .unwrap_or_else(|| claim.resource_root.join("skills").join(&skill.name));
+            let dst = home.join("skills").join(&skill.name);
             ctx.ops.copy_tree(&src, &dst)?;
         }
 
@@ -966,6 +976,7 @@ mod tests {
 
     #[test]
     fn only_declared_skills_are_planned_and_claimed() {
+        use crate::adapter::driver::DeclaredSkill;
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
         std::fs::create_dir_all(root.join("skills/sec-audit")).expect("mkdir");
@@ -982,7 +993,10 @@ mod tests {
             resource_root: root.to_path_buf(),
             user_home: Some(PathBuf::from("/tmp/test-home-c")),
             declared_plugin_id: Some("test-plugin".to_string()),
-            declared_skills: vec!["sec-audit".to_string()],
+            declared_skills: vec![DeclaredSkill {
+                name: "sec-audit".to_string(),
+                source: None,
+            }],
             declared_config: Vec::new(),
             declared_bundle_entry: None,
             dry_run: true,

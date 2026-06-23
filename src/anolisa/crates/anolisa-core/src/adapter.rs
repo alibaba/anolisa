@@ -141,6 +141,22 @@ pub enum AdapterError {
         framework: String,
     },
 
+    /// The component contract declares a `dest` for the adapter, but the
+    /// expanded path does not exist on disk. Unlike [`ResourceRootNotFound`],
+    /// this means the contract was explicit — the caller should **not**
+    /// silently fall back to convention discovery.
+    #[error(
+        "adapter resource root from contract does not exist for '{component}/{framework}': {path}"
+    )]
+    ContractResourceRootNotFound {
+        /// Component name.
+        component: String,
+        /// Framework name.
+        framework: String,
+        /// Expanded path that was expected to exist.
+        path: PathBuf,
+    },
+
     /// The resource bundle is missing required files or is otherwise
     /// unreadable by the driver.
     #[error("invalid adapter bundle at {root}: {reason}")]

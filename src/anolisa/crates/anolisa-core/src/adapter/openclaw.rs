@@ -144,9 +144,16 @@ impl FrameworkDriver for OpenClawDriver {
         )];
 
         for skill in &ctx.declared_skills {
+            let src_display = match skill.source {
+                Some(ref s) => s.display().to_string(),
+                None => format!("{}/skills/{}", bundle.resource_root.display(), skill.name,),
+            };
             actions.push(format!(
-                "deliver openclaw skill '{skill}' to {}/skills/{skill}",
-                home.display()
+                "deliver openclaw skill '{}' from {} to {}/skills/{}",
+                skill.name,
+                src_display,
+                home.display(),
+                skill.name,
             ));
         }
         for (i, cfg) in ctx.declared_config.iter().enumerate() {
@@ -192,12 +199,12 @@ impl FrameworkDriver for OpenClawDriver {
 
         let mut skill_resources = Vec::new();
         for skill in &ctx.declared_skills {
-            let res_id = format!("openclaw_skill_{skill}");
+            let res_id = format!("openclaw_skill_{}", skill.name);
             resources.push(ClaimResource {
                 id: res_id.clone(),
                 purpose: "openclaw_skill".to_string(),
                 kind: ClaimResourceKind::ExternalPath {
-                    path: home.join("skills").join(skill),
+                    path: home.join("skills").join(&skill.name),
                 },
             });
             skill_resources.push(res_id);
@@ -258,8 +265,11 @@ impl FrameworkDriver for OpenClawDriver {
 
         // 2. Deliver skills through the Manager's controlled IO.
         for skill in &ctx.declared_skills {
-            let src = ctx.resource_root.join("skills").join(skill);
-            let dst = home.join("skills").join(skill);
+            let src = skill
+                .source
+                .clone()
+                .unwrap_or_else(|| ctx.resource_root.join("skills").join(&skill.name));
+            let dst = home.join("skills").join(&skill.name);
             ctx.ops.copy_tree(&src, &dst)?;
         }
 
