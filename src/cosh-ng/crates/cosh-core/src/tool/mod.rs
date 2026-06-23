@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::provider::ToolDeclaration;
-use crate::skill::SkillManager;
+use crate::skill::{SkillConfig, SkillManager};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ToolKind {
@@ -132,6 +132,16 @@ impl ToolRegistry {
             .into_iter()
             .map(|s| (s.name, s.description))
             .collect()
+    }
+
+    /// Look up a single skill by name from the underlying manager.
+    /// Used by the hook system to populate `skill_context` (skill_name +
+    /// file_path) on PreToolUse / PostToolUse for the `skill` tool, so
+    /// extensions like agent-sec-core's skill-ledger can locate the skill
+    /// on disk regardless of how the LLM phrased the name.
+    pub async fn lookup_skill(&self, name: &str) -> Option<SkillConfig> {
+        let mgr = self.skill_manager.as_ref()?;
+        mgr.load(name).await
     }
 
     pub fn declarations(&self) -> Vec<ToolDeclaration> {

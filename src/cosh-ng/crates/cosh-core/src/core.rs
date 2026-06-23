@@ -469,10 +469,37 @@ impl CoshCore {
 
                 let outcome = self.classify_tool(&tc.name, &params);
 
+                // 当工具是 skill 且 action=invoke 时，预查 skill_context 透传给
+                // hook（供 agent-sec-core skill-ledger 等扩展使用）。
+                let skill_context = if tc.name == "skill"
+                    && params.get("action").and_then(|v| v.as_str()).unwrap_or("invoke") == "invoke"
+                {
+                    let skill_name = params.get("name").and_then(|v| v.as_str());
+                    if let Some(name) = skill_name {
+                        self.tools.lookup_skill(name).await.map(|s| {
+                            serde_json::json!({
+                                "skill_name": s.name,
+                                "file_path": s.file_path.to_string_lossy(),
+                            })
+                        })
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
                 // ─── Hook: PreToolUse ───
                 let hook_result = self
                     .hook_system
-                    .fire_pre_tool_use(&self.session_id, &cwd_str, &tc.name, &params)
+                    .fire_pre_tool_use(
+                        &self.session_id,
+                        &cwd_str,
+                        &tc.id,
+                        &tc.name,
+                        &params,
+                        skill_context.as_ref(),
+                    )
                     .await;
                 self.emit_hook_notifications(writer, &hook_result.notifications, Some(&tc.id));
 
@@ -486,7 +513,16 @@ impl CoshCore {
                         ));
                         continue;
                     }
-                    HookDecision::Ask => (Outcome::RequireApproval, params),
+                    HookDecision::Ask => {
+                        // Apply tool_input_patch even when decision is Ask so that
+                        // sandbox-guard wrapping is preserved through the approval flow.
+                        let params = if let Some(patch) = hook_result.tool_input_patch.clone() {
+                            crate::hook::merge_json_pub(params, patch)
+                        } else {
+                            params
+                        };
+                        (Outcome::RequireApproval, params)
+                    }
                     _ => {
                         let params = if let Some(patch) = hook_result.tool_input_patch {
                             crate::hook::merge_json_pub(params, patch)
@@ -558,9 +594,11 @@ impl CoshCore {
                     .fire_post_tool_use(
                         &self.session_id,
                         &cwd_str,
+                        &tc.id,
                         &tc.name,
                         &params_for_post_hook,
                         &result.output,
+                        skill_context.as_ref(),
                     )
                     .await;
                 self.emit_hook_notifications(writer, &post_hook.notifications, None);
@@ -586,9 +624,11 @@ impl CoshCore {
                         .fire_post_tool_use_failure(
                             &self.session_id,
                             &cwd_str,
+                            &tc.id,
                             &tc.name,
                             &params_for_post_hook,
                             &result.output,
+                            skill_context.as_ref(),
                         )
                         .await;
                     self.emit_hook_notifications(writer, &failure_hook.notifications, None);

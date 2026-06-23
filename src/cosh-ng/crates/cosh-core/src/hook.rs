@@ -44,6 +44,9 @@ pub struct HookInput {
     pub cwd: String,
     pub hook_event_name: String,
     pub timestamp: String,
+    /// copilot-shell 协议必填字段。cosh-ng 不维护会话 transcript
+    /// 文件，用 cwd 派生路径占位，仅保证协议合规。
+    pub transcript_path: String,
     #[serde(flatten)]
     pub event_data: Value,
 }
@@ -230,15 +233,57 @@ impl HookSystem {
             .unwrap_or_default()
     }
 
+    /// cosh-ng 内部工具名 ↔ copilot-shell 标准名 双向别名映射。
+    /// 仅用于 matcher 匹配阶段，不影响发给 hook 的 tool_name 字段。
+    fn tool_name_alias(tool_name: &str) -> Option<&'static str> {
+        match tool_name {
+            "shell" => Some("run_shell_command"),
+            "run_shell_command" => Some("shell"),
+            "grep" => Some("grep_search"),
+            "grep_search" => Some("grep"),
+            "todo" => Some("todo_write"),
+            "todo_write" => Some("todo"),
+            _ => None,
+        }
+    }
+
+    /// 从 hook_specific_output 读取 additionalContext，兼容两种字段名。
+    /// 优先 snake_case（cosh-ng 原协议），次选 camelCase（copilot-shell 协议）。
+    fn pick_additional_context(specific: &Value) -> Option<&str> {
+        specific
+            .get("additional_context")
+            .and_then(|v| v.as_str())
+            .or_else(|| specific.get("additionalContext").and_then(|v| v.as_str()))
+    }
+
+    /// 把 tool 输出文本包装为 copilot-shell 协议要求的 JSON 对象。
+    /// - 已是合法 JSON object/array → 原样返回
+    /// - 纯文本 → 包装为 {"llmContent": text, "returnDisplay": text}
+    fn wrap_tool_response(tool_response: &str) -> Value {
+        if let Ok(v) = serde_json::from_str::<Value>(tool_response) {
+            if v.is_object() || v.is_array() {
+                return v;
+            }
+        }
+        serde_json::json!({
+            "llmContent": tool_response,
+            "returnDisplay": tool_response,
+        })
+    }
+
     fn matches_tool(def: &HookDefinition, tool_name: &str) -> bool {
         match &def.matcher {
             None => true,
             Some(pattern) => {
-                if let Ok(re) = Regex::new(pattern) {
-                    re.is_match(tool_name)
-                } else {
-                    pattern == tool_name
-                }
+                let matches_one = |name: &str| {
+                    if let Ok(re) = Regex::new(pattern) {
+                        re.is_match(name)
+                    } else {
+                        pattern == name
+                    }
+                };
+                matches_one(tool_name)
+                    || Self::tool_name_alias(tool_name).is_some_and(matches_one)
             }
         }
     }
@@ -261,8 +306,10 @@ impl HookSystem {
         &self,
         session_id: &str,
         cwd: &str,
+        tool_use_id: &str,
         tool_name: &str,
         tool_input: &Value,
+        skill_context: Option<&Value>,
     ) -> PreToolUseResult {
         if !self.enabled {
             return PreToolUseResult {
@@ -286,10 +333,14 @@ impl HookSystem {
             };
         }
 
-        let event_data = serde_json::json!({
+        let mut event_data = serde_json::json!({
+            "tool_use_id": tool_use_id,
             "tool_name": tool_name,
             "tool_input": tool_input,
         });
+        if let Some(ctx) = skill_context {
+            event_data["skill_context"] = ctx.clone();
+        }
         let input = self.build_input(session_id, cwd, HookEventName::PreToolUse, event_data);
         let outputs = self.run_hooks(&defs, &input).await;
 
@@ -300,9 +351,11 @@ impl HookSystem {
         &self,
         session_id: &str,
         cwd: &str,
+        tool_use_id: &str,
         tool_name: &str,
         tool_input: &Value,
         tool_response: &str,
+        skill_context: Option<&Value>,
     ) -> PostToolUseResult {
         if !self.enabled {
             return PostToolUseResult {
@@ -328,11 +381,15 @@ impl HookSystem {
             };
         }
 
-        let event_data = serde_json::json!({
+        let mut event_data = serde_json::json!({
+            "tool_use_id": tool_use_id,
             "tool_name": tool_name,
             "tool_input": tool_input,
-            "tool_response": tool_response,
+            "tool_response": Self::wrap_tool_response(tool_response),
         });
+        if let Some(ctx) = skill_context {
+            event_data["skill_context"] = ctx.clone();
+        }
         let input = self.build_input(session_id, cwd, HookEventName::PostToolUse, event_data);
         let outputs = self.run_hooks(&defs, &input).await;
 
@@ -430,9 +487,11 @@ impl HookSystem {
         &self,
         session_id: &str,
         cwd: &str,
+        tool_use_id: &str,
         tool_name: &str,
         tool_input: &Value,
         error: &str,
+        skill_context: Option<&Value>,
     ) -> PostToolUseFailureResult {
         if !self.enabled {
             return PostToolUseFailureResult { notifications: vec![] };
@@ -448,11 +507,15 @@ impl HookSystem {
             return PostToolUseFailureResult { notifications: vec![] };
         }
 
-        let event_data = serde_json::json!({
+        let mut event_data = serde_json::json!({
+            "tool_use_id": tool_use_id,
             "tool_name": tool_name,
             "tool_input": tool_input,
             "error": error,
         });
+        if let Some(ctx) = skill_context {
+            event_data["skill_context"] = ctx.clone();
+        }
         let input = self.build_input(session_id, cwd, HookEventName::PostToolUseFailure, event_data);
         let outputs = self.run_hooks(&defs, &input).await;
 
@@ -536,6 +599,7 @@ impl HookSystem {
             cwd: cwd.to_string(),
             hook_event_name: event.as_str().to_string(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            transcript_path: format!("{cwd}/.cosh-transcript.jsonl"),
             event_data,
         }
     }
@@ -723,7 +787,7 @@ impl HookSystem {
             }
 
             if let Some(ref specific) = out.hook_specific_output {
-                if let Some(ctx) = specific.get("additional_context").and_then(|v| v.as_str()) {
+                if let Some(ctx) = Self::pick_additional_context(specific) {
                     additional_context = Some(match additional_context {
                         Some(existing) => format!("{existing}\n{ctx}"),
                         None => ctx.to_string(),
@@ -762,7 +826,7 @@ impl HookSystem {
             }
 
             if let Some(ref specific) = out.hook_specific_output {
-                if let Some(ctx) = specific.get("additional_context").and_then(|v| v.as_str()) {
+                if let Some(ctx) = Self::pick_additional_context(specific) {
                     additional_context = Some(match additional_context {
                         Some(existing) => format!("{existing}\n{ctx}"),
                         None => ctx.to_string(),
@@ -791,7 +855,7 @@ impl HookSystem {
             self.collect_notifications(&out, &name, &mut notifications);
 
             if let Some(ref specific) = out.hook_specific_output {
-                if let Some(ctx) = specific.get("additional_context").and_then(|v| v.as_str()) {
+                if let Some(ctx) = Self::pick_additional_context(specific) {
                     additional_context = Some(match additional_context {
                         Some(existing) => format!("{existing}\n{ctx}"),
                         None => ctx.to_string(),
@@ -926,7 +990,7 @@ mod tests {
     fn disabled_system_returns_passthrough() {
         let sys = HookSystem::new_disabled();
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(sys.fire_pre_tool_use("s1", "/tmp", "shell", &Value::Null));
+        let result = rt.block_on(sys.fire_pre_tool_use("s1", "/tmp", "tool-1", "shell", &Value::Null, None));
         assert_eq!(result.decision, HookDecision::Passthrough);
     }
 
@@ -977,7 +1041,14 @@ mod tests {
         };
         let sys = HookSystem::from_config(&config);
         let result = sys
-            .fire_pre_tool_use("s1", "/tmp", "run_shell_command", &serde_json::json!({"command": "rm -rf /"}))
+            .fire_pre_tool_use(
+                "s1",
+                "/tmp",
+                "tool-1",
+                "run_shell_command",
+                &serde_json::json!({"command": "rm -rf /"}),
+                None,
+            )
             .await;
         assert_eq!(result.decision, HookDecision::Block("no rm allowed".to_string()));
         assert!(!result.notifications.is_empty());
@@ -1005,7 +1076,14 @@ mod tests {
         };
         let sys = HookSystem::from_config(&config);
         let result = sys
-            .fire_pre_tool_use("s1", "/tmp", "read_file", &serde_json::json!({}))
+            .fire_pre_tool_use(
+                "s1",
+                "/tmp",
+                "tool-1",
+                "read_file",
+                &serde_json::json!({}),
+                None,
+            )
             .await;
         assert_eq!(result.decision, HookDecision::Passthrough);
     }
@@ -1032,8 +1110,239 @@ mod tests {
         };
         let sys = HookSystem::from_config(&config);
         let result = sys
-            .fire_pre_tool_use("s1", "/tmp", "any", &serde_json::json!({}))
+            .fire_pre_tool_use(
+                "s1",
+                "/tmp",
+                "tool-1",
+                "any",
+                &serde_json::json!({}),
+                None,
+            )
             .await;
         assert_eq!(result.decision, HookDecision::Block("blocked".to_string()));
+    }
+
+    // ===== Task 1: matcher 双向工具名兼容 =====
+
+    fn def_with_matcher(matcher: &str) -> HookDefinition {
+        HookDefinition {
+            command: "echo".to_string(),
+            name: None,
+            matcher: Some(matcher.to_string()),
+            timeout: None,
+            sequential: None,
+        }
+    }
+
+    #[test]
+    fn matcher_matches_alias_run_shell_command() {
+        // matcher 写 copilot-shell 名字，cosh-ng 内部名也能命中
+        let def = def_with_matcher("^run_shell_command$");
+        assert!(HookSystem::matches_tool(&def, "shell"));
+        assert!(HookSystem::matches_tool(&def, "run_shell_command"));
+    }
+
+    #[test]
+    fn matcher_matches_alias_shell() {
+        // matcher 写 cosh-ng 名字，copilot-shell 名字也能命中
+        let def = def_with_matcher("^shell$");
+        assert!(HookSystem::matches_tool(&def, "shell"));
+        assert!(HookSystem::matches_tool(&def, "run_shell_command"));
+    }
+
+    #[test]
+    fn matcher_alias_grep_and_todo() {
+        let def_grep = def_with_matcher("^grep_search$");
+        assert!(HookSystem::matches_tool(&def_grep, "grep"));
+        let def_todo = def_with_matcher("^todo_write$");
+        assert!(HookSystem::matches_tool(&def_todo, "todo"));
+    }
+
+    #[test]
+    fn matcher_unknown_tool_no_alias() {
+        // 不在别名表的工具名走原路径
+        let def = def_with_matcher("^read_file$");
+        assert!(HookSystem::matches_tool(&def, "read_file"));
+        assert!(!HookSystem::matches_tool(&def, "shell"));
+    }
+
+    // ===== Task 2: additionalContext 双向兼容 =====
+
+    #[test]
+    fn pick_additional_context_prefers_snake_case() {
+        let v = serde_json::json!({
+            "additional_context": "snake",
+            "additionalContext": "camel"
+        });
+        assert_eq!(HookSystem::pick_additional_context(&v), Some("snake"));
+    }
+
+    #[test]
+    fn pick_additional_context_falls_back_to_camel_case() {
+        let v = serde_json::json!({"additionalContext": "only-camel"});
+        assert_eq!(
+            HookSystem::pick_additional_context(&v),
+            Some("only-camel")
+        );
+    }
+
+    #[test]
+    fn pick_additional_context_returns_none_when_absent() {
+        let v = serde_json::json!({"other": "x"});
+        assert_eq!(HookSystem::pick_additional_context(&v), None);
+    }
+
+    // ===== Task 3: tool_response 包装 =====
+
+    #[test]
+    fn wrap_tool_response_plain_text() {
+        let v = HookSystem::wrap_tool_response("hello world");
+        assert_eq!(v["llmContent"], "hello world");
+        assert_eq!(v["returnDisplay"], "hello world");
+    }
+
+    #[test]
+    fn wrap_tool_response_passes_through_object() {
+        let raw = r#"{"llmContent":"x","returnDisplay":"y"}"#;
+        let v = HookSystem::wrap_tool_response(raw);
+        assert_eq!(v["llmContent"], "x");
+        assert_eq!(v["returnDisplay"], "y");
+    }
+
+    #[test]
+    fn wrap_tool_response_passes_through_array() {
+        let raw = r#"[1,2,3]"#;
+        let v = HookSystem::wrap_tool_response(raw);
+        assert!(v.is_array());
+        assert_eq!(v[0], 1);
+    }
+
+    #[test]
+    fn wrap_tool_response_bare_number_is_wrapped() {
+        // 裸数字虽是合法 JSON 但不是 object/array，仍需要包装。
+        let v = HookSystem::wrap_tool_response("42");
+        assert_eq!(v["llmContent"], "42");
+    }
+
+    // ===== Task 4: HookInput / event_data 新字段 =====
+
+    #[test]
+    fn hook_input_contains_transcript_path() {
+        let sys = HookSystem::new_disabled();
+        let input = sys.build_input(
+            "sess-1",
+            "/work",
+            HookEventName::PreToolUse,
+            serde_json::json!({"tool_name": "shell"}),
+        );
+        let json = serde_json::to_value(&input).unwrap();
+        assert_eq!(json["transcript_path"], "/work/.cosh-transcript.jsonl");
+        assert_eq!(json["session_id"], "sess-1");
+        assert_eq!(json["hook_event_name"], "PreToolUse");
+    }
+
+    #[tokio::test]
+    async fn event_data_contains_tool_use_id_and_keeps_native_tool_name() {
+        // 调用方传 cosh-ng 原名 shell + matcher 写 run_shell_command。
+        // hook 脚本输出使用输入中的 tool_name 与 tool_use_id 作为上下文验证。
+        let config = HooksConfig {
+            enabled: true,
+            disabled: vec![],
+            pre_tool_use: vec![],
+            post_tool_use: vec![HookDefinition {
+                command: r#"python3 -c 'import sys,json; d=json.load(sys.stdin); print(json.dumps({"hook_specific_output": {"additionalContext": d["tool_name"]+"|"+d["tool_use_id"]}}))'"#.to_string(),
+                name: Some("echo".to_string()),
+                matcher: Some("^run_shell_command$".to_string()),
+                timeout: Some(5000),
+                sequential: None,
+            }],
+            post_tool_use_failure: vec![],
+            user_prompt_submit: vec![],
+            session_start: vec![],
+            stop: vec![],
+            before_model: vec![],
+            after_model: vec![],
+        };
+        let sys = HookSystem::from_config(&config);
+        let result = sys
+            .fire_post_tool_use(
+                "s1",
+                "/tmp",
+                "call-42",
+                "shell",
+                &serde_json::json!({"command": "ls"}),
+                "hello",
+                None,
+            )
+            .await;
+        // additional_context 里会包含传入的 cosh-ng 原名 shell 与 tool_use_id call-42
+        let ctx = result.additional_context.unwrap();
+        assert!(ctx.contains("shell"), "ctx={ctx}");
+        assert!(ctx.contains("call-42"), "ctx={ctx}");
+    }
+
+    #[tokio::test]
+    async fn event_data_includes_skill_context_when_provided() {
+        // hook 脚本反射 skill_context.file_path 到 additionalContext 验证透传。
+        let config = HooksConfig {
+            enabled: true,
+            disabled: vec![],
+            pre_tool_use: vec![HookDefinition {
+                command: r#"python3 -c 'import sys,json; d=json.load(sys.stdin); ctx=d.get("skill_context",{}); print(json.dumps({"hook_specific_output":{"additionalContext": ctx.get("file_path","none")}}))'"#.to_string(),
+                name: Some("skill-probe".to_string()),
+                matcher: Some("skill".to_string()),
+                timeout: Some(5000),
+                sequential: None,
+            }],
+            post_tool_use: vec![],
+            post_tool_use_failure: vec![],
+            user_prompt_submit: vec![],
+            session_start: vec![],
+            stop: vec![],
+            before_model: vec![],
+            after_model: vec![],
+        };
+        let sys = HookSystem::from_config(&config);
+        let skill_ctx = serde_json::json!({
+            "skill_name": "demo",
+            "file_path": "/skills/demo/SKILL.md",
+        });
+        // PreToolUse 不会在 additional_context 里体现 hook 输出，改用
+        // PostToolUse 路径验证（不同处理器但同样读 skill_context）。
+        let config2 = HooksConfig {
+            enabled: true,
+            disabled: vec![],
+            pre_tool_use: vec![],
+            post_tool_use: vec![HookDefinition {
+                command: r#"python3 -c 'import sys,json; d=json.load(sys.stdin); ctx=d.get("skill_context",{}); print(json.dumps({"hook_specific_output":{"additionalContext": ctx.get("file_path","none")}}))'"#.to_string(),
+                name: Some("skill-probe".to_string()),
+                matcher: Some("skill".to_string()),
+                timeout: Some(5000),
+                sequential: None,
+            }],
+            post_tool_use_failure: vec![],
+            user_prompt_submit: vec![],
+            session_start: vec![],
+            stop: vec![],
+            before_model: vec![],
+            after_model: vec![],
+        };
+        let sys2 = HookSystem::from_config(&config2);
+        let result = sys2
+            .fire_post_tool_use(
+                "s1",
+                "/tmp",
+                "call-1",
+                "skill",
+                &serde_json::json!({"action": "invoke", "name": "demo"}),
+                "",
+                Some(&skill_ctx),
+            )
+            .await;
+        assert_eq!(
+            result.additional_context.as_deref(),
+            Some("/skills/demo/SKILL.md"),
+        );
+        let _ = sys; // 避免 unused
     }
 }
