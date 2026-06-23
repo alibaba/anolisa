@@ -241,6 +241,7 @@ pub struct CoreControlResponseBody {
 pub struct CoreControlCapabilities {
     pub can_handle_can_use_tool: bool,
     pub can_handle_host_executed_shell_tool_result: bool,
+    pub can_handle_shell_evidence_tool: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -323,6 +324,22 @@ pub enum CoreControlRequest {
         error_message: Option<String>,
         providers: Vec<AuthProvider>,
     },
+
+    #[serde(rename = "shell_evidence")]
+    ShellEvidence {
+        tool_use_id: String,
+        action: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        limit: Option<u16>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cursor: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        direction: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        lines: Option<u16>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -401,7 +418,7 @@ impl OutputMessage {
         }
     }
 
-    pub fn initialize_success(request_id: &str) -> Self {
+    pub fn initialize_success(request_id: &str, can_handle_shell_evidence_tool: bool) -> Self {
         Self::ControlResponse {
             response: CoreControlResponsePayload {
                 subtype: "success".to_string(),
@@ -411,6 +428,7 @@ impl OutputMessage {
                     capabilities: CoreControlCapabilities {
                         can_handle_can_use_tool: true,
                         can_handle_host_executed_shell_tool_result: true,
+                        can_handle_shell_evidence_tool,
                     },
                 },
             },
@@ -603,6 +621,47 @@ impl OutputMessage {
             },
         }
     }
+
+    pub fn shell_evidence_list_commands(
+        request_id: &str,
+        tool_use_id: &str,
+        limit: u16,
+        cursor: Option<&str>,
+    ) -> Self {
+        Self::ControlRequest {
+            request_id: request_id.to_string(),
+            request: CoreControlRequest::ShellEvidence {
+                tool_use_id: tool_use_id.to_string(),
+                action: "list_commands".to_string(),
+                limit: Some(limit),
+                cursor: cursor.map(str::to_string),
+                output_id: None,
+                direction: None,
+                lines: None,
+            },
+        }
+    }
+
+    pub fn shell_evidence_read_output(
+        request_id: &str,
+        tool_use_id: &str,
+        output_id: &str,
+        direction: &str,
+        lines: u16,
+    ) -> Self {
+        Self::ControlRequest {
+            request_id: request_id.to_string(),
+            request: CoreControlRequest::ShellEvidence {
+                tool_use_id: tool_use_id.to_string(),
+                action: "read_output".to_string(),
+                limit: None,
+                cursor: None,
+                output_id: Some(output_id.to_string()),
+                direction: Some(direction.to_string()),
+                lines: Some(lines),
+            },
+        }
+    }
 }
 
 // =====================================================================
@@ -717,7 +776,7 @@ mod tests {
 
     #[test]
     fn serialize_initialize_success_capabilities() {
-        let msg = OutputMessage::initialize_success("init-1");
+        let msg = OutputMessage::initialize_success("init-1", false);
         let json = serde_json::to_string(&msg).unwrap();
         let v: Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["type"], "control_response");
@@ -730,6 +789,24 @@ mod tests {
         );
         assert_eq!(
             v["response"]["response"]["capabilities"]["can_handle_host_executed_shell_tool_result"],
+            true
+        );
+        assert_eq!(
+            v["response"]["response"]["capabilities"]["can_handle_shell_evidence_tool"],
+            false
+        );
+        assert!(v["response"]["response"]["capabilities"]
+            .get("can_handle_shell_output_evidence_tool")
+            .is_none());
+    }
+
+    #[test]
+    fn serialize_initialize_success_shell_evidence_capability() {
+        let msg = OutputMessage::initialize_success("init-1", true);
+        let json = serde_json::to_string(&msg).unwrap();
+        let v: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            v["response"]["response"]["capabilities"]["can_handle_shell_evidence_tool"],
             true
         );
     }
@@ -762,6 +839,46 @@ mod tests {
         assert_eq!(v["request"]["tool_name"], "Bash");
         assert_eq!(v["request"]["input"]["command"], "echo hello");
         assert_eq!(v["request"]["tool_use_id"], "toolu_001");
+    }
+
+    #[test]
+    fn serialize_shell_evidence_read_output() {
+        let msg = OutputMessage::shell_evidence_read_output(
+            "evidence-1",
+            "toolu_abc",
+            "terminal-output://raw-session-a1b2/cmd-1",
+            "tail",
+            120,
+        );
+        let json = serde_json::to_string(&msg).unwrap();
+        let v: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "control_request");
+        assert_eq!(v["request_id"], "evidence-1");
+        assert_eq!(v["request"]["subtype"], "shell_evidence");
+        assert_eq!(v["request"]["tool_use_id"], "toolu_abc");
+        assert_eq!(v["request"]["action"], "read_output");
+        assert_eq!(
+            v["request"]["output_id"],
+            "terminal-output://raw-session-a1b2/cmd-1"
+        );
+        assert_eq!(v["request"]["direction"], "tail");
+        assert_eq!(v["request"]["lines"], 120);
+    }
+
+    #[test]
+    fn serialize_shell_evidence_list_commands() {
+        let msg = OutputMessage::shell_evidence_list_commands("evidence-1", "toolu_abc", 20, None);
+        let json = serde_json::to_string(&msg).unwrap();
+        let v: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "control_request");
+        assert_eq!(v["request_id"], "evidence-1");
+        assert_eq!(v["request"]["subtype"], "shell_evidence");
+        assert_eq!(v["request"]["tool_use_id"], "toolu_abc");
+        assert_eq!(v["request"]["action"], "list_commands");
+        assert_eq!(v["request"]["limit"], 20);
+        assert!(v["request"].get("output_id").is_none());
+        assert!(v["request"].get("direction").is_none());
+        assert!(v["request"].get("lines").is_none());
     }
 
     #[test]

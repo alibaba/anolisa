@@ -7,9 +7,7 @@ use crate::cli::CliArgs;
 use crate::config::{self, CoreConfig};
 use crate::core::CoshCore;
 use crate::extension::ExtensionManager;
-use crate::protocol::{
-    AuthReason, InputMessage, OutputMessage, ShellControlRequest,
-};
+use crate::protocol::{AuthReason, InputMessage, OutputMessage, ShellControlRequest};
 use crate::skill::manager::expand_path;
 use crate::skill::SkillManager;
 use crate::tool::ToolRegistry;
@@ -57,10 +55,15 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) {
     skill_manager.refresh().await;
     skill_manager.start_watching().await;
 
-    let tools = ToolRegistry::with_defaults(skill_manager);
+    let mut tools = ToolRegistry::with_defaults(skill_manager);
+    if args.enable_shell_evidence_tool {
+        tools = tools.with_shell_evidence();
+    }
     let mut engine = CoshCore::new(config, provider, tools);
     engine.extra_params = extra_params;
-    engine.hook_system.register_extension_hooks(&ext_manager.hook_definitions());
+    engine
+        .hook_system
+        .register_extension_hooks(&ext_manager.hook_definitions());
 
     if let Some(ref sid) = args.resume {
         engine.session_id = sid.clone();
@@ -94,7 +97,15 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) {
 
     // Replay any lines that were buffered during the auth wait
     for buffered_line in buffered_lines {
-        if !process_input_line(&buffered_line, &mut engine, &mut lines, &mut writer).await {
+        if !process_input_line(
+            &buffered_line,
+            &mut engine,
+            &mut lines,
+            &mut writer,
+            args.enable_shell_evidence_tool,
+        )
+        .await
+        {
             return;
         }
     }
@@ -105,7 +116,15 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) {
             continue;
         }
 
-        if !process_input_line(&line, &mut engine, &mut lines, &mut writer).await {
+        if !process_input_line(
+            &line,
+            &mut engine,
+            &mut lines,
+            &mut writer,
+            args.enable_shell_evidence_tool,
+        )
+        .await
+        {
             break;
         }
     }
@@ -117,6 +136,7 @@ async fn process_input_line<W, R>(
     engine: &mut CoshCore,
     lines: &mut tokio::io::Lines<R>,
     writer: &mut W,
+    enable_shell_evidence_tool: bool,
 ) -> bool
 where
     W: io::Write,
@@ -136,7 +156,10 @@ where
             request,
         } => match request {
             ShellControlRequest::Initialize => {
-                engine.emit(writer, &OutputMessage::initialize_success(&request_id));
+                engine.emit(
+                    writer,
+                    &OutputMessage::initialize_success(&request_id, enable_shell_evidence_tool),
+                );
                 let init_msg = OutputMessage::system_init(
                     &engine.session_id,
                     &engine.model,
@@ -157,9 +180,11 @@ where
                     );
                 }
                 if let Some(ref ctx) = ss_result.additional_context {
-                    engine.messages.push(
-                        crate::provider::Message::system(&format!("[Hook context] {ctx}")),
-                    );
+                    engine
+                        .messages
+                        .push(crate::provider::Message::system(&format!(
+                            "[Hook context] {ctx}"
+                        )));
                 }
             }
             ShellControlRequest::Interrupt => {
@@ -175,10 +200,7 @@ where
             }
             ShellControlRequest::ReloadConfig => {
                 engine.config = CoreConfig::load();
-                engine.emit(
-                    writer,
-                    &OutputMessage::system_status("config_reloaded"),
-                );
+                engine.emit(writer, &OutputMessage::system_status("config_reloaded"));
             }
             ShellControlRequest::ConfigOverride {
                 approval_mode,
@@ -267,12 +289,8 @@ where
     let request_id = "auth-init";
     let providers = builtin_auth_providers();
 
-    let auth_msg = OutputMessage::auth_required(
-        request_id,
-        AuthReason::NotConfigured,
-        None,
-        providers,
-    );
+    let auth_msg =
+        OutputMessage::auth_required(request_id, AuthReason::NotConfigured, None, providers);
 
     // Emit auth request
     if let Ok(json) = serde_json::to_string(&auth_msg) {

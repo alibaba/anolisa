@@ -5,7 +5,31 @@ use serde_json::Value;
 
 use super::{Tool, ToolContext, ToolKind, ToolResult};
 
-pub struct ReadFileTool;
+pub struct ReadFileTool {
+    terminal_output_guidance: &'static str,
+}
+
+impl ReadFileTool {
+    pub fn new() -> Self {
+        Self {
+            terminal_output_guidance:
+                "terminal-output:// refs are not files. Use fenced cosh-request output fallback in cosh-shell.",
+        }
+    }
+
+    pub fn with_shell_evidence_tool_guidance() -> Self {
+        Self {
+            terminal_output_guidance:
+                "terminal-output:// refs are not files. Use cosh_shell_evidence action=read_output with output_id.",
+        }
+    }
+}
+
+impl Default for ReadFileTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait]
 impl Tool for ReadFileTool {
@@ -48,6 +72,10 @@ impl Tool for ReadFileTool {
             .and_then(|v| v.as_str())
             .ok_or("missing 'path' parameter")?;
 
+        if path_str.starts_with("terminal-output://") {
+            return Ok(ToolResult::error(self.terminal_output_guidance));
+        }
+
         let path = resolve_path(path_str, &ctx.cwd);
 
         if !path.exists() {
@@ -57,25 +85,15 @@ impl Tool for ReadFileTool {
             )));
         }
         if !path.is_file() {
-            return Ok(ToolResult::error(format!(
-                "Not a file: {}",
-                path.display()
-            )));
+            return Ok(ToolResult::error(format!("Not a file: {}", path.display())));
         }
 
-        let content =
-            tokio::fs::read_to_string(&path)
-                .await
-                .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+        let content = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
 
-        let offset = params
-            .get("offset")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
-        let limit = params
-            .get("limit")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(2000) as usize;
+        let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(2000) as usize;
 
         let lines: Vec<&str> = content.lines().collect();
         let total = lines.len();
@@ -128,7 +146,7 @@ mod tests {
         let tmp = NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), "line1\nline2\nline3\n").unwrap();
 
-        let tool = ReadFileTool;
+        let tool = ReadFileTool::new();
         let result = tool
             .invoke(
                 serde_json::json!({"path": tmp.path().to_str().unwrap()}),
@@ -147,7 +165,7 @@ mod tests {
         let tmp = NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), "a\nb\nc\nd\ne\n").unwrap();
 
-        let tool = ReadFileTool;
+        let tool = ReadFileTool::new();
         let result = tool
             .invoke(
                 serde_json::json!({"path": tmp.path().to_str().unwrap(), "offset": 1, "limit": 2}),
@@ -163,7 +181,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_nonexistent_file() {
-        let tool = ReadFileTool;
+        let tool = ReadFileTool::new();
         let result = tool
             .invoke(
                 serde_json::json!({"path": "/tmp/definitely_not_a_real_file_xyz"}),
@@ -173,5 +191,40 @@ mod tests {
             .unwrap();
         assert!(result.is_error);
         assert!(result.output.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn read_terminal_output_ref_fails_closed() {
+        let tool = ReadFileTool::with_shell_evidence_tool_guidance();
+        let result = tool
+            .invoke(
+                serde_json::json!({"path": "terminal-output://raw-session/cmd-1"}),
+                &test_ctx(),
+            )
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result
+            .output
+            .contains("terminal-output:// refs are not files"));
+        assert!(result
+            .output
+            .contains("cosh_shell_evidence action=read_output"));
+        assert!(!result.output.contains("fenced cosh-request"));
+    }
+
+    #[tokio::test]
+    async fn read_terminal_output_ref_defaults_to_fenced_fallback_guidance() {
+        let tool = ReadFileTool::new();
+        let result = tool
+            .invoke(
+                serde_json::json!({"path": "terminal-output://raw-session/cmd-1"}),
+                &test_ctx(),
+            )
+            .await
+            .unwrap();
+        assert!(result.is_error);
+        assert!(result.output.contains("fenced cosh-request"));
+        assert!(!result.output.contains("cosh_shell_evidence"));
     }
 }

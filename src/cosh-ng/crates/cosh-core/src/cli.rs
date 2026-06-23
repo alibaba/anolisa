@@ -1,7 +1,10 @@
 use clap::Parser;
 
 #[derive(Parser, Debug)]
-#[command(name = "cosh-core", about = "cosh core — agent core + interactive terminal")]
+#[command(
+    name = "cosh-core",
+    about = "cosh core — agent core + interactive terminal"
+)]
 pub struct CliArgs {
     /// Force headless JSONL mode (otherwise auto-detected via TTY)
     #[arg(long)]
@@ -30,6 +33,10 @@ pub struct CliArgs {
     /// Registry-only mode: respond to one registry_request then exit
     #[arg(long)]
     pub registry: bool,
+
+    /// Enable cosh-shell backed terminal output evidence tool
+    #[arg(long)]
+    pub enable_shell_evidence_tool: bool,
 
     // Compatibility flags — accepted but ignored
     #[arg(long, value_name = "FMT", hide = true)]

@@ -2,6 +2,7 @@ pub mod edit;
 pub mod grep;
 pub mod read_file;
 pub mod shell;
+pub mod shell_evidence;
 pub mod skill;
 pub mod todo;
 pub mod write_file;
@@ -21,6 +22,7 @@ pub enum ToolKind {
     ReadOnly,
     FileEdit,
     ShellExec,
+    ShellEvidence,
     Other,
 }
 
@@ -93,7 +95,7 @@ impl ToolRegistry {
     pub fn with_defaults(skill_manager: Arc<SkillManager>) -> Self {
         let mut registry = Self::new();
         registry.register(Box::new(shell::ShellTool));
-        registry.register(Box::new(read_file::ReadFileTool));
+        registry.register(Box::new(read_file::ReadFileTool::new()));
         registry.register(Box::new(write_file::WriteFileTool));
         registry.register(Box::new(edit::EditTool));
         registry.register(Box::new(grep::GrepTool));
@@ -101,6 +103,14 @@ impl ToolRegistry {
         registry.register(Box::new(skill::SkillTool::new(Arc::clone(&skill_manager))));
         registry.skill_manager = Some(skill_manager);
         registry
+    }
+
+    pub fn with_shell_evidence(mut self) -> Self {
+        self.register(Box::new(
+            read_file::ReadFileTool::with_shell_evidence_tool_guidance(),
+        ));
+        self.register(Box::new(shell_evidence::ShellEvidenceTool));
+        self
     }
 
     /// Convenience constructor for tests that don't need a real SkillManager.
@@ -232,6 +242,33 @@ mod tests {
         assert_eq!(decls.len(), 2);
         assert!(decls.iter().any(|d| d.name == "dummy"));
         assert!(decls.iter().any(|d| d.name == "ask_user_question"));
+    }
+
+    #[test]
+    fn cosh_shell_evidence_is_opt_in() {
+        let registry = ToolRegistry::new();
+        assert!(registry.get("cosh_shell_evidence").is_none());
+
+        let registry = ToolRegistry::new().with_shell_evidence();
+        let tool = registry
+            .get("cosh_shell_evidence")
+            .expect("shell evidence tool");
+        assert_eq!(tool.kind(), ToolKind::ShellEvidence);
+
+        let decls = registry.declarations();
+        let decl = decls
+            .iter()
+            .find(|d| d.name == "cosh_shell_evidence")
+            .expect("declaration");
+        assert_eq!(decl.parameters["required"][0], "action");
+        assert_eq!(
+            decl.parameters["properties"]["action"]["enum"][0],
+            "list_commands"
+        );
+        assert_eq!(
+            decl.parameters["properties"]["action"]["enum"][1],
+            "read_output"
+        );
     }
 
     #[tokio::test]

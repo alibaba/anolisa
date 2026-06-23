@@ -8,7 +8,9 @@ use tokio::io::AsyncBufReadExt;
 use cosh_platform::audit::{self, LoadedPolicy};
 use cosh_types::audit::Outcome;
 
-use crate::auth::{apply_auth_credentials, builtin_auth_providers, is_auth_error, wait_for_auth_response};
+use crate::auth::{
+    apply_auth_credentials, builtin_auth_providers, is_auth_error, wait_for_auth_response,
+};
 use crate::config::{self, CoreConfig};
 use crate::context::ContextBuilder;
 use crate::hook::{HookDecision, HookNotification, HookSystem};
@@ -79,9 +81,17 @@ impl CoshCore {
         }
     }
 
-    fn emit_hook_notifications<W: Write>(&self, writer: &mut W, notifications: &[HookNotification], tool_use_id: Option<&str>) {
+    fn emit_hook_notifications<W: Write>(
+        &self,
+        writer: &mut W,
+        notifications: &[HookNotification],
+        tool_use_id: Option<&str>,
+    ) {
         for n in notifications {
-            self.emit(writer, &OutputMessage::hook_notification(&n.hook_name, &n.message, tool_use_id));
+            self.emit(
+                writer,
+                &OutputMessage::hook_notification(&n.hook_name, &n.message, tool_use_id),
+            );
         }
     }
 
@@ -154,7 +164,10 @@ impl CoshCore {
         if let HookDecision::Block(reason) = &prompt_result.decision {
             self.emit(
                 writer,
-                &OutputMessage::assistant_text(&self.session_id, &format!("Prompt blocked by hook: {reason}")),
+                &OutputMessage::assistant_text(
+                    &self.session_id,
+                    &format!("Prompt blocked by hook: {reason}"),
+                ),
             );
             return Ok(());
         }
@@ -163,7 +176,8 @@ impl CoshCore {
 
         // Inject additional context from hooks
         if let Some(ref ctx) = prompt_result.additional_context {
-            self.messages.push(Message::system(&format!("[Hook context] {ctx}")));
+            self.messages
+                .push(Message::system(&format!("[Hook context] {ctx}")));
         }
 
         let tool_decls = self.tools.declarations();
@@ -374,7 +388,9 @@ impl CoshCore {
                     .await;
                 self.emit_hook_notifications(writer, &stop_result.notifications, None);
                 if stop_result.reject {
-                    let reason = stop_result.reject_reason.unwrap_or_else(|| "rejected by hook".to_string());
+                    let reason = stop_result
+                        .reject_reason
+                        .unwrap_or_else(|| "rejected by hook".to_string());
                     self.messages.push(Message::assistant(&text_buf));
                     self.messages.push(Message::user(&format!(
                         "[Hook rejected response] {reason}. Please revise your answer."
@@ -430,6 +446,27 @@ impl CoshCore {
                     continue;
                 }
 
+                if self
+                    .tools
+                    .get(&tc.name)
+                    .map(|tool| tool.kind() == ToolKind::ShellEvidence)
+                    .unwrap_or(false)
+                {
+                    let result = self
+                        .handle_shell_evidence(&tc.id, &params, reader, writer)
+                        .await;
+                    self.emit_provider_native_tool_result(writer, &tc.id, &result);
+                    self.messages.push(Message::tool_result(
+                        &tc.id,
+                        &result.output,
+                        result.is_error,
+                    ));
+                    if interrupted {
+                        return Ok(());
+                    }
+                    continue;
+                }
+
                 let outcome = self.classify_tool(&tc.name, &params);
 
                 // ─── Hook: PreToolUse ───
@@ -469,7 +506,8 @@ impl CoshCore {
                         result
                     }
                     Outcome::RequireApproval => {
-                        let hook_requires_approval = matches!(hook_result.decision, HookDecision::Ask);
+                        let hook_requires_approval =
+                            matches!(hook_result.decision, HookDecision::Ask);
                         let request_id = self.next_request_id();
                         self.emit(
                             writer,
@@ -528,7 +566,9 @@ impl CoshCore {
                 self.emit_hook_notifications(writer, &post_hook.notifications, None);
 
                 let result = if post_hook.deny {
-                    let reason = post_hook.deny_reason.unwrap_or_else(|| "denied by hook".to_string());
+                    let reason = post_hook
+                        .deny_reason
+                        .unwrap_or_else(|| "denied by hook".to_string());
                     ToolResult::error(format!("Post-tool hook denied: {reason}"))
                 } else if let Some(ref extra) = post_hook.additional_context {
                     ToolResult {
@@ -711,6 +751,187 @@ impl CoshCore {
         None
     }
 
+    async fn handle_shell_evidence<W, R>(
+        &self,
+        tool_use_id: &str,
+        params: &serde_json::Value,
+        reader: &mut tokio::io::Lines<R>,
+        writer: &mut W,
+    ) -> ToolResult
+    where
+        W: Write,
+        R: AsyncBufReadExt + Unpin,
+    {
+        let Some(action) = params.get("action").and_then(|v| v.as_str()) else {
+            return ToolResult::error("cosh_shell_evidence missing required action");
+        };
+
+        let request_id = self.next_request_id();
+        match action {
+            "list_commands" => {
+                if params.get("output_id").is_some() || params.get("lines").is_some() {
+                    return ToolResult::error(
+                        "cosh_shell_evidence action=list_commands accepts only limit and cursor",
+                    );
+                }
+                let limit = params
+                    .get("limit")
+                    .map(|v| {
+                        v.as_u64().ok_or_else(|| {
+                            ToolResult::error("cosh_shell_evidence limit must be an integer")
+                        })
+                    })
+                    .transpose();
+                let limit = match limit {
+                    Ok(limit) => limit.unwrap_or(20).clamp(1, 100) as u16,
+                    Err(result) => return result,
+                };
+                let cursor = match params.get("cursor") {
+                    Some(serde_json::Value::Null) | None => None,
+                    Some(v) => match v.as_str() {
+                        Some(s) => Some(s),
+                        None => {
+                            return ToolResult::error(
+                                "cosh_shell_evidence cursor must be a string or null",
+                            );
+                        }
+                    },
+                };
+                self.emit(
+                    writer,
+                    &OutputMessage::shell_evidence_list_commands(
+                        &request_id,
+                        tool_use_id,
+                        limit,
+                        cursor,
+                    ),
+                );
+            }
+            "read_output" => {
+                let Some(output_id) = params.get("output_id").and_then(|v| v.as_str()) else {
+                    return ToolResult::error(
+                        "cosh_shell_evidence action=read_output missing required output_id",
+                    );
+                };
+                let direction = params
+                    .get("direction")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("tail");
+                if direction != "head" && direction != "tail" {
+                    return ToolResult::error(
+                        "cosh_shell_evidence action=read_output direction must be head or tail",
+                    );
+                }
+                let lines = params
+                    .get("lines")
+                    .map(|v| {
+                        v.as_u64().ok_or_else(|| {
+                            ToolResult::error(
+                                "cosh_shell_evidence action=read_output lines must be an integer",
+                            )
+                        })
+                    })
+                    .transpose();
+                let lines = match lines {
+                    Ok(lines) => lines.unwrap_or(120).clamp(1, 300) as u16,
+                    Err(result) => return result,
+                };
+
+                self.emit(
+                    writer,
+                    &OutputMessage::shell_evidence_read_output(
+                        &request_id,
+                        tool_use_id,
+                        output_id,
+                        direction,
+                        lines,
+                    ),
+                );
+            }
+            _ => {
+                return ToolResult::error(
+                    "cosh_shell_evidence action must be list_commands or read_output",
+                );
+            }
+        }
+
+        self.wait_for_shell_evidence(&request_id, reader).await
+    }
+
+    async fn wait_for_shell_evidence<R: AsyncBufReadExt + Unpin>(
+        &self,
+        expected_request_id: &str,
+        reader: &mut tokio::io::Lines<R>,
+    ) -> ToolResult {
+        while let Ok(Some(line)) = reader.next_line().await {
+            let line = line.trim().to_string();
+            if line.is_empty() {
+                continue;
+            }
+
+            let msg: InputMessage = match serde_json::from_str(&line) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+
+            match msg {
+                InputMessage::ControlResponse { response } => {
+                    if response.request_id != expected_request_id {
+                        continue;
+                    }
+                    if response.response.behavior.as_deref() != Some("shell_evidence") {
+                        return ToolResult::error("cosh_shell_evidence received unknown response");
+                    }
+                    let Some(result) = response.response.result else {
+                        return ToolResult::error("cosh_shell_evidence response missing result");
+                    };
+                    let is_error = result
+                        .metadata
+                        .as_ref()
+                        .and_then(|m| m.get("is_error"))
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                        || result
+                            .metadata
+                            .as_ref()
+                            .and_then(|m| m.get("excerpt_status"))
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|status| status != "available");
+                    let is_error = is_error
+                        || result
+                            .metadata
+                            .as_ref()
+                            .and_then(|m| m.get("status"))
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|status| {
+                                matches!(
+                                    status,
+                                    "unavailable" | "failed" | "redacted_confirmation_required"
+                                )
+                            })
+                        || result
+                            .metadata
+                            .as_ref()
+                            .and_then(|m| m.get("reason"))
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|reason| reason == "redacted_confirmation_required");
+                    return ToolResult {
+                        output: result.llm_content,
+                        is_error,
+                    };
+                }
+                InputMessage::ControlRequest { request, .. } => {
+                    if matches!(request, ShellControlRequest::Interrupt) {
+                        self.provider.cancel();
+                        return ToolResult::error("Interrupted by user");
+                    }
+                }
+                _ => {}
+            }
+        }
+        ToolResult::error("cosh_shell_evidence response was not received")
+    }
+
     async fn wait_for_approval<R: AsyncBufReadExt + Unpin>(
         &self,
         expected_request_id: &str,
@@ -768,11 +989,7 @@ impl CoshCore {
 
     /// Attempt to re-authenticate by sending auth_required to Shell.
     /// Returns true if re-auth succeeded and provider was rebuilt.
-    async fn try_reauth<W, R>(
-        &mut self,
-        reader: &mut tokio::io::Lines<R>,
-        writer: &mut W,
-    ) -> bool
+    async fn try_reauth<W, R>(&mut self, reader: &mut tokio::io::Lines<R>, writer: &mut W) -> bool
     where
         W: Write,
         R: AsyncBufReadExt + Unpin,
@@ -809,13 +1026,11 @@ impl CoshCore {
         // Rebuild provider
         let resolved = self.config.resolve_provider();
         let profile = crate::provider::profile::profile_from_name(&resolved.provider_type);
-        self.provider = Box::new(
-            crate::provider::openai_compat::OpenAICompatProvider::new(
-                &resolved.base_url,
-                &resolved.api_key,
-                profile,
-            ),
-        );
+        self.provider = Box::new(crate::provider::openai_compat::OpenAICompatProvider::new(
+            &resolved.base_url,
+            &resolved.api_key,
+            profile,
+        ));
 
         self.emit(writer, &OutputMessage::system_status("auth_ok"));
         true
@@ -1445,6 +1660,376 @@ mod tests {
                 assert!(content.contains("Rust"));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn cosh_shell_evidence_read_output_uses_control_protocol_result() {
+        let provider = MockProvider::new(vec![
+            vec![
+                GenerateEvent::ToolCallStart {
+                    index: 0,
+                    id: "call-evidence".to_string(),
+                    name: "cosh_shell_evidence".to_string(),
+                },
+                GenerateEvent::ToolCallDelta {
+                    index: 0,
+                    arguments_delta: r#"{"action":"read_output","output_id":"terminal-output://raw-session-a1b2/cmd-1","direction":"tail","lines":42}"#.to_string(),
+                },
+                GenerateEvent::ToolCallEnd { index: 0 },
+                GenerateEvent::MessageEnd,
+            ],
+            vec![
+                GenerateEvent::TextDelta("I can see the captured output.".to_string()),
+                GenerateEvent::MessageEnd,
+            ],
+        ]);
+
+        let mut config = CoreConfig::default();
+        config.agent.approval_mode = "trust".to_string();
+        let tools = ToolRegistry::new().with_shell_evidence();
+        let mut core = CoshCore::new(config, Box::new(provider), tools);
+
+        let response = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"shell_evidence","result":{"llmContent":"ShellEvidenceExcerpt\noutput_id: terminal-output://raw-session-a1b2/cmd-1\nexcerpt_status: available\nstdout","returnDisplay":"captured output","metadata":{"action":"read_output","output_id":"terminal-output://raw-session-a1b2/cmd-1","excerpt_status":"available","is_error":false}}}}}"#;
+        let input = format!("{response}\n");
+        let mut reader = BufReader::new(input.as_bytes()).lines();
+        let mut output = Vec::new();
+
+        core.handle_user_message("read output", &mut reader, &mut output)
+            .await
+            .unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(
+            output_str.contains(r#""subtype":"shell_evidence""#),
+            "{output_str}"
+        );
+        assert!(
+            output_str.contains(r#""action":"read_output""#),
+            "{output_str}"
+        );
+        assert!(
+            output_str.contains(r#""tool_use_id":"call-evidence""#),
+            "{output_str}"
+        );
+        assert!(output_str.contains(r#""lines":42"#), "{output_str}");
+        assert!(
+            output_str.contains(r#""type":"tool_result""#),
+            "{output_str}"
+        );
+        assert!(
+            output_str.contains("I can see the captured output."),
+            "{output_str}"
+        );
+
+        let tool_result = core
+            .messages
+            .iter()
+            .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("call-evidence"))
+            .expect("tool result");
+        match &tool_result.content {
+            crate::provider::MessageContent::Text(content) => {
+                assert!(content.contains("ShellEvidenceExcerpt"));
+                assert!(content.contains("excerpt_status: available"));
+            }
+            _ => panic!("expected text tool result"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cosh_shell_evidence_list_commands_uses_control_protocol_result() {
+        let provider = MockProvider::new(vec![
+            vec![
+                GenerateEvent::ToolCallStart {
+                    index: 0,
+                    id: "call-evidence".to_string(),
+                    name: "cosh_shell_evidence".to_string(),
+                },
+                GenerateEvent::ToolCallDelta {
+                    index: 0,
+                    arguments_delta: r#"{"action":"list_commands","limit":2}"#.to_string(),
+                },
+                GenerateEvent::ToolCallEnd { index: 0 },
+                GenerateEvent::MessageEnd,
+            ],
+            vec![
+                GenerateEvent::TextDelta("I can see the command index.".to_string()),
+                GenerateEvent::MessageEnd,
+            ],
+        ]);
+
+        let mut config = CoreConfig::default();
+        config.agent.approval_mode = "trust".to_string();
+        let tools = ToolRegistry::new().with_shell_evidence();
+        let mut core = CoshCore::new(config, Box::new(provider), tools);
+
+        let response = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"shell_evidence","result":{"llmContent":"ShellEvidenceCommandIndex\ncommand_id: cmd-1\noutput_available: true","returnDisplay":null,"metadata":{"action":"list_commands","scope":"current_ledger","limit":2,"next_cursor":null,"is_error":false}}}}}"#;
+        let input = format!("{response}\n");
+        let mut reader = BufReader::new(input.as_bytes()).lines();
+        let mut output = Vec::new();
+
+        core.handle_user_message("list commands", &mut reader, &mut output)
+            .await
+            .unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(
+            output_str.contains(r#""subtype":"shell_evidence""#),
+            "{output_str}"
+        );
+        assert!(
+            output_str.contains(r#""action":"list_commands""#),
+            "{output_str}"
+        );
+        assert!(output_str.contains(r#""limit":2"#), "{output_str}");
+        assert!(
+            output_str.contains("I can see the command index."),
+            "{output_str}"
+        );
+
+        let tool_result = core
+            .messages
+            .iter()
+            .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("call-evidence"))
+            .expect("tool result");
+        match &tool_result.content {
+            crate::provider::MessageContent::Text(content) => {
+                assert!(content.contains("ShellEvidenceCommandIndex"));
+                assert!(content.contains("output_available: true"));
+            }
+            _ => panic!("expected text tool result"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cosh_shell_evidence_preserves_error_result() {
+        let provider = MockProvider::new(vec![
+            vec![
+                GenerateEvent::ToolCallStart {
+                    index: 0,
+                    id: "call-evidence".to_string(),
+                    name: "cosh_shell_evidence".to_string(),
+                },
+                GenerateEvent::ToolCallDelta {
+                    index: 0,
+                    arguments_delta: r#"{"action":"read_output","output_id":"terminal-output://old-session/cmd-1"}"#
+                        .to_string(),
+                },
+                GenerateEvent::ToolCallEnd { index: 0 },
+                GenerateEvent::MessageEnd,
+            ],
+            vec![
+                GenerateEvent::TextDelta("The output is stale.".to_string()),
+                GenerateEvent::MessageEnd,
+            ],
+        ]);
+
+        let mut config = CoreConfig::default();
+        config.agent.approval_mode = "trust".to_string();
+        let tools = ToolRegistry::new().with_shell_evidence();
+        let mut core = CoshCore::new(config, Box::new(provider), tools);
+
+        let response = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"shell_evidence","result":{"llmContent":"ShellEvidenceExcerpt\noutput_id: terminal-output://old-session/cmd-1\nexcerpt_status: unavailable\nreason: stale_session","returnDisplay":"stale output","metadata":{"action":"read_output","output_id":"terminal-output://old-session/cmd-1","excerpt_status":"unavailable","is_error":true,"reason":"stale_session"}}}}}"#;
+        let input = format!("{response}\n");
+        let mut reader = BufReader::new(input.as_bytes()).lines();
+        let mut output = Vec::new();
+
+        core.handle_user_message("read output", &mut reader, &mut output)
+            .await
+            .unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(output_str.contains(r#""is_error":true"#), "{output_str}");
+        let tool_result = core
+            .messages
+            .iter()
+            .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("call-evidence"))
+            .expect("tool result");
+        match &tool_result.content {
+            crate::provider::MessageContent::Text(content) => {
+                assert!(content.contains("excerpt_status: unavailable"));
+                assert!(content.contains("reason: stale_session"));
+            }
+            _ => panic!("expected text tool result"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cosh_shell_evidence_bypasses_normal_tool_hooks() {
+        let provider = MockProvider::new(vec![
+            vec![
+                GenerateEvent::ToolCallStart {
+                    index: 0,
+                    id: "call-list".to_string(),
+                    name: "cosh_shell_evidence".to_string(),
+                },
+                GenerateEvent::ToolCallDelta {
+                    index: 0,
+                    arguments_delta: r#"{"action":"list_commands","limit":2}"#.to_string(),
+                },
+                GenerateEvent::ToolCallEnd { index: 0 },
+                GenerateEvent::MessageEnd,
+            ],
+            vec![
+                GenerateEvent::ToolCallStart {
+                    index: 0,
+                    id: "call-read".to_string(),
+                    name: "cosh_shell_evidence".to_string(),
+                },
+                GenerateEvent::ToolCallDelta {
+                    index: 0,
+                    arguments_delta: r#"{"action":"read_output","output_id":"terminal-output://raw-session/cmd-1"}"#.to_string(),
+                },
+                GenerateEvent::ToolCallEnd { index: 0 },
+                GenerateEvent::MessageEnd,
+            ],
+            vec![
+                GenerateEvent::TextDelta("evidence hooks bypassed".to_string()),
+                GenerateEvent::MessageEnd,
+            ],
+        ]);
+
+        let mut config = CoreConfig::default();
+        config.agent.approval_mode = "trust".to_string();
+        config.hooks = config::HooksConfig {
+            enabled: true,
+            pre_tool_use: vec![config::HookDefinition {
+                command: "echo '{\"decision\":\"block\",\"reason\":\"pre hook should not run\"}'"
+                    .to_string(),
+                name: Some("block-evidence".to_string()),
+                matcher: Some("cosh_shell_evidence".to_string()),
+                timeout: Some(5000),
+                sequential: None,
+            }],
+            post_tool_use: vec![config::HookDefinition {
+                command: "echo '{\"decision\":\"block\",\"reason\":\"post hook should not run\"}'"
+                    .to_string(),
+                name: Some("deny-evidence".to_string()),
+                matcher: Some("cosh_shell_evidence".to_string()),
+                timeout: Some(5000),
+                sequential: None,
+            }],
+            ..Default::default()
+        };
+        let tools = ToolRegistry::new().with_shell_evidence();
+        let mut core = CoshCore::new(config, Box::new(provider), tools);
+
+        let list_response = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"shell_evidence","result":{"llmContent":"ShellEvidenceCommandIndex\ncommand_id: cmd-1","returnDisplay":null,"metadata":{"action":"list_commands","is_error":false}}}}}"#;
+        let read_response = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-1","response":{"behavior":"shell_evidence","result":{"llmContent":"ShellEvidenceExcerpt\noutput_id: terminal-output://raw-session/cmd-1\nstdout","returnDisplay":"stdout","metadata":{"action":"read_output","is_error":false}}}}}"#;
+        let input = format!("{list_response}\n{read_response}\n");
+        let mut reader = BufReader::new(input.as_bytes()).lines();
+        let mut output = Vec::new();
+
+        core.handle_user_message("inspect shell evidence", &mut reader, &mut output)
+            .await
+            .unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(
+            output_str.contains(r#""action":"list_commands""#),
+            "{output_str}"
+        );
+        assert!(
+            output_str.contains(r#""action":"read_output""#),
+            "{output_str}"
+        );
+        assert!(output_str.contains("evidence hooks bypassed"), "{output_str}");
+        assert!(!output_str.contains("hook_notification"), "{output_str}");
+        assert!(!output_str.contains("Blocked by hook"), "{output_str}");
+        assert!(!output_str.contains("Post-tool hook denied"), "{output_str}");
+        assert!(!output_str.contains("pre hook should not run"), "{output_str}");
+        assert!(!output_str.contains("post hook should not run"), "{output_str}");
+    }
+
+    #[tokio::test]
+    async fn cosh_shell_evidence_rejects_read_output_without_output_id() {
+        let core = make_core(MockProvider::new(vec![]));
+        let mut reader = empty_reader().await;
+        let mut output = Vec::new();
+
+        let result = core
+            .handle_shell_evidence(
+                "call-evidence",
+                &serde_json::json!({"action":"read_output"}),
+                &mut reader,
+                &mut output,
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert!(result.output.contains("missing required output_id"));
+        assert!(String::from_utf8(output).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cosh_shell_evidence_rejects_list_commands_read_output_fields() {
+        let core = make_core(MockProvider::new(vec![]));
+        let mut reader = empty_reader().await;
+        let mut output = Vec::new();
+
+        let result = core
+            .handle_shell_evidence(
+                "call-evidence",
+                &serde_json::json!({
+                    "action":"list_commands",
+                    "output_id":"terminal-output://raw-session/cmd-1"
+                }),
+                &mut reader,
+                &mut output,
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert!(result.output.contains("accepts only limit and cursor"));
+        assert!(String::from_utf8(output).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cosh_shell_evidence_list_commands_ignores_direction_hint() {
+        let core = make_core(MockProvider::new(vec![]));
+        let response = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"shell_evidence","result":{"llmContent":"ShellEvidenceCommandIndex\ncommand_id: cmd-1","returnDisplay":null,"metadata":{"action":"list_commands","scope":"current_ledger","limit":10,"next_cursor":null,"is_error":false}}}}}"#;
+        let input = format!("{response}\n");
+        let mut reader = BufReader::new(input.as_bytes()).lines();
+        let mut output = Vec::new();
+
+        let result = core
+            .handle_shell_evidence(
+                "call-evidence",
+                &serde_json::json!({
+                    "action":"list_commands",
+                    "direction":"tail",
+                    "limit":10
+                }),
+                &mut reader,
+                &mut output,
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.output);
+        assert!(result.output.contains("ShellEvidenceCommandIndex"));
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains(r#""action":"list_commands""#), "{output}");
+        assert!(output.contains(r#""limit":10"#), "{output}");
+        assert!(!output.contains(r#""direction""#), "{output}");
+    }
+
+    #[tokio::test]
+    async fn cosh_shell_evidence_rejects_invalid_limit_type() {
+        let core = make_core(MockProvider::new(vec![]));
+        let mut reader = empty_reader().await;
+        let mut output = Vec::new();
+
+        let result = core
+            .handle_shell_evidence(
+                "call-evidence",
+                &serde_json::json!({"action":"list_commands","limit":"many"}),
+                &mut reader,
+                &mut output,
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert!(result.output.contains("limit must be an integer"));
+        assert!(String::from_utf8(output).unwrap().is_empty());
     }
 
     #[tokio::test]
