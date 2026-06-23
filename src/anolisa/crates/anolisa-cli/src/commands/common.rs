@@ -247,12 +247,24 @@ pub(crate) fn build_adapter_manager(ctx: &CliContext) -> AdapterManager {
     let env = anolisa_env::EnvService::detect();
     let mut manager = AdapterManager::new(layout.clone(), Some(env.home), env.user);
 
+    // Two independent datadir-discovery mechanisms are layered here:
+    //
+    //   packaged_datadir_root()  — runtime probe: env override → exe-sibling
+    //                              `../share/anolisa/` → layout.datadir.
+    //                              Discovers wherever the *running binary's*
+    //                              packaged tree actually lives on disk.
+    //
+    //   layout.package_datadir() — FHS constant: `/usr/share/anolisa` (rebased
+    //                              under prefix). Always present in system mode
+    //                              so RPM-installed contracts are found even
+    //                              when the binary is at `/usr/local/bin/`.
+    //
+    // Both are added (deduped by push_primary_datadir_root / contains-check)
+    // because they cover different scenarios: the exe-sibling probe handles
+    // relocated installs; the FHS constant handles cross-install-method
+    // discovery (raw binary + RPM components).
+
     if ctx.install_mode == InstallMode::User {
-        // In user mode, the primary visible root is the user layout (set
-        // by `new`).  Add a system visible root so user-mode CLI can
-        // enable adapters for system-installed components.  The system
-        // root pairs with the system datadir + packaged datadir, which
-        // may differ (RPM uses /usr/share, CLI installs to /usr/local/share).
         let system_layout = FsLayout::system(ctx.prefix.clone());
         let mut system_datadirs = vec![system_layout.datadir.clone()];
         if let Some(packaged) = packaged::packaged_datadir_root(&system_layout)
@@ -260,19 +272,23 @@ pub(crate) fn build_adapter_manager(ctx: &CliContext) -> AdapterManager {
         {
             system_datadirs.push(packaged);
         }
+        if let Some(pkg_dd) = system_layout.package_datadir()
+            && !system_datadirs.contains(&pkg_dd)
+        {
+            system_datadirs.push(pkg_dd);
+        }
         manager.push_visible_root(VisibleRoot {
             state_dir: system_layout.state_dir,
             contract_datadir_roots: system_datadirs,
         });
     } else {
-        // In system mode, the primary visible root uses `layout.datadir`.
-        // If the packaged datadir differs (exe-sibling vs install prefix),
-        // add it to the primary root's contract datadirs so RPM-installed
-        // contracts at /usr/share/... are found.
         if let Some(packaged) = packaged::packaged_datadir_root(&layout)
             && packaged != layout.datadir
         {
             manager.push_primary_datadir_root(packaged);
+        }
+        if let Some(pkg_dd) = layout.package_datadir() {
+            manager.push_primary_datadir_root(pkg_dd);
         }
     }
 
@@ -282,6 +298,104 @@ pub(crate) fn build_adapter_manager(ctx: &CliContext) -> AdapterManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verify that `package_datadir()` is wired into the system-mode
+    /// manager: an RPM-installed contract under `{prefix}/usr/share/anolisa`
+    /// must be discoverable via scan when the primary datadir is
+    /// `{prefix}/usr/local/share/anolisa`.
+    ///
+    /// This exercises the same wiring path as `build_adapter_manager()`
+    /// for system mode without needing a full `CliContext`.
+    #[test]
+    fn system_mode_wiring_discovers_package_datadir_contract() {
+        use anolisa_core::adapter::manager::AdapterManager;
+        use anolisa_core::state::{
+            InstalledObject, InstalledState, ObjectKind, ObjectStatus, Ownership, SubscriptionScope,
+        };
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prefix = tmp.path().to_path_buf();
+        let layout = FsLayout::system(Some(prefix));
+
+        // Simulate the system-mode wiring from build_adapter_manager().
+        let mut manager = AdapterManager::new(
+            layout.clone(),
+            Some(tmp.path().to_path_buf()),
+            "test".into(),
+        );
+        if let Some(pkg_dd) = layout.package_datadir() {
+            manager.push_primary_datadir_root(pkg_dd);
+        }
+
+        // Seed state: sec-core adopted.
+        let state_dir = &layout.state_dir;
+        let mut state = InstalledState::default();
+        state.upsert_object(InstalledObject {
+            kind: ObjectKind::Component,
+            name: "sec-core".to_string(),
+            version: "0.1.0".to_string(),
+            status: ObjectStatus::Adopted,
+            manifest_digest: None,
+            distribution_source: None,
+            raw_package: None,
+            install_backend: Some("rpm".to_string()),
+            ownership: Some(Ownership::RpmObserved),
+            rpm_metadata: None,
+            installed_at: "2026-06-23T00:00:00Z".to_string(),
+            last_operation_id: None,
+            managed: false,
+            adopted: true,
+            subscription_scope: SubscriptionScope::None,
+            enabled_features: Vec::new(),
+            component_refs: Vec::new(),
+            files: Vec::new(),
+            external_modified_files: Vec::new(),
+            services: Vec::new(),
+            health: Vec::new(),
+        });
+        std::fs::create_dir_all(state_dir).expect("mkdir state");
+        state
+            .save(&state_dir.join("installed.toml"))
+            .expect("save state");
+
+        // Write contract under the package datadir (NOT local datadir).
+        let package_datadir = layout.package_datadir().expect("package_datadir");
+        let contract_dir = package_datadir.join("components").join("sec-core");
+        std::fs::create_dir_all(&contract_dir).expect("mkdir contract");
+        std::fs::write(
+            contract_dir.join("component.toml"),
+            r#"
+[component]
+name = "sec-core"
+version = "0.1.0"
+layer = "runtime"
+
+[[adapters]]
+framework = "openclaw"
+adapter_type = "plugin"
+plugin_id = "sec-core"
+dest = "{datadir}/adapters/sec-core/openclaw/"
+"#,
+        )
+        .expect("write contract");
+
+        let report = manager.scan().expect("scan");
+        let entry = report
+            .entries
+            .iter()
+            .find(|e| e.component == "sec-core" && e.framework == "openclaw");
+        assert!(
+            entry.is_some_and(|e| e.declared),
+            "system-mode wiring must discover contract under package_datadir; \
+             entries: {:?}, warnings: {:?}",
+            report
+                .entries
+                .iter()
+                .map(|e| (&e.component, &e.framework, e.declared))
+                .collect::<Vec<_>>(),
+            report.warnings,
+        );
+    }
 
     /// `object_status_str` must cover every variant of `ObjectStatus` and
     /// produce the exact wire vocabulary the spec promises. If a new variant

@@ -2862,13 +2862,19 @@ fn snapshot_datadir_contract(layout: &FsLayout, component: &str, command: &str) 
     let mut warnings: Vec<String> = Vec::new();
 
     // Build the set of datadir roots to search, deduped, in priority
-    // order.  packaged_datadir_root already covers env override →
-    // exe-sibling → layout.datadir, but its last probe is is_dir()
-    // gated.  We always include layout.datadir as the final fallback
-    // so the path appears in the "not found" warning.
+    // order. packaged_datadir_root covers env override → exe-sibling →
+    // layout.datadir, while package_datadir covers the FHS RPM/DEB root
+    // (`/usr/share/anolisa`, rebased under prefix). Always include
+    // layout.datadir as the final fallback so the path appears in the
+    // "not found" warning.
     let mut roots: Vec<PathBuf> = Vec::new();
     if let Some(packaged) = crate::packaged::packaged_datadir_root(layout) {
         roots.push(packaged);
+    }
+    if let Some(package_datadir) = layout.package_datadir()
+        && !roots.iter().any(|r| r == &package_datadir)
+    {
+        roots.push(package_datadir);
     }
     if !roots.iter().any(|r| r == &layout.datadir) {
         roots.push(layout.datadir.clone());
@@ -5361,6 +5367,56 @@ scope = "@anolisa"
         assert_eq!(
             content, contract,
             "snapshot must be a verbatim copy of the packaged contract"
+        );
+    }
+
+    /// Regression: RPM contracts live in the FHS package datadir
+    /// (`/usr/share/anolisa`, rebased under prefix), which is distinct
+    /// from the raw/system install datadir (`/usr/local/share/anolisa`).
+    #[test]
+    fn adopt_snapshots_fhs_package_datadir_contract() {
+        let _env_guard = crate::packaged::DataDirEnvGuard::clear();
+        let tmp = tempdir().expect("tempdir");
+        let prefix = tmp.path().join("sys");
+        let ctx = ctx_with_prefix(false, Some(prefix));
+        let layout = common::resolve_layout(&ctx);
+
+        let contract = component_manifest_toml("copilot-shell", "2.3.0", &["system"]);
+        let package_datadir = layout.package_datadir().expect("package datadir");
+        let contract_dir = package_datadir.join("components").join("copilot-shell");
+        std::fs::create_dir_all(&contract_dir).expect("mkdir package contract");
+        std::fs::write(contract_dir.join("component.toml"), &contract)
+            .expect("write package contract");
+
+        assert_ne!(
+            package_datadir, layout.datadir,
+            "test requires package datadir to differ from raw install datadir"
+        );
+
+        let q = FakeQuery {
+            installed: vec![(
+                "anolisa-copilot-shell".to_string(),
+                pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+            )],
+            origins: vec![("anolisa-copilot-shell".to_string(), "@System".to_string())],
+            ..Default::default()
+        };
+        let outcome =
+            handle_one_with_query("copilot-shell".to_string(), args("copilot-shell"), &ctx, &q)
+                .expect("adopt ok");
+
+        assert_eq!(outcome, InstallOutcome::Adopted);
+
+        let snapshot = common::installed_component_manifest_path(&layout, "copilot-shell", COMMAND)
+            .expect("snapshot path");
+        assert!(
+            snapshot.exists(),
+            "adopt must snapshot from FHS package datadir to {snapshot:?}"
+        );
+        let content = std::fs::read_to_string(&snapshot).expect("read snapshot");
+        assert_eq!(
+            content, contract,
+            "snapshot must be a verbatim copy of the FHS package contract"
         );
     }
 }

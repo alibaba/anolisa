@@ -2735,6 +2735,164 @@ source = "{datadir}/skills/code-scanner/"
         );
     }
 
+    /// System-mode manager discovers a package contract under the FHS
+    /// `/usr/share/anolisa` tree (simulated via temp dirs) when
+    /// `package_datadir` is added to `contract_datadir_roots`.
+    #[test]
+    fn system_manager_discovers_package_contract_under_usr_share() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let local_datadir = tmp.path().join("usr/local/share/anolisa");
+        let package_datadir = tmp.path().join("usr/share/anolisa");
+        let state_dir = tmp.path().join("var/lib/anolisa");
+
+        seed_installed_state(&state_dir, "sec-core", ObjectStatus::Adopted);
+
+        // Contract lives under the package datadir (simulates RPM install).
+        write_contract(&package_datadir, "sec-core");
+
+        // Adapter resource directory under the package datadir.
+        let adapter_root = package_datadir
+            .join("adapters")
+            .join("sec-core")
+            .join("openclaw");
+        std::fs::create_dir_all(&adapter_root).expect("mkdir adapter");
+        std::fs::write(adapter_root.join("plugin.json"), b"{}").expect("write");
+
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let mut manager =
+            AdapterManager::new(layout, Some(tmp.path().to_path_buf()), "test".into());
+        manager.state_path = state_dir.join("installed.toml");
+        manager.visible_roots = vec![VisibleRoot {
+            state_dir: state_dir.clone(),
+            contract_datadir_roots: vec![local_datadir.clone(), package_datadir.clone()],
+        }];
+        manager.all_datadir_roots = vec![local_datadir, package_datadir.clone()];
+
+        let report = manager.scan().expect("scan");
+        let entry = report
+            .entries
+            .iter()
+            .find(|e| e.component == "sec-core" && e.framework == "openclaw")
+            .expect("sec-core/openclaw should be discovered from package datadir");
+        assert!(
+            entry.declared,
+            "contract from package datadir must be declared"
+        );
+        assert!(
+            entry.resource_root.is_some(),
+            "resource root must be found under package datadir"
+        );
+
+        // Verify resolve_resource_root returns the package datadir path.
+        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let (manifest, scoped_roots) = manager
+            .load_visible_component_manifest("sec-core", &state)
+            .expect("load manifest");
+        let (resource_root, effective_datadir) = manager
+            .resolve_resource_root("sec-core", "openclaw", &manifest, &scoped_roots)
+            .expect("resolve resource root");
+        assert_eq!(
+            effective_datadir, package_datadir,
+            "effective datadir must be the package datadir"
+        );
+        assert!(
+            resource_root.starts_with(&package_datadir),
+            "resource root must be under the package datadir"
+        );
+    }
+
+    /// When a contract from the package datadir declares `dest` and
+    /// skill `source` using `{datadir}`, the placeholder must expand to
+    /// the package datadir — not the local-install datadir.
+    #[test]
+    fn package_contract_datadir_expands_skill_source() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let local_datadir = tmp.path().join("usr/local/share/anolisa");
+        let package_datadir = tmp.path().join("usr/share/anolisa");
+        let state_dir = tmp.path().join("var/lib/anolisa");
+
+        seed_installed_state(&state_dir, "sec-core", ObjectStatus::Adopted);
+
+        let contract = r#"
+[component]
+name = "sec-core"
+version = "0.1.0"
+layer = "runtime"
+
+[[adapters]]
+framework = "openclaw"
+adapter_type = "plugin"
+plugin_id = "sec-core"
+dest = "{datadir}/adapters/sec-core/openclaw/"
+
+[[adapters.openclaw.skills]]
+name = "code-scanner"
+source = "{datadir}/skills/code-scanner/"
+"#;
+        write_contract_with_content(&package_datadir, "sec-core", contract);
+
+        // Create the adapter and skill directories under the package datadir.
+        let adapter_root = package_datadir
+            .join("adapters")
+            .join("sec-core")
+            .join("openclaw");
+        std::fs::create_dir_all(&adapter_root).expect("mkdir adapter");
+        std::fs::write(adapter_root.join("plugin.json"), b"{}").expect("write");
+        let skill_source = package_datadir.join("skills").join("code-scanner");
+        std::fs::create_dir_all(&skill_source).expect("mkdir skill source");
+        std::fs::write(skill_source.join("manifest.json"), b"{}").expect("write skill");
+
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let mut manager = AdapterManager::new(
+            layout.clone(),
+            Some(tmp.path().to_path_buf()),
+            "test".into(),
+        );
+        manager.state_path = state_dir.join("installed.toml");
+        manager.visible_roots = vec![VisibleRoot {
+            state_dir: state_dir.clone(),
+            contract_datadir_roots: vec![local_datadir, package_datadir.clone()],
+        }];
+        manager.all_datadir_roots = vec![package_datadir.clone()];
+
+        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let (manifest, scoped_roots) = manager
+            .load_visible_component_manifest("sec-core", &state)
+            .expect("load manifest");
+
+        // resource root must be under the package datadir.
+        let (resource_root, effective_datadir) = manager
+            .resolve_resource_root("sec-core", "openclaw", &manifest, &scoped_roots)
+            .expect("resolve resource root");
+        assert_eq!(
+            resource_root, adapter_root,
+            "resource root must be the package datadir adapter path"
+        );
+        assert_eq!(
+            effective_datadir, package_datadir,
+            "effective datadir must be the package datadir"
+        );
+
+        // skill source must also resolve under the package datadir.
+        let skill_specs = declared_skills(&manifest, "openclaw");
+        let skills = resolve_skill_sources(
+            skill_specs,
+            &layout,
+            &effective_datadir,
+            "sec-core",
+            "openclaw",
+            &resource_root,
+        )
+        .expect("resolve skills");
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "code-scanner");
+        assert_eq!(
+            skills[0].source.as_ref(),
+            Some(&skill_source),
+            "skill source {{datadir}} must expand to the package datadir"
+        );
+    }
+
     /// User-mode scan includes system-installed component via system
     /// visible root (contract resolved from system datadir).
     #[test]
