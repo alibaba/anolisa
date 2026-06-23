@@ -24,18 +24,15 @@ use parking_lot::RwLock;
 use skillfs_core::{ParseConfig, store::SkillStore};
 use skillfs_fuse::{MountOptions, mount_background};
 
+mod common;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Returns `true` when FUSE is likely usable in this environment.
 fn fuse_available() -> bool {
-    Path::new("/dev/fuse").exists()
-        && std::process::Command::new("fusermount3")
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+    common::fuse_available()
 }
 
 /// Build a SharedSkillStore from the test fixture directory.
