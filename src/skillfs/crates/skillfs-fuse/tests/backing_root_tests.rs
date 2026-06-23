@@ -25,9 +25,9 @@ use std::time::Duration;
 use parking_lot::RwLock;
 use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
 use skillfs_fuse::security::{
-    ActivationReloadController, ActiveSkillResolver, ActiveTarget, InMemoryNotifyClient,
-    InMemoryProtocolEventWriter, LedgerBackingRoot, MutationKind, NotifyController, ReloadOutcome,
-    bootstrap_activation,
+    ActivationReloadController, ActiveSkillResolver, ActiveTarget, BackingRootError,
+    InMemoryNotifyClient, InMemoryProtocolEventWriter, LedgerBackingRoot, MutationKind,
+    NotifyController, ReloadOutcome, bootstrap_activation,
 };
 use skillfs_fuse::{MountConfig, MountHandle, MountOptions, mount_background_configured};
 
@@ -631,4 +631,149 @@ fn non_in_place_no_backing_root_preserves_behavior() {
     let source_entries = list_dir_names(fixture.source_path());
     assert!(source_entries.contains(&"alpha".to_string()));
     assert!(source_entries.contains(&"beta".to_string()));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Startup validation: backing root accessibility
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn backing_root_missing_fails_validation_in_place() {
+    use skillfs_fuse::security::SecurityConfig;
+
+    let config: SecurityConfig = toml::from_str(
+        r#"
+[activation]
+mode = "file"
+
+[ledger]
+backing_root = "/nonexistent/path/that/does/not/exist"
+"#,
+    )
+    .unwrap();
+
+    let result = config.validate_backing_root_accessible(true);
+    assert!(
+        result.is_err(),
+        "missing backing root in in-place mode with activation enabled must fail"
+    );
+}
+
+#[test]
+fn backing_root_not_configured_fails_validation_in_place() {
+    use skillfs_fuse::security::SecurityConfig;
+
+    let config: SecurityConfig = toml::from_str(
+        r#"
+[activation]
+mode = "file"
+"#,
+    )
+    .unwrap();
+
+    let result = config.validate_backing_root_accessible(true);
+    assert!(
+        result.is_err(),
+        "in-place + activation without backing_root configured must fail"
+    );
+}
+
+#[test]
+fn backing_root_not_needed_when_not_in_place() {
+    use skillfs_fuse::security::SecurityConfig;
+
+    let config: SecurityConfig = toml::from_str(
+        r#"
+[activation]
+mode = "file"
+
+[ledger]
+backing_root = "/nonexistent/path/that/does/not/exist"
+"#,
+    )
+    .unwrap();
+
+    let result = config.validate_backing_root_accessible(false);
+    assert!(
+        result.is_ok(),
+        "non-in-place mode should not require backing root validation"
+    );
+}
+
+#[test]
+fn backing_root_valid_passes_validation() {
+    use skillfs_fuse::security::SecurityConfig;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_str = format!(
+        r#"
+[activation]
+mode = "file"
+
+[ledger]
+backing_root = "{}"
+"#,
+        dir.path().display()
+    );
+    let config: SecurityConfig = toml::from_str(&config_str).unwrap();
+
+    let result = config.validate_backing_root_accessible(true);
+    assert!(
+        result.is_ok(),
+        "existing backing root directory must pass validation"
+    );
+}
+
+#[test]
+fn normal_mount_notify_uses_source_as_skilldir() {
+    let source = tempfile::tempdir().unwrap();
+    make_skill(source.path(), "alpha");
+
+    let client = Arc::new(InMemoryNotifyClient::new());
+    let ctrl = NotifyController::new(
+        client.clone(),
+        source.path().to_path_buf(),
+        Duration::from_millis(50),
+        5000,
+    );
+
+    ctrl.observe("alpha", Some(Path::new("SKILL.md")), MutationKind::Write);
+    ctrl.flush_for_testing();
+
+    let events = client.events();
+    assert_eq!(events.len(), 1);
+    let expected_dir = source.path().join("alpha").to_string_lossy().to_string();
+    assert_eq!(
+        events[0].skill_dir, expected_dir,
+        "normal mount (no backing root) must use source dir as skillDir"
+    );
+    ctrl.shutdown();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Propagation isolation (make-private)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn make_private_failed_error_display() {
+    let err = BackingRootError::MakePrivateFailed {
+        target: PathBuf::from("/tmp/backing"),
+        error: std::io::Error::from_raw_os_error(libc::EINVAL),
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("make-private"), "display: {msg}");
+    assert!(msg.contains("/tmp/backing"), "display: {msg}");
+    assert!(msg.contains("propagation"), "display: {msg}");
+}
+
+#[test]
+fn make_private_failed_error_source() {
+    let err = BackingRootError::MakePrivateFailed {
+        target: PathBuf::from("/tmp/backing"),
+        error: std::io::Error::from_raw_os_error(libc::EPERM),
+    };
+    assert!(
+        std::error::Error::source(&err).is_some(),
+        "MakePrivateFailed must expose its inner io::Error via source()"
+    );
 }

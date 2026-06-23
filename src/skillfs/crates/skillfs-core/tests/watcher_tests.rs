@@ -172,8 +172,11 @@ async fn test_watcher_detects_directory_creation() {
     let event = event.unwrap();
     assert!(event.is_some());
 
-    if let SkillEvent::DirCreated(path) = event.unwrap() {
-        assert!(path.to_string_lossy().contains("new-dir"));
+    match event.unwrap() {
+        SkillEvent::DirCreated(path) => {
+            assert!(path.to_string_lossy().contains("new-dir"));
+        }
+        _ => {} // Other events are ok too
     }
 }
 

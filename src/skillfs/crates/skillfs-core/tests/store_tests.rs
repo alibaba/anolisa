@@ -29,7 +29,6 @@ fn load_store(source_dir: &Path) -> (SkillStore, Vec<skillfs_core::store::LoadEr
 fn test_load_from_directory_with_valid_skills() {
     let source_dir = tempfile::tempdir().unwrap();
 
-    // Add multiple valid skills (skill name comes from file content, not directory name)
     add_skill_from_fixture(source_dir.path(), "web-search-dir", "valid_full.md");
     add_skill_from_fixture(source_dir.path(), "hello-world-dir", "valid_minimal.md");
     add_skill_from_fixture(source_dir.path(), "code-review-dir", "valid_no_params.md");
@@ -37,10 +36,10 @@ fn test_load_from_directory_with_valid_skills() {
     let (store, _errors) = load_store(source_dir.path());
 
     assert_eq!(store.len(), 3);
-    // Names come from SKILL.md frontmatter, not directory names
-    assert!(store.get("web-search").is_some());
-    assert!(store.get("hello-world").is_some());
-    assert!(store.get("code-review").is_some());
+    // Names come from directory basename, not SKILL.md frontmatter
+    assert!(store.get("web-search-dir").is_some());
+    assert!(store.get("hello-world-dir").is_some());
+    assert!(store.get("code-review-dir").is_some());
 }
 
 #[test]
@@ -67,7 +66,6 @@ fn test_load_from_directory_with_mixed_quality() {
 fn test_load_from_directory_ignores_hidden() {
     let source_dir = tempfile::tempdir().unwrap();
 
-    // Add a normal skill (name comes from file: hello-world)
     add_skill_from_fixture(source_dir.path(), "visible-dir", "valid_minimal.md");
 
     // Create a hidden directory with a skill
@@ -78,8 +76,8 @@ fn test_load_from_directory_ignores_hidden() {
     let (store, _errors) = load_store(source_dir.path());
 
     assert_eq!(store.len(), 1);
-    // Name comes from SKILL.md frontmatter
-    assert!(store.get("hello-world").is_some());
+    // Name comes from directory basename, not SKILL.md frontmatter
+    assert!(store.get("visible-dir").is_some());
     assert!(store.get("hidden").is_none());
 }
 
@@ -156,4 +154,68 @@ fn test_reload_updates_existing() {
         store.get("test-skill").unwrap().metadata.description,
         "Updated"
     );
+}
+
+// -----------------------------------------------------------------------
+// Canonical identity: directory basename overrides frontmatter name
+// -----------------------------------------------------------------------
+
+#[test]
+fn flat_layout_uses_directory_basename_not_frontmatter_name() {
+    let source_dir = tempfile::tempdir().unwrap();
+
+    add_skill(
+        source_dir.path(),
+        "tianqi-weather",
+        "---\nname: 天气\ndescription: weather skill\n---\n",
+    );
+
+    let (store, errors) = load_store(source_dir.path());
+
+    assert!(errors.is_empty());
+    assert_eq!(store.len(), 1);
+    let names = store.list();
+    assert!(
+        names.contains(&"tianqi-weather"),
+        "store key must be directory basename, got {names:?}"
+    );
+    assert!(
+        !names.contains(&"天气"),
+        "frontmatter name must NOT appear as store key, got {names:?}"
+    );
+    let entry = store.get("tianqi-weather").unwrap();
+    assert_eq!(entry.metadata.name, "tianqi-weather");
+    assert!(store.get("天气").is_none());
+}
+
+#[test]
+fn categorized_layout_uses_directory_basename_not_frontmatter_name() {
+    let source_dir = tempfile::tempdir().unwrap();
+
+    // Create a category directory with a skill inside
+    let cat_dir = source_dir.path().join("weather");
+    let skill_dir = cat_dir.join("tianqi-weather");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: 天气\ndescription: weather skill\n---\n",
+    )
+    .unwrap();
+
+    let (store, errors) = load_store(source_dir.path());
+
+    assert!(errors.is_empty());
+    assert_eq!(store.len(), 1);
+    let names = store.list();
+    assert!(
+        names.contains(&"tianqi-weather"),
+        "store key must be skill directory basename, got {names:?}"
+    );
+    assert!(
+        !names.contains(&"天气"),
+        "frontmatter name must NOT appear as store key, got {names:?}"
+    );
+    let entry = store.get("tianqi-weather").unwrap();
+    assert_eq!(entry.metadata.name, "tianqi-weather");
+    assert!(store.get("天气").is_none());
 }

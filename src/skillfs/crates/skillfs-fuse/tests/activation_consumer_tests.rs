@@ -750,3 +750,97 @@ fn fuse_mount_xattr_only_serves_snapshot() {
         .args(["-u", &mountpoint.path().to_string_lossy()])
         .output();
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests: canonical skill identity — directory basename, not frontmatter name
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn frontmatter_name_mismatch_uses_directory_basename_in_store_and_mount() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+
+    let mount = ActivationMount::new(
+        |src| {
+            let skill_dir = src.join("tianqi-weather");
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            std::fs::write(
+                skill_dir.join("SKILL.md"),
+                "---\nname: 天气\ndescription: weather\n---\n",
+            )
+            .unwrap();
+        },
+        |_src_root| None,
+    );
+
+    let listing = sorted_dir(&mount.skills_dir());
+    assert!(
+        listing.contains(&"tianqi-weather".to_string()),
+        "/skills/tianqi-weather must be visible, got {listing:?}"
+    );
+    assert!(
+        !listing.contains(&"天气".to_string()),
+        "/skills/天气 must NOT appear from frontmatter name, got {listing:?}"
+    );
+
+    assert!(mount.skill_md("tianqi-weather").exists());
+
+    let err = std::fs::metadata(mount.skill_dir("天气")).unwrap_err();
+    assert_eq!(
+        err.raw_os_error(),
+        Some(libc::ENOENT),
+        "expected ENOENT for frontmatter-name path, got {err:?}"
+    );
+}
+
+#[test]
+fn frontmatter_name_mismatch_with_activation_uses_directory_basename() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+
+    let mount = ActivationMount::new(
+        |src| {
+            let skill_dir = src.join("tianqi-weather");
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            std::fs::write(
+                skill_dir.join("SKILL.md"),
+                "---\nname: 天气\ndescription: weather\n---\n",
+            )
+            .unwrap();
+            write_snapshot(
+                src,
+                "tianqi-weather",
+                "v000001.snapshot",
+                "---\nname: tianqi-weather\ndescription: snapshot\n---\n",
+            );
+            write_activation(
+                src,
+                "tianqi-weather",
+                r#"{"schemaVersion": 1, "target": ".skill-meta/versions/v000001.snapshot"}"#,
+            );
+        },
+        |src_root| {
+            let resolver = ActiveSkillResolver::new(src_root);
+            let names = vec!["tianqi-weather".to_string()];
+            bootstrap_activation(src_root, &names, &resolver);
+            Some(Arc::new(resolver))
+        },
+    );
+
+    let listing = sorted_dir(&mount.skills_dir());
+    assert!(
+        listing.contains(&"tianqi-weather".to_string()),
+        "/skills/tianqi-weather must be visible with activation, got {listing:?}"
+    );
+    assert!(
+        !listing.contains(&"天气".to_string()),
+        "/skills/天气 must NOT appear, got {listing:?}"
+    );
+
+    let err = std::fs::metadata(mount.skill_dir("天气")).unwrap_err();
+    assert_eq!(err.raw_os_error(), Some(libc::ENOENT));
+}

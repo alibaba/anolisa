@@ -565,6 +565,62 @@ fn wrong_skill_name_response_does_not_update_resolver() {
     assert!(resolver.get("calculator").is_none());
 }
 
+/// Initial load with frontmatter `name: 天气` in directory
+/// `tianqi-weather` must use `tianqi-weather` as the canonical store
+/// key. The ledger/resolver operates on directory basenames; the
+/// frontmatter-declared name must never create a mount alias.
+#[test]
+fn initial_load_frontmatter_name_mismatch_uses_directory_basename() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+
+    let mount = LedgerMount::new(
+        |src| {
+            let skill_dir = src.join("tianqi-weather");
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            std::fs::write(
+                skill_dir.join("SKILL.md"),
+                "---\nname: 天气\ndescription: weather skill\n---\n",
+            )
+            .unwrap();
+            create_skill_dir(src, "always-visible");
+        },
+        |src_root| {
+            let r = ActiveSkillResolver::new(src_root.to_path_buf());
+            r.set_from_resolve(&current_result("tianqi-weather"))
+                .unwrap();
+            r.set_from_resolve(&current_result("always-visible"))
+                .unwrap();
+            Some(Arc::new(r))
+        },
+    );
+
+    let listing = sorted_dir(&mount.skills_dir());
+    assert!(
+        listing.contains(&"tianqi-weather".to_string()),
+        "/skills/tianqi-weather must be visible via canonical dir name, got {listing:?}"
+    );
+    assert!(
+        !listing.contains(&"天气".to_string()),
+        "/skills/天气 must NOT appear from frontmatter, got {listing:?}"
+    );
+    assert!(
+        listing.contains(&"always-visible".to_string()),
+        "unrelated skill must stay visible, got {listing:?}"
+    );
+
+    assert!(mount.skill_md("tianqi-weather").exists());
+
+    let err = std::fs::metadata(mount.skill_dir("天气")).unwrap_err();
+    assert_eq!(
+        err.raw_os_error(),
+        Some(libc::ENOENT),
+        "frontmatter-name path must return ENOENT"
+    );
+}
+
 /// A response with `skillName=weather`, `declaredName=calculator`,
 /// `decision=hidden` is the canonical N1/D1.6 use case: the provider
 /// observed a `SKILL.md` whose declared name disagrees with the

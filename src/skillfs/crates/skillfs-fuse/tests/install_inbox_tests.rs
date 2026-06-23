@@ -659,7 +659,7 @@ fn create_at_inbox_skill_slot_is_refused_and_does_not_create_source_file() {
     let inbox_slot = mountpoint.path().join(".skillfs-inbox/new-skill");
     let create_err = std::fs::OpenOptions::new()
         .create(true)
-        .truncate(false)
+        .truncate(true)
         .write(true)
         .open(&inbox_slot)
         .expect_err("touch at inbox skill slot must fail");

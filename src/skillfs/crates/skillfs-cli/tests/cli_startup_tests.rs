@@ -750,3 +750,326 @@ fn trusted_writer_exe_directory_fails_startup() {
         "expected not-a-regular-file error, got: {combined}"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// I2: Installer staging startup gates
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn staging_patterns_without_notify_source_fails_startup() {
+    let source = empty_source();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let config_dir = tempfile::tempdir().expect("config dir");
+    let config_path = config_dir.path().join("security.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+[activation]
+mode = "file"
+
+[install]
+staging_patterns = [".openclaw-install-stage-*"]
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--config",
+            config_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains(
+            "install.staging_patterns requires --notify-socket or --activation-events-log"
+        ),
+        "expected staging-requires-notify error, got: {combined}"
+    );
+}
+
+#[test]
+fn staging_patterns_with_activation_events_log_passes_gate() {
+    let source = empty_source();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let config_dir = tempfile::tempdir().expect("config dir");
+    let config_path = config_dir.path().join("security.toml");
+    let events_log = tempfile::NamedTempFile::new().expect("events log");
+    std::fs::write(
+        &config_path,
+        r#"
+[activation]
+mode = "file"
+
+[install]
+staging_patterns = [".openclaw-install-stage-*"]
+"#,
+    )
+    .unwrap();
+
+    let mut child = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--config",
+            config_path.to_str().unwrap(),
+            "--activation-events-log",
+            events_log.path().to_str().unwrap(),
+        ])
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn skillfs");
+
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let _ = child.kill();
+    let out = child.wait_with_output().expect("wait for child");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        !combined.contains("install.staging_patterns requires"),
+        "staging gate must not fire when --activation-events-log is set, got: {combined}"
+    );
+}
+
+#[test]
+fn staging_patterns_with_notify_socket_passes_gate() {
+    let source = empty_source();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let config_dir = tempfile::tempdir().expect("config dir");
+    let config_path = config_dir.path().join("security.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+[activation]
+mode = "file"
+
+[install]
+staging_patterns = [".openclaw-install-stage-*"]
+"#,
+    )
+    .unwrap();
+
+    let mut child = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--config",
+            config_path.to_str().unwrap(),
+            "--notify-socket",
+            "/tmp/nonexistent-daemon.sock",
+        ])
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn skillfs");
+
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let _ = child.kill();
+    let out = child.wait_with_output().expect("wait for child");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        !combined.contains("install.staging_patterns requires"),
+        "staging gate must not fire when --notify-socket is set, got: {combined}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Trusted peer control socket startup gates
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn control_socket_without_trusted_peer_exe_fails_startup() {
+    let source = empty_source();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--control-socket",
+            "/tmp/test-skillfs.sock",
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("--control-socket") && combined.contains("requires --trusted-peer-exe"),
+        "expected requires-trusted-peer-exe error, got: {combined}"
+    );
+}
+
+#[test]
+fn trusted_peer_exe_without_control_socket_fails_startup() {
+    let source = empty_source();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--trusted-peer-exe",
+            "/usr/bin/env",
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("--trusted-peer-exe") && combined.contains("requires --control-socket"),
+        "expected requires-control-socket error, got: {combined}"
+    );
+}
+
+#[test]
+fn control_socket_trusted_peer_exe_nonexistent_fails() {
+    let source = empty_source();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--control-socket",
+            "/tmp/test-skillfs.sock",
+            "--trusted-peer-exe",
+            "/nonexistent/binary/path",
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("--trusted-peer-exe"),
+        "expected trusted-peer-exe error, got: {combined}"
+    );
+}
+
+#[test]
+fn control_socket_trusted_peer_exe_directory_fails() {
+    let source = empty_source();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let dir = tempfile::tempdir().expect("directory for test");
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--control-socket",
+            "/tmp/test-skillfs.sock",
+            "--trusted-peer-exe",
+            dir.path().to_str().unwrap(),
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("not a regular file"),
+        "expected not-a-regular-file error, got: {combined}"
+    );
+}
+
+#[test]
+fn control_socket_created_and_accepts_ping() {
+    let source = empty_source();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let sock_dir = tempfile::tempdir().expect("socket dir");
+    let sock_path = sock_dir.path().join("skillfs.sock");
+
+    let mut child = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
+            "--control-socket",
+            sock_path.to_str().unwrap(),
+            "--trusted-peer-exe",
+            bin_path(),
+        ])
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn skillfs");
+
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    let socket_exists = sock_path.exists();
+
+    let ping_ok = if socket_exists {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixStream;
+        match UnixStream::connect(&sock_path) {
+            Ok(stream) => {
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                    .ok();
+                let req = r#"{"schemaVersion":"1","method":"ping"}"#;
+                writeln!(&stream, "{req}").ok();
+                (&stream).flush().ok();
+                let mut reader = BufReader::new(&stream);
+                let mut response = String::new();
+                match reader.read_line(&mut response) {
+                    Ok(_) => response.contains("\"ok\""),
+                    Err(_) => false,
+                }
+            }
+            Err(_) => false,
+        }
+    } else {
+        false
+    };
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    if socket_exists {
+        assert!(
+            ping_ok,
+            "control socket was created but ping failed — server not running"
+        );
+    } else {
+        eprintln!("SKIP: control socket not created (FUSE mount likely unavailable)");
+    }
+}

@@ -919,10 +919,10 @@ fn resolver_switch_old_fd_pin_new_open_reads_new_target() {
 // Regression: production notify coverage gaps
 // ---------------------------------------------------------------------------
 
-/// P1 regression: inbox `.install-complete` must trigger NotifyController
-/// in addition to RefreshController. Without the fix,
-/// `inbox_observe_install_complete` only bridged to refresh_controller and
-/// `activation-mode=file` production paths (which rely on
+/// P1 regression: inbox `.install-complete` sentinel must trigger
+/// NotifyController in addition to RefreshController. Without the fix,
+/// `inbox_observe_install_complete` only bridged to refresh_controller
+/// and `activation-mode=file` production paths (which rely on
 /// notify_controller) never received the mutation.
 #[test]
 fn inbox_install_complete_triggers_notify_controller() {
@@ -940,15 +940,21 @@ fn inbox_install_complete_triggers_notify_controller() {
     fixture.wait_and_assert_no_notify(&client);
 
     // Write the `.install-complete` sentinel — MUST trigger notify.
+    // The event_kind will be a real mutation ("write" or "create"),
+    // not "install-complete" which is an internal flush concept only.
     std::fs::write(inbox_skill.join(".install-complete"), b"").unwrap();
     fixture.wait_for_notify(1, &client);
 
     let events = client.events();
     assert!(
         !events.is_empty(),
-        "inbox .install-complete must trigger notify_controller"
+        "inbox .install-complete sentinel must trigger notify_controller"
     );
     assert_eq!(events[0].skill_name, "alpha");
+    assert_ne!(
+        events[0].event_kind, "install-complete",
+        "protocol events must use real mutation kinds, not install-complete"
+    );
 }
 
 /// P2a regression: `open(O_TRUNC)` on SKILL.md must trigger notify.

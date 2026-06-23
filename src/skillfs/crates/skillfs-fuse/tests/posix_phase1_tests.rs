@@ -950,7 +950,7 @@ fn test_skill_meta_create_returns_eacces() {
 
     let err = std::fs::OpenOptions::new()
         .create(true)
-        .truncate(false)
+        .truncate(true)
         .write(true)
         .open(&target)
         .expect_err("create under .skill-meta must fail");
@@ -1293,8 +1293,8 @@ fn test_non_meta_passthrough_mutation_still_succeeds() {
     {
         let mut f = std::fs::OpenOptions::new()
             .create(true)
-            .truncate(true)
             .write(true)
+            .truncate(true)
             .open(&normal)
             .expect("create regular.txt");
         f.write_all(b"hello").expect("write regular.txt");
