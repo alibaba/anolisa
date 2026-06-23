@@ -89,7 +89,7 @@ int BPF_PROG(trace_udp_sendmsg, struct sock *sk, struct msghdr *msg, size_t size
     __u32 tid = (__u32)pid_tgid;
 
     // Skip processes already being traced - no need to discover them again
-    if (bpf_map_lookup_elem(&traced_processes, &pid))
+    if (is_pid_traced(pid))
         return 0;
 
     struct dns_buf_info buf = get_dns_buf_info(msg);
@@ -130,7 +130,7 @@ int BPF_PROG(trace_udp_sendmsg, struct sock *sk, struct msghdr *msg, size_t size
     // Fill event metadata
     event->source = EVENT_SOURCE_UDPDNS;
     event->timestamp_ns = bpf_ktime_get_ns();
-    event->pid = pid;
+    event->pid = current_ns_pid();
     event->tid = tid;
     event->uid = bpf_get_current_uid_gid();
     event->payload_len = read_len;

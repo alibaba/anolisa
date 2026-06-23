@@ -207,7 +207,7 @@ static __always_inline int emit_tcp_event_buf(
     data->source = EVENT_SOURCE_SSL;  // reuse SSL source for seamless pipeline
     data->timestamp_ns = now;
     data->delta_ns = (start_ns > 0) ? (now - start_ns) : 0;
-    data->pid = (u32)(pid_tgid >> 32);
+    data->pid = current_ns_pid();
     data->tid = (u32)pid_tgid;
     data->uid = bpf_get_current_uid_gid();
     data->len = data_len;
@@ -306,7 +306,7 @@ int BPF_PROG(trace_tcp_sendmsg, struct sock *sk, struct msghdr *msg, size_t size
     data->source = EVENT_SOURCE_SSL;
     data->timestamp_ns = now;
     data->delta_ns = 0;
-    data->pid = (u32)(pid_tgid >> 32);
+    data->pid = current_ns_pid();
     data->tid = (u32)pid_tgid;
     data->uid = bpf_get_current_uid_gid();
     data->len = (u32)size;
