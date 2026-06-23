@@ -36,8 +36,41 @@ benchmark-prompt-scan: ## Run prompt-scan benchmark (Chinese dataset)
 	@echo "📊 Running prompt-scan benchmark (mode=$(PROMPT_SCAN_MODE))..."
 	@uv run --project agent-sec-cli python3 benchmarks/prompt-scan/scripts/run_benchmark.py --mode $(PROMPT_SCAN_MODE)
 
+# ----- L4 multi-turn intent benchmark -----
+# Override knobs (defaults run the full 1200+1200 test split):
+#   MULTITURN_LIMIT=N         cap each split to N convs (0 = full)
+#   MULTITURN_CONCURRENCY=K   parallel conversations (default 4)
+#   MULTITURN_THRESHOLD=T     p_harmful BLOCK threshold (default 0.55)
+#   MULTITURN_MODEL=name      Ollama model name (default 'warden')
+# Quick smoke test:  make benchmark-prompt-scan-multiturn-smoke
+MULTITURN_LIMIT ?= 0
+MULTITURN_CONCURRENCY ?= 4
+MULTITURN_THRESHOLD ?= 0.55
+MULTITURN_MODEL ?=
+MULTITURN_SMOKE_LIMIT ?= 50
+
+.PHONY: benchmark-prompt-scan-multiturn
+benchmark-prompt-scan-multiturn: ## Run L4 multi-turn intent benchmark (requires Ollama 'warden')
+	@echo "📊 Running multi-turn intent benchmark (limit=$(MULTITURN_LIMIT) concurrency=$(MULTITURN_CONCURRENCY) threshold=$(MULTITURN_THRESHOLD))..."
+	@echo "    NOTE: requires local Ollama with the 'warden' model loaded."
+	@uv run --project agent-sec-cli python3 benchmarks/prompt-scan/scripts/run_benchmark_multiturn.py \
+		--limit $(MULTITURN_LIMIT) \
+		--concurrency $(MULTITURN_CONCURRENCY) \
+		--threshold $(MULTITURN_THRESHOLD) \
+		$(if $(MULTITURN_MODEL),--model $(MULTITURN_MODEL))
+
+.PHONY: benchmark-prompt-scan-multiturn-smoke
+benchmark-prompt-scan-multiturn-smoke: ## Quick smoke test ($(MULTITURN_SMOKE_LIMIT) convs/side, shuffled, ~3 min)
+	@echo "📊 Running multi-turn intent benchmark SMOKE ($(MULTITURN_SMOKE_LIMIT) convs/side, seed-shuffled)..."
+	@uv run --project agent-sec-cli python3 benchmarks/prompt-scan/scripts/run_benchmark_multiturn.py \
+		--limit $(MULTITURN_SMOKE_LIMIT) \
+		--seed-shuffle \
+		--concurrency $(MULTITURN_CONCURRENCY) \
+		--threshold $(MULTITURN_THRESHOLD) \
+		$(if $(MULTITURN_MODEL),--model $(MULTITURN_MODEL))
+
 .PHONY: benchmark
-benchmark: benchmark-prompt-scan ## Run all benchmarks (currently: prompt-scan only)
+benchmark: benchmark-prompt-scan ## Run benchmarks (multiturn needs Ollama, run separately: make benchmark-prompt-scan-multiturn)
 
 # =============================================================================
 # TEST
