@@ -960,6 +960,9 @@ fn control_socket_trusted_peer_exe_nonexistent_fails() {
             "mount",
             source.path().to_str().unwrap(),
             mount.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
             "--control-socket",
             "/tmp/test-skillfs.sock",
             "--trusted-peer-exe",
@@ -989,6 +992,9 @@ fn control_socket_trusted_peer_exe_directory_fails() {
             "mount",
             source.path().to_str().unwrap(),
             mount.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
             "--control-socket",
             "/tmp/test-skillfs.sock",
             "--trusted-peer-exe",
@@ -1005,6 +1011,96 @@ fn control_socket_trusted_peer_exe_directory_fails() {
     assert!(
         combined.contains("not a regular file"),
         "expected not-a-regular-file error, got: {combined}"
+    );
+}
+
+#[test]
+fn control_socket_without_security_fails_startup() {
+    let source = empty_source();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--control-socket",
+            "/tmp/test-skillfs.sock",
+            "--trusted-peer-exe",
+            bin_path(),
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("--control-socket requires --security"),
+        "expected requires-security error, got: {combined}"
+    );
+}
+
+#[test]
+fn control_socket_without_activation_mode_file_fails_startup() {
+    let source = empty_source();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--control-socket",
+            "/tmp/test-skillfs.sock",
+            "--trusted-peer-exe",
+            bin_path(),
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("--control-socket requires --activation-mode file"),
+        "expected requires-activation-mode-file error, got: {combined}"
+    );
+}
+
+#[test]
+fn control_socket_with_decision_command_fails_startup() {
+    let source = empty_source();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
+            "--decision-command",
+            "agent-sec-cli skill-ledger",
+            "--control-socket",
+            "/tmp/test-skillfs.sock",
+            "--trusted-peer-exe",
+            bin_path(),
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("mutually exclusive"),
+        "expected mutually-exclusive error, got: {combined}"
     );
 }
 
@@ -1037,22 +1133,27 @@ fn control_socket_created_and_accepts_ping() {
 
     let socket_exists = sock_path.exists();
 
-    let ping_ok = if socket_exists {
-        use std::io::{BufRead, BufReader, Write};
+    let server_responded = if socket_exists {
+        use std::io::{BufRead, BufReader};
         use std::os::unix::net::UnixStream;
         match UnixStream::connect(&sock_path) {
             Ok(stream) => {
                 stream
                     .set_read_timeout(Some(std::time::Duration::from_secs(3)))
                     .ok();
-                let req = r#"{"schemaVersion":"1","method":"ping"}"#;
-                writeln!(&stream, "{req}").ok();
-                (&stream).flush().ok();
+                // The server verifies peer identity before reading the
+                // request, so the test binary may be rejected with
+                // permission_denied. Either a pong or a permission_denied
+                // response proves the server is alive.
                 let mut reader = BufReader::new(&stream);
                 let mut response = String::new();
                 match reader.read_line(&mut response) {
-                    Ok(_) => response.contains("\"ok\""),
-                    Err(_) => false,
+                    Ok(n) if n > 0 => {
+                        response.contains("\"schemaVersion\"")
+                            && (response.contains("\"pong\":true")
+                                || response.contains("\"permission_denied\""))
+                    }
+                    _ => false,
                 }
             }
             Err(_) => false,
@@ -1066,8 +1167,8 @@ fn control_socket_created_and_accepts_ping() {
 
     if socket_exists {
         assert!(
-            ping_ok,
-            "control socket was created but ping failed — server not running"
+            server_responded,
+            "control socket was created but server did not respond"
         );
     } else {
         eprintln!("SKIP: control socket not created (FUSE mount likely unavailable)");

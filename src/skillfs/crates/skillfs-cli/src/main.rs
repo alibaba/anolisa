@@ -557,6 +557,47 @@ async fn cmd_mount(
                 .into(),
         );
     }
+
+    // Control socket gates — mutual requirement first, then semantic
+    // gates. Must fire before the generic security source check so the
+    // error message names the actual problem.
+    match (&control_socket, &trusted_peer_exe) {
+        (Some(p), None) => {
+            return Err(format!(
+                "--control-socket {} requires --trusted-peer-exe",
+                p.display()
+            )
+            .into());
+        }
+        (None, Some(p)) => {
+            return Err(format!(
+                "--trusted-peer-exe {} requires --control-socket",
+                p.display()
+            )
+            .into());
+        }
+        _ => {}
+    }
+    if control_socket.is_some() {
+        if !security {
+            return Err("--control-socket requires --security (the control socket \
+                 writes activation state through the active resolver)"
+                .into());
+        }
+        if activation_mode != ActivationMode::File {
+            return Err("--control-socket requires --activation-mode file (the \
+                 control socket writes activation files consumed by the \
+                 file-based activation path)"
+                .into());
+        }
+        if parsed_decision_command.is_some() {
+            return Err("--control-socket and --decision-command are mutually \
+                 exclusive (control socket is the daemon-driven activation \
+                 path; --decision-command is the CLI-driven refresh path)"
+                .into());
+        }
+    }
+
     if security && activation_mode == ActivationMode::Off && parsed_decision_command.is_none() {
         return Err(
             "--security requires --decision-command <COMMAND> or --activation-mode file".into(),
@@ -1333,8 +1374,8 @@ async fn cmd_mount(
             .and_then(|c| c.control_socket_trusted_peer_gid())
     });
 
-    // Startup validation: --control-socket requires --trusted-peer-exe
-    // and vice versa.
+    // Re-check mutual requirement after config merge (the early gate
+    // only covers CLI args; config-file values are merged above).
     match (&control_socket, &trusted_peer_exe) {
         (Some(p), None) => {
             return Err(format!(
