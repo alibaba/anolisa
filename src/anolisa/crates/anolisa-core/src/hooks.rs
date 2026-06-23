@@ -11,7 +11,9 @@
 //!      outside ANOLISA's owned roots (`/etc/passwd-pre-enable.sh`, a
 //!      symlink-into-`/etc`, etc.) is refused without ever running.
 //!      Components cannot opt out of this guard — third-party packages
-//!      ship hooks under `<datadir>/hooks/<component>/...` and that's it.
+//!      ship hooks under `<datadir>/hooks/<component>/...`, declare them in
+//!      `[[component.hooks]]`, and the runner resolves those declarations
+//!      via [`resolve_manifest_hooks`] before spawning.
 //!   2. **Execution**: the script runs as a child process with a bounded
 //!      timeout. Exit 0 = success, anything else = failure. The runner
 //!      captures stderr (tail) + duration so callers can include the
@@ -36,7 +38,9 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::adapter::{AdapterError, expand_layout_placeholders};
 use crate::central_log::{CentralLog, LogKind, LogRecord, Severity};
+use crate::manifest::ManifestHookSpec;
 use crate::path_safety::{PathBoundaryError, validate_owned_path};
 use anolisa_platform::fs_layout::FsLayout;
 
@@ -489,81 +493,46 @@ pub struct HookRunResult {
     pub hard_failure: Option<HookOutcome>,
 }
 
-/// Convention for where a component ships its phase scripts. The runner
-/// only ever looks at `<datadir>/hooks/<component>/<phase>.sh` —
-/// components that don't ship a script for a phase get a silent no-op
-/// (the discovery returns `None`, the executor never calls `run_hook`,
-/// so no log line lands in the central log for that combination).
+/// Resolve a component's contract-declared hooks for one `phase` into
+/// executor inputs.
 ///
-/// This is the alpha contract: hooks are 100% manifest-free and live on
-/// disk under an ANOLISA-owned path. A component shipping a hook is the
-/// same delivery shape as shipping a binary — the install runner drops
-/// the file under `<datadir>/hooks/<component>/...`, and the lifecycle
-/// runner picks it up by phase. Path-safety is enforced by `run_hook`
-/// regardless, so a forged absolute path here is still refused before
-/// spawn.
-pub fn discover_component_phase_hook(
+/// Hooks are **contract-driven**: a component declares them in
+/// `[[component.hooks]]` (parsed into [`ManifestHookSpec`]), and the
+/// installer persists that contract verbatim so the uninstall side can read
+/// the real `script`/`strict`/`timeout` back. This is what lets a component
+/// like ws-ckpt mark its `pre-uninstall` recover `strict = false` (a failed
+/// recover warns instead of rolling back the uninstall) — a guarantee the
+/// old `<phase>.sh` filename convention could not express.
+///
+/// `script` is an unexpanded layout-template path
+/// (e.g. `{datadir}/hooks/ws-ckpt/pre-uninstall.sh`); it is expanded with
+/// the same [`expand_layout_placeholders`] machinery used for adapters,
+/// with `{component}` bound so per-component paths resolve. Path-safety is
+/// enforced downstream by [`run_hook`] regardless, so an expanded path that
+/// escapes ANOLISA's owned roots is still refused before spawn.
+///
+/// # Errors
+///
+/// Returns [`AdapterError::UnknownPlaceholder`] when a `script` template
+/// references a placeholder that is neither a layout field nor `{component}`.
+pub fn resolve_manifest_hooks(
+    manifest_hooks: &[ManifestHookSpec],
     layout: &FsLayout,
     component: &str,
     phase: HookPhase,
-) -> Option<HookSpec> {
-    let script = layout
-        .datadir
-        .join("hooks")
-        .join(component)
-        .join(format!("{}.sh", phase.as_str()));
-    if !script.exists() {
-        return None;
+) -> Result<Vec<HookSpec>, AdapterError> {
+    let mut specs = Vec::new();
+    for h in manifest_hooks.iter().filter(|h| h.phase == phase) {
+        let script = expand_layout_placeholders(&h.script, layout, &[("component", component)])?;
+        specs.push(HookSpec {
+            component: component.to_string(),
+            phase,
+            script,
+            timeout_secs: h.timeout_secs,
+            strict: h.strict,
+        });
     }
-    Some(HookSpec::new(component, phase, script))
-}
-
-/// Convenience over `run_hooks` that handles the common "for each
-/// component in this op, run its `<phase>.sh` if present" pattern. Used
-/// by the lifecycle executors (`install_runner`,
-/// `lifecycle::execute_uninstall_or_purge`) so all three verbs share
-/// hook semantics: same discovery convention, same path-safety guard,
-/// same central-log shape, same warning aggregation.
-///
-/// Components with no script for `phase` produce no log line and no
-/// warning — they are simply absent from `outcomes`.
-///
-/// `strict` controls the failure surface. `pre_*` phases pass `true` so
-/// a failed hook short-circuits the parent verb (the runner stops at
-/// the first hard failure and `HookRunResult.hard_failure` is set). The
-/// caller is expected to translate `hard_failure` into a verb-level
-/// error and append a `failed` audit record. `post_*` phases pass
-/// `false` so a failed hook is recorded as a warning but does not
-/// roll back work the verb has already committed.
-// Keep lifecycle/audit dimensions explicit at call sites; hiding them in
-// a bag struct makes hook phase boundaries harder to audit.
-#[allow(clippy::too_many_arguments)]
-pub fn run_phase_hooks(
-    layout: &FsLayout,
-    components: &[String],
-    phase: HookPhase,
-    log: Option<&CentralLog>,
-    operation_id: &str,
-    actor: &str,
-    install_mode: &str,
-    strict: bool,
-) -> HookRunResult {
-    let specs: Vec<HookSpec> = components
-        .iter()
-        .filter_map(|c| discover_component_phase_hook(layout, c, phase))
-        .map(|mut s| {
-            s.strict = strict;
-            s
-        })
-        .collect();
-    if specs.is_empty() {
-        return HookRunResult {
-            outcomes: Vec::new(),
-            warnings: Vec::new(),
-            hard_failure: None,
-        };
-    }
-    run_hooks(&specs, layout, log, operation_id, actor, install_mode)
+    Ok(specs)
 }
 
 #[cfg(test)]
@@ -756,5 +725,72 @@ mod tests {
             outcome.duration < Duration::from_secs(5),
             "should not wait full 5s"
         );
+    }
+
+    #[test]
+    fn resolve_manifest_hooks_expands_path_and_carries_contract_fields() {
+        let dir = tempdir().expect("tmpdir");
+        let layout = layout_with(dir.path());
+        let manifest_hooks = vec![ManifestHookSpec {
+            phase: HookPhase::PreUninstall,
+            script: "{datadir}/hooks/ws-ckpt/pre-uninstall.sh".to_string(),
+            timeout_secs: 45,
+            strict: false,
+        }];
+        let specs =
+            resolve_manifest_hooks(&manifest_hooks, &layout, "ws-ckpt", HookPhase::PreUninstall)
+                .expect("resolve ok");
+        assert_eq!(specs.len(), 1);
+        let spec = &specs[0];
+        assert_eq!(
+            spec.script,
+            layout.datadir.join("hooks/ws-ckpt/pre-uninstall.sh"),
+        );
+        assert_eq!(spec.component, "ws-ckpt");
+        assert_eq!(spec.phase, HookPhase::PreUninstall);
+        assert_eq!(spec.timeout_secs, 45);
+        // ws-ckpt's recover MUST stay non-strict so a failed recover warns
+        // instead of rolling back the uninstall.
+        assert!(!spec.strict);
+    }
+
+    #[test]
+    fn resolve_manifest_hooks_filters_by_phase() {
+        let dir = tempdir().expect("tmpdir");
+        let layout = layout_with(dir.path());
+        let manifest_hooks = vec![
+            ManifestHookSpec {
+                phase: HookPhase::PreUninstall,
+                script: "{datadir}/hooks/c/pre-uninstall.sh".to_string(),
+                timeout_secs: 30,
+                strict: true,
+            },
+            ManifestHookSpec {
+                phase: HookPhase::PostUninstall,
+                script: "{datadir}/hooks/c/post-uninstall.sh".to_string(),
+                timeout_secs: 30,
+                strict: false,
+            },
+        ];
+        let pre = resolve_manifest_hooks(&manifest_hooks, &layout, "c", HookPhase::PreUninstall)
+            .expect("resolve ok");
+        assert_eq!(pre.len(), 1);
+        assert_eq!(pre[0].phase, HookPhase::PreUninstall);
+        assert!(pre[0].strict);
+    }
+
+    #[test]
+    fn resolve_manifest_hooks_rejects_unknown_placeholder() {
+        let dir = tempdir().expect("tmpdir");
+        let layout = layout_with(dir.path());
+        let manifest_hooks = vec![ManifestHookSpec {
+            phase: HookPhase::PreUninstall,
+            script: "{nope}/pre-uninstall.sh".to_string(),
+            timeout_secs: 30,
+            strict: false,
+        }];
+        let err = resolve_manifest_hooks(&manifest_hooks, &layout, "c", HookPhase::PreUninstall)
+            .expect_err("unknown placeholder must error");
+        assert!(matches!(err, AdapterError::UnknownPlaceholder { .. }));
     }
 }

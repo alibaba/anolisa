@@ -6,6 +6,7 @@
 
 pub mod adapter;
 pub mod backup;
+pub mod capability;
 pub mod catalog;
 pub mod central_log;
 pub mod component;
@@ -44,6 +45,11 @@ pub use adapter::manager::{
 pub use adapter::registry::DriverRegistry;
 pub use adapter::{AdapterError, DetectResult, detect_framework, expand_layout_placeholders};
 pub use backup::{BackupEntry, BackupSet};
+pub use capability::{
+    CapabilityError, CapabilityManager, CapabilityOutcome, CapabilityRequest, CapabilityRunOutcome,
+    FakeCapabilityManager, NotSupportedCapabilityManager, SetcapManager, apply_capabilities,
+    for_install_mode as capability_for_install_mode,
+};
 pub use catalog::{Catalog, CatalogError, CatalogLayers};
 pub use central_log::{
     CentralLog, CentralLogError, LogFilter, LogKind, LogRecord, LogStatus, Severity,
@@ -57,8 +63,8 @@ pub use download::{DownloadCache, DownloadError, DownloadedArtifact};
 pub use feature_flags::FeatureStore;
 pub use health::{CheckEnv, CheckOutcome, CheckSpec, CheckStatus, Protocol, run_check};
 pub use hooks::{
-    HookOutcome, HookPhase, HookRunResult, HookSkipReason, HookSpec, discover_component_phase_hook,
-    run_hook, run_hooks, run_phase_hooks,
+    HookOutcome, HookPhase, HookRunResult, HookSkipReason, HookSpec, resolve_manifest_hooks,
+    run_hook, run_hooks,
 };
 pub use install_runner::{
     InstallError, InstallOutcome, InstallRunner, InstalledFile, ResolvedInstallFile,
@@ -68,11 +74,13 @@ pub use integrity::{IntegrityStatus, check_owned_file};
 pub use lifecycle::{
     ComponentLifecyclePlan, FileAction, FileActionKind, FileOwner as LifecycleFileOwner,
     HookAction, LifecycleError, LifecycleMode, LifecycleOperation, LifecycleOutcome,
-    LifecyclePhase, LifecyclePlan, LifecycleTargetKind, RiskLevel, ServiceAction,
-    ServiceActionKind, execute_plan,
+    LifecyclePhase, LifecyclePlan, LifecycleTargetKind, ResolvedLifecycleHooks, RiskLevel,
+    ServiceAction, ServiceActionKind, execute_plan,
 };
 pub use lock::{InstallLock, LockError};
-pub use manifest::{AdapterSpec, ComponentManifest, DistributionSelector, FileKind, HealthSpec};
+pub use manifest::{
+    AdapterSpec, ComponentManifest, DistributionSelector, FileKind, HealthSpec, ServiceScope,
+};
 pub use metadata::MetadataClient;
 pub use register::{
     ConsentState, HistoryAction, HistoryEntry, ProductType, RegisterRecord, RegisterSource,
@@ -87,8 +95,9 @@ pub use self_update::{
     check_update, update_url,
 };
 pub use service::{
-    FakeServiceManager, NotSupportedServiceManager, ServiceError, ServiceManager, ServiceOp,
-    ServiceOutcome, ServiceState, SystemdServiceManager,
+    DeactivationOutcome, FakeServiceManager, NotSupportedServiceManager, ServiceActivation,
+    ServiceError, ServiceManager, ServiceOp, ServiceOutcome, ServiceRequest, ServiceRunOutcome,
+    ServiceState, SystemdServiceManager, apply_services, deactivate_services,
     for_install_mode as service_for_install_mode,
 };
 pub use state::{

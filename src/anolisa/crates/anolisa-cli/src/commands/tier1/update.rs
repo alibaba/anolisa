@@ -47,6 +47,10 @@ use anolisa_core::transaction::{
     RollbackAction, RollbackActionKind, Transaction, TransactionOutcomeStatus, TransactionStep,
     TransactionStepStatus,
 };
+use anolisa_core::{
+    CapabilityRunOutcome, ServiceActivation, ServiceRequest, ServiceRunOutcome, apply_capabilities,
+    apply_services, capability_for_install_mode, service_for_install_mode,
+};
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError};
 use anolisa_platform::pkg_transaction::{PackageTransaction, PackageTransactionError};
@@ -436,7 +440,7 @@ fn update_raw_component(
     // failure must leave the current install untouched.
     let prepared =
         prepare_raw_execution(ctx, &layout, resolution).map_err(|e| e.with_command(command))?;
-    let operation_id = execute_raw_update(
+    let update_result = execute_raw_update(
         ctx,
         &layout,
         component,
@@ -445,6 +449,8 @@ fn update_raw_component(
         command,
         &warnings,
     )?;
+    let mut warnings = warnings;
+    warnings.extend(update_result.warnings);
 
     let payload = ComponentUpdatePayload {
         component: component.to_string(),
@@ -457,17 +463,53 @@ fn update_raw_component(
         updated: true,
         dry_run: false,
         available_candidates: Vec::new(),
-        operation_id: Some(operation_id),
+        operation_id: Some(update_result.operation_id),
         warnings,
     };
     render_component_update(ctx, &payload);
     Ok(())
 }
 
+fn raw_update_service_refs(
+    ctx: &CliContext,
+    services: &[ServiceRequest],
+    service_run: Option<&ServiceRunOutcome>,
+) -> Vec<ServiceRef> {
+    let manager = match ctx.install_mode {
+        crate::context::InstallMode::System => "systemd",
+        crate::context::InstallMode::User => "systemd-user",
+    };
+    services
+        .iter()
+        .map(|svc| ServiceRef {
+            name: svc.unit.clone(),
+            manager: manager.to_string(),
+            restartable: true,
+            enabled: service_run.is_some_and(|run| run.enabled_units.contains(&svc.unit)),
+        })
+        .collect()
+}
+
+struct RawUpdateResult {
+    operation_id: String,
+    warnings: Vec<String>,
+}
+
+fn committed_capability_warnings(outcome: CapabilityRunOutcome) -> Vec<String> {
+    let mut warnings = outcome.warnings;
+    if let Some(reason) = outcome.aborted {
+        warnings.push(format!(
+            "required capability application failed after update commit: {reason}"
+        ));
+    }
+    warnings
+}
+
 /// Apply a prepared raw update transactionally: back up and remove the old
 /// owned files, install the new artifact, rewrite the component manifest, and
 /// refresh state — rolling everything back to the previous version on failure.
-/// Returns the operation id recorded against the refreshed state.
+/// Returns the operation id recorded against the refreshed state plus
+/// committed best-effort warnings.
 ///
 /// `from_version` is the version the lock-free resolve planned against. Because
 /// resolve + download ran outside the lock, this aborts (before any mutation)
@@ -483,12 +525,13 @@ fn execute_raw_update(
     prepared: PreparedInstall,
     command: &str,
     warnings: &[String],
-) -> Result<String, CliError> {
+) -> Result<RawUpdateResult, CliError> {
     let PreparedInstall {
         resolution,
         artifact_path,
         files,
         services,
+        capabilities,
         manifest_toml,
     } = prepared;
     let started_at = now_iso8601();
@@ -748,21 +791,11 @@ fn execute_raw_update(
     obj.last_operation_id = Some(operation_id.clone());
     // A clean replacement matches a fresh install of the new version: services
     // come from the new manifest, status returns to Installed, and stale health
-    // / external-modification rows from the old version no longer apply. The
-    // ServiceRef shaping mirrors the install path (enablement is deferred).
-    let service_manager = match ctx.install_mode {
-        crate::context::InstallMode::System => "systemd",
-        crate::context::InstallMode::User => "systemd-user",
-    };
-    obj.services = services
-        .iter()
-        .map(|svc| ServiceRef {
-            name: svc.clone(),
-            manager: service_manager.to_string(),
-            restartable: true,
-            enabled: false,
-        })
-        .collect();
+    // / external-modification rows from the old version no longer apply.
+    // Service activation happens after this durable state write, so the first
+    // save records the service declarations with conservative `enabled=false`;
+    // a best-effort second save below backfills the actual enable result.
+    obj.services = raw_update_service_refs(ctx, &services, None);
     obj.status = ObjectStatus::Installed;
     obj.health = Vec::new();
     obj.external_modified_files = Vec::new();
@@ -789,13 +822,64 @@ fn execute_raw_update(
     let _ = tx.mark_done(persist_idx);
     let _ = tx.finish(TransactionOutcomeStatus::Ok);
 
+    // Phase 5 — apply external post-commit side effects after state is durable.
+    // Capability xattrs and running systemd processes are not covered by the
+    // file/state rollback journal. Running them before the final state save can
+    // leave an incomplete rollback (for example, old file bytes restored but
+    // old file capabilities lost), so update commits first and surfaces any
+    // side-effect failure as a warning.
+    let log = CentralLog::open(layout.central_log.clone());
+    let env = anolisa_env::EnvService::detect();
+    let cap_manager = capability_for_install_mode(ctx.install_mode.as_str(), &env);
+    let cap_outcome = apply_capabilities(
+        cap_manager.as_ref(),
+        &capabilities,
+        Some(&log),
+        component,
+        &operation_id,
+        "cli",
+        ctx.install_mode.as_str(),
+    );
+    let cap_warnings = committed_capability_warnings(cap_outcome);
+
+    // Upgrade restarts (not just starts) so the new binary is loaded.
+    // Best-effort: failures warn, never roll back, because the component
+    // record and new files are already committed.
+    let service_run = apply_services(
+        service_for_install_mode(ctx.install_mode.as_str(), &env).as_ref(),
+        &services,
+        ServiceActivation::Restart,
+        Some(&log),
+        component,
+        &operation_id,
+        "cli",
+        ctx.install_mode.as_str(),
+    );
+
+    let mut activation_state_warnings = Vec::new();
+    if !services.is_empty() {
+        if let Some(obj) = state.find_object_mut(ObjectKind::Component, component) {
+            obj.services = raw_update_service_refs(ctx, &services, Some(&service_run));
+            if let Err(err) = state.save(&state_path) {
+                activation_state_warnings.push(format!(
+                    "failed to persist service activation result after update: {err}"
+                ));
+            }
+        }
+    }
+
     // The transaction committed; per-operation backups are rollback scratch
     // (as in uninstall), so prune them once the new version is in place.
     let _ = std::fs::remove_dir_all(&backup_root);
 
     // Audit is best-effort: the update already persisted, so a log failure
     // downgrades to a warning rather than unwinding the transaction.
-    let log = CentralLog::open(layout.central_log.clone());
+    // `log` was opened above for the capability audit and is reused here.
+    let mut execution_warnings = cap_warnings;
+    execution_warnings.extend(service_run.warnings);
+    execution_warnings.extend(activation_state_warnings);
+    let mut all_warnings = warnings.to_vec();
+    all_warnings.extend(execution_warnings.clone());
     let record = LogRecord {
         kind: LogKind::Operation,
         operation_id: Some(operation_id.clone()),
@@ -813,7 +897,7 @@ fn execute_raw_update(
         // Backups are pruned on success (the new version is in place), so no
         // backup set is retained for this operation.
         backup_ids: Vec::new(),
-        warnings: warnings.to_vec(),
+        warnings: all_warnings,
         details: serde_json::Value::Null,
     };
     if let Err(err) = log.append(&record)
@@ -822,7 +906,10 @@ fn execute_raw_update(
         eprintln!("warning: failed to append audit log: {err}");
     }
 
-    Ok(operation_id)
+    Ok(RawUpdateResult {
+        operation_id,
+        warnings: execution_warnings,
+    })
 }
 
 /// Everything a rollback exit needs to report the failure, built once in
@@ -1645,6 +1732,53 @@ mod tests {
         let data = build_json_data(&outcome, false);
         assert!(!data.update_available);
         assert!(!data.updated);
+    }
+
+    #[test]
+    fn raw_update_service_refs_are_conservative_until_activation_runs() {
+        let ctx = CliContext {
+            install_mode: InstallMode::System,
+            prefix: None,
+            json: false,
+            dry_run: false,
+            verbose: false,
+            quiet: true,
+            no_color: true,
+        };
+        let services = vec![ServiceRequest {
+            unit: "agentsight.service".to_string(),
+            scope: anolisa_core::ServiceScope::System,
+            enable: true,
+            start: true,
+        }];
+
+        let before_activation = raw_update_service_refs(&ctx, &services, None);
+        assert!(!before_activation[0].enabled);
+
+        let run = ServiceRunOutcome {
+            enabled_units: vec!["agentsight.service".to_string()],
+            started_units: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let after_activation = raw_update_service_refs(&ctx, &services, Some(&run));
+        assert!(after_activation[0].enabled);
+    }
+
+    #[test]
+    fn committed_capability_warnings_include_required_failure() {
+        let warnings = committed_capability_warnings(CapabilityRunOutcome {
+            applied: 0,
+            warnings: vec!["optional capability for /bin/demo failed: no xattr".to_string()],
+            aborted: Some("required capability for /bin/demo failed: EPERM".to_string()),
+        });
+
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings[0].contains("optional capability"));
+        assert!(
+            warnings[1].contains("required capability application failed after update commit"),
+            "got: {}",
+            warnings[1]
+        );
     }
 
     // ── component update (#959): RPM path ───────────────────────────────

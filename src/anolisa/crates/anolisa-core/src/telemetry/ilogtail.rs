@@ -14,7 +14,7 @@ use crate::metadata::MetadataClient;
 use crate::telemetry::{TelemetryConfig, TelemetryError, validate_sls_account_id};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
 
 // ── RegionProbe ───────────────────────────────────────────────────────
 
@@ -146,14 +146,7 @@ impl<'a> IlogtailInstaller<'a> {
         if !init_script.exists() {
             return Ok(false);
         }
-        let output = Command::new(init_script)
-            .arg("status")
-            .output()
-            .map_err(|e| {
-                TelemetryError::Command(format!(
-                    "failed to check ilogtaild-aliyun-security status: {e}"
-                ))
-            })?;
+        let output = run_init_status(init_script, "ilogtaild-aliyun-security")?;
         Ok(String::from_utf8_lossy(&output.stdout).contains("ilogtail is running"))
     }
 
@@ -162,12 +155,7 @@ impl<'a> IlogtailInstaller<'a> {
         if !init_script.exists() {
             return Ok(false);
         }
-        let output = Command::new(init_script)
-            .arg("status")
-            .output()
-            .map_err(|e| {
-                TelemetryError::Command(format!("failed to check ilogtaild status: {e}"))
-            })?;
+        let output = run_init_status(init_script, "ilogtaild")?;
         Ok(String::from_utf8_lossy(&output.stdout).contains("ilogtail is running"))
     }
 
@@ -436,6 +424,21 @@ impl<'a> IlogtailInstaller<'a> {
     }
 }
 
+fn run_init_status(init_script: &Path, name: &str) -> Result<Output, TelemetryError> {
+    let mut command = Command::new(init_script);
+    command
+        .arg("status")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let child = crate::process::spawn_retry_etxtbsy(&mut command)
+        .map_err(|e| TelemetryError::Command(format!("failed to check {name} status: {e}")))?;
+    child
+        .wait_with_output()
+        .map_err(|e| TelemetryError::Command(format!("failed to check {name} status: {e}")))
+}
+
 // ── Unit tests ─────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -605,6 +608,33 @@ mod tests {
                 .join(&cfg.sls_account_id)
                 .exists()
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_ensure_installed_retries_when_init_script_is_temporarily_busy() {
+        let dir = TempDir::new().unwrap();
+        let cfg = test_config(&dir);
+        write_mock_init_script(&cfg.aliyun_security_init, "ilogtail is running");
+
+        let writer = fs::OpenOptions::new()
+            .write(true)
+            .open(&cfg.aliyun_security_init)
+            .unwrap();
+        let cfg_for_thread = cfg.clone();
+        let handle = std::thread::spawn(move || {
+            let installer = IlogtailInstaller::new(&cfg_for_thread);
+            let region = RegionInfo {
+                region_id: "cn-hangzhou".into(),
+                use_internal: false,
+            };
+            installer.ensure_installed(&region)
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        drop(writer);
+
+        handle.join().unwrap().unwrap();
     }
 
     #[test]

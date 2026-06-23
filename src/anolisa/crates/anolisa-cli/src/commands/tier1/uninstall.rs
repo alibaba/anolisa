@@ -59,7 +59,8 @@ use anolisa_core::central_log::{CentralLog, LogKind, LogRecord, LogStatus, Sever
 use anolisa_core::lock::InstallLock;
 use anolisa_core::state::{OperationRecord, Ownership};
 use anolisa_core::{
-    LifecycleError, LifecycleOperation, LifecycleOutcome, LifecyclePlan, ObjectKind, execute_plan,
+    ComponentManifest, HookPhase, LifecycleError, LifecycleOperation, LifecycleOutcome,
+    LifecyclePlan, ObjectKind, ResolvedLifecycleHooks, execute_plan, resolve_manifest_hooks,
 };
 use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError};
 use anolisa_platform::pkg_transaction::{PackageTransaction, PackageTransactionError};
@@ -254,7 +255,35 @@ pub(crate) fn handle_with_deps(
         );
     }
 
-    let outcome = execute_plan(&plan, &layout, &actor, install_mode)
+    // Contract-driven uninstall hooks: read the installed component manifest
+    // snapshot (persisted verbatim at install) and resolve its declared
+    // pre/post-uninstall scripts. Best-effort — a missing or unreadable
+    // snapshot (older installs, RPM-delegated paths) or an unresolvable
+    // script path means no hooks for that phase, never a failed uninstall.
+    let hooks = match common::installed_component_manifest_path(&layout, target, COMMAND)
+        .ok()
+        .and_then(|path| ComponentManifest::from_file(&path).ok())
+    {
+        Some(manifest) => ResolvedLifecycleHooks {
+            pre_uninstall: resolve_manifest_hooks(
+                &manifest.install.hooks,
+                &layout,
+                target,
+                HookPhase::PreUninstall,
+            )
+            .unwrap_or_default(),
+            post_uninstall: resolve_manifest_hooks(
+                &manifest.install.hooks,
+                &layout,
+                target,
+                HookPhase::PostUninstall,
+            )
+            .unwrap_or_default(),
+        },
+        None => ResolvedLifecycleHooks::default(),
+    };
+
+    let outcome = execute_plan(&plan, &layout, &actor, install_mode, &hooks)
         .map_err(|err| lifecycle_err_to_cli(&command, err))?;
 
     if ctx.json {
@@ -1264,6 +1293,117 @@ mod tests {
             layout.central_log.exists(),
             "component uninstall must append a central-log record",
         );
+    }
+
+    /// End-to-end wiring: uninstall reads the installed component-manifest
+    /// snapshot, resolves its `[[component.hooks]]` pre-uninstall script
+    /// (placeholder-expanded, contract `strict`), and runs it before the
+    /// files are removed. Pins that the CLI feeds contract hooks into
+    /// `execute_plan` — the no-snapshot path is covered by
+    /// `uninstall_execute_on_installed_component_removes_owned_files_and_succeeds`.
+    #[test]
+    #[cfg(unix)]
+    fn uninstall_runs_contract_declared_pre_uninstall_hook() {
+        use anolisa_core::{
+            FileOwner, InstalledObject, InstalledState, ObjectKind, ObjectStatus, OwnedFile,
+        };
+        use anolisa_platform::fs_layout::FsLayout;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().expect("tmpdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        std::fs::create_dir_all(&layout.state_dir).expect("mkdir state");
+        std::fs::create_dir_all(&layout.bin_dir).expect("mkdir bin");
+        let owned = layout.bin_dir.join("ws-ckpt");
+        std::fs::write(&owned, b"binary").expect("write owned");
+
+        // Hook script shipped under the datadir, declared by the contract.
+        let hook_dir = layout.datadir.join("hooks").join("ws-ckpt");
+        std::fs::create_dir_all(&hook_dir).expect("mkdir hook dir");
+        let hook_script = hook_dir.join("pre-uninstall.sh");
+        let sentinel = tmp.path().join("pre-uninstall.ran");
+        std::fs::write(
+            &hook_script,
+            format!("#!/bin/sh\ntouch {}\n", sentinel.display()),
+        )
+        .expect("write hook");
+        let mut perm = std::fs::metadata(&hook_script).expect("stat").permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&hook_script, perm).expect("chmod");
+
+        // Installed component-manifest snapshot carrying the contract hook.
+        let manifest_path =
+            common::installed_component_manifest_path(&layout, "ws-ckpt", "uninstall")
+                .expect("manifest path");
+        std::fs::create_dir_all(manifest_path.parent().unwrap()).expect("mkdir manifest dir");
+        std::fs::write(
+            &manifest_path,
+            r#"
+            [component]
+            name = "ws-ckpt"
+            version = "0.1.0"
+
+            # Hooks parse only on the minimal-schema path, which is gated on
+            # the presence of [component.layout].
+            [component.layout]
+            modes = ["system"]
+
+            [[component.hooks]]
+            phase = "pre_uninstall"
+            script = "{datadir}/hooks/ws-ckpt/pre-uninstall.sh"
+            strict = false
+            "#,
+        )
+        .expect("write installed manifest");
+
+        let mut state = InstalledState::default();
+        state.upsert_object(InstalledObject {
+            kind: ObjectKind::Component,
+            name: "ws-ckpt".to_string(),
+            version: "0.1.0".to_string(),
+            status: ObjectStatus::Installed,
+            manifest_digest: None,
+            distribution_source: Some("file:///fake".to_string()),
+            raw_package: None,
+            install_backend: Some("raw".to_string()),
+            ownership: None,
+            rpm_metadata: None,
+            installed_at: "2026-06-01T10:00:00Z".to_string(),
+            last_operation_id: Some("op-prior".to_string()),
+            managed: true,
+            adopted: false,
+            subscription_scope: Default::default(),
+            enabled_features: Vec::new(),
+            component_refs: Vec::new(),
+            files: vec![OwnedFile {
+                path: owned.clone(),
+                owner: FileOwner::Anolisa,
+                sha256: Some("0".repeat(64)),
+            }],
+            external_modified_files: Vec::new(),
+            services: Vec::new(),
+            health: Vec::new(),
+        });
+        state
+            .save(&layout.state_dir.join("installed.toml"))
+            .expect("seed state save");
+
+        handle(
+            args("ws-ckpt", false),
+            &ctx_with_prefix(
+                false,
+                false,
+                InstallMode::System,
+                Some(tmp.path().to_path_buf()),
+            ),
+        )
+        .expect("uninstall with contract hook must succeed");
+
+        assert!(
+            sentinel.exists(),
+            "contract-declared pre_uninstall hook must have run",
+        );
+        assert!(!owned.exists(), "owned file must be removed after the hook");
     }
 
     /// Purge stays gated until manifest-driven config/cache/state

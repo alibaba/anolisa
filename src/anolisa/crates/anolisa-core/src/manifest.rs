@@ -11,6 +11,7 @@
 
 use crate::distribution::ArtifactType;
 use crate::health::CheckSpec;
+use crate::hooks::HookPhase;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -208,10 +209,13 @@ pub struct InstallSpec {
     pub modes: Vec<String>,
     /// Files copied or extracted during install.
     pub files: Vec<InstallFileSpec>,
-    /// Service units managed by lifecycle operations.
-    pub services: Vec<String>,
+    /// Service units managed by lifecycle operations (enable/start on
+    /// install, stop/disable on uninstall).
+    pub services: Vec<ServiceSpec>,
     /// Linux capability assignments requested for installed files.
     pub capabilities: Vec<InstallCapabilitySpec>,
+    /// Lifecycle hook scripts run around install/uninstall phases.
+    pub hooks: Vec<ManifestHookSpec>,
 }
 
 /// Role of an installed file (minimal-schema `type` key).
@@ -282,6 +286,67 @@ impl InstallFileSpec {
     }
 }
 
+/// Manager scope for a declared service unit.
+///
+/// `system` units live under `{unitdir}` and are driven by `systemctl`
+/// (needs root); `user` units live under `{userunitdir}` and are driven by
+/// `systemctl --user` (per-user, no root). System services are only
+/// actionable in system install mode.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceScope {
+    /// System-level unit (`systemctl`, needs root). Default.
+    #[default]
+    System,
+    /// User-level unit (`systemctl --user`, per-user, no root).
+    User,
+}
+
+/// systemd unit lifecycle declaration from `[[component.services]]`.
+///
+/// Drives `enable`/`start` on install and `stop`/`disable` on uninstall.
+/// The unit *file* is an ordinary layout entry; this spec references it by
+/// name and declares how its lifecycle is managed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceSpec {
+    /// Native unit name, e.g. `agentsight.service`, or a template unit
+    /// `anolisa-memory@.service` instantiated via [`instance`](Self::instance).
+    pub unit: String,
+    /// Manager scope. Defaults to [`ServiceScope::System`].
+    #[serde(default)]
+    pub scope: ServiceScope,
+    /// `systemctl enable` on install for boot persistence. Defaults true.
+    #[serde(default = "default_true")]
+    pub enable: bool,
+    /// Ensure the unit is active on install, restarting it when already
+    /// running so upgrades pick up the new binary. Defaults true.
+    #[serde(default = "default_true")]
+    pub start: bool,
+    /// Instance token for template (`@.service`) units — e.g. `%u` expands to
+    /// the caller's username (`anolisa-memory@<user>`). `None` for plain units.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
+}
+
+impl ServiceSpec {
+    /// Build a spec from a legacy `[install] services = [...]` unit name:
+    /// system scope, enable + start, no template instance.
+    fn from_legacy_unit(unit: String) -> Self {
+        Self {
+            unit,
+            scope: ServiceScope::System,
+            enable: true,
+            start: true,
+            instance: None,
+        }
+    }
+}
+
+/// Serde default for boolean fields whose absent value is `true`.
+fn default_true() -> bool {
+    true
+}
+
 /// Linux capability assignment for an installed file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InstallCapabilitySpec {
@@ -291,6 +356,13 @@ pub struct InstallCapabilitySpec {
     /// Capability names, e.g. `CAP_BPF`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub caps: Vec<String>,
+    /// Best-effort flag. When true, a `setcap` failure (no xattr support,
+    /// non-root, unsupported filesystem) degrades to a warning instead of
+    /// aborting the install. Defaults to false — a strict capability whose
+    /// failure must abort. Skipped on serialize when false so legacy
+    /// manifests round-trip byte-stable.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub optional: bool,
 }
 
 impl InstallCapabilitySpec {
@@ -303,6 +375,37 @@ impl InstallCapabilitySpec {
             (None, true) => "<empty>".to_string(),
         }
     }
+}
+
+/// Lifecycle hook declaration from `[[component.hooks]]`.
+///
+/// Distinct from the executor input [`HookSpec`](crate::hooks::HookSpec):
+/// this is the *contract-level declaration*. `script` is an unexpanded
+/// layout-template path (e.g. `{datadir}/hooks/ws-ckpt/pre-uninstall.sh`),
+/// not a resolved absolute path, and the owning component comes from the
+/// surrounding manifest. The executor input is derived from this at install
+/// time (placeholder expansion + path-safety validation).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManifestHookSpec {
+    /// Lifecycle phase that triggers the script.
+    pub phase: HookPhase,
+    /// Layout-template path to the script, shipped in the package payload as
+    /// an ordinary layout file.
+    pub script: String,
+    /// Maximum wall-clock seconds before the script is killed. Defaults to 30.
+    #[serde(default = "default_hook_timeout")]
+    pub timeout_secs: u32,
+    /// Failure handling. When false (default), a failure warns and the verb
+    /// continues; when true, it aborts and the installer rolls back. ws-ckpt's
+    /// pre-uninstall recover stays false to match the RPM `recover || warn`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub strict: bool,
+}
+
+/// Serde default for [`ManifestHookSpec::timeout_secs`] — matches the
+/// executor's alpha 30-second default.
+fn default_hook_timeout() -> u32 {
+    30
 }
 
 /// Optional feature declared by a component manifest.
@@ -462,7 +565,7 @@ pub struct AdapterConfigSetSpec {
 
 /// One skill entry in an `[[adapters]]` or framework-specific section.
 ///
-/// Two TOML forms are accepted (via [`deserialize_skills`]):
+/// Two TOML forms are accepted (via `deserialize_skills`):
 ///
 /// * **String array** (legacy): `skills = ["code-scanner", "prompt-scanner"]`
 ///   — normalised to `AdapterSkillSpec { name, source: None }`.
@@ -654,6 +757,22 @@ struct ComponentMetaRaw {
     artifact: Option<ArtifactRaw>,
     #[serde(default)]
     layout: Option<LayoutRaw>,
+    // `[[component.services]]` — systemd unit lifecycle declarations, a
+    // sibling of `[component.layout]`. ServiceSpec is simple and tolerant
+    // (every field but `unit` defaults), so it deserializes directly without
+    // a separate Raw mirror — same rationale as `[backends]`.
+    #[serde(default)]
+    services: Vec<ServiceSpec>,
+    // `[[component.capabilities]]` — install-related setcap declarations,
+    // a sibling of `[component.layout]` in the minimal schema (the legacy
+    // schema declares them under `[install.capabilities]` instead).
+    #[serde(default)]
+    capabilities: Vec<InstallCapabilityRaw>,
+    // `[[component.hooks]]` — lifecycle hook declarations, minimal-schema only
+    // (legacy `[install]` predates hooks). ManifestHookSpec deserializes
+    // directly: phase + script are required, the rest defaults.
+    #[serde(default)]
+    hooks: Vec<ManifestHookSpec>,
     // `[component.health_check]` — minimal-schema structured check. Parses
     // directly into the internally-tagged `CheckSpec` (`type = "..."`).
     #[serde(default)]
@@ -796,6 +915,8 @@ struct InstallCapabilityRaw {
     path: Option<String>,
     #[serde(default)]
     caps: Vec<String>,
+    #[serde(default)]
+    optional: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -905,6 +1026,9 @@ impl From<ComponentManifestRaw> for ComponentManifest {
             platform: platform_raw,
             artifact: artifact_raw,
             layout: layout_raw,
+            services: component_services,
+            capabilities: component_capabilities,
+            hooks: component_hooks,
             health_check,
         } = raw.component;
 
@@ -960,9 +1084,11 @@ impl From<ComponentManifestRaw> for ComponentManifest {
 
         // Prefer the minimal-schema `[component.layout]`; fall back to the
         // legacy top-level `[install]` for not-yet-migrated manifests. The
-        // minimal `target` key maps onto the internal `dest`; nested
-        // service/capabilities arrive in T2.7. Legacy `[install]` files may
-        // carry `type` (e.g. symlink entries); absent defaults to `Data`.
+        // minimal `target` key maps onto the internal `dest`. Services,
+        // capabilities, and hooks are `[component.*]` siblings of
+        // `[component.layout]`, parsed only on this minimal path; legacy
+        // `[install]` carries services/capabilities inline and predates hooks.
+        // Legacy files may carry `type` (e.g. symlinks); absent defaults `Data`.
         let install = if let Some(layout) = layout_raw {
             let files = layout
                 .files
@@ -975,11 +1101,21 @@ impl From<ComponentManifestRaw> for ComponentManifest {
                 })
                 .filter(|f| f.install_path().is_some())
                 .collect();
+            let capabilities = capabilities_from_raw(component_capabilities);
+            let services = component_services
+                .into_iter()
+                .filter(|s| !s.unit.is_empty())
+                .collect();
+            let hooks = component_hooks
+                .into_iter()
+                .filter(|h| !h.script.is_empty())
+                .collect();
             InstallSpec {
                 modes: layout.modes,
                 files,
-                services: Vec::new(),
-                capabilities: Vec::new(),
+                services,
+                capabilities,
+                hooks,
             }
         } else {
             raw.install
@@ -995,20 +1131,21 @@ impl From<ComponentManifestRaw> for ComponentManifest {
                         })
                         .filter(|f| f.install_path().is_some())
                         .collect();
-                    let capabilities = i
-                        .capabilities
+                    let capabilities = capabilities_from_raw(i.capabilities);
+                    let services = i
+                        .services
                         .into_iter()
-                        .map(|c| InstallCapabilitySpec {
-                            path: c.path,
-                            caps: c.caps,
-                        })
-                        .filter(|c| c.path.is_some() || !c.caps.is_empty())
+                        .filter(|u| !u.is_empty())
+                        .map(ServiceSpec::from_legacy_unit)
                         .collect();
                     InstallSpec {
                         modes: i.modes,
                         files,
-                        services: i.services,
+                        services,
                         capabilities,
+                        // Hooks are minimal-schema only; legacy `[install]`
+                        // predates them.
+                        hooks: Vec::new(),
                     }
                 })
                 .unwrap_or_default()
@@ -1097,6 +1234,20 @@ impl From<ComponentManifestRaw> for ComponentManifest {
             health_checks,
         }
     }
+}
+
+/// Map raw capability entries to specs, dropping fully-empty rows. Shared by
+/// the minimal-schema (`[[component.capabilities]]`) and legacy
+/// (`[install.capabilities]`) parse paths so the two cannot drift.
+fn capabilities_from_raw(raw: Vec<InstallCapabilityRaw>) -> Vec<InstallCapabilitySpec> {
+    raw.into_iter()
+        .map(|c| InstallCapabilitySpec {
+            path: c.path,
+            caps: c.caps,
+            optional: c.optional,
+        })
+        .filter(|c| c.path.is_some() || !c.caps.is_empty())
+        .collect()
 }
 
 fn source_from_raw(raw: SourceRaw) -> SourceSpec {
@@ -1645,6 +1796,184 @@ mod tests {
             m.install.capabilities[0].caps,
             vec!["cap_bpf", "cap_perfmon"]
         );
+    }
+
+    #[test]
+    fn install_capability_optional_parses_and_defaults_false() {
+        // `optional = true` marks a setcap as best-effort (warn on failure
+        // rather than aborting the install); absent, it defaults to a strict
+        // capability whose failure must abort.
+        let toml_text = r#"
+            [component]
+            name = "agentsight"
+            version = "0.2.0"
+
+            [install]
+            modes = ["system"]
+
+            [[install.capabilities]]
+            path = "{bindir}/agentsight"
+            caps = ["cap_bpf", "cap_perfmon"]
+            optional = true
+
+            [[install.capabilities]]
+            path = "{bindir}/strict-tool"
+            caps = ["cap_net_admin"]
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+
+        assert_eq!(m.install.capabilities.len(), 2);
+        assert!(m.install.capabilities[0].optional);
+        assert!(!m.install.capabilities[1].optional);
+    }
+
+    #[test]
+    fn minimal_schema_parses_component_capabilities() {
+        // `[[component.capabilities]]` lives in the [component] namespace,
+        // a sibling of [component.layout]; the layout branch must read it
+        // (rather than dropping it on the floor as it did before).
+        let toml_text = r#"
+            [component]
+            name = "agentsight"
+            version = "0.2.0"
+
+            [component.layout]
+            modes = ["system"]
+
+            [[component.layout.files]]
+            source = "bin/agentsight"
+            target = "{bindir}/agentsight"
+            type = "executable"
+
+            [[component.capabilities]]
+            path = "{bindir}/agentsight"
+            caps = ["cap_bpf", "cap_perfmon"]
+            optional = true
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse minimal caps");
+
+        assert_eq!(m.install.capabilities.len(), 1);
+        assert_eq!(
+            m.install.capabilities[0].path.as_deref(),
+            Some("{bindir}/agentsight")
+        );
+        assert_eq!(
+            m.install.capabilities[0].caps,
+            vec!["cap_bpf", "cap_perfmon"]
+        );
+        assert!(m.install.capabilities[0].optional);
+    }
+
+    #[test]
+    fn minimal_schema_parses_component_services_with_defaults() {
+        // `[[component.services]]` parses into ServiceSpec. scope defaults to
+        // system; enable/start default to true; instance is template-only.
+        let toml_text = r#"
+            [component]
+            name = "agentsight"
+            version = "0.2.0"
+
+            [component.layout]
+            modes = ["system"]
+
+            [[component.layout.files]]
+            source = "bin/agentsight"
+            target = "{bindir}/agentsight"
+            type = "executable"
+
+            [[component.services]]
+            unit = "agentsight.service"
+
+            [[component.services]]
+            unit = "anolisa-memory@.service"
+            scope = "user"
+            enable = false
+            start = false
+            instance = "%u"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse services");
+
+        assert_eq!(m.install.services.len(), 2);
+        // First service: every optional field defaulted.
+        assert_eq!(m.install.services[0].unit, "agentsight.service");
+        assert_eq!(m.install.services[0].scope, ServiceScope::System);
+        assert!(m.install.services[0].enable);
+        assert!(m.install.services[0].start);
+        assert_eq!(m.install.services[0].instance, None);
+        // Second service: explicit user-scope opt-in template unit.
+        assert_eq!(m.install.services[1].unit, "anolisa-memory@.service");
+        assert_eq!(m.install.services[1].scope, ServiceScope::User);
+        assert!(!m.install.services[1].enable);
+        assert!(!m.install.services[1].start);
+        assert_eq!(m.install.services[1].instance.as_deref(), Some("%u"));
+    }
+
+    #[test]
+    fn legacy_install_services_map_to_specs_with_defaults() {
+        // Legacy `[install] services = [...]` is a bare unit-name list; each
+        // name becomes a system-scoped ServiceSpec with enable/start true.
+        let toml_text = r#"
+            [component]
+            name = "ws-ckpt"
+            version = "0.1.0"
+
+            [install]
+            modes = ["system"]
+            services = ["ws-ckpt.service"]
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse legacy services");
+
+        assert_eq!(m.install.services.len(), 1);
+        assert_eq!(m.install.services[0].unit, "ws-ckpt.service");
+        assert_eq!(m.install.services[0].scope, ServiceScope::System);
+        assert!(m.install.services[0].enable);
+        assert!(m.install.services[0].start);
+    }
+
+    #[test]
+    fn minimal_schema_parses_component_hooks_with_defaults() {
+        // `[[component.hooks]]` declares lifecycle scripts. strict defaults to
+        // false (warn-and-continue) and timeout_secs to 30; phase reuses the
+        // executor's HookPhase vocabulary. `script` stays an unexpanded
+        // layout-template path — expansion happens at install time.
+        let toml_text = r#"
+            [component]
+            name = "ws-ckpt"
+            version = "0.1.0"
+
+            [component.layout]
+            modes = ["system"]
+
+            [[component.layout.files]]
+            source = "bin/ws-ckpt"
+            target = "{bindir}/ws-ckpt"
+            type = "executable"
+
+            [[component.hooks]]
+            phase = "pre_uninstall"
+            script = "{datadir}/hooks/ws-ckpt/pre-uninstall.sh"
+
+            [[component.hooks]]
+            phase = "post_uninstall"
+            script = "{datadir}/hooks/ws-ckpt/post-uninstall.sh"
+            timeout_secs = 120
+            strict = true
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse hooks");
+
+        assert_eq!(m.install.hooks.len(), 2);
+        // First hook: defaulted timeout + non-strict.
+        assert_eq!(m.install.hooks[0].phase, HookPhase::PreUninstall);
+        assert_eq!(
+            m.install.hooks[0].script,
+            "{datadir}/hooks/ws-ckpt/pre-uninstall.sh"
+        );
+        assert_eq!(m.install.hooks[0].timeout_secs, 30);
+        assert!(!m.install.hooks[0].strict);
+        // Second hook: explicit timeout + strict abort.
+        assert_eq!(m.install.hooks[1].phase, HookPhase::PostUninstall);
+        assert_eq!(m.install.hooks[1].timeout_secs, 120);
+        assert!(m.install.hooks[1].strict);
     }
 
     #[test]

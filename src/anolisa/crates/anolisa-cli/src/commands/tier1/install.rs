@@ -21,12 +21,12 @@
 //! then pick an action by `(backend, rpmdb hit, install mode)`. `npm` remains
 //! NOT_IMPLEMENTED.
 //!
-//! Deliberately out of scope for this milestone: execution-policy gating,
-//! pre/post hooks, health checks, and service start/enable. Installed
-//! services are recorded in state with `enabled: false`.
+//! Deliberately out of scope for this milestone: execution-policy gating and
+//! health checks.
 
 use clap::Parser;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -44,8 +44,11 @@ use anolisa_core::state::{
     ObjectStatus, OperationRecord, OwnedFile, Ownership, RpmMetadata, ServiceRef,
 };
 use anolisa_core::{
-    ArtifactType, ComponentManifest, DistributionEntry, DistributionIndex, FileKind, ResolveQuery,
-    expand_layout_placeholders,
+    ArtifactType, CapabilityRequest, ComponentManifest, DistributionEntry, DistributionIndex,
+    FileKind, HookPhase, HookSpec, ResolveQuery, ServiceActivation, ServiceManager, ServiceRequest,
+    ServiceRunOutcome, apply_capabilities, apply_services, capability_for_install_mode,
+    deactivate_services, expand_layout_placeholders, resolve_manifest_hooks, run_hooks,
+    service_for_install_mode,
 };
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError};
@@ -118,7 +121,8 @@ pub(crate) struct RawResolution {
 struct InstallPreview {
     resolution: RawResolution,
     files: Vec<ResolvedInstallFile>,
-    services: Vec<String>,
+    services: Vec<ServiceRequest>,
+    capabilities: Vec<CapabilityRequest>,
 }
 
 /// Execution input after the artifact has been verified and its install
@@ -130,7 +134,12 @@ pub(crate) struct PreparedInstall {
     pub(crate) resolution: RawResolution,
     pub(crate) artifact_path: PathBuf,
     pub(crate) files: Vec<ResolvedInstallFile>,
-    pub(crate) services: Vec<String>,
+    /// Declared service activations (unit + scope + enable/start), applied
+    /// after files land. Carried resolved with template instances expanded.
+    pub(crate) services: Vec<ServiceRequest>,
+    /// Linux file capabilities to apply after files land (raw, system mode
+    /// only). Carried resolved — path already layout-expanded and bounded.
+    pub(crate) capabilities: Vec<CapabilityRequest>,
     pub(crate) manifest_toml: String,
 }
 
@@ -168,6 +177,9 @@ struct InstallPlanPayload {
     artifact: ArtifactInfo,
     files: Vec<String>,
     services: Vec<String>,
+    /// Human-readable `path: cap,cap` lines for the capabilities install
+    /// would apply. Rendered for `--dry-run`; setcap is never run here.
+    capabilities: Vec<String>,
     dry_run: bool,
     warnings: Vec<String>,
 }
@@ -1913,10 +1925,11 @@ fn build_install_preview(
             resolution,
             files: Vec::new(),
             services: Vec::new(),
+            capabilities: Vec::new(),
         });
     };
 
-    let (files, services) = match resolve_manifest_contract(
+    let (files, services, capabilities) = match resolve_manifest_contract(
         &contract.manifest,
         layout,
         &resolution,
@@ -1929,7 +1942,7 @@ fn build_install_preview(
                 "local catalog manifest does not match resolved artifact; file and service details are unavailable: {}",
                 err.reason()
             ));
-            (Vec::new(), Vec::new())
+            (Vec::new(), Vec::new(), Vec::new())
         }
         Err(err) => return Err(err),
     };
@@ -1938,6 +1951,7 @@ fn build_install_preview(
         resolution,
         files,
         services,
+        capabilities,
     })
 }
 
@@ -1969,7 +1983,7 @@ pub(crate) fn prepare_raw_execution(
 
     let contract =
         load_execution_install_contract(ctx, layout, &resolution, &artifact.cached_path)?;
-    let (files, services) = resolve_manifest_contract(
+    let (files, services, capabilities) = resolve_manifest_contract(
         &contract.manifest,
         layout,
         &resolution,
@@ -1982,6 +1996,7 @@ pub(crate) fn prepare_raw_execution(
         artifact_path: artifact.cached_path,
         files,
         services,
+        capabilities,
         manifest_toml: contract.toml,
     })
 }
@@ -2161,13 +2176,21 @@ fn sidecar_meta_url(artifact_url: &str, component: &str, version: &str) -> Optio
         .map(|idx| format!("{}/meta.toml", &artifact_url[..idx]))
 }
 
+/// Resolved install contract: laid files, recorded service unit names, and
+/// capability requests to apply once those files are on disk.
+type ResolvedContract = (
+    Vec<ResolvedInstallFile>,
+    Vec<ServiceRequest>,
+    Vec<CapabilityRequest>,
+);
+
 fn resolve_manifest_contract(
     manifest: &ComponentManifest,
     layout: &FsLayout,
     resolution: &RawResolution,
     mode: &str,
     source: InstallContractSource,
-) -> Result<(Vec<ResolvedInstallFile>, Vec<String>), CliError> {
+) -> Result<ResolvedContract, CliError> {
     if manifest.component.name.as_str() != resolution.component {
         return Err(CliError::Runtime {
             command: COMMAND.to_string(),
@@ -2225,7 +2248,49 @@ fn resolve_manifest_contract(
         &resolution.component,
     )?);
 
-    Ok((files, manifest.install.services.clone()))
+    let services = resolve_manifest_services(manifest, &resolution.component)?;
+    let capabilities = resolve_manifest_capabilities(manifest, layout, &resolution.component)?;
+
+    Ok((files, services, capabilities))
+}
+
+/// Render the manifest's `[[component.services]]` into activation requests:
+/// substitute the template instance into the unit name and carry
+/// scope/enable/start through to the executor. No filesystem or layout
+/// expansion — unit names are systemd identifiers, not paths.
+///
+/// # Errors
+///
+/// Returns [`CliError::Runtime`] if a service entry has an empty `unit`.
+fn resolve_manifest_services(
+    manifest: &ComponentManifest,
+    component: &str,
+) -> Result<Vec<ServiceRequest>, CliError> {
+    let mut requests = Vec::with_capacity(manifest.install.services.len());
+    for spec in &manifest.install.services {
+        if spec.unit.trim().is_empty() {
+            return Err(CliError::Runtime {
+                command: COMMAND.to_string(),
+                reason: format!(
+                    "component '{component}' has a [[component.services]] entry with an empty unit"
+                ),
+            });
+        }
+        // Template unit (`name@.service`) + instance → `name@<instance>.service`.
+        let unit = match &spec.instance {
+            Some(instance) if spec.unit.contains("@.") => {
+                spec.unit.replacen("@.", &format!("@{instance}."), 1)
+            }
+            _ => spec.unit.clone(),
+        };
+        requests.push(ServiceRequest {
+            unit,
+            scope: spec.scope,
+            enable: spec.enable,
+            start: spec.start,
+        });
+    }
+    Ok(requests)
 }
 
 /// Render the manifest's `[install.files]` against the layout: expand
@@ -2372,6 +2437,95 @@ fn resolve_adapter_files(
     Ok(files)
 }
 
+/// Render the manifest's `[[component.capabilities]]` against the layout:
+/// expand `{bindir}`-style placeholders in the target path and reject any
+/// path escaping the ANOLISA-owned roots before `setcap` ever runs.
+///
+/// Rows with empty `caps` are skipped — there is nothing to grant. A row
+/// that lists caps but no `path` is a contract error: we will not guess
+/// which binary to harden.
+fn resolve_manifest_capabilities(
+    manifest: &ComponentManifest,
+    layout: &FsLayout,
+    component: &str,
+) -> Result<Vec<CapabilityRequest>, CliError> {
+    let mut requests = Vec::new();
+    for spec in &manifest.install.capabilities {
+        if spec.caps.is_empty() {
+            continue;
+        }
+        let template = spec.path.as_deref().ok_or_else(|| CliError::Runtime {
+            command: COMMAND.to_string(),
+            reason: format!(
+                "component '{component}' has a [[component.capabilities]] entry with caps but no path"
+            ),
+        })?;
+        let path = expand_layout_placeholders(template, layout, &[("component", component)])
+            .map_err(|err| CliError::Runtime {
+                command: COMMAND.to_string(),
+                reason: format!("failed to expand capability path '{template}': {err}"),
+            })?;
+        validate_owned_path(layout, &path).map_err(|err| CliError::Runtime {
+            command: COMMAND.to_string(),
+            reason: format!(
+                "capability target '{}' failed path safety check: {err}",
+                path.display()
+            ),
+        })?;
+        requests.push(CapabilityRequest {
+            path,
+            caps: spec.caps.clone(),
+            optional: spec.optional,
+        });
+    }
+    Ok(requests)
+}
+
+/// Contract-declared lifecycle hooks for the three raw-install phases,
+/// placeholder-expanded with `strict`/`timeout` carried from the contract.
+///
+/// `pre_install` runs before any files are laid down. On a fresh raw install
+/// the hook script ships in the same artifact and is therefore not on disk
+/// yet, so [`run_hook`](anolisa_core::run_hook) reports it as `Missing`. With
+/// `strict = false` — the only sensible choice for `pre_install`, since the
+/// script cannot exist on a first install — that is a silent no-op; a
+/// `strict = true` `pre_install` would instead abort the install (the script
+/// it requires is unreachable). The phase becomes meaningful on the update
+/// path (out of scope here) where a prior version already laid the script.
+#[derive(Debug)]
+struct InstallHooks {
+    pre_install: Vec<HookSpec>,
+    post_install: Vec<HookSpec>,
+    post_enable: Vec<HookSpec>,
+}
+
+/// Resolve a component's `[[component.hooks]]` for the three install phases.
+///
+/// Unlike the uninstall side (which degrades a missing/invalid snapshot to
+/// "no hooks"), install resolves strictly: an unresolvable script path is a
+/// contract authoring bug and aborts before any IO so it surfaces early.
+fn resolve_install_hooks(
+    manifest: &ComponentManifest,
+    layout: &FsLayout,
+    component: &str,
+) -> Result<InstallHooks, CliError> {
+    let resolve = |phase: HookPhase| -> Result<Vec<HookSpec>, CliError> {
+        resolve_manifest_hooks(&manifest.install.hooks, layout, component, phase).map_err(|err| {
+            CliError::Runtime {
+                command: COMMAND.to_string(),
+                reason: format!(
+                    "component '{component}' has an invalid [[component.hooks]] script path: {err}"
+                ),
+            }
+        })
+    };
+    Ok(InstallHooks {
+        pre_install: resolve(HookPhase::PreInstall)?,
+        post_install: resolve(HookPhase::PostInstall)?,
+        post_enable: resolve(HookPhase::PostEnable)?,
+    })
+}
+
 /// Execute the resolved install: download+verify, copy files under the
 /// install lock, persist state, and append the audit record. Files already
 /// on disk are rolled back when a later step fails, so no phantom install
@@ -2387,6 +2541,7 @@ fn execute_raw(
         artifact_path,
         files,
         services,
+        capabilities,
         manifest_toml,
     } = prepared;
     let started_at = now_iso8601();
@@ -2418,6 +2573,37 @@ fn execute_raw(
         lock_ts.timestamp_subsec_nanos()
     );
 
+    // Resolve the contract's lifecycle hooks before any IO so an invalid
+    // script path (a contract authoring bug) aborts the install before files
+    // are touched. The log handle is opened here too: pre_install runs before
+    // file layout, and the capability/service steps below reuse it.
+    let manifest =
+        ComponentManifest::from_toml_str(&manifest_toml).map_err(|err| CliError::Runtime {
+            command: command.to_string(),
+            reason: format!("failed to parse component manifest for hook resolution: {err}"),
+        })?;
+    let hooks = resolve_install_hooks(&manifest, layout, &resolution.component)?;
+    let log = CentralLog::open(layout.central_log.clone());
+
+    // pre_install hook — before files land, so a strict failure aborts with
+    // nothing on disk to roll back. On a fresh raw install the script ships in
+    // this artifact and is not yet laid, so it skips as Missing (no warning).
+    let pre_install = run_hooks(
+        &hooks.pre_install,
+        layout,
+        Some(&log),
+        &operation_id,
+        "cli",
+        ctx.install_mode.as_str(),
+    );
+    resolution.warnings.extend(pre_install.warnings);
+    if let Some(hf) = pre_install.hard_failure.as_ref() {
+        return Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!("pre_install hook failed: {}", hf.summary()),
+        });
+    }
+
     let runner = InstallRunner::new(layout);
     let outcome = runner
         .install_files(
@@ -2440,6 +2626,115 @@ fn execute_raw(
             }
         };
 
+    // Files and the contract manifest are on disk; apply declared Linux file
+    // capabilities now. The manager gates itself to raw + system + Linux +
+    // non-container — user mode, containers, and non-Linux are quiet skips.
+    // A required (non-optional) failure aborts: roll back files + manifest
+    // while the lock is still held and before any state is persisted, so no
+    // half-installed component survives. Optional failures degrade to
+    // warnings. Reuses the `log` handle opened before file layout.
+    let env = anolisa_env::EnvService::detect();
+    let cap_manager = capability_for_install_mode(ctx.install_mode.as_str(), &env);
+    let cap_outcome = apply_capabilities(
+        cap_manager.as_ref(),
+        &capabilities,
+        Some(&log),
+        &resolution.component,
+        &operation_id,
+        "cli",
+        ctx.install_mode.as_str(),
+    );
+    if let Some(reason) = cap_outcome.aborted {
+        rollback_installed_files(&outcome.files);
+        rollback_installed_manifest(&manifest_path);
+        return Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "required capability application failed; rolled back installed files and manifest: {reason}"
+            ),
+        });
+    }
+    resolution.warnings.extend(cap_outcome.warnings);
+
+    // post_install hook — after setcap, before services (§6.2). Files and
+    // capabilities are committed, so a strict failure rolls them back exactly
+    // like a required capability abort.
+    let post_install = run_hooks(
+        &hooks.post_install,
+        layout,
+        Some(&log),
+        &operation_id,
+        "cli",
+        ctx.install_mode.as_str(),
+    );
+    resolution.warnings.extend(post_install.warnings);
+    if let Some(hf) = post_install.hard_failure.as_ref() {
+        rollback_installed_files(&outcome.files);
+        rollback_installed_manifest(&manifest_path);
+        return Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "post_install hook failed; rolled back installed files and manifest: {}",
+                hf.summary()
+            ),
+        });
+    }
+
+    // Capabilities done; bring declared services up (issue order: setcap →
+    // service enable/start). The manager gates itself to system + Linux +
+    // non-container; user-scope units and unsupported hosts are quiet skips.
+    // Activation is best-effort — a failed enable/start is a warning, not an
+    // abort: the component's files are installed and an operator can fix the
+    // unit out of band. Reuse the env + log opened for the capability step.
+    let service_manager = service_for_install_mode(ctx.install_mode.as_str(), &env);
+    let service_run = apply_services(
+        service_manager.as_ref(),
+        &services,
+        ServiceActivation::Start,
+        Some(&log),
+        &resolution.component,
+        &operation_id,
+        "cli",
+        ctx.install_mode.as_str(),
+    );
+    resolution
+        .warnings
+        .extend(service_run.warnings.iter().cloned());
+
+    // post_enable hook — after service enable/start (§6.2). A strict failure
+    // rolls back files + manifest like post_install. Because services are an
+    // external side effect, clean up only the units this install successfully
+    // enabled or started before removing their unit files.
+    let post_enable = run_hooks(
+        &hooks.post_enable,
+        layout,
+        Some(&log),
+        &operation_id,
+        "cli",
+        ctx.install_mode.as_str(),
+    );
+    resolution.warnings.extend(post_enable.warnings);
+    if let Some(hf) = post_enable.hard_failure.as_ref() {
+        let cleanup_warnings = rollback_activated_services(
+            service_manager.as_ref(),
+            &service_run,
+            Some(&log),
+            &resolution.component,
+            &operation_id,
+            ctx.install_mode.as_str(),
+        );
+        rollback_installed_files(&outcome.files);
+        rollback_installed_manifest(&manifest_path);
+        let cleanup_suffix = service_cleanup_suffix(&cleanup_warnings);
+        let hook_summary = hf.summary();
+        return Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "post_enable hook failed; stopped/disabled activated services and rolled back installed files and manifest{cleanup_suffix}: {hook_summary}",
+            ),
+        });
+    }
+
     let mut owned_files: Vec<OwnedFile> = outcome
         .files
         .iter()
@@ -2461,7 +2756,7 @@ fn execute_raw(
         .collect();
     installed_paths.push(manifest_path.display().to_string());
 
-    let service_manager = match ctx.install_mode {
+    let service_manager_label = match ctx.install_mode {
         crate::context::InstallMode::System => "systemd",
         crate::context::InstallMode::User => "systemd-user",
     };
@@ -2509,11 +2804,11 @@ fn execute_raw(
         services: services
             .iter()
             .map(|svc| ServiceRef {
-                name: svc.clone(),
-                manager: service_manager.to_string(),
+                name: svc.unit.clone(),
+                manager: service_manager_label.to_string(),
                 restartable: true,
-                // Service enablement is deferred to a later milestone.
-                enabled: false,
+                // Reflect what the executor actually enabled this run.
+                enabled: service_run.enabled_units.contains(&svc.unit),
             })
             .collect(),
         health: Vec::new(),
@@ -2528,19 +2823,28 @@ fn execute_raw(
 
     let state_path = layout.state_dir.join("installed.toml");
     if let Err(err) = state.save(&state_path) {
+        let cleanup_warnings = rollback_activated_services(
+            service_manager.as_ref(),
+            &service_run,
+            Some(&log),
+            &resolution.component,
+            &operation_id,
+            ctx.install_mode.as_str(),
+        );
         rollback_installed_files(&outcome.files);
         rollback_installed_manifest(&manifest_path);
+        let cleanup_suffix = service_cleanup_suffix(&cleanup_warnings);
         return Err(CliError::Runtime {
             command: command.to_string(),
             reason: format!(
-                "failed to save state; attempted best-effort rollback of installed files (some may remain on disk): {err}"
+                "failed to save state; stopped/disabled activated services and attempted best-effort rollback of installed files and manifest{cleanup_suffix} (some files may remain on disk): {err}",
             ),
         });
     }
 
     // Audit log is best-effort: the install already succeeded and state is
     // saved, so a log failure downgrades to a warning instead of unwinding.
-    let log = CentralLog::open(layout.central_log.clone());
+    // `log` was opened above for the capability audit and is reused here.
     if !pruned_legacy.is_empty() {
         // Warn-severity so `logs --level warn` surfaces the migration.
         let prune_record = LogRecord {
@@ -2603,7 +2907,7 @@ fn execute_raw(
         operation_id,
         artifact_url: resolution.artifact_url,
         files_installed: installed_paths,
-        services,
+        services: services.iter().map(|s| s.unit.clone()).collect(),
         warnings: resolution.warnings,
     };
     if ctx.json {
@@ -2680,7 +2984,12 @@ fn render_plan(ctx: &CliContext, preview: &InstallPreview) -> Result<(), CliErro
             .iter()
             .map(|f| f.dest.display().to_string())
             .collect(),
-        services: preview.services.clone(),
+        services: preview.services.iter().map(|s| s.unit.clone()).collect(),
+        capabilities: preview
+            .capabilities
+            .iter()
+            .map(|c| format!("{}: {}", c.path.display(), c.caps.join(",")))
+            .collect(),
         dry_run: true,
         warnings: resolved.warnings.clone(),
     };
@@ -2718,9 +3027,18 @@ fn render_plan(ctx: &CliContext, preview: &InstallPreview) -> Result<(), CliErro
         println!("  - {}", color.path(f));
     }
     if !payload.services.is_empty() {
-        println!("{}", color.header("services (recorded, not started):"));
+        println!(
+            "{}",
+            color.header("services (would enable/start when supported):")
+        );
         for s in &payload.services {
             println!("  - {s}");
+        }
+    }
+    if !payload.capabilities.is_empty() {
+        println!("{}", color.header("capabilities (applied on install):"));
+        for c in &payload.capabilities {
+            println!("  - {c}");
         }
     }
     render_warnings(&payload.warnings, &color);
@@ -2752,7 +3070,10 @@ fn render_result(payload: &InstallResultPayload, no_color: bool) {
         println!("  - {}", color.path(p));
     }
     if !payload.services.is_empty() {
-        println!("{}", color.header("services (recorded, not started):"));
+        println!(
+            "{}",
+            color.header("services (enabled/started when supported):")
+        );
         for s in &payload.services {
             println!("  - {s}");
         }
@@ -2821,6 +3142,40 @@ pub(crate) fn artifact_type_wire(t: &ArtifactType) -> &'static str {
 fn rollback_installed_files(files: &[anolisa_core::InstalledFile]) {
     for f in files {
         let _ = std::fs::remove_file(&f.path);
+    }
+}
+
+/// Best-effort cleanup for service side effects from an install that will
+/// otherwise roll back.
+fn rollback_activated_services(
+    manager: &dyn ServiceManager,
+    service_run: &ServiceRunOutcome,
+    log: Option<&CentralLog>,
+    component: &str,
+    operation_id: &str,
+    install_mode: &str,
+) -> Vec<String> {
+    let units: BTreeSet<String> = service_run
+        .enabled_units
+        .iter()
+        .chain(service_run.started_units.iter())
+        .cloned()
+        .collect();
+    if units.is_empty() {
+        return Vec::new();
+    }
+    let units = units
+        .into_iter()
+        .map(|unit| (component.to_string(), unit))
+        .collect::<Vec<_>>();
+    deactivate_services(manager, &units, log, operation_id, "cli", install_mode).warnings
+}
+
+fn service_cleanup_suffix(warnings: &[String]) -> String {
+    if warnings.is_empty() {
+        String::new()
+    } else {
+        format!("; service cleanup warnings: {}", warnings.join("; "))
     }
 }
 
@@ -2976,6 +3331,7 @@ mod tests {
     use super::*;
 
     use crate::context::InstallMode;
+    use anolisa_core::{FakeServiceManager, ServiceOp};
     use flate2::Compression;
     use flate2::write::GzEncoder;
     use sha2::{Digest, Sha256};
@@ -3012,6 +3368,30 @@ mod tests {
             repo: None,
             package: None,
         }
+    }
+
+    #[test]
+    fn rollback_activated_services_only_cleans_touched_units() {
+        let manager = FakeServiceManager::new();
+        let service_run = ServiceRunOutcome {
+            enabled_units: vec!["enabled.service".to_string()],
+            started_units: vec!["started.service".to_string(), "enabled.service".to_string()],
+            warnings: Vec::new(),
+        };
+
+        let warnings =
+            rollback_activated_services(&manager, &service_run, None, "agentsight", "op", "system");
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            manager.calls(),
+            vec![
+                (ServiceOp::Stop, "enabled.service".to_string()),
+                (ServiceOp::Disable, "enabled.service".to_string()),
+                (ServiceOp::Stop, "started.service".to_string()),
+                (ServiceOp::Disable, "started.service".to_string()),
+            ]
+        );
     }
 
     /// Single-component [`handle`] seam that injects a fake package query
@@ -3169,6 +3549,75 @@ type = "executable"
         let manifest = ComponentManifest::from_toml_str(&toml).expect("parse manifest");
         let files = resolve_adapter_files(&manifest, &layout, "tokenless").expect("resolve");
         assert!(files.is_empty());
+    }
+
+    /// Build a manifest with a single `[[component.capabilities]]` entry,
+    /// optionally overriding the target path and whether it is optional.
+    fn capability_manifest(path: Option<&str>, caps: &[&str], optional: bool) -> String {
+        let mut toml = String::from(
+            "[component]\nname = \"agentsight\"\nversion = \"0.1.0\"\n\n\
+             [component.layout]\nmodes = [\"system\"]\n\n\
+             [[component.layout.files]]\n\
+             source = \"bin/agentsight\"\ntarget = \"{bindir}/agentsight\"\n\
+             mode = \"0755\"\ntype = \"executable\"\n\n\
+             [[component.capabilities]]\n",
+        );
+        if let Some(p) = path {
+            toml.push_str(&format!("path = \"{p}\"\n"));
+        }
+        toml.push_str(&format!("caps = {}\n", toml_string_array(caps)));
+        if optional {
+            toml.push_str("optional = true\n");
+        }
+        toml
+    }
+
+    #[test]
+    fn resolve_manifest_capabilities_expands_bindir_path() {
+        let prefix = tempdir().unwrap();
+        let layout = FsLayout::system(Some(prefix.path().to_path_buf()));
+        let toml = capability_manifest(Some("{bindir}/agentsight"), &["CAP_BPF"], false);
+        let manifest = ComponentManifest::from_toml_str(&toml).expect("parse manifest");
+        let reqs =
+            resolve_manifest_capabilities(&manifest, &layout, "agentsight").expect("resolve");
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].path, layout.bin_dir.join("agentsight"));
+        assert_eq!(reqs[0].caps, vec!["CAP_BPF".to_string()]);
+        assert!(!reqs[0].optional);
+    }
+
+    #[test]
+    fn resolve_manifest_capabilities_rejects_out_of_bounds_path() {
+        let prefix = tempdir().unwrap();
+        let layout = FsLayout::system(Some(prefix.path().to_path_buf()));
+        let toml = capability_manifest(Some("/etc/passwd"), &["CAP_BPF"], false);
+        let manifest = ComponentManifest::from_toml_str(&toml).expect("parse manifest");
+        let err = resolve_manifest_capabilities(&manifest, &layout, "agentsight")
+            .expect_err("path escaping owned roots must be rejected");
+        assert!(matches!(err, CliError::Runtime { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn resolve_manifest_capabilities_skips_rows_with_empty_caps() {
+        let prefix = tempdir().unwrap();
+        let layout = FsLayout::system(Some(prefix.path().to_path_buf()));
+        // A path but nothing to grant — nothing to do, no setcap invocation.
+        let toml = capability_manifest(Some("{bindir}/agentsight"), &[], false);
+        let manifest = ComponentManifest::from_toml_str(&toml).expect("parse manifest");
+        let reqs =
+            resolve_manifest_capabilities(&manifest, &layout, "agentsight").expect("resolve");
+        assert!(reqs.is_empty());
+    }
+
+    #[test]
+    fn resolve_manifest_capabilities_requires_path_when_caps_present() {
+        let prefix = tempdir().unwrap();
+        let layout = FsLayout::system(Some(prefix.path().to_path_buf()));
+        let toml = capability_manifest(None, &["CAP_BPF"], false);
+        let manifest = ComponentManifest::from_toml_str(&toml).expect("parse manifest");
+        let err = resolve_manifest_capabilities(&manifest, &layout, "agentsight")
+            .expect_err("caps without a path is a contract error");
+        assert!(matches!(err, CliError::Runtime { .. }), "got {err:?}");
     }
 
     fn write_empty_repo(root: &Path) -> String {
@@ -3745,6 +4194,598 @@ scope = "@anolisa"
         );
         assert_eq!(state.operations.len(), 1);
         assert!(state.operations[0].id.starts_with("op-install-"));
+    }
+
+    /// Component manifest with a single `[[component.capabilities]]` entry
+    /// appended to the minimal-schema body.
+    fn component_manifest_toml_with_capability(
+        component: &str,
+        version: &str,
+        modes: &[&str],
+        cap_path: &str,
+        caps: &[&str],
+        optional: bool,
+    ) -> String {
+        let mut toml = component_manifest_toml(component, version, modes);
+        toml.push_str("\n[[component.capabilities]]\n");
+        toml.push_str(&format!("path = \"{cap_path}\"\n"));
+        toml.push_str(&format!("caps = {}\n", toml_string_array(caps)));
+        if optional {
+            toml.push_str("optional = true\n");
+        }
+        toml
+    }
+
+    fn build_component_artifact_with_capability(
+        component: &str,
+        version: &str,
+        modes: &[&str],
+        cap_path: &str,
+        caps: &[&str],
+        optional: bool,
+    ) -> Vec<u8> {
+        let manifest = component_manifest_toml_with_capability(
+            component, version, modes, cap_path, caps, optional,
+        );
+        let bin_path = format!("bin/{component}");
+        let payload = format!("#!/bin/sh\necho {component}\n");
+        build_tar_gz(&[
+            (".anolisa/component.toml", manifest.as_bytes()),
+            (bin_path.as_str(), payload.as_bytes()),
+        ])
+    }
+
+    /// Local `file://` repo whose embedded artifact contract declares a
+    /// capability. Mirrors [`write_local_repo_component_with_modes`] but laces
+    /// the artifact's `component.toml` with `[[component.capabilities]]`.
+    fn write_local_repo_component_with_capability(
+        root: &Path,
+        component: &str,
+        version: &str,
+        modes: &[&str],
+        cap_path: &str,
+        caps: &[&str],
+        optional: bool,
+    ) -> String {
+        let v1 = root.join("v1");
+        std::fs::create_dir_all(&v1).expect("create repo dirs");
+
+        let artifact = build_component_artifact_with_capability(
+            component, version, modes, cap_path, caps, optional,
+        );
+        let artifact_name = format!("{component}.tar.gz");
+        std::fs::write(v1.join(&artifact_name), &artifact).expect("write artifact");
+        let sha = format!("{:x}", Sha256::digest(&artifact));
+        let modes_arr = toml_string_array(modes);
+
+        let env = anolisa_env::EnvService::detect();
+        let index = format!(
+            r#"schema_version = 1
+channel = "stable"
+publisher = "test"
+
+[[entries]]
+component = "{component}"
+version = "{version}"
+channel = "stable"
+artifact_type = "tar_gz"
+backend = "raw"
+url = "{artifact_name}"
+os = "{os}"
+arch = "{arch}"
+install_modes = {modes_arr}
+sha256 = "{sha}"
+"#,
+            os = env.os,
+            arch = env.arch,
+        );
+        std::fs::write(v1.join("index.toml"), index).expect("write index");
+        format!("file://{}", v1.display())
+    }
+
+    /// `prepare_raw_execution` downloads + parses the embedded contract and
+    /// surfaces declared capabilities into [`PreparedInstall`] — without
+    /// running `setcap` or laying any file. The actual apply happens in
+    /// `execute_raw`; this pins that the resolve path carries them through.
+    #[test]
+    fn prepare_raw_execution_resolves_declared_capabilities() {
+        let tmp = tempdir().expect("tmpdir");
+        let prefix = tmp.path().join("sys");
+        let repo_url = write_local_repo_component_with_capability(
+            &tmp.path().join("repo"),
+            "agentsight",
+            "0.2.0",
+            &["system"],
+            "{bindir}/agentsight",
+            &["CAP_BPF", "CAP_PERFMON"],
+            true,
+        );
+        let ctx = ctx_with_prefix(false, Some(prefix.clone()));
+        let layout = FsLayout::system(Some(prefix.clone()));
+        let env = anolisa_env::EnvService::detect();
+        let resolution = resolve_raw(
+            &ctx,
+            &layout,
+            &env,
+            ResolveInputs {
+                component: "agentsight".to_string(),
+                package: "agentsight".to_string(),
+                backend: "raw".to_string(),
+                base_url: repo_url,
+                version: None,
+                warnings: Vec::new(),
+            },
+        )
+        .expect("resolve");
+        let prepared = prepare_raw_execution(&ctx, &layout, resolution).expect("prepare");
+
+        assert_eq!(prepared.capabilities.len(), 1);
+        assert_eq!(
+            prepared.capabilities[0].path,
+            layout.bin_dir.join("agentsight")
+        );
+        assert_eq!(
+            prepared.capabilities[0].caps,
+            vec!["CAP_BPF".to_string(), "CAP_PERFMON".to_string()]
+        );
+        assert!(prepared.capabilities[0].optional);
+        // Resolve-only: no setcap, no file laid, no state.
+        assert!(!layout.bin_dir.join("agentsight").exists());
+        assert!(!layout.state_dir.join("installed.toml").exists());
+    }
+
+    /// End-to-end raw install of a component that declares an **optional**
+    /// capability succeeds without root: `setcap` is attempted but, because
+    /// the capability is optional, a non-root / no-xattr failure degrades to
+    /// a warning and the install still completes. We assert the binary and
+    /// state landed; we deliberately do NOT assert the file actually carries
+    /// the capability (root + filesystem xattr support required).
+    #[test]
+    fn install_raw_end_to_end_applies_optional_capability() {
+        let tmp = tempdir().expect("tmpdir");
+        let prefix = tmp.path().join("sys");
+        let repo_url = write_local_repo_component_with_capability(
+            &tmp.path().join("repo"),
+            "agentsight",
+            "0.2.0",
+            &["system"],
+            "{bindir}/agentsight",
+            &["CAP_BPF"],
+            true,
+        );
+
+        let mut a = args("agentsight");
+        a.repo = Some(repo_url);
+        handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+            .expect("install with optional capability must succeed even without root");
+
+        let layout = FsLayout::system(Some(prefix));
+        assert!(
+            layout.bin_dir.join("agentsight").exists(),
+            "binary must be installed even when the optional setcap is skipped"
+        );
+        let state = anolisa_core::InstalledState::load(&layout.state_dir.join("installed.toml"))
+            .expect("state must load");
+        assert!(
+            state
+                .find_object(ObjectKind::Component, "agentsight")
+                .is_some(),
+            "component must be recorded despite optional capability outcome"
+        );
+    }
+
+    /// Component manifest with a single `[[component.services]]` entry
+    /// appended to the minimal-schema body.
+    fn service_manifest(unit: &str, enable: bool, start: bool, instance: Option<&str>) -> String {
+        let mut toml = component_manifest_toml("agentsight", "0.2.0", &["system"]);
+        toml.push_str("\n[[component.services]]\n");
+        toml.push_str(&format!(
+            "unit = \"{unit}\"\nenable = {enable}\nstart = {start}\n"
+        ));
+        if let Some(i) = instance {
+            toml.push_str(&format!("instance = \"{i}\"\n"));
+        }
+        toml
+    }
+
+    #[test]
+    fn resolve_manifest_services_carries_spec_and_expands_instance() {
+        let toml = service_manifest("anolisa-memory@.service", true, false, Some("alice"));
+        let manifest = ComponentManifest::from_toml_str(&toml).expect("parse manifest");
+        let reqs = resolve_manifest_services(&manifest, "agentsight").expect("resolve");
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].unit, "anolisa-memory@alice.service");
+        assert!(reqs[0].enable);
+        assert!(!reqs[0].start);
+    }
+
+    #[test]
+    fn resolve_manifest_services_plain_unit_unchanged() {
+        let toml = service_manifest("agentsight.service", true, true, None);
+        let manifest = ComponentManifest::from_toml_str(&toml).expect("parse manifest");
+        let reqs = resolve_manifest_services(&manifest, "agentsight").expect("resolve");
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].unit, "agentsight.service");
+        assert!(reqs[0].enable && reqs[0].start);
+        assert_eq!(reqs[0].scope, anolisa_core::ServiceScope::System);
+    }
+
+    /// Minimal-schema manifest with the given `[[component.hooks]]` entries
+    /// (phase, script template, strict) appended.
+    fn hooks_manifest(specs: &[(&str, &str, bool)]) -> String {
+        let mut toml = component_manifest_toml("demo", "0.1.0", &["system"]);
+        for (phase, script, strict) in specs {
+            toml.push_str("\n[[component.hooks]]\n");
+            toml.push_str(&format!(
+                "phase = \"{phase}\"\nscript = \"{script}\"\nstrict = {strict}\n"
+            ));
+        }
+        toml
+    }
+
+    #[test]
+    fn resolve_install_hooks_classifies_phases_and_filters_uninstall() {
+        let tmp = tempdir().expect("tmpdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let toml = hooks_manifest(&[
+            ("pre_install", "{datadir}/hooks/demo/pre-install.sh", false),
+            ("post_install", "{datadir}/hooks/demo/post-install.sh", true),
+            ("post_enable", "{datadir}/hooks/demo/post-enable.sh", false),
+            (
+                "pre_uninstall",
+                "{datadir}/hooks/demo/pre-uninstall.sh",
+                false,
+            ),
+        ]);
+        let manifest = ComponentManifest::from_toml_str(&toml).expect("parse manifest");
+        let hooks = resolve_install_hooks(&manifest, &layout, "demo").expect("resolve");
+
+        assert_eq!(hooks.pre_install.len(), 1);
+        assert_eq!(hooks.post_install.len(), 1);
+        assert!(hooks.post_install[0].strict, "strict carried from contract");
+        assert_eq!(hooks.post_enable.len(), 1);
+        assert_eq!(
+            hooks.pre_install[0].script,
+            layout.datadir.join("hooks/demo/pre-install.sh"),
+        );
+        // The pre_uninstall entry must not leak into any install-phase list.
+        let total = hooks.pre_install.len() + hooks.post_install.len() + hooks.post_enable.len();
+        assert_eq!(total, 3, "uninstall-phase hook must be excluded");
+    }
+
+    #[test]
+    fn resolve_install_hooks_rejects_invalid_placeholder() {
+        let tmp = tempdir().expect("tmpdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let toml = hooks_manifest(&[("post_install", "{nope}/x.sh", false)]);
+        let manifest = ComponentManifest::from_toml_str(&toml).expect("parse manifest");
+        let err = resolve_install_hooks(&manifest, &layout, "demo").expect_err("must error");
+        assert!(matches!(err, CliError::Runtime { .. }));
+    }
+
+    fn build_component_artifact_with_service(
+        component: &str,
+        version: &str,
+        modes: &[&str],
+        unit: &str,
+        enable: bool,
+        start: bool,
+    ) -> Vec<u8> {
+        let mut manifest = component_manifest_toml(component, version, modes);
+        manifest.push_str("\n[[component.services]]\n");
+        manifest.push_str(&format!(
+            "unit = \"{unit}\"\nenable = {enable}\nstart = {start}\n"
+        ));
+        let bin_path = format!("bin/{component}");
+        let payload = format!("#!/bin/sh\necho {component}\n");
+        build_tar_gz(&[
+            (".anolisa/component.toml", manifest.as_bytes()),
+            (bin_path.as_str(), payload.as_bytes()),
+        ])
+    }
+
+    /// Local `file://` repo whose embedded artifact contract declares a
+    /// service. Mirrors [`write_local_repo_component_with_capability`].
+    fn write_local_repo_component_with_service(
+        root: &Path,
+        component: &str,
+        version: &str,
+        modes: &[&str],
+        unit: &str,
+        enable: bool,
+        start: bool,
+    ) -> String {
+        let v1 = root.join("v1");
+        std::fs::create_dir_all(&v1).expect("create repo dirs");
+
+        let artifact =
+            build_component_artifact_with_service(component, version, modes, unit, enable, start);
+        let artifact_name = format!("{component}.tar.gz");
+        std::fs::write(v1.join(&artifact_name), &artifact).expect("write artifact");
+        let sha = format!("{:x}", Sha256::digest(&artifact));
+        let modes_arr = toml_string_array(modes);
+
+        let env = anolisa_env::EnvService::detect();
+        let index = format!(
+            r#"schema_version = 1
+channel = "stable"
+publisher = "test"
+
+[[entries]]
+component = "{component}"
+version = "{version}"
+channel = "stable"
+artifact_type = "tar_gz"
+backend = "raw"
+url = "{artifact_name}"
+os = "{os}"
+arch = "{arch}"
+install_modes = {modes_arr}
+sha256 = "{sha}"
+"#,
+            os = env.os,
+            arch = env.arch,
+        );
+        std::fs::write(v1.join("index.toml"), index).expect("write index");
+        format!("file://{}", v1.display())
+    }
+
+    /// `prepare_raw_execution` carries declared services (unit + enable/start)
+    /// into [`PreparedInstall`] without activating or laying anything.
+    #[test]
+    fn prepare_raw_execution_resolves_declared_services() {
+        let tmp = tempdir().expect("tmpdir");
+        let prefix = tmp.path().join("sys");
+        let repo_url = write_local_repo_component_with_service(
+            &tmp.path().join("repo"),
+            "agentsight",
+            "0.2.0",
+            &["system"],
+            "agentsight.service",
+            true,
+            true,
+        );
+        let ctx = ctx_with_prefix(false, Some(prefix.clone()));
+        let layout = FsLayout::system(Some(prefix.clone()));
+        let env = anolisa_env::EnvService::detect();
+        let resolution = resolve_raw(
+            &ctx,
+            &layout,
+            &env,
+            ResolveInputs {
+                component: "agentsight".to_string(),
+                package: "agentsight".to_string(),
+                backend: "raw".to_string(),
+                base_url: repo_url,
+                version: None,
+                warnings: Vec::new(),
+            },
+        )
+        .expect("resolve");
+        let prepared = prepare_raw_execution(&ctx, &layout, resolution).expect("prepare");
+
+        assert_eq!(prepared.services.len(), 1);
+        assert_eq!(prepared.services[0].unit, "agentsight.service");
+        assert!(prepared.services[0].enable && prepared.services[0].start);
+        // Resolve-only: nothing activated or laid.
+        assert!(!layout.bin_dir.join("agentsight").exists());
+        assert!(!layout.state_dir.join("installed.toml").exists());
+    }
+
+    /// End-to-end raw install of a component declaring a system service
+    /// succeeds: activation is best-effort, so in a non-systemd / non-root
+    /// test env a failed enable/start degrades to a warning and the install
+    /// still completes. We assert the binary and the ServiceRef landed; we do
+    /// NOT assert the unit was actually enabled (requires real systemd+root).
+    #[test]
+    fn install_raw_end_to_end_records_declared_service() {
+        let tmp = tempdir().expect("tmpdir");
+        let prefix = tmp.path().join("sys");
+        let repo_url = write_local_repo_component_with_service(
+            &tmp.path().join("repo"),
+            "agentsight",
+            "0.2.0",
+            &["system"],
+            "agentsight.service",
+            true,
+            true,
+        );
+
+        let mut a = args("agentsight");
+        a.repo = Some(repo_url);
+        handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+            .expect("install with a declared service must succeed (activation is best-effort)");
+
+        let layout = FsLayout::system(Some(prefix));
+        assert!(
+            layout.bin_dir.join("agentsight").exists(),
+            "binary installed"
+        );
+        let state = anolisa_core::InstalledState::load(&layout.state_dir.join("installed.toml"))
+            .expect("state must load");
+        let obj = state
+            .find_object(ObjectKind::Component, "agentsight")
+            .expect("component recorded");
+        assert_eq!(obj.services.len(), 1);
+        assert_eq!(obj.services[0].name, "agentsight.service");
+    }
+
+    /// Local `file://` repo whose artifact ships a binary plus an executable
+    /// hook script, with the contract declaring that script for `phase`.
+    /// Mirrors [`write_local_repo_component_with_service`].
+    fn write_local_repo_component_with_hook(
+        root: &Path,
+        component: &str,
+        version: &str,
+        phase: &str,
+        strict: bool,
+        script_body: &str,
+    ) -> String {
+        let v1 = root.join("v1");
+        std::fs::create_dir_all(&v1).expect("create repo dirs");
+
+        let script_rel = format!("hooks/{component}/{}.sh", phase.replace('_', "-"));
+        let mut manifest = component_manifest_toml(component, version, &["system"]);
+        // Hook script is itself a laid-down layout file, mode 0755 so the
+        // runner can spawn it.
+        manifest.push_str("\n[[component.layout.files]]\n");
+        manifest.push_str(&format!(
+            "source = \"hook.sh\"\ntarget = \"{{datadir}}/{script_rel}\"\nmode = \"0755\"\n"
+        ));
+        manifest.push_str("\n[[component.hooks]]\n");
+        manifest.push_str(&format!(
+            "phase = \"{phase}\"\nscript = \"{{datadir}}/{script_rel}\"\nstrict = {strict}\n"
+        ));
+
+        let bin_path = format!("bin/{component}");
+        let bin_payload = format!("#!/bin/sh\necho {component}\n");
+        let artifact = build_tar_gz(&[
+            (".anolisa/component.toml", manifest.as_bytes()),
+            (bin_path.as_str(), bin_payload.as_bytes()),
+            ("hook.sh", script_body.as_bytes()),
+        ]);
+        let artifact_name = format!("{component}.tar.gz");
+        std::fs::write(v1.join(&artifact_name), &artifact).expect("write artifact");
+        let sha = format!("{:x}", Sha256::digest(&artifact));
+
+        let env = anolisa_env::EnvService::detect();
+        let index = format!(
+            r#"schema_version = 1
+channel = "stable"
+publisher = "test"
+
+[[entries]]
+component = "{component}"
+version = "{version}"
+channel = "stable"
+artifact_type = "tar_gz"
+backend = "raw"
+url = "{artifact_name}"
+os = "{os}"
+arch = "{arch}"
+install_modes = ["system"]
+sha256 = "{sha}"
+"#,
+            os = env.os,
+            arch = env.arch,
+        );
+        std::fs::write(v1.join("index.toml"), index).expect("write index");
+        format!("file://{}", v1.display())
+    }
+
+    /// A declared `post_install` hook runs after files land (§6.2): the script
+    /// touches a sentinel, which must exist after a successful install.
+    #[test]
+    #[cfg(unix)]
+    fn install_raw_runs_post_install_hook() {
+        let tmp = tempdir().expect("tmpdir");
+        let prefix = tmp.path().join("sys");
+        let sentinel = tmp.path().join("post-install.ran");
+        let body = format!("#!/bin/sh\ntouch {}\n", sentinel.display());
+        let repo_url = write_local_repo_component_with_hook(
+            &tmp.path().join("repo"),
+            "agentsight",
+            "0.2.0",
+            "post_install",
+            false,
+            &body,
+        );
+
+        let mut a = args("agentsight");
+        a.repo = Some(repo_url);
+        handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+            .expect("install with a post_install hook must succeed");
+
+        let layout = FsLayout::system(Some(prefix));
+        assert!(
+            layout.bin_dir.join("agentsight").exists(),
+            "binary installed"
+        );
+        assert!(
+            sentinel.exists(),
+            "post_install hook must run after files are laid down"
+        );
+    }
+
+    /// A strict `post_install` failure aborts and rolls back: by then files
+    /// and the manifest snapshot are on disk, so both must be removed.
+    #[test]
+    #[cfg(unix)]
+    fn install_raw_strict_post_install_failure_rolls_back() {
+        let tmp = tempdir().expect("tmpdir");
+        let prefix = tmp.path().join("sys");
+        let repo_url = write_local_repo_component_with_hook(
+            &tmp.path().join("repo"),
+            "agentsight",
+            "0.2.0",
+            "post_install",
+            true,
+            "#!/bin/sh\nexit 1\n",
+        );
+
+        let mut a = args("agentsight");
+        a.repo = Some(repo_url);
+        let err = handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+            .expect_err("strict post_install failure must abort the install");
+        assert!(matches!(err, CliError::Runtime { .. }));
+
+        let layout = FsLayout::system(Some(prefix));
+        assert!(
+            !layout.bin_dir.join("agentsight").exists(),
+            "installed files must be rolled back after a strict hook failure"
+        );
+        let snapshot = common::installed_component_manifest_path(&layout, "agentsight", COMMAND)
+            .expect("manifest path");
+        assert!(
+            !snapshot.exists(),
+            "installed manifest snapshot must be rolled back"
+        );
+        let state_path = layout.state_dir.join("installed.toml");
+        if state_path.exists() {
+            let state = anolisa_core::InstalledState::load(&state_path).expect("state load");
+            assert!(
+                state
+                    .find_object(ObjectKind::Component, "agentsight")
+                    .is_none(),
+                "component must not be recorded after rollback"
+            );
+        }
+    }
+
+    /// `pre_install` runs before files land. On a fresh install the script
+    /// ships in the artifact but is not yet on disk, so a `strict = false`
+    /// `pre_install` skips as Missing and the install still succeeds — the
+    /// sentinel it would touch must not appear.
+    #[test]
+    #[cfg(unix)]
+    fn install_raw_pre_install_hook_skipped_as_missing_on_fresh_install() {
+        let tmp = tempdir().expect("tmpdir");
+        let prefix = tmp.path().join("sys");
+        let sentinel = tmp.path().join("pre-install.ran");
+        let body = format!("#!/bin/sh\ntouch {}\n", sentinel.display());
+        let repo_url = write_local_repo_component_with_hook(
+            &tmp.path().join("repo"),
+            "agentsight",
+            "0.2.0",
+            "pre_install",
+            false,
+            &body,
+        );
+
+        let mut a = args("agentsight");
+        a.repo = Some(repo_url);
+        handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+            .expect("install must succeed; pre_install script is not yet laid");
+
+        let layout = FsLayout::system(Some(prefix));
+        assert!(
+            layout.bin_dir.join("agentsight").exists(),
+            "binary installed"
+        );
+        assert!(
+            !sentinel.exists(),
+            "pre_install must skip when its script is not yet on disk"
+        );
     }
 
     #[test]

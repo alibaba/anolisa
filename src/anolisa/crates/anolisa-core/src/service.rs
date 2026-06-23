@@ -24,6 +24,8 @@ use std::sync::Mutex;
 
 use anolisa_env::EnvFacts;
 
+use crate::manifest::ServiceScope;
+
 /// One operation issued against a service manager. Used both to drive
 /// systemctl and to record what a [`FakeServiceManager`] saw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -602,6 +604,311 @@ pub fn record_service_op_unsupported(
     });
 }
 
+/// One resolved service activation. `unit` is the effective unit name
+/// (template instance already substituted by the caller); `scope`,
+/// `enable`, and `start` are carried verbatim from the component's
+/// `[[component.services]]` contract.
+#[derive(Debug, Clone)]
+pub struct ServiceRequest {
+    /// Effective systemd unit name (e.g. `agentsight.service` or
+    /// `anolisa-memory@alice.service`).
+    pub unit: String,
+    /// `system` drives `systemctl`; `user` is a documented skip for now.
+    pub scope: ServiceScope,
+    /// Enable the unit (persistent across boots) when true.
+    pub enable: bool,
+    /// Start the unit now when true. On upgrade this becomes a restart —
+    /// see [`ServiceActivation`].
+    pub start: bool,
+}
+
+/// How [`apply_services`] brings a unit up: a fresh install starts it; an
+/// upgrade restarts it so the replaced binary is reloaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceActivation {
+    /// Fresh install — `systemctl start`.
+    Start,
+    /// Upgrade — `systemctl restart` to pick up the new binary.
+    Restart,
+}
+
+/// Aggregate result of [`apply_services`]. Activation is best-effort, so
+/// there is no abort field — every request is attempted and failures are
+/// collected as warnings.
+#[derive(Debug, Default)]
+pub struct ServiceRunOutcome {
+    /// Units successfully enabled — used to backfill `ServiceRef.enabled`.
+    pub enabled_units: Vec<String>,
+    /// Units successfully started or restarted.
+    pub started_units: Vec<String>,
+    /// Per-op warnings from tolerated (best-effort) failures.
+    pub warnings: Vec<String>,
+}
+
+/// Enable/start (or restart) each requested unit, recording one audit line
+/// per attempted op. Activation is **best-effort**: a failed enable or
+/// start degrades to a warning and the run continues — service failures
+/// never abort or roll back the install (a component's files are still
+/// usable, and operators can fix the unit out of band).
+///
+/// Skips, in priority order, each producing a documented `Info` audit line
+/// and no warning:
+/// - `scope == user`: user-scope activation is not yet supported.
+/// - `!manager.supported()`: non-Linux, user mode, or container host.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_services(
+    manager: &dyn ServiceManager,
+    requests: &[ServiceRequest],
+    activation: ServiceActivation,
+    log: Option<&crate::central_log::CentralLog>,
+    component: &str,
+    operation_id: &str,
+    actor: &str,
+    install_mode: &str,
+) -> ServiceRunOutcome {
+    let mut outcome = ServiceRunOutcome::default();
+    for req in requests {
+        // Representative op for skip records: prefer the first op we would
+        // have run so the audit line names a meaningful action.
+        let primary_op = if req.enable {
+            ServiceOp::Enable
+        } else {
+            ServiceOp::Start
+        };
+
+        if req.scope == ServiceScope::User {
+            record_service_op_unsupported(
+                log,
+                primary_op,
+                component,
+                &req.unit,
+                operation_id,
+                actor,
+                install_mode,
+                manager.manager(),
+                Some("user-scope service activation not yet supported"),
+            );
+            continue;
+        }
+
+        if !manager.supported() {
+            record_service_op_unsupported(
+                log,
+                primary_op,
+                component,
+                &req.unit,
+                operation_id,
+                actor,
+                install_mode,
+                manager.manager(),
+                manager.unsupported_reason(),
+            );
+            continue;
+        }
+
+        if req.enable {
+            match manager.enable_service(&req.unit) {
+                Ok(_) => {
+                    record_service_op(
+                        log,
+                        ServiceOp::Enable,
+                        component,
+                        &req.unit,
+                        operation_id,
+                        actor,
+                        install_mode,
+                        None,
+                    );
+                    outcome.enabled_units.push(req.unit.clone());
+                }
+                Err(err) => {
+                    let msg = err.to_string();
+                    record_service_op(
+                        log,
+                        ServiceOp::Enable,
+                        component,
+                        &req.unit,
+                        operation_id,
+                        actor,
+                        install_mode,
+                        Some(&msg),
+                    );
+                    outcome
+                        .warnings
+                        .push(format!("enable {} failed: {msg}", req.unit));
+                }
+            }
+        }
+
+        if req.start {
+            let op = match activation {
+                ServiceActivation::Start => ServiceOp::Start,
+                ServiceActivation::Restart => ServiceOp::Restart,
+            };
+            let result = match activation {
+                ServiceActivation::Start => manager.start_service(&req.unit),
+                ServiceActivation::Restart => manager.restart_service(&req.unit),
+            };
+            match result {
+                Ok(_) => {
+                    record_service_op(
+                        log,
+                        op,
+                        component,
+                        &req.unit,
+                        operation_id,
+                        actor,
+                        install_mode,
+                        None,
+                    );
+                    outcome.started_units.push(req.unit.clone());
+                }
+                Err(err) => {
+                    let msg = err.to_string();
+                    record_service_op(
+                        log,
+                        op,
+                        component,
+                        &req.unit,
+                        operation_id,
+                        actor,
+                        install_mode,
+                        Some(&msg),
+                    );
+                    outcome
+                        .warnings
+                        .push(format!("{} {} failed: {msg}", op.as_str(), req.unit));
+                }
+            }
+        }
+    }
+    outcome
+}
+
+/// Aggregate result of [`deactivate_services`]. Like [`ServiceRunOutcome`]
+/// for the install side, deactivation is best-effort: every unit is
+/// attempted and failures are collected as warnings rather than aborting
+/// the uninstall.
+#[derive(Debug, Default)]
+pub struct DeactivationOutcome {
+    /// Units successfully stopped.
+    pub stopped: Vec<String>,
+    /// Units successfully disabled.
+    pub disabled: Vec<String>,
+    /// Per-op warnings from tolerated (best-effort) failures.
+    pub warnings: Vec<String>,
+}
+
+/// Stop and disable each owned unit before its files are removed, recording
+/// one audit line per attempted op. The uninstall-side mirror of
+/// [`apply_services`]: stopping releases the running daemon so its binary
+/// can be unlinked cleanly, disabling removes the boot-time symlink so an
+/// uninstalled component leaves no orphan `enabled` unit behind.
+///
+/// `disable` is idempotent (a no-op on a unit that was never enabled), so
+/// each unit is stopped *and* disabled unconditionally — the executor does
+/// not need to know which units were enabled at install time.
+///
+/// **Best-effort**: a failed stop still proceeds to disable, and neither
+/// failure aborts or rolls back the uninstall — warnings surface on the
+/// verb's outcome instead. An `!manager.supported()` host produces a
+/// documented `Info` skip line per op (stop and disable) and no warning.
+#[allow(clippy::too_many_arguments)]
+pub fn deactivate_services(
+    manager: &dyn ServiceManager,
+    units: &[(String, String)],
+    log: Option<&crate::central_log::CentralLog>,
+    operation_id: &str,
+    actor: &str,
+    install_mode: &str,
+) -> DeactivationOutcome {
+    let mut outcome = DeactivationOutcome::default();
+    for (component, unit) in units {
+        if !manager.supported() {
+            for op in [ServiceOp::Stop, ServiceOp::Disable] {
+                record_service_op_unsupported(
+                    log,
+                    op,
+                    component,
+                    unit,
+                    operation_id,
+                    actor,
+                    install_mode,
+                    manager.manager(),
+                    manager.unsupported_reason(),
+                );
+            }
+            continue;
+        }
+
+        match manager.stop_service(unit) {
+            Ok(_) => {
+                record_service_op(
+                    log,
+                    ServiceOp::Stop,
+                    component,
+                    unit,
+                    operation_id,
+                    actor,
+                    install_mode,
+                    None,
+                );
+                outcome.stopped.push(unit.clone());
+            }
+            Err(err) => {
+                let msg = err.to_string();
+                record_service_op(
+                    log,
+                    ServiceOp::Stop,
+                    component,
+                    unit,
+                    operation_id,
+                    actor,
+                    install_mode,
+                    Some(&msg),
+                );
+                outcome.warnings.push(format!("stop {unit} failed: {msg}"));
+            }
+        }
+
+        // Disable runs even when stop failed: a still-running unit can
+        // still have its boot symlink removed, and leaving it enabled is
+        // exactly the orphan we are here to prevent.
+        match manager.disable_service(unit) {
+            Ok(_) => {
+                record_service_op(
+                    log,
+                    ServiceOp::Disable,
+                    component,
+                    unit,
+                    operation_id,
+                    actor,
+                    install_mode,
+                    None,
+                );
+                outcome.disabled.push(unit.clone());
+            }
+            Err(err) => {
+                let msg = err.to_string();
+                record_service_op(
+                    log,
+                    ServiceOp::Disable,
+                    component,
+                    unit,
+                    operation_id,
+                    actor,
+                    install_mode,
+                    Some(&msg),
+                );
+                outcome
+                    .warnings
+                    .push(format!("disable {unit} failed: {msg}"));
+            }
+        }
+    }
+    outcome
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -915,5 +1222,400 @@ mod tests {
             "not-supported",
             Some("nope"),
         );
+    }
+
+    fn svc_req(unit: &str, enable: bool, start: bool) -> ServiceRequest {
+        ServiceRequest {
+            unit: unit.to_string(),
+            scope: ServiceScope::System,
+            enable,
+            start,
+        }
+    }
+
+    #[test]
+    fn apply_services_enables_then_starts_in_order() {
+        let m = FakeServiceManager::new();
+        let reqs = vec![svc_req("a.service", true, true)];
+        let out = apply_services(
+            &m,
+            &reqs,
+            ServiceActivation::Start,
+            None,
+            "comp",
+            "op1",
+            "cli",
+            "system",
+        );
+        assert_eq!(
+            m.calls(),
+            vec![
+                (ServiceOp::Enable, "a.service".to_string()),
+                (ServiceOp::Start, "a.service".to_string()),
+            ]
+        );
+        assert_eq!(out.enabled_units, vec!["a.service".to_string()]);
+        assert_eq!(out.started_units, vec!["a.service".to_string()]);
+        assert!(out.warnings.is_empty());
+    }
+
+    #[test]
+    fn apply_services_skips_enable_when_not_requested() {
+        let m = FakeServiceManager::new();
+        let reqs = vec![svc_req("a.service", false, true)];
+        let out = apply_services(
+            &m,
+            &reqs,
+            ServiceActivation::Start,
+            None,
+            "comp",
+            "op1",
+            "cli",
+            "system",
+        );
+        assert_eq!(m.calls(), vec![(ServiceOp::Start, "a.service".to_string())]);
+        assert!(out.enabled_units.is_empty());
+        assert_eq!(out.started_units, vec!["a.service".to_string()]);
+    }
+
+    #[test]
+    fn apply_services_skips_start_when_not_requested() {
+        let m = FakeServiceManager::new();
+        let reqs = vec![svc_req("a.service", true, false)];
+        let out = apply_services(
+            &m,
+            &reqs,
+            ServiceActivation::Start,
+            None,
+            "comp",
+            "op1",
+            "cli",
+            "system",
+        );
+        assert_eq!(
+            m.calls(),
+            vec![(ServiceOp::Enable, "a.service".to_string())]
+        );
+        assert_eq!(out.enabled_units, vec!["a.service".to_string()]);
+        assert!(out.started_units.is_empty());
+    }
+
+    #[test]
+    fn apply_services_restart_activation_uses_restart_not_start() {
+        let m = FakeServiceManager::new();
+        let reqs = vec![svc_req("a.service", false, true)];
+        let out = apply_services(
+            &m,
+            &reqs,
+            ServiceActivation::Restart,
+            None,
+            "comp",
+            "op1",
+            "cli",
+            "system",
+        );
+        assert_eq!(
+            m.calls(),
+            vec![(ServiceOp::Restart, "a.service".to_string())]
+        );
+        assert_eq!(out.started_units, vec!["a.service".to_string()]);
+    }
+
+    #[test]
+    fn apply_services_enable_failure_warns_and_still_starts() {
+        let m = FakeServiceManager::new();
+        m.fail(ServiceOp::Enable, "a.service");
+        let reqs = vec![svc_req("a.service", true, true)];
+        let out = apply_services(
+            &m,
+            &reqs,
+            ServiceActivation::Start,
+            None,
+            "comp",
+            "op1",
+            "cli",
+            "system",
+        );
+        // Best-effort: enable failed but start was still attempted.
+        assert_eq!(
+            m.calls(),
+            vec![
+                (ServiceOp::Enable, "a.service".to_string()),
+                (ServiceOp::Start, "a.service".to_string()),
+            ]
+        );
+        assert!(out.enabled_units.is_empty());
+        assert_eq!(out.started_units, vec!["a.service".to_string()]);
+        assert_eq!(out.warnings.len(), 1);
+        assert!(out.warnings[0].contains("a.service"));
+    }
+
+    #[test]
+    fn apply_services_start_failure_warns_without_aborting() {
+        let m = FakeServiceManager::new();
+        m.fail(ServiceOp::Start, "a.service");
+        let reqs = vec![svc_req("a.service", true, true)];
+        let out = apply_services(
+            &m,
+            &reqs,
+            ServiceActivation::Start,
+            None,
+            "comp",
+            "op1",
+            "cli",
+            "system",
+        );
+        assert_eq!(out.enabled_units, vec!["a.service".to_string()]);
+        assert!(out.started_units.is_empty());
+        assert_eq!(out.warnings.len(), 1);
+        assert!(out.warnings[0].contains("a.service"));
+    }
+
+    #[test]
+    fn apply_services_unsupported_manager_is_quiet_skip() {
+        let m = NotSupportedServiceManager::new("install_mode=user".to_string());
+        let reqs = vec![svc_req("a.service", true, true)];
+        let out = apply_services(
+            &m,
+            &reqs,
+            ServiceActivation::Start,
+            None,
+            "comp",
+            "op1",
+            "cli",
+            "user",
+        );
+        assert!(out.enabled_units.is_empty());
+        assert!(out.started_units.is_empty());
+        // Unsupported is a documented skip, not a fault — no warnings.
+        assert!(out.warnings.is_empty());
+    }
+
+    #[test]
+    fn apply_services_user_scope_is_skipped_without_touching_manager() {
+        let m = FakeServiceManager::new();
+        let reqs = vec![ServiceRequest {
+            unit: "anolisa-memory@alice.service".to_string(),
+            scope: ServiceScope::User,
+            enable: true,
+            start: true,
+        }];
+        let out = apply_services(
+            &m,
+            &reqs,
+            ServiceActivation::Start,
+            None,
+            "comp",
+            "op1",
+            "cli",
+            "system",
+        );
+        // user-scope activation is out of scope: the manager is never called.
+        assert!(m.calls().is_empty());
+        assert!(out.enabled_units.is_empty());
+        assert!(out.started_units.is_empty());
+        assert!(out.warnings.is_empty());
+    }
+
+    #[test]
+    fn apply_services_logs_info_on_enable_and_warn_on_start_failure() {
+        use crate::central_log::CentralLog;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("central.log");
+        let log = CentralLog::open(path.clone());
+
+        let m = FakeServiceManager::new();
+        m.fail(ServiceOp::Start, "agentsight.service");
+        let reqs = vec![svc_req("agentsight.service", true, true)];
+        apply_services(
+            &m,
+            &reqs,
+            ServiceActivation::Start,
+            Some(&log),
+            "agentsight",
+            "op-svc-1",
+            "tester",
+            "system",
+        );
+
+        let content = std::fs::read_to_string(&path).expect("read log");
+        let lines: Vec<serde_json::Value> = content
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).expect("parse line"))
+            .collect();
+        assert_eq!(lines.len(), 2, "one record per attempted op");
+
+        assert_eq!(
+            lines[0].get("command").and_then(|v| v.as_str()),
+            Some("service:enable"),
+        );
+        assert_eq!(
+            lines[0].get("severity").and_then(|v| v.as_str()),
+            Some("info"),
+        );
+        assert_eq!(
+            lines[1].get("command").and_then(|v| v.as_str()),
+            Some("service:start"),
+        );
+        assert_eq!(
+            lines[1].get("severity").and_then(|v| v.as_str()),
+            Some("warn"),
+            "a failed start must be Warn so audit pipelines can grep",
+        );
+        let msg = lines[1]
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            msg.contains("agentsight.service"),
+            "warn must name the unit: {msg}"
+        );
+    }
+
+    #[test]
+    fn apply_services_unsupported_logs_supported_false_details() {
+        use crate::central_log::CentralLog;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("central.log");
+        let log = CentralLog::open(path.clone());
+
+        let m = NotSupportedServiceManager::new("install_mode=user is not supported".to_string());
+        let reqs = vec![svc_req("agentsight.service", true, true)];
+        apply_services(
+            &m,
+            &reqs,
+            ServiceActivation::Start,
+            Some(&log),
+            "agentsight",
+            "op-svc-2",
+            "tester",
+            "user",
+        );
+
+        let content = std::fs::read_to_string(&path).expect("read log");
+        let lines: Vec<serde_json::Value> = content
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).expect("parse line"))
+            .collect();
+        assert_eq!(lines.len(), 1, "one skip record per request");
+        let rec = &lines[0];
+        assert_eq!(
+            rec.get("severity").and_then(|v| v.as_str()),
+            Some("info"),
+            "unsupported skip is documented behaviour, not a fault",
+        );
+        let details = rec.get("details").expect("details present");
+        assert_eq!(
+            details.get("supported").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+    }
+
+    fn unit(component: &str, name: &str) -> (String, String) {
+        (component.to_string(), name.to_string())
+    }
+
+    #[test]
+    fn deactivate_services_stops_then_disables_in_order() {
+        let m = FakeServiceManager::new();
+        let units = vec![unit("agentsight", "agentsight.service")];
+        let out = deactivate_services(&m, &units, None, "op1", "cli", "system");
+        assert_eq!(
+            m.calls(),
+            vec![
+                (ServiceOp::Stop, "agentsight.service".to_string()),
+                (ServiceOp::Disable, "agentsight.service".to_string()),
+            ]
+        );
+        assert_eq!(out.stopped, vec!["agentsight.service".to_string()]);
+        assert_eq!(out.disabled, vec!["agentsight.service".to_string()]);
+        assert!(out.warnings.is_empty());
+    }
+
+    #[test]
+    fn deactivate_services_stop_failure_warns_and_still_disables() {
+        let m = FakeServiceManager::new();
+        m.fail(ServiceOp::Stop, "a.service");
+        let units = vec![unit("comp", "a.service")];
+        let out = deactivate_services(&m, &units, None, "op1", "cli", "system");
+        // Best-effort: stop failed but disable was still attempted so the
+        // boot symlink is removed regardless.
+        assert_eq!(
+            m.calls(),
+            vec![
+                (ServiceOp::Stop, "a.service".to_string()),
+                (ServiceOp::Disable, "a.service".to_string()),
+            ]
+        );
+        assert!(out.stopped.is_empty());
+        assert_eq!(out.disabled, vec!["a.service".to_string()]);
+        assert_eq!(out.warnings.len(), 1);
+        assert!(out.warnings[0].contains("a.service"));
+    }
+
+    #[test]
+    fn deactivate_services_disable_failure_warns_without_aborting() {
+        let m = FakeServiceManager::new();
+        m.fail(ServiceOp::Disable, "a.service");
+        let units = vec![unit("comp", "a.service")];
+        let out = deactivate_services(&m, &units, None, "op1", "cli", "system");
+        assert_eq!(out.stopped, vec!["a.service".to_string()]);
+        assert!(out.disabled.is_empty());
+        assert_eq!(out.warnings.len(), 1);
+        assert!(out.warnings[0].contains("a.service"));
+    }
+
+    #[test]
+    fn deactivate_services_unsupported_manager_is_quiet_skip() {
+        let m = NotSupportedServiceManager::new("install_mode=user".to_string());
+        let units = vec![unit("comp", "a.service")];
+        let out = deactivate_services(&m, &units, None, "op1", "cli", "user");
+        // Unsupported never touches a manager method and never warns.
+        assert!(out.stopped.is_empty());
+        assert!(out.disabled.is_empty());
+        assert!(out.warnings.is_empty());
+    }
+
+    #[test]
+    fn deactivate_services_logs_stop_and_disable_records() {
+        use crate::central_log::CentralLog;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("central.log");
+        let log = CentralLog::open(path.clone());
+
+        let m = FakeServiceManager::new();
+        let units = vec![unit("agentsight", "agentsight.service")];
+        deactivate_services(&m, &units, Some(&log), "op-deact-1", "tester", "system");
+
+        let content = std::fs::read_to_string(&path).expect("read log");
+        let lines: Vec<serde_json::Value> = content
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).expect("parse line"))
+            .collect();
+        assert_eq!(lines.len(), 2, "one record per attempted op");
+        assert_eq!(
+            lines[0].get("command").and_then(|v| v.as_str()),
+            Some("service:stop"),
+        );
+        assert_eq!(
+            lines[1].get("command").and_then(|v| v.as_str()),
+            Some("service:disable"),
+        );
+        for rec in &lines {
+            assert_eq!(rec.get("severity").and_then(|v| v.as_str()), Some("info"));
+            assert_eq!(rec.get("kind").and_then(|v| v.as_str()), Some("component"));
+        }
+    }
+
+    #[test]
+    fn deactivate_services_with_no_log_handle_is_a_noop() {
+        let m = FakeServiceManager::new();
+        let units = vec![unit("comp", "a.service")];
+        // None log handle must not panic and must still drive the manager.
+        let out = deactivate_services(&m, &units, None, "op1", "cli", "system");
+        assert_eq!(out.stopped.len() + out.disabled.len(), 2);
     }
 }

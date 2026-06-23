@@ -142,9 +142,10 @@ pub enum AdapterError {
     },
 
     /// The component contract declares a `dest` for the adapter, but the
-    /// expanded path does not exist on disk. Unlike [`ResourceRootNotFound`],
-    /// this means the contract was explicit — the caller should **not**
-    /// silently fall back to convention discovery.
+    /// expanded path does not exist on disk. Unlike
+    /// [`ResourceRootNotFound`](AdapterError::ResourceRootNotFound), this
+    /// means the contract was explicit — the caller should **not** silently
+    /// fall back to convention discovery.
     #[error(
         "adapter resource root from contract does not exist for '{component}/{framework}': {path}"
     )]
