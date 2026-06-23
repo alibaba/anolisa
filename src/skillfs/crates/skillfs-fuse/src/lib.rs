@@ -90,18 +90,21 @@ impl Default for MountOptions {
 pub struct MountHandle {
     /// The mount point path
     pub mountpoint: PathBuf,
-    /// Background session (if mounted in background)
+    /// Background session (if mounted in background).
+    /// Wrapped in `Option` so both explicit `unmount` and `Drop` can
+    /// take it without double-joining.
     session: Option<std::thread::JoinHandle<()>>,
 }
 
 impl MountHandle {
-    /// Unmount the filesystem.
-    pub fn unmount(self) -> Result<(), FuseError> {
-        info!(mountpoint = %self.mountpoint.display(), "unmounting filesystem");
+    /// Unmount the filesystem and wait for the FUSE event loop thread
+    /// to exit.
+    pub fn unmount(mut self) -> Result<(), FuseError> {
+        self.unmount_inner()
+    }
 
-        if let Some(session) = self.session {
-            drop(session);
-        }
+    fn unmount_inner(&mut self) -> Result<(), FuseError> {
+        info!(mountpoint = %self.mountpoint.display(), "unmounting filesystem");
 
         #[cfg(target_os = "linux")]
         {
@@ -112,25 +115,48 @@ impl MountHandle {
             match output {
                 Ok(output) if output.status.success() => {
                     info!("unmount successful");
-                    Ok(())
                 }
                 Ok(output) => {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    Err(FuseError::UnmountFailed(stderr.to_string()))
+                    // Return immediately without joining the session thread.
+                    // The background thread runs fuser::mount2's event loop;
+                    // if fusermount3 failed the loop may still be blocking on
+                    // the FUSE fd, so joining here would hang indefinitely.
+                    // The JoinHandle stays in `self.session` and is detached
+                    // when the struct is dropped.
+                    return Err(FuseError::UnmountFailed(stderr.to_string()));
                 }
-                Err(e) => Err(FuseError::IoError(e)),
+                Err(e) => {
+                    return Err(FuseError::IoError(e));
+                }
             }
         }
 
-        #[cfg(not(target_os = "linux"))]
-        {
-            Ok(())
+        // fusermount3 succeeded — the kernel has torn down the FUSE
+        // connection, so the event loop thread will exit. Join it to
+        // ensure deterministic cleanup.
+        if let Some(handle) = self.session.take() {
+            if handle.join().is_err() {
+                return Err(FuseError::UnmountFailed(
+                    "FUSE event loop thread panicked".to_string(),
+                ));
+            }
         }
+
+        Ok(())
     }
 
     /// Check if the mount is still active.
     pub fn is_mounted(&self) -> bool {
         std::fs::metadata(&self.mountpoint).is_ok()
+    }
+}
+
+impl Drop for MountHandle {
+    fn drop(&mut self) {
+        if self.session.is_some() {
+            let _ = self.unmount_inner();
+        }
     }
 }
 
@@ -240,6 +266,50 @@ mod tests {
                 relative_path: PathBuf::from("a/b/c/d.txt"),
             }
         );
+    }
+
+    #[test]
+    fn unmount_inner_skips_join_when_fusermount_fails() {
+        let mut handle = MountHandle {
+            mountpoint: PathBuf::from("/nonexistent/mount/point"),
+            session: Some(std::thread::spawn(|| {})),
+        };
+        // fusermount3 will fail on a bogus path.
+        let result = handle.unmount_inner();
+        assert!(result.is_err(), "bogus mountpoint must produce an error");
+        // session must NOT have been taken — join was skipped because
+        // fusermount3 failed and the event loop may still be running.
+        assert!(
+            handle.session.is_some(),
+            "session must remain when fusermount3 fails (join skipped)"
+        );
+    }
+
+    #[test]
+    fn drop_with_failed_fusermount_does_not_block() {
+        use std::time::{Duration, Instant};
+
+        let handle = MountHandle {
+            mountpoint: PathBuf::from("/nonexistent/mount/point"),
+            session: Some(std::thread::spawn(|| {})),
+        };
+        // Drop retries fusermount3 (fails again) and gives up without
+        // joining. Must return promptly, not block forever.
+        let start = Instant::now();
+        drop(handle);
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "Drop must not block on failed fusermount3"
+        );
+    }
+
+    #[test]
+    fn drop_without_session_is_noop() {
+        let handle = MountHandle {
+            mountpoint: PathBuf::from("/tmp/test-mount"),
+            session: None,
+        };
+        drop(handle);
     }
 
     #[test]

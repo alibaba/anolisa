@@ -666,6 +666,35 @@ fn ledger_backing_root_inside_source_fails_before_mount() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PID file cleanup tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn pid_file_not_left_behind_on_startup_failure() {
+    let source = empty_source();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let pid_dir = tempfile::tempdir().expect("pid dir");
+    let pid_path = pid_dir.path().join("skillfs.pid");
+
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--pid-file",
+            pid_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success());
+    assert!(
+        !pid_path.exists(),
+        "pid file must not be left behind after startup failure"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Trusted writer exe startup gates
 // ─────────────────────────────────────────────────────────────────────────────
 

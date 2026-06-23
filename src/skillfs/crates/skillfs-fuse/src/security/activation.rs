@@ -492,9 +492,10 @@ pub enum XattrReadOutcome {
 /// xattr subsystem is nominally present but broken, so the caller must
 /// not silently fall through to a potentially stale `activation.json`.
 pub fn classify_xattr_errno(errno: i32) -> XattrReadOutcome {
-    match errno {
-        libc::ENODATA | libc::ENOTSUP => XattrReadOutcome::Absent,
-        other => XattrReadOutcome::OsError(other),
+    if errno == libc::ENODATA || errno == libc::ENOTSUP || errno == libc::EOPNOTSUPP {
+        XattrReadOutcome::Absent
+    } else {
+        XattrReadOutcome::OsError(errno)
     }
 }
 
@@ -1357,13 +1358,17 @@ mod tests {
 
     #[test]
     fn classify_xattr_errno_absent_vs_unexpected() {
-        // ENODATA, ENOTSUP => Absent (fallback ok)
+        // ENODATA, ENOTSUP, EOPNOTSUPP => Absent (fallback ok)
         assert!(matches!(
             classify_xattr_errno(libc::ENODATA),
             XattrReadOutcome::Absent
         ));
         assert!(matches!(
             classify_xattr_errno(libc::ENOTSUP),
+            XattrReadOutcome::Absent
+        ));
+        assert!(matches!(
+            classify_xattr_errno(libc::EOPNOTSUPP),
             XattrReadOutcome::Absent
         ));
 

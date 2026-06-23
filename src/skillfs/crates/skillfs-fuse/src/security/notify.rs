@@ -18,7 +18,7 @@
 //! Wire format follows `SKILL_LEDGER_SKILLFS_ACTIVATION_CN.md` §变更通知接口.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader, Write as IoWrite};
+use std::io::{BufRead, BufReader, Read as IoRead, Write as IoWrite};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -45,6 +45,11 @@ pub const DEFAULT_NOTIFY_DEBOUNCE_MS: u64 = 300;
 /// Maximum number of relative paths per notification. Exceeding this sends
 /// `paths: []` to signal "whole skill may have changed".
 pub const MAX_NOTIFY_PATHS: usize = 64;
+
+/// Maximum response body size (bytes) accepted from the daemon.
+/// Responses exceeding this limit are rejected as `InvalidResponse`
+/// to prevent unbounded memory allocation on a malicious/buggy peer.
+const MAX_RESPONSE_BYTES: u64 = 64 * 1024;
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -219,12 +224,18 @@ impl NotifyClient for UnixSocketNotifyClient {
         writer.write_all(b"\n").map_err(NotifyError::Write)?;
         writer.flush().map_err(NotifyError::Write)?;
 
-        let mut reader = BufReader::new(&stream);
+        let reader = BufReader::new(&stream);
+        let mut limited = reader.take(MAX_RESPONSE_BYTES + 1);
         let mut line = String::new();
-        match reader.read_line(&mut line) {
+        match limited.read_line(&mut line) {
             Ok(0) => {
                 return Err(NotifyError::InvalidResponse {
                     body: "empty response".to_string(),
+                });
+            }
+            Ok(n) if n as u64 > MAX_RESPONSE_BYTES => {
+                return Err(NotifyError::InvalidResponse {
+                    body: format!("response exceeds {MAX_RESPONSE_BYTES} byte limit"),
                 });
             }
             Ok(_) => {}
@@ -1678,6 +1689,88 @@ mod tests {
     // -------------------------------------------------------------------
     // A4 Reload outcome protocol event tests
     // -------------------------------------------------------------------
+
+    // -------------------------------------------------------------------
+    // Response size limit tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn unix_socket_client_accepts_normal_response() {
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("test.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+
+        let client = UnixSocketNotifyClient::new(&sock_path, Duration::from_secs(5));
+        let event = NotifyChangeEvent::new(
+            "/srv/skills/alpha",
+            "alpha",
+            NotifyEventKind::Write,
+            vec!["SKILL.md".to_string()],
+            5000,
+        );
+
+        let handle = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut _req = String::new();
+            reader.read_line(&mut _req).unwrap();
+            use std::io::Write;
+            let mut writer = std::io::BufWriter::new(&stream);
+            writer
+                .write_all(br#"{"ok":true,"data":{"schemaVersion":1,"accepted":true}}"#)
+                .unwrap();
+            writer.write_all(b"\n").unwrap();
+            writer.flush().unwrap();
+        });
+
+        let result = client.send(&event);
+        handle.join().unwrap();
+        assert!(
+            result.is_ok(),
+            "normal response must be accepted: {result:?}"
+        );
+    }
+
+    #[test]
+    fn unix_socket_client_rejects_oversized_response() {
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("test.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+
+        let client = UnixSocketNotifyClient::new(&sock_path, Duration::from_secs(5));
+        let event = NotifyChangeEvent::new(
+            "/srv/skills/alpha",
+            "alpha",
+            NotifyEventKind::Write,
+            vec![],
+            5000,
+        );
+
+        let handle = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut _req = String::new();
+            reader.read_line(&mut _req).unwrap();
+            use std::io::Write;
+            let mut writer = std::io::BufWriter::new(&stream);
+            // Write >64KB without a newline — should be rejected.
+            let payload = vec![b'A'; (MAX_RESPONSE_BYTES as usize) + 100];
+            writer.write_all(&payload).unwrap();
+            writer.write_all(b"\n").unwrap();
+            writer.flush().unwrap();
+        });
+
+        let result = client.send(&event);
+        handle.join().unwrap();
+        assert!(
+            matches!(result, Err(NotifyError::InvalidResponse { .. })),
+            "oversized response must be rejected: {result:?}"
+        );
+    }
 
     #[test]
     fn reload_outcome_emitted_as_protocol_event_after_flush() {

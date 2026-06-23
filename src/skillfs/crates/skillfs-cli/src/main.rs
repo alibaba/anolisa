@@ -3,6 +3,16 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+fn cleanup_pid_file(pid_file: &Option<PathBuf>) {
+    if let Some(p) = pid_file {
+        match std::fs::remove_file(p) {
+            Ok(()) => tracing::info!(path = %p.display(), "removed PID file"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(path = %p.display(), error = %e, "failed to remove PID file"),
+        }
+    }
+}
+
 use clap::{Parser, Subcommand};
 use skillfs_core::store::SkillStore;
 use skillfs_core::views::ViewsConfig;
@@ -1312,6 +1322,7 @@ async fn cmd_mount(
 
     // Capture the mountpoint for signal-triggered cleanup.
     let mountpoint_for_signal = mountpoint.clone();
+    let pid_file_for_signal = pid_file.clone();
 
     // Package W1 source drift observer wiring. Best-effort and visibility-only.
     //
@@ -1464,10 +1475,7 @@ async fn cmd_mount(
         _ = signal::ctrl_c() => {
             info!("received Ctrl+C, unmounting");
             trigger_unmount(&mountpoint_for_signal);
-            // Explicit, deterministic shutdown of both the core watcher
-            // and the drift adapter. Drop fallback (best-effort abort)
-            // would still work, but signal handlers are exactly the
-            // path long-lived embedders need to be predictable.
+            cleanup_pid_file(&pid_file_for_signal);
             if let Some(h) = drift_handle {
                 h.shutdown().await;
             }
@@ -1480,6 +1488,7 @@ async fn cmd_mount(
         } => {
             info!("received SIGTERM, unmounting");
             trigger_unmount(&mountpoint_for_signal);
+            cleanup_pid_file(&pid_file_for_signal);
             if let Some(h) = drift_handle {
                 h.shutdown().await;
             }
@@ -1499,13 +1508,13 @@ async fn cmd_mount(
     match result {
         Ok(()) => {
             info!("filesystem unmounted successfully");
-            // Remove PID file on clean exit.
-            if let Some(ref pid_path) = pid_file {
-                let _ = std::fs::remove_file(pid_path);
-            }
+            cleanup_pid_file(&pid_file);
             Ok(())
         }
-        Err(e) => Err(format!("Mount failed: {}", e).into()),
+        Err(e) => {
+            cleanup_pid_file(&pid_file);
+            Err(format!("Mount failed: {}", e).into())
+        }
     }
 }
 
@@ -1797,4 +1806,33 @@ async fn cmd_list(source: PathBuf, enabled_only: bool) -> Result<(), Box<dyn std
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cleanup_pid_file_removes_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("skillfs.pid");
+        std::fs::write(&pid_path, "12345\n").unwrap();
+        assert!(pid_path.exists());
+
+        cleanup_pid_file(&Some(pid_path.clone()));
+        assert!(!pid_path.exists());
+    }
+
+    #[test]
+    fn cleanup_pid_file_idempotent_on_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("skillfs.pid");
+        cleanup_pid_file(&Some(pid_path.clone()));
+        assert!(!pid_path.exists());
+    }
+
+    #[test]
+    fn cleanup_pid_file_none_is_noop() {
+        cleanup_pid_file(&None);
+    }
 }

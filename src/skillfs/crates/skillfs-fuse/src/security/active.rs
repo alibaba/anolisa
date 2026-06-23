@@ -677,6 +677,69 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_read_write_no_panic_no_deadlock() {
+        use std::sync::Arc;
+
+        let resolver = Arc::new(ActiveSkillResolver::new("/srv/skills"));
+
+        const WRITERS: usize = 4;
+        const READERS: usize = 4;
+        const ITERS: usize = 200;
+
+        let mut handles = Vec::new();
+
+        for w in 0..WRITERS {
+            let r = resolver.clone();
+            handles.push(std::thread::spawn(move || {
+                for i in 0..ITERS {
+                    let name = format!("skill-{}", (w * ITERS + i) % 8);
+                    match i % 3 {
+                        0 => {
+                            r.set(
+                                name,
+                                ActiveTarget::Hidden {
+                                    reason: "test".to_string(),
+                                },
+                            );
+                        }
+                        1 => {
+                            let _ = r.set_from_resolve(&make_current());
+                        }
+                        _ => {
+                            r.forget(&name);
+                        }
+                    }
+                }
+            }));
+        }
+
+        for _ in 0..READERS {
+            let r = resolver.clone();
+            handles.push(std::thread::spawn(move || {
+                for i in 0..ITERS {
+                    let name = format!("skill-{}", i % 8);
+                    let _ = r.get(&name);
+                    let _ = r.snapshot();
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().expect("thread must not panic");
+        }
+
+        // Resolver is still usable after concurrent stress.
+        resolver.set(
+            "post-stress",
+            ActiveTarget::Current {
+                source_dir: PathBuf::from("/srv/skills/post-stress"),
+            },
+        );
+        assert!(resolver.get("post-stress").is_some());
+        let _ = resolver.snapshot();
+    }
+
+    #[test]
     fn pinned_status_round_trip() {
         // Sanity check that the ledger status -> demo-mapping reasoning
         // stays the way the plan documents it. The mapping table in
