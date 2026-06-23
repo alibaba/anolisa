@@ -31,7 +31,11 @@ schema = 1
 entry = "openclaw.plugin.json"
 
 [adapters.openclaw]
-skills = ["code-scanner", "prompt-scanner", "skill-ledger"]
+skills = [
+  { name = "code-scanner", source = "{datadir}/skills/code-scanner/" },
+  { name = "prompt-scanner", source = "{datadir}/skills/prompt-scanner/" },
+  { name = "skill-ledger", source = "{datadir}/skills/skill-ledger/" },
+]
 
 [[adapters]]
 framework = "hermes"
@@ -53,4 +57,8 @@ schema = 1
 entry = "plugin.yaml"
 
 [adapters.hermes]
-skills = ["code-scanner", "prompt-scanner", "skill-ledger"]
+skills = [
+  { name = "code-scanner", source = "{datadir}/skills/code-scanner/" },
+  { name = "prompt-scanner", source = "{datadir}/skills/prompt-scanner/" },
+  { name = "skill-ledger", source = "{datadir}/skills/skill-ledger/" },
+]
