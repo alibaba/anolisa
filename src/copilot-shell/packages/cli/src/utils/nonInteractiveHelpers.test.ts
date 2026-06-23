@@ -366,6 +366,15 @@ describe('computeUsageFromMetrics', () => {
         totalRuns: 0,
         totalBlocked: 0,
       },
+      toolErrorCounts: {
+        modelError: 0,
+        executionError: 0,
+        denied: 0,
+      },
+      awaitApproval: {
+        totalDurationMs: 0,
+        count: 0,
+      },
     };
     const result = computeUsageFromMetrics(metrics);
     expect(result).toEqual({
@@ -423,6 +432,15 @@ describe('computeUsageFromMetrics', () => {
         totalRuns: 0,
         totalBlocked: 0,
       },
+      toolErrorCounts: {
+        modelError: 0,
+        executionError: 0,
+        denied: 0,
+      },
+      awaitApproval: {
+        totalDurationMs: 0,
+        count: 0,
+      },
     };
     const result = computeUsageFromMetrics(metrics);
     expect(result).toEqual({
@@ -469,6 +487,15 @@ describe('computeUsageFromMetrics', () => {
         totalRuns: 0,
         totalBlocked: 0,
       },
+      toolErrorCounts: {
+        modelError: 0,
+        executionError: 0,
+        denied: 0,
+      },
+      awaitApproval: {
+        totalDurationMs: 0,
+        count: 0,
+      },
     };
     const result = computeUsageFromMetrics(metrics);
     expect(result).not.toHaveProperty('total_tokens');
@@ -502,6 +529,15 @@ describe('computeUsageFromMetrics', () => {
       sandbox: {
         totalRuns: 0,
         totalBlocked: 0,
+      },
+      toolErrorCounts: {
+        modelError: 0,
+        executionError: 0,
+        denied: 0,
+      },
+      awaitApproval: {
+        totalDurationMs: 0,
+        count: 0,
       },
     };
     const result = computeUsageFromMetrics(metrics);

@@ -48,6 +48,7 @@ export {
   logAuth,
   logSkillLaunch,
   logUserFeedback,
+  logSessionSummary,
 } from './loggers.js';
 export type { SlashCommandEvent, ChatCompressionEvent } from './types.js';
 export {

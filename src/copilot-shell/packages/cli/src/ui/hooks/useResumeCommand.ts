@@ -5,7 +5,11 @@
  */
 
 import { useState, useCallback } from 'react';
-import { SessionService, type Config } from '@copilot-shell/core';
+import {
+  SessionService,
+  logSessionSummary,
+  type Config,
+} from '@copilot-shell/core';
 import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
 import { getPromptCountFromSessionData } from '../contexts/SessionContext.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
@@ -66,6 +70,8 @@ export function useResumeCommand(
       historyManager.loadHistory(uiHistoryItems);
 
       // Update session history core.
+      // Flush current session summary before switching to the resumed session
+      logSessionSummary(config);
       config.startNewSession(sessionId, sessionData);
       await config.getGeminiClient()?.initialize?.();
 

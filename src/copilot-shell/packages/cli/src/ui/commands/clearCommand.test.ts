@@ -17,6 +17,7 @@ vi.mock('@copilot-shell/core', async () => {
     uiTelemetryService: {
       reset: vi.fn(),
     },
+    logSessionSummary: vi.fn(),
   };
 });
 

@@ -53,6 +53,7 @@ import { TaskTool } from '../tools/task.js';
 import {
   NextSpeakerCheckEvent,
   logNextSpeakerCheck,
+  logSessionSummary,
 } from '../telemetry/index.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 
@@ -188,6 +189,7 @@ export class GeminiClient {
   async shutdown(): Promise<void> {
     if (this.hasShutdown) return;
     this.hasShutdown = true;
+    logSessionSummary(this.config);
     await this.fireSessionEndHook(SessionEndReason.PromptInputExit);
   }
 

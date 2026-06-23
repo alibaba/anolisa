@@ -31,6 +31,7 @@ import {
   InputFormat,
   SkillTool,
 } from '../index.js';
+import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import type { SandboxBypassApprovalRequest } from '../index.js';
 import type { HookDecision } from '../hooks/types.js';
 import type {
@@ -132,6 +133,12 @@ export type WaitingToolCall = {
    */
   hookForceAsk?: boolean;
   startTime?: number;
+  /**
+   * Timestamp when the tool call entered awaiting_approval state.
+   * Used to accurately measure user approval wait duration (excludes
+   * validation and hook execution time).
+   */
+  awaitStartTime?: number;
   outcome?: ToolConfirmationOutcome;
 };
 
@@ -492,6 +499,8 @@ export class CoreToolScheduler {
             confirmationDetails: auxiliaryData as ToolCallConfirmationDetails,
             hookForceAsk,
             startTime: existingStartTime,
+            awaitStartTime:
+              (currentCall as WaitingToolCall).awaitStartTime ?? Date.now(),
             outcome,
             invocation,
           } as WaitingToolCall;
@@ -1197,6 +1206,17 @@ export class CoreToolScheduler {
     const toolCall = this.toolCalls.find(
       (c) => c.request.callId === callId && c.status === 'awaiting_approval',
     );
+
+    // Record await duration for SLS telemetry (use awaitStartTime for accuracy)
+    if (toolCall) {
+      const awaitStart =
+        ('awaitStartTime' in toolCall && toolCall.awaitStartTime) ||
+        ('startTime' in toolCall && toolCall.startTime);
+      if (awaitStart) {
+        const awaitDuration = Date.now() - awaitStart;
+        uiTelemetryService.recordAwaitDuration(awaitDuration);
+      }
+    }
 
     await originalOnConfirm(outcome, payload);
 

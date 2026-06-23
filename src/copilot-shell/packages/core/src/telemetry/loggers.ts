@@ -4,11 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import os from 'node:os';
 import type { LogAttributes, LogRecord } from '@opentelemetry/api-logs';
 import { logs } from '@opentelemetry/api-logs';
 import { SemanticAttributes } from '@opentelemetry/semantic-conventions';
 import type { Config } from '../config/config.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
+import { appendSlsLog } from './sls-logger.js';
+import { ToolCallDecision } from './tool-call-decision.js';
+import { InstallationManager } from '../utils/installationManager.js';
 import {
   EVENT_API_ERROR,
   EVENT_API_CANCEL,
@@ -944,4 +948,109 @@ export function logUserFeedback(
     attributes,
   };
   logger.emit(logRecord);
+}
+
+/**
+ * Write session summary to SLS JSONL log file at session end.
+ * Data is collected from uiTelemetryService metrics and config.
+ * Idempotent: only emits once per process to avoid duplicate records.
+ */
+const loggedSessionIds = new Set<string>();
+export function logSessionSummary(config: Config): void {
+  const sessionId = config.getSessionId();
+  if (loggedSessionIds.has(sessionId)) return;
+  loggedSessionIds.add(sessionId);
+
+  const metrics = uiTelemetryService.getMetrics();
+  const installationManager = new InstallationManager();
+
+  const awaitStats = metrics.awaitApproval;
+  const avgAwaitSeconds =
+    awaitStats.count > 0
+      ? awaitStats.totalDurationMs / awaitStats.count / 1000
+      : 0;
+
+  // Aggregate token and API stats across all models
+  let tokensInput = 0;
+  let tokensOutput = 0;
+  let tokensCached = 0;
+  let tokensTotal = 0;
+  let apiTotalRequests = 0;
+  let apiTotalErrors = 0;
+  let apiTotalLatencyMs = 0;
+  for (const model of Object.values(metrics.models)) {
+    tokensInput += model.tokens.prompt;
+    tokensOutput += model.tokens.candidates;
+    tokensCached += model.tokens.cached;
+    tokensTotal += model.tokens.total;
+    apiTotalRequests += model.api.totalRequests;
+    apiTotalErrors += model.api.totalErrors;
+    apiTotalLatencyMs += model.api.totalLatencyMs;
+  }
+
+  const record = {
+    // Component identification
+    'component.name': 'cosh',
+    'component.version': config.getCliVersion() || 'unknown',
+    'component.agent_name': 'copilot-shell',
+    'session.id': config.getSessionId(),
+    installation_id: installationManager.getInstallationId(),
+
+    // Session configuration
+    'session.model': config.getModel() || 'unknown',
+    'session.auth_type': config.getAuthType() || 'unknown',
+    'session.approval_mode': config.getApprovalMode(),
+
+    // Audit decision counts
+    'session.audit_decision_counts.approve':
+      metrics.tools.totalDecisions[ToolCallDecision.ACCEPT] +
+      metrics.tools.totalDecisions[ToolCallDecision.AUTO_ACCEPT],
+    'session.audit_decision_counts.deny':
+      metrics.tools.totalDecisions[ToolCallDecision.REJECT],
+    'session.audit_decision_counts.modify':
+      metrics.tools.totalDecisions[ToolCallDecision.MODIFY],
+
+    // Tool call counts
+    'session.tool_call_counts.total': metrics.tools.totalCalls,
+    'session.tool_call_counts.success': metrics.tools.totalSuccess,
+    'session.tool_call_counts.fail': metrics.tools.totalFail,
+    'session.tool_call_total_duration_seconds':
+      Math.round((metrics.tools.totalDurationMs / 1000) * 100) / 100,
+
+    // Tool error counts by category
+    'session.tool_error_counts.model_error': metrics.toolErrorCounts.modelError,
+    'session.tool_error_counts.execution_error':
+      metrics.toolErrorCounts.executionError,
+    'session.tool_error_counts.denied': metrics.toolErrorCounts.denied,
+
+    // Await approval
+    'session.avg_await_duration_seconds':
+      Math.round(avgAwaitSeconds * 100) / 100,
+
+    // File operation stats
+    'session.files.lines_added': metrics.files.totalLinesAdded,
+    'session.files.lines_removed': metrics.files.totalLinesRemoved,
+
+    // Sandbox stats
+    'session.sandbox.total_runs': metrics.sandbox.totalRuns,
+    'session.sandbox.total_blocked': metrics.sandbox.totalBlocked,
+
+    // Token usage (aggregated across all models)
+    'session.tokens.input': tokensInput,
+    'session.tokens.output': tokensOutput,
+    'session.tokens.cached': tokensCached,
+    'session.tokens.total': tokensTotal,
+
+    // API stats (aggregated across all models)
+    'session.api.total_requests': apiTotalRequests,
+    'session.api.total_errors': apiTotalErrors,
+    'session.api.total_latency_seconds':
+      Math.round((apiTotalLatencyMs / 1000) * 100) / 100,
+
+    // Environment info
+    'os.type': os.platform(),
+    'os.arch': process.arch,
+  };
+
+  appendSlsLog(record);
 }

@@ -12,11 +12,25 @@ import {
 } from './constants.js';
 
 import { ToolCallDecision } from './tool-call-decision.js';
+import { ToolErrorType } from '../tools/tool-error.js';
 import type {
   ApiErrorEvent,
   ApiResponseEvent,
   ToolCallEvent,
 } from './types.js';
+
+/**
+ * ToolErrorType values classified as model output errors.
+ */
+const MODEL_ERROR_TYPES: ReadonlySet<string> = new Set([
+  ToolErrorType.INVALID_TOOL_PARAMS,
+  ToolErrorType.TOOL_NOT_REGISTERED,
+]);
+
+/**
+ * ToolErrorType value classified as execution denied.
+ */
+const DENIED_ERROR_TYPE = ToolErrorType.EXECUTION_DENIED;
 
 export type UiEvent =
   | (ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE })
@@ -81,6 +95,15 @@ export interface SessionMetrics {
     totalRuns: number;
     totalBlocked: number;
   };
+  toolErrorCounts: {
+    modelError: number;
+    executionError: number;
+    denied: number;
+  };
+  awaitApproval: {
+    totalDurationMs: number;
+    count: number;
+  };
 }
 
 const createInitialModelMetrics = (): ModelMetrics => ({
@@ -121,6 +144,15 @@ const createInitialMetrics = (): SessionMetrics => ({
   sandbox: {
     totalRuns: 0,
     totalBlocked: 0,
+  },
+  toolErrorCounts: {
+    modelError: 0,
+    executionError: 0,
+    denied: 0,
+  },
+  awaitApproval: {
+    totalDurationMs: 0,
+    count: 0,
   },
 });
 
@@ -164,6 +196,15 @@ export class UiTelemetryService extends EventEmitter {
       metrics: this.#metrics,
       lastPromptTokenCount: this.#lastPromptTokenCount,
     });
+  }
+
+  /**
+   * Records the duration a tool call spent awaiting user approval.
+   * Called by coreToolScheduler when a confirmation response is received.
+   */
+  recordAwaitDuration(durationMs: number): void {
+    this.#metrics.awaitApproval.totalDurationMs += durationMs;
+    this.#metrics.awaitApproval.count++;
   }
 
   /**
@@ -215,6 +256,18 @@ export class UiTelemetryService extends EventEmitter {
       tools.totalSuccess++;
     } else {
       tools.totalFail++;
+      // Classify error type into aggregated categories
+      if (event.error_type) {
+        if (MODEL_ERROR_TYPES.has(event.error_type)) {
+          this.#metrics.toolErrorCounts.modelError++;
+        } else if (event.error_type === DENIED_ERROR_TYPE) {
+          this.#metrics.toolErrorCounts.denied++;
+        } else {
+          this.#metrics.toolErrorCounts.executionError++;
+        }
+      } else {
+        this.#metrics.toolErrorCounts.executionError++;
+      }
     }
 
     if (!tools.byName[event.function_name]) {

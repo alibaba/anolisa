@@ -18,6 +18,7 @@ import {
   InputFormat,
   uiTelemetryService,
   parseAndFormatApiError,
+  logSessionSummary,
 } from '@copilot-shell/core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -414,6 +415,7 @@ export async function runNonInteractive(
       // Cleanup signal handlers
       process.removeListener('SIGINT', shutdownHandler);
       process.removeListener('SIGTERM', shutdownHandler);
+      logSessionSummary(config);
       if (isTelemetrySdkInitialized()) {
         await shutdownTelemetry(config);
       }

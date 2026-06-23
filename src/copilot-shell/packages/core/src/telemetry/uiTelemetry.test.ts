@@ -146,6 +146,15 @@ describe('UiTelemetryService', () => {
         totalRuns: 0,
         totalBlocked: 0,
       },
+      toolErrorCounts: {
+        modelError: 0,
+        executionError: 0,
+        denied: 0,
+      },
+      awaitApproval: {
+        totalDurationMs: 0,
+        count: 0,
+      },
     });
     expect(service.getLastPromptTokenCount()).toBe(0);
   });

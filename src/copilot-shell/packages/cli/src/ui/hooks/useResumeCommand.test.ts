@@ -61,6 +61,7 @@ vi.mock('@copilot-shell/core', () => {
 
   return {
     SessionService,
+    logSessionSummary: vi.fn(),
     uiTelemetryService: {
       getMetrics: () => ({ models: {}, tools: {}, files: {} }),
       getLastPromptTokenCount: () => 0,

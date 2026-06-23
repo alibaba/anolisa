@@ -7,7 +7,7 @@
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
-import { uiTelemetryService } from '@copilot-shell/core';
+import { uiTelemetryService, logSessionSummary } from '@copilot-shell/core';
 
 export const clearCommand: SlashCommand = {
   name: 'clear',
@@ -20,6 +20,8 @@ export const clearCommand: SlashCommand = {
     const { config } = context.services;
 
     if (config) {
+      // Flush current session summary before resetting metrics
+      logSessionSummary(config);
       const newSessionId = config.startNewSession();
 
       // Reset UI telemetry metrics for the new session

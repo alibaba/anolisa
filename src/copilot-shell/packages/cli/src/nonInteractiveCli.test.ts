@@ -138,6 +138,7 @@ describe('runNonInteractive', () => {
       getFolderTrust: vi.fn().mockReturnValue(false),
       getIncludePartialMessages: vi.fn().mockReturnValue(false),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      getAuthType: vi.fn().mockReturnValue('dashscope'),
       getModel: vi.fn(() => currentModel),
       setModel: vi.fn(async (model: string) => {
         currentModel = model;
