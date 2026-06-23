@@ -90,6 +90,8 @@ jobs:
           ls /opt/agent-sec/hermes-plugin/scripts/deploy.sh
           echo "=== Verify skills ==="
           ls /usr/share/anolisa/skills/
+          echo "=== Verify component manifest ==="
+          test -f /usr/share/anolisa/components/sec-core/component.toml || { echo "ERROR: component.toml not found after RPM install"; exit 1; }
 
       - name: Verify Python dependencies match requirements.txt
         run: |

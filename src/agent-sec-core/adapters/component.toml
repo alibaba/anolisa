@@ -1,0 +1,56 @@
+manifest_version = 2
+anolisa_min_version = "0.1.12"
+
+[component]
+name = "sec-core"
+version = "0.6.1"
+layer = "runtime"
+domain = "security"
+description = "Agent security core adapters for OpenClaw and Hermes"
+
+[install]
+modes = ["system"]
+
+[[adapters]]
+framework = "openclaw"
+name = "sec-core-openclaw"
+display_name = "sec-core for OpenClaw"
+adapter_type = "plugin"
+trust = "first-party"
+plugin_id = "agent-sec"
+source = "adapters/sec-core/openclaw"
+dest = "/opt/agent-sec/openclaw-plugin/"
+detect = { binary = "openclaw" }
+
+[adapters.bundle]
+schema = 1
+entry = "openclaw.plugin.json"
+
+[adapters.openclaw.bundle]
+schema = 1
+entry = "openclaw.plugin.json"
+
+[adapters.openclaw]
+skills = ["code-scanner", "prompt-scanner", "skill-ledger"]
+
+[[adapters]]
+framework = "hermes"
+name = "sec-core-hermes"
+display_name = "sec-core for Hermes"
+adapter_type = "plugin"
+trust = "first-party"
+plugin_id = "agent-sec-core-hermes-plugin"
+source = "adapters/sec-core/hermes"
+dest = "/opt/agent-sec/hermes-plugin/"
+detect = { binary = "hermes" }
+
+[adapters.bundle]
+schema = 1
+entry = "plugin.yaml"
+
+[adapters.hermes.bundle]
+schema = 1
+entry = "plugin.yaml"
+
+[adapters.hermes]
+skills = ["code-scanner", "prompt-scanner", "skill-ledger"]

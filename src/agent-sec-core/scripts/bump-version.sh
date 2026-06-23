@@ -19,7 +19,8 @@
 #   7. cosh-extension/cosh-extension.json    ("version" field)
 #   8. hermes-plugin/src/plugin.yaml        (version field)
 #   9. adapters/adapter-manifest.json        ("version" field)
-#  10. Lock files: Cargo.lock, uv.lock, package-lock.json (auto-regenerated)
+#  10. adapters/component.toml              (component.version)
+#  11. Lock files: Cargo.lock, uv.lock, package-lock.json (auto-regenerated)
 #
 # Manual update required (not automated):
 #   - agent-sec-core.spec.in  (%changelog entry)
@@ -190,7 +191,15 @@ bump_file "$PROJECT_ROOT/adapters/adapter-manifest.json" \
     "adapters/adapter-manifest.json"
 
 # -----------------------------------------------------------------------------
-# 10. Regenerate lock files
+# 10. adapters/component.toml
+# -----------------------------------------------------------------------------
+bump_file "$PROJECT_ROOT/adapters/component.toml" \
+    "^version = \"$OLD_VERSION\"" \
+    "version = \"$NEW_VERSION\"" \
+    "adapters/component.toml"
+
+# -----------------------------------------------------------------------------
+# 11. Regenerate lock files
 # -----------------------------------------------------------------------------
 log "Regenerating lock files..."
 

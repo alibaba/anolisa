@@ -192,8 +192,14 @@ stage-adapter-manifest: ## Stage adapter-manifest.json to BUILD_DIR
 	install -p -m 0755 adapters/hermes/scripts/install.sh $(ADAPTER_STAGE_DIR)/hermes/scripts/
 	install -p -m 0755 adapters/hermes/scripts/uninstall.sh $(ADAPTER_STAGE_DIR)/hermes/scripts/
 
+.PHONY: stage-component-manifest
+stage-component-manifest: ## Stage component.toml into BUILD_DIR
+	install -d -m 0755 $(BUILD_DIR)/share/anolisa/components/sec-core
+	install -p -m 0644 adapters/component.toml \
+		$(BUILD_DIR)/share/anolisa/components/sec-core/component.toml
+
 .PHONY: build-all
-build-all: build-sandbox build-cli build-openclaw-plugin build-hermes-plugin stage-cosh-extension stage-skills stage-adapter-manifest ## Build all components
+build-all: build-sandbox build-cli build-openclaw-plugin build-hermes-plugin stage-cosh-extension stage-skills stage-adapter-manifest stage-component-manifest ## Build all components
 	@echo "📦 All artifacts collected to $(BUILD_DIR)/"
 
 .PHONY: export-requirements
@@ -243,6 +249,7 @@ endif
 
 ADAPTER_DIR         ?= $(ANOLISA_DATADIR)/adapters/sec-core
 ADAPTER_STAGE_DIR   ?= $(BUILD_DIR)/share/anolisa/adapters/sec-core
+COMPONENT_DIR       ?= $(ANOLISA_DATADIR)/components/sec-core
 
 BINDIR              ?= $(PREFIX)/bin
 LIBDIR              ?= $(PREFIX)/lib/anolisa/sec-core
@@ -347,13 +354,19 @@ install-adapter-manifest: ## Install adapter-manifest.json from staged copy
 	install -p -m 0755 $(ADAPTER_STAGE_DIR)/hermes/scripts/install.sh $(DESTDIR)$(ADAPTER_DIR)/hermes/scripts/
 	install -p -m 0755 $(ADAPTER_STAGE_DIR)/hermes/scripts/uninstall.sh $(DESTDIR)$(ADAPTER_DIR)/hermes/scripts/
 
+.PHONY: install-component-manifest
+install-component-manifest: ## Install component.toml to DESTDIR
+	install -d -m 0755 $(DESTDIR)$(COMPONENT_DIR)
+	install -m 0644 adapters/component.toml \
+		$(DESTDIR)$(COMPONENT_DIR)/component.toml
+
 .PHONY: install-all
-install-all: install-cli-venv install-cosh-hook install-openclaw-plugin install-hermes-plugin install-skills install-adapter-manifest ## Install all (user source build)
+install-all: install-cli-venv install-cosh-hook install-openclaw-plugin install-hermes-plugin install-skills install-adapter-manifest install-component-manifest ## Install all (user source build)
 
 .PHONY: install-all-for-rpmbuild
 install-all-for-rpmbuild: OPENCLAW_PLUGIN_DIR := $(RPM_OPENCLAW_PLUGIN_DIR)
 install-all-for-rpmbuild: HERMES_PLUGIN_DIR := $(RPM_HERMES_PLUGIN_DIR)
-install-all-for-rpmbuild: install-cli-site install-cosh-hook install-openclaw-plugin install-hermes-plugin install-skills install-adapter-manifest ## Install all (RPM build)
+install-all-for-rpmbuild: install-cli-site install-cosh-hook install-openclaw-plugin install-hermes-plugin install-skills install-adapter-manifest install-component-manifest ## Install all (RPM build)
 
 # =============================================================================
 # UNINSTALL
@@ -397,8 +410,12 @@ uninstall-skills: ## Remove sec-core's own skill subdirs from SKILLDIR
 uninstall-adapter-manifest: ## Remove installed adapter manifest directory
 	rm -rf $(DESTDIR)$(ADAPTER_DIR)
 
+.PHONY: uninstall-component-manifest
+uninstall-component-manifest: ## Remove component manifest
+	rm -rf $(DESTDIR)$(COMPONENT_DIR)
+
 .PHONY: uninstall
-uninstall: uninstall-cli-venv uninstall-cosh-hook uninstall-openclaw-plugin uninstall-hermes-plugin uninstall-skills uninstall-adapter-manifest ## Uninstall everything install-all installed
+uninstall: uninstall-cli-venv uninstall-cosh-hook uninstall-openclaw-plugin uninstall-hermes-plugin uninstall-skills uninstall-adapter-manifest uninstall-component-manifest ## Uninstall everything install-all installed
 
 .PHONY: help
 help: ## Show this help message

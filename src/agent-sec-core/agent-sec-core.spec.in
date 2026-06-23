@@ -80,6 +80,9 @@ Built with maturin as a Rust native Python extension.
 %{_datadir}/anolisa/adapters/sec-core/manifest.json
 %dir %{_datadir}/anolisa/adapters/sec-core/common
 %{_datadir}/anolisa/adapters/sec-core/common/manifest.sh
+%dir %{_datadir}/anolisa/components
+%dir %{_datadir}/anolisa/components/sec-core
+%{_datadir}/anolisa/components/sec-core/component.toml
 %license LICENSE
 
 # =============================================================================
