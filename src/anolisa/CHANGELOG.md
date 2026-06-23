@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.13] - 2026-06-23
+
+### Added
+
+- `anolisa adapter enable` now supports Hermes plugins.
+- `anolisa adapter enable` now installs declared OpenClaw skills.
+- `anolisa adapter enable` now applies declared OpenClaw config values.
+- `anolisa install` now starts declared services for raw components.
+- `anolisa install` now applies declared file capabilities for raw components.
+- `anolisa install` now runs declared hooks for raw components.
+- `anolisa update <component>` now restarts declared services for raw components.
+- `anolisa update <component>` now reapplies declared file capabilities for raw components.
+- `anolisa uninstall` now runs declared hooks for raw components.
+- `anolisa uninstall` now disables declared services after stopping them.
+
+### Changed
+
+- `anolisa adapter scan` now honors declared adapter resource locations.
+- `anolisa adapter enable` now reads package-installed adapter resources.
+- `anolisa install --dry-run` now previews declared capabilities for raw components.
+- `anolisa register status` now reports the latest registration after repeated changes.
+- Cancelled `anolisa register` and `unregister` prompts now exit successfully.
+
+### Fixed
+
+- `anolisa adapter status` now detects OpenClaw plugins from wrapped table output.
+- `anolisa adapter status` now ignores bundled Hermes plugins during checks.
+- `anolisa adapter` commands now find metadata shipped by RPM-installed components.
+- `anolisa register status` now reports sysom console registrations as active.
+
 ## [0.1.12] - 2026-06-22
 
 ### Added
@@ -233,6 +263,36 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.1.13] - 2026-06-23
+
+### 新增
+
+- `anolisa adapter enable` 现支持 Hermes 插件。
+- `anolisa adapter enable` 现安装声明的 OpenClaw 技能。
+- `anolisa adapter enable` 现写入声明的 OpenClaw 配置。
+- `anolisa install` 现启动 raw 组件声明的服务。
+- `anolisa install` 现设置 raw 组件声明的文件能力。
+- `anolisa install` 现执行 raw 组件声明的钩子。
+- `anolisa update <component>` 现重启 raw 组件声明的服务。
+- `anolisa update <component>` 现重设 raw 组件声明的文件能力。
+- `anolisa uninstall` 现执行 raw 组件卸载钩子。
+- `anolisa uninstall` 现停用已停止的声明服务。
+
+### 变更
+
+- `anolisa adapter scan` 现按声明位置查找资源。
+- `anolisa adapter enable` 现读取包内适配器资源。
+- `anolisa install --dry-run` 现预览 raw 文件能力。
+- `anolisa register status` 现显示最新注册记录。
+- 取消 `anolisa register` 或 `unregister` 不再报错。
+
+### 修复
+
+- `anolisa adapter status` 现能识别换行的 OpenClaw 表格。
+- `anolisa adapter status` 检查 Hermes 时忽略内置插件。
+- `anolisa adapter` 现能找到 RPM 组件附带的元数据。
+- `anolisa register status` 现显示 sysom 控制台注册。
 
 ## [0.1.12] - 2026-06-22
 
