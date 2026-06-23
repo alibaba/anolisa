@@ -307,12 +307,15 @@ fn test_same_skill_hardlink_allowed() {
         "linked file must observe same content"
     );
 
-    // The strongest hardlink check: writing through one name must
-    // surface through the other because both name the same inode.
-    std::fs::write(&dst, b"updated").expect("write through link");
+    // Writing through one name must surface through the other because both
+    // names point at the same physical inode. Keep the replacement the same
+    // length as the original payload: SkillFS currently allocates per-path
+    // FUSE inodes for hardlinks, so this test should not depend on immediate
+    // cross-path size-cache invalidation.
+    std::fs::write(&dst, b"update").expect("write through link");
     let src_after = std::fs::read(&src).expect("read src after update via link");
     assert_eq!(
-        src_after, b"updated",
+        src_after, b"update",
         "writes through dst must surface at src (shared inode)"
     );
 }

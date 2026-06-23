@@ -2482,8 +2482,12 @@ mod tests {
             stream
                 .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                 .unwrap();
-            writeln!(stream, "{req}").unwrap();
-            stream.flush().unwrap();
+            // The server authenticates the peer before reading the
+            // request. An untrusted peer may therefore receive the
+            // `permission_denied` response and close before this write
+            // completes, so BrokenPipe is an acceptable race here.
+            let _ = writeln!(stream, "{req}");
+            let _ = stream.flush();
 
             let mut reader = BufReader::new(&stream);
             let mut response = String::new();
@@ -2722,8 +2726,12 @@ mod tests {
             stream
                 .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                 .unwrap();
-            writeln!(stream, "{req}").unwrap();
-            stream.flush().unwrap();
+            // The server authenticates the peer before reading the
+            // request. An untrusted peer may therefore receive the
+            // `permission_denied` response and close before this write
+            // completes, so BrokenPipe is an acceptable race here.
+            let _ = writeln!(stream, "{req}");
+            let _ = stream.flush();
 
             let mut reader = BufReader::new(&stream);
             let mut response = String::new();
