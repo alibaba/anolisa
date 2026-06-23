@@ -208,8 +208,9 @@ agentsight serve
 运行时配置通过 `AgentsightConfig`（`src/config.rs`），支持以下方式：
 
 1. **默认值**: 内置默认配置
-2. **环境变量**: SLS 相关变量、`AGENTSIGHT_TOKENIZER_PATH` 等
-3. **CLI 参数**: 各子命令支持 `--verbose`, `--storage-path` 等
+2. **配置文件**: `/etc/agentsight/config.json`（通过 `--config` 指定），**完全替换**内嵌默认规则，详见 AGENTS.md §10
+3. **环境变量**: SLS 相关变量、`AGENTSIGHT_TOKENIZER_PATH` 等
+4. **CLI 参数**: 各子命令支持 `--verbose`, `--storage-path` 等
 
 ### 关键配置项
 

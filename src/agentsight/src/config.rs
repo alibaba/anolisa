@@ -751,6 +751,10 @@ impl AgentsightConfig {
 
     /// Load configuration from a JSON file, appending rules to existing ones.
     ///
+    /// In the standard flow the config starts from `AgentsightConfig::new()`
+    /// (empty rules), so this call effectively **replaces** the embedded
+    /// defaults with the file content.
+    ///
     /// Reads the file and delegates to `load_from_json`. All fields supported by
     /// `load_from_json` (verbose, log_path, cmdline, domain) are loaded.
     pub fn load_from_file(&mut self, path: &Path) -> anyhow::Result<()> {

@@ -208,6 +208,12 @@ React + TypeScript + Webpack + Tailwind CSS，位于 `dashboard/`。开发: `npm
 
 `AgentsightConfig`（`src/config.rs`），关键环境变量：SLS_*（阿里云日志服务导出）、`AGENTSIGHT_TOKENIZER_PATH`、`AGENTSIGHT_CHROME_TRACE`、`RUST_LOG`。
 
+### 配置文件加载语义
+
+Agent 规则配置文件路径：`/etc/agentsight/config.json`（可通过 `--config` 覆盖），格式参见项目根目录 `agentsight.json`。
+
+**重要：用户配置文件会完全替换（replace）内嵌的默认规则，而非追加（extend）。** 如果配置文件中缺少某个 Agent 的规则（如 `*claude*`），该 Agent 将不会被发现。修改配置前请确保包含所有需要监控的 Agent 规则。
+
 ## 11. Design Docs
 
 - [eBPF Probes 设计](docs/design-docs/ebpf-probes.md)
