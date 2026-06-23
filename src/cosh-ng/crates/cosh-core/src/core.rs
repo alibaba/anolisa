@@ -90,7 +90,12 @@ impl CoshCore {
         for n in notifications {
             self.emit(
                 writer,
-                &OutputMessage::hook_notification(&n.hook_name, &n.message, tool_use_id),
+                &OutputMessage::hook_notification(
+                    &n.hook_name,
+                    &n.message,
+                    tool_use_id,
+                    n.decision.as_deref(),
+                ),
             );
         }
     }
@@ -601,7 +606,7 @@ impl CoshCore {
                         skill_context.as_ref(),
                     )
                     .await;
-                self.emit_hook_notifications(writer, &post_hook.notifications, None);
+                self.emit_hook_notifications(writer, &post_hook.notifications, Some(&tc.id));
 
                 let result = if post_hook.deny {
                     let reason = post_hook
@@ -631,7 +636,7 @@ impl CoshCore {
                             skill_context.as_ref(),
                         )
                         .await;
-                    self.emit_hook_notifications(writer, &failure_hook.notifications, None);
+                    self.emit_hook_notifications(writer, &failure_hook.notifications, Some(&tc.id));
                 }
 
                 self.messages.push(Message::tool_result(

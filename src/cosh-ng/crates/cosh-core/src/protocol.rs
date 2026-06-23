@@ -258,6 +258,9 @@ pub struct SystemPayload {
     pub hook_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_use_id: Option<String>,
+    /// Hook decision (allow/ask/block/deny) for per-hook color-coding in cosh-shell.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -445,13 +448,14 @@ impl OutputMessage {
         }
     }
 
-    pub fn hook_notification(hook_name: &str, message: &str, tool_use_id: Option<&str>) -> Self {
+    pub fn hook_notification(hook_name: &str, message: &str, tool_use_id: Option<&str>, decision: Option<&str>) -> Self {
         Self::System {
             subtype: "hook_notification".to_string(),
             payload: SystemPayload {
                 status: Some(message.to_string()),
                 hook_name: Some(hook_name.to_string()),
                 tool_use_id: tool_use_id.map(String::from),
+                decision: decision.map(String::from),
                 ..Default::default()
             },
         }

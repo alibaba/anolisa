@@ -176,7 +176,7 @@ where
                 for n in &ss_result.notifications {
                     engine.emit(
                         writer,
-                        &OutputMessage::hook_notification(&n.hook_name, &n.message, None),
+                        &OutputMessage::hook_notification(&n.hook_name, &n.message, None, n.decision.as_deref()),
                     );
                 }
                 if let Some(ref ctx) = ss_result.additional_context {

@@ -76,6 +76,9 @@ pub enum HookDecision {
 pub struct HookNotification {
     pub hook_name: String,
     pub message: String,
+    /// The individual hook's decision (e.g. "allow", "ask", "block", "deny").
+    /// Carried through the protocol so cosh-shell can color-code per-hook notices.
+    pub decision: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -902,20 +905,15 @@ impl HookSystem {
         hook_name: &str,
         notifications: &mut Vec<HookNotification>,
     ) {
-        if let Some(ref msg) = output.system_message {
+        // Use systemMessage if present, otherwise fall back to reason.
+        // This avoids duplicate notifications when both fields exist on block/deny.
+        let msg = output.system_message.as_ref().or(output.reason.as_ref());
+        if let Some(msg) = msg {
             notifications.push(HookNotification {
                 hook_name: hook_name.to_string(),
                 message: msg.clone(),
+                decision: output.decision.clone(),
             });
-        }
-        // Also show reason as notification for block/deny
-        if matches!(output.decision.as_deref(), Some("block") | Some("deny")) {
-            if let Some(ref reason) = output.reason {
-                notifications.push(HookNotification {
-                    hook_name: hook_name.to_string(),
-                    message: format!("Blocked: {reason}"),
-                });
-            }
         }
     }
 }
