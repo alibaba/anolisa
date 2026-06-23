@@ -4,6 +4,21 @@ All notable changes to the cosh-ng project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] — 2026-06-23
+
+### Added
+- Shell evidence protocol for capturing and replaying command execution context
+- Shell evidence control tool in cosh-core for evidence lifecycle management
+- Hook protocol aligned with copilot-shell for zero-change extension support
+- Per-hook decision propagation through notification protocol
+- Hook warnings rendered with per-hook decision color-coding in cosh-shell
+
+### Changed
+- Share agent error display text across cosh-shell modules
+
+### Tests
+- Cover shell evidence raw CLI flows
+
 ## [0.9.0] — 2026-06-22
 
 ### Added
