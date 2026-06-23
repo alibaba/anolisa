@@ -2,7 +2,7 @@
 
 **Crate**: `skillfs-fuse`
 **Version**: 0.1.0
-**Status**: Implementation
+**Status**: Current implementation snapshot; see capability record for latest support matrix
 
 ---
 
@@ -17,6 +17,12 @@
 - 读取 `SKILL.md` 时动态执行编译。
 - 透传 skill 目录中的其他真实文件和子目录。
 - 支持物理写透传，并把 `SKILL.md` 变化同步回 store。
+
+文件系统能力与 POSIX 兼容状态见：
+
+- [`docs/skillfs-filesystem-capability-record.md`](../skillfs-filesystem-capability-record.md)
+- [`docs/specs/posix-phase1-spec.md`](posix-phase1-spec.md)
+- [`docs/testing/posix-phase1-acceptance.md`](../testing/posix-phase1-acceptance.md)
 
 ---
 
@@ -109,9 +115,56 @@ in-place mount 模式：
 - `symlink`
 - `link`
 
+### 4.5 POSIX Phase 1 Planned Behavior
+
+Phase 1 计划补齐默认开启前最容易影响常用工具的一组 POSIX 语义。该小节描述计划目标，不代表当前代码已经全部实现。
+
+计划新增或强化：
+
+- fd-backed handle table，用真实文件描述符支撑 passthrough read/write/flush/fsync/release。
+- `open` / `create` flags：
+  - `O_RDONLY`
+  - `O_WRONLY`
+  - `O_RDWR`
+  - `O_CREAT`
+  - `O_EXCL`
+  - `O_TRUNC`
+  - `O_APPEND`
+  - `O_DIRECTORY`
+  - `O_NOFOLLOW`
+- passthrough file offset read/write，不再为普通文件 read 全量读入内存。
+- `flush`、`fsync`、`fsyncdir`。
+- `statfs` 透传底层 source filesystem 的非零统计信息。
+- `access` 支持 `F_OK` / `R_OK` / `W_OK` / `X_OK`。
+- `setattr` 支持 mode、uid、gid、atime、mtime、size。
+- `opendir` / `readdir` / `releasedir` 使用稳定目录快照。
+- rename flags 不再静默忽略；未知或不支持的 flag 必须明确失败。
+- errno 尽量保留底层 syscall 返回值，避免不必要地折叠为 `EIO`。
+
+Phase 1 非目标：
+
+- `symlink` / `readlink`
+- `link`
+- xattr
+- special files / FIFO / device nodes
+- `copy_file_range`
+- `fallocate`
+- watcher 接入
+- `skillfs-views.toml` 热重载
+
+### 4.6 POSIX Phase 1 Compatibility Boundaries
+
+即使 Phase 1 完成，以下仍是 SkillFS 的产品语义，不追求和普通目录完全一致：
+
+- `SKILL.md` 读取返回编译结果，而不是原始 source 文件。
+- `SKILL.md` 写入仍落到底层 source 文件，并触发 store reparse。
+- `skill-discover` 是只读虚拟 skill。
+- 根目录和 `/skills` 是 view 驱动的虚拟目录。
+- in-place mount 的底层访问路径当前仍依赖 Linux `/proc/self/fd/{n}`。
+
 ---
 
-## 5. Implementation Notes
+## 5. Internal Notes
 
 - `EnvironmentProfile::detect()` 在 FUSE 启动时构建一次，用于 `compiler::compile`。
 - in-place mount 会预打开 source dir fd，并通过 `/proc/self/fd/{n}` 避免 over-mount 自回环。
@@ -129,3 +182,10 @@ in-place mount 模式：
 - `cargo check -p skillfs -p skillfs-fuse` 通过。
 
 如果修改了公开挂载接口、路径解析逻辑或 store 同步逻辑，建议至少重跑这两条验证。
+
+Phase 1 完成后，额外要求：
+
+- `cargo test -p skillfs-fuse --test write_guard_tests`
+- `cargo test -p skillfs-fuse --test posix_phase1_tests`
+- 长期能力记录和 `POSIX_FS_TEST_MATRIX.csv` 中列出的已支持项有测试覆盖
+  或明确延期说明。

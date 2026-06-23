@@ -5,6 +5,29 @@ All notable changes to SkillFS are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Trusted peer control socket (`--control-socket`, `--trusted-peer-exe`) with
+  `SO_PEERCRED` identity verification, activation write API, and bounded
+  request size (64 KB limit).
+- Installer staging compatibility: `[install] staging_patterns` config for
+  installer-private workspaces with rename-boundary mutation notify.
+- Quiet-timeout notifications: aggregated mutation notify after a configurable
+  quiet window for installers that do not use rename or `.install-complete`.
+- Direct pending install transactions: track newly created skill directories
+  and suppress notify until a quiet window confirms completion.
+- Post-publish grace sessions: time-limited exact-path writes to whitelisted
+  patterns after staging rename or pending install completion.
+- Backing root propagation isolation: `MS_PRIVATE | MS_REC` after bind mount
+  to prevent the FUSE over-mount from leaking into the backing root.
+- Backing root accessibility validation at startup for in-place mounts with
+  activation or notify enabled.
+- Canonical skill identity: store key is the directory basename, not the
+  frontmatter `name:` field.
+- `enqueue_immediate()` on `NotifyController` for staging and quiet-timeout
+  dispatch that bypasses debounce.
+
 ## [0.2.0] - 2026-05-09
 
 ### Added

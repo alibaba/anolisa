@@ -1,149 +1,159 @@
 ---
 name: skillfs-mount
 description: >
-  Set up, mount, unmount, and recover the SkillFS FUSE virtual filesystem
-  on a local machine. Covers preflight checks, generating
-  skillfs-views.toml, mounting (normal or in-place), post-mount health
-  checks, and graceful unmount.
-  TRIGGER when the user asks to mount or unmount SkillFS, generate or
-  regenerate skillfs-views.toml, recover from a broken SkillFS mount, or
-  verify whether SkillFS is currently mounted.
+  Help users configure, mount, and unmount a skillfs FUSE virtual filesystem
+  on their local machine (e.g. for openclaw). Covers analyzing existing skill
+  usage to suggest view configuration, generating skillfs-views.toml, mounting,
+  and graceful unmount.
+  Use this skill when the user asks to: set up skillfs, configure skill views,
+  mount or unmount skillfs, check if skillfs is running, or get help organizing
+  their skills directory (especially for openclaw users).
 ---
 
 # skillfs 配置与挂载指南
 
-## 主流程（5 步，按顺序执行；失败即停）
+## 前提条件
 
-### STEP 1：预检 + 模式确认
-
-```bash
-SKILLS_DIR="<skills-dir>"                          # source 路径
-MOUNT_POINT="$SKILLS_DIR"                          # 默认 in-place；normal 模式改成独立目录
-MOUNT_ID=$(basename "$SKILLS_DIR")
-PID_FILE="/tmp/skillfs-${MOUNT_ID}.pid"
-LOG_FILE="/tmp/skillfs-${MOUNT_ID}-{pid}.log"      # mount 会把 {pid} 替换为实际 pid
-```
-
-硬门槛——任一失败立即停：
-
-```bash
-[ -d "$SKILLS_DIR" ]                                                            || exit
-[ -n "$(find "$SKILLS_DIR" -maxdepth 2 -name SKILL.md -print -quit)" ]           || exit
-! grep -Fq " $MOUNT_POINT " /proc/mounts                                         || exit
-
-command -v skillfs       && skillfs --version
-command -v fusermount3
-```
-
-**in-place mount 必须先与用户确认**：
-
-- 用户未明确模式时：询问 normal（独立挂载点）还是 in-place（覆盖 `SKILLS_DIR`）
-- 选 in-place 时复述：挂载后该目录仅显示主视图技能 + `skill-discover`；要恢复完整 source 必须先 unmount
-- 未获明确同意 → 走 normal
+- `skillfs` 已安装（RPM 包），运行 `skillfs --version` 确认
+- 系统已安装 `fuse3`（若缺失：`yum install -y fuse3`）
+- 确认 skills 源目录路径（openclaw 用户通常为 `~/.openclaw/skills`）
 
 ---
 
-### STEP 2：验证 skills
+## 操作流程
+
+### STEP 1：了解用户类型，确定主视图
+
+**有使用历史的用户（openclaw）：**
+
+运行脚本分析历史调用频次，按调用次数决定哪些 skill 进主视图：
 
 ```bash
-skillfs validate "$SKILLS_DIR"
+# 分析 openclaw session 日志中的 skill 使用频次
+python3 <skill_dir>/scripts/openclaw_skill_cnt.py
+
+# 分析 copilot-shell (cosh) 的 skill 调用统计
+python3 <skill_dir>/scripts/cosh_skill_cnt.py
 ```
 
-返回非 0 → 按报错修 SKILL.md frontmatter 后**重跑这一步**，不要继续。
+输出示例：
+```
+=== Skill Invocation Statistics ===
+  github: 42
+  slack: 28
+  tmux: 17
+  weather: 3
+```
+
+调用频次高的 skill 建议放入主视图，频次低或从未使用的放入次级视图。
+
+**纯新用户（无历史）：**
+
+列出 skills 目录内容，按用途给出分类建议：
+
+```bash
+ls ~/.openclaw/skills/
+```
+
+常见分类建议：
+- 主视图（高频核心）：代码工具、版本管理、常用 API 集成
+- 次级视图：不常用工具、实验性 skill、特定场景用途
 
 ---
 
-### STEP 3：生成 / 调整 skillfs-views.toml
+### STEP 2：生成 skillfs-views.toml
 
-先 dry-run：
-
-```bash
-skillfs classify "$SKILLS_DIR" --primary-count 8 --dry-run
-```
-
-确认无误后落地：
+根据分析结果，运行 classify 命令生成初始配置：
 
 ```bash
-skillfs classify "$SKILLS_DIR" --primary-count 8
+skillfs classify ~/.openclaw/skills --primary-count 8
 ```
 
-手动编辑 `$SKILLS_DIR/skillfs-views.toml` 时：每条 `skills = [...]` 字符串
-必须与对应 SKILL.md frontmatter 的 `name:` 一字不差；改后重跑
-`skillfs validate`；挂载期间改 views.toml 不生效，需 STEP 5 → STEP 4 重挂。
+生成的 `~/.openclaw/skills/skillfs-views.toml` 结构（视图名称固定为 `major` / `other`）：
+
+```toml
+[[view]]
+name = "major"
+default = true
+description = "Core skills shown at mount time"
+skills = ["github", "slack", "tmux", ...]
+
+[[view]]
+name = "other"
+default = false
+description = "Additional skills accessible via skill-discover"
+skills = ["weather", "notion", ...]
+```
+
+> 挂载行为由 `default = true/false` 决定，视图名称仅作为 skill-discover 中的分组标题显示。
+
+**按分析结果手动调整**：直接编辑 views.toml，在两个 skills 列表之间移动 skill 名称。
+
+> ⚠️ views.toml 中的字符串必须与各 SKILL.md frontmatter 的 `name:` 字段完全一致，
+> 否则该技能将从视图中消失。
 
 ---
 
-### STEP 4：挂载 + 健康检查
+### STEP 3：挂载
 
 ```bash
-skillfs mount "$SKILLS_DIR" "$MOUNT_POINT" \
-  --pid-file "$PID_FILE" \
-  --log-file "$LOG_FILE" &
+# 原地挂载（推荐）：Agent 访问同一路径，FUSE 透明过滤内容
+skillfs mount ~/.openclaw/skills ~/.openclaw/skills \
+  --pid-file /tmp/skillfs.pid \
+  --log-file /tmp/skillfs-{pid}.log &
 sleep 1
+
+# 确认挂载成功
+ls ~/.openclaw/skills/    # 应只显示主视图 skill + skill-discover
 ```
 
-按顺序跑三项检查，全部通过才算成功：
+挂载时自动将未出现在 views.toml 中的新 skill 追加到默认视图。
+
+---
+
+### STEP 4：验证挂载状态
 
 ```bash
-kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null && echo "ok: process alive"
-grep -Fq " $MOUNT_POINT " /proc/mounts                && echo "ok: mount registered"
-ls "$MOUNT_POINT" | head                                # 应能看到主视图技能
-```
+# 检查进程是否存活
+kill -0 $(cat /tmp/skillfs.pid) 2>/dev/null && echo "mounted" || echo "not mounted"
 
-任一失败 → 解析实际日志路径再看：
-
-```bash
-ACTUAL_LOG=$(printf '%s\n' "$LOG_FILE" | sed "s/{pid}/$(cat "$PID_FILE" 2>/dev/null)/")
-tail -n 50 "$ACTUAL_LOG" 2>/dev/null \
-  || echo "no log file — 重跑 mount 去掉 '&' 加 --foreground 直接看 stderr"
+# 查看实时日志
+tail -f /tmp/skillfs-$(cat /tmp/skillfs.pid).log
 ```
 
 ---
 
-### STEP 5：卸载（**禁止 `kill -9`**）
+### STEP 5：卸载
 
 ```bash
-kill -TERM "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null
-sleep 2
+# 优雅卸载（推荐）
+kill -TERM $(cat /tmp/skillfs.pid)
+sleep 1
 
-if grep -Fq " $MOUNT_POINT " /proc/mounts; then
-  fusermount3 -u "$MOUNT_POINT"
-fi
+# 卸载后目录恢复完整内容
+ls ~/.openclaw/skills/
 
-if grep -Fq " $MOUNT_POINT " /proc/mounts; then
-  echo "still mounted; try: fusermount3 -uz $MOUNT_POINT"
-else
-  echo "unmounted ok"
-  rm -f "$PID_FILE"
-fi
+# 若进程意外退出，手动清理残留挂载：
+fusermount3 -u ~/.openclaw/skills
 ```
+
+PID 文件在卸载成功后自动删除。
 
 ---
 
-## 可选：按使用频率定义主视图
+## 关键说明
 
-仅在用户明确要求"按历史使用频次定主视图"时执行：
-
-```bash
-# openclaw 格式：默认 ~/.openclaw
-python3 <skill_dir>/scripts/skill_usage_from_session_logs.py [--logs-dir <path>]
-
-# copilot-shell 格式：默认 ~/.copilot-shell
-python3 <skill_dir>/scripts/skill_usage_from_chat_logs.py [--logs-dir <path>]
-```
-
-按结果调整 STEP 3 的 `--primary-count`，或手工编辑 views.toml。
+- SkillFS 是**只读**文件系统；挂载期间 views.toml 对 FUSE 不可见，需修改时先卸载
+- 不生成 views.toml 也可直接挂载，此时所有 skill 均在主视图中可见
 
 ---
 
 ## 故障排查
 
-| 错误 / 现象 | 解决方案 |
+| 错误 | 解决方案 |
 |------|----------|
-| `Package fuse3 was not found` | `yum install -y fuse3 fuse3-devel` 或 `apt install -y fuse3 libfuse3-dev` |
-| 挂载前 `/proc/mounts` 已含目标路径 | `fusermount3 -u "$MOUNT_POINT"`；仍失败再 `fusermount3 -uz "$MOUNT_POINT"` |
-| `Transport endpoint is not connected` | `fusermount3 -u "$MOUNT_POINT"` 清残留；进程已死时直接 `umount` |
-| skill 消失于列表 | 统一 SKILL.md `name:` 与 views.toml 字符串；改后重跑 `skillfs validate` |
-| skill-discover 不完整 | 重跑 `skillfs classify --dry-run` 或手编 views.toml 后按 STEP 5 → STEP 4 重挂 |
-| 修改 views.toml 后未生效 | views 在挂载时一次性加载，必须重挂 |
-| `tail -f` 日志路径找不到 | `{pid}` 替换成实际 pid（见 STEP 4 的 sed 命令）；或加 `--foreground` 看 stderr |
+| `Package fuse3 was not found` | `yum install -y fuse3 fuse3-devel` |
+| `Transport endpoint is not connected` | `fusermount3 -u <mountpoint>` 后重新挂载 |
+| skill 消失于列表 | 统一 SKILL.md `name:` 与 views.toml 字符串 |
+| skill-discover 不完整 | 重新运行 `skillfs classify` 或手动编辑 views.toml |
+| 原地挂载后无法写 views.toml | 先卸载，编辑，再重新挂载 |

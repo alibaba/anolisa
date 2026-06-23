@@ -1,6 +1,6 @@
 # SkillFS Runtime Activation Implementation Plan
 
-Status: A1/A2/A3/A4/A5/A6/B1 implemented
+Status: core daemon-activation path implemented; trusted-writer tightening and provider lifecycle consistency remain planned
 
 This document records the production-oriented path from the current
 `--decision-command scan -> resolve` integration toward a daemon-driven
@@ -154,9 +154,8 @@ Goal: consume `user.agent_sec.skill_ledger.activation` with
 Scope:
 
 - Read the user xattr without following symlinks via direct `lgetxattr`
-  libc call against the physical source directory, rather than through
-  the FUSE xattr callback path. This avoids notification loops and keeps
-  activation consumption separate from ordinary user xattr passthrough.
+  libc call against the physical source directory (not the FUSE xattr
+  callback path — no T3 interaction or loop risk).
 - Parse the same `ActivationRecord` payload.
 - Prefer xattr when present and valid.
 - Fall back to `activation.json` only when xattr is absent (`ENODATA`)
@@ -349,6 +348,11 @@ Scope:
   security mount configuration.
 - For in-place mounts, require or automatically create a backing root before
   the FUSE over-mount, using a private bind mount or equivalent source alias.
+  After the bind mount, immediately mark the backing root `MS_PRIVATE | MS_REC`
+  to prevent host mount-propagation events (most critically the in-place FUSE
+  over-mount) from leaking into the backing root. If make-private fails,
+  startup fails closed: the bind mount is unmounted, any created temp directory
+  is cleaned up, and `BackingRootError::MakePrivateFailed` is returned.
 - For non-in-place mounts, allow the same concept to be used as a normalized
   daemon working path. It may point at the source directly or at a private
   alias, but SkillFS should present one consistent path shape to the daemon.
@@ -394,6 +398,346 @@ Acceptance criteria:
 - Non-in-place security mounts can opt into the same backing-root path shape
   for daemon consistency without changing ordinary passthrough semantics.
 
+### I2: Configurable Installer Staging Compatibility
+
+Status: **implemented**
+
+Goal: support existing installers that stage skill files under the managed
+skills root before publishing the final skill directory, without requiring
+them to implement the SkillFS-native `/.skillfs-inbox/<skill>/.install-complete`
+sentinel protocol.
+
+Problem statement:
+
+Some installers create temporary directories directly under the configured
+skills root, write multiple files there, and later rename or move the staged
+directory into the final skill name. OpenClaw, for example, uses top-level
+directories shaped like `.openclaw-install-stage-*`. Under an in-place
+SkillFS mount, top-level directories are normally interpreted as skill
+names. Without a staging bypass, the installer workspace can be treated as a
+skill candidate and can enter normal notify/activation handling before the
+install is complete.
+
+The existing inbox sentinel remains the precise SkillFS-native install
+protocol, but it is too invasive for installers that already write directly
+to the configured skills directory. I2 adds a compatibility layer for
+well-known installer staging directories with a rename-boundary completion
+model.
+
+Scope:
+
+- Add an installer staging configuration surface:
+
+  ```toml
+  [install]
+  staging_patterns = [".openclaw-install-stage-*"]
+  unactivated_visibility = "hidden"
+  ```
+
+- Keep pattern matching intentionally small and auditable. The initial shape
+  supports exact names and prefix-star patterns such as
+  `.openclaw-install-stage-*`; arbitrary regex is not supported.
+- Match staging patterns only at the managed root level. A matching name
+  inside a skill directory is ordinary passthrough content, not an installer
+  workspace.
+- Treat matching staging roots as installer-private workspaces, not skills:
+  they must not participate in active resolver lookup, activation bootstrap,
+  skill-discover, or normal skill notify. Staging roots are hidden from
+  `/skills` readdir/opendir but remain accessible for exact-path access —
+  lookup, stat, opendir, readdir, read, write, create, mkdir, rename, unlink,
+  rmdir, and setattr all follow normal physical passthrough behavior. When an
+  active resolver is attached, staging roots bypass the resolver hidden gate
+  so installers can traverse and populate the staging directory through the
+  FUSE mount. SKILL.md inside a staging root is served as a raw physical file
+  (no compiler pass, no virtual size projection).
+- Allow passthrough mutation inside the staging workspace, subject to the
+  existing sensitive-path boundaries.
+- Suppress all notify for intermediate writes inside staging. Staging root
+  names are never sent to the daemon — not through normal notify, not through
+  any timeout heuristic.
+- When a staging root is renamed to a valid final skill directory name, treat
+  that rename as the install-complete boundary and enqueue exactly one rename
+  mutation notification through the background notify worker (protocol event
+  log, socket send, activation reload poll, watcher registration). The
+  notification uses `eventKind: "rename"` — not "install-complete" which is
+  an internal/historical flush concept only. The rename notification is
+  non-blocking: the FUSE reply returns immediately without waiting for
+  socket I/O or activation reload.
+- Reject rename targets that are invalid skill names, `.skill-meta`,
+  `.skillfs-inbox`, lifecycle reserved roots, `skill-discover`, or other
+  sensitive namespaces.
+- Preserve fail-safe activation semantics by default: missing activation still
+  maps to hidden in security activation mode. A compatibility setting that
+  exposes unactivated source, if ever added, must be explicit and documented
+  as fail-open.
+
+An optional quiet-timeout heuristic supports installers that write files
+directly into a final skill directory without using the staging rename
+boundary or the `.install-complete` sentinel. When `quiet_timeout_ms` is
+configured in the `[install]` section, SkillFS tracks mutation timestamps per
+final skill name and emits an aggregated mutation notification (using the
+last observed mutation kind, e.g. "write") after the configured quiet window
+expires with no further writes. Multiple writes within the window are
+collapsed into one notification. The quiet timeout does not apply to staging
+roots — staging roots complete only through the rename boundary. The quiet
+timeout is an installer compatibility notification, not a security approval;
+activation still determines visibility.
+
+**Protocol note:** "install-complete" is not a protocol-level `eventKind`.
+It is a historical/internal flush reason only. The formal notify protocol
+uses ordinary mutation event kinds (rename, write, create, unlink, rmdir,
+truncate, reconcile). Debounce, quiet-timeout, and staging rename only
+determine *when* to flush aggregated events — they do not change the event
+facts.
+
+Direct final-skill pending install is implemented in I3 below.
+
+**Backing root requirement:** In in-place/security mode with activation or
+notify enabled, the daemon-facing backing root must exist and be accessible
+at startup. All daemon-facing operations (notify `skillDir`, activation
+bootstrap, activation reload, startup reconcile, activation watcher) use
+the backing root path. The agent-visible FUSE mount path must never appear
+in notify payloads.
+
+Out of scope for I2:
+
+- Replacing the inbox sentinel protocol.
+- Parsing installer-specific manifests.
+- Treating arbitrary dot-prefixed directories as safe.
+- Exposing unactivated skills by default.
+- Running scan/check inside SkillFS.
+- Deleting or rolling back failed installer staging directories.
+Acceptance criteria:
+
+- A configured `.openclaw-install-stage-*` root can be created and written
+  under the managed root without being parsed as a skill.
+- Intermediate writes inside a configured staging root do not trigger any
+  notify — not normal skill notify and not install-complete. The staging
+  root name is never sent to the daemon.
+- Renaming a configured staging root to a valid skill name triggers exactly
+  one rename mutation notify for the final skill (eventKind: "rename").
+- Invalid final names and sensitive targets are rejected.
+- Missing activation remains hidden by default after install notify; exposure
+  still depends on daemon-written activation state.
+- Existing inbox tests, normal skill mutation notify tests, activation reload
+  tests, and lifecycle namespace tests continue to pass.
+
+### I3: Direct Final-Skill Pending Install
+
+Status: **implemented**
+
+Goal: support installers that create the final skill directory first and
+populate it in-place, without using a staging rename boundary or the
+SkillFS inbox sentinel protocol.
+
+Problem statement:
+
+Some installers create the target skill directory directly under the managed
+skills root and then write files into it progressively.  Under an in-place
+SkillFS mount with activation mode, such a directory has no activation entry
+in the active resolver and is therefore hidden from FUSE reads.  Worse, the
+normal notify path may trigger a daemon scan before the skill is complete;
+the daemon may reject the incomplete candidate and write a `target: null`
+activation, permanently hiding the directory and causing subsequent
+installer writes to fail.
+
+Scope:
+
+- Add a `PendingInstallController` that tracks newly created,
+  not-yet-activated final skill directories.  A skill is eligible for
+  pending tracking when the pending controller is attached and the active
+  resolver has no entry for it.  Already-activated skills (current,
+  fallback, or hidden) continue to use the normal mutation notify path.
+- Pending skills are hidden from `/skills` listing (readdir/opendir) and
+  agent discovery but remain accessible for exact-path access: lookup, stat,
+  opendir, readdir, read, write, create, mkdir, rename, unlink, rmdir, and
+  setattr all follow normal physical passthrough behavior.
+- `SKILL.md` inside a pending skill directory is served as a raw physical
+  file (no compiler pass, no virtual size projection).
+- Intermediate mutations for pending skills do not trigger normal
+  notify/refresh/quiet-timeout.  Mutations are recorded in the pending
+  controller instead.
+- After a quiet window expires, the controller checks whether the skill
+  directory has a complete shape: directory exists, `SKILL.md` exists and
+  is parseable by the existing parser (Ok or Degraded status).  If
+  complete, one aggregated ordinary mutation notification is emitted
+  (eventKind matches the last observed mutation kind).  If incomplete, the
+  entry stays pending and waits for the next mutation to restart the
+  window.
+- Staging roots, lifecycle reserved names, `skill-discover`,
+  `.skill-meta`, and `.skillfs-inbox` are excluded from pending tracking.
+- The quiet timeout for pending installs reuses the same duration as I2
+  quiet-timeout but operates independently.
+- "install-complete" is not emitted as a protocol-level event kind.
+  The notification uses ordinary mutation kinds (write, create, mkdir,
+  etc.).
+- Activation still determines final visibility.  The pending notification
+  triggers daemon processing; the daemon writes activation state; SkillFS
+  reloads activation and exposes or hides the skill accordingly.
+
+Out of scope for I3:
+
+- Replacing the inbox sentinel protocol.
+- Replacing the staging rename boundary.
+- Parsing installer-specific manifests.
+- Running scan/check inside SkillFS.
+- Exposing unactivated skills by default.
+
+Acceptance criteria:
+
+- `mkdir /skills/new-skill` does not immediately notify when the skill has
+  no activation entry.
+- Pending skill does not appear in `/skills` listing.
+- Pending exact path (metadata, readdir, write, create, mkdir) is
+  accessible.
+- `SKILL.md` missing at quiet timeout expiry: no notification.
+- `SKILL.md` unparseable at quiet timeout expiry: no notification.
+- `SKILL.md` complete at quiet timeout expiry: one ordinary mutation
+  notification.
+- Multiple writes within the quiet window collapse to one notification.
+- Activation write makes the skill visible as current/fallback/hidden
+  through the normal resolver path.
+- Already-activated skill updates still use normal notify, not pending.
+- Staging and inbox existing tests do not regress.
+
+### Control Socket Meta Write API
+
+Status: **implemented**
+
+Goal: move activation writes out of the FUSE mount path. The external
+security daemon should use the trusted control socket to ask SkillFS to update
+activation state, instead of writing `.skill-meta/**` through the agent-visible
+filesystem view.
+
+Problem statement:
+
+The current production identity work can prove that a peer is a trusted daemon
+by combining `SO_PEERCRED` with executable identity checks. However,
+activation writes still rely on file-path mutation surfaces when the daemon
+writes `.skill-meta/activation.json` or activation xattrs directly. That keeps
+the runtime contract dependent on mount-path trusted-writer behavior and makes
+it harder to tighten `.skill-meta/**` for ordinary FUSE users.
+
+Scope:
+
+- Extend the control socket protocol with activation-only write methods:
+
+  ```json
+  {"schemaVersion":"1","method":"meta.writeActivation","skillName":"demo-weather","activation":{...}}
+  {"schemaVersion":"1","method":"meta.setActivationXattr","skillName":"demo-weather","activation":{...}}
+  ```
+
+- Accept requests only after the peer passes the existing control socket
+  `SO_PEERCRED` + executable identity verification chain.
+- Validate `skillName` as a canonical directory name. Directory name remains
+  authoritative; `SKILL.md name:` must not create aliases.
+- Restrict write targets to exactly:
+  - `<skill_dir>/.skill-meta/activation.json`
+  - `user.agent_sec.skill_ledger.activation` on the physical skill directory
+- Reuse the same `ActivationRecord` parser and path validation used by the
+  activation consumer. Invalid payloads must be rejected before writing.
+- Write `activation.json` atomically by writing a temporary file in
+  `.skill-meta`, fsyncing as appropriate, and renaming into place.
+- Set activation xattr with no-follow semantics against the physical skill
+  directory.
+- After a successful write, trigger activation reload or watcher immediate
+  check for the affected skill.
+- Emit a protocol event that records the control-plane write and resulting
+  reload outcome where available.
+
+Out of scope for control socket meta writes:
+
+- General-purpose `.skill-meta/**` file writes.
+- Writing manifests, findings, signatures, version snapshots, or scan output.
+- Allowing untrusted FUSE clients to invoke the meta write path.
+- Replacing daemon-owned policy computation.
+- Changing activation schema.
+
+Acceptance criteria:
+
+- A trusted peer can write activation JSON through the control socket and new
+  FUSE opens observe the updated active mapping.
+- A trusted peer can set activation xattr through the control socket and the
+  xattr-preferred activation path observes it.
+- Mismatched uid/gid/executable identity is denied before any write.
+- Invalid skill names, missing skills, unsafe activation targets, and malformed
+  activation payloads are rejected without mutating disk state.
+- Activation JSON writes are atomic: readers never observe partial JSON.
+- Successful writes produce protocol events and schedule reload.
+- Existing direct activation-file and activation-xattr consumers keep working.
+
+### Mount-Path Trusted Writer Tightening
+
+Status: **planned**
+
+Goal: make the control socket the primary production path for activation
+writes, and reduce mount-path trusted writer to an explicit compatibility
+fallback.
+
+Scope:
+
+- Update production documentation to recommend the control socket meta write
+  API for activation updates.
+- Keep ordinary FUSE mount-path mutation of `.skill-meta/**` denied by
+  default.
+- Reclassify `--trusted-writer-exe` as a fallback or compatibility mechanism
+  for deployments that cannot yet use the control socket.
+- Keep process-name-only `--trusted-writer` documented as compatibility-only
+  because process `comm` is spoofable.
+- Add tests proving that disabling mount-path trusted writer does not block
+  control socket activation writes.
+
+Out of scope for mount-path trusted writer tightening:
+
+- Removing the existing trusted-writer code path immediately.
+- Changing read-side activation behavior.
+- Adding general-purpose metadata write methods.
+
+Acceptance criteria:
+
+- Production examples use `--control-socket` and `--trusted-peer-exe` for
+  activation writes.
+- Compatibility examples clearly mark `--trusted-writer-exe` as fallback.
+- `.skill-meta/**` remains denied for ordinary FUSE clients.
+- Control socket activation writes still work when no mount-path trusted
+  writer is configured.
+
+### Provider Lifecycle And Activation Consistency
+
+Status: **planned**
+
+Goal: make activation updates idempotent, observable, and consistent across
+JSON, xattr, reload, daemon restart, and watcher repair paths.
+
+Scope:
+
+- Define idempotent behavior for repeated writes of the same activation target.
+- Preserve the xattr-first / JSON-fallback contract:
+  - xattr valid + JSON absent or invalid: xattr wins;
+  - xattr and JSON valid but disagree: fail-safe hidden;
+  - unexpected xattr read errors: fail-safe hidden.
+- Add control socket method outcomes that distinguish updated, unchanged,
+  rejected, and reload-failed cases.
+- Make active mapping state observable enough for integration tests and
+  operations diagnostics without exposing policy internals.
+- Expand tests for daemon restart reconcile, missed notifications, watcher
+  convergence, and control socket activation writes.
+
+Out of scope for provider lifecycle and activation consistency:
+
+- Parsing scan findings or risk policy inside SkillFS.
+- Making activation reload synchronous on every FUSE read.
+- Changing fd pin semantics.
+
+Acceptance criteria:
+
+- Rewriting the same activation is safe and produces an unchanged outcome.
+- JSON/xattr mismatch still hides the skill.
+- Reload after control socket write is observable through protocol events.
+- Watcher convergence still repairs activation state when a daemon writes
+  activation outside the current notify cycle.
+- Existing activation-mode, notify, reload, and watcher tests remain green.
+
 ## CLI And Config Direction
 
 The current CLI surface is:
@@ -406,7 +750,11 @@ The current CLI surface is:
 --activation-events-log <PATH>
 --activation-reload-mode off|poll
 --events-log <PATH>
---trusted-writer-exe <PATH> # production: exe identity (dev,ino) pinning
+--control-socket <PATH>
+--trusted-peer-exe <PATH>   # production: socket peer executable identity
+--trusted-peer-uid <UID>
+--trusted-peer-gid <GID>
+--trusted-writer-exe <PATH> # fallback: mount-path .skill-meta writer
 --trusted-writer <NAME>     # deprecated / compatibility; process comm is spoofable
 --ledger-backing-root <PATH>
 --config <PATH>
@@ -429,12 +777,78 @@ socket_path = "/run/user/1000/agent-sec-core/daemon.sock"
 [activation_events]
 log_path = "/var/log/skillfs-activation-events.jsonl"
 
+[control_socket]
+path = "/run/skillfs/control.sock"
+trusted_peer_exe = "/usr/local/bin/agent-sec-cli"
+trusted_peer_uid = 1000
+trusted_peer_gid = 1000
+
 [ledger]
 backing_root = "/run/skillfs-ledger/<mount-id>/source"
+
+[install]
+staging_patterns = [".openclaw-install-stage-*"]
+unactivated_visibility = "hidden"
+# quiet_timeout_ms = 5000
 ```
 
 Do not silently switch existing `--security --decision-command` users to the
 activation path. Compatibility is important during security-side rollout.
+
+### I4: Installer Post-Publish Grace Window
+
+After staging rename or direct-write pending install completion, installers
+like OpenClaw continue writing metadata (e.g. `.openclaw/.fs-safe-replace...tmp`)
+into the final skill directory. If the Ledger has already written activation and
+SkillFS switched the skill to hidden/fallback, these exact-path writes are
+blocked. The post-publish grace window is a conservative, explicit-whitelist
+mechanism that allows these writes for a limited time.
+
+Configuration (both required together, default off):
+
+```toml
+[install]
+post_publish_grace_ms = 5000
+post_publish_write_patterns = [".openclaw/**"]
+```
+
+Design:
+- Grace session starts immediately after staging rename completes or
+  after pending install fires its completion notification.
+- Only exact-path writes matching `post_publish_write_patterns` bypass
+  the active resolver's hidden/fallback view.
+- `.skill-meta/**` is always rejected regardless of grace.
+- Lifecycle reserved roots, skill-discover, absolute paths, and `..`
+  traversal are rejected at pattern validation time.
+- Grace writes produce normal mutation notify events (no new event kind).
+- Activation still controls listing/read view; grace only bypasses the
+  hidden gate for whitelisted write operations.
+- Symlink/hardlink policy is not relaxed by grace.
+- Session expires after `post_publish_grace_ms`; expired sessions are
+  cleaned up lazily.
+
+Files:
+- `security/install.rs`: `PostPublishWritePattern`, `PostPublishGraceController`,
+  `validate_post_publish_patterns`, session management.
+- `security/config.rs`: `InstallSection` fields and validation.
+- `fs/paths.rs`: `is_post_publish_grace_allowed`, `should_reject_hidden_write`.
+- `fs/callbacks/meta.rs`: Grace bypass in lookup/getattr.
+- `fs/callbacks/dir.rs`: Grace bypass in readdir/opendir.
+- `fs/callbacks/read.rs`: Grace bypass in open.
+- `fs/callbacks/write.rs`: Grace rejection in create.
+- `fs/callbacks/mutate.rs`: Grace rejection in mkdir/unlink/rmdir; session
+  start after staging rename.
+
+I4 is complete when:
+- Both `post_publish_grace_ms` and `post_publish_write_patterns` must be
+  configured together (startup error otherwise).
+- Staging rename triggers a grace session.
+- Pending install completion triggers a grace session.
+- Whitelisted writes succeed within the grace window.
+- Non-whitelisted writes are rejected within the grace window.
+- Writes are rejected after grace expires.
+- `.skill-meta/**` is rejected even during grace.
+- All existing staging, pending, notify, and activation tests pass.
 
 ## Acceptance Criteria
 
@@ -491,7 +905,11 @@ cargo test -p skillfs-core
   convergence mechanism.
 - Without A6/B1, in-place activation mode still needs careful deployment:
   external daemons must not scan the over-mounted FUSE path when they need the
-  live source. A private backing root is the mechanism for making that
-  path split explicit and testable. A6/B1 is now implemented: the
-  `--ledger-backing-root` flag and `[ledger].backing_root` config enable
-  a private source alias for daemon-facing operations.
+  live source. A private backing root is the mechanism for making that path
+  split explicit and testable. A6/B1 is implemented: the
+  `--ledger-backing-root` flag and `[ledger].backing_root` config enable a
+  private source alias for daemon-facing operations.
+- The trusted daemon can now write activation through the dedicated control
+  socket meta write API. Mount-path trusted writer remains a compatibility
+  fallback until the trusted-writer tightening work makes that fallback
+  explicitly secondary.

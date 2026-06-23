@@ -1,4 +1,4 @@
-# SkillFS POSIX External Test Harness
+# SkillFS POSIX External Test Harness (Packages T0 + T0.1)
 
 **Status**: Optional. Not invoked by `cargo test` or `scripts/test.sh`.
 **Script**: [`scripts/posix/run_pjdfstest.sh`](../../scripts/posix/run_pjdfstest.sh)
@@ -19,13 +19,14 @@ citation — see ["Adding to a manifest"](#adding-to-a-manifest)):
 
 **Upstream**: <https://github.com/pjd/pjdfstest>
 
-## What The Harness Does
+## What T0 Is
 
-The harness drives an external POSIX conformance suite (pjdfstest)
-against a real SkillFS FUSE mount. It keeps conformance runs optional
-and reports failures in actionable buckets (unsupported surface,
-blocked helper dependency, caller-identity gap, unexpected failure).
-The harness itself changes no filesystem behavior. It:
+T0 drives an external POSIX conformance suite (pjdfstest) against a
+real SkillFS FUSE mount. T0.1 refined the harness to make the report
+actionable (profiles, two manifests, three buckets, verbose rerun) and
+fixed three small POSIX gaps the T0 baseline surfaced (`create` /
+`mkdir` mode+umask; passthrough `getattr` inode). The harness itself
+changes no filesystem behavior. It:
 
 1. Builds the `skillfs` binary (debug by default; `--release` for the
    release binary).
@@ -96,7 +97,7 @@ need to hand the harness the checkout path.
 sudo SKILLFS_PJDFSTEST_DIR=~/pjdfstest scripts/posix/run_pjdfstest.sh \
   --report /tmp/skillfs-smoke.txt
 
-# Full profile: runs every *.t under tests/.
+# Full profile: runs every *.t under tests/ (reproduces T0 baseline).
 sudo scripts/posix/run_pjdfstest.sh --pjdfstest ~/pjdfstest \
   --profile full --report /tmp/skillfs-full.txt
 
@@ -143,21 +144,21 @@ The remaining list is the prove input. Manifest classification of
 
 ## Interpreting the Report
 
-The harness prints a single summary block. Example:
+The harness prints a single summary block. Example with T0.1 buckets:
 
 ```
-SkillFS External POSIX Harness Report
+SkillFS T0/T0.1 — External POSIX Harness Report
 ===============================================
 repo:           /home/you/code/SkillFS
 skillfs build:  debug (.../target/debug/skillfs)
 pjdfstest:      /home/you/pjdfstest
-sandbox:        /tmp/skillfs-posix.AbCxYz/mount/skills/harness-skill/sandbox
+sandbox:        /tmp/skillfs-t0.AbCxYz/mount/skills/harness-skill/sandbox
 profile:        smoke
 selected:       128 / 237 test files
 skipped by:     include=0 exclude=0 profile=109
 prove exit:     1
-prove log:      /tmp/skillfs-posix.AbCxYz/prove.log
-rerun log:      /tmp/skillfs-posix.AbCxYz/rerun-verbose.log
+prove log:      /tmp/skillfs-t0.AbCxYz/prove.log
+rerun log:      /tmp/skillfs-t0.AbCxYz/rerun-verbose.log
 
 prove summary:
   Files=128, Tests=4500, ...
@@ -267,11 +268,11 @@ mismatch.
 
 ## What This Harness Does Not Cover
 
-By design, the harness is visibility / refinement only. Out of scope:
-
-- Exercising every policy-controlled or advanced Linux filesystem
-  surface. Unsupported or partially supported areas remain visible in
-  the manifests and `POSIX_FS_TEST_MATRIX.csv`.
+By design, the external harness only measures and classifies behavior. It does
+not implement filesystem features. Current support status for symlink creation,
+hard links, FIFO creation, xattrs, sparse-file APIs, and copy acceleration is
+tracked in `docs/skillfs-filesystem-capability-record.md` and
+`POSIX_FS_TEST_MATRIX.csv`.
 - Changing SKILL.md compiled read/write semantics, skill-discover
   semantics, `.skill-meta` protection, or lifecycle namespace policy.
   The sandbox path is chosen specifically so pjdfstest never crosses
@@ -281,4 +282,4 @@ By design, the harness is visibility / refinement only. Out of scope:
 - Caller-identity fidelity in the FUSE filesystem (the `pjdfstest -u
   <uid> -g <gid>` switches). Several `truncate/`, `unlink/`,
   `chown/` files exercise permission semantics that depend on the
-  FUSE daemon honoring per-caller uid/gid; that is tracked separately.
+  FUSE daemon honoring per-caller uid/gid; that is bigger than T0.1.

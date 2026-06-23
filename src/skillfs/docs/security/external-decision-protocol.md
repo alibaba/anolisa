@@ -64,7 +64,7 @@ Where:
   prepended to every per-call argv.
 - `scan` is the optional pre-step. Providers may use it to refresh
   internal scan state, recompute findings, etc. SkillFS does **not**
-  parse the scan stdout; only the exit status is consumed.
+  parse the scan stdout in D1.3.1; only the exit status is consumed.
   Exit `0` lets SkillFS proceed to `resolve`; a non-zero exit
   short-circuits the resolve and applies the demo failure behavior.
 - `resolve` is the load-bearing subcommand. It is the only command
@@ -85,13 +85,12 @@ spawns: agent-sec-cli skill-ledger scan <skill_dir> --json
         agent-sec-cli skill-ledger resolve <skill_dir> --json
 ```
 
-### Parsing rules
+### Parsing rules (D1.3.1)
 
 - The command string is split on ASCII whitespace. Consecutive
   whitespace is collapsed.
 - Shell quoting and backslash escaping are **not** supported in
-  the current command parser; a path containing spaces cannot currently
-  be expressed.
+  D1.3.1; a path containing spaces cannot currently be expressed.
 - An empty or whitespace-only `--decision-command` is rejected at
   startup.
 - SkillFS spawns the program directly via `std::process::Command`.
@@ -331,7 +330,7 @@ Reject any `target` that:
 - is not under `.skill-meta/versions/`,
 - does not end in `.snapshot`.
 
-### Failure policy
+### Demo policy (D1.x)
 
 - Invalid or failed provider output MAY downgrade to a warning and
   hide the affected skill.

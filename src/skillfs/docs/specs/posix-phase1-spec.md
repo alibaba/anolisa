@@ -1,7 +1,8 @@
 # SkillFS POSIX Phase 1 Specification
 
-**Status**: baseline implemented
+**Status**: baseline complete; retained as the Phase 1 behavior contract
 **Target crate**: `skillfs-fuse`
+**Capability record**: `docs/skillfs-filesystem-capability-record.md`
 
 ## 1. Scope
 
@@ -249,4 +250,3 @@ Phase 1 is complete when:
 - `cargo test -p skillfs-fuse --test posix_phase1_tests` passes on a FUSE-enabled Linux runner;
 - P0 rows in `POSIX_FS_TEST_MATRIX.csv` are covered by tests or explicitly marked deferred;
 - this spec is updated to reflect any accepted deviations.
-

@@ -1,6 +1,7 @@
 # POSIX Filesystem References For SkillFS
 
-This file collects the references and local source anchors used for the SkillFS POSIX roadmap and future test work.
+This file collects standards, implementation anchors, and test references used
+for SkillFS filesystem compatibility work.
 
 ## Standards
 
@@ -29,6 +30,10 @@ This file collects the references and local source anchors used for the SkillFS 
 - `docs/specs/fuse-spec.md`
   - FUSE public API, mounted layout, behavior contracts, rejected operations.
 
+- `docs/skillfs-filesystem-capability-record.md`
+  - Maintained record of filesystem capabilities, security integration surfaces,
+    test coverage, boundaries, and implementation history.
+
 - `crates/skillfs-core/src/parser.rs`
   - `SKILL.md` parsing, fallback metadata behavior, parse status model.
 
@@ -48,8 +53,9 @@ This file collects the references and local source anchors used for the SkillFS 
 - `crates/skillfs-fuse/tests/write_guard_tests.rs`
   - Existing FUSE integration tests for read, write passthrough, mkdir, rename, in-place mode, stale frontmatter, and rejected operations.
 
-- Local fuser trait source:
-  - Use the `Filesystem` trait as the callback checklist. Unimplemented callbacks in SkillFS inherit fuser defaults.
+- Installed `fuser` crate source, when available in the local Cargo registry:
+  - Use the `Filesystem` trait as the callback checklist. Unimplemented
+    callbacks in SkillFS inherit fuser defaults.
 
 ## Suggested Test Tooling
 
