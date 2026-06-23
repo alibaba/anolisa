@@ -22,10 +22,8 @@ ureq.workspace = true
 flate2.workspace = true
 tar.workspace = true
 fs2.workspace = true
+uuid.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 nix.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true

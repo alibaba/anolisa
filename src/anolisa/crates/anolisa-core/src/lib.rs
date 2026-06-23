@@ -17,10 +17,12 @@ pub mod feature_flags;
 pub mod health;
 pub mod hooks;
 pub mod install_runner;
+pub mod instance;
 pub mod integrity;
 pub mod lifecycle;
 pub mod lock;
 pub mod manifest;
+pub mod metadata;
 pub mod osbase_install;
 pub mod path_safety;
 pub mod process;
@@ -31,8 +33,8 @@ pub mod self_update;
 pub mod service;
 pub mod state;
 pub mod system_helper;
+pub mod telemetry;
 pub mod transaction;
-pub mod upload;
 
 pub use adapter::claim::{AdapterClaim, ClaimResource, ClaimResourceKind, ClaimStatus};
 pub use adapter::driver::{AdapterStatusReport, AdapterSummary, ConditionStatus, DriverPlan};
@@ -61,6 +63,7 @@ pub use hooks::{
 pub use install_runner::{
     InstallError, InstallOutcome, InstallRunner, InstalledFile, ResolvedInstallFile,
 };
+pub use instance::{InstanceInfo, InstanceProber, InstanceSnapshot};
 pub use integrity::{IntegrityStatus, check_owned_file};
 pub use lifecycle::{
     ComponentLifecyclePlan, FileAction, FileActionKind, FileOwner as LifecycleFileOwner,
@@ -70,9 +73,10 @@ pub use lifecycle::{
 };
 pub use lock::{InstallLock, LockError};
 pub use manifest::{AdapterSpec, ComponentManifest, DistributionSelector, FileKind, HealthSpec};
+pub use metadata::MetadataClient;
 pub use register::{
-    ConsentState, ProductType, RegisterRecord, RegisterSource, RegisterState, RegistrationManager,
-    SubscriptionError, current_operator, require_root,
+    ConsentState, HistoryAction, HistoryEntry, ProductType, RegisterRecord, RegisterSource,
+    RegisterState, RegistrationManager, SubscriptionError, current_operator, require_root,
 };
 pub use registry::{
     FetchFailure, FetchedMeta, HttpFetch, IndexFreshness, Registry, RegistryClient, RegistryConfig,
@@ -92,8 +96,8 @@ pub use state::{
     InstalledState, ObjectKind, ObjectStatus, OperationRecord, OwnedFile, Ownership, RpmMetadata,
     STATE_SCHEMA_VERSION, ServiceRef, StateError, SubscriptionScope,
 };
+pub use telemetry::{TelemetryConfig, TelemetryError, TelemetryStarter, validate_sls_account_id};
 pub use transaction::{
     JOURNAL_SCHEMA_VERSION, RollbackAction, RollbackActionKind, Transaction, TransactionError,
     TransactionOutcome, TransactionOutcomeStatus, TransactionStep, TransactionStepStatus,
 };
-pub use upload::{UploadConfig, UploadError, UploadStarter, validate_sls_account_id};
