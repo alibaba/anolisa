@@ -215,10 +215,119 @@ pub fn format_show(record: &StatsRecord) -> String {
     output
 }
 
+/// Sum tokens by operation type. `use_before` selects `before_tokens` (the
+/// raw/baseline context) when true, else `after_tokens` (the compressed
+/// context actually seen under tokenless).
+fn tokens_by_op(records: &[StatsRecord], use_before: bool) -> BTreeMap<&'static str, usize> {
+    let mut map: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for r in records {
+        let t = if use_before {
+            r.before_tokens
+        } else {
+            r.after_tokens
+        };
+        *map.entry(r.operation.as_str()).or_default() += t;
+    }
+    map
+}
+
+/// Format a side-by-side comparison between a baseline (compression-off /
+/// dry-run) run and a tokenless (compression-on / active) run.
+///
+/// Baseline context uses each record's `before_tokens` (the raw text that
+/// reached the LLM); the tokenless side uses `after_tokens` (the compressed
+/// text). Savings = baseline − tokenless.
+pub fn format_compare(baseline: &[StatsRecord], tokenless: &[StatsRecord]) -> String {
+    let base_by_op = tokens_by_op(baseline, true);
+    let tls_by_op = tokens_by_op(tokenless, false);
+
+    let base_total: usize = base_by_op.values().sum();
+    let tls_total: usize = tls_by_op.values().sum();
+
+    let mut ops: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    ops.extend(base_by_op.keys().copied());
+    ops.extend(tls_by_op.keys().copied());
+
+    let saved_total = base_total.saturating_sub(tls_total);
+    let saved_pct = if base_total > 0 {
+        (saved_total as f64 / base_total as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let mut output = String::new();
+    output.push_str("Tokenless Comparison Report\n");
+    output.push_str(&"=".repeat(60));
+    output.push('\n');
+    output.push_str(&format!(
+        "{:<22}{:>12}{:>14}{:>10}{:>12}\n",
+        "operation", "baseline", "tokenless", "saved", "saved%"
+    ));
+    output.push_str(&"-".repeat(68));
+    output.push('\n');
+
+    for op in ops {
+        let b = *base_by_op.get(op).unwrap_or(&0);
+        let t = *tls_by_op.get(op).unwrap_or(&0);
+        let saved = b.saturating_sub(t);
+        let pct = if b > 0 {
+            (saved as f64 / b as f64) * 100.0
+        } else {
+            0.0
+        };
+        output.push_str(&format!(
+            "{:<22}{:>12}{:>14}{:>10}{:>11.1}%\n",
+            op, b, t, saved, pct
+        ));
+    }
+
+    output.push_str(&"-".repeat(68));
+    output.push('\n');
+    output.push_str(&format!(
+        "{:<22}{:>12}{:>14}{:>10}{:>11.1}%\n",
+        "TOTAL", base_total, tls_total, saved_total, saved_pct
+    ));
+
+    output
+}
+
+/// Format the comparison as machine-readable JSON.
+pub fn format_compare_json(baseline: &[StatsRecord], tokenless: &[StatsRecord]) -> String {
+    let base_by_op = tokens_by_op(baseline, true);
+    let tls_by_op = tokens_by_op(tokenless, false);
+
+    let base_total: usize = base_by_op.values().sum();
+    let tls_total: usize = tls_by_op.values().sum();
+    let saved_total = base_total.saturating_sub(tls_total);
+    let saved_pct = if base_total > 0 {
+        (saved_total as f64 / base_total as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let by_op_json = |map: &BTreeMap<&str, usize>| -> serde_json::Map<String, serde_json::Value> {
+        map.iter()
+            .map(|(op, &v)| (op.to_string(), serde_json::json!(v)))
+            .collect()
+    };
+
+    let output = serde_json::json!({
+        "schema_version": "1.0",
+        "baseline_tokens": base_total,
+        "tokenless_tokens": tls_total,
+        "saved_tokens": saved_total,
+        "saved_percent": saved_pct,
+        "baseline_by_operation": by_op_json(&base_by_op),
+        "tokenless_by_operation": by_op_json(&tls_by_op),
+    });
+
+    serde_json::to_string_pretty(&output).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::record::{OperationType, StatsRecord};
+    use crate::record::{CompressionMode, OperationType, StatsRecord};
     use chrono::Local;
 
     fn test_record() -> StatsRecord {
@@ -419,5 +528,92 @@ mod tests {
 
         let output = format_show(&r);
         assert!(output.contains("no text content stored"));
+    }
+
+    fn compare_record(
+        op: OperationType,
+        mode: CompressionMode,
+        before: usize,
+        after: usize,
+    ) -> StatsRecord {
+        let mut r = StatsRecord::new(op, "cli".to_string(), before * 4, before, after * 4, after)
+            .with_mode(mode);
+        r.timestamp = Local::now();
+        r
+    }
+
+    #[test]
+    fn test_format_compare_totals_and_delta() {
+        // Baseline (dry-run): context reached = before_tokens.
+        // Tokenless (active): context reached = after_tokens.
+        let baseline = vec![
+            compare_record(
+                OperationType::CompressSchema,
+                CompressionMode::DryRun,
+                400,
+                200,
+            ),
+            compare_record(
+                OperationType::CompressResponse,
+                CompressionMode::DryRun,
+                1000,
+                300,
+            ),
+        ];
+        let tokenless = vec![
+            compare_record(
+                OperationType::CompressSchema,
+                CompressionMode::Active,
+                400,
+                200,
+            ),
+            compare_record(
+                OperationType::CompressResponse,
+                CompressionMode::Active,
+                1000,
+                300,
+            ),
+        ];
+
+        let out = format_compare(&baseline, &tokenless);
+        // baseline total = 400+1000 = 1400; tokenless total = 200+300 = 500
+        assert!(out.contains("TOTAL"));
+        assert!(out.contains(&format!("{:>12}", 1400)));
+        assert!(out.contains(&format!("{:>14}", 500)));
+        assert!(out.contains("compress-schema"));
+        assert!(out.contains("compress-response"));
+    }
+
+    #[test]
+    fn test_format_compare_json_fields() {
+        let baseline = vec![compare_record(
+            OperationType::CompressSchema,
+            CompressionMode::DryRun,
+            400,
+            200,
+        )];
+        let tokenless = vec![compare_record(
+            OperationType::CompressSchema,
+            CompressionMode::Active,
+            400,
+            200,
+        )];
+        let parsed: serde_json::Value =
+            serde_json::from_str(&format_compare_json(&baseline, &tokenless)).unwrap();
+        assert_eq!(parsed.get("schema_version").unwrap(), "1.0");
+        assert_eq!(parsed.get("baseline_tokens").unwrap(), 400);
+        assert_eq!(parsed.get("tokenless_tokens").unwrap(), 200);
+        assert_eq!(parsed.get("saved_tokens").unwrap(), 200);
+        assert!(parsed.get("saved_percent").unwrap().as_f64().unwrap() > 0.0);
+    }
+
+    #[test]
+    fn test_format_compare_empty() {
+        let out = format_compare(&[], &[]);
+        assert!(out.contains("TOTAL"));
+        // no baseline tokens → saved 0%, no panic
+        let parsed: serde_json::Value =
+            serde_json::from_str(&format_compare_json(&[], &[])).unwrap();
+        assert_eq!(parsed.get("saved_percent").unwrap().as_f64().unwrap(), 0.0);
     }
 }

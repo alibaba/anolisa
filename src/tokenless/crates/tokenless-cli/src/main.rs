@@ -6,9 +6,13 @@ use std::fs;
 use std::io::{self, Read};
 use std::process;
 use tokenless_schema::{ResponseCompressor, SchemaCompressor};
-use tokenless_stats::{OperationType, StatsRecord, StatsRecorder, TokenlessConfig};
+use tokenless_stats::{
+    CompressionMode, OperationType, StatsRecord, StatsRecorder, TokenlessConfig,
+};
 use tokenless_stats::{estimate_tokens, estimate_tokens_from_bytes};
-use tokenless_stats::{format_list, format_show, format_summary};
+use tokenless_stats::{
+    format_compare, format_compare_json, format_list, format_show, format_summary,
+};
 
 #[derive(Parser)]
 #[command(
@@ -114,6 +118,10 @@ enum StatsCommands {
         /// Output machine-readable JSON
         #[arg(long)]
         json: bool,
+        /// Compare two runs by session: baseline (compression-off) vs tokenless (compression-on).
+        /// Provide exactly two session IDs.
+        #[arg(long, num_args = 2, value_names = ["BASELINE_SESSION", "TOKENLESS_SESSION"])]
+        compare: Option<Vec<String>>,
     },
     /// List recent records
     List {
@@ -325,7 +333,14 @@ fn run() -> Result<(), (String, i32)> {
                 after_compact.clone()
             };
 
-            println!("{}", output_text);
+            let compression_on = TokenlessConfig::load().is_compression_enabled();
+            let mode = resolve_mode(compression_on, before_tokens, after_tokens);
+            let emit_text = if compression_on {
+                output_text.clone()
+            } else {
+                input.clone()
+            };
+            println!("{}", emit_text);
 
             record_compression_stats(
                 OperationType::CompressSchema,
@@ -334,6 +349,7 @@ fn run() -> Result<(), (String, i32)> {
                 tool_use_id,
                 input,
                 output_text,
+                mode,
             );
         }
         Commands::CompressResponse {
@@ -374,7 +390,14 @@ fn run() -> Result<(), (String, i32)> {
                 after_compact.clone()
             };
 
-            println!("{}", output_text);
+            let compression_on = TokenlessConfig::load().is_compression_enabled();
+            let mode = resolve_mode(compression_on, before_tokens, after_tokens);
+            let emit_text = if compression_on {
+                output_text.clone()
+            } else {
+                input.clone()
+            };
+            println!("{}", emit_text);
 
             record_compression_stats(
                 OperationType::CompressResponse,
@@ -383,13 +406,38 @@ fn run() -> Result<(), (String, i32)> {
                 tool_use_id,
                 input,
                 output_text,
+                mode,
             );
         }
         Commands::Stats(stats_cmd) => {
             let recorder = open_recorder()?;
 
             match stats_cmd {
-                StatsCommands::Summary { limit, json } => {
+                StatsCommands::Summary {
+                    limit,
+                    json,
+                    compare,
+                } => {
+                    if let Some(sessions) = compare {
+                        let baseline_sid = sessions[0].as_str();
+                        let tokenless_sid = sessions[1].as_str();
+                        let baseline = recorder
+                            .records_by_session(baseline_sid, limit)
+                            .map_err(|e| (format!("Failed to query baseline: {}", e), 1))?;
+                        let tokenless = recorder
+                            .records_by_session(tokenless_sid, limit)
+                            .map_err(|e| (format!("Failed to query tokenless: {}", e), 1))?;
+                        // Warn if a session's records do not match the expected mode,
+                        // i.e. the baseline run was not recorded as dry-run.
+                        warn_mode_mismatch("baseline", &baseline, CompressionMode::DryRun);
+                        warn_mode_mismatch("tokenless", &tokenless, CompressionMode::Active);
+                        if json {
+                            println!("{}", format_compare_json(&baseline, &tokenless));
+                        } else {
+                            println!("{}", format_compare(&baseline, &tokenless));
+                        }
+                        return Ok(());
+                    }
                     let records = recorder
                         .all_records(limit)
                         .map_err(|e| (format!("Failed to query records: {}", e), 1))?;
@@ -507,24 +555,37 @@ fn run() -> Result<(), (String, i32)> {
             // If no token savings, output original instead of TOON result
             let before_tokens = estimate_tokens_from_bytes(input.len());
             let after_tokens = estimate_tokens_from_bytes(output.len());
-            let display = if output.is_empty() || after_tokens >= before_tokens {
+            let no_savings = output.is_empty() || after_tokens >= before_tokens;
+            if no_savings {
                 eprintln!(
                     "tokenless: TOON encoding did not reduce size ({} -> {} est. tokens), outputting original JSON",
                     before_tokens, after_tokens
                 );
-                input.clone()
-            } else {
-                output
-            };
-            println!("{}", display);
+            }
 
+            let compression_on = TokenlessConfig::load().is_compression_enabled();
+            let mode = resolve_mode(compression_on, before_tokens, after_tokens);
+            // Active: emit the TOON result (or original if no savings).
+            // Dry-run: emit the original so context stays uncompressed, but
+            // still record the TOON result as the predicted savings below.
+            let emit_text = if compression_on && !no_savings {
+                output.clone()
+            } else {
+                input.clone()
+            };
+            println!("{}", emit_text);
+
+            // Recorded `after` = the predicted TOON result (or original when
+            // TOON did not reduce size), so dry-run captures the prediction.
+            let record_after = if no_savings { input.clone() } else { output };
             record_compression_stats(
                 OperationType::CompressToon,
                 agent_id,
                 session_id,
                 tool_use_id,
                 input,
-                display,
+                record_after,
+                mode,
             );
         }
         Commands::DecompressToon { file } => {
@@ -552,6 +613,46 @@ fn run() -> Result<(), (String, i32)> {
     Ok(())
 }
 
+/// Resolve the recording mode from the compression toggle.
+///
+/// When compression is disabled (dry-run), the original input is emitted so
+/// the LLM context stays uncompressed, but the predicted savings are still
+/// recorded — enabling A/B comparison of the same task with/without
+/// compression.
+fn resolve_mode(
+    compression_on: bool,
+    before_tokens: usize,
+    after_tokens: usize,
+) -> CompressionMode {
+    if compression_on {
+        CompressionMode::Active
+    } else {
+        eprintln!(
+            "tokenless: dry-run mode (compression disabled) — emitted original, predicted {} -> {} est. tokens",
+            before_tokens, after_tokens
+        );
+        CompressionMode::DryRun
+    }
+}
+
+/// Warn (to stderr) when a session's records were not recorded in the expected
+/// mode, e.g. a "baseline" session that was not run with compression disabled.
+/// A non-blocking sanity hint — comparison still proceeds.
+fn warn_mode_mismatch(label: &str, records: &[StatsRecord], expected: CompressionMode) {
+    if records.is_empty() {
+        return;
+    }
+    let mismatched = records.iter().filter(|r| r.mode != expected).count();
+    if mismatched > 0 {
+        eprintln!(
+            "tokenless: warning — {} session has {} record(s) not in {} mode (comparison may be inaccurate)",
+            label,
+            mismatched,
+            expected.as_str()
+        );
+    }
+}
+
 /// Record compression stats — fail-silent so compression output
 /// is never blocked by database errors.
 ///
@@ -564,6 +665,7 @@ fn record_compression_stats(
     tool_use_id: Option<String>,
     before_text: String,
     after_text: String,
+    mode: CompressionMode,
 ) {
     let config = TokenlessConfig::load();
 
@@ -603,7 +705,7 @@ fn record_compression_stats(
     if let Some(tuid) = tool_use_id {
         record = record.with_tool_use_id(tuid);
     }
-    record = record.with_source_pid(pid as i64);
+    record = record.with_source_pid(pid as i64).with_mode(mode);
 
     // SQLite stats recording — gated by stats_enabled
     if config.is_stats_enabled()

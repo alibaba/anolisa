@@ -728,6 +728,28 @@ tokenless stats show <记录ID>     # 查看某条记录的压缩前后文本
 tokenless stats summary           # 查看所有操作的汇总节省数据
 ```
 
+#### 压缩开关与 dry-run 对照（双跑对比）
+
+通过环境变量 `TOKENLESS_COMPRESSION_ENABLED`（或 `~/.tokenless/config.json` 的 `compression_enabled`）控制压缩是否真正生效：
+
+- `1`（默认）：正常压缩，压缩结果进入 LLM 上下文，记录 `mode=active`。
+- `0`（**dry-run 模式**）：算出压缩效果并记录预测值（`mode=dryrun`），但**原样输出原文**，不改变 LLM 上下文。
+
+对同一任务跑两次（一次关闭、一次开启），即可输出对照图，准确评估 tokenless 的真实节省效果：
+
+```bash
+# 跑 1：关闭压缩（dry-run 基线，输出原文）
+TOKENLESS_COMPRESSION_ENABLED=0  <跑同一任务>   # 记录于 session A
+# 跑 2：开启压缩（真实压缩）
+TOKENLESS_COMPRESSION_ENABLED=1  <跑同一任务>   # 记录于 session B
+
+# 对照图：baseline=context 上下文（原文），tokenless=压缩后
+tokenless stats summary --compare <session-A> <session-B>
+tokenless stats summary --compare <session-A> <session-B> --json   # 机器可读
+```
+
+> 注：tokenless 仅度量它经手的可压缩内容；模型推理 token / 真实计费 token 不在其内。
+
 ### 6.3 验证安装
 
 ```bash

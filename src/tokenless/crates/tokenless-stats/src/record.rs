@@ -22,7 +22,7 @@ pub enum OperationType {
 }
 
 impl OperationType {
-    pub fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             OperationType::CompressSchema => "compress-schema",
             OperationType::CompressResponse => "compress-response",
@@ -42,6 +42,40 @@ impl FromStr for OperationType {
             "rewrite-command" => Ok(OperationType::RewriteCommand),
             "compress-toon" => Ok(OperationType::CompressToon),
             other => Err(format!("unknown operation type: {}", other)),
+        }
+    }
+}
+
+/// Whether the compression result was actually applied or only predicted.
+///
+/// `Active` is the normal mode: the compressed output is emitted and reaches
+/// the LLM context. `DryRun` is the toggle-off mode: the compression is
+/// computed (so the predicted savings are recorded) but the original text is
+/// emitted instead — letting the same task run with/without compression to
+/// compare E2E effect.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum CompressionMode {
+    #[default]
+    Active,
+    DryRun,
+}
+
+impl CompressionMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CompressionMode::Active => "active",
+            CompressionMode::DryRun => "dryrun",
+        }
+    }
+
+    /// Parse a stored mode value. Unknown/empty values (legacy rows with no
+    /// `mode` column, or NULLs) fall back to `Active` rather than erroring,
+    /// so historical data remains readable.
+    pub fn from_db(s: &str) -> Self {
+        match s {
+            "dryrun" => CompressionMode::DryRun,
+            _ => CompressionMode::Active,
         }
     }
 }
@@ -79,6 +113,8 @@ pub struct StatsRecord {
     pub before_output: Option<String>,
     /// Rewritten command output (for rewrite-command output comparison)
     pub after_output: Option<String>,
+    /// Whether compression was applied (Active) or only predicted (DryRun)
+    pub mode: CompressionMode,
 }
 
 impl StatsRecord {
@@ -107,6 +143,7 @@ impl StatsRecord {
             after_text: None,
             before_output: None,
             after_output: None,
+            mode: CompressionMode::default(),
         }
     }
 
@@ -125,6 +162,12 @@ impl StatsRecord {
     /// Set the source PID
     pub fn with_source_pid(mut self, pid: i64) -> Self {
         self.source_pid = Some(pid);
+        self
+    }
+
+    /// Set whether compression was applied (Active) or only predicted (DryRun)
+    pub fn with_mode(mut self, mode: CompressionMode) -> Self {
+        self.mode = mode;
         self
     }
 
@@ -303,5 +346,32 @@ mod tests {
         let line = record.format_summary_line();
         assert!(line.contains("copilot-shell"));
         assert!(line.contains("pid:12345"));
+    }
+
+    #[test]
+    fn test_compression_mode_roundtrip() {
+        assert_eq!(CompressionMode::Active.as_str(), "active");
+        assert_eq!(CompressionMode::DryRun.as_str(), "dryrun");
+        assert_eq!(CompressionMode::from_db("active"), CompressionMode::Active);
+        assert_eq!(CompressionMode::from_db("dryrun"), CompressionMode::DryRun);
+        // Unknown / empty (legacy NULL) fall back to Active
+        assert_eq!(CompressionMode::from_db(""), CompressionMode::Active);
+        assert_eq!(CompressionMode::from_db("???"), CompressionMode::Active);
+    }
+
+    #[test]
+    fn test_record_default_mode_active() {
+        let record = StatsRecord::new(
+            OperationType::CompressSchema,
+            "test".to_string(),
+            100,
+            25,
+            80,
+            20,
+        );
+        assert_eq!(record.mode, CompressionMode::Active);
+
+        let record = record.with_mode(CompressionMode::DryRun);
+        assert_eq!(record.mode, CompressionMode::DryRun);
     }
 }

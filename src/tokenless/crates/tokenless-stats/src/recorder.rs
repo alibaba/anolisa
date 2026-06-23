@@ -2,7 +2,7 @@
 //!
 //! Provides SQLite-based storage for compression and rewriting metrics.
 
-use crate::record::{OperationType, StatsRecord};
+use crate::record::{CompressionMode, OperationType, StatsRecord};
 use chrono::DateTime;
 use rusqlite::Connection;
 use std::path::Path;
@@ -63,7 +63,8 @@ impl StatsRecorder {
                 before_text TEXT,
                 after_text TEXT,
                 before_output TEXT,
-                after_output TEXT
+                after_output TEXT,
+                mode TEXT
             )",
             [],
         )?;
@@ -89,7 +90,7 @@ impl StatsRecorder {
         // Use PRAGMA table_info to check column existence before ALTER TABLE
         // instead of relying on error-message string matching, which is
         // fragile across SQLite versions and locales.
-        for col in &["before_output", "after_output"] {
+        for col in &["before_output", "after_output", "mode"] {
             let exists: bool = conn
                 .query_row(
                     "SELECT COUNT(*) FROM pragma_table_info('stats') WHERE name = ?",
@@ -136,8 +137,8 @@ impl StatsRecorder {
                 timestamp, operation, agent_id, source_pid, session_id, tool_use_id,
                 before_chars, before_tokens, after_chars, after_tokens,
                 before_text, after_text,
-                before_output, after_output
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                before_output, after_output, mode
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rusqlite::params![
                 record.timestamp.to_rfc3339(),
                 record.operation.as_str(),
@@ -153,6 +154,7 @@ impl StatsRecorder {
                 record.after_text,
                 record.before_output,
                 record.after_output,
+                record.mode.as_str(),
             ],
         )?;
 
@@ -170,7 +172,7 @@ impl StatsRecorder {
         const SELECT_COLS: &str =
             "id, timestamp, operation, agent_id, source_pid, session_id, tool_use_id,
                         before_chars, before_tokens, after_chars, after_tokens,
-                        before_text, after_text, before_output, after_output";
+                        before_text, after_text, before_output, after_output, mode";
 
         let n = limit.unwrap_or(Self::DEFAULT_LIMIT);
         let mut stmt = conn.prepare(&format!(
@@ -205,7 +207,7 @@ impl StatsRecorder {
         let mut stmt = conn.prepare(
             "SELECT id, timestamp, operation, agent_id, source_pid, session_id, tool_use_id,
                     before_chars, before_tokens, after_chars, after_tokens,
-                    before_text, after_text, before_output, after_output
+                    before_text, after_text, before_output, after_output, mode
              FROM stats WHERE id = ?",
         )?;
 
@@ -216,6 +218,28 @@ impl StatsRecorder {
         } else {
             Ok(None)
         }
+    }
+
+    /// Query all records for a given session, newest first, with optional limit.
+    pub fn records_by_session(
+        &self,
+        session_id: &str,
+        limit: Option<usize>,
+    ) -> StatsResult<Vec<StatsRecord>> {
+        let conn = self.lock_conn();
+
+        const SELECT_COLS: &str =
+            "id, timestamp, operation, agent_id, source_pid, session_id, tool_use_id,
+                        before_chars, before_tokens, after_chars, after_tokens,
+                        before_text, after_text, before_output, after_output, mode";
+
+        let n = limit.unwrap_or(Self::DEFAULT_LIMIT);
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM stats WHERE session_id = ? ORDER BY timestamp DESC LIMIT ?",
+            SELECT_COLS
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![session_id, n as i64], Self::row_to_record)?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
     /// Get record count
@@ -270,6 +294,7 @@ impl StatsRecorder {
             after_text: row.get(12)?,
             before_output: row.get(13)?,
             after_output: row.get(14)?,
+            mode: CompressionMode::from_db(&row.get::<_, Option<String>>(15)?.unwrap_or_default()),
         })
     }
 }
@@ -331,5 +356,82 @@ impl StatsSummary {
         }
 
         summary
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::record::OperationType;
+
+    fn new_recorder() -> StatsRecorder {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("stats.db");
+        std::mem::forget(dir); // keep dir for test lifetime
+        StatsRecorder::new(&db).unwrap()
+    }
+
+    fn sample(op: OperationType, mode: CompressionMode, session: &str) -> StatsRecord {
+        StatsRecord::new(op, "cli".to_string(), 1000, 400, 500, 200)
+            .with_session_id(session)
+            .with_mode(mode)
+    }
+
+    #[test]
+    fn records_and_reads_mode() {
+        let rec = new_recorder();
+        let id = rec
+            .record(&sample(
+                OperationType::CompressSchema,
+                CompressionMode::DryRun,
+                "s1",
+            ))
+            .unwrap();
+        let got = rec.record_by_id(id).unwrap().unwrap();
+        assert_eq!(got.mode, CompressionMode::DryRun);
+        assert_eq!(got.session_id.as_deref(), Some("s1"));
+    }
+
+    #[test]
+    fn default_mode_is_active() {
+        let rec = new_recorder();
+        let id = rec
+            .record(&sample(
+                OperationType::CompressSchema,
+                CompressionMode::Active,
+                "s1",
+            ))
+            .unwrap();
+        let got = rec.record_by_id(id).unwrap().unwrap();
+        assert_eq!(got.mode, CompressionMode::Active);
+    }
+
+    #[test]
+    fn records_by_session_filters() {
+        let rec = new_recorder();
+        rec.record(&sample(
+            OperationType::CompressResponse,
+            CompressionMode::Active,
+            "baseline",
+        ))
+        .unwrap();
+        rec.record(&sample(
+            OperationType::CompressResponse,
+            CompressionMode::DryRun,
+            "tokenless",
+        ))
+        .unwrap();
+        rec.record(&sample(
+            OperationType::CompressResponse,
+            CompressionMode::Active,
+            "baseline",
+        ))
+        .unwrap();
+
+        let baseline = rec.records_by_session("baseline", None).unwrap();
+        let tokenless = rec.records_by_session("tokenless", None).unwrap();
+        assert_eq!(baseline.len(), 2);
+        assert_eq!(tokenless.len(), 1);
+        assert_eq!(tokenless[0].mode, CompressionMode::DryRun);
     }
 }

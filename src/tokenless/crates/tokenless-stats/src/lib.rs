@@ -12,11 +12,14 @@ pub mod recorder;
 pub mod sls;
 pub mod tokenizer;
 
-pub use record::{OperationType, StatsRecord};
+pub use record::{CompressionMode, OperationType, StatsRecord};
 
 pub use recorder::{StatsError, StatsRecorder, StatsResult, StatsSummary};
 
-pub use query::{format_list, format_show, format_summary, format_summary_json};
+pub use query::{
+    format_compare, format_compare_json, format_list, format_show, format_summary,
+    format_summary_json,
+};
 
 pub use tokenizer::{Tokenizer, count_chars, estimate_tokens, estimate_tokens_from_bytes};
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- add compression toggle with dry-run compare mode (`TOKENLESS_COMPRESSION_ENABLED`, `stats summary --compare`)
+
 ## 0.5.1
 
 - add --json output to stats summary

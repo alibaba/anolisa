@@ -16,6 +16,12 @@ pub struct TokenlessConfig {
     /// Whether SLS integration is enabled (default: false)
     #[serde(default)]
     pub sls_enabled: bool,
+    /// Whether compression is actually applied (default: true).
+    /// When false, tokenless runs in dry-run mode: it computes and records
+    /// the predicted savings but emits the original (uncompressed) text,
+    /// enabling A/B comparison of the same task with/without compression.
+    #[serde(default = "default_true")]
+    pub compression_enabled: bool,
 }
 
 fn default_true() -> bool {
@@ -27,6 +33,7 @@ impl Default for TokenlessConfig {
         Self {
             stats_enabled: true,
             sls_enabled: false,
+            compression_enabled: true,
         }
     }
 }
@@ -59,26 +66,30 @@ impl TokenlessConfig {
         Self::config_path().exists()
     }
 
-    /// Load config with explicit env overrides for both toggles and optional custom path.
+    /// Load config with explicit env overrides for all toggles and optional custom path.
     /// Priority (per toggle): env > config.json file > default
     /// Empty env var values are normalized to None (treated as unset).
-    /// When both env vars are set, skips the config file read entirely.
+    /// When stats and sls envs are both set, skips the config file read entirely
+    /// (compression still defaults to true unless its own env is set).
     pub fn load_with_envs_and_path(
         stats_env: Option<&str>,
         sls_env: Option<&str>,
+        compression_env: Option<&str>,
         path: Option<&PathBuf>,
     ) -> Self {
         // Normalize empty strings to None — an empty env var means "unset".
         let stats_env = stats_env.filter(|v| !v.is_empty());
         let sls_env = sls_env.filter(|v| !v.is_empty());
+        let compression_env = compression_env.filter(|v| !v.is_empty());
 
-        // When both env vars are set, skip the file read entirely.
+        // When both stats and sls env vars are set, skip the file read entirely.
         // This avoids unnecessary I/O when the config file is on a slow
         // or unavailable filesystem (e.g. broken NFS mount).
         if let (Some(stats_val), Some(sls_val)) = (stats_env, sls_env) {
             return Self {
                 stats_enabled: parse_env_bool(stats_val),
                 sls_enabled: parse_env_bool(sls_val),
+                compression_enabled: compression_env.map(parse_env_bool).unwrap_or(true),
             };
         }
 
@@ -101,21 +112,28 @@ impl TokenlessConfig {
             base.sls_enabled
         };
 
+        let compression_enabled = if let Some(val) = compression_env {
+            parse_env_bool(val)
+        } else {
+            base.compression_enabled
+        };
+
         Self {
             stats_enabled,
             sls_enabled,
+            compression_enabled,
         }
     }
 
-    /// Load config with explicit env overrides for both toggles.
+    /// Load config with explicit env overrides for stats and sls toggles.
     pub fn load_with_envs(stats_env: Option<&str>, sls_env: Option<&str>) -> Self {
-        Self::load_with_envs_and_path(stats_env, sls_env, None)
+        Self::load_with_envs_and_path(stats_env, sls_env, None, None)
     }
 
     /// Load config with an explicit env override value and optional custom path.
     /// Backward-compatible wrapper: only overrides stats_enabled.
     pub fn load_with_env_and_path(env_val: Option<&str>, path: Option<&PathBuf>) -> Self {
-        Self::load_with_envs_and_path(env_val, None, path)
+        Self::load_with_envs_and_path(env_val, None, None, path)
     }
 
     /// Load config with an explicit env override value.
@@ -134,7 +152,15 @@ impl TokenlessConfig {
         let sls_env = std::env::var("TOKENLESS_SLS_ENABLED")
             .ok()
             .filter(|v| !v.is_empty());
-        Self::load_with_envs(stats_env.as_deref(), sls_env.as_deref())
+        let compression_env = std::env::var("TOKENLESS_COMPRESSION_ENABLED")
+            .ok()
+            .filter(|v| !v.is_empty());
+        Self::load_with_envs_and_path(
+            stats_env.as_deref(),
+            sls_env.as_deref(),
+            compression_env.as_deref(),
+            None,
+        )
     }
 
     /// Save config to disk.
@@ -163,6 +189,12 @@ impl TokenlessConfig {
     /// Returns true if SLS integration is enabled (env override or file config).
     pub fn is_sls_enabled(&self) -> bool {
         self.sls_enabled
+    }
+
+    /// Returns true if compression is applied (env override or file config).
+    /// When false, tokenless runs in dry-run mode.
+    pub fn is_compression_enabled(&self) -> bool {
+        self.compression_enabled
     }
 }
 
@@ -233,7 +265,7 @@ mod tests {
     fn test_load_sls_missing_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        let config = TokenlessConfig::load_with_envs_and_path(None, None, Some(&path));
+        let config = TokenlessConfig::load_with_envs_and_path(None, None, None, Some(&path));
         assert!(!config.is_sls_enabled());
         assert!(config.is_stats_enabled());
     }
@@ -269,7 +301,7 @@ mod tests {
         // Write file config with sls_enabled=true
         let _ = std::fs::write(&path, "{\"stats_enabled\":true,\"sls_enabled\":true}");
         // Env override to disable sls
-        let config = TokenlessConfig::load_with_envs_and_path(None, Some("0"), Some(&path));
+        let config = TokenlessConfig::load_with_envs_and_path(None, Some("0"), None, Some(&path));
         assert!(config.is_stats_enabled());
         assert!(!config.is_sls_enabled());
     }
@@ -292,7 +324,49 @@ mod tests {
         // File config has stats_enabled=true
         let _ = std::fs::write(&path, "{\"stats_enabled\":true}");
         // Empty string should fall through to file config (true), not override to false
-        let config = TokenlessConfig::load_with_envs_and_path(Some(""), None, Some(&path));
+        let config = TokenlessConfig::load_with_envs_and_path(Some(""), None, None, Some(&path));
         assert!(config.is_stats_enabled());
+    }
+
+    #[test]
+    fn test_compression_default_true() {
+        let config = TokenlessConfig::default();
+        assert!(config.is_compression_enabled());
+    }
+
+    #[test]
+    fn test_compression_env_override() {
+        let config = TokenlessConfig::load_with_envs_and_path(None, None, Some("0"), None);
+        assert!(!config.is_compression_enabled());
+
+        let config = TokenlessConfig::load_with_envs_and_path(None, None, Some("1"), None);
+        assert!(config.is_compression_enabled());
+    }
+
+    #[test]
+    fn test_compression_env_overrides_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let _ = std::fs::write(&path, "{\"compression_enabled\":false}");
+        let config = TokenlessConfig::load_with_envs_and_path(None, None, Some("1"), Some(&path));
+        assert!(config.is_compression_enabled());
+    }
+
+    #[test]
+    fn test_compression_file_config_honored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let _ = std::fs::write(&path, "{\"compression_enabled\":false}");
+        let config = TokenlessConfig::load_with_envs_and_path(None, None, None, Some(&path));
+        assert!(!config.is_compression_enabled());
+    }
+
+    #[test]
+    fn test_compression_empty_env_treated_as_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let _ = std::fs::write(&path, "{\"compression_enabled\":false}");
+        let config = TokenlessConfig::load_with_envs_and_path(None, None, Some(""), Some(&path));
+        assert!(!config.is_compression_enabled());
     }
 }

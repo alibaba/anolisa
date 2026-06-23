@@ -798,6 +798,28 @@ tokenless stats show <record-id>  # Show before/after text for a record
 tokenless stats summary           # Aggregate savings across all operations
 ```
 
+#### Compression toggle and dry-run comparison (dual-run)
+
+Control whether compression is actually applied via `TOKENLESS_COMPRESSION_ENABLED` (or `compression_enabled` in `~/.tokenless/config.json`):
+
+- `1` (default): normal compression; the compressed output reaches the LLM context, recorded with `mode=active`.
+- `0` (**dry-run mode**): compression is computed and the predicted savings are recorded (`mode=dryrun`), but the **original text is emitted**, leaving the LLM context uncompressed.
+
+Run the same task twice (once with compression off, once on) to produce a comparison chart that accurately reflects tokenless savings:
+
+```bash
+# Run 1: compression off (dry-run baseline, emits original)
+TOKENLESS_COMPRESSION_ENABLED=0  <run the same task>   # recorded under session A
+# Run 2: compression on (real compression)
+TOKENLESS_COMPRESSION_ENABLED=1  <run the same task>   # recorded under session B
+
+# Comparison chart: baseline = context reached (raw), tokenless = compressed
+tokenless stats summary --compare <session-A> <session-B>
+tokenless stats summary --compare <session-A> <session-B> --json   # machine-readable
+```
+
+> Note: tokenless only measures the compressible content it processes; model reasoning tokens / real billed tokens are out of scope.
+
 ### 6.3 Verify Installation
 
 ```bash
