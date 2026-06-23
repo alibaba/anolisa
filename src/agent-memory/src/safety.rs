@@ -74,6 +74,94 @@ macro_rules! injection_patterns {
 static INJECTION_SET: std::sync::LazyLock<RegexSet> =
     std::sync::LazyLock::new(|| RegexSet::new(injection_patterns!()).expect("injection regex set"));
 
+// ── secret / PII redaction ────────────────────────────────────────
+// High-confidence patterns for API keys, tokens, passwords, and other
+// secrets that should never be persisted in memory files.
+
+use regex::Regex;
+
+/// Precompiled secret patterns with their labels.
+static SECRET_REGEXES: std::sync::LazyLock<Vec<(Regex, &str)>> = std::sync::LazyLock::new(|| {
+    SECRET_PATTERNS
+        .iter()
+        .map(|(label, pattern)| {
+            (
+                Regex::new(pattern).expect("static secret pattern should be valid"),
+                *label,
+            )
+        })
+        .collect()
+});
+
+/// Precompiled regex for `<private>` tags (handles unclosed tags too).
+static PRIVATE_TAG_REGEX: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r"(?s)<private>(?:(.*?)</private>|.*$)").expect("private tag regex should be valid")
+});
+
+/// Precompiled regex set for fast `contains_secrets` checks.
+static SECRET_SET: std::sync::LazyLock<RegexSet> = std::sync::LazyLock::new(|| {
+    let patterns: Vec<&str> = SECRET_PATTERNS.iter().map(|(_, p)| *p).collect();
+    RegexSet::new(patterns).expect("secret regex set should be valid")
+});
+
+/// Redact secrets and PII from text before storing in memory.
+/// Replaces matched patterns with `[REDACTED:<type>]`.
+/// Also strips content between `<private>` and `</private>` tags (or unclosed `<private>`).
+pub fn redact_secrets(text: &str) -> String {
+    let mut result = text.to_string();
+
+    // Strip <private>...</private> tags (user-explicit redaction)
+    // Handles both closed and unclosed tags
+    result = PRIVATE_TAG_REGEX
+        .replace_all(&result, "[PRIVATE CONTENT]")
+        .to_string();
+
+    // Apply secret patterns in order of specificity
+    for (re, label) in SECRET_REGEXES.iter() {
+        result = re
+            .replace_all(&result, format!("[REDACTED:{label}]"))
+            .to_string();
+    }
+
+    result
+}
+
+/// Returns true if the text contains any detected secrets.
+pub fn contains_secrets(text: &str) -> bool {
+    SECRET_SET.is_match(text) || text.contains("<private>")
+}
+
+/// (label, regex_pattern) pairs ordered from most-specific to broadest.
+static SECRET_PATTERNS: &[(&str, &str)] = &[
+    // Anthropic API key: sk-ant-...
+    ("anthropic-key", r"sk-ant-[a-zA-Z0-9]{20,}"),
+    // OpenAI API key: sk-...
+    ("openai-key", r"sk-[a-zA-Z0-9]{20,}"),
+    // GitHub personal access token: ghp_...
+    ("github-token", r"ghp_[a-zA-Z0-9]{36}"),
+    // GitHub fine-grained token: github_pat_...
+    ("github-pat", r"github_pat_[a-zA-Z0-9_]{22,}"),
+    // AWS access key: AKIA...
+    ("aws-key", r"AKIA[0-9A-Z]{16}"),
+    // Private key block
+    (
+        "private-key",
+        r"-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----",
+    ),
+    // Bearer token in headers
+    ("bearer-token", r"(?i)bearer\s+[a-zA-Z0-9\-._~+/]+=*"),
+    // Generic password assignment
+    (
+        "password",
+        r#"(?i)(?:password|passwd|pwd)\s*[:=]\s*["']?\S{4,}"#,
+    ),
+    // Connection strings
+    (
+        "connection-string",
+        r"(?i)(?:postgresql|mysql|mongodb|redis)://[^\s]+",
+    ),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,5 +249,96 @@ mod tests {
         let input = "The user's name is Alice. She works at Acme Corp.";
         let escaped = escape_memory_for_prompt(input);
         assert_eq!(input, escaped);
+    }
+
+    // ── secret redaction tests ──────────────────────────────────
+
+    #[test]
+    fn redacts_anthropic_key() {
+        let text = "My API key is sk-ant-abc123def456ghi789jkl012mno345pqr678stu901";
+        let result = redact_secrets(text);
+        assert!(!result.contains("sk-ant-"));
+        assert!(result.contains("[REDACTED:anthropic-key]"));
+    }
+
+    #[test]
+    fn redacts_openai_key() {
+        let text = "OPENAI_API_KEY=sk-abc123def456ghi789jkl012mno345";
+        let result = redact_secrets(text);
+        assert!(!result.contains("sk-abc"));
+        assert!(result.contains("[REDACTED:openai-key]"));
+    }
+
+    #[test]
+    fn redacts_github_token() {
+        let text = "token: ghp_ABCDEFghijklmnop1234567890abcdef1234";
+        let result = redact_secrets(text);
+        assert!(!result.contains("ghp_"));
+        assert!(result.contains("[REDACTED:github-token]"));
+    }
+
+    #[test]
+    fn redacts_aws_key() {
+        let text = "aws_access_key_id = AKIAIOSFODNN7EXAMPLE";
+        let result = redact_secrets(text);
+        assert!(!result.contains("AKIA"));
+        assert!(result.contains("[REDACTED:aws-key]"));
+    }
+
+    #[test]
+    fn redacts_private_key_block() {
+        let text = "-----BEGIN RSA PRIVATE KEY-----\nMIIBogIBA...";
+        let result = redact_secrets(text);
+        assert!(!result.contains("PRIVATE KEY"));
+        assert!(result.contains("[REDACTED:private-key]"));
+    }
+
+    #[test]
+    fn redacts_password_assignment() {
+        let text = r#"database_password = "super_secret_123""#;
+        let result = redact_secrets(text);
+        assert!(!result.contains("super_secret"));
+        assert!(result.contains("[REDACTED:password]"));
+    }
+
+    #[test]
+    fn redacts_connection_string() {
+        let text = "connect to postgresql://user:pass@host:5432/db";
+        let result = redact_secrets(text);
+        assert!(!result.contains("postgresql://"));
+        assert!(result.contains("[REDACTED:connection-string]"));
+    }
+
+    #[test]
+    fn strips_private_tags() {
+        let text = "Public info <private>secret info</private> more public";
+        let result = redact_secrets(text);
+        assert!(!result.contains("secret info"));
+        assert!(result.contains("[PRIVATE CONTENT]"));
+        assert!(result.contains("Public info"));
+        assert!(result.contains("more public"));
+    }
+
+    #[test]
+    fn contains_secrets_detects() {
+        assert!(contains_secrets(
+            "key: sk-ant-abc123def456ghi789jkl012mno345"
+        ));
+        assert!(contains_secrets("<private>hidden</private>"));
+        assert!(!contains_secrets("The user prefers Rust over C++."));
+    }
+
+    #[test]
+    fn normal_text_passes_through() {
+        let text = "The API client uses exponential backoff with 200ms base delay.";
+        let result = redact_secrets(text);
+        assert_eq!(result, text);
+    }
+
+    #[test]
+    fn chinese_text_passes_through() {
+        let text = "用户更喜欢用 Python 写后端服务。";
+        let result = redact_secrets(text);
+        assert_eq!(result, text);
     }
 }
