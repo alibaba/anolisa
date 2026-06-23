@@ -362,6 +362,7 @@ fn control_protocol_policy_suppresses_provider_auto_approved_shell_activity() {
         ],
         ActivityRecordPolicy {
             suppress_provider_native_shell: true,
+            ..Default::default()
         },
     );
 
@@ -410,6 +411,7 @@ fn debug_mode_keeps_provider_auto_approved_shell_activity() {
         })],
         ActivityRecordPolicy {
             suppress_provider_native_shell: true,
+            ..Default::default()
         },
     );
 
@@ -626,6 +628,7 @@ fn control_protocol_policy_suppresses_known_foreground_shell_echo() {
         ],
         ActivityRecordPolicy {
             suppress_provider_native_shell: true,
+            ..Default::default()
         },
     );
 
@@ -926,4 +929,105 @@ fn activity_interactive_handoff_summary_uses_state_language() {
     assert!(row
         .detail
         .contains("interactive_hint: may_require_foreground_shell"));
+}
+
+#[test]
+fn activity_records_shell_evidence_read_details() {
+    let mut state = InlineState::default();
+
+    let id = record_shell_evidence_action(
+        state.language,
+        &mut state.activity.rows,
+        "run-1",
+        "read-1",
+        "toolu-1",
+        "read_output",
+        Some("terminal-output://raw-session-123/cmd-1"),
+        Some("tail"),
+        Some(120),
+        "unavailable",
+        Some("stale_session"),
+    );
+
+    assert_eq!(id, "evidence-1");
+    let row = state
+        .activity
+        .rows
+        .iter()
+        .find(|row| row.id == id)
+        .expect("activity row");
+    assert_eq!(row.subject, "toolu-1");
+    assert!(row.summary.contains("cosh_shell_evidence"), "{row:?}");
+    assert!(row.detail.contains("evidence: ShellEvidenceAction"));
+    assert!(row.detail.contains("request_id: read-1"));
+    assert!(row.detail.contains("tool_use_id: toolu-1"));
+    assert!(row.detail.contains("action: read_output"));
+    assert!(row
+        .detail
+        .contains("output_id: terminal-output://raw-session-123/cmd-1"));
+    assert!(row.detail.contains("status: unavailable"));
+    assert!(row.detail.contains("failure_reason: stale_session"));
+}
+
+#[test]
+fn activity_records_terminal_output_read_misroute_for_control_tool_mode() {
+    let mut state = InlineState::default();
+    let ids = record_activity_rows_with_policy(
+        &mut state,
+        &[governed(AgentEvent::ToolCall {
+            run_id: "run-1".to_string(),
+            tool_id: Some("toolu-read".to_string()),
+            name: "read_file".to_string(),
+            input: r#"{"path":"terminal-output://raw-session-123/cmd-1"}"#.to_string(),
+        })],
+        ActivityRecordPolicy {
+            suppress_provider_native_shell: false,
+            shell_evidence_tool_available: true,
+        },
+    );
+
+    assert_eq!(ids, ["tool-1"]);
+    let row = state
+        .activity
+        .rows
+        .iter()
+        .find(|row| row.id == "tool-1")
+        .expect("activity row");
+    assert!(row.detail.contains("virtual_evidence_read_misroute: true"));
+    assert!(row
+        .detail
+        .contains("misrouted_output_id: terminal-output://raw-session-123/cmd-1"));
+    assert!(row
+        .detail
+        .contains("recommended_action: cosh_shell_evidence_read_output"));
+}
+
+#[test]
+fn activity_records_terminal_output_read_misroute_for_fenced_fallback() {
+    let mut state = InlineState::default();
+    let ids = record_activity_rows_with_policy(
+        &mut state,
+        &[governed(AgentEvent::ToolCall {
+            run_id: "run-1".to_string(),
+            tool_id: Some("toolu-read".to_string()),
+            name: "Read".to_string(),
+            input: r#"{"file_path":"terminal-output://raw-session-123/cmd-1"}"#.to_string(),
+        })],
+        ActivityRecordPolicy {
+            suppress_provider_native_shell: false,
+            shell_evidence_tool_available: false,
+        },
+    );
+
+    assert_eq!(ids, ["tool-1"]);
+    let row = state
+        .activity
+        .rows
+        .iter()
+        .find(|row| row.id == "tool-1")
+        .expect("activity row");
+    assert!(row.detail.contains("virtual_evidence_read_misroute: true"));
+    assert!(row
+        .detail
+        .contains("recommended_action: fenced_cosh_request_output"));
 }

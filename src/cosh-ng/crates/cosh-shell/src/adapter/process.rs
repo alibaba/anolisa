@@ -383,6 +383,7 @@ pub(crate) fn agent_event_is_provider_progress(event: &AgentEvent) -> bool {
         | AgentEvent::AgentFailed { .. }
         | AgentEvent::AgentCancelled { .. }
         | AgentEvent::AuthRequired { .. }
+        | AgentEvent::ShellEvidenceRequest { .. }
         | AgentEvent::HookNotification { .. } => true,
     }
 }

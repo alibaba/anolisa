@@ -17,6 +17,8 @@ pub(crate) struct EvidenceExcerpt {
     pub(crate) status: &'static str,
     pub(crate) redaction_status: &'static str,
     pub(crate) truncated: bool,
+    pub(crate) truncated_by_lines: bool,
+    pub(crate) truncated_by_bytes: bool,
 }
 
 pub(crate) type OutputExcerptRequest = EvidenceExcerptRequest;

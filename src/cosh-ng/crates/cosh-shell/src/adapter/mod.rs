@@ -38,7 +38,10 @@ pub(crate) use process::{
     run_provider_process_loop, spawn_provider_child, terminate_process_group, ProviderLineProgress,
     ProviderPromptArgMode, ProviderRunOutcome, ProviderStdinMode,
 };
-pub use prompt::{prompt_from_request, provider_prompt_contract};
+pub use prompt::{
+    prompt_from_request, prompt_from_request_with_evidence_access,
+    prompt_from_request_with_evidence_policy, provider_prompt_contract,
+};
 pub use qwen::QwenCliAdapter;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

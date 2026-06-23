@@ -200,6 +200,11 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::DebugLatestToolUseLine => "最近 tool use id: {value}",
         MessageId::DebugLatestRecoveryStatusLine => "最近恢复状态: {value}",
         MessageId::DebugLatestRecoveryReasonLine => "最近恢复原因: {value}",
+        MessageId::DebugEvidenceAccessLine => "evidence 访问方式: {value}",
+        MessageId::DebugEvidenceToolRegisteredLine => "evidence tool 已注册: {value}",
+        MessageId::DebugEvidenceNamespaceLine => "当前 evidence namespace: {value}",
+        MessageId::DebugEvidenceLedgerCountLine => "evidence ledger 命令数: {value}",
+        MessageId::DebugLatestShellOutputReadLine => "最近 shell evidence action: {value}",
         MessageId::DebugUnknownTargetBody => "未知 debug 目标: {target}",
         MessageId::DebugUnknownTargetFooter => "使用 /debug session。",
         MessageId::CommandRemovedTitle => "命令已移除",
@@ -599,9 +604,7 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::HelpSummarySkills => "列出/查看 cosh-core 技能",
         MessageId::SlashExtensionsTitle => "扩展",
         MessageId::SlashSkillsTitle => "技能",
-        MessageId::SlashRegistryUnavailable => {
-            "此功能需要 cosh-core 后端支持。"
-        }
+        MessageId::SlashRegistryUnavailable => "此功能需要 cosh-core 后端支持。",
         MessageId::SlashHooksShellSection => "Shell Hooks",
         MessageId::SlashHooksAgentSection => "Agent Hooks",
         MessageId::SlashHooksAgentUnavailable => "(cosh-core 后端不可用)",

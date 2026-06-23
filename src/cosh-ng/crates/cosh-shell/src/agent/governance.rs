@@ -182,7 +182,16 @@ pub fn govern_agent_events_with_language(
                 "Authentication credentials required".to_string(),
                 false,
             ),
-            AgentEvent::HookNotification { hook_name, message, .. } => (
+            AgentEvent::ShellEvidenceRequest { action, .. } => (
+                GovernanceDecision::Display,
+                GovernancePolicyDecision::AuditOnly,
+                "shell evidence request is handled through control protocol".to_string(),
+                format!("shell evidence requested: {}", action.as_str()),
+                false,
+            ),
+            AgentEvent::HookNotification {
+                hook_name, message, ..
+            } => (
                 GovernanceDecision::Display,
                 GovernancePolicyDecision::DisplayOnly,
                 "hook notification is display-only".to_string(),

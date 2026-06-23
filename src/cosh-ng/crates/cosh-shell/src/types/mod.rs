@@ -429,6 +429,12 @@ pub enum AgentEvent {
         error_message: Option<String>,
         providers: Vec<crate::adapter::AuthProviderInfo>,
     },
+    ShellEvidenceRequest {
+        run_id: String,
+        request_id: String,
+        tool_use_id: String,
+        action: crate::adapter::ShellEvidenceAction,
+    },
     HookNotification {
         run_id: String,
         hook_name: String,

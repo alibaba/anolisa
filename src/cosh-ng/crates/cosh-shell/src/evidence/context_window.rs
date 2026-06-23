@@ -35,6 +35,12 @@ pub struct ContextEntry {
     pub age_label: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellEvidenceAccess {
+    ControlProtocolTool,
+    FencedRequestFallback,
+}
+
 pub struct RelatedHistoryConfig {
     pub max_commands: usize,
     pub max_age_ms: u64,
@@ -233,6 +239,21 @@ fn format_age(now_ms: u64, then_ms: u64) -> String {
 }
 
 pub fn format_context_prompt(entries: &[ContextEntry]) -> String {
+    format_context_prompt_with_access(entries, ShellEvidenceAccess::FencedRequestFallback)
+}
+
+pub fn format_context_prompt_with_access(
+    entries: &[ContextEntry],
+    access: ShellEvidenceAccess,
+) -> String {
+    format_context_prompt_with_policy(entries, access, true)
+}
+
+pub fn format_context_prompt_with_policy(
+    entries: &[ContextEntry],
+    access: ShellEvidenceAccess,
+    allow_output_requests: bool,
+) -> String {
     if entries.is_empty() {
         return String::new();
     }
@@ -257,10 +278,19 @@ pub fn format_context_prompt(entries: &[ContextEntry]) -> String {
             }
         }
     }
-    lines.push(
-        "\nterminal-output:// refs are cosh-shell evidence ids, not files. Ask for more output only through cosh-shell evidence requests."
-            .into(),
-    );
+    let access_text = if !allow_output_requests {
+        "\nterminal-output:// refs are cosh-shell evidence ids, not files. In recommend mode, do not request shell output automatically; state when output evidence is needed."
+    } else {
+        match access {
+            ShellEvidenceAccess::ControlProtocolTool => {
+                "\nterminal-output:// refs are cosh-shell evidence ids, not files. To list commands or inspect output, call cosh_shell_evidence with action=list_commands or action=read_output."
+            }
+            ShellEvidenceAccess::FencedRequestFallback => {
+                "\nterminal-output:// refs are cosh-shell evidence ids, not files. For more output, emit one fenced cosh-request output block."
+            }
+        }
+    };
+    lines.push(access_text.into());
     lines.join("\n")
 }
 
@@ -460,7 +490,28 @@ mod tests {
         assert!(prompt.contains("exit=0"));
         assert!(prompt.contains("stability=stable_snapshot"));
         assert!(prompt.contains("terminal-output:// refs are cosh-shell evidence ids"));
+        assert!(prompt.contains("fenced cosh-request output block"));
+        assert!(!prompt.contains("cosh_read_shell_output"));
         assert!(!prompt.contains("Use Read tool on output_ref paths"));
+    }
+
+    #[test]
+    fn format_context_prompt_control_mode_points_to_evidence_tool() {
+        let blocks = vec![make_block("x", 0, 1000, None)];
+        let config = ContextWindowConfig {
+            preview_enabled: false,
+            ..Default::default()
+        };
+        let entries = build_context_window(&blocks, 2000, &config);
+        let prompt =
+            format_context_prompt_with_access(&entries, ShellEvidenceAccess::ControlProtocolTool);
+        assert!(prompt.contains("cosh_shell_evidence"), "{prompt}");
+        assert!(prompt.contains("action=list_commands"), "{prompt}");
+        assert!(prompt.contains("action=read_output"), "{prompt}");
+        assert!(
+            !prompt.contains("fenced cosh-request output block"),
+            "{prompt}"
+        );
     }
 
     #[test]

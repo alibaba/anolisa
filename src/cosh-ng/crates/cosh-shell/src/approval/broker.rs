@@ -288,6 +288,9 @@ mod tests {
                 ApprovalDecision::Answer { .. } => {
                     panic!("status response must not build question answer response")
                 }
+                ApprovalDecision::ShellEvidence { .. } => {
+                    panic!("status response must not build shell output evidence response")
+                }
             }
         }
     }

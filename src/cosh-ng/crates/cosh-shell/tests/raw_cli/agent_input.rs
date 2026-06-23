@@ -84,7 +84,12 @@ fn raw_cli_natural_language_includes_recent_command_facts_without_output_body() 
         "{output}"
     );
     assert!(
-        no_wrap.contains("output_id=terminal-output://raw-session/cmd-1"),
+        no_wrap.contains("output_id=terminal-output://raw-session-"),
+        "{output}"
+    );
+    assert!(no_wrap.contains("/cmd-1"), "{output}");
+    assert!(
+        !no_wrap.contains("output_id=terminal-output://raw-session/cmd-1"),
         "{output}"
     );
     assert!(!no_wrap.contains("command=exit"), "{output}");

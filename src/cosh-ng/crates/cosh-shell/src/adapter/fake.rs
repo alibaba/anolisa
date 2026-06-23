@@ -1,4 +1,4 @@
-use crate::evidence::provider_safe_command_fact_line;
+use crate::evidence::{provider_safe_command_fact_line, terminal_output_id};
 use crate::types::{AgentEvent, AgentRequest, QuestionSelectionMode};
 
 use super::{first_token, AdapterError, AgentAdapter, AgentBackendCapabilities};
@@ -103,12 +103,10 @@ impl AgentAdapter for FakeAgentAdapter {
                         .iter()
                         .any(|hint| hint.contains("disable provider resume"))
                 {
-                    return Ok(vec![
-                        AgentEvent::AgentFailed {
-                            run_id,
-                            error: "Agent timed out: No provider response within 20s".to_string(),
-                        },
-                    ]);
+                    return Ok(vec![AgentEvent::AgentFailed {
+                        run_id,
+                        error: "Agent timed out: No provider response within 20s".to_string(),
+                    }]);
                 }
                 if input.contains("trigger resume timeout")
                     && !request
@@ -503,15 +501,86 @@ impl AgentAdapter for FakeAgentAdapter {
                 ]);
             }
             if input.contains("request captured output evidence") {
+                let output_id = first_request_output_id(request)
+                    .or_else(|| first_terminal_output_id(input))
+                    .unwrap_or_else(|| "terminal-output://raw-session/cmd-1".to_string());
                 return Ok(vec![
                     AgentEvent::TextDelta {
                         run_id: run_id.clone(),
-                        text: "I need captured output.\n```cosh-request\noutput terminal-output://raw-session/cmd-1 tail\nlines 2\n```\n"
-                            .to_string(),
+                        text: format!(
+                            "I need captured output.\n```cosh-request\noutput {output_id} tail\nlines 2\n```\n"
+                        ),
                     },
                     AgentEvent::AgentCompleted {
                         run_id,
                         summary: "requested captured output evidence".to_string(),
+                    },
+                ]);
+            }
+            if input.contains("request invalid shell evidence") {
+                return Ok(vec![
+                    AgentEvent::TextDelta {
+                        run_id: run_id.clone(),
+                        text: "I need invalid shell evidence.\n```cosh-request\nread terminal-output://raw-session/cmd-1\n```\n"
+                            .to_string(),
+                    },
+                    AgentEvent::AgentCompleted {
+                        run_id,
+                        summary: "requested invalid shell evidence".to_string(),
+                    },
+                ]);
+            }
+            if input.contains("recommend evidence instruction check") {
+                if input.contains("cosh_shell_evidence") || input.contains("```cosh-request") {
+                    return Ok(vec![AgentEvent::AgentFailed {
+                        run_id,
+                        error: "recommend prompt exposed shell evidence request instructions"
+                            .to_string(),
+                    }]);
+                }
+                return Ok(vec![
+                    AgentEvent::TextDelta {
+                        run_id: run_id.clone(),
+                        text: "Recommend evidence instructions suppressed.".to_string(),
+                    },
+                    AgentEvent::AgentCompleted {
+                        run_id,
+                        summary: "recommend evidence instruction check completed".to_string(),
+                    },
+                ]);
+            }
+            if input.contains("list recent commands only evidence check") {
+                if input.contains("bounded_output_excerpt:") {
+                    return Ok(vec![AgentEvent::AgentFailed {
+                        run_id,
+                        error: "list-only prompt included output excerpt".to_string(),
+                    }]);
+                }
+                return Ok(vec![
+                    AgentEvent::TextDelta {
+                        run_id: run_id.clone(),
+                        text: "Recent command facts only; no output read requested.".to_string(),
+                    },
+                    AgentEvent::AgentCompleted {
+                        run_id,
+                        summary: "list-only evidence check completed".to_string(),
+                    },
+                ]);
+            }
+            if input.contains("misroute terminal output read") {
+                let output_id = first_request_output_id(request)
+                    .or_else(|| first_terminal_output_id(input))
+                    .unwrap_or_else(|| "terminal-output://raw-session/cmd-1".to_string());
+                return Ok(vec![
+                    AgentEvent::ToolCall {
+                        run_id: run_id.clone(),
+                        tool_id: Some("toolu-misroute".to_string()),
+                        name: "read_file".to_string(),
+                        input: format!(r#"{{"path":"{output_id}"}}"#),
+                    },
+                    AgentEvent::AgentCompleted {
+                        run_id,
+                        summary: "misroute terminal output read rendered".to_string(),
                     },
                 ]);
             }
@@ -655,4 +724,23 @@ impl AgentAdapter for FakeAgentAdapter {
 
         emit_fake_slow_stream(input, request, sink)
     }
+}
+
+fn first_terminal_output_id(input: &str) -> Option<String> {
+    input.split_whitespace().find_map(|token| {
+        let start = token.find("terminal-output://")?;
+        Some(
+            token[start..]
+                .trim_matches(|ch: char| matches!(ch, ',' | ';' | '.' | '`'))
+                .to_string(),
+        )
+    })
+}
+
+fn first_request_output_id(request: &AgentRequest) -> Option<String> {
+    request
+        .context_blocks
+        .iter()
+        .find(|block| block.output.terminal_output_ref.is_some())
+        .map(|block| terminal_output_id(&block.session_id, &block.id))
 }

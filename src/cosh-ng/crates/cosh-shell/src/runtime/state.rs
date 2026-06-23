@@ -76,6 +76,7 @@ pub(crate) struct InlineState {
     pub(crate) provider_cancellation_artifacts: ProviderCancellationArtifactState,
     pub(crate) evidence: EvidenceState,
     pub(crate) evidence_requests: EvidenceRequestState,
+    pub(crate) shell_evidence: ShellEvidenceState,
     pub(crate) session_blocks: Vec<CommandBlock>,
     pub(crate) shell_exited: bool,
     pub(crate) language: Language,
@@ -86,6 +87,22 @@ pub(crate) struct InlineState {
     pub(crate) trigger_pty_prompt: bool,
     pub(crate) pending_shell_handoff_timeout_notice: Option<Duration>,
     pub(crate) continuity: ContinuityState,
+}
+
+#[derive(Default)]
+pub(crate) struct ShellEvidenceState {
+    pub(crate) last_action: Option<ShellEvidenceActionRecord>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ShellEvidenceActionRecord {
+    pub(crate) mode: &'static str,
+    pub(crate) request_id: String,
+    pub(crate) tool_use_id: String,
+    pub(crate) action: String,
+    pub(crate) output_id: Option<String>,
+    pub(crate) status: String,
+    pub(crate) failure_reason: Option<String>,
 }
 
 #[derive(Default)]

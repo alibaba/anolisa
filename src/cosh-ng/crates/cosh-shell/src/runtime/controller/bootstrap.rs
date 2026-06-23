@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::approval::handoff::trust_key_from_command;
 use crate::hooks::{
@@ -67,7 +68,15 @@ pub(crate) fn run_raw(adapter_name: &str, shell_kind: RawShellKind) -> i32 {
     let work_dir =
         std::env::temp_dir().join(format!("cosh-shell-raw-session-{}", std::process::id()));
     let _work_dir_cleanup = TempSessionDir::new(work_dir.clone());
-    let mut config = ShellHostConfig::new("raw-session", work_dir);
+    let session_id = format!(
+        "raw-session-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    );
+    let mut config = ShellHostConfig::new(session_id, work_dir);
 
     let isolated = args.iter().any(|a| a == "--isolated")
         || std::env::var("COSH_SHELL_ISOLATED").as_deref() == Ok("1");

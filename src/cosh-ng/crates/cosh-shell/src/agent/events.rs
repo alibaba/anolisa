@@ -42,6 +42,7 @@ pub(crate) fn render_agent_structured_events<W: Write>(
         governed_events,
         ActivityRecordPolicy {
             suppress_provider_native_shell: adapter.capabilities().control_protocol,
+            shell_evidence_tool_available: shell_evidence_tool_available(state, adapter),
         },
     );
     render_provider_native_shell_transcript(state, &activity_ids, output)?;
@@ -65,6 +66,20 @@ pub(crate) fn render_agent_structured_events<W: Write>(
     Ok(())
 }
 
+fn shell_evidence_tool_available(state: &InlineState, adapter: &AdapterInstance) -> bool {
+    state
+        .agent_run
+        .active
+        .as_ref()
+        .map(|active| {
+            active
+                .handle
+                .control_capabilities()
+                .can_handle_shell_evidence_tool
+        })
+        .unwrap_or_else(|| adapter.name() == "cosh-core" && adapter.capabilities().control_protocol)
+}
+
 pub(crate) fn render_active_agent_event<W: Write>(
     active_run: &mut ActiveAgentRun,
     event: AgentEvent,
@@ -73,7 +88,13 @@ pub(crate) fn render_active_agent_event<W: Write>(
 ) -> std::io::Result<()> {
     // If this is a HookNotification with a tool_use_id, store it in pending_hook_notifications
     // for later association with the corresponding ToolPermissionRequest.
-    if let AgentEvent::HookNotification { ref tool_use_id, ref hook_name, ref message, .. } = event {
+    if let AgentEvent::HookNotification {
+        ref tool_use_id,
+        ref hook_name,
+        ref message,
+        ..
+    } = event
+    {
         if tool_use_id.is_some() {
             active_run.pending_hook_notifications.push(
                 crate::agent::run::PendingHookNotification {
@@ -83,8 +104,12 @@ pub(crate) fn render_active_agent_event<W: Write>(
                 },
             );
             // Still record in governed_events for audit, but don't defer for rendering
-            let governed =
-                govern_agent_events_with_language(&[event], &Policy::default(), active_run.language).events;
+            let governed = govern_agent_events_with_language(
+                &[event],
+                &Policy::default(),
+                active_run.language,
+            )
+            .events;
             active_run.governed_events.extend(governed);
             return Ok(());
         }
@@ -277,10 +302,10 @@ fn should_render_governance_block(event: &GovernedEvent) -> bool {
         | AgentEvent::Action { .. }
         | AgentEvent::ToolPermissionRequest { .. } => false,
         AgentEvent::AgentFailed { .. } | AgentEvent::AgentCancelled { .. } => true,
-        AgentEvent::ToolOutputDelta { .. }
-        | AgentEvent::ToolCompleted { .. } => false,
+        AgentEvent::ToolOutputDelta { .. } | AgentEvent::ToolCompleted { .. } => false,
         AgentEvent::TextDelta { .. } | AgentEvent::AgentCompleted { .. } => false,
         AgentEvent::AuthRequired { .. } => false,
+        AgentEvent::ShellEvidenceRequest { .. } => false,
         AgentEvent::HookNotification { .. } => true,
     }
 }

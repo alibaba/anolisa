@@ -134,6 +134,12 @@ pub(super) fn start_control_protocol_cosh_core_process(
                     ApprovalDecision::Answer { answer } => {
                         control_protocol::serialize_answer(&response.request_id, answer)
                     }
+                    ApprovalDecision::ShellEvidence { result } => {
+                        control_protocol::serialize_shell_evidence_result(
+                            &response.request_id,
+                            result,
+                        )
+                    }
                 };
                 if writeln!(writer, "{msg}").is_err() {
                     break;
@@ -245,6 +251,22 @@ pub(super) fn start_control_protocol_cosh_core_process(
                                     reason,
                                     error_message,
                                     providers,
+                                },
+                            );
+                            return Ok(ProviderLineProgress::AwaitingApproval);
+                        }
+                        control_protocol::ControlRequest::ShellEvidence {
+                            request_id,
+                            tool_use_id,
+                            action,
+                        } => {
+                            send_agent_event(
+                                &event_tx,
+                                AgentEvent::ShellEvidenceRequest {
+                                    run_id: run_id.clone(),
+                                    request_id,
+                                    tool_use_id,
+                                    action,
                                 },
                             );
                             return Ok(ProviderLineProgress::AwaitingApproval);

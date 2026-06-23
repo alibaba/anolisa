@@ -17,6 +17,7 @@ mod mvp_loop_tests;
 pub(crate) mod prelude;
 pub(crate) mod provider_cancellation_artifacts;
 pub(crate) mod provider_tool_state;
+pub(crate) mod shell_evidence;
 pub(crate) mod shell_handoff_state;
 pub(crate) mod startup;
 pub(crate) mod state;

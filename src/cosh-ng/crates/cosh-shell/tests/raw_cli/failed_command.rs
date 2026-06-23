@@ -96,7 +96,12 @@ fn raw_cli_natural_language_includes_recent_failed_command_fact_without_hook_hin
         "{output}"
     );
     assert!(
-        compact.contains("output_id=terminal-output://raw-session/cmd-1"),
+        compact.contains("output_id=terminal-output://raw-session-"),
+        "{output}"
+    );
+    assert!(compact.contains("/cmd-1"), "{output}");
+    assert!(
+        !compact.contains("output_id=terminal-output://raw-session/cmd-1"),
         "{output}"
     );
     assert!(!output.contains("hook-cmd-"), "{output}");

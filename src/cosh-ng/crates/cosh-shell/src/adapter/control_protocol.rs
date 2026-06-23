@@ -36,6 +36,48 @@ pub enum ControlRequest {
         error_message: Option<String>,
         providers: Vec<AuthProviderInfo>,
     },
+    ShellEvidence {
+        request_id: String,
+        tool_use_id: String,
+        action: ShellEvidenceAction,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShellOutputDirection {
+    Head,
+    Tail,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShellEvidenceAction {
+    ListCommands {
+        limit: u16,
+        cursor: Option<String>,
+    },
+    ReadOutput {
+        output_id: String,
+        direction: ShellOutputDirection,
+        lines: u16,
+    },
+}
+
+impl ShellEvidenceAction {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ListCommands { .. } => "list_commands",
+            Self::ReadOutput { .. } => "read_output",
+        }
+    }
+}
+
+impl ShellOutputDirection {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Head => "head",
+            Self::Tail => "tail",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +109,7 @@ pub struct ControlProtocolCapabilities {
     pub provider_initialize_seen: bool,
     pub can_handle_can_use_tool: bool,
     pub can_handle_host_executed_shell_tool_result: bool,
+    pub can_handle_shell_evidence_tool: bool,
 }
 
 #[derive(Debug, Default)]
@@ -329,7 +372,84 @@ pub fn parse_control_request(line: &str) -> Option<ControlRequest> {
                 providers,
             })
         }
+        "shell_evidence" => {
+            let tool_use_id = request.get("tool_use_id")?.as_str()?.to_string();
+            let action = match request.get("action")?.as_str()? {
+                "list_commands" => {
+                    if request.get("output_id").is_some()
+                        || request.get("direction").is_some()
+                        || request.get("lines").is_some()
+                    {
+                        return None;
+                    }
+                    ShellEvidenceAction::ListCommands {
+                        limit: parse_shell_evidence_list_limit(request)?,
+                        cursor: parse_shell_evidence_list_cursor(request)?,
+                    }
+                }
+                "read_output" => {
+                    let output_id = request.get("output_id")?.as_str()?.to_string();
+                    if !output_id.starts_with("terminal-output://") {
+                        return None;
+                    }
+                    let direction = parse_shell_output_direction(request)?;
+                    let lines = parse_shell_output_lines(request)?;
+                    ShellEvidenceAction::ReadOutput {
+                        output_id,
+                        direction,
+                        lines,
+                    }
+                }
+                _ => return None,
+            };
+            Some(ControlRequest::ShellEvidence {
+                request_id,
+                tool_use_id,
+                action,
+            })
+        }
         _ => None,
+    }
+}
+
+fn parse_shell_output_direction(request: &Value) -> Option<ShellOutputDirection> {
+    let direction = match request.get("direction") {
+        Some(value) => value.as_str()?,
+        None => "tail",
+    };
+    match direction {
+        "head" => Some(ShellOutputDirection::Head),
+        "tail" => Some(ShellOutputDirection::Tail),
+        _ => None,
+    }
+}
+
+fn parse_shell_output_lines(request: &Value) -> Option<u16> {
+    let lines = match request.get("lines") {
+        Some(value) => value.as_u64()?,
+        None => 120,
+    };
+    if lines == 0 {
+        return None;
+    }
+    Some(lines.min(300) as u16)
+}
+
+fn parse_shell_evidence_list_limit(request: &Value) -> Option<u16> {
+    let limit = match request.get("limit") {
+        Some(value) => value.as_u64()?,
+        None => 20,
+    };
+    if limit == 0 {
+        return None;
+    }
+    Some(limit.min(100) as u16)
+}
+
+fn parse_shell_evidence_list_cursor(request: &Value) -> Option<Option<String>> {
+    match request.get("cursor") {
+        Some(Value::Null) | None => Some(None),
+        Some(value) => value.as_str().map(|cursor| Some(cursor.to_string())),
     }
 }
 
@@ -359,6 +479,10 @@ pub fn parse_initialize_capabilities(line: &str) -> Option<ControlProtocolCapabi
         can_handle_host_executed_shell_tool_result: bool_capability(
             capabilities,
             "can_handle_host_executed_shell_tool_result",
+        ),
+        can_handle_shell_evidence_tool: bool_capability(
+            capabilities,
+            "can_handle_shell_evidence_tool",
         ),
     })
 }
@@ -390,6 +514,37 @@ pub enum ApprovalDecision {
     Answer {
         answer: String,
     },
+    ShellEvidence {
+        result: Box<ShellEvidenceResult>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellEvidenceResult {
+    pub llm_content: String,
+    pub return_display: Option<String>,
+    pub metadata: ShellEvidenceMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellEvidenceMetadata {
+    pub action: String,
+    pub scope: Option<String>,
+    pub limit: Option<u16>,
+    pub next_cursor: Option<String>,
+    pub output_id: String,
+    pub status: String,
+    pub excerpt_status: String,
+    pub reason: Option<String>,
+    pub direction: String,
+    pub lines: u16,
+    pub command_count: Option<usize>,
+    pub provider_visible_byte_cap: usize,
+    pub truncated: bool,
+    pub truncated_by_lines: bool,
+    pub truncated_by_bytes: bool,
+    pub truncation_reason: String,
+    pub is_error: bool,
 }
 
 pub fn analysis_continuation_shell_deny_response(
@@ -523,6 +678,43 @@ pub fn serialize_host_executed_shell_result(
                         "redaction_status": result.metadata.redaction_status,
                         "approval_id": result.metadata.approval_id,
                         "tool_use_id": result.metadata.tool_use_id,
+                    }
+                }
+            }
+        }
+    })
+    .to_string()
+}
+
+pub fn serialize_shell_evidence_result(request_id: &str, result: &ShellEvidenceResult) -> String {
+    json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": request_id,
+            "response": {
+                "behavior": "shell_evidence",
+                "result": {
+                    "llmContent": result.llm_content,
+                    "returnDisplay": result.return_display,
+                    "metadata": {
+                        "action": result.metadata.action,
+                        "scope": result.metadata.scope,
+                        "limit": result.metadata.limit,
+                        "next_cursor": result.metadata.next_cursor,
+                        "output_id": result.metadata.output_id,
+                        "status": result.metadata.status,
+                        "excerpt_status": result.metadata.excerpt_status,
+                        "reason": result.metadata.reason,
+                        "direction": result.metadata.direction,
+                        "lines": result.metadata.lines,
+                        "command_count": result.metadata.command_count,
+                        "provider_visible_byte_cap": result.metadata.provider_visible_byte_cap,
+                        "truncated": result.metadata.truncated,
+                        "truncated_by_lines": result.metadata.truncated_by_lines,
+                        "truncated_by_bytes": result.metadata.truncated_by_bytes,
+                        "truncation_reason": result.metadata.truncation_reason,
+                        "is_error": result.metadata.is_error,
                     }
                 }
             }

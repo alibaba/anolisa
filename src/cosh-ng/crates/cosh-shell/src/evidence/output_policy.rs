@@ -117,8 +117,11 @@ pub(crate) fn bounded_output_excerpt_for_block(
 }
 
 pub(crate) fn output_excerpt_status_for_block(block: &CommandBlock) -> &'static str {
-    if block.output.terminal_output_ref.is_none() {
+    let Some(output_ref) = block.output.terminal_output_ref.as_deref() else {
         return "unavailable";
+    };
+    if !Path::new(output_ref).is_file() {
+        return "expired";
     }
     if block.output.terminal_output_bytes as usize > COMMAND_OUTPUT_REF_MAX_BYTES {
         "truncated_at_capture"
@@ -157,6 +160,8 @@ pub(crate) fn bounded_output_excerpt(
         status: if truncated { "truncated" } else { "included" },
         redaction_status,
         truncated,
+        truncated_by_lines: line_truncated,
+        truncated_by_bytes: byte_truncated,
     }
 }
 
@@ -167,6 +172,8 @@ fn unavailable_excerpt() -> EvidenceExcerpt {
         status: "unavailable",
         redaction_status: "excerpt_unavailable",
         truncated: false,
+        truncated_by_lines: false,
+        truncated_by_bytes: false,
     }
 }
 

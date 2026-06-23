@@ -8,7 +8,7 @@ pub use implementation::{
     AuthFieldInfo, AuthProviderInfo, AuthResponse, ClaudeCodeAdapter, ControlProtocolCapabilities,
     CoshCoreAdapter, FakeAgentAdapter, HostExecutedShellMetadata, HostExecutedShellResult,
     ProviderCancellationArtifact, ProviderCancellationArtifactKind,
-    ProviderCancellationArtifactStore, QwenCliAdapter,
+    ProviderCancellationArtifactStore, QwenCliAdapter, ShellEvidenceAction,
 };
 
 #[allow(unused_imports)]

@@ -168,6 +168,98 @@ fn poll_active_agent_run_with_policy<W: Write>(
             },
         };
 
+        if let AgentEvent::ShellEvidenceRequest {
+            run_id,
+            request_id,
+            tool_use_id,
+            action,
+        } = &event
+        {
+            let result = match action {
+                crate::adapter::ShellEvidenceAction::ListCommands { limit, cursor } => {
+                    crate::runtime::shell_evidence::list_shell_evidence_commands(
+                        &state.session_blocks,
+                        *limit,
+                        cursor.as_deref(),
+                    )
+                }
+                crate::adapter::ShellEvidenceAction::ReadOutput {
+                    output_id,
+                    direction,
+                    lines,
+                } => crate::runtime::shell_evidence::read_shell_evidence_output(
+                    &state.session_blocks,
+                    state.approval_mode,
+                    output_id,
+                    direction.as_str(),
+                    *lines,
+                ),
+            };
+            let status =
+                if result.metadata.reason.as_deref() == Some("redacted_confirmation_required") {
+                    "redacted_confirmation_required".to_string()
+                } else {
+                    result.metadata.excerpt_status.clone()
+                };
+            let output_id = match action {
+                crate::adapter::ShellEvidenceAction::ReadOutput { output_id, .. } => {
+                    Some(output_id.clone())
+                }
+                crate::adapter::ShellEvidenceAction::ListCommands { .. } => None,
+            };
+            state.shell_evidence.last_action =
+                Some(crate::runtime::state::ShellEvidenceActionRecord {
+                    mode: "control_protocol_tool",
+                    request_id: request_id.clone(),
+                    tool_use_id: tool_use_id.clone(),
+                    action: action.as_str().to_string(),
+                    output_id: output_id.clone(),
+                    status: status.clone(),
+                    failure_reason: result.metadata.reason.clone(),
+                });
+            if let crate::adapter::ShellEvidenceAction::ReadOutput {
+                output_id,
+                direction,
+                lines,
+            } = action
+            {
+                crate::activity::runtime::record_shell_evidence_action(
+                    state.language,
+                    &mut state.activity.rows,
+                    run_id,
+                    request_id,
+                    tool_use_id,
+                    action.as_str(),
+                    Some(output_id),
+                    Some(direction.as_str()),
+                    Some(*lines),
+                    &status,
+                    result.metadata.reason.as_deref(),
+                );
+            } else {
+                crate::activity::runtime::record_shell_evidence_action(
+                    state.language,
+                    &mut state.activity.rows,
+                    run_id,
+                    request_id,
+                    tool_use_id,
+                    action.as_str(),
+                    output_id.as_deref(),
+                    None,
+                    None,
+                    &status,
+                    result.metadata.reason.as_deref(),
+                );
+            }
+            let _ = active_run.handle.respond_approval(ApprovalResponse {
+                request_id: request_id.clone(),
+                tool_use_id: None,
+                tool_input: None,
+                decision: ApprovalDecision::ShellEvidence {
+                    result: Box::new(result),
+                },
+            });
+        }
         let terminal_event = matches!(
             event,
             AgentEvent::AgentCompleted { .. }
@@ -362,6 +454,7 @@ fn shell_evidence_provider_progress_observed(event: &AgentEvent) -> bool {
             | AgentEvent::ToolOutputDelta { .. }
             | AgentEvent::ToolCompleted { .. }
             | AgentEvent::UserQuestion { .. }
+            | AgentEvent::ShellEvidenceRequest { .. }
             | AgentEvent::AgentCompleted { .. }
             | AgentEvent::AgentFailed { .. }
             | AgentEvent::AgentCancelled { .. }

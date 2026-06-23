@@ -542,6 +542,12 @@ fn provider_prompt_contract_describes_recommend_mode_without_tools() {
     assert!(prompt.contains("agent"), "{prompt}");
     assert!(prompt.contains("do not emit tool calls"), "{prompt}");
     assert!(prompt.contains("run_shell_command"), "{prompt}");
+    assert!(
+        prompt.contains("do not request shell output automatically"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("```cosh-request"), "{prompt}");
+    assert!(!prompt.contains("cosh_shell_evidence"), "{prompt}");
 }
 
 #[test]

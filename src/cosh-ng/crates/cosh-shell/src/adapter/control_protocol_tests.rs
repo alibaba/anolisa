@@ -63,6 +63,182 @@ fn parse_ask_user() {
 }
 
 #[test]
+fn parse_read_shell_output_subtype_is_not_final_protocol() {
+    assert!(parse_control_request(
+        r#"{"type":"control_request","request_id":"evidence-1","request":{"subtype":"read_shell_output","tool_use_id":"toolu_abc","output_id":"terminal-output://raw-session-a1b2/cmd-1","direction":"tail","lines":120}}"#
+    )
+    .is_none());
+}
+
+#[test]
+fn parse_shell_evidence_list_commands() {
+    let line = r#"{"type":"control_request","request_id":"evidence-1","request":{"subtype":"shell_evidence","tool_use_id":"toolu_abc","action":"list_commands"}}"#;
+    let req = parse_control_request(line).expect("should parse");
+    match req {
+        ControlRequest::ShellEvidence {
+            request_id,
+            tool_use_id,
+            action,
+        } => {
+            assert_eq!(request_id, "evidence-1");
+            assert_eq!(tool_use_id, "toolu_abc");
+            assert_eq!(
+                action,
+                ShellEvidenceAction::ListCommands {
+                    limit: 20,
+                    cursor: None
+                }
+            );
+            assert_eq!(action.as_str(), "list_commands");
+        }
+        _ => panic!("expected ShellEvidence"),
+    }
+}
+
+#[test]
+fn parse_shell_evidence_list_commands_pagination() {
+    let line = r#"{"type":"control_request","request_id":"evidence-1","request":{"subtype":"shell_evidence","tool_use_id":"toolu_abc","action":"list_commands","limit":2,"cursor":"offset:2"}}"#;
+    let req = parse_control_request(line).expect("should parse");
+    match req {
+        ControlRequest::ShellEvidence {
+            action: ShellEvidenceAction::ListCommands { limit, cursor },
+            ..
+        } => {
+            assert_eq!(limit, 2);
+            assert_eq!(cursor.as_deref(), Some("offset:2"));
+        }
+        _ => panic!("expected ShellEvidence list_commands"),
+    }
+}
+
+#[test]
+fn parse_shell_evidence_read_output() {
+    let line = r#"{"type":"control_request","request_id":"evidence-2","request":{"subtype":"shell_evidence","tool_use_id":"toolu_def","action":"read_output","output_id":"terminal-output://raw-session-a1b2/cmd-1","direction":"head","lines":12}}"#;
+    let req = parse_control_request(line).expect("should parse");
+    match req {
+        ControlRequest::ShellEvidence {
+            request_id,
+            tool_use_id,
+            action:
+                ShellEvidenceAction::ReadOutput {
+                    output_id,
+                    direction,
+                    lines,
+                },
+        } => {
+            assert_eq!(request_id, "evidence-2");
+            assert_eq!(tool_use_id, "toolu_def");
+            assert_eq!(output_id, "terminal-output://raw-session-a1b2/cmd-1");
+            assert_eq!(direction, ShellOutputDirection::Head);
+            assert_eq!(lines, 12);
+        }
+        _ => panic!("expected ShellEvidence read_output"),
+    }
+}
+
+#[test]
+fn parse_shell_evidence_read_output_defaults_optional_fields() {
+    let line = r#"{"type":"control_request","request_id":"evidence-2","request":{"subtype":"shell_evidence","tool_use_id":"toolu_def","action":"read_output","output_id":"terminal-output://raw-session-a1b2/cmd-1"}}"#;
+    let req = parse_control_request(line).expect("should parse");
+    match req {
+        ControlRequest::ShellEvidence {
+            action:
+                ShellEvidenceAction::ReadOutput {
+                    direction, lines, ..
+                },
+            ..
+        } => {
+            assert_eq!(direction, ShellOutputDirection::Tail);
+            assert_eq!(lines, 120);
+        }
+        _ => panic!("expected ShellEvidence read_output"),
+    }
+}
+
+#[test]
+fn parse_shell_evidence_rejects_invalid_action_family() {
+    assert!(parse_control_request(
+        r#"{"type":"control_request","request_id":"evidence-1","request":{"subtype":"shell_evidence","tool_use_id":"toolu_abc","action":"read_shell_output","output_id":"terminal-output://raw-session/cmd-1"}}"#
+    )
+    .is_none());
+    assert!(parse_control_request(
+        r#"{"type":"control_request","request_id":"evidence-1","request":{"subtype":"shell_evidence","tool_use_id":"toolu_abc","action":"read_output","output_id":"/tmp/file"}}"#
+    )
+    .is_none());
+    assert!(parse_control_request(
+        r#"{"type":"control_request","request_id":"evidence-1","request":{"subtype":"shell_evidence","action":"list_commands"}}"#
+    )
+    .is_none());
+    assert!(parse_control_request(
+        r#"{"type":"control_request","request_id":"evidence-1","request":{"subtype":"shell_evidence","tool_use_id":"toolu_abc","action":"read_output","output_id":"terminal-output://raw-session/cmd-1","direction":"middle","lines":120}}"#
+    )
+    .is_none());
+    assert!(parse_control_request(
+        r#"{"type":"control_request","request_id":"evidence-1","request":{"subtype":"shell_evidence","tool_use_id":"toolu_abc","action":"read_output","output_id":"terminal-output://raw-session/cmd-1","direction":"tail","lines":0}}"#
+    )
+    .is_none());
+    assert!(parse_control_request(
+        r#"{"type":"control_request","request_id":"evidence-1","request":{"subtype":"shell_evidence","tool_use_id":"toolu_abc","action":"list_commands","output_id":"terminal-output://raw-session/cmd-1"}}"#
+    )
+    .is_none());
+    assert!(parse_control_request(
+        r#"{"type":"control_request","request_id":"evidence-1","request":{"subtype":"shell_evidence","tool_use_id":"toolu_abc","action":"list_commands","direction":"tail"}}"#
+    )
+    .is_none());
+    assert!(parse_control_request(
+        r#"{"type":"control_request","request_id":"evidence-1","request":{"subtype":"shell_evidence","tool_use_id":"toolu_abc","action":"list_commands","lines":120}}"#
+    )
+    .is_none());
+    assert!(parse_control_request(
+        r#"{"type":"control_request","request_id":"evidence-1","request":{"subtype":"shell_evidence","tool_use_id":"toolu_abc","action":"list_commands","limit":0}}"#
+    )
+    .is_none());
+    assert!(parse_control_request(
+        r#"{"type":"control_request","request_id":"evidence-1","request":{"subtype":"shell_evidence","tool_use_id":"toolu_abc","action":"list_commands","limit":"many"}}"#
+    )
+    .is_none());
+    assert!(parse_control_request(
+        r#"{"type":"control_request","request_id":"evidence-1","request":{"subtype":"shell_evidence","tool_use_id":"toolu_abc","action":"list_commands","cursor":3}}"#
+    )
+    .is_none());
+    assert!(parse_control_request(
+        r#"{"type":"control_request","request_id":"evidence-1","request":{"subtype":"shell_evidence","tool_use_id":"toolu_abc","action":"read_output","output_id":"terminal-output://raw-session/cmd-1","direction":7}}"#
+    )
+    .is_none());
+    assert!(parse_control_request(
+        r#"{"type":"control_request","request_id":"evidence-1","request":{"subtype":"shell_evidence","tool_use_id":"toolu_abc","action":"read_output","output_id":"terminal-output://raw-session/cmd-1","lines":"many"}}"#
+    )
+    .is_none());
+}
+
+#[test]
+fn parse_shell_evidence_caps_limit_and_lines() {
+    let req = parse_control_request(
+        r#"{"type":"control_request","request_id":"evidence-1","request":{"subtype":"shell_evidence","tool_use_id":"toolu_abc","action":"list_commands","limit":101}}"#
+    )
+    .expect("should parse");
+    match req {
+        ControlRequest::ShellEvidence {
+            action: ShellEvidenceAction::ListCommands { limit, .. },
+            ..
+        } => assert_eq!(limit, 100),
+        _ => panic!("expected list_commands"),
+    }
+
+    let req = parse_control_request(
+        r#"{"type":"control_request","request_id":"evidence-2","request":{"subtype":"shell_evidence","tool_use_id":"toolu_abc","action":"read_output","output_id":"terminal-output://raw-session/cmd-1","lines":301}}"#
+    )
+    .expect("should parse");
+    match req {
+        ControlRequest::ShellEvidence {
+            action: ShellEvidenceAction::ReadOutput { lines, .. },
+            ..
+        } => assert_eq!(lines, 300),
+        _ => panic!("expected read_output"),
+    }
+}
+
+#[test]
 fn parse_non_control_request_returns_none() {
     assert!(parse_control_request(r#"{"type":"assistant","message":"hi"}"#).is_none());
     assert!(parse_control_request(r#"{"type":"result","result":"done"}"#).is_none());
@@ -72,11 +248,12 @@ fn parse_non_control_request_returns_none() {
 
 #[test]
 fn parse_initialize_capabilities_from_success_response() {
-    let line = r#"{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}"#;
+    let line = r#"{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true,"can_handle_shell_evidence_tool":true}}}}"#;
     let capabilities = parse_initialize_capabilities(line).expect("capabilities");
     assert!(capabilities.provider_initialize_seen);
     assert!(capabilities.can_handle_can_use_tool);
     assert!(capabilities.can_handle_host_executed_shell_tool_result);
+    assert!(capabilities.can_handle_shell_evidence_tool);
 }
 
 #[test]
@@ -86,6 +263,7 @@ fn parse_initialize_capabilities_defaults_missing_flags_to_false() {
     assert!(capabilities.provider_initialize_seen);
     assert!(!capabilities.can_handle_can_use_tool);
     assert!(!capabilities.can_handle_host_executed_shell_tool_result);
+    assert!(!capabilities.can_handle_shell_evidence_tool);
 }
 
 #[test]
@@ -184,6 +362,104 @@ fn serialize_host_executed_shell_result_format() {
     assert_eq!(
         v["response"]["response"]["result"]["metadata"]["tool_use_id"],
         "toolu-1"
+    );
+}
+
+#[test]
+fn serialize_shell_evidence_result_format() {
+    let result = ShellEvidenceResult {
+        llm_content: "ShellEvidenceExcerpt\noutput_id: terminal-output://raw-session-a1b2/cmd-1\nexcerpt_status: available\nstdout".to_string(),
+        return_display: Some("captured output".to_string()),
+        metadata: ShellEvidenceMetadata {
+            action: "read_output".to_string(),
+            scope: None,
+            limit: None,
+            next_cursor: None,
+            output_id: "terminal-output://raw-session-a1b2/cmd-1".to_string(),
+            status: "included".to_string(),
+            excerpt_status: "available".to_string(),
+            reason: None,
+            direction: "tail".to_string(),
+            lines: 120,
+            command_count: None,
+            provider_visible_byte_cap: 12 * 1024,
+            truncated: false,
+            truncated_by_lines: false,
+            truncated_by_bytes: false,
+            truncation_reason: "none".to_string(),
+            is_error: false,
+        },
+    };
+    let s = serialize_shell_evidence_result("evidence-1", &result);
+    let v: Value = serde_json::from_str(&s).unwrap();
+    assert_eq!(v["type"], "control_response");
+    assert_eq!(v["response"]["subtype"], "success");
+    assert_eq!(v["response"]["request_id"], "evidence-1");
+    assert_eq!(v["response"]["response"]["behavior"], "shell_evidence");
+    assert_ne!(
+        v["response"]["response"]["behavior"],
+        "shell_output_evidence"
+    );
+    assert_eq!(
+        v["response"]["response"]["result"]["llmContent"],
+        result.llm_content
+    );
+    assert_eq!(
+        v["response"]["response"]["result"]["metadata"]["output_id"],
+        result.metadata.output_id
+    );
+    assert_eq!(
+        v["response"]["response"]["result"]["metadata"]["status"],
+        "included"
+    );
+    assert_eq!(
+        v["response"]["response"]["result"]["metadata"]["action"],
+        "read_output"
+    );
+    assert_eq!(
+        v["response"]["response"]["result"]["metadata"]["is_error"],
+        false
+    );
+    assert_eq!(
+        v["response"]["response"]["result"]["metadata"]["truncation_reason"],
+        "none"
+    );
+}
+
+#[test]
+fn serialize_shell_evidence_failure_format() {
+    let result = ShellEvidenceResult {
+        llm_content: "ShellEvidenceExcerpt\noutput_id: terminal-output://old-session/cmd-1\nexcerpt_status: unavailable\nreason: stale_session".to_string(),
+        return_display: Some("stale output".to_string()),
+        metadata: ShellEvidenceMetadata {
+            action: "read_output".to_string(),
+            scope: None,
+            limit: None,
+            next_cursor: None,
+            output_id: "terminal-output://old-session/cmd-1".to_string(),
+            status: "unavailable".to_string(),
+            excerpt_status: "unavailable".to_string(),
+            reason: Some("stale_session".to_string()),
+            direction: "tail".to_string(),
+            lines: 120,
+            command_count: None,
+            provider_visible_byte_cap: 12 * 1024,
+            truncated: false,
+            truncated_by_lines: false,
+            truncated_by_bytes: false,
+            truncation_reason: "none".to_string(),
+            is_error: true,
+        },
+    };
+    let s = serialize_shell_evidence_result("evidence-1", &result);
+    let v: Value = serde_json::from_str(&s).unwrap();
+    assert_eq!(
+        v["response"]["response"]["result"]["metadata"]["reason"],
+        "stale_session"
+    );
+    assert_eq!(
+        v["response"]["response"]["result"]["metadata"]["is_error"],
+        true
     );
 }
 

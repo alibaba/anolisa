@@ -52,6 +52,9 @@ fn prepare_invocation_headless_flag() {
     let inv = test_adapter().prepare_invocation(&test_request(), CoshApprovalMode::Auto);
     assert_eq!(inv.program, "cosh-core");
     assert!(inv.args.contains(&"--headless".to_string()));
+    assert!(inv
+        .args
+        .contains(&"--enable-shell-evidence-tool".to_string()));
 }
 
 #[test]
@@ -78,6 +81,89 @@ fn prepare_invocation_prompt_leaves_shell_tool_trigger_to_cosh_core() {
         .prompt
         .contains("Always emit a provider permission request"));
     assert!(!inv.prompt.contains("cosh-core adapter compatibility"));
+}
+
+#[test]
+fn prepare_invocation_prompt_uses_shell_output_tool_mode() {
+    let mut request = test_request();
+    let mut context = request.command_block.clone();
+    context.id = "cmd-1".to_string();
+    context.session_id = "session-1".to_string();
+    context.exit_code = 0;
+    context.status = CommandStatus::Completed;
+    context.output.terminal_output_ref = Some("/tmp/cosh-output.txt".to_string());
+    context.output.terminal_output_bytes = 42;
+    request.context_blocks = vec![context];
+
+    let inv = test_adapter().prepare_invocation(&request, CoshApprovalMode::Auto);
+
+    assert!(inv.prompt.contains("cosh_shell_evidence"), "{}", inv.prompt);
+    assert!(
+        inv.prompt.contains("action=list_commands"),
+        "{}",
+        inv.prompt
+    );
+    assert!(inv.prompt.contains("action=read_output"), "{}", inv.prompt);
+    assert!(
+        inv.prompt
+            .contains("read relevant outputs before making result claims"),
+        "{}",
+        inv.prompt
+    );
+    assert!(
+        inv.prompt.contains("up to 3 outputs per answer"),
+        "{}",
+        inv.prompt
+    );
+    assert!(
+        inv.prompt.contains("activity recaps or command lists"),
+        "{}",
+        inv.prompt
+    );
+    assert!(
+        inv.prompt.contains("output_available=false"),
+        "{}",
+        inv.prompt
+    );
+    assert!(inv.prompt.contains("output_bytes=0"), "{}", inv.prompt);
+    assert!(
+        inv.prompt
+            .contains("call cosh_shell_evidence with action=list_commands"),
+        "{}",
+        inv.prompt
+    );
+    assert!(!inv.prompt.contains("```cosh-request"), "{}", inv.prompt);
+    assert!(
+        !inv.prompt.contains("```cosh-request\noutput"),
+        "{}",
+        inv.prompt
+    );
+}
+
+#[test]
+fn prepare_invocation_prompt_suppresses_shell_output_requests_in_recommend_mode() {
+    let mut request = test_request();
+    let mut context = request.command_block.clone();
+    context.id = "cmd-1".to_string();
+    context.session_id = "session-1".to_string();
+    context.output.terminal_output_ref = Some("/tmp/cosh-output.txt".to_string());
+    context.output.terminal_output_bytes = 42;
+    request.context_blocks = vec![context];
+
+    let inv = test_adapter().prepare_invocation(&request, CoshApprovalMode::Recommend);
+
+    assert!(
+        inv.prompt
+            .contains("do not request shell output automatically"),
+        "{}",
+        inv.prompt
+    );
+    assert!(
+        !inv.prompt.contains("cosh_shell_evidence"),
+        "{}",
+        inv.prompt
+    );
+    assert!(!inv.prompt.contains("```cosh-request"), "{}", inv.prompt);
 }
 
 #[test]

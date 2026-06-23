@@ -5,10 +5,13 @@ fn raw_cli_cosh_request_history_auto_sends_history_index() {
     let output = run_raw_cli_with_delayed_input(
         "fake",
         vec![
-            (b"echo before-history\n".to_vec(), Duration::ZERO),
+            (
+                b"echo before-history\n".to_vec(),
+                Duration::from_millis(300),
+            ),
             (
                 b"?? request shell history evidence\n".to_vec(),
-                Duration::from_millis(300),
+                Duration::from_millis(600),
             ),
             (
                 b"/details cosh-request-1\n".to_vec(),
@@ -49,7 +52,7 @@ fn raw_cli_cosh_request_history_redaction_requires_confirmation() {
                 b"?? request shell history evidence\n".to_vec(),
                 Duration::from_millis(300),
             ),
-            (b"\n".to_vec(), Duration::from_millis(800)),
+            (b"\n".to_vec(), Duration::from_millis(1_500)),
             (b"exit\n".to_vec(), Duration::from_millis(600)),
         ],
     );
@@ -81,7 +84,7 @@ fn raw_cli_cosh_request_output_card_sends_bounded_excerpt() {
                 b"?? request captured output evidence\n".to_vec(),
                 Duration::from_millis(300),
             ),
-            (b"\n".to_vec(), Duration::from_millis(800)),
+            (b"\n".to_vec(), Duration::from_millis(1_500)),
             (b"exit\n".to_vec(), Duration::from_millis(600)),
         ],
     );
@@ -91,7 +94,16 @@ fn raw_cli_cosh_request_output_card_sends_bounded_excerpt() {
     assert!(output.contains("gamma"), "{output}");
     assert!(output.contains("Agent Requested Evidence"), "{output}");
     assert!(
-        output.contains(
+        output.contains("Agent wants to inspect captured output:"),
+        "{output}"
+    );
+    assert!(
+        output.contains("terminal-output://raw-session-"),
+        "{output}"
+    );
+    assert!(output.contains("/cmd-1 tail"), "{output}");
+    assert!(
+        !output.contains(
             "Agent wants to inspect captured output: terminal-output://raw-session/cmd-1 tail"
         ),
         "{output}"
@@ -174,4 +186,95 @@ fn raw_cli_cosh_request_card_ctrl_c_cancels_only_evidence_request() {
         "{output}"
     );
     assert!(!output.contains("cosh-osc$ cosh-osc$"), "{output}");
+}
+
+#[test]
+fn raw_cli_terminal_output_read_misroute_records_details_audit() {
+    let output = run_raw_cli_with_delayed_input(
+        "fake",
+        vec![
+            (b"printf 'misroute-output\\n'\n".to_vec(), Duration::ZERO),
+            (
+                b"?? misroute terminal output read\n".to_vec(),
+                Duration::from_millis(300),
+            ),
+            (b"/details tool-1\n".to_vec(), Duration::from_millis(1_200)),
+            (b"exit\n".to_vec(), Duration::from_millis(300)),
+        ],
+    );
+
+    assert!(output.contains("misroute-output"), "{output}");
+    assert!(output.contains("Activity details tool-1"), "{output}");
+    assert!(
+        output.contains("virtual_evidence_read_misroute: true"),
+        "{output}"
+    );
+    assert!(
+        output.contains("misrouted_output_id: terminal-output://raw-session-"),
+        "{output}"
+    );
+    assert!(
+        output.contains("recommended_action: fenced_cosh_request_output"),
+        "{output}"
+    );
+    assert!(!output.contains("raw-session/cmd-1"), "{output}");
+    assert!(!output.contains("bash: /details"), "{output}");
+}
+
+#[test]
+fn raw_cli_invalid_cosh_request_is_audited_without_evidence_card() {
+    let output = run_raw_cli_with_delayed_input(
+        "fake",
+        vec![
+            (
+                b"?? request invalid shell evidence\n".to_vec(),
+                Duration::from_millis(300),
+            ),
+            (
+                b"/details cosh-request-1\n".to_vec(),
+                Duration::from_millis(1_500),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(300)),
+        ],
+    );
+
+    assert!(output.contains("cosh-request details"), "{output}");
+    assert!(output.contains("request_id: cosh-request-1"), "{output}");
+    assert!(output.contains("outcome: invalid"), "{output}");
+    assert!(output.contains("reason: parse_error"), "{output}");
+    assert!(
+        compact_terminal_words(&output).contains("```cosh-requestread terminal-output://"),
+        "{output}"
+    );
+    assert!(!output.contains("Agent Requested Evidence"), "{output}");
+    assert!(
+        !output.contains("Evidence excerpt received by fake adapter"),
+        "{output}"
+    );
+    assert!(!output.contains("bash: /details"), "{output}");
+}
+
+#[test]
+fn raw_cli_fallback_debug_session_reports_fenced_request_access() {
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[("COSH_SHELL_DEBUG", "1")],
+        vec![
+            (b"printf 'fallback-debug\\n'\n".to_vec(), Duration::ZERO),
+            (b"/debug session\n".to_vec(), Duration::from_millis(500)),
+            (b"exit\n".to_vec(), Duration::from_millis(300)),
+        ],
+    );
+
+    assert!(output.contains("fallback-debug"), "{output}");
+    assert!(
+        output.contains("evidence access: fenced_request_fallback"),
+        "{output}"
+    );
+    assert!(
+        !output.contains("evidence access: control_protocol_tool"),
+        "{output}"
+    );
+    assert!(!output.contains("bash: /debug"), "{output}");
 }

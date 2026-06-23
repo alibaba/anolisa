@@ -38,6 +38,7 @@ pub(super) fn record_activity_rows(
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ActivityRecordPolicy {
     pub(crate) suppress_provider_native_shell: bool,
+    pub(crate) shell_evidence_tool_available: bool,
 }
 
 pub(crate) fn record_activity_rows_with_policy(
@@ -55,7 +56,6 @@ pub(crate) fn record_activity_rows_with_policy(
         .collect::<HashSet<_>>();
     for event in governed_events {
         let row = match &event.event {
-
             AgentEvent::ToolCall {
                 run_id,
                 tool_id,
@@ -109,6 +109,7 @@ pub(crate) fn record_activity_rows_with_policy(
                             tool_id.as_deref(),
                             name,
                             input,
+                            policy.shell_evidence_tool_available,
                         ))
                     }
                 } else {
@@ -121,6 +122,7 @@ pub(crate) fn record_activity_rows_with_policy(
                         tool_id.as_deref(),
                         name,
                         input,
+                        policy.shell_evidence_tool_available,
                     ))
                 }
             }
@@ -169,6 +171,7 @@ pub(crate) fn record_activity_rows_with_policy(
                     tool_name,
                     tool_input,
                     tool_use_id,
+                    policy.shell_evidence_tool_available,
                 ))
             }
             AgentEvent::ToolCompleted {
@@ -278,9 +281,12 @@ fn provider_tool_call_row(
     tool_id: Option<&str>,
     tool_name: &str,
     input: &str,
+    shell_evidence_tool_available: bool,
 ) -> RuntimeActivityRow {
     let id = next_activity_id(state, "tool");
     let info = display_for_tool(tool_name, input);
+    let misroute_detail =
+        terminal_output_misroute_detail(tool_name, input, shell_evidence_tool_available);
     RuntimeActivityRow {
         id: id.clone(),
         run_id: run_id.to_string(),
@@ -297,9 +303,10 @@ fn provider_tool_call_row(
             ],
         ),
         detail: format!(
-            "evidence: ProviderToolCall\nprovider: provider_native_stream\nexecution_path: provider_native_stream\ntool_id: {}\ntool_name: {tool_name}\ninput_preview: {}\nagent_result_visibility: provider_native_result",
+            "evidence: ProviderToolCall\nprovider: provider_native_stream\nexecution_path: provider_native_stream\ntool_id: {}\ntool_name: {tool_name}\ninput_preview: {}{}\nagent_result_visibility: provider_native_result",
             tool_id.unwrap_or("<none>"),
-            info.preview
+            info.preview,
+            misroute_detail
         ),
     }
 }
@@ -311,11 +318,14 @@ fn provider_tool_request_row(
     tool_name: &str,
     tool_input: &serde_json::Value,
     tool_use_id: &str,
+    shell_evidence_tool_available: bool,
 ) -> RuntimeActivityRow {
     let id = next_activity_id(state, "tool");
     let input_str = serde_json::to_string(tool_input).unwrap_or_default();
     let info = display_for_tool(tool_name, &input_str);
     let preview = provider_tool_input_preview(tool_name, tool_input, &info.preview);
+    let misroute_detail =
+        terminal_output_misroute_detail(tool_name, &input_str, shell_evidence_tool_available);
     RuntimeActivityRow {
         id: id.clone(),
         run_id: run_id.to_string(),
@@ -332,9 +342,82 @@ fn provider_tool_request_row(
             ],
         ),
         detail: format!(
-            "evidence: ProviderToolRequest\nprovider: provider_control_protocol\nexecution_path: provider_control_protocol\nrequest_id: {request_id}\ntool_use_id: {tool_use_id}\ntool_name: {tool_name}\ninput_preview: {preview}\nagent_result_visibility: provider_native_result"
+            "evidence: ProviderToolRequest\nprovider: provider_control_protocol\nexecution_path: provider_control_protocol\nrequest_id: {request_id}\ntool_use_id: {tool_use_id}\ntool_name: {tool_name}\ninput_preview: {preview}{misroute_detail}\nagent_result_visibility: provider_native_result"
         ),
     }
+}
+
+fn terminal_output_misroute_detail(
+    tool_name: &str,
+    input: &str,
+    shell_evidence_tool_available: bool,
+) -> String {
+    let Some(output_id) = terminal_output_id_from_read_tool_input(tool_name, input) else {
+        return String::new();
+    };
+    let recommended_action = if shell_evidence_tool_available {
+        "cosh_shell_evidence_read_output"
+    } else {
+        "fenced_cosh_request_output"
+    };
+    format!(
+        "\nvirtual_evidence_read_misroute: true\nmisrouted_output_id: {output_id}\nrecommended_action: {recommended_action}"
+    )
+}
+
+fn terminal_output_id_from_read_tool_input(tool_name: &str, input: &str) -> Option<String> {
+    if !matches!(tool_name, "Read" | "read_file") {
+        return None;
+    }
+    let value = serde_json::from_str::<serde_json::Value>(input).ok()?;
+    ["path", "file_path"]
+        .iter()
+        .filter_map(|key| value.get(key).and_then(|value| value.as_str()))
+        .find(|path| path.starts_with("terminal-output://"))
+        .map(ToString::to_string)
+}
+
+pub(crate) fn record_shell_evidence_action(
+    language: Language,
+    rows: &mut Vec<RuntimeActivityRow>,
+    run_id: &str,
+    request_id: &str,
+    tool_use_id: &str,
+    action: &str,
+    output_id: Option<&str>,
+    direction: Option<&str>,
+    lines: Option<u16>,
+    status: &str,
+    failure_reason: Option<&str>,
+) -> String {
+    let id = next_activity_id_from_rows(rows, "evidence");
+    let reason = failure_reason.unwrap_or("<none>");
+    let output_id = output_id.unwrap_or("<none>");
+    let direction = direction.unwrap_or("<none>");
+    let lines = lines
+        .map(|lines| lines.to_string())
+        .unwrap_or_else(|| "<none>".to_string());
+    let preview = format!("{action} {output_id} {direction} lines={lines}");
+    let row = RuntimeActivityRow {
+        id: id.clone(),
+        run_id: run_id.to_string(),
+        kind: ActivityKind::Tool,
+        status: status.to_string(),
+        subject: tool_use_id.to_string(),
+        summary: I18n::new(language).format(
+            MessageId::ActivityToolRequestedSummary,
+            &[
+                ("tool", "cosh_shell_evidence"),
+                ("preview", &activity_summary_preview(&preview, 120)),
+                ("id", &id),
+            ],
+        ),
+        detail: format!(
+            "evidence: ShellEvidenceAction\nprovider: provider_control_protocol\nexecution_path: control_protocol_shell_evidence\nrequest_id: {request_id}\ntool_use_id: {tool_use_id}\ntool_name: cosh_shell_evidence\naction: {action}\noutput_id: {output_id}\ndirection: {direction}\nlines: {lines}\nstatus: {status}\nfailure_reason: {reason}\nagent_result_visibility: provider_tool_result"
+        ),
+    };
+    rows.push(row);
+    id
 }
 
 fn provider_tool_input_preview(
@@ -598,6 +681,24 @@ fn tool_output_row(
 
 pub(crate) fn next_activity_id(state: &InlineState, prefix: &str) -> String {
     next_activity_id_excluding(state, prefix, std::iter::empty())
+}
+
+fn next_activity_id_from_rows(rows: &[RuntimeActivityRow], prefix: &str) -> String {
+    let prefix_with_dash = format!("{prefix}-");
+    let used_ids = rows
+        .iter()
+        .filter(|row| row.id.starts_with(&prefix_with_dash))
+        .map(|row| row.id.clone())
+        .collect::<HashSet<_>>();
+
+    let mut next = 1;
+    loop {
+        let id = format!("{prefix}-{next}");
+        if !used_ids.contains(&id) {
+            return id;
+        }
+        next += 1;
+    }
 }
 
 fn next_activity_id_excluding<'a>(

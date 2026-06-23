@@ -12,7 +12,7 @@ use super::claude::{
 };
 use super::cosh_core_process::start_control_protocol_cosh_core_process;
 use super::{
-    agent_event_is_provider_progress, control_protocol, prompt_from_request,
+    agent_event_is_provider_progress, control_protocol, prompt_from_request_with_evidence_policy,
     record_cancellation_pending_session, run_provider_process_loop, spawn_provider_child,
     start_threaded_adapter_run, AdapterError, AdapterInstance, AgentAdapter,
     AgentBackendCapabilities, AgentRunHandle, ClaudeStreamParser, PreparedInvocation,
@@ -81,6 +81,7 @@ impl CoshCoreAdapter {
         };
         let mut args = vec![
             "--headless".to_string(),
+            "--enable-shell-evidence-tool".to_string(),
             "--approval-mode".to_string(),
             approval_mode.to_string(),
         ];
@@ -248,8 +249,12 @@ impl AgentAdapter for CoshCoreAdapter {
     }
 }
 
-fn cosh_core_prompt_from_request(request: &AgentRequest, _mode: CoshApprovalMode) -> String {
-    prompt_from_request(request)
+fn cosh_core_prompt_from_request(request: &AgentRequest, mode: CoshApprovalMode) -> String {
+    prompt_from_request_with_evidence_policy(
+        request,
+        crate::evidence::ShellEvidenceAccess::ControlProtocolTool,
+        mode != CoshApprovalMode::Recommend,
+    )
 }
 
 fn cosh_core_dry_run_events(
@@ -268,8 +273,9 @@ fn cosh_core_dry_run_events(
         },
         AgentEvent::Recommendation {
             run_id: request.id.clone(),
-            summary: "cosh-core adapter is configured but model calls are disabled in dry-run mode."
-                .to_string(),
+            summary:
+                "cosh-core adapter is configured but model calls are disabled in dry-run mode."
+                    .to_string(),
             commands: vec![format!("{} {}", prepared.program, prepared.args.join(" "))],
             auto_execute: false,
         },

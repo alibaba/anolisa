@@ -1,16 +1,41 @@
 use crate::evidence::{
-    build_context_window, format_context_prompt, provider_safe_command_facts, ContextWindowConfig,
+    build_context_window, format_context_prompt_with_policy, provider_safe_command_facts,
+    ContextWindowConfig, ShellEvidenceAccess,
 };
 use crate::types::{AgentRequest, CoshApprovalMode};
 
 pub fn prompt_from_request(request: &AgentRequest) -> String {
-    let mut prompt = trigger_evidence_prompt(request);
-    prompt.push_str(&runtime_frame_prompt(request));
+    prompt_from_request_with_evidence_access(request, ShellEvidenceAccess::FencedRequestFallback)
+}
+
+pub fn prompt_from_request_with_evidence_access(
+    request: &AgentRequest,
+    access: ShellEvidenceAccess,
+) -> String {
+    prompt_from_request_with_evidence_policy(request, access, true)
+}
+
+pub fn prompt_from_request_with_evidence_policy(
+    request: &AgentRequest,
+    access: ShellEvidenceAccess,
+    allow_output_requests: bool,
+) -> String {
+    let mut prompt = trigger_evidence_prompt(request, access, allow_output_requests);
+    prompt.push_str(&runtime_frame_prompt(
+        request,
+        access,
+        allow_output_requests,
+    ));
     prompt.push_str(&hook_finding_prompt(request));
     prompt
 }
 
-fn trigger_evidence_prompt(request: &AgentRequest) -> String {
+fn trigger_evidence_prompt(
+    request: &AgentRequest,
+    access: ShellEvidenceAccess,
+    allow_output_requests: bool,
+) -> String {
+    let output_access = output_access_instruction(access, allow_output_requests);
     if let Some(input) = &request.user_input {
         if input.starts_with("Answer to pending Agent question:") {
             format!(
@@ -58,8 +83,7 @@ fn trigger_evidence_prompt(request: &AgentRequest) -> String {
             format!(
                 "Continue the same Shell-first Agent session using this user-requested shell evidence excerpt.\n\
                  The excerpt is bounded and may not contain the full command output. \
-                 terminal-output:// refs are cosh-shell evidence ids, not files; do not use provider file tools to read them. \
-                 If more shell evidence is needed, ask through the cosh-shell evidence request protocol instead of guessing. \
+                 terminal-output:// refs are cosh-shell evidence ids, not files; do not use provider file tools to read them. {output_access} \
                  Do not execute follow-up commands automatically unless the user asks for further live inspection.\n\
                  Do not mention Claude Code, plan mode, implementation status, or internal workflow.\n\n\
                  shell_evidence_excerpt:\n{}\n\
@@ -80,10 +104,11 @@ fn trigger_evidence_prompt(request: &AgentRequest) -> String {
                  use it as a Bash tool request and let cosh-shell ask for confirmation when required.\n\
                  If more user input is needed, request AskUserQuestion with the visible question text \
                  and 2-4 concrete options; allow free text for an Other answer when appropriate.\n\
-                 history_access: Recent shell history is not included by default. If prior commands are needed, emit exactly one fenced cosh-request block: ```cosh-request\nhistory\n```.\n\
+                 history_access: {}\n\
                  Do not mention Claude Code, plan mode, implementation status, or internal workflow.\n\n\
                  user_input: {}\n\
                  ",
+                history_access_instruction(access, allow_output_requests),
                 input
             )
         }
@@ -99,8 +124,7 @@ fn trigger_evidence_prompt(request: &AgentRequest) -> String {
         format!(
             "Analyze this failed shell command for a Shell-first assistant.\n\
              Use the included bounded shell context and output id; terminal-output:// refs are \
-             not files and must not be read with provider file tools. If more output is required, \
-             ask through the cosh-shell evidence request protocol. Then explain the failure and suggest fixes. \
+             not files and must not be read with provider file tools. {output_access} Then explain the failure and suggest fixes. \
              cosh-shell has an approval system that reviews every tool request.\n\
              Do not mention Claude Code, plan mode, implementation status, or internal workflow.\n\n\
              command: {}\n\
@@ -145,6 +169,7 @@ pub fn provider_prompt_contract_for_language(
         mode_instruction,
         shell_tool_name,
         language_hint,
+        ShellEvidenceAccess::FencedRequestFallback,
     )
 }
 
@@ -153,7 +178,9 @@ fn invariant_contract_prompt(
     mode_instruction: &str,
     shell_tool_name: &str,
     language_hint: &str,
+    access: ShellEvidenceAccess,
 ) -> String {
+    let output_access = output_access_instruction_for_mode(access, target_mode);
     format!(
         "\n\ncosh-shell Agent contract:\n\
          - User modes: recommend and agent.\n\
@@ -162,11 +189,78 @@ fn invariant_contract_prompt(
          - Always emit a provider permission request for `{shell_tool_name}` before any shell command executes, even read-only commands in auto approval mode. \
          cosh-shell may auto-approve safe commands, but it still needs the request so the exact command can run in the foreground shell transcript. \
          Shell syntax is supported after cosh-shell approval; do not avoid useful shell syntax by asking the user to run commands manually.\n\
-         - terminal-output:// refs are cosh-shell evidence ids, not files. Do not use provider file tools to read them. For more captured output, emit exactly one fenced cosh-request block: ```cosh-request\noutput <output_id> tail\nlines <n>\n```.\n\
+         - terminal-output:// refs are cosh-shell evidence ids, not files. Do not use provider file tools to read them. {output_access}\n\
          - The approval system is handled by cosh-shell; do not downgrade to manual command suggestions only because approval may be needed.\n\
          - {language_hint}\n\
          - Keep provider-specific names out of visible responses unless already shown by cosh-shell."
     )
+}
+
+pub fn provider_prompt_contract_with_evidence_access(
+    mode: CoshApprovalMode,
+    shell_tool_name: &str,
+    access: ShellEvidenceAccess,
+) -> String {
+    let target_mode = match mode {
+        CoshApprovalMode::Recommend => "recommend",
+        CoshApprovalMode::Auto | CoshApprovalMode::Trust => "agent",
+    };
+    let mode_instruction = if target_mode == "recommend" {
+        "This invocation is recommend mode: do not emit tool calls. Answer with concise guidance, explanations, and example commands in code blocks."
+    } else {
+        "This invocation is agent mode: when the user asks to inspect system, project, file, test, runtime, or command state, actively use tools for live evidence instead of only suggesting commands for the user to run."
+    };
+    invariant_contract_prompt(
+        target_mode,
+        mode_instruction,
+        shell_tool_name,
+        provider_language_hint(crate::language_config_status().effective),
+        access,
+    )
+}
+
+fn output_access_instruction(
+    access: ShellEvidenceAccess,
+    allow_output_requests: bool,
+) -> &'static str {
+    if !allow_output_requests {
+        return "In recommend mode, do not request shell output automatically; state when output evidence is needed for a reliable answer.";
+    }
+    match access {
+        ShellEvidenceAccess::ControlProtocolTool => {
+            "To list recorded shell commands or inspect captured output, call cosh_shell_evidence with action=list_commands or action=read_output. For diagnostics, failures, output analysis, or status checks, read relevant outputs before making result claims, up to 3 outputs per answer; do not call read_output for commands whose facts show no output_id, output_available=false, or output_bytes=0. For activity recaps or command lists, use command facts only."
+        }
+        ShellEvidenceAccess::FencedRequestFallback => {
+            "For more captured output, emit exactly one fenced cosh-request block: ```cosh-request\noutput <output_id> tail\nlines <n>\n```."
+        }
+    }
+}
+
+fn output_access_instruction_for_mode(
+    access: ShellEvidenceAccess,
+    target_mode: &str,
+) -> &'static str {
+    if target_mode == "recommend" {
+        return "In recommend mode, do not request shell output automatically; state when output evidence is needed for a reliable answer.";
+    }
+    output_access_instruction(access, true)
+}
+
+fn history_access_instruction(
+    access: ShellEvidenceAccess,
+    allow_output_requests: bool,
+) -> &'static str {
+    if !allow_output_requests {
+        return "Recent shell history is not included by default. In recommend mode, say when shell evidence is needed instead of requesting it automatically.";
+    }
+    match access {
+        ShellEvidenceAccess::ControlProtocolTool => {
+            "Recent shell history is not included by default. If prior commands are needed, call cosh_shell_evidence with action=list_commands. For diagnostics, failures, output analysis, or status checks, read relevant outputs before making result claims, up to 3 outputs per answer; do not call read_output for commands whose facts show no output_id, output_available=false, or output_bytes=0. For activity recaps or command lists, use command facts only."
+        }
+        ShellEvidenceAccess::FencedRequestFallback => {
+            "Recent shell history is not included by default. If prior commands are needed, emit exactly one fenced cosh-request block: ```cosh-request\nhistory\n```."
+        }
+    }
 }
 
 pub fn provider_language_hint(language: crate::Language) -> &'static str {
@@ -193,19 +287,27 @@ fn hook_finding_prompt(request: &AgentRequest) -> String {
     )
 }
 
-fn runtime_frame_prompt(request: &AgentRequest) -> String {
+fn runtime_frame_prompt(
+    request: &AgentRequest,
+    access: ShellEvidenceAccess,
+    allow_output_requests: bool,
+) -> String {
     format!(
         "\n\nruntime_frame:\n\
          cwd: {}\n\
          mode: {:?}{}{}",
         request.command_block.cwd,
         request.mode,
-        rich_context_prompt(request),
+        rich_context_prompt(request, access, allow_output_requests),
         hook_routing_hints_prompt(request)
     )
 }
 
-fn rich_context_prompt(request: &AgentRequest) -> String {
+fn rich_context_prompt(
+    request: &AgentRequest,
+    access: ShellEvidenceAccess,
+    allow_output_requests: bool,
+) -> String {
     if request.context_blocks.is_empty() {
         return String::new();
     }
@@ -223,7 +325,7 @@ fn rich_context_prompt(request: &AgentRequest) -> String {
         ..Default::default()
     };
     let entries = build_context_window(&request.context_blocks, before_ms, &config);
-    format_context_prompt(&entries)
+    format_context_prompt_with_policy(&entries, access, allow_output_requests)
 }
 
 fn hook_routing_hints_prompt(request: &AgentRequest) -> String {

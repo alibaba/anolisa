@@ -161,7 +161,14 @@ pub(crate) fn remember_agent_activity(active_run: &mut ActiveAgentRun, governed:
                 active_run.current_phase = "auth".to_string();
                 active_run.current_message = "Authentication credentials required".to_string();
             }
-            AgentEvent::HookNotification { hook_name, message, .. } => {
+            AgentEvent::ShellEvidenceRequest { action, .. } => {
+                active_run.current_phase = "evidence".to_string();
+                active_run.current_message =
+                    format!("Handling shell evidence action: {}", action.as_str());
+            }
+            AgentEvent::HookNotification {
+                hook_name, message, ..
+            } => {
                 active_run.current_phase = "hook".to_string();
                 active_run.current_message = format!("[{hook_name}] {message}");
             }
