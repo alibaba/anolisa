@@ -80,12 +80,10 @@ impl SkillStore {
             }
 
             // Skip hidden directories
-            if path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|name| name.starts_with('.'))
-            {
-                continue;
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with('.') {
+                    continue;
+                }
             }
 
             // Check max_skills limit (rough guard)
@@ -177,12 +175,10 @@ impl SkillStore {
                 continue;
             }
 
-            if path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|name| name.starts_with('.'))
-            {
-                continue;
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with('.') {
+                    continue;
+                }
             }
 
             if *loaded_count >= config.max_skills {
@@ -320,11 +316,10 @@ fn is_category_dir(dir: &Path) -> bool {
 fn load_category_meta(dir: &Path, cat_name: &str) -> CategoryMeta {
     let yaml_path = dir.join("_category.yaml");
     if yaml_path.exists() {
-        let meta = std::fs::read_to_string(&yaml_path)
-            .ok()
-            .and_then(|content| serde_yaml::from_str::<CategoryMeta>(&content).ok());
-        if let Some(meta) = meta {
-            return meta;
+        if let Ok(content) = std::fs::read_to_string(&yaml_path) {
+            if let Ok(meta) = serde_yaml::from_str::<CategoryMeta>(&content) {
+                return meta;
+            }
         }
     }
     CategoryMeta {

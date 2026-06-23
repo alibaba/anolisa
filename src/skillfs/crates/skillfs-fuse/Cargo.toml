@@ -10,11 +10,12 @@ description = "FUSE virtual filesystem layer for SkillFS"
 
 [dependencies]
 skillfs-core = { workspace = true }
-fuser = "0.15"
+fuser = { version = "0.15", features = ["abi-7-23"] }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 parking_lot = { workspace = true }
+serde_json = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]

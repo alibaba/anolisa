@@ -291,7 +291,6 @@ fn parse_returns(section: Option<&String>, issues: &mut Vec<String>) -> Vec<Retu
 /// Parse lines like: - `name` (type, required|optional): description
 fn parse_typed_list(section: &str, issues: &mut Vec<String>) -> Vec<Parameter> {
     let re_pattern = r"^-\s+`(\w+)`\s+\((\w+)(?:,\s*(required|optional))?\):\s*(.*)$";
-    // Pattern is a compile-time literal; `Regex::new` cannot fail at runtime here.
     let re = regex::Regex::new(re_pattern).expect("valid regex");
 
     let mut result = Vec::new();
@@ -665,13 +664,12 @@ Body.
         let long_name = "a".repeat(65);
         let content = format!(
             r#"---
-name: {}
+name: {long_name}
 description: Test
 ---
 
 Body.
-"#,
-            long_name
+"#
         );
 
         let entry = parse_skill_md(&content, "fallback");

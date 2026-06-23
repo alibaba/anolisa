@@ -92,7 +92,6 @@ fn compile_conditional(content: &str, env: &EnvironmentProfile) -> String {
                 let len = emit_at_depth.len();
                 let parent_active = emit_at_depth[..len - 1].iter().all(|&e| e);
                 if parent_active {
-                    // `emit_at_depth.len() > 1` above guarantees a last element exists.
                     let last = emit_at_depth.last_mut().unwrap();
                     *last = !*last;
                 }
@@ -236,7 +235,7 @@ fn evaluate_primitive(expr: &str, env: &EnvironmentProfile) -> bool {
 
 /// Extract the argument from `func_name(...)`.
 fn strip_func_arg<'a>(expr: &'a str, func_name: &str) -> Option<&'a str> {
-    let prefix = format!("{}(", func_name);
+    let prefix = format!("{func_name}(");
     let inner = expr.strip_prefix(prefix.as_str())?.strip_suffix(')')?;
     Some(inner.trim())
 }
@@ -313,19 +312,19 @@ fn normalize_line(line: &str, has_uv: bool, node_pm: &str) -> String {
     // Node package manager normalization.
     if !node_pm.is_empty() && node_pm != "npm" {
         let npm_install = "npm install";
-        let pm_install = format!("{} install", node_pm);
+        let pm_install = format!("{node_pm} install");
         if result.contains(npm_install) && !result.contains(&pm_install) {
             result = result.replace(npm_install, &pm_install);
         }
 
         let npm_run = "npm run ";
-        let pm_run = format!("{} run ", node_pm);
+        let pm_run = format!("{node_pm} run ");
         if result.contains(npm_run) {
             result = result.replace(npm_run, &pm_run);
         }
 
         let npm_test = "npm test";
-        let pm_test = format!("{} test", node_pm);
+        let pm_test = format!("{node_pm} test");
         if result.contains(npm_test) && !result.contains(&pm_test) {
             result = result.replace(npm_test, &pm_test);
         }

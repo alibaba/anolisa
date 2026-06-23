@@ -7,7 +7,10 @@ use clap::{Parser, Subcommand};
 use skillfs_core::store::SkillStore;
 use skillfs_core::views::ViewsConfig;
 use skillfs_core::{ParseConfig, SharedSkillStore};
-use skillfs_fuse::{FuseError as FuseErr, MountOptions, mount};
+use skillfs_fuse::security::{
+    AuditRuntimeConfig, SecurityModeConfig, SourceDriftObserver, spawn_drift_watcher,
+};
+use skillfs_fuse::{FuseError as FuseErr, MountOptions, mount_with_security};
 use tokio::signal;
 use tracing::{error, info, warn};
 
@@ -58,6 +61,35 @@ enum Commands {
         /// Use `kill $(cat <file>)` or `kill -TERM $(cat <file>)` to unmount.
         #[arg(long, value_name = "PATH")]
         pid_file: Option<PathBuf>,
+
+        /// Enable best-effort JSONL audit logging by writing one event per
+        /// line to this file. The file is opened in append mode and created
+        /// if missing. When omitted, audit logging is disabled (the default
+        /// in-process sink drops every event).
+        ///
+        /// If the path cannot be opened, the mount fails before the FUSE
+        /// session starts rather than silently downgrading to a no-op sink.
+        #[arg(long, value_name = "PATH")]
+        audit_log: Option<PathBuf>,
+
+        /// Bounded queue capacity for the audit writer thread. `0` (the
+        /// default) maps to the built-in default capacity. Only meaningful
+        /// when `--audit-log` is also set.
+        #[arg(long, value_name = "N", default_value_t = 0)]
+        audit_queue_capacity: usize,
+
+        /// Refuse to mount unless `SOURCE` and `MOUNTPOINT` resolve to the
+        /// same directory (in-place / over-mount layout). In that layout
+        /// FUSE intercepts every read and write to the physical source
+        /// path, so `.skill-meta` policy and the audit log cover all
+        /// userspace operations.
+        ///
+        /// Without this flag the existing non-in-place layout is allowed
+        /// for compatibility, but it can only observe operations that go
+        /// through the FUSE mountpoint — direct writes to the source path
+        /// bypass SkillFS entirely.
+        #[arg(long)]
+        security_mode: bool,
     },
 
     /// Generate or update skillfs-views.toml from a skill directory
@@ -183,7 +215,22 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             allow_other,
             foreground,
             pid_file,
-        } => cmd_mount(source, mountpoint, allow_other, foreground, pid_file).await,
+            audit_log,
+            audit_queue_capacity,
+            security_mode,
+        } => {
+            cmd_mount(
+                source,
+                mountpoint,
+                allow_other,
+                foreground,
+                pid_file,
+                audit_log,
+                audit_queue_capacity,
+                security_mode,
+            )
+            .await
+        }
         Commands::Classify {
             source,
             primary_count,
@@ -201,14 +248,26 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 // Mount Command
 // ---------------------------------------------------------------------------
 
+/// Debounce window for the runtime source drift watcher (Package W1).
+///
+/// Mirrors the value used in the existing `skillfs-core::watcher` integration
+/// tests. Drift observation is best-effort, so a few-hundred-ms coalescing
+/// window keeps audit volume reasonable without losing the signal that an
+/// out-of-band change happened.
+const DRIFT_DEBOUNCE_MS: u64 = 200;
+
+#[allow(clippy::too_many_arguments)]
 async fn cmd_mount(
     source: PathBuf,
     mountpoint: PathBuf,
     allow_other: bool,
     foreground: bool,
     pid_file: Option<PathBuf>,
+    audit_log: Option<PathBuf>,
+    audit_queue_capacity: usize,
+    security_mode: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    info!(source = %source.display(), mountpoint = %mountpoint.display(), "mounting SkillFS");
+    info!(source = %source.display(), mountpoint = %mountpoint.display(), security_mode, "mounting SkillFS");
 
     // Validate source directory
     if !source.exists() {
@@ -218,7 +277,78 @@ async fn cmd_mount(
         return Err(format!("Source is not a directory: {}", source.display()).into());
     }
 
-    // Validate mount point
+    // Package M0 security-mode gate. Ordered intentionally as the first
+    // startup gate after the source check (and before any audit setup or
+    // mountpoint auto-creation): when `--security-mode` is set, refuse to
+    // mount unless `source` and `mountpoint` canonicalize to the same
+    // directory. This is the only configuration in which SkillFS can
+    // intercept *every* read/write to the physical source path.
+    //
+    // Putting this first matches the runtime fixture (validate →
+    // build_sink → mount) used by the M0 integration tests and avoids
+    // leaving startup side-effects (audit log file, auto-created
+    // mountpoint directory) behind when the gate rejects the mount. In
+    // compat mode (`--security-mode` not set) `validate()` is a no-op, so
+    // the existing auto-create-mountpoint UX below is unchanged.
+    let security_config = SecurityModeConfig {
+        enabled: security_mode,
+    };
+    security_config
+        .validate(&source, &mountpoint)
+        .map_err(|e| format!("{}", e))?;
+
+    // Resolve the source canonical path once, up front. Several startup
+    // gates need it: the W1 audit-path-vs-source check below, the
+    // in-place detection further down, and the W1 drift watcher
+    // (which must observe canonical source events). Falls back to the
+    // user-supplied path on canonicalize failure so the existing CLI UX
+    // is preserved for callers who hand us a relative path that already
+    // resolves to a real directory.
+    let source_canon = source.canonicalize().unwrap_or_else(|_| source.clone());
+
+    // Build the runtime audit configuration. When `--audit-log` is omitted
+    // the default `NoopEventSink` is preserved (Ok(None) below). When it is
+    // present but the file cannot be opened, surface a startup error and
+    // refuse to mount rather than silently downgrading — operators who ask
+    // for audit logging must not be left without it.
+    let audit_runtime = AuditRuntimeConfig {
+        path: audit_log.clone(),
+        queue_capacity: audit_queue_capacity,
+    };
+    // Package W1 safety gate. Refuse to start if `--audit-log` would land
+    // inside the source tree: every audit write would either trigger the
+    // drift watcher (creating a `source_changed` feedback loop on each
+    // line) or land on top of an actual `<source>/<skill>/SKILL.md`,
+    // corrupting the manifest SkillFS is meant to protect. The check is
+    // ordered before `build_sink` so a rejected configuration never
+    // creates the audit log file on disk. Disabled audit configs always
+    // pass.
+    audit_runtime
+        .validate_audit_path_outside_source(&source_canon)
+        .map_err(|e| format!("{}", e))?;
+    let audit_sink = audit_runtime.build_sink().map_err(|e| {
+        format!(
+            "failed to open audit log '{}': {}",
+            audit_log
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            e
+        )
+    })?;
+    if let Some(ref p) = audit_log {
+        info!(
+            path = %p.display(),
+            queue_capacity = audit_runtime.effective_queue_capacity(),
+            "audit logging enabled"
+        );
+    }
+
+    // Validate mount point. Auto-create is intentionally still here, after
+    // the security-mode gate: under `--security-mode` the mountpoint must
+    // already equal the source (which was checked above), so this branch
+    // only ever runs in compat mode where a fresh dedicated mountpoint is
+    // the expected ergonomic.
     if !mountpoint.exists() {
         info!("creating mount point directory");
         std::fs::create_dir_all(&mountpoint)?;
@@ -274,11 +404,13 @@ async fn cmd_mount(
     info!("starting FUSE filesystem (blocking)");
 
     // Detect in-place mount: when source and mountpoint resolve to the same path.
-    let source_canon = source.canonicalize().unwrap_or_else(|_| source.clone());
+    // `source_canon` is computed once at the top of cmd_mount so the W1
+    // audit-path-vs-source guard can use it before any audit sink is built.
     let mount_canon = mountpoint
         .canonicalize()
         .unwrap_or_else(|_| mountpoint.clone());
     let in_place = source_canon == mount_canon;
+    let drift_enabled = audit_sink.is_some();
     if in_place {
         info!("in-place mount detected: FUSE will over-mount the source directory");
         eprintln!();
@@ -289,15 +421,61 @@ async fn cmd_mount(
         eprintln!("   To install, update, or remove skills, you MUST unmount first:");
         eprintln!("     fusermount3 -u '{}'", mountpoint.display());
         eprintln!("   or send SIGTERM / press Ctrl+C to stop this process.");
+        if security_mode {
+            eprintln!();
+            eprintln!("   --security-mode is enabled: SkillFS audit and policy now cover");
+            eprintln!(
+                "   every read/write to '{}' that goes through userspace.",
+                source.display()
+            );
+            if drift_enabled {
+                eprintln!(
+                    "   --audit-log is also enabled: best-effort source drift observation is"
+                );
+                eprintln!("   active, surfacing out-of-band create/modify/delete of");
+                eprintln!("   <source>/<skill>/SKILL.md and immediate skill directories as");
+                eprintln!(
+                    "   `source_changed` audit lines (visibility-only, no real-time blocking)."
+                );
+            }
+        }
         eprintln!();
     } else {
-        eprintln!();
-        eprintln!(
-            "ℹ  Source directory '{}' is NOT affected by the FUSE mount.",
-            source.display()
+        // Non-in-place / "compatibility" mount. SkillFS still serves the
+        // virtual skill view at '{mountpoint}/skills/...', but the physical
+        // source directory remains directly writable outside FUSE. Be
+        // explicit so an operator who relies on .skill-meta protection or
+        // the audit log knows where the boundary actually is.
+        warn!(
+            source = %source.display(),
+            mountpoint = %mountpoint.display(),
+            "non-in-place mount: SkillFS policy/audit only cover the FUSE mountpoint"
         );
-        eprintln!("   You can add or remove skill directories there at any time;");
-        eprintln!("   changes are picked up automatically on the next mount.");
+        eprintln!();
+        eprintln!("⚠  Non-in-place (compatibility / dev) mount:");
+        eprintln!("     source     = '{}'", source.display());
+        eprintln!("     mountpoint = '{}'", mountpoint.display());
+        eprintln!("   • Direct writes to the source path are NOT routed through SkillFS,");
+        eprintln!("     so '.skill-meta' protection and the audit log only cover");
+        eprintln!(
+            "     operations that go through '{}'.",
+            mountpoint.display()
+        );
+        if drift_enabled {
+            eprintln!("   • Source drift observation is enabled (Package W1, best-effort):");
+            eprintln!("     out-of-band create/modify/delete of <source>/<skill>/SKILL.md and");
+            eprintln!("     immediate skill directories surface as `source_changed` audit lines.");
+            eprintln!("     Arbitrary files inside skills, '.skill-meta/**', and nested layouts");
+            eprintln!("     are NOT observed; SkillFS does not block in real time.");
+        } else {
+            eprintln!("   • Source drift observation is OFF (no --audit-log): out-of-band");
+            eprintln!("     changes to the source path are not observed at all. Re-run with");
+            eprintln!("     --audit-log <PATH> to record SKILL.md / skill-dir drift.");
+        }
+        eprintln!("   • You can add or remove skill directories at the source at any");
+        eprintln!("     time; the change is picked up on the next mount.");
+        eprintln!("   For a mount that enforces SkillFS policy on every read/write,");
+        eprintln!("   re-run with '--security-mode' and source == mountpoint.");
         eprintln!();
     }
 
@@ -313,11 +491,59 @@ async fn cmd_mount(
     // Capture the mountpoint for signal-triggered cleanup.
     let mountpoint_for_signal = mountpoint.clone();
 
-    // Note: mount() blocks until the FUSE session exits (Ctrl+C or SIGTERM).
-    // We wrap it in spawn_blocking and race against OS signals so that
-    // SIGTERM triggers the same clean unmount path as Ctrl+C.
+    // Package W1 source drift observer wiring. Best-effort and visibility-only.
+    //
+    // When the operator opts in to audit logging via `--audit-log`, attach
+    // the existing `skillfs-core` watcher to the same audit sink so
+    // out-of-band source-tree changes (especially direct writes to the
+    // physical source path in compat mode, and writes through pre-mount
+    // file descriptors in security mode) surface as `SourceChanged` JSONL
+    // records. Without `--audit-log` this whole block is skipped, so the
+    // pre-W1 default behavior is preserved exactly: no watcher is spawned,
+    // no drift observation runs, no extra threads are started.
+    //
+    // Failures are non-fatal. Drift observation is a visibility aid: a
+    // failed watcher startup must not abort the FUSE mount that an
+    // operator already asked for. We log a warning and continue with the
+    // sink-only audit pipeline that S2.1 delivered.
+    let drift_handle = if let Some(ref sink) = audit_sink {
+        let observer = Arc::new(SourceDriftObserver::new(source_canon.clone(), sink.clone()));
+        match spawn_drift_watcher(source_canon.clone(), observer, DRIFT_DEBOUNCE_MS).await {
+            Ok(handle) => {
+                info!(
+                    source = %source_canon.display(),
+                    debounce_ms = DRIFT_DEBOUNCE_MS,
+                    "source drift observation enabled"
+                );
+                Some(handle)
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "failed to start source drift watcher; continuing without drift observation"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Note: mount_with_security() blocks until the FUSE session exits
+    // (Ctrl+C or SIGTERM). We wrap it in spawn_blocking and race against
+    // OS signals so that SIGTERM triggers the same clean unmount path as
+    // Ctrl+C. When `audit_sink` is `None` the FUSE filesystem keeps its
+    // default `NoopEventSink`, matching the prior `mount(...)` behavior.
     let mount_task = tokio::task::spawn_blocking(move || {
-        mount(&mountpoint, &source, shared_store, options, in_place)
+        mount_with_security(
+            &mountpoint,
+            &source,
+            shared_store,
+            options,
+            in_place,
+            audit_sink,
+            None,
+        )
     });
 
     /// Trigger a clean FUSE unmount by calling fusermount3 -u.
@@ -339,19 +565,37 @@ async fn cmd_mount(
         _ = signal::ctrl_c() => {
             info!("received Ctrl+C, unmounting");
             trigger_unmount(&mountpoint_for_signal);
+            // Explicit, deterministic shutdown of both the core watcher
+            // and the drift adapter. Drop fallback (best-effort abort)
+            // would still work, but signal handlers are exactly the
+            // path long-lived embedders need to be predictable.
+            if let Some(h) = drift_handle {
+                h.shutdown().await;
+            }
             return Ok(());
         }
         _ = async {
-            // CLI startup: a failure here is unrecoverable (libc-level signal-handler limit).
             let mut term = signal::unix::signal(signal::unix::SignalKind::terminate())
                 .expect("failed to register SIGTERM handler");
             term.recv().await
         } => {
             info!("received SIGTERM, unmounting");
             trigger_unmount(&mountpoint_for_signal);
+            if let Some(h) = drift_handle {
+                h.shutdown().await;
+            }
             return Ok(());
         }
     };
+
+    // Mount exited on its own (FUSE event loop returned). Make sure the
+    // drift watcher does not outlive the mount it was paired with: shut
+    // it down explicitly so the underlying notify watcher and the drift
+    // adapter task are torn down deterministically before this function
+    // returns.
+    if let Some(h) = drift_handle {
+        h.shutdown().await;
+    }
 
     match result {
         Ok(()) => {
