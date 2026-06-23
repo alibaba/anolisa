@@ -742,16 +742,16 @@ fn ffi_background_thread(
             match cmd {
                 ProbeCommand::AddCgroup(id) => {
                     if let Err(e) = sight.add_traced_cgroup(id) {
-                        log::warn!("add_traced_cgroup({}) failed: {}", id, e);
+                        log::warn!("add_traced_cgroup({id}) failed: {e}");
                     } else {
-                        log::info!("Added cgroup_id {} to BPF filter", id);
+                        log::info!("Added cgroup_id {id} to BPF filter");
                     }
                 }
                 ProbeCommand::RemoveCgroup(id) => {
                     if let Err(e) = sight.remove_traced_cgroup(id) {
-                        log::warn!("remove_traced_cgroup({}) failed: {}", id, e);
+                        log::warn!("remove_traced_cgroup({id}) failed: {e}");
                     } else {
-                        log::info!("Removed cgroup_id {} from BPF filter", id);
+                        log::info!("Removed cgroup_id {id} from BPF filter");
                     }
                 }
             }

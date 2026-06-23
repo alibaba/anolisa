@@ -76,6 +76,9 @@ pub struct AuditRecord {
     pub duration_ns: u64,
     /// Type-specific extra fields (serialized as JSON)
     pub extra: AuditExtra,
+    /// Session ID from agent environment (e.g. CLAUDE_CODE_SESSION_ID).
+    /// Set at capture time when the process exports a known session env var.
+    pub session_id: Option<String>,
 }
 
 /// Summary statistics for audit events

@@ -32,11 +32,14 @@ pub struct AggregatedProcess {
     pub start_timestamp_ns: u64,
     /// Last timestamp when data was added
     pub end_timestamp_ns: u64,
+    /// Session ID read from process environment at exec time
+    pub session_id: Option<String>,
 }
 
 impl AggregatedProcess {
     /// Create a new aggregated process
     pub fn new(pid: u32, tid: u32, ppid: u32, ptid: u32, comm: String, timestamp_ns: u64) -> Self {
+        let session_id = read_session_env(pid);
         AggregatedProcess {
             pid,
             ppid,
@@ -50,6 +53,7 @@ impl AggregatedProcess {
             is_complete: false,
             start_timestamp_ns: timestamp_ns,
             end_timestamp_ns: timestamp_ns,
+            session_id,
         }
     }
 
@@ -226,6 +230,38 @@ impl ToChromeTraceEvent for AggregatedProcess {
     }
 }
 
+const SESSION_ENV_VARS: &[&str] = &[
+    "CLAUDE_CODE_SESSION_ID",
+    "HERMES_SESSION_ID",
+    "AGENT_SEC_SESSION_ID",
+];
+
+fn read_session_env(pid: u32) -> Option<String> {
+    let data = match std::fs::read(format!("/proc/{pid}/environ")) {
+        Ok(d) => d,
+        Err(e) => {
+            log::debug!("read_session_env({pid}): {e}");
+            return None;
+        }
+    };
+    parse_session_from_environ(&data)
+}
+
+fn parse_session_from_environ(data: &[u8]) -> Option<String> {
+    for entry in data.split(|&b| b == 0) {
+        if let Ok(s) = std::str::from_utf8(entry) {
+            for var in SESSION_ENV_VARS {
+                if let Some(val) = s.strip_prefix(var).and_then(|rest| rest.strip_prefix('=')) {
+                    if !val.is_empty() {
+                        return Some(val.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,5 +327,74 @@ mod tests {
 
         // Empty first args should have "..." appended
         assert_eq!(proc.args, Some(" ...".to_string()));
+    }
+
+    #[test]
+    fn test_parse_session_claude_code() {
+        let env = b"HOME=/root\0CLAUDE_CODE_SESSION_ID=abc-123\0TERM=xterm\0";
+        assert_eq!(parse_session_from_environ(env), Some("abc-123".to_string()));
+    }
+
+    #[test]
+    fn test_parse_session_hermes() {
+        let env = b"PATH=/usr/bin\0HERMES_SESSION_ID=hermes-42\0";
+        assert_eq!(
+            parse_session_from_environ(env),
+            Some("hermes-42".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_session_priority_first_match_wins() {
+        let env = b"CLAUDE_CODE_SESSION_ID=first\0HERMES_SESSION_ID=second\0";
+        assert_eq!(parse_session_from_environ(env), Some("first".to_string()));
+    }
+
+    #[test]
+    fn test_parse_session_empty_environ() {
+        assert_eq!(parse_session_from_environ(b""), None);
+    }
+
+    #[test]
+    fn test_parse_session_no_session_vars() {
+        let env = b"HOME=/root\0PATH=/usr/bin\0TERM=xterm\0";
+        assert_eq!(parse_session_from_environ(env), None);
+    }
+
+    #[test]
+    fn test_parse_session_empty_value_rejected() {
+        let env = b"CLAUDE_CODE_SESSION_ID=\0OTHER=val\0";
+        assert_eq!(parse_session_from_environ(env), None);
+    }
+
+    #[test]
+    fn test_parse_session_prefix_collision() {
+        // CLAUDE_CODE_SESSION_ID_V2 must NOT match CLAUDE_CODE_SESSION_ID
+        let env = b"CLAUDE_CODE_SESSION_ID_V2=wrong\0";
+        assert_eq!(parse_session_from_environ(env), None);
+    }
+
+    #[test]
+    fn test_parse_session_non_utf8_skipped() {
+        let mut env = Vec::new();
+        env.extend_from_slice(b"BROKEN=");
+        env.extend_from_slice(&[0xFF, 0xFE]); // invalid UTF-8
+        env.push(0);
+        env.extend_from_slice(b"CLAUDE_CODE_SESSION_ID=valid-id");
+        env.push(0);
+        assert_eq!(
+            parse_session_from_environ(&env),
+            Some("valid-id".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_session_no_trailing_null() {
+        // /proc/pid/environ may not end with null
+        let env = b"CLAUDE_CODE_SESSION_ID=no-trailing";
+        assert_eq!(
+            parse_session_from_environ(env),
+            Some("no-trailing".to_string())
+        );
     }
 }

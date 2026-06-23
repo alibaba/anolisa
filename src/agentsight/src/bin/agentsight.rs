@@ -6,7 +6,6 @@
 //! - `audit`: Query audit events
 //! - `discover`: Discover running AI agents
 //! - `interruption`: Query and manage session interruption events
-
 use structopt::StructOpt;
 
 mod cli;

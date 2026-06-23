@@ -46,6 +46,10 @@ impl AuditStore {
         );
         conn.execute_batch(&format!("{create_table_sql}{create_index_sql}"))?;
 
+        // Idempotent migration (#1025): add session correlation columns
+        // to pre-existing databases.
+        ensure_correlation_columns(&conn, &table_name)?;
+
         Ok(AuditStore { conn, table_name })
     }
 
@@ -61,8 +65,8 @@ impl AuditStore {
             serde_json::to_string(&record.extra).context("Failed to serialize extra")?;
 
         let sql = format!(
-            "INSERT INTO {} (event_type, timestamp_ns, pid, ppid, comm, duration_ns, extra)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO {} (event_type, timestamp_ns, pid, ppid, comm, duration_ns, extra, session_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             self.table_name
         );
         self.conn.execute(
@@ -75,6 +79,7 @@ impl AuditStore {
                 record.comm,
                 record.duration_ns as i64,
                 extra_json,
+                record.session_id,
             ],
         )?;
 
@@ -93,7 +98,7 @@ impl AuditStore {
         if let Some(et) = event_type {
             type_str = et.to_string();
             sql = format!(
-                "SELECT id, event_type, timestamp_ns, pid, ppid, comm, duration_ns, extra
+                "SELECT id, event_type, timestamp_ns, pid, ppid, comm, duration_ns, extra, session_id
                  FROM {} WHERE timestamp_ns >= ?1 AND event_type = ?2
                  ORDER BY timestamp_ns ASC",
                 self.table_name
@@ -101,7 +106,7 @@ impl AuditStore {
             query_params = vec![Box::new(since_ns as i64), Box::new(type_str.clone())];
         } else {
             sql = format!(
-                "SELECT id, event_type, timestamp_ns, pid, ppid, comm, duration_ns, extra
+                "SELECT id, event_type, timestamp_ns, pid, ppid, comm, duration_ns, extra, session_id
                  FROM {} WHERE timestamp_ns >= ?1
                  ORDER BY timestamp_ns ASC",
                 self.table_name
@@ -139,7 +144,7 @@ impl AuditStore {
         if let Some(et) = event_type {
             type_str = et.to_string();
             sql = format!(
-                "SELECT id, event_type, timestamp_ns, pid, ppid, comm, duration_ns, extra
+                "SELECT id, event_type, timestamp_ns, pid, ppid, comm, duration_ns, extra, session_id
                  FROM {} WHERE pid = ?1 AND event_type = ?2
                  ORDER BY timestamp_ns ASC",
                 self.table_name
@@ -147,7 +152,7 @@ impl AuditStore {
             query_params = vec![Box::new(pid), Box::new(type_str.clone())];
         } else {
             sql = format!(
-                "SELECT id, event_type, timestamp_ns, pid, ppid, comm, duration_ns, extra
+                "SELECT id, event_type, timestamp_ns, pid, ppid, comm, duration_ns, extra, session_id
                  FROM {} WHERE pid = ?1
                  ORDER BY timestamp_ns ASC",
                 self.table_name
@@ -294,6 +299,7 @@ fn row_to_record(row: &rusqlite::Row) -> Result<AuditRecord> {
     let comm: String = row.get(5).map_err(|e| anyhow::anyhow!("{e}"))?;
     let duration_ns: i64 = row.get(6).map_err(|e| anyhow::anyhow!("{e}"))?;
     let extra_str: String = row.get(7).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let session_id: Option<String> = row.get(8).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let event_type: AuditEventType = event_type_str
         .parse()
@@ -311,7 +317,37 @@ fn row_to_record(row: &rusqlite::Row) -> Result<AuditRecord> {
         comm,
         duration_ns: duration_ns as u64,
         extra,
+        session_id,
     })
+}
+
+/// Idempotent migration: ensure session correlation columns exist.
+///
+/// Databases created before #1025 lack `session_id` and `conversation_id`
+/// columns. Add them via `ALTER TABLE` only when missing (checked through
+/// `pragma_table_info`). Also create an index on `session_id`.
+fn ensure_correlation_columns(conn: &Connection, table_name: &str) -> Result<()> {
+    let existing: std::collections::HashSet<String> = {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table_name})"))?;
+        stmt.query_map([], |row| row.get::<_, String>(1))? // column 1 = name
+            .filter_map(|r| r.ok())
+            .collect()
+    };
+
+    if !existing.contains("session_id") {
+        conn.execute_batch(&format!(
+            "ALTER TABLE {table_name} ADD COLUMN session_id TEXT;"
+        ))?;
+    }
+    if !existing.contains("conversation_id") {
+        conn.execute_batch(&format!(
+            "ALTER TABLE {table_name} ADD COLUMN conversation_id TEXT;"
+        ))?;
+    }
+    conn.execute_batch(&format!(
+        "CREATE INDEX IF NOT EXISTS idx_{table_name}_session_id ON {table_name}(session_id);"
+    ))?;
+    Ok(())
 }
 
 /// Extract full command line from extra JSON (ProcessAction.args or filename)
@@ -338,3 +374,146 @@ fn extract_cmdline_from_extra(extra_str: &str, comm: &str) -> String {
 
 // Backward compatibility alias
 pub type SqliteStore = AuditStore;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_session_id_round_trip() {
+        // Use an in-memory Connection to avoid tempfile dependency, then manually
+        // replicate what AuditStore::new does (create table + migration).
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                timestamp_ns INTEGER NOT NULL,
+                pid INTEGER NOT NULL,
+                ppid INTEGER,
+                comm TEXT NOT NULL,
+                duration_ns INTEGER DEFAULT 0,
+                extra TEXT
+            );",
+        )
+        .unwrap();
+        ensure_correlation_columns(&conn, "audit_events").unwrap();
+
+        let store = AuditStore {
+            conn,
+            table_name: "audit_events".to_string(),
+        };
+
+        let record = AuditRecord {
+            id: None,
+            event_type: AuditEventType::ProcessAction,
+            timestamp_ns: 1_000_000_000,
+            pid: 42,
+            ppid: Some(1),
+            comm: "bash".to_string(),
+            duration_ns: 500_000,
+            extra: AuditExtra::ProcessAction {
+                filename: Some("/bin/bash".to_string()),
+                args: Some("echo hi".to_string()),
+                exit_code: None,
+            },
+            session_id: Some("sess-abc-123".to_string()),
+        };
+        store.insert(&record).unwrap();
+
+        let results = store.query_since(0, None).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].session_id.as_deref(),
+            Some("sess-abc-123"),
+            "session_id must survive insert→query round-trip"
+        );
+    }
+
+    #[test]
+    fn test_session_id_none_round_trip() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                timestamp_ns INTEGER NOT NULL,
+                pid INTEGER NOT NULL,
+                ppid INTEGER,
+                comm TEXT NOT NULL,
+                duration_ns INTEGER DEFAULT 0,
+                extra TEXT
+            );",
+        )
+        .unwrap();
+        ensure_correlation_columns(&conn, "audit_events").unwrap();
+
+        let store = AuditStore {
+            conn,
+            table_name: "audit_events".to_string(),
+        };
+
+        let record = AuditRecord {
+            id: None,
+            event_type: AuditEventType::ProcessAction,
+            timestamp_ns: 2_000_000_000,
+            pid: 43,
+            ppid: None,
+            comm: "ls".to_string(),
+            duration_ns: 100_000,
+            extra: AuditExtra::ProcessAction {
+                filename: Some("/bin/ls".to_string()),
+                args: Some("ls -la".to_string()),
+                exit_code: Some(0),
+            },
+            session_id: None,
+        };
+        store.insert(&record).unwrap();
+
+        let results = store.query_by_pid(43, None).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].session_id, None);
+    }
+
+    #[test]
+    fn test_ensure_correlation_columns_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Pre-existing audit table WITHOUT the correlation columns (old DB).
+        conn.execute_batch(
+            "CREATE TABLE audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                timestamp_ns INTEGER NOT NULL,
+                pid INTEGER NOT NULL,
+                comm TEXT NOT NULL,
+                extra TEXT
+            );",
+        )
+        .unwrap();
+
+        // Run twice: must be idempotent. A naive ALTER without the pragma guard
+        // would error "duplicate column name" on the second call.
+        ensure_correlation_columns(&conn, "audit_events").unwrap();
+        ensure_correlation_columns(&conn, "audit_events").unwrap();
+
+        let cols: std::collections::HashSet<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(audit_events)").unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect()
+        };
+        assert!(cols.contains("session_id"));
+        assert!(cols.contains("conversation_id"));
+
+        let idx: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_audit_events_session_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, 1);
+    }
+}

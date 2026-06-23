@@ -92,6 +92,7 @@ impl AuditCommand {
                         "comm": r.comm,
                         "duration_ns": r.duration_ns,
                         "extra": r.extra,
+                        "session_id": r.session_id,
                     })
                 })
                 .collect();
@@ -109,6 +110,7 @@ impl AuditCommand {
                     "comm": record.comm,
                     "duration_ns": record.duration_ns,
                     "extra": record.extra,
+                    "session_id": record.session_id,
                 });
                 println!("{}", serde_json::to_string(&json_record).unwrap());
             }

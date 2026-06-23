@@ -90,6 +90,7 @@ impl AuditAnalyzer {
                 cache_read_tokens,
                 is_sse: true,
             },
+            session_id: None,
         })
     }
 
@@ -134,6 +135,7 @@ impl AuditAnalyzer {
                 cache_read_tokens: 0,
                 is_sse,
             },
+            session_id: None,
         }
     }
 
@@ -150,8 +152,9 @@ impl AuditAnalyzer {
             extra: AuditExtra::ProcessAction {
                 filename: process.filename.clone(),
                 args: process.args.clone(),
-                exit_code: None, // AggregatedProcess doesn't have exit_code yet
+                exit_code: None,
             },
+            session_id: process.session_id.clone(),
         }
     }
 }
@@ -172,4 +175,37 @@ fn detect_model_from_request(pair: &HttpPair) -> Option<String> {
     json.get("model")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::aggregator::AggregatedProcess;
+
+    #[test]
+    fn test_extract_process_action_propagates_session_id() {
+        let mut proc = AggregatedProcess::new(100, 100, 50, 50, "bash".to_string(), 1000);
+        proc.session_id = Some("test-session-xyz".to_string());
+        proc.add_exec("/bin/bash".to_string(), "echo hi".to_string(), 2000);
+
+        let analyzer = AuditAnalyzer::new();
+        let record = analyzer.extract_process_action(&proc);
+
+        assert_eq!(
+            record.session_id.as_deref(),
+            Some("test-session-xyz"),
+            "session_id must propagate from AggregatedProcess to AuditRecord"
+        );
+    }
+
+    #[test]
+    fn test_extract_process_action_none_session_id() {
+        let mut proc = AggregatedProcess::new(100, 100, 50, 50, "bash".to_string(), 1000);
+        proc.add_exec("/bin/bash".to_string(), "echo hi".to_string(), 2000);
+
+        let analyzer = AuditAnalyzer::new();
+        let record = analyzer.extract_process_action(&proc);
+
+        assert_eq!(record.session_id, None);
+    }
 }
