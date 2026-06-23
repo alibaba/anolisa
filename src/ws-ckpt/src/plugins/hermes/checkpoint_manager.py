@@ -130,6 +130,7 @@ class CheckpointManager:
                 capture_output=True,
                 text=True,
                 timeout=DEFAULT_TIMEOUT_S,
+                env={**os.environ, "WS_CKPT_AGENT_NAME": "hermes"},
             )
             return CommandOutput(
                 exit_code=result.returncode,

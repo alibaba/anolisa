@@ -266,6 +266,7 @@ export class CommandExecutor {
       const { stdout, stderr } = await execFileAsync(WS_CKPT_BIN, args, {
         timeout: this.timeoutMs,
         encoding: "utf-8",
+        env: { ...process.env, WS_CKPT_AGENT_NAME: "openclaw" },
       });
 
       return {

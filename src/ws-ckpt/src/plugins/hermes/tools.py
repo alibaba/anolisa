@@ -14,6 +14,7 @@ Tool surface mirrors the OpenClaw plugin (`ws-ckpt-*`):
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from typing import Any, Dict, Optional, Tuple
@@ -58,7 +59,10 @@ def _reject_if_cwd_inside_workspace(workspace: str) -> Optional[str]:
 def _run_ws_ckpt_cmd(cmd: list) -> Tuple[bool, str]:
     """Execute a ws-ckpt CLI command and return (success, output)."""
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30,
+            env={**os.environ, "WS_CKPT_AGENT_NAME": "hermes"},
+        )
         return result.returncode == 0, result.stdout.strip() or result.stderr.strip()
     except subprocess.TimeoutExpired:
         return False, "Command timed out (30s)"

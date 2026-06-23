@@ -5,7 +5,9 @@ pub mod fs_watcher;
 pub mod index_store;
 pub mod listener;
 mod lockfile;
+pub mod ops_log;
 pub mod scheduler;
+#[cfg(target_os = "linux")]
 pub mod seccomp;
 pub mod snapshot_mgr;
 mod startup;
@@ -69,6 +71,7 @@ pub async fn run_daemon(config: DaemonConfig) -> anyhow::Result<()> {
     util::ensure_symlinks(&state).await;
 
     // 8. Apply seccomp-bpf syscall filter (after bootstrap, before listener)
+    #[cfg(target_os = "linux")]
     if let Err(e) = seccomp::apply_seccomp_filter() {
         tracing::warn!(
             "Failed to apply seccomp filter: {:#}. Continuing without syscall filtering.",
