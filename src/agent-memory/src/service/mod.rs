@@ -34,6 +34,9 @@ pub struct MemoryService {
     /// Prevents recursive consolidation: set to true while consolidate() is
     /// running, so audit_log calls from within consolidation don't re-enter.
     consolidating: std::sync::atomic::AtomicBool,
+    /// Cached consent configuration for memory sovereignty checks.
+    pub consent_cache:
+        std::sync::Arc<std::sync::Mutex<Option<crate::tools::memory_sovereignty::ConsentConfig>>>,
 }
 
 impl MemoryService {
@@ -118,6 +121,7 @@ impl MemoryService {
             mount_strategy_name: strategy_name,
             audit_counter: AtomicUsize::new(0),
             consolidating: std::sync::atomic::AtomicBool::new(false),
+            consent_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -318,6 +322,12 @@ impl MemoryService {
         }
 
         let session_id = session.sid().as_str();
+
+        // Check consent before running consolidation.
+        if !crate::tools::memory_sovereignty::is_source_allowed(self, "auto-consolidation") {
+            tracing::info!("consolidation skipped: auto-consolidation denied by consent config");
+            return 0;
+        }
 
         // Quality filter: check mutual exclusion BEFORE running heuristics
         // to avoid wasted I/O and CPU.

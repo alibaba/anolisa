@@ -446,6 +446,61 @@ impl MemoryMcpServer {
         )
         .map_err(|e| fmt_err("import failed", e))
     }
+
+    #[tool(
+        description = "Search for all memories related to a topic. Returns matching paths and snippets."
+    )]
+    async fn memory_about(
+        &self,
+        #[tool(param)] topic: String,
+        #[tool(param)] limit: Option<u32>,
+    ) -> ToolResult {
+        crate::tools::memory_sovereignty::memory_about(
+            &self.svc,
+            &topic,
+            limit.unwrap_or(10) as usize,
+        )
+        .map_err(|e| fmt_err("memory_about failed", e))
+    }
+
+    #[tool(
+        description = "Forget memories about a topic. Set confirm=false for preview, confirm=true to delete."
+    )]
+    async fn memory_forget(
+        &self,
+        #[tool(param)] topic: String,
+        #[tool(param)] confirm: Option<bool>,
+    ) -> ToolResult {
+        crate::tools::memory_sovereignty::memory_forget(&self.svc, &topic, confirm.unwrap_or(false))
+            .map_err(|e| fmt_err("memory_forget failed", e))
+    }
+
+    #[tool(
+        description = "List all auto-created memories for review. Returns JSON array of entries."
+    )]
+    async fn memory_auto_created(&self, #[tool(param)] limit: Option<u32>) -> ToolResult {
+        crate::tools::memory_sovereignty::memory_auto_created(
+            &self.svc,
+            limit.unwrap_or(20) as usize,
+        )
+        .map_err(|e| fmt_err("memory_auto_created failed", e))
+    }
+
+    #[tool(
+        description = "Manage auto-memory consent. Action: 'query', 'allow', or 'deny'. Scope: 'all', 'consolidation', or 'capture'."
+    )]
+    async fn memory_consent(
+        &self,
+        #[tool(param)] action: Option<String>,
+        #[tool(param)] scope: Option<String>,
+    ) -> ToolResult {
+        crate::tools::memory_sovereignty::memory_consent(
+            &self.svc,
+            action.as_deref(),
+            scope.as_deref(),
+        )
+        .map_err(|e| fmt_err("memory_consent failed", e))
+    }
 }
 
 rmcp::tool_box!(MemoryMcpServer {
@@ -476,6 +531,10 @@ rmcp::tool_box!(MemoryMcpServer {
     memory_task_close,
     mem_export,
     mem_import,
+    memory_about,
+    memory_forget,
+    memory_auto_created,
+    memory_consent,
 } memory_tool_box);
 
 impl ServerHandler for MemoryMcpServer {

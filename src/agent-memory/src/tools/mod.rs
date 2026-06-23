@@ -21,6 +21,7 @@ pub mod memory_get_context;
 pub mod memory_import;
 pub mod memory_observe;
 pub mod memory_search;
+pub mod memory_sovereignty;
 pub mod memory_task;
 pub mod mkdir;
 pub mod promote;

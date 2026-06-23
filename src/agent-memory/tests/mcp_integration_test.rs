@@ -39,6 +39,10 @@ const EXPECTED_TOOLS: &[&str] = &[
     "memory_task_close",
     "mem_export",
     "mem_import",
+    "memory_about",
+    "memory_forget",
+    "memory_auto_created",
+    "memory_consent",
 ];
 
 async fn spawn_with_dir(

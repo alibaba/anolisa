@@ -292,10 +292,16 @@ impl Profile {
     /// `expert`-profile clients cannot bypass the filter by hard-coding
     /// a Tier B tool name.
     pub fn tool_visible(&self, tool_name: &str) -> bool {
-        // Tier B: structured API. Hidden on `expert`.
+        // Tier B: structured API + sovereignty tools with destructive capability.
+        // Hidden on `expert` profile.
         let tier_b = matches!(
             tool_name,
-            "memory_search" | "memory_observe" | "memory_get_context"
+            "memory_search"
+                | "memory_observe"
+                | "memory_get_context"
+                | "mem_consolidate"
+                | "memory_forget"
+                | "memory_consent"
         );
         if tier_b && *self == Profile::Expert {
             return false;
