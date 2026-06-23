@@ -355,6 +355,28 @@ fn apply_auto_approved_request_outcome<W: Write>(
     title: MessageId,
     output: &mut W,
 ) -> std::io::Result<AutoApprovalFlow> {
+    // DR-6: When hooks had something to say but the tool is auto-approved,
+    // render an independent hook notice panel before the tool call header
+    // so that the user is aware of the hook's intervention.
+    if !request.hook_warnings.is_empty() {
+        let mut body: Vec<String> = Vec::new();
+        for w in &request.hook_warnings {
+            let icon = hook_warning_icon(w.decision.as_deref());
+            body.push(format!("\u{2502} {icon} {}", w.hook_name));
+            for msg_line in w.message.lines() {
+                body.push(format!("\u{2502}   {msg_line}"));
+            }
+        }
+        let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
+        renderer.write_notice_panel(
+            output,
+            NoticePanelModel {
+                title: "Hook",
+                body,
+                footer: None,
+            },
+        )?;
+    }
     let outcome = approval_outcome_for_auto_request(request);
     if outcome == ApprovalOutcome::ProviderNativeShellFallback {
         mark_provider_native_shell_execution(state, request);

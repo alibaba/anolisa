@@ -29,7 +29,15 @@ pub struct ApprovalPanelModel<'a> {
     pub next_label: Option<&'a str>,
     pub selected_action: ApprovalPanelAction,
     pub expanded: bool,
-    pub hook_warnings: Vec<&'a str>,
+    pub hook_warnings: Vec<HookWarningView<'a>>,
+}
+
+/// View model for a single hook warning in the approval panel.
+#[derive(Debug, Clone)]
+pub struct HookWarningView<'a> {
+    pub hook_name: &'a str,
+    pub message: &'a str,
+    pub decision: Option<&'a str>,
 }
 
 impl RatatuiInlineRenderer {
@@ -88,7 +96,11 @@ impl RatatuiInlineRenderer {
                 command_request_heading(model.subject, i18n).to_string(),
             ];
             for warning in &model.hook_warnings {
-                lines.push(format!("\u{26a0} {warning}"));
+                let icon = hook_warning_icon(warning.decision);
+                lines.push(format!("\u{2502} {icon} {}", warning.hook_name));
+                for msg_line in warning.message.lines() {
+                    lines.push(format!("\u{2502}   {msg_line}"));
+                }
             }
             if let Some(reason) = model.reason {
                 lines.push(approval_reason_line(reason, i18n));
@@ -138,7 +150,11 @@ impl RatatuiInlineRenderer {
             ),
         ];
         for warning in &model.hook_warnings {
-            lines.push(format!("⚠ {warning}"));
+            let icon = hook_warning_icon(warning.decision);
+            lines.push(format!("\u{2502} {icon} {}", warning.hook_name));
+            for msg_line in warning.message.lines() {
+                lines.push(format!("\u{2502}   {msg_line}"));
+            }
         }
         lines.push(format!(
             "{}{}",
@@ -173,7 +189,9 @@ impl RatatuiInlineRenderer {
 
 fn approval_panel_height(model: &ApprovalPanelModel<'_>, width: u16) -> u16 {
     let content_width = approval_content_width(width);
-    let hook_warning_rows = model.hook_warnings.len() as u16;
+    let hook_warning_rows = model.hook_warnings.iter()
+        .map(|w| 1 + w.message.lines().count())  // 1 for hookName line + N message lines
+        .sum::<usize>() as u16;
     if is_command_approval_request(model) {
         let command_rows = command_preview_rows(
             model.preview,
@@ -263,7 +281,9 @@ fn render_approval_panel(
         .map(|reason| approval_reason_rows(reason, inner.width.saturating_sub(2) as usize, i18n))
         .unwrap_or_default();
     let reason_height = reason_rows.len() as u16;
-    let hook_warning_height = model.hook_warnings.len() as u16;
+    let hook_warning_height = model.hook_warnings.iter()
+        .map(|w| 1 + w.message.lines().count())
+        .sum::<usize>() as u16;
     let mut constraints = vec![
         Constraint::Length(1),
         Constraint::Length(hook_warning_height),
@@ -304,16 +324,29 @@ fn render_approval_panel(
     .render(chunks[0], buffer);
 
     if !model.hook_warnings.is_empty() {
-        let warning_lines: Vec<Line<'_>> = model
-            .hook_warnings
-            .iter()
-            .map(|w| {
-                Line::from(Span::styled(
-                    format!("⚠ {w}"),
-                    Style::default().fg(Color::Yellow),
-                ))
-            })
-            .collect();
+        let mut warning_lines: Vec<Line<'_>> = Vec::new();
+        for w in &model.hook_warnings {
+            let color = hook_warning_color(w.decision);
+            let icon = hook_warning_icon(w.decision);
+            // Line 1: colored left bar + icon + bold hookName
+            warning_lines.push(Line::from(vec![
+                Span::styled(
+                    format!("\u{2502} {icon} "),
+                    Style::default().fg(color),
+                ),
+                Span::styled(
+                    w.hook_name.to_string(),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            // Message lines: colored left bar + indented text, split on newlines
+            for msg_line in w.message.lines() {
+                warning_lines.push(Line::from(vec![
+                    Span::styled("\u{2502}   ", Style::default().fg(color)),
+                    Span::raw(msg_line.to_string()),
+                ]));
+            }
+        }
         Paragraph::new(Text::from(warning_lines)).render(chunks[1], buffer);
     }
 
@@ -415,7 +448,9 @@ fn render_command_tool_approval_panel(
         .reason
         .map(|reason| approval_reason_rows(reason, inner.width.saturating_sub(2) as usize, i18n))
         .unwrap_or_default();
-    let hook_warning_height = model.hook_warnings.len() as u16;
+    let hook_warning_height = model.hook_warnings.iter()
+        .map(|w| 1 + w.message.lines().count())
+        .sum::<usize>() as u16;
     let queue_height = u16::from(model.queue_total > 1);
     let mut constraints = vec![
         Constraint::Length(1),
@@ -443,16 +478,27 @@ fn render_command_tool_approval_panel(
     .render(chunks[0], buffer);
 
     if !model.hook_warnings.is_empty() {
-        let warning_lines: Vec<Line<'_>> = model
-            .hook_warnings
-            .iter()
-            .map(|w| {
-                Line::from(Span::styled(
-                    format!("⚠ {w}"),
-                    Style::default().fg(Color::Yellow),
-                ))
-            })
-            .collect();
+        let mut warning_lines: Vec<Line<'_>> = Vec::new();
+        for w in &model.hook_warnings {
+            let color = hook_warning_color(w.decision);
+            let icon = hook_warning_icon(w.decision);
+            warning_lines.push(Line::from(vec![
+                Span::styled(
+                    format!("\u{2502} {icon} "),
+                    Style::default().fg(color),
+                ),
+                Span::styled(
+                    w.hook_name.to_string(),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            for msg_line in w.message.lines() {
+                warning_lines.push(Line::from(vec![
+                    Span::styled("\u{2502}   ", Style::default().fg(color)),
+                    Span::raw(msg_line.to_string()),
+                ]));
+            }
+        }
         Paragraph::new(Text::from(warning_lines)).render(chunks[1], buffer);
     }
 
@@ -667,4 +713,26 @@ fn ellipsize_last_row(mut rows: Vec<String>, width: usize) -> Vec<String> {
         last.push_str(" ...");
     }
     rows
+}
+
+// ─── Hook warning decision-based styling ────────────────────────────
+
+/// Color for hook warnings in ratatui rendering, selected by decision.
+fn hook_warning_color(decision: Option<&str>) -> Color {
+    match decision {
+        Some("allow") | Some("approve") => Color::Green,
+        Some("ask") => Color::Yellow,
+        Some("block") | Some("deny") => Color::Red,
+        _ => Color::Yellow,
+    }
+}
+
+/// Decision icon for hook warnings.
+pub(crate) fn hook_warning_icon(decision: Option<&str>) -> &'static str {
+    match decision {
+        Some("allow") | Some("approve") => "\u{2713}",  // ✓
+        Some("ask") => "?",
+        Some("block") | Some("deny") => "\u{2717}",     // ✗
+        _ => "\u{2022}",                                // •
+    }
 }

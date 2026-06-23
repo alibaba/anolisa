@@ -440,6 +440,10 @@ pub enum AgentEvent {
         hook_name: String,
         message: String,
         tool_use_id: Option<String>,
+        /// Per-hook decision (allow/ask/block/deny). Only populated by CoshCore adapter;
+        /// other adapters leave this as None, preserving their existing behaviour.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decision: Option<String>,
     },
 }
 

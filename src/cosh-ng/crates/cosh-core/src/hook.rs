@@ -1282,32 +1282,9 @@ mod tests {
     #[tokio::test]
     async fn event_data_includes_skill_context_when_provided() {
         // hook 脚本反射 skill_context.file_path 到 additionalContext 验证透传。
-        let config = HooksConfig {
-            enabled: true,
-            disabled: vec![],
-            pre_tool_use: vec![HookDefinition {
-                command: r#"python3 -c 'import sys,json; d=json.load(sys.stdin); ctx=d.get("skill_context",{}); print(json.dumps({"hook_specific_output":{"additionalContext": ctx.get("file_path","none")}}))'"#.to_string(),
-                name: Some("skill-probe".to_string()),
-                matcher: Some("skill".to_string()),
-                timeout: Some(5000),
-                sequential: None,
-            }],
-            post_tool_use: vec![],
-            post_tool_use_failure: vec![],
-            user_prompt_submit: vec![],
-            session_start: vec![],
-            stop: vec![],
-            before_model: vec![],
-            after_model: vec![],
-        };
-        let sys = HookSystem::from_config(&config);
-        let skill_ctx = serde_json::json!({
-            "skill_name": "demo",
-            "file_path": "/skills/demo/SKILL.md",
-        });
         // PreToolUse 不会在 additional_context 里体现 hook 输出，改用
         // PostToolUse 路径验证（不同处理器但同样读 skill_context）。
-        let config2 = HooksConfig {
+        let config = HooksConfig {
             enabled: true,
             disabled: vec![],
             pre_tool_use: vec![],
@@ -1325,8 +1302,12 @@ mod tests {
             before_model: vec![],
             after_model: vec![],
         };
-        let sys2 = HookSystem::from_config(&config2);
-        let result = sys2
+        let sys = HookSystem::from_config(&config);
+        let skill_ctx = serde_json::json!({
+            "skill_name": "demo",
+            "file_path": "/skills/demo/SKILL.md",
+        });
+        let result = sys
             .fire_post_tool_use(
                 "s1",
                 "/tmp",
@@ -1341,6 +1322,5 @@ mod tests {
             result.additional_context.as_deref(),
             Some("/skills/demo/SKILL.md"),
         );
-        let _ = sys; // 避免 unused
     }
 }

@@ -92,6 +92,7 @@ pub(crate) fn render_active_agent_event<W: Write>(
         ref tool_use_id,
         ref hook_name,
         ref message,
+        ref decision,
         ..
     } = event
     {
@@ -101,6 +102,7 @@ pub(crate) fn render_active_agent_event<W: Write>(
                     tool_use_id: tool_use_id.clone(),
                     hook_name: hook_name.clone(),
                     message: message.clone(),
+                    decision: decision.clone(),
                 },
             );
             // Still record in governed_events for audit, but don't defer for rendering

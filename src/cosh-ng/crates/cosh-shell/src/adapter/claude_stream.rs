@@ -294,11 +294,16 @@ impl ClaudeStreamParser {
             .get("tool_use_id")
             .and_then(|v| v.as_str())
             .map(String::from);
+        let decision = value
+            .get("decision")
+            .and_then(|v| v.as_str())
+            .map(String::from);
         Some(AgentEvent::HookNotification {
             run_id: self.run_id.clone(),
             hook_name,
             message,
             tool_use_id,
+            decision,
         })
     }
 

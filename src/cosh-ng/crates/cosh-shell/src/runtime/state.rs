@@ -613,7 +613,17 @@ pub(crate) struct RuntimeApprovalRequest {
     pub(crate) redaction_status: Option<&'static str>,
     pub(crate) assessment: Option<RuntimeCommandAssessmentSummary>,
     pub(crate) hook_requires_approval: bool,
-    pub(crate) hook_warnings: Vec<String>,
+    pub(crate) hook_warnings: Vec<HookWarning>,
+}
+
+/// Structured hook warning carrying the hook identity, message, and decision.
+/// Only the CoshCore adapter populates `decision`;
+/// other adapters leave it as `None`, preserving their existing behaviour.
+#[derive(Debug, Clone)]
+pub(crate) struct HookWarning {
+    pub(crate) hook_name: String,
+    pub(crate) message: String,
+    pub(crate) decision: Option<String>,
 }
 
 #[derive(Debug, Clone)]

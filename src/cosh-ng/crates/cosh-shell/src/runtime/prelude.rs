@@ -61,9 +61,9 @@ pub(crate) use crate::ui::{
     approval_action_at, render_transcript, ActivityDetailsPanelModel, ActivityPanelModel,
     ActivityRowModel, AgentStatusAnimation, ApprovalDetailsPanelModel, ApprovalJournalEntryModel,
     ApprovalJournalPanelModel, ApprovalPanelAction, ApprovalPanelModel, ApprovalReceiptPanelModel,
-    CommandAssessmentSummaryModel, MarkdownStreamBlock, NoticePanelModel, QuestionAnswerPanelModel,
+    CommandAssessmentSummaryModel, HookWarningView, MarkdownStreamBlock, NoticePanelModel, QuestionAnswerPanelModel,
     QuestionPanelModel, RatatuiInlineRenderer, RecommendationActionPanelModel,
-    RecommendationPanelModel,
+    RecommendationPanelModel, hook_warning_icon,
 };
 
 #[cfg(test)]

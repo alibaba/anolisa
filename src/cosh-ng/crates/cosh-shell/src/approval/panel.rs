@@ -82,7 +82,11 @@ pub(crate) fn render_current_approval_request<W: Write>(
                 next_label: next_label.as_deref(),
                 selected_action,
                 expanded,
-                hook_warnings: request.hook_warnings.iter().map(|s| s.as_str()).collect(),
+                hook_warnings: request.hook_warnings.iter().map(|w| HookWarningView {
+                    hook_name: w.hook_name.as_str(),
+                    message: w.message.as_str(),
+                    decision: w.decision.as_deref(),
+                }).collect(),
             },
         )?;
     state.approvals.active_panel_id = Some(request.id.clone());

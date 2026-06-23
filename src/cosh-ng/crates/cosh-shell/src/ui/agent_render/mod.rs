@@ -31,7 +31,8 @@ pub use actions::{
     APPROVAL_PANEL_ACTIONS,
 };
 pub use activity::{ActivityDetailsPanelModel, ActivityPanelModel, ActivityRowModel};
-pub use approval::ApprovalPanelModel;
+pub use approval::{ApprovalPanelModel, HookWarningView};
+pub(crate) use approval::hook_warning_icon;
 pub use approval_details::{ApprovalDetailsPanelModel, CommandAssessmentSummaryModel};
 pub use approval_journal::{ApprovalJournalEntryModel, ApprovalJournalPanelModel};
 pub use approval_receipt::ApprovalReceiptPanelModel;

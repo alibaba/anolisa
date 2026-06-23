@@ -195,7 +195,7 @@ pub fn govern_agent_events_with_language(
                 GovernanceDecision::Display,
                 GovernancePolicyDecision::DisplayOnly,
                 "hook notification is display-only".to_string(),
-                format!("[{hook_name}] {message}"),
+                format!("{hook_name}: {message}"),
                 false,
             ),
         };

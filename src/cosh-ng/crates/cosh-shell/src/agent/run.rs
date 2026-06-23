@@ -37,6 +37,7 @@ pub(crate) struct PendingHookNotification {
     pub(crate) tool_use_id: Option<String>,
     pub(crate) hook_name: String,
     pub(crate) message: String,
+    pub(crate) decision: Option<String>,
 }
 
 #[derive(Debug, Clone)]
