@@ -681,13 +681,193 @@ fn display_command(cmd: &FrameworkCommand) -> String {
     s
 }
 
-/// True when `plugin_id` appears as a whole whitespace-delimited token on
-/// any line of `plugins list` output. Tolerant of decoration like
-/// `- tokenless (v1.2)`.
+/// True when `plugin_id` appears in the `plugins list` output.
+///
+/// Handles three output shapes:
+/// 1. Plain text — each line has whitespace-delimited tokens.
+/// 2. Rich table without wrapping — tokens appear between │ delimiters.
+/// 3. Rich table with wrapping — a cell value is split across
+///    consecutive physical lines within the same column.
+///
+/// ANSI escape codes are stripped before any matching.
 fn list_contains_plugin(stdout: &str, plugin_id: &str) -> bool {
-    stdout
-        .lines()
-        .any(|line| line.split_whitespace().any(|tok| tok == plugin_id))
+    let stripped = strip_ansi(stdout);
+
+    // Fast path: exact whitespace-token match on lines that are NOT
+    // table data lines. Table data lines (containing │/┃/║) must go
+    // through the table parser, because a wrapped cell fragment can
+    // look like a complete token on a single physical line.
+    if stripped.lines().any(|line| {
+        !line.contains(|c: char| is_cell_delimiter(c))
+            && line.split_whitespace().any(|tok| tok == plugin_id)
+    }) {
+        return true;
+    }
+
+    // Table-aware path: parse rows, concatenate wrapped cell text per
+    // column, then search each concatenated cell.
+    table_contains_token(&stripped, plugin_id)
+}
+
+/// Strip ANSI escape sequences (CSI and OSC) from `s`.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.peek() {
+                Some('[') => {
+                    chars.next();
+                    // CSI: consume until a final byte (0x40..=0x7E).
+                    for c in chars.by_ref() {
+                        if matches!(c, '\x40'..='\x7e') {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    chars.next();
+                    // OSC: consume until BEL or ST.
+                    for c in chars.by_ref() {
+                        if c == '\x07' {
+                            break;
+                        }
+                        if c == '\x1b' {
+                            if chars.peek() == Some(&'\\') {
+                                chars.next();
+                            }
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    chars.next();
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn is_cell_delimiter(c: char) -> bool {
+    matches!(c, '│' | '┃' | '║')
+}
+
+fn is_border_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    !trimmed.is_empty()
+        && trimmed.chars().all(|c| {
+            is_cell_delimiter(c)
+                || matches!(
+                    c,
+                    '─' | '━'
+                        | '═'
+                        | '┌'
+                        | '┐'
+                        | '└'
+                        | '┘'
+                        | '├'
+                        | '┤'
+                        | '┬'
+                        | '┴'
+                        | '┼'
+                        | '┏'
+                        | '┓'
+                        | '┗'
+                        | '┛'
+                        | '┣'
+                        | '┫'
+                        | '┳'
+                        | '┻'
+                        | '╋'
+                        | '┡'
+                        | '┩'
+                        | '╇'
+                        | '╔'
+                        | '╗'
+                        | '╚'
+                        | '╝'
+                        | '╠'
+                        | '╣'
+                        | '╦'
+                        | '╩'
+                        | '╬'
+                        | ' '
+                )
+        })
+}
+
+/// Extract cell text from a line delimited by │/┃/║. Returns `None`
+/// when the line has no cell delimiters (not a table data line).
+fn extract_cells(line: &str) -> Option<Vec<String>> {
+    let trimmed = line.trim();
+    if !trimmed.contains(|c: char| is_cell_delimiter(c)) {
+        return None;
+    }
+    let parts: Vec<&str> = trimmed.split(|c: char| is_cell_delimiter(c)).collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    // Skip the empty segments before the first and after the last │.
+    let cells: Vec<String> = parts[1..parts.len() - 1]
+        .iter()
+        .map(|cell| cell.trim().to_string())
+        .collect();
+    Some(cells)
+}
+
+/// Parse rich-table output into logical rows (merging physical
+/// continuation lines), then check whether any cell in any row
+/// matches `token` as a whitespace-delimited word.
+///
+/// A continuation line is detected by the *last* column being empty.
+/// In `plugins list` tables the last column is typically Status
+/// (`enabled`/`disabled`), which is always populated on the first
+/// physical line of a row but empty on continuation lines. This
+/// correctly handles the case where *both* Name and ID wrap.
+fn table_contains_token(text: &str, token: &str) -> bool {
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut current: Option<Vec<String>> = None;
+
+    for line in text.lines() {
+        if is_border_line(line) {
+            if let Some(cells) = current.take() {
+                rows.push(cells);
+            }
+            continue;
+        }
+
+        if let Some(cells) = extract_cells(line) {
+            let is_continuation = current.is_some() && cells.last().is_some_and(|c| c.is_empty());
+
+            if is_continuation {
+                if let Some(cur) = current.as_mut() {
+                    for (i, cell) in cells.into_iter().enumerate() {
+                        if i < cur.len() && !cell.is_empty() {
+                            cur[i].push_str(&cell);
+                        }
+                    }
+                }
+            } else {
+                if let Some(prev) = current.take() {
+                    rows.push(prev);
+                }
+                current = Some(cells);
+            }
+        }
+    }
+    if let Some(cells) = current {
+        rows.push(cells);
+    }
+
+    rows.iter().any(|row| {
+        row.iter().any(|cell| {
+            let trimmed = cell.trim();
+            trimmed == token || trimmed.split_whitespace().any(|t| t == token)
+        })
+    })
 }
 
 /// Extract the validated plugin id from a claim's `FrameworkPlugin`
@@ -886,6 +1066,123 @@ mod tests {
         assert!(list_contains_plugin("- tokenless (v1.2)\n", "tokenless"));
         assert!(!list_contains_plugin("tokenless-extra\n", "tokenless"));
         assert!(!list_contains_plugin("", "tokenless"));
+    }
+
+    #[test]
+    fn list_contains_plugin_strips_ansi() {
+        let ansi_output = "\x1b[1m\x1b[32magent-sec\x1b[0m\nother\n";
+        assert!(list_contains_plugin(ansi_output, "agent-sec"));
+        assert!(!list_contains_plugin(ansi_output, "not-here"));
+    }
+
+    #[test]
+    fn list_contains_plugin_rich_table_no_wrap() {
+        let table = "\
+┏━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━┓
+┃ Name               ┃ ID          ┃ Status  ┃
+┡━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━┩
+│ Agent Security     │ agent-sec   │ enabled │
+└────────────────────┴─────────────┴─────────┘
+";
+        assert!(list_contains_plugin(table, "agent-sec"));
+        assert!(!list_contains_plugin(table, "not-here"));
+        assert!(!list_contains_plugin(table, "agent-sec-extra"));
+    }
+
+    #[test]
+    fn list_contains_plugin_rich_table_wrapped() {
+        let table = "\
+┏━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┓
+┃ Name            ┃ ID                ┃ Status  ┃
+┡━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━┩
+│ Agent Security  │ agent-sec-core-op │ enabled │
+│                 │ enclaw-plugin     │         │
+└─────────────────┴───────────────────┴─────────┘
+";
+        assert!(list_contains_plugin(
+            table,
+            "agent-sec-core-openclaw-plugin"
+        ));
+        assert!(!list_contains_plugin(table, "agent-sec"));
+    }
+
+    #[test]
+    fn list_contains_plugin_rich_table_ansi_wrapped() {
+        let table = "\
+\x1b[1m┏━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┓\x1b[0m
+\x1b[1m┃\x1b[0m Name            \x1b[1m┃\x1b[0m ID                \x1b[1m┃\x1b[0m Status  \x1b[1m┃\x1b[0m
+\x1b[1m┡━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━┩\x1b[0m
+│ Agent Security  │ agent-sec-core-op │ enabled │
+│                 │ enclaw-plugin     │         │
+\x1b[1m└─────────────────┴───────────────────┴─────────┘\x1b[0m
+";
+        assert!(list_contains_plugin(
+            table,
+            "agent-sec-core-openclaw-plugin"
+        ));
+    }
+
+    #[test]
+    fn strip_ansi_removes_sgr_and_osc() {
+        assert_eq!(strip_ansi("\x1b[1mbold\x1b[0m"), "bold");
+        assert_eq!(strip_ansi("\x1b[32mgreen\x1b[0m text"), "green text");
+        assert_eq!(strip_ansi("no escapes here"), "no escapes here");
+    }
+
+    #[test]
+    fn is_border_line_identifies_borders() {
+        assert!(is_border_line("┏━━━━━━━━━━━━━━━━━┳━━━━━━━━━┓"));
+        assert!(is_border_line("├──────┼──────────┤"));
+        assert!(is_border_line("└──────┴──────────┘"));
+        assert!(!is_border_line("│ agent-sec │ enabled │"));
+        assert!(!is_border_line("plain text"));
+        assert!(!is_border_line(""));
+    }
+
+    #[test]
+    fn extract_cells_splits_data_line() {
+        let cells = extract_cells("│ agent-sec   │ enabled │").unwrap();
+        assert_eq!(cells, vec!["agent-sec", "enabled"]);
+    }
+
+    #[test]
+    fn extract_cells_returns_none_for_plain_text() {
+        assert!(extract_cells("plain text").is_none());
+    }
+
+    #[test]
+    fn list_contains_plugin_rich_table_name_and_id_both_wrap() {
+        let table = "\
+┏━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┓
+┃ Name            ┃ ID                ┃ Status  ┃
+┡━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━┩
+│ Agent Security  │ agent-sec-core-op │ enabled │
+│ Core Plugin     │ enclaw-plugin     │         │
+└─────────────────┴───────────────────┴─────────┘
+";
+        assert!(list_contains_plugin(
+            table,
+            "agent-sec-core-openclaw-plugin"
+        ));
+        assert!(!list_contains_plugin(table, "agent-sec-core-op"));
+    }
+
+    #[test]
+    fn list_contains_plugin_no_false_positive_across_rows() {
+        let table = "\
+┏━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┓
+┃ Name            ┃ ID                ┃ Status  ┃
+┡━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━┩
+│ Plugin A        │ agent-sec-core-op │ enabled │
+│ Plugin B        │ enclaw-plugin     │ enabled │
+└─────────────────┴───────────────────┴─────────┘
+";
+        assert!(
+            !list_contains_plugin(table, "agent-sec-core-openclaw-plugin"),
+            "must not merge IDs from independent rows into a false match"
+        );
+        assert!(list_contains_plugin(table, "agent-sec-core-op"));
+        assert!(list_contains_plugin(table, "enclaw-plugin"));
     }
 
     #[test]

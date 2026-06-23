@@ -10,9 +10,10 @@
 //! [`AdapterOps::remove_tree`](super::driver::AdapterOps::remove_tree).
 //! Skill directories discovered under `<resource_root>/skills/` are
 //! copied into `$HERMES_HOME/skills/` during enable. Status uses the
-//! read-only `hermes plugins list`. All CLI and filesystem operations go
-//! through the Manager's [`AdapterOps`](super::driver::AdapterOps) —
-//! the driver never performs direct IO.
+//! read-only `hermes plugins list --plain --no-bundled`. All CLI and
+//! filesystem operations go through the Manager's
+//! [`AdapterOps`](super::driver::AdapterOps) — the driver never
+//! performs direct IO.
 //!
 //! The CLI env contract: `HERMES_BIN` overrides the executable (used by
 //! tests to point at a fake CLI); `HERMES_HOME` overrides the home
@@ -545,9 +546,18 @@ fn build_disable_cmd(plugin_id: &str) -> FrameworkCommand {
     ])
 }
 
-/// Build the read-only `hermes plugins list`.
+/// Build the read-only `hermes plugins list --plain --no-bundled`.
+///
+/// `--plain` avoids rich table formatting that breaks token-based
+/// parsing. `--no-bundled` excludes built-in plugins so the output
+/// reflects only explicitly installed entries.
 fn build_list_cmd() -> FrameworkCommand {
-    base_cmd(vec!["plugins".to_string(), "list".to_string()])
+    base_cmd(vec![
+        "plugins".to_string(),
+        "list".to_string(),
+        "--plain".to_string(),
+        "--no-bundled".to_string(),
+    ])
 }
 
 /// Plugin id declared by a Hermes-native manifest, when present.
@@ -839,6 +849,21 @@ mod tests {
         assert!(list_contains_plugin("- agent-sec (v1.2)\n", "agent-sec"));
         assert!(!list_contains_plugin("agent-sec-extra\n", "agent-sec"));
         assert!(!list_contains_plugin("", "agent-sec"));
+    }
+
+    #[test]
+    fn list_contains_plugin_plain_output() {
+        let plain = "agent-sec-core-hermes-plugin\nanother-plugin\n";
+        assert!(list_contains_plugin(plain, "agent-sec-core-hermes-plugin"));
+        assert!(list_contains_plugin(plain, "another-plugin"));
+        assert!(!list_contains_plugin(plain, "not-here"));
+    }
+
+    #[test]
+    fn list_cmd_uses_plain_and_no_bundled() {
+        let cmd = build_list_cmd();
+        assert_eq!(cmd.program, "hermes");
+        assert_eq!(cmd.args, vec!["plugins", "list", "--plain", "--no-bundled"]);
     }
 
     #[test]
