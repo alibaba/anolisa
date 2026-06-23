@@ -277,8 +277,33 @@ impl MemoryService {
 
         let session_id = session.sid().as_str();
 
+        // Quality filter: check mutual exclusion BEFORE running heuristics
+        // to avoid wasted I/O and CPU.
+        let manual_count = entries
+            .iter()
+            .filter(|e| e.tool == "memory_observe")
+            .count();
+        if crate::consolidation::quality::should_skip_consolidation(manual_count) {
+            tracing::info!(
+                "skipping consolidation: session {session_id} has {manual_count} manual observations"
+            );
+            return 0;
+        }
+
         // Convert to OwnedAuditEntry for heuristics.
-        let facts = run_consolidation_owned(&entries, session_id, config);
+        let mut facts = run_consolidation_owned(&entries, session_id, config);
+
+        // Quality filter: remove derivable facts and normalize dates
+        let before = facts.len();
+        facts.retain(|f| !crate::consolidation::quality::is_derivable(&f.content));
+        facts.iter_mut().for_each(|f| {
+            f.content = crate::consolidation::quality::normalize_relative_dates(&f.content);
+        });
+        let filtered = before - facts.len();
+        if filtered > 0 {
+            tracing::debug!("filtered {filtered} derivable facts");
+        }
+
         if facts.is_empty() {
             tracing::debug!("consolidation produced no facts for session {session_id}");
             return 0;

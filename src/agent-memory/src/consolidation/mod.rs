@@ -6,6 +6,7 @@
 
 pub mod fact;
 pub mod heuristics;
+pub mod quality;
 pub mod writer;
 
 pub use fact::{ConsolidatedFact, FactCategory};
