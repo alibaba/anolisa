@@ -243,7 +243,9 @@ fn strip_func_arg<'a>(expr: &'a str, func_name: &str) -> Option<&'a str> {
 /// Strip surrounding single or double quotes from a string.
 fn unquote(s: &str) -> &str {
     let s = s.trim();
-    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
+    if s.len() >= 2
+        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
+    {
         &s[1..s.len() - 1]
     } else {
         s
@@ -598,6 +600,45 @@ mod tests {
         let env = env_darwin_uv();
         assert!(evaluate_expr("os != linux", &env));
         assert!(!evaluate_expr("os != darwin", &env));
+    }
+
+    #[test]
+    fn test_unquote_single_char_no_panic() {
+        assert_eq!(unquote("\""), "\"");
+        assert_eq!(unquote("'"), "'");
+        assert_eq!(unquote(""), "");
+    }
+
+    #[test]
+    fn test_unquote_matched_pair() {
+        assert_eq!(unquote("\"x\""), "x");
+        assert_eq!(unquote("'x'"), "x");
+        assert_eq!(unquote("\"\""), "");
+        assert_eq!(unquote("''"), "");
+    }
+
+    #[test]
+    fn test_unquote_mismatched_quotes() {
+        assert_eq!(unquote("\"x'"), "\"x'");
+        assert_eq!(unquote("'x\""), "'x\"");
+    }
+
+    #[test]
+    fn test_compile_malformed_directives_never_panic() {
+        let env = env_linux_no_uv();
+        let cases = [
+            "<!-- @if has_command(\") -->\nA\n<!-- @endif -->",
+            "<!-- @if os == \" -->\nA\n<!-- @endif -->",
+            "<!-- @if os == ' -->\nA\n<!-- @endif -->",
+            "<!-- @if has_command(\")\") -->\nA\n<!-- @endif -->",
+            "<!-- @if has_command(\"\") -->\nA\n<!-- @endif -->",
+            "<!-- @if has_command('') -->\nA\n<!-- @endif -->",
+            "<!-- @if has_command(') -->\nA\n<!-- @endif -->",
+            "<!-- @if os == -->\nA\n<!-- @endif -->",
+        ];
+        for input in cases {
+            let _ = compile(input, &env);
+        }
     }
 
     #[test]

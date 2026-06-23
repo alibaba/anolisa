@@ -79,12 +79,13 @@ pub fn is_reserved_lifecycle_name(name: &str) -> bool {
 /// the canonical constant from this module so callers can include it in
 /// audit detail without copying.
 pub fn classify_skill_name(skill_name: &str) -> LifecycleNameClass {
-    for reserved in LIFECYCLE_RESERVED_NAMES {
-        if *reserved == skill_name {
-            return LifecycleNameClass::Reserved(reserved);
-        }
+    match skill_name {
+        LIFECYCLE_STAGING => LifecycleNameClass::Reserved(LIFECYCLE_STAGING),
+        LIFECYCLE_CERTIFIED => LifecycleNameClass::Reserved(LIFECYCLE_CERTIFIED),
+        LIFECYCLE_QUARANTINE => LifecycleNameClass::Reserved(LIFECYCLE_QUARANTINE),
+        LIFECYCLE_ARCHIVE => LifecycleNameClass::Reserved(LIFECYCLE_ARCHIVE),
+        _ => LifecycleNameClass::Ordinary,
     }
-    LifecycleNameClass::Ordinary
 }
 
 /// Caller-facing view of lifecycle reservations (Package S3.1 contract).
@@ -251,6 +252,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::explicit_auto_deref)]
     fn matches_each_reserved_name() {
         for reserved in LIFECYCLE_RESERVED_NAMES {
             assert!(
@@ -260,7 +262,7 @@ mod tests {
             );
             assert_eq!(
                 classify_skill_name(reserved),
-                LifecycleNameClass::Reserved(reserved)
+                LifecycleNameClass::Reserved(*reserved)
             );
         }
     }
@@ -329,10 +331,9 @@ mod tests {
     }
 
     #[test]
-    fn classify_returns_reserved_name_value() {
-        // The Reserved variant carries a stable reserved name value. Tests
-        // avoid pointer identity because string literal interning is not a
-        // portable public contract across toolchains.
+    fn classify_returns_canonical_static_string() {
+        // The Reserved variant carries the canonical lifecycle value for
+        // audit details rather than the caller-provided spelling.
         match classify_skill_name(".staging") {
             LifecycleNameClass::Reserved(name) => {
                 assert_eq!(name, LIFECYCLE_STAGING);
@@ -449,7 +450,6 @@ mod tests {
                 ),
             }
         }
-        // The staging value round-trips through the mode-aware API.
         match classify_skill_name_with_mode(LIFECYCLE_STAGING, LifecycleViewMode::Ordinary) {
             LifecycleAccess::Hidden(name) => assert_eq!(name, LIFECYCLE_STAGING),
             other => panic!("expected Hidden, got {:?}", other),

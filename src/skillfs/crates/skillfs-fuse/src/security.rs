@@ -36,6 +36,37 @@
 //!   roots. S3.1 only ships the contract: no FUSE callback selects
 //!   [`lifecycle::LifecycleViewMode::Management`] today, and no CLI flag
 //!   turns it on. Default mount behavior is exactly S3.
+//! * [`ledger::LedgerAdapter`] /
+//!   [`ledger::CliLedgerAdapter`] /
+//!   [`ledger::DecisionCommand`] /
+//!   [`ledger::LedgerResolveResult`] — contract for the external
+//!   decision provider. [`ledger::DecisionCommand`] parses the
+//!   operator-supplied `--decision-command <COMMAND>` value into
+//!   `program + fixed_args`; the adapter then drives
+//!   `<command> scan <skill_dir> --json` followed by
+//!   `<command> resolve <skill_dir> --json`. Only `resolve` JSON is
+//!   strictly validated. A [`ledger::StaticLedgerAdapter`] is exported
+//!   for tests so no subprocess is needed.
+//! * [`active::ActiveSkillResolver`] /
+//!   [`active::ActiveTarget`] — D1.0 in-memory mapping that turns a
+//!   parsed [`ledger::LedgerResolveResult`] into the runtime entry point
+//!   `/skills/<skill>` should expose (current / snapshot / hidden).
+//!   Default mount behavior is unchanged: no FUSE callback consults the
+//!   resolver yet, but the type is exported so a future hook handler can
+//!   wire it without touching POSIX or compiled `SKILL.md` paths.
+//! * [`trusted_writer::TrustedWriterConfig`] /
+//!   [`trusted_writer::ProcessIdentityResolver`] /
+//!   [`trusted_writer::evaluate_trusted_writer`] — trusted writer
+//!   process gate with starttime verification. Default disabled. When
+//!   the operator passes `--trusted-writer <NAME>` the gate compares
+//!   the configured name against the FUSE caller thread's process
+//!   `comm` (TID -> TGID via `/proc/<pid>/status`, then
+//!   `/proc/<tgid>/comm`) and verifies starttime to defend against
+//!   PID reuse. On match, allows the otherwise-denied
+//!   `.skill-meta/**` mutation. The bypass is strictly scoped to
+//!   `.skill-meta/**` writes; it does not relax lifecycle
+//!   reservation, virtual paths, `skill-discover`, or any other
+//!   policy.
 //! * [`drift_runtime`] — Package W1 runtime adapter that turns
 //!   [`skillfs_core::watcher::SkillEvent`] notifications into
 //!   [`drift::DriftEvent`] records and emits them through an injected
@@ -57,19 +88,46 @@
 //! existing `skillfs-core::watcher` to the W0 drift observer so out-of-band
 //! source changes can surface as `SourceChanged` audit records.
 
+pub mod activation;
+pub mod activation_reload;
+pub mod activation_watcher;
+pub mod active;
 pub mod audit;
+pub mod backing_root;
+pub mod config;
 pub mod drift;
 pub mod drift_runtime;
 pub mod event;
+pub mod event_stream;
+pub mod inbox;
+pub mod ledger;
 pub mod lifecycle;
 pub mod mode;
+pub mod notify;
 pub mod path;
 pub mod policy;
+pub mod protocol_events;
+pub mod refresh;
+pub mod trusted_writer;
 
+pub use activation::{
+    ACTIVATION_FILE, ACTIVATION_SCHEMA_VERSION, ACTIVATION_XATTR, ActivationError, ActivationMode,
+    ActivationRecord, XattrReadOutcome, bootstrap_activation, classify_xattr_errno,
+    fail_safe_hidden, load_activation, load_activation_prefer_xattr, read_activation_xattr,
+    resolve_activation,
+};
+pub use activation_reload::{
+    ActivationFreshness, ActivationReloadController, DEFAULT_RELOAD_INTERVAL_MS,
+    DEFAULT_RELOAD_TIMEOUT_MS, ReloadMode, ReloadOutcome,
+};
+pub use activation_watcher::{ActivationWatcher, DEFAULT_WATCHER_INTERVAL_MS, WatcherRegistrar};
+pub use active::{ActiveMappingError, ActiveResolverError, ActiveSkillResolver, ActiveTarget};
 pub use audit::{
     AuditConfig, AuditPathError, AuditRuntimeConfig, DEFAULT_AUDIT_QUEUE_CAPACITY,
     JsonlFileAuditSink, event_action_str, event_kind_str, event_to_json, serialize_event_jsonl,
 };
+pub use backing_root::{BackingRootError, LedgerBackingRoot};
+pub use config::{ConfigError, SecurityConfig};
 pub use drift::{
     DriftChangeKind, DriftEvent, DriftScope, SourceDriftObserver, classify_drift_path,
 };
@@ -79,6 +137,20 @@ pub use drift_runtime::{
 pub use event::{
     InMemoryEventSink, NoopEventSink, SkillEvent, SkillEventAction, SkillEventKind, SkillEventSink,
 };
+pub use event_stream::{
+    DEFAULT_EVENT_QUEUE_CAPACITY, InMemorySecurityEventWriter, JsonlSecurityEventWriter,
+    NoopSecurityEventWriter, SecurityEvent, SecurityEventSink, SecurityEventWriter,
+    resolve_events_path,
+};
+pub use inbox::{
+    INBOX_DIR_NAME, INBOX_SKILL_NAME_MAX_LEN, INSTALL_COMPLETE_SENTINEL, is_inbox_dir_name,
+    is_install_complete_path, is_valid_inbox_skill_name,
+};
+pub use ledger::{
+    CliLedgerAdapter, DecisionCommand, LEDGER_SCHEMA_VERSION, LEDGER_SNAPSHOT_PREFIX,
+    LedgerAdapter, LedgerDecision, LedgerError, LedgerResolveResult, LedgerStatus,
+    LedgerTargetKind, MAX_SKILL_NAME_LEN, StaticAdapterCall, StaticLedgerAdapter,
+};
 pub use lifecycle::{
     LIFECYCLE_ARCHIVE, LIFECYCLE_CERTIFIED, LIFECYCLE_QUARANTINE, LIFECYCLE_RESERVED_NAMES,
     LIFECYCLE_STAGING, LifecycleAccess, LifecycleNameClass, LifecycleViewMode,
@@ -87,10 +159,58 @@ pub use lifecycle::{
     is_lifecycle_name_mutable, is_lifecycle_name_visible, is_reserved_lifecycle_name,
 };
 pub use mode::{SecurityModeConfig, SecurityModeError};
+pub use notify::{
+    CapturedNotify, DEFAULT_NOTIFY_DEBOUNCE_MS, DEFAULT_NOTIFY_TIMEOUT_MS, FailingNotifyClient,
+    InMemoryNotifyClient, MAX_NOTIFY_PATHS, NOTIFY_METHOD, NOTIFY_SCHEMA_VERSION, NoopNotifyClient,
+    NotifyChangeEvent, NotifyClient, NotifyController, NotifyError, NotifyEventKind, NotifyParams,
+    UnixSocketNotifyClient,
+};
 pub use path::{SKILL_META_DIR, is_skill_meta_path};
 pub use policy::{
     PathPolicy, PermissivePolicy, PolicyDecision, SecurityPolicy, SkillMetaProtectionPolicy,
 };
+pub use protocol_events::{
+    DEFAULT_PROTOCOL_EVENT_QUEUE_CAPACITY, InMemoryProtocolEventWriter, JsonlProtocolEventWriter,
+    NoopProtocolEventWriter, PROTOCOL_EVENT_SCHEMA_VERSION, ProtocolEvent, ProtocolEventWriter,
+    ProtocolEventsPathError, resolve_protocol_events_path, serialize_protocol_event,
+    validate_protocol_events_path_outside_source,
+};
+pub use refresh::{
+    DEFAULT_REFRESH_DEBOUNCE_MS, FailedResolveBehavior, MutationKind, RefreshController,
+    RefreshObservation,
+};
+pub use trusted_writer::{
+    FileId, LinuxProcCommResolver, ProcessIdentity, ProcessIdentityResolver, TrustedWriterConfig,
+    TrustedWriterDecision, default_identity_resolver, evaluate_trusted_writer, read_comm_file,
+};
+
+// Deprecated compat aliases — remove in next major version.
+#[deprecated(note = "renamed to RefreshController")]
+pub type DemoRefreshController = RefreshController;
+#[deprecated(note = "renamed to RefreshObservation")]
+pub type DemoRefreshObservation = RefreshObservation;
+#[deprecated(note = "renamed to MutationKind")]
+pub type DemoMutationKind = MutationKind;
+#[deprecated(note = "renamed to SecurityEvent")]
+pub type DemoEvent = SecurityEvent;
+#[deprecated(note = "renamed to SecurityEventWriter")]
+pub type DemoEventWriter = dyn SecurityEventWriter;
+#[deprecated(note = "renamed to SecurityEventSink")]
+pub type DemoEventSink = dyn SecurityEventWriter;
+#[deprecated(note = "renamed to JsonlSecurityEventWriter")]
+pub type JsonlDemoEventWriter = JsonlSecurityEventWriter;
+#[deprecated(note = "renamed to NoopSecurityEventWriter")]
+pub type NoopDemoEventWriter = NoopSecurityEventWriter;
+#[deprecated(note = "renamed to InMemorySecurityEventWriter")]
+pub type InMemoryDemoEventWriter = InMemorySecurityEventWriter;
+#[deprecated(note = "renamed to DEFAULT_EVENT_QUEUE_CAPACITY")]
+pub const DEFAULT_DEMO_EVENT_QUEUE_CAPACITY: usize = DEFAULT_EVENT_QUEUE_CAPACITY;
+#[deprecated(note = "renamed to DEFAULT_REFRESH_DEBOUNCE_MS")]
+pub const DEFAULT_DEMO_REFRESH_DEBOUNCE_MS: u64 = DEFAULT_REFRESH_DEBOUNCE_MS;
+#[deprecated(note = "renamed to resolve_events_path")]
+pub fn resolve_demo_events_path(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    resolve_events_path(path)
+}
 
 #[cfg(test)]
 mod tests {

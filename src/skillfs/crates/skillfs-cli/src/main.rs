@@ -8,9 +8,16 @@ use skillfs_core::store::SkillStore;
 use skillfs_core::views::ViewsConfig;
 use skillfs_core::{ParseConfig, SharedSkillStore};
 use skillfs_fuse::security::{
-    AuditRuntimeConfig, SecurityModeConfig, SourceDriftObserver, spawn_drift_watcher,
+    ActivationMode, ActivationReloadController, ActivationWatcher, ActiveSkillResolver,
+    AuditRuntimeConfig, CliLedgerAdapter, DEFAULT_NOTIFY_DEBOUNCE_MS, DEFAULT_NOTIFY_TIMEOUT_MS,
+    DEFAULT_RELOAD_INTERVAL_MS, DEFAULT_RELOAD_TIMEOUT_MS, DecisionCommand,
+    JsonlProtocolEventWriter, JsonlSecurityEventWriter, LedgerAdapter, LedgerBackingRoot,
+    NoopProtocolEventWriter, NoopSecurityEventWriter, NotifyController, ProtocolEventWriter,
+    RefreshController, ReloadMode, SecurityConfig, SecurityEventWriter, SecurityModeConfig,
+    SourceDriftObserver, TrustedWriterConfig, UnixSocketNotifyClient, bootstrap_activation,
+    resolve_events_path, resolve_protocol_events_path, spawn_drift_watcher,
 };
-use skillfs_fuse::{FuseError as FuseErr, MountOptions, mount_with_security};
+use skillfs_fuse::{FuseError as FuseErr, MountConfig, MountOptions, mount_configured};
 use tokio::signal;
 use tracing::{error, info, warn};
 
@@ -38,6 +45,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Mount the SkillFS virtual filesystem
     Mount {
@@ -90,6 +98,102 @@ enum Commands {
         /// bypass SkillFS entirely.
         #[arg(long)]
         security_mode: bool,
+
+        /// External decision-provider command prefix. Either a single
+        /// binary like `/usr/local/bin/xxx-cli`, or a whitespace-split
+        /// command prefix like `agent-sec-cli skill-ledger`. The first
+        /// token is the executable; subsequent tokens are fixed
+        /// arguments. SkillFS appends `scan <skill_dir> --json` and
+        /// `resolve <skill_dir> --json` per call and spawns the
+        /// program directly (no shell, no quoting). Required when
+        /// `--security` is set; empty or whitespace-only values are
+        /// rejected at startup.
+        #[arg(long, value_name = "COMMAND")]
+        decision_command: Option<String>,
+
+        /// Enable the security pipeline. When set, the mount wires the
+        /// active skill resolver and a debounced scan-then-resolve
+        /// refresh controller against `--decision-command`. Without
+        /// this flag the mount falls back to passthrough behavior.
+        #[arg(long)]
+        security: bool,
+
+        /// Path to the security events JSONL output. Only meaningful
+        /// with `--security`; an unopenable path is a startup error.
+        #[arg(long, value_name = "PATH")]
+        events_log: Option<PathBuf>,
+
+        /// [DEPRECATED / compatibility] Trusted writer process-name
+        /// gate. Matches the FUSE caller's process `comm` via
+        /// `/proc/<tgid>/comm`. Process `comm` can be spoofed via
+        /// `prctl(PR_SET_NAME)` or by exec'ing a same-basename
+        /// binary; NOT production-strength. Use
+        /// `--trusted-writer-exe` instead.
+        #[arg(long, value_name = "NAME")]
+        trusted_writer: Option<String>,
+
+        /// [RECOMMENDED] Trusted writer executable identity gate.
+        /// Matches the FUSE caller's `/proc/<tgid>/exe` readlink
+        /// against the configured canonical path and on-disk file
+        /// identity `(dev, ino)`. Resistant to process-name spoofing.
+        /// Requires Linux. The path must exist and be a regular file.
+        #[arg(long, value_name = "PATH")]
+        trusted_writer_exe: Option<PathBuf>,
+
+        /// Path to a TOML configuration file for security settings.
+        /// CLI flags override values from the config file.
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+
+        /// Activation file consumption mode. When set to `file`, SkillFS
+        /// reads `<skill_dir>/.skill-meta/activation.json` at startup to
+        /// populate the active-skill resolver. When set to `off` (the
+        /// default), the existing `--decision-command` path is unchanged.
+        /// Requires `--security`. Mutually exclusive with
+        /// `--decision-command`.
+        #[arg(long, value_name = "MODE")]
+        activation_mode: Option<String>,
+
+        /// Unix domain socket path for the N2 notify change client.
+        /// When set, SkillFS sends `skill_ledger.skillfs_notify_change`
+        /// notifications to the external daemon after debounced FUSE
+        /// mutations. The daemon owns scan, reconcile, and activation
+        /// refresh. Requires `--security --activation-mode file`.
+        /// Mutually exclusive with `--decision-command`.
+        #[arg(long, value_name = "PATH")]
+        notify_socket: Option<PathBuf>,
+
+        /// Path to the N3 activation protocol event log (JSONL).
+        /// When set, SkillFS writes an append-only JSONL line for each
+        /// debounced FUSE mutation that passes notify filtering. The
+        /// log is a reconcile aid for the daemon; write failures only
+        /// warn and never affect FUSE or the notify client.
+        /// Requires `--security --activation-mode file`.
+        /// Mutually exclusive with `--decision-command`.
+        #[arg(long, value_name = "PATH")]
+        activation_events_log: Option<PathBuf>,
+
+        /// A3: Runtime activation reload mode. When set to `poll`,
+        /// SkillFS re-reads activation.json / xattr after each debounced
+        /// notify send and updates the active-skill resolver without
+        /// requiring a remount. Default `off`.
+        /// Requires `--security --activation-mode file`.
+        #[arg(long, value_name = "MODE")]
+        activation_reload_mode: Option<String>,
+
+        /// A6/B1: Private source-side work path for the external security
+        /// daemon. When set, all daemon-facing operations (notify skillDir,
+        /// activation bootstrap, activation reload, startup reconcile,
+        /// activation watcher) use this path instead of the source path.
+        /// In in-place mounts, SkillFS creates a bind mount from the
+        /// source to this path before the FUSE over-mount so the daemon
+        /// can scan the live source tree. Fail-closed: unsafe backing
+        /// root (world-writable, inside mount path, wrong owner) rejects
+        /// startup.
+        /// Requires `--security --activation-mode file`.
+        /// Mutually exclusive with `--decision-command`.
+        #[arg(long, value_name = "PATH")]
+        ledger_backing_root: Option<PathBuf>,
     },
 
     /// Generate or update skillfs-views.toml from a skill directory
@@ -218,6 +322,17 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             audit_log,
             audit_queue_capacity,
             security_mode,
+            decision_command,
+            security,
+            events_log,
+            trusted_writer,
+            trusted_writer_exe,
+            config,
+            activation_mode,
+            notify_socket,
+            activation_events_log,
+            activation_reload_mode,
+            ledger_backing_root,
         } => {
             cmd_mount(
                 source,
@@ -228,6 +343,17 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 audit_log,
                 audit_queue_capacity,
                 security_mode,
+                decision_command,
+                security,
+                events_log,
+                trusted_writer,
+                trusted_writer_exe,
+                config,
+                activation_mode,
+                notify_socket,
+                activation_events_log,
+                activation_reload_mode,
+                ledger_backing_root,
             )
             .await
         }
@@ -266,8 +392,304 @@ async fn cmd_mount(
     audit_log: Option<PathBuf>,
     audit_queue_capacity: usize,
     security_mode: bool,
+    decision_command: Option<String>,
+    security: bool,
+    events_log: Option<PathBuf>,
+    trusted_writer: Option<String>,
+    trusted_writer_exe: Option<PathBuf>,
+    config_path: Option<PathBuf>,
+    activation_mode_raw: Option<String>,
+    notify_socket: Option<PathBuf>,
+    activation_events_log: Option<PathBuf>,
+    activation_reload_mode_raw: Option<String>,
+    ledger_backing_root: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!(source = %source.display(), mountpoint = %mountpoint.display(), security_mode, "mounting SkillFS");
+
+    // Load TOML config if --config is set. CLI flags override config values.
+    let file_config = match config_path {
+        Some(ref p) => {
+            let cfg = SecurityConfig::load(p)
+                .map_err(|e| format!("failed to load config '{}': {e}", p.display()))?;
+            info!(path = %p.display(), "loaded security config");
+            Some(cfg)
+        }
+        None => None,
+    };
+
+    // Parse activation mode: CLI flag (if present) overrides config file.
+    let activation_mode = match activation_mode_raw.as_deref() {
+        Some(raw) => ActivationMode::parse(raw)
+            .ok_or_else(|| format!("invalid --activation-mode '{raw}'; allowed: off, file"))?,
+        None => file_config
+            .as_ref()
+            .map(|c| c.activation_mode())
+            .unwrap_or_default(),
+    };
+
+    // Parse reload mode: CLI flag (if present) overrides config file.
+    let reload_mode = match activation_reload_mode_raw.as_deref() {
+        Some(raw) => ReloadMode::parse(raw).ok_or_else(|| {
+            format!("invalid --activation-reload-mode '{raw}'; allowed: off, poll")
+        })?,
+        None => file_config
+            .as_ref()
+            .map(|c| c.reload_mode())
+            .unwrap_or_default(),
+    };
+    let reload_interval_ms = file_config
+        .as_ref()
+        .and_then(|c| c.reload_interval_ms())
+        .unwrap_or(DEFAULT_RELOAD_INTERVAL_MS);
+    let reload_timeout_ms = file_config
+        .as_ref()
+        .and_then(|c| c.reload_timeout_ms())
+        .unwrap_or(DEFAULT_RELOAD_TIMEOUT_MS);
+    let watcher_interval_ms = file_config
+        .as_ref()
+        .and_then(|c| c.watcher_interval_ms())
+        .unwrap_or(skillfs_fuse::security::DEFAULT_WATCHER_INTERVAL_MS);
+
+    // Merge: CLI flag overrides config file value.
+    let decision_command = decision_command.or_else(|| {
+        file_config
+            .as_ref()
+            .and_then(|c| c.decision_command().map(String::from))
+    });
+    let events_log = events_log.or_else(|| {
+        file_config
+            .as_ref()
+            .and_then(|c| c.events_log_path().map(PathBuf::from))
+    });
+    let trusted_writer = trusted_writer.or_else(|| {
+        file_config
+            .as_ref()
+            .and_then(|c| c.trusted_writer_name().map(String::from))
+    });
+    let audit_log = audit_log.or_else(|| {
+        file_config
+            .as_ref()
+            .and_then(|c| c.audit_log_path().map(PathBuf::from))
+    });
+    let audit_queue_capacity = if audit_queue_capacity != 0 {
+        audit_queue_capacity
+    } else {
+        file_config
+            .as_ref()
+            .and_then(|c| c.audit_queue_capacity())
+            .unwrap_or(0)
+    };
+
+    let parsed_decision_command: Option<DecisionCommand> = match decision_command.as_deref() {
+        Some(raw) => {
+            let cmd = DecisionCommand::parse(raw)
+                .map_err(|e| format!("invalid --decision-command '{raw}': {e}"))?;
+            Some(cmd)
+        }
+        None => None,
+    };
+
+    // Activation source validation:
+    //   --security + --decision-command           => scan -> resolve path
+    //   --security + --activation-mode file        => activation.json consumer
+    //   --security + both                          => startup error (dual source)
+    //   --activation-mode file without --security  => startup error
+    //   --security without either source           => startup error
+    if activation_mode == ActivationMode::File && !security {
+        return Err("--activation-mode file requires --security".into());
+    }
+    if activation_mode == ActivationMode::File && parsed_decision_command.is_some() {
+        return Err(
+            "--activation-mode file and --decision-command are mutually exclusive \
+             (activation.json and scan->resolve cannot both populate the resolver)"
+                .into(),
+        );
+    }
+    if security && activation_mode == ActivationMode::Off && parsed_decision_command.is_none() {
+        return Err(
+            "--security requires --decision-command <COMMAND> or --activation-mode file".into(),
+        );
+    }
+
+    // Reload mode validation.
+    if reload_mode == ReloadMode::Poll {
+        if !security {
+            return Err("--activation-reload-mode poll requires --security".into());
+        }
+        if activation_mode != ActivationMode::File {
+            return Err("--activation-reload-mode poll requires --activation-mode file".into());
+        }
+    }
+
+    // Merge notify socket: CLI flag overrides config file.
+    let notify_socket = notify_socket.or_else(|| {
+        file_config
+            .as_ref()
+            .and_then(|c| c.notify_socket_path().map(PathBuf::from))
+    });
+    let notify_timeout_ms = file_config
+        .as_ref()
+        .and_then(|c| c.notify_timeout_ms())
+        .unwrap_or(DEFAULT_NOTIFY_TIMEOUT_MS);
+
+    // --notify-socket startup validation.
+    if let Some(ref p) = notify_socket {
+        if p.as_os_str().is_empty() {
+            return Err("--notify-socket path must not be empty".into());
+        }
+        if !security {
+            return Err(format!("--notify-socket {} requires --security", p.display()).into());
+        }
+        if activation_mode != ActivationMode::File {
+            return Err(format!(
+                "--notify-socket {} requires --activation-mode file",
+                p.display()
+            )
+            .into());
+        }
+        if parsed_decision_command.is_some() {
+            return Err(
+                "--notify-socket and --decision-command are mutually exclusive \
+                 (notify is for the daemon-driven activation path; \
+                 decision-command has its own scan->resolve refresh)"
+                    .into(),
+            );
+        }
+    }
+
+    // Merge activation-events-log: CLI flag overrides config file.
+    let activation_events_log = activation_events_log.or_else(|| {
+        file_config
+            .as_ref()
+            .and_then(|c| c.activation_events_log_path().map(PathBuf::from))
+    });
+
+    // --activation-events-log startup validation.
+    if let Some(ref p) = activation_events_log {
+        if p.as_os_str().is_empty() {
+            return Err("--activation-events-log path must not be empty".into());
+        }
+        if !security {
+            return Err(format!(
+                "--activation-events-log {} requires --security",
+                p.display()
+            )
+            .into());
+        }
+        if activation_mode != ActivationMode::File {
+            return Err(format!(
+                "--activation-events-log {} requires --activation-mode file",
+                p.display()
+            )
+            .into());
+        }
+        if parsed_decision_command.is_some() {
+            return Err(
+                "--activation-events-log and --decision-command are mutually exclusive \
+                 (activation-events-log is for the daemon-driven activation path; \
+                 decision-command has its own events-log)"
+                    .into(),
+            );
+        }
+        match resolve_protocol_events_path(p) {
+            Ok(_) => {}
+            Err(e) => {
+                return Err(format!(
+                    "invalid --activation-events-log path '{}': {}",
+                    p.display(),
+                    e
+                )
+                .into());
+            }
+        }
+    }
+
+    // P1 gate: reload=poll requires a notify trigger source. Without
+    // --notify-socket or --activation-events-log the NotifyController is
+    // never created, so FUSE mutations would never trigger the reload
+    // poll — the operator would think reload is active while it is inert.
+    if reload_mode == ReloadMode::Poll && notify_socket.is_none() && activation_events_log.is_none()
+    {
+        return Err("--activation-reload-mode poll requires --notify-socket or \
+             --activation-events-log (without a notify trigger source, \
+             reload would never fire)"
+            .into());
+    }
+
+    // A6/B1: Merge ledger backing root: CLI flag overrides config file.
+    let ledger_backing_root = ledger_backing_root.or_else(|| {
+        file_config
+            .as_ref()
+            .and_then(|c| c.ledger_backing_root().map(PathBuf::from))
+    });
+
+    // A6/B1: --ledger-backing-root startup validation.
+    if let Some(ref p) = ledger_backing_root {
+        if p.as_os_str().is_empty() {
+            return Err("--ledger-backing-root path must not be empty".into());
+        }
+        if !security {
+            return Err(
+                format!("--ledger-backing-root {} requires --security", p.display()).into(),
+            );
+        }
+        if activation_mode != ActivationMode::File {
+            return Err(format!(
+                "--ledger-backing-root {} requires --activation-mode file",
+                p.display()
+            )
+            .into());
+        }
+        if parsed_decision_command.is_some() {
+            return Err(
+                "--ledger-backing-root and --decision-command are mutually exclusive \
+                 (backing root is for the daemon-driven activation path)"
+                    .into(),
+            );
+        }
+    }
+
+    if security || parsed_decision_command.is_some() || events_log.is_some() {
+        info!(
+            security,
+            decision_command = ?parsed_decision_command.as_ref().map(|c| {
+                let mut s = c.program().display().to_string();
+                for a in c.fixed_args() {
+                    s.push(' ');
+                    s.push_str(a);
+                }
+                s
+            }),
+            events_log = ?events_log.as_ref().map(|p| p.display().to_string()),
+            "security mode: active resolver + refresh controller enabled"
+        );
+    }
+
+    // `--events-log` is only meaningful in security mode. Surface a clear
+    // startup error otherwise so an operator typo cannot silently
+    // discard events. Security mode + a path that cannot be resolved (e.g.
+    // missing parent dir) is also a startup error: the mount must not
+    // begin without the event sink the operator asked for.
+    if let Some(ref p) = events_log {
+        if !security {
+            return Err(format!("--events-log {} requires --security", p.display()).into());
+        }
+        if activation_mode == ActivationMode::File {
+            return Err(format!(
+                "--events-log {} is not supported with --activation-mode file \
+                     (events log requires --decision-command refresh; \
+                     activation event logging is a later package)",
+                p.display()
+            )
+            .into());
+        }
+        match resolve_events_path(p) {
+            Ok(_) => {}
+            Err(e) => {
+                return Err(format!("invalid --events-log path '{}': {}", p.display(), e).into());
+            }
+        }
+    }
 
     // Validate source directory
     if !source.exists() {
@@ -326,6 +748,13 @@ async fn cmd_mount(
     audit_runtime
         .validate_audit_path_outside_source(&source_canon)
         .map_err(|e| format!("{}", e))?;
+    // N3 source-tree guard: reject --activation-events-log inside source,
+    // same rationale as audit. Ordered before the file is opened so a
+    // rejected path never creates the log file on disk.
+    if let Some(ref p) = activation_events_log {
+        skillfs_fuse::security::validate_protocol_events_path_outside_source(p, &source_canon)
+            .map_err(|e| format!("{}", e))?;
+    }
     let audit_sink = audit_runtime.build_sink().map_err(|e| {
         format!(
             "failed to open audit log '{}': {}",
@@ -356,6 +785,39 @@ async fn cmd_mount(
     if !mountpoint.is_dir() {
         return Err(format!("Mount point is not a directory: {}", mountpoint.display()).into());
     }
+
+    // Compute mount_canon and in_place early so the A6/B1 backing root
+    // setup can validate path shape before the FUSE over-mount.
+    let mount_canon = mountpoint
+        .canonicalize()
+        .unwrap_or_else(|_| mountpoint.clone());
+    let in_place = source_canon == mount_canon;
+
+    // A6/B1: Ledger backing root setup.
+    //
+    // When the operator provides --ledger-backing-root, SkillFS creates a
+    // private source alias (bind mount) before the FUSE over-mount becomes
+    // active. All daemon-facing operations then use the backing root path.
+    // Fail-closed: unsafe backing root rejects startup.
+    let backing_root: Option<LedgerBackingRoot> = if let Some(ref br_path) = ledger_backing_root {
+        let br = LedgerBackingRoot::setup(&source_canon, br_path, &mount_canon, in_place)
+            .map_err(|e| format!("--ledger-backing-root setup failed: {e}"))?;
+        info!(
+            backing_root = %br.path().display(),
+            in_place,
+            "ledger backing root enabled — daemon-facing operations will use this path"
+        );
+        Some(br)
+    } else {
+        None
+    };
+
+    // daemon_root: the path used for all daemon-facing operations.
+    // When a backing root is set, use it; otherwise fall back to the source.
+    let daemon_root: PathBuf = backing_root
+        .as_ref()
+        .map(|br| br.path().to_path_buf())
+        .unwrap_or_else(|| source.clone());
 
     // Load skills into store
     info!("loading skills from source directory");
@@ -394,6 +856,371 @@ async fn cmd_mount(
 
     let shared_store: SharedSkillStore = Arc::new(parking_lot::RwLock::new(store));
 
+    // D1.3.1 active-mapping bootstrap (read-only).
+    //
+    // Only fires when **both** `--security` and
+    // `--decision-command` are set (both gates were checked up-front).
+    // We build a fresh `ActiveSkillResolver` rooted at `source` and run
+    // `scan` then `resolve` against the decision provider per skill;
+    // the parsed resolve result is installed into the resolver.
+    //
+    // Behavior on individual failures is intentionally non-fatal:
+    //  * scan failure: we skip resolve, leave the skill out of the
+    //    resolver (read paths default to hidden (no activation)), and log.
+    //  * resolve spawn / non-zero-exit / JSON parse errors log a
+    //    warning and leave the skill out of the resolver.
+    //  * a successful resolve whose `decision` cannot be installed
+    //    (e.g. an empty source root) logs a warning and the skill
+    //    stays hidden — same fallback as a failed resolve.
+    //
+    // D1.3.1 explicitly does **not** wire watcher hot sync, daemon
+    // transport, or `check`/`certify`. Skill-discover is exempt from
+    // the gate inside SkillFS itself, so we deliberately do not
+    // run scan/resolve on it.
+    let active_resolver: Option<Arc<ActiveSkillResolver>> =
+        if security && activation_mode == ActivationMode::File {
+            // A1: Activation File Consumer bootstrap.
+            //
+            // When `--activation-mode file` is set, SkillFS reads
+            // `<skill_dir>/.skill-meta/activation.json` for every loaded
+            // skill at startup and populates the resolver. Invalid or
+            // missing activation files map to hidden (fail-safe).
+            let resolver = ActiveSkillResolver::new(source.clone());
+            let skill_names: Vec<String> = shared_store
+                .read()
+                .list()
+                .iter()
+                .filter(|n| **n != "skill-discover")
+                .map(|s| s.to_string())
+                .collect();
+            info!(
+                count = skill_names.len(),
+                activation_mode = %activation_mode,
+                "activation: loading activation files for skill mapping"
+            );
+            let results = bootstrap_activation(daemon_root.as_path(), &skill_names, &resolver);
+            for (name, outcome) in &results {
+                match outcome {
+                    Ok(target) => {
+                        info!(
+                            skill = %name,
+                            target = %target.as_label(),
+                            "activation file loaded"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            skill = %name,
+                            error = %e,
+                            "activation file invalid or missing; skill hidden (fail-safe)"
+                        );
+                    }
+                }
+            }
+            Some(Arc::new(resolver))
+        } else if security && parsed_decision_command.is_some() {
+            // D1.3.1 active-mapping bootstrap (decision-command path).
+            let cmd = parsed_decision_command
+                .as_ref()
+                .expect("decision_command presence checked above")
+                .clone();
+            let adapter: Arc<dyn LedgerAdapter> = Arc::new(CliLedgerAdapter::new(cmd.clone()));
+            let resolver = ActiveSkillResolver::new(source.clone());
+            let skill_names: Vec<String> = shared_store
+                .read()
+                .list()
+                .iter()
+                .filter(|n| **n != "skill-discover")
+                .map(|s| s.to_string())
+                .collect();
+            info!(
+                count = skill_names.len(),
+                program = %cmd.program().display(),
+                "security: resolving active skill mapping via scan -> resolve"
+            );
+            for name in &skill_names {
+                let skill_dir = source.join(name);
+                if let Err(e) = adapter.scan(&skill_dir) {
+                    warn!(
+                        skill = %name,
+                        error = %e,
+                        "decision-command scan failed; skill will be hidden (no activation)"
+                    );
+                    continue;
+                }
+                match adapter.resolve(&skill_dir) {
+                    Ok(result) => match resolver.set_from_resolve_for_expected(name, &result) {
+                        Ok(target) => {
+                            info!(
+                                skill = %name,
+                                target = %target.as_label(),
+                                "decision-command resolve installed"
+                            );
+                        }
+                        Err(e) => warn!(
+                            skill = %name,
+                            error = %e,
+                            "could not install resolve target; skill will be hidden (no activation)"
+                        ),
+                    },
+                    Err(e) => warn!(
+                        skill = %name,
+                        error = %e,
+                        "decision-command resolve failed; skill will be hidden (no activation)"
+                    ),
+                }
+            }
+            Some(Arc::new(resolver))
+        } else {
+            None
+        };
+
+    // D1.3.1 refresh controller bootstrap.
+    //
+    // Only wired when `--security` and `--decision-command`
+    // are both set AND we successfully built an active resolver above.
+    // The controller takes the same adapter the read-path bootstrap
+    // used and runs scan -> resolve on its own worker after a
+    // per-skill debounce.
+    //
+    // `--events-log` selects the JSONL sink; its absence keeps the
+    // [`NoopSecurityEventWriter`]. A `--events-log` path that cannot be
+    // opened is a startup error: the operator asked for the security
+    // event stream and we refuse to silently downgrade.
+    let refresh_controller: Option<Arc<RefreshController>> = if security
+        && active_resolver.is_some()
+        && parsed_decision_command.is_some()
+    {
+        let cmd = parsed_decision_command
+            .as_ref()
+            .expect("decision_command presence checked above")
+            .clone();
+        let adapter: Arc<dyn LedgerAdapter> = Arc::new(CliLedgerAdapter::new(cmd));
+        let resolver_for_ctrl = active_resolver
+            .clone()
+            .expect("active_resolver presence checked above");
+        let event_writer: Arc<dyn SecurityEventWriter> = if let Some(p) = events_log.as_ref() {
+            let writer = JsonlSecurityEventWriter::new(p, 0).map_err(|e| {
+                format!("failed to open --events-log path '{}': {}", p.display(), e)
+            })?;
+            info!(path = %p.display(), "security events JSONL enabled");
+            Arc::new(writer) as Arc<dyn SecurityEventWriter>
+        } else {
+            Arc::new(NoopSecurityEventWriter) as Arc<dyn SecurityEventWriter>
+        };
+        let failed_behavior = file_config
+            .as_ref()
+            .map(|c| c.failed_resolve_behavior())
+            .unwrap_or_default();
+        let ctrl = RefreshController::new(
+            adapter,
+            resolver_for_ctrl,
+            event_writer,
+            std::time::Duration::from_millis(skillfs_fuse::security::DEFAULT_REFRESH_DEBOUNCE_MS),
+            failed_behavior,
+        );
+        info!("security: refresh controller wired (scan -> resolve)");
+        Some(ctrl)
+    } else {
+        // Security mode without a decision-command cannot run scans /
+        // resolves; the up-front gate already errored out. Without
+        // security mode at all, nothing wires the controller and the
+        // mount falls back to the pre-security behavior.
+        None
+    };
+
+    // N2 notify controller bootstrap.
+    //
+    // Only wired when `--security --activation-mode file` and
+    // `--notify-socket` are all set. The controller debounces per-skill
+    // FUSE mutations and sends `skill_ledger.skillfs_notify_change` to the
+    // daemon. Notify failure is diagnostic only and never changes the
+    // active resolver.
+    // N3 protocol event writer bootstrap.
+    //
+    // Built before the notify controller so it can be injected.
+    // When `--activation-events-log` is set but the file cannot be
+    // opened, the mount fails at startup.
+    let protocol_event_writer: Arc<dyn ProtocolEventWriter> =
+        if let Some(ref p) = activation_events_log {
+            let writer = JsonlProtocolEventWriter::new(p, 0).map_err(|e| {
+                format!(
+                    "failed to open --activation-events-log path '{}': {}",
+                    p.display(),
+                    e
+                )
+            })?;
+            info!(path = %p.display(), "activation protocol event log enabled");
+            Arc::new(writer) as Arc<dyn ProtocolEventWriter>
+        } else {
+            Arc::new(NoopProtocolEventWriter) as Arc<dyn ProtocolEventWriter>
+        };
+
+    // A3: Activation reload controller bootstrap.
+    //
+    // Built before the notify controller so it can be injected.
+    // Only constructed when --security --activation-mode file
+    // --activation-reload-mode poll and an active resolver exists.
+    let reload_controller: Option<Arc<ActivationReloadController>> =
+        if reload_mode == ReloadMode::Poll && active_resolver.is_some() {
+            let resolver_for_reload = active_resolver
+                .clone()
+                .expect("active_resolver presence checked above");
+            let ctrl = Arc::new(ActivationReloadController::new(
+                daemon_root.clone(),
+                resolver_for_reload,
+                std::time::Duration::from_millis(reload_interval_ms),
+                std::time::Duration::from_millis(reload_timeout_ms),
+            ));
+            info!(
+                reload_mode = %reload_mode,
+                interval_ms = reload_interval_ms,
+                timeout_ms = reload_timeout_ms,
+                "activation reload controller enabled"
+            );
+            Some(ctrl)
+        } else {
+            None
+        };
+
+    let notify_controller: Option<Arc<NotifyController>> =
+        if let Some(ref socket_path) = notify_socket {
+            let client = Arc::new(UnixSocketNotifyClient::new(
+                socket_path.clone(),
+                std::time::Duration::from_millis(notify_timeout_ms),
+            ));
+            let source_for_notify = daemon_root.clone();
+            let ctrl = if let Some(ref reload) = reload_controller {
+                NotifyController::new_with_reload(
+                    client,
+                    source_for_notify,
+                    std::time::Duration::from_millis(DEFAULT_NOTIFY_DEBOUNCE_MS),
+                    notify_timeout_ms,
+                    protocol_event_writer.clone(),
+                    reload.clone(),
+                )
+            } else {
+                NotifyController::new_with_protocol_writer(
+                    client,
+                    source_for_notify,
+                    std::time::Duration::from_millis(DEFAULT_NOTIFY_DEBOUNCE_MS),
+                    notify_timeout_ms,
+                    protocol_event_writer.clone(),
+                )
+            };
+            info!(
+                socket = %socket_path.display(),
+                timeout_ms = notify_timeout_ms,
+                reload = reload_mode != ReloadMode::Off,
+                "notify: change client enabled (Unix socket)"
+            );
+            Some(ctrl)
+        } else if activation_events_log.is_some() {
+            let client = Arc::new(skillfs_fuse::security::NoopNotifyClient);
+            let ctrl = if let Some(ref reload) = reload_controller {
+                NotifyController::new_with_reload(
+                    client,
+                    daemon_root.clone(),
+                    std::time::Duration::from_millis(DEFAULT_NOTIFY_DEBOUNCE_MS),
+                    DEFAULT_NOTIFY_TIMEOUT_MS,
+                    protocol_event_writer.clone(),
+                    reload.clone(),
+                )
+            } else {
+                NotifyController::new_with_protocol_writer(
+                    client,
+                    daemon_root.clone(),
+                    std::time::Duration::from_millis(DEFAULT_NOTIFY_DEBOUNCE_MS),
+                    DEFAULT_NOTIFY_TIMEOUT_MS,
+                    protocol_event_writer.clone(),
+                )
+            };
+            info!("notify: protocol event log only (no socket)");
+            Some(ctrl)
+        } else {
+            None
+        };
+
+    // Merge trusted-writer-exe: CLI flag overrides config file.
+    let trusted_writer_exe = trusted_writer_exe.or_else(|| {
+        file_config
+            .as_ref()
+            .and_then(|c| c.trusted_writer_exe().map(PathBuf::from))
+    });
+
+    // Trusted writer gate construction.
+    let trusted_writer_config: Option<TrustedWriterConfig> =
+        match (&trusted_writer, &trusted_writer_exe) {
+            (_, Some(exe_path)) => {
+                #[cfg(not(target_os = "linux"))]
+                return Err("--trusted-writer-exe requires Linux (/proc/<pid>/exe)".into());
+
+                #[cfg(target_os = "linux")]
+                {
+                    use skillfs_fuse::security::FileId;
+                    use std::os::unix::fs::MetadataExt;
+
+                    let canonical = std::fs::canonicalize(exe_path).map_err(|e| {
+                        format!("--trusted-writer-exe '{}': {e}", exe_path.display())
+                    })?;
+                    let meta = std::fs::metadata(&canonical).map_err(|e| {
+                        format!("--trusted-writer-exe '{}': {e}", canonical.display())
+                    })?;
+                    if !meta.is_file() {
+                        return Err(format!(
+                            "--trusted-writer-exe '{}': not a regular file",
+                            canonical.display()
+                        )
+                        .into());
+                    }
+                    let file_id = FileId {
+                        dev: meta.dev(),
+                        ino: meta.ino(),
+                    };
+                    let cfg = match &trusted_writer {
+                        Some(name) if !name.trim().is_empty() => {
+                            TrustedWriterConfig::with_executable_and_compat_name(
+                                canonical.clone(),
+                                file_id,
+                                name.clone(),
+                            )
+                        }
+                        _ => TrustedWriterConfig::with_executable(canonical.clone(), file_id),
+                    };
+                    info!(
+                        trusted_writer_exe = %canonical.display(),
+                        "trusted writer enabled (executable identity)"
+                    );
+                    eprintln!();
+                    eprintln!("  --trusted-writer-exe: executable identity pinned (production).");
+                    eprintln!("   path = {}", canonical.display());
+                    eprintln!("   file_id = ({file_id})");
+                    if trusted_writer.is_some() {
+                        eprintln!(
+                            "   --trusted-writer is also set (compatibility/log context only)."
+                        );
+                        eprintln!("   Executable identity is the sole authorization basis.");
+                    }
+                    eprintln!();
+                    Some(cfg)
+                }
+            }
+            (Some(name), None) if !name.trim().is_empty() => {
+                let cfg = TrustedWriterConfig::with_process_name(name.clone());
+                info!(
+                    trusted_writer = %name,
+                    "trusted writer enabled (compat: TID-to-TGID comm match)"
+                );
+                eprintln!();
+                eprintln!("⚠  --trusted-writer is a deprecated / compatibility gate (comm match).");
+                eprintln!("   Process comm can be spoofed (prctl PR_SET_NAME, exec'd basename).");
+                eprintln!("   Production: use --trusted-writer-exe <PATH> instead.");
+                eprintln!();
+                Some(cfg)
+            }
+            _ => None,
+        };
+
     // Mount options
     let options = MountOptions {
         allow_other,
@@ -403,13 +1230,8 @@ async fn cmd_mount(
 
     info!("starting FUSE filesystem (blocking)");
 
-    // Detect in-place mount: when source and mountpoint resolve to the same path.
-    // `source_canon` is computed once at the top of cmd_mount so the W1
-    // audit-path-vs-source guard can use it before any audit sink is built.
-    let mount_canon = mountpoint
-        .canonicalize()
-        .unwrap_or_else(|_| mountpoint.clone());
-    let in_place = source_canon == mount_canon;
+    // mount_canon and in_place were computed earlier, before the A6/B1
+    // backing root setup.
     let drift_enabled = audit_sink.is_some();
     if in_place {
         info!("in-place mount detected: FUSE will over-mount the source directory");
@@ -529,22 +1351,99 @@ async fn cmd_mount(
         None
     };
 
-    // Note: mount_with_security() blocks until the FUSE session exits
-    // (Ctrl+C or SIGTERM). We wrap it in spawn_blocking and race against
-    // OS signals so that SIGTERM triggers the same clean unmount path as
-    // Ctrl+C. When `audit_sink` is `None` the FUSE filesystem keeps its
-    // default `NoopEventSink`, matching the prior `mount(...)` behavior.
+    // A5: Activation state watcher. Background convergence loop that
+    // periodically checks activation freshness and reloads when the
+    // daemon writes new activation. Independent of FUSE event loop.
+    let activation_watcher: Option<Arc<ActivationWatcher>> =
+        if reload_mode == ReloadMode::Poll && reload_controller.is_some() {
+            let reload_for_watcher = reload_controller
+                .clone()
+                .expect("reload_controller presence checked above");
+            let watcher = Arc::new(ActivationWatcher::new(
+                reload_for_watcher,
+                protocol_event_writer.clone(),
+                std::time::Duration::from_millis(watcher_interval_ms),
+            ));
+            info!(
+                watcher_interval_ms = watcher_interval_ms,
+                "activation watcher enabled (continuous convergence)"
+            );
+            Some(watcher)
+        } else {
+            None
+        };
+
+    // A5: inject watcher registrar into notify controller so new skills
+    // observed through FUSE mutations are automatically tracked.
+    if let (Some(watcher), Some(ctrl)) = (&activation_watcher, &notify_controller) {
+        ctrl.set_watcher_registrar(watcher.clone());
+    }
+
+    // A4: capture reconcile inputs before notify_controller is moved into
+    // MountConfig. Reconcile fires once after mount startup when
+    // --security --activation-mode file and a notify controller exists.
+    let reconcile_notify = notify_controller.clone();
+    let reconcile_skill_names: Option<Vec<String>> =
+        if activation_mode == ActivationMode::File && notify_controller.is_some() {
+            let names: Vec<String> = shared_store
+                .read()
+                .list()
+                .iter()
+                .filter(|n| **n != "skill-discover")
+                .map(|s| s.to_string())
+                .collect();
+            Some(names)
+        } else {
+            None
+        };
+
+    // mount_configured() blocks until the FUSE session exits (Ctrl+C or
+    // SIGTERM). We wrap it in spawn_blocking and race against OS signals
+    // so that SIGTERM triggers the same clean unmount path as Ctrl+C.
+    //
+    // A6/B1: `backing_root` stays in this scope and is dropped when
+    // cmd_mount returns. The Drop impl calls cleanup(), which unmounts
+    // the bind mount and removes the temp dir. The bind mount is
+    // independent of the FUSE mount, so cleanup order does not matter.
     let mount_task = tokio::task::spawn_blocking(move || {
-        mount_with_security(
+        mount_configured(
             &mountpoint,
             &source,
             shared_store,
             options,
             in_place,
-            audit_sink,
-            None,
+            MountConfig {
+                event_sink: audit_sink,
+                policy: None,
+                active_resolver,
+                refresh_controller,
+                notify_controller,
+                trusted_writer: trusted_writer_config,
+            },
         )
     });
+
+    // A5: start activation watcher after mount is spawned.
+    if let Some(ref watcher) = activation_watcher {
+        if let Some(ref names) = reconcile_skill_names {
+            watcher.register_skills(names);
+        }
+        watcher.start();
+    }
+
+    // A4: fire startup reconcile after mount is spawned. Runs on a
+    // background thread so daemon socket latency cannot block startup.
+    // A5: after reconcile, schedule an immediate watcher check so
+    // daemon-written activation is picked up without waiting for the
+    // periodic interval.
+    if let (Some(ctrl), Some(names)) = (reconcile_notify, &reconcile_skill_names) {
+        let names_owned = names.clone();
+        let watcher_for_reconcile = activation_watcher.clone();
+        ctrl.spawn_startup_reconcile(names_owned.clone());
+        if let Some(ref w) = watcher_for_reconcile {
+            w.schedule_immediate_check(names_owned);
+        }
+    }
 
     /// Trigger a clean FUSE unmount by calling fusermount3 -u.
     /// This causes fuser::mount2 event loop to exit, which unblocks the

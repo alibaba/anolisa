@@ -773,11 +773,13 @@ dependencies = [
  "fuser",
  "libc",
  "parking_lot",
+ "serde",
  "serde_json",
  "skillfs-core",
  "tempfile",
  "thiserror",
  "tokio",
+ "toml",
  "tracing",
 ]
 
