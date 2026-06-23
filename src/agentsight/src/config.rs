@@ -429,9 +429,14 @@ impl AgentsightConfig {
         init_logging(self.verbose, self.log_path.as_deref());
     }
 
-    /// Load configuration from a JSON string, appending rules to existing ones.
+    /// Load configuration from a JSON string, extending rules onto existing ones.
     ///
     /// Parses `verbose`, `log_path`, `cmdline` and `domain` fields.
+    ///
+    /// **Design note**: `AgentsightConfig::new()` starts with empty rule lists.
+    /// In the normal flow (`AgentSight::new`), only the config file is loaded,
+    /// so the file effectively **replaces** the embedded defaults — this is
+    /// intentional. Users must include all needed agent rules in their config.
     pub fn load_from_json(&mut self, json: &str) -> Result<(), String> {
         let mut parsed: JsonFullConfig = serde_json::from_str(json)
             .map_err(|e| format!("JSON parse error: {}", e))?;
@@ -479,10 +484,12 @@ impl AgentsightConfig {
         self
     }
 
-    /// Load configuration from a JSON file, appending rules to existing ones.
+    /// Load configuration from a JSON file, replacing any pre-existing rules.
     ///
-    /// Reads the file and delegates to `load_from_json`. All fields supported by
-    /// `load_from_json` (verbose, log_path, cmdline, domain) are loaded.
+    /// Reads the file and delegates to `load_from_json`. In the standard flow
+    /// the config starts from `AgentsightConfig::new()` (empty rules), so this
+    /// call effectively **replaces** the embedded defaults with the file content.
+    /// Users must ensure their config file contains all required agent rules.
     pub fn load_from_file(&mut self, path: &Path) -> anyhow::Result<()> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config from {:?}", path))?;

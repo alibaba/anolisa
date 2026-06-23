@@ -123,8 +123,13 @@ impl AgentSight {
     pub fn new(mut config: AgentsightConfig) -> Result<Self> {
         config.apply_verbose();
 
-        // Load rules from config file only when config_path is set (CLI --config)
+        // Load rules from config file only when config_path is set (CLI --config).
         // FFI users provide rules via API, no config file needed.
+        //
+        // Design: AgentsightConfig::new() starts with empty rule lists, so
+        // load_from_file() effectively REPLACES the embedded defaults. This is
+        // intentional — users must include all needed agent rules in their config.
+        // On load failure we fall back to embedded defaults (best-effort).
         if let Some(path) = config.config_path.clone() {
             let load_result = if path.exists() {
                 config.load_from_file(&path)

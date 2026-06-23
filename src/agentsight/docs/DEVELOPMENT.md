@@ -158,9 +158,16 @@ agentsight serve
 
 运行时配置通过 `AgentsightConfig`（`src/config.rs`），支持以下方式：
 
-1. **默认值**: 内置默认配置
-2. **环境变量**: SLS 相关变量、`AGENTSIGHT_TOKENIZER_PATH` 等
-3. **CLI 参数**: 各子命令支持 `--verbose`, `--storage-path` 等
+1. **默认值**: 内嵌于二进制的 `agentsight.json`，包含所有已知 Agent 的匹配规则
+2. **配置文件**: `/etc/agentsight/config.json`（通过 `--config` 指定），**完全替换**内嵌默认规则
+3. **环境变量**: SLS 相关变量、`AGENTSIGHT_TOKENIZER_PATH` 等
+4. **CLI 参数**: 各子命令支持 `--verbose`, `--storage-path` 等
+
+### Agent 规则配置文件
+
+配置文件格式参见项目根目录 `agentsight.json`，包含 `cmdline`（Agent 进程匹配规则）和 `domain`（域名规则）两部分。
+
+> **⚠️ 重要**：用户配置文件会完全替换（replace）内嵌的默认规则，而非追加。如果配置文件中缺少某个 Agent 的规则，该 Agent 将不会被发现。编辑配置文件前，请先复制完整的默认配置再修改。
 
 ### 关键配置项
 
