@@ -29,6 +29,11 @@ A FUSE-backed virtual filesystem for local agent skills. SkillFS parses
   handling, long-path fallbacks, post-unlink handles, safe symlink and
   hardlink policy, FIFO creation, and conservative `user.*` xattr
   passthrough.
+- Provides optional security integration surfaces for external
+  providers: decision-command activation, durable activation
+  file/xattr consumption, notify socket events, protocol JSONL events,
+  active mapping reload, startup reconcile, and trusted writer identity
+  checks.
 
 ## Feature Matrix
 
@@ -48,6 +53,34 @@ A FUSE-backed virtual filesystem for local agent skills. SkillFS parses
 | `link` | restricted passthrough | restricted passthrough | regular files inside the same skill |
 | `mkfifo` | passthrough | passthrough | FIFO only; device nodes remain rejected |
 | `xattr user.*` | passthrough | passthrough | ordinary passthrough paths only |
+
+## Security Integration
+
+SkillFS keeps security judgement outside the filesystem core. External
+providers can scan, certify, or evaluate skills, then tell SkillFS which
+runtime view to expose:
+
+- `current`: serve the live skill source;
+- `fallback`: serve a trusted `.skill-meta/versions/*.snapshot`;
+- `hidden`: omit the skill from `/skills`.
+
+Two integration paths are available:
+
+- compatibility mode through `--security --decision-command`, where
+  SkillFS runs `<decision-command> scan <skill_dir> --json` followed by
+  `<decision-command> resolve <skill_dir> --json`;
+- activation mode through `--activation-mode file`, where SkillFS
+  consumes `.skill-meta/activation.json` or
+  `user.agent_sec.skill_ledger.activation`, sends notify events to an
+  external daemon, and reloads the active mapping after activation
+  changes.
+
+For in-place security mounts, `--ledger-backing-root` provides a
+daemon-readable source view that is separate from the agent-visible
+FUSE view. `--trusted-writer-exe` can authorize selected
+`.skill-meta/**` writes by matching the trusted process executable path
+and `(dev, ino)` identity; process-name matching is kept only as a
+compatibility fallback.
 
 ## Scope
 
@@ -267,6 +300,12 @@ integration tests.
   POSIX passthrough baseline.
 - [docs/testing/posix-phase1-acceptance.md](docs/testing/posix-phase1-acceptance.md) —
   acceptance checklist.
+- [docs/security/external-decision-protocol.md](docs/security/external-decision-protocol.md) —
+  decision-command JSON contract.
+- [docs/security/runtime-activation-implementation-plan.md](docs/security/runtime-activation-implementation-plan.md) —
+  activation, notify, reload, and backing-root integration.
+- [docs/skillfs-filesystem-capability-record.md](docs/skillfs-filesystem-capability-record.md) —
+  maintained capability record.
 - [POSIX_FS_TEST_MATRIX.csv](POSIX_FS_TEST_MATRIX.csv) — POSIX test
   matrix and current coverage.
 

@@ -22,6 +22,10 @@
   fd-backed I/O、create/mkdir mode 处理、长路径 fallback、
   open-after-unlink 句柄、受限 symlink/hardlink 策略、FIFO 创建、
   以及保守的 `user.*` xattr 透传。
+- 提供可选的外部安全集成面：decision-command activation、
+  activation 文件/xattr 消费、notify socket 事件、protocol JSONL
+  事件、active mapping reload、startup reconcile，以及可信写进程
+  身份校验。
 
 ## 功能矩阵
 
@@ -41,6 +45,31 @@
 | `link` | 受限透传 | 受限透传 | 仅允许同 skill 内普通文件 |
 | `mkfifo` | 透传 | 透传 | 仅 FIFO；device node 仍拒绝 |
 | `xattr user.*` | 透传 | 透传 | 仅普通 passthrough 路径 |
+
+## 安全集成
+
+SkillFS 不在文件系统核心中实现安全判断。外部 provider 负责扫描、
+认证和策略判断，然后告诉 SkillFS 应该暴露哪个运行视图：
+
+- `current`：暴露当前 source；
+- `fallback`：暴露可信 `.skill-meta/versions/*.snapshot`；
+- `hidden`：不在 `/skills` 中暴露该 skill。
+
+当前支持两条集成路径：
+
+- 兼容模式：通过 `--security --decision-command`，SkillFS 依次执行
+  `<decision-command> scan <skill_dir> --json` 和
+  `<decision-command> resolve <skill_dir> --json`；
+- activation 模式：通过 `--activation-mode file`，SkillFS 消费
+  `.skill-meta/activation.json` 或
+  `user.agent_sec.skill_ledger.activation`，向外部 daemon 发送 notify
+  事件，并在 activation 变化后刷新 active mapping。
+
+对于 in-place security mount，`--ledger-backing-root` 提供 daemon
+可读写的 source 视图，避免 daemon 读取 agent 可见的 FUSE 视图。
+`--trusted-writer-exe` 可以通过可信进程的 executable 路径和
+`(dev, ino)` 身份授权部分 `.skill-meta/**` 写入；进程名匹配仅保留为
+兼容 fallback。
 
 ## 范围
 
@@ -231,6 +260,9 @@ scripts/          build.sh、test.sh 与可选 POSIX harness
 - [docs/specs/fuse-spec.md](docs/specs/fuse-spec.md) - `skillfs-fuse` 实现
 - [docs/specs/posix-phase1-spec.md](docs/specs/posix-phase1-spec.md) - POSIX passthrough 基线
 - [docs/testing/posix-phase1-acceptance.md](docs/testing/posix-phase1-acceptance.md) - POSIX 验收清单
+- [docs/security/external-decision-protocol.md](docs/security/external-decision-protocol.md) - decision-command JSON 协议
+- [docs/security/runtime-activation-implementation-plan.md](docs/security/runtime-activation-implementation-plan.md) - activation / notify / reload / backing-root 集成说明
+- [docs/skillfs-filesystem-capability-record.md](docs/skillfs-filesystem-capability-record.md) - 长期维护的能力记录
 - [POSIX_FS_TEST_MATRIX.csv](POSIX_FS_TEST_MATRIX.csv) - POSIX 测试矩阵与当前覆盖
 
 ## 验证
