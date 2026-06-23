@@ -31,11 +31,33 @@ impl SkillFs {
         relative_path: Option<&Path>,
         kind: MutationKind,
     ) {
+        // I2: staging roots bypass normal refresh/notify.
+        if let Some(ref matcher) = self.staging_matcher {
+            if matcher.is_staging_root(skill_name) {
+                return;
+            }
+        }
+        // Pending install: if a pending_install_controller is attached,
+        // check the skill's activation state.
+        if let Some(ref pending_ctrl) = self.pending_install_controller {
+            let has_activation = self
+                .active_resolver
+                .as_ref()
+                .is_some_and(|r| r.get(skill_name).is_some());
+            if has_activation {
+                pending_ctrl.clear_if_activated(skill_name);
+            } else if pending_ctrl.observe_mutation(skill_name, relative_path, kind) {
+                return;
+            }
+        }
         if let Some(ctrl) = self.refresh_controller.as_ref() {
             ctrl.observe_mutation(skill_name, relative_path, kind);
         }
         if let Some(ctrl) = self.notify_controller.as_ref() {
             ctrl.observe_mutation(skill_name, relative_path, kind);
+        }
+        if let Some(ctrl) = self.quiet_timeout_controller.as_ref() {
+            ctrl.observe_skill_mutation(skill_name, relative_path, kind);
         }
     }
 

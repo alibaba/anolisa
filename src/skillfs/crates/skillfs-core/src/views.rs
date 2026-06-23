@@ -128,8 +128,8 @@ impl ViewsConfig {
     pub fn save(&self, source_dir: &Path) -> std::io::Result<()> {
         let path = source_dir.join("skillfs-views.toml");
         let tmp_path = source_dir.join(".skillfs-views.toml.tmp");
-        let content =
-            toml::to_string_pretty(self).map_err(|e| std::io::Error::other(e.to_string()))?;
+        let content = toml::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
         std::fs::write(&tmp_path, &content)?;
         std::fs::rename(&tmp_path, &path)?;
         Ok(())

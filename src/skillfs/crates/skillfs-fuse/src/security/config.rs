@@ -10,6 +10,9 @@ use serde::Deserialize;
 
 use super::activation::ActivationMode;
 use super::activation_reload::ReloadMode;
+use super::install::{
+    StagingConfig, UnactivatedVisibility, validate_post_publish_patterns, validate_staging_patterns,
+};
 use super::refresh::FailedResolveBehavior;
 
 #[derive(Debug, Deserialize, Default)]
@@ -24,6 +27,8 @@ pub struct SecurityConfig {
     pub notify: Option<NotifySection>,
     pub activation_events: Option<ActivationEventsSection>,
     pub ledger: Option<LedgerSection>,
+    pub install: Option<InstallSection>,
+    pub control_socket: Option<ControlSocketSection>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,6 +110,27 @@ pub struct LedgerSection {
     /// activation bootstrap, activation reload, startup reconcile,
     /// activation watcher) use this path instead of the source.
     pub backing_root: Option<String>,
+}
+
+/// I2/I4: Installer staging configuration.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallSection {
+    pub staging_patterns: Option<Vec<String>>,
+    pub unactivated_visibility: Option<String>,
+    pub quiet_timeout_ms: Option<u64>,
+    pub post_publish_grace_ms: Option<u64>,
+    pub post_publish_write_patterns: Option<Vec<String>>,
+}
+
+/// Trusted peer control socket configuration.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlSocketSection {
+    pub path: Option<String>,
+    pub trusted_peer_exe: Option<String>,
+    pub trusted_peer_uid: Option<u32>,
+    pub trusted_peer_gid: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -263,6 +289,94 @@ impl SecurityConfig {
                 }
             }
         }
+        if let Some(ref install) = self.install {
+            if let Some(ref vis) = install.unactivated_visibility {
+                if UnactivatedVisibility::parse(vis).is_none() {
+                    return Err(ConfigError::InvalidValue {
+                        field: "install.unactivated_visibility",
+                        value: vis.to_string(),
+                        allowed: "hidden",
+                    });
+                }
+            }
+            if let Some(ref patterns) = install.staging_patterns {
+                validate_staging_patterns(patterns)?;
+            }
+            if let Some(t) = install.quiet_timeout_ms {
+                if !(100..=300_000).contains(&t) {
+                    return Err(ConfigError::InvalidValue {
+                        field: "install.quiet_timeout_ms",
+                        value: t.to_string(),
+                        allowed: "100..300000",
+                    });
+                }
+            }
+            // I4: post-publish grace validation — both or neither.
+            let has_grace = install.post_publish_grace_ms.is_some();
+            let has_pp_patterns = install
+                .post_publish_write_patterns
+                .as_ref()
+                .map(|p| !p.is_empty())
+                .unwrap_or(false);
+            let has_pp_patterns_field = install.post_publish_write_patterns.is_some();
+            if has_grace && !has_pp_patterns {
+                return Err(ConfigError::InvalidValue {
+                    field: "install.post_publish_write_patterns",
+                    value: String::new(),
+                    allowed: "non-empty pattern list when post_publish_grace_ms is set",
+                });
+            }
+            if has_pp_patterns && !has_grace {
+                return Err(ConfigError::InvalidValue {
+                    field: "install.post_publish_grace_ms",
+                    value: String::new(),
+                    allowed: "must be set when post_publish_write_patterns is configured",
+                });
+            }
+            if has_pp_patterns_field && !has_pp_patterns && !has_grace {
+                // Empty patterns list without grace: no-op, allowed.
+            }
+            if let Some(t) = install.post_publish_grace_ms {
+                if !(100..=300_000).contains(&t) {
+                    return Err(ConfigError::InvalidValue {
+                        field: "install.post_publish_grace_ms",
+                        value: t.to_string(),
+                        allowed: "100..300000",
+                    });
+                }
+            }
+            if let Some(ref patterns) = install.post_publish_write_patterns {
+                if !patterns.is_empty() {
+                    validate_post_publish_patterns(patterns)?;
+                }
+            }
+        }
+        if let Some(ref cs) = self.control_socket {
+            let has_path = cs
+                .path
+                .as_deref()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+            let has_exe = cs
+                .trusted_peer_exe
+                .as_deref()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+            if has_path && !has_exe {
+                return Err(ConfigError::InvalidValue {
+                    field: "control_socket.trusted_peer_exe",
+                    value: String::new(),
+                    allowed: "non-empty path when control_socket.path is set",
+                });
+            }
+            if !has_path && has_exe {
+                return Err(ConfigError::InvalidValue {
+                    field: "control_socket.path",
+                    value: String::new(),
+                    allowed: "non-empty path when control_socket.trusted_peer_exe is set",
+                });
+            }
+        }
         Ok(())
     }
 
@@ -381,6 +495,107 @@ impl SecurityConfig {
             .and_then(|l| l.backing_root.as_deref())
             .filter(|s| !s.trim().is_empty())
     }
+
+    /// Returns the control socket path when configured.
+    pub fn control_socket_path(&self) -> Option<&str> {
+        self.control_socket
+            .as_ref()
+            .and_then(|c| c.path.as_deref())
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    /// Returns the trusted peer executable path when configured.
+    pub fn control_socket_trusted_peer_exe(&self) -> Option<&str> {
+        self.control_socket
+            .as_ref()
+            .and_then(|c| c.trusted_peer_exe.as_deref())
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    /// Returns the optional trusted peer uid constraint.
+    pub fn control_socket_trusted_peer_uid(&self) -> Option<u32> {
+        self.control_socket
+            .as_ref()
+            .and_then(|c| c.trusted_peer_uid)
+    }
+
+    /// Returns the optional trusted peer gid constraint.
+    pub fn control_socket_trusted_peer_gid(&self) -> Option<u32> {
+        self.control_socket
+            .as_ref()
+            .and_then(|c| c.trusted_peer_gid)
+    }
+
+    /// I2: Build a `StagingConfig` from the `[install]` section.
+    /// Returns `None` when the section is absent or has no patterns.
+    pub fn staging_config(&self) -> Option<StagingConfig> {
+        let install = self.install.as_ref()?;
+        let raw_patterns = install.staging_patterns.as_ref()?;
+        if raw_patterns.is_empty() {
+            return None;
+        }
+        let patterns = validate_staging_patterns(raw_patterns).ok()?;
+        Some(StagingConfig {
+            patterns,
+            unactivated_visibility: install
+                .unactivated_visibility
+                .as_deref()
+                .and_then(UnactivatedVisibility::parse)
+                .unwrap_or_default(),
+        })
+    }
+
+    /// Returns the quiet timeout in milliseconds when configured.
+    pub fn quiet_timeout_ms(&self) -> Option<u64> {
+        self.install.as_ref().and_then(|i| i.quiet_timeout_ms)
+    }
+
+    /// I4: Returns the post-publish grace window in milliseconds.
+    pub fn post_publish_grace_ms(&self) -> Option<u64> {
+        self.install.as_ref().and_then(|i| i.post_publish_grace_ms)
+    }
+
+    /// I4: Returns the post-publish write patterns when configured
+    /// and non-empty.
+    pub fn post_publish_write_patterns(&self) -> Option<&[String]> {
+        self.install
+            .as_ref()
+            .and_then(|i| i.post_publish_write_patterns.as_deref())
+            .filter(|p| !p.is_empty())
+    }
+
+    /// Validate that the backing root is configured and accessible when
+    /// required.
+    pub fn validate_backing_root_accessible(&self, in_place: bool) -> Result<(), ConfigError> {
+        let needs_backing = in_place
+            && (self.activation_mode() != ActivationMode::Off || self.notify_mode() != "off");
+        if !needs_backing {
+            return Ok(());
+        }
+        let Some(backing) = self.ledger_backing_root() else {
+            return Err(ConfigError::InvalidValue {
+                field: "ledger.backing_root",
+                value: String::new(),
+                allowed: "must be configured when in-place mode has activation or notify enabled",
+            });
+        };
+        let path = std::path::Path::new(backing);
+        if !path.exists() {
+            return Err(ConfigError::InvalidValue {
+                field: "ledger.backing_root",
+                value: backing.to_string(),
+                allowed: "path must exist when in-place mode has activation or notify enabled",
+            });
+        }
+        if !path.is_dir() {
+            return Err(ConfigError::InvalidValue {
+                field: "ledger.backing_root",
+                value: backing.to_string(),
+                allowed: "path must be a directory",
+            });
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -399,9 +614,11 @@ mod tests {
         assert!(cfg.notify.is_none());
         assert!(cfg.activation_events.is_none());
         assert!(cfg.ledger.is_none());
+        assert!(cfg.install.is_none());
         assert_eq!(cfg.activation_mode(), ActivationMode::Off);
         assert_eq!(cfg.notify_mode(), "off");
         assert!(cfg.activation_events_log_path().is_none());
+        assert!(cfg.staging_config().is_none());
     }
 
     #[test]
@@ -963,5 +1180,489 @@ unknown = true
 "#;
         let result: Result<SecurityConfig, _> = toml::from_str(toml);
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // I2: Install section config tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn install_section_parses() {
+        let toml = r#"
+[install]
+staging_patterns = [".openclaw-install-stage-*"]
+unactivated_visibility = "hidden"
+"#;
+        let cfg: SecurityConfig = toml::from_str(toml).unwrap();
+        let install = cfg.install.as_ref().unwrap();
+        assert_eq!(
+            install.staging_patterns.as_ref().unwrap(),
+            &vec![".openclaw-install-stage-*".to_string()]
+        );
+        assert_eq!(install.unactivated_visibility.as_deref(), Some("hidden"));
+    }
+
+    #[test]
+    fn install_section_staging_config_builds() {
+        let toml = r#"
+[install]
+staging_patterns = [".openclaw-install-stage-*", ".pip-staging"]
+"#;
+        let cfg: SecurityConfig = toml::from_str(toml).unwrap();
+        let staging = cfg.staging_config().expect("staging config");
+        assert_eq!(staging.patterns.len(), 2);
+    }
+
+    #[test]
+    fn install_section_absent_returns_none_staging() {
+        let cfg: SecurityConfig = toml::from_str("").unwrap();
+        assert!(cfg.staging_config().is_none());
+    }
+
+    #[test]
+    fn install_section_empty_patterns_returns_none_staging() {
+        let toml = r#"
+[install]
+staging_patterns = []
+"#;
+        let cfg: SecurityConfig = toml::from_str(toml).unwrap();
+        assert!(cfg.staging_config().is_none());
+    }
+
+    #[test]
+    fn install_invalid_unactivated_visibility_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(&path, "[install]\nunactivated_visibility = \"visible\"\n").unwrap();
+        let result = SecurityConfig::load(&path);
+        assert!(matches!(result, Err(ConfigError::InvalidValue { .. })));
+    }
+
+    #[test]
+    fn install_quiet_timeout_ms_valid_value_accepted() {
+        let toml = r#"
+[install]
+staging_patterns = [".openclaw-install-stage-*"]
+quiet_timeout_ms = 2000
+"#;
+        let cfg: SecurityConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.quiet_timeout_ms(), Some(2000));
+    }
+
+    #[test]
+    fn install_quiet_timeout_ms_boundary_values() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let path = dir.path().join("low.toml");
+        std::fs::write(&path, "[install]\nquiet_timeout_ms = 100\n").unwrap();
+        let cfg = SecurityConfig::load(&path).unwrap();
+        assert_eq!(cfg.quiet_timeout_ms(), Some(100));
+
+        let path = dir.path().join("high.toml");
+        std::fs::write(&path, "[install]\nquiet_timeout_ms = 300000\n").unwrap();
+        let cfg = SecurityConfig::load(&path).unwrap();
+        assert_eq!(cfg.quiet_timeout_ms(), Some(300_000));
+    }
+
+    #[test]
+    fn install_quiet_timeout_ms_zero_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(&path, "[install]\nquiet_timeout_ms = 0\n").unwrap();
+        let result = SecurityConfig::load(&path);
+        assert!(matches!(result, Err(ConfigError::InvalidValue { .. })));
+    }
+
+    #[test]
+    fn install_quiet_timeout_ms_too_large_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(&path, "[install]\nquiet_timeout_ms = 500000\n").unwrap();
+        let result = SecurityConfig::load(&path);
+        assert!(matches!(result, Err(ConfigError::InvalidValue { .. })));
+    }
+
+    #[test]
+    fn install_quiet_timeout_ms_below_minimum_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(&path, "[install]\nquiet_timeout_ms = 50\n").unwrap();
+        let result = SecurityConfig::load(&path);
+        assert!(matches!(result, Err(ConfigError::InvalidValue { .. })));
+    }
+
+    #[test]
+    fn install_quiet_timeout_ms_absent_returns_none() {
+        let toml = r#"
+[install]
+staging_patterns = [".openclaw-install-stage-*"]
+"#;
+        let cfg: SecurityConfig = toml::from_str(toml).unwrap();
+        assert!(cfg.quiet_timeout_ms().is_none());
+    }
+
+    #[test]
+    fn install_removed_complete_on_rename_rejected_as_unknown() {
+        let toml = r#"
+[install]
+staging_patterns = [".openclaw-install-stage-*"]
+complete_on_rename_to_skill = true
+"#;
+        let result: Result<SecurityConfig, _> = toml::from_str(toml);
+        assert!(
+            result.is_err(),
+            "complete_on_rename_to_skill is no longer a valid field"
+        );
+    }
+
+    #[test]
+    fn install_invalid_staging_pattern_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(&path, "[install]\nstaging_patterns = [\"foo/bar\"]\n").unwrap();
+        let result = SecurityConfig::load(&path);
+        assert!(matches!(result, Err(ConfigError::InvalidValue { .. })));
+    }
+
+    #[test]
+    fn install_sensitive_staging_pattern_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(&path, "[install]\nstaging_patterns = [\".skill-meta\"]\n").unwrap();
+        let result = SecurityConfig::load(&path);
+        assert!(matches!(result, Err(ConfigError::InvalidValue { .. })));
+    }
+
+    #[test]
+    fn install_section_unknown_field_rejected() {
+        let toml = r#"
+[install]
+staging_patterns = [".openclaw-install-stage-*"]
+unknown = true
+"#;
+        let result: Result<SecurityConfig, _> = toml::from_str(toml);
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Trusted peer control socket config tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn control_socket_full_config_parses() {
+        let toml = r#"
+[control_socket]
+path = "/run/skillfs/skillfs.sock"
+trusted_peer_exe = "/usr/local/bin/agent-sec-cli"
+trusted_peer_uid = 1000
+trusted_peer_gid = 1000
+"#;
+        let cfg: SecurityConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.control_socket_path(), Some("/run/skillfs/skillfs.sock"));
+        assert_eq!(
+            cfg.control_socket_trusted_peer_exe(),
+            Some("/usr/local/bin/agent-sec-cli")
+        );
+        assert_eq!(cfg.control_socket_trusted_peer_uid(), Some(1000));
+        assert_eq!(cfg.control_socket_trusted_peer_gid(), Some(1000));
+    }
+
+    #[test]
+    fn control_socket_absent_returns_none() {
+        let cfg: SecurityConfig = toml::from_str("").unwrap();
+        assert!(cfg.control_socket_path().is_none());
+        assert!(cfg.control_socket_trusted_peer_exe().is_none());
+        assert!(cfg.control_socket_trusted_peer_uid().is_none());
+        assert!(cfg.control_socket_trusted_peer_gid().is_none());
+    }
+
+    #[test]
+    fn control_socket_empty_path_treated_as_absent() {
+        let toml = r#"
+[control_socket]
+path = "  "
+"#;
+        let cfg: SecurityConfig = toml::from_str(toml).unwrap();
+        assert!(cfg.control_socket_path().is_none());
+    }
+
+    #[test]
+    fn control_socket_path_without_exe_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(
+            &path,
+            r#"
+[control_socket]
+path = "/run/skillfs/skillfs.sock"
+"#,
+        )
+        .unwrap();
+        let result = SecurityConfig::load(&path);
+        assert!(
+            matches!(
+                result,
+                Err(ConfigError::InvalidValue {
+                    field: "control_socket.trusted_peer_exe",
+                    ..
+                })
+            ),
+            "path without trusted_peer_exe must fail: {result:?}"
+        );
+    }
+
+    #[test]
+    fn control_socket_exe_without_path_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(
+            &path,
+            r#"
+[control_socket]
+trusted_peer_exe = "/usr/local/bin/agent-sec-cli"
+"#,
+        )
+        .unwrap();
+        let result = SecurityConfig::load(&path);
+        assert!(
+            matches!(
+                result,
+                Err(ConfigError::InvalidValue {
+                    field: "control_socket.path",
+                    ..
+                })
+            ),
+            "trusted_peer_exe without path must fail: {result:?}"
+        );
+    }
+
+    #[test]
+    fn control_socket_optional_uid_gid_accepted() {
+        let toml = r#"
+[control_socket]
+path = "/run/skillfs/skillfs.sock"
+trusted_peer_exe = "/usr/local/bin/agent-sec-cli"
+"#;
+        let cfg: SecurityConfig = toml::from_str(toml).unwrap();
+        assert!(cfg.control_socket_trusted_peer_uid().is_none());
+        assert!(cfg.control_socket_trusted_peer_gid().is_none());
+    }
+
+    #[test]
+    fn control_socket_unknown_field_rejected() {
+        let toml = r#"
+[control_socket]
+path = "/run/skillfs/skillfs.sock"
+trusted_peer_exe = "/usr/local/bin/agent-sec-cli"
+unknown = true
+"#;
+        let result: Result<SecurityConfig, _> = toml::from_str(toml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn install_defaults_preserved_when_absent() {
+        let toml = r#"
+[activation]
+mode = "file"
+"#;
+        let cfg: SecurityConfig = toml::from_str(toml).unwrap();
+        assert!(cfg.install.is_none());
+        assert!(cfg.staging_config().is_none());
+        assert_eq!(cfg.activation_mode(), ActivationMode::File);
+    }
+
+    #[test]
+    fn full_config_with_install_section_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("full.toml");
+        std::fs::write(
+            &path,
+            r#"
+[activation]
+mode = "file"
+
+[notify]
+mode = "unix-socket"
+socket_path = "/tmp/daemon.sock"
+
+[install]
+staging_patterns = [".openclaw-install-stage-*"]
+unactivated_visibility = "hidden"
+"#,
+        )
+        .unwrap();
+        let cfg = SecurityConfig::load(&path).unwrap();
+        assert_eq!(cfg.activation_mode(), ActivationMode::File);
+        assert!(cfg.staging_config().is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // I4: Post-publish grace config tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn post_publish_both_configured_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ok.toml");
+        std::fs::write(
+            &path,
+            r#"
+[install]
+post_publish_grace_ms = 5000
+post_publish_write_patterns = [".openclaw/**"]
+"#,
+        )
+        .unwrap();
+        let cfg = SecurityConfig::load(&path).unwrap();
+        assert_eq!(cfg.post_publish_grace_ms(), Some(5000));
+        assert_eq!(
+            cfg.post_publish_write_patterns(),
+            Some([".openclaw/**".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn post_publish_grace_without_patterns_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(&path, "[install]\npost_publish_grace_ms = 5000\n").unwrap();
+        let result = SecurityConfig::load(&path);
+        assert!(
+            matches!(
+                result,
+                Err(ConfigError::InvalidValue {
+                    field: "install.post_publish_write_patterns",
+                    ..
+                })
+            ),
+            "grace without patterns must fail: {result:?}"
+        );
+    }
+
+    #[test]
+    fn post_publish_patterns_without_grace_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(
+            &path,
+            "[install]\npost_publish_write_patterns = [\".openclaw/**\"]\n",
+        )
+        .unwrap();
+        let result = SecurityConfig::load(&path);
+        assert!(
+            matches!(
+                result,
+                Err(ConfigError::InvalidValue {
+                    field: "install.post_publish_grace_ms",
+                    ..
+                })
+            ),
+            "patterns without grace must fail: {result:?}"
+        );
+    }
+
+    #[test]
+    fn post_publish_empty_patterns_with_grace_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(
+            &path,
+            "[install]\npost_publish_grace_ms = 5000\npost_publish_write_patterns = []\n",
+        )
+        .unwrap();
+        let result = SecurityConfig::load(&path);
+        assert!(
+            matches!(result, Err(ConfigError::InvalidValue { .. })),
+            "empty patterns with grace must fail: {result:?}"
+        );
+    }
+
+    #[test]
+    fn post_publish_grace_ms_boundary_values() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let path = dir.path().join("low.toml");
+        std::fs::write(
+            &path,
+            "[install]\npost_publish_grace_ms = 100\npost_publish_write_patterns = [\".openclaw/**\"]\n",
+        )
+        .unwrap();
+        let cfg = SecurityConfig::load(&path).unwrap();
+        assert_eq!(cfg.post_publish_grace_ms(), Some(100));
+
+        let path = dir.path().join("high.toml");
+        std::fs::write(
+            &path,
+            "[install]\npost_publish_grace_ms = 300000\npost_publish_write_patterns = [\".openclaw/**\"]\n",
+        )
+        .unwrap();
+        let cfg = SecurityConfig::load(&path).unwrap();
+        assert_eq!(cfg.post_publish_grace_ms(), Some(300_000));
+    }
+
+    #[test]
+    fn post_publish_grace_ms_too_low_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(
+            &path,
+            "[install]\npost_publish_grace_ms = 50\npost_publish_write_patterns = [\".openclaw/**\"]\n",
+        )
+        .unwrap();
+        let result = SecurityConfig::load(&path);
+        assert!(matches!(result, Err(ConfigError::InvalidValue { .. })));
+    }
+
+    #[test]
+    fn post_publish_grace_ms_too_high_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(
+            &path,
+            "[install]\npost_publish_grace_ms = 500000\npost_publish_write_patterns = [\".openclaw/**\"]\n",
+        )
+        .unwrap();
+        let result = SecurityConfig::load(&path);
+        assert!(matches!(result, Err(ConfigError::InvalidValue { .. })));
+    }
+
+    #[test]
+    fn post_publish_invalid_pattern_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(
+            &path,
+            "[install]\npost_publish_grace_ms = 5000\npost_publish_write_patterns = [\".skill-meta/**\"]\n",
+        )
+        .unwrap();
+        let result = SecurityConfig::load(&path);
+        assert!(matches!(result, Err(ConfigError::InvalidValue { .. })));
+    }
+
+    #[test]
+    fn post_publish_absent_returns_none() {
+        let cfg: SecurityConfig = toml::from_str("").unwrap();
+        assert!(cfg.post_publish_grace_ms().is_none());
+        assert!(cfg.post_publish_write_patterns().is_none());
+    }
+
+    #[test]
+    fn post_publish_with_staging_patterns_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ok.toml");
+        std::fs::write(
+            &path,
+            r#"
+[install]
+staging_patterns = [".openclaw-install-stage-*"]
+post_publish_grace_ms = 5000
+post_publish_write_patterns = [".openclaw/**"]
+"#,
+        )
+        .unwrap();
+        let cfg = SecurityConfig::load(&path).unwrap();
+        assert!(cfg.staging_config().is_some());
+        assert_eq!(cfg.post_publish_grace_ms(), Some(5000));
     }
 }

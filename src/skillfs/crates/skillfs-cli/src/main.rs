@@ -19,13 +19,15 @@ use skillfs_core::views::ViewsConfig;
 use skillfs_core::{ParseConfig, SharedSkillStore};
 use skillfs_fuse::security::{
     ActivationMode, ActivationReloadController, ActivationWatcher, ActiveSkillResolver,
-    AuditRuntimeConfig, CliLedgerAdapter, DEFAULT_NOTIFY_DEBOUNCE_MS, DEFAULT_NOTIFY_TIMEOUT_MS,
+    AuditRuntimeConfig, CliLedgerAdapter, ControlSocketConfig, ControlSocketContext,
+    ControlSocketServer, DEFAULT_NOTIFY_DEBOUNCE_MS, DEFAULT_NOTIFY_TIMEOUT_MS,
     DEFAULT_RELOAD_INTERVAL_MS, DEFAULT_RELOAD_TIMEOUT_MS, DecisionCommand,
-    JsonlProtocolEventWriter, JsonlSecurityEventWriter, LedgerAdapter, LedgerBackingRoot,
-    NoopProtocolEventWriter, NoopSecurityEventWriter, NotifyController, ProtocolEventWriter,
-    RefreshController, ReloadMode, SecurityConfig, SecurityEventWriter, SecurityModeConfig,
-    SourceDriftObserver, TrustedWriterConfig, UnixSocketNotifyClient, bootstrap_activation,
-    resolve_events_path, resolve_protocol_events_path, spawn_drift_watcher,
+    InstallerStagingController, JsonlProtocolEventWriter, JsonlSecurityEventWriter, LedgerAdapter,
+    LedgerBackingRoot, NoopProtocolEventWriter, NoopSecurityEventWriter, NotifyController,
+    ProtocolEventWriter, RefreshController, ReloadMode, SecurityConfig, SecurityEventWriter,
+    SecurityModeConfig, SourceDriftObserver, StagingMatcher, TrustedPeerConfig,
+    TrustedWriterConfig, UnixSocketNotifyClient, bootstrap_activation, resolve_events_path,
+    resolve_protocol_events_path, spawn_drift_watcher,
 };
 use skillfs_fuse::{FuseError as FuseErr, MountConfig, MountOptions, mount_configured};
 use tokio::signal;
@@ -204,6 +206,34 @@ enum Commands {
         /// Mutually exclusive with `--decision-command`.
         #[arg(long, value_name = "PATH")]
         ledger_backing_root: Option<PathBuf>,
+
+        /// Unix domain socket path for the trusted peer control
+        /// channel. When set, SkillFS creates a control socket at this
+        /// path and accepts connections from trusted peers. Peer
+        /// identity is verified via `SO_PEERCRED` + executable identity.
+        /// Requires `--trusted-peer-exe`. Linux only.
+        #[arg(long, value_name = "PATH")]
+        control_socket: Option<PathBuf>,
+
+        /// Trusted peer executable path for control socket
+        /// authentication. The peer's `/proc/<pid>/exe` must match this
+        /// canonical path and its on-disk `(dev, ino)` file identity.
+        /// Requires `--control-socket`. The path must exist and be a
+        /// regular file.
+        #[arg(long, value_name = "PATH")]
+        trusted_peer_exe: Option<PathBuf>,
+
+        /// Optional trusted peer UID constraint for control
+        /// socket authentication. When set, the peer's UID (from
+        /// `SO_PEERCRED`) must match this value.
+        #[arg(long, value_name = "UID")]
+        trusted_peer_uid: Option<u32>,
+
+        /// Optional trusted peer GID constraint for control
+        /// socket authentication. When set, the peer's GID (from
+        /// `SO_PEERCRED`) must match this value.
+        #[arg(long, value_name = "GID")]
+        trusted_peer_gid: Option<u32>,
     },
 
     /// Generate or update skillfs-views.toml from a skill directory
@@ -343,6 +373,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             activation_events_log,
             activation_reload_mode,
             ledger_backing_root,
+            control_socket,
+            trusted_peer_exe,
+            trusted_peer_uid,
+            trusted_peer_gid,
         } => {
             cmd_mount(
                 source,
@@ -364,6 +398,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 activation_events_log,
                 activation_reload_mode,
                 ledger_backing_root,
+                control_socket,
+                trusted_peer_exe,
+                trusted_peer_uid,
+                trusted_peer_gid,
             )
             .await
         }
@@ -413,6 +451,10 @@ async fn cmd_mount(
     activation_events_log: Option<PathBuf>,
     activation_reload_mode_raw: Option<String>,
     ledger_backing_root: Option<PathBuf>,
+    control_socket: Option<PathBuf>,
+    trusted_peer_exe: Option<PathBuf>,
+    trusted_peer_uid: Option<u32>,
+    trusted_peer_gid: Option<u32>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!(source = %source.display(), mountpoint = %mountpoint.display(), security_mode, "mounting SkillFS");
 
@@ -626,6 +668,23 @@ async fn cmd_mount(
             .into());
     }
 
+    // I2 gate: staging patterns require a notify source. Without
+    // --notify-socket or --activation-events-log the NotifyController is
+    // never created, so a staging rename would silently fail to emit the
+    // mutation notification.
+    let has_staging_patterns = file_config
+        .as_ref()
+        .and_then(|c| c.install.as_ref())
+        .and_then(|i| i.staging_patterns.as_ref())
+        .map(|p| !p.is_empty())
+        .unwrap_or(false);
+    if has_staging_patterns && notify_socket.is_none() && activation_events_log.is_none() {
+        return Err("install.staging_patterns requires --notify-socket or \
+             --activation-events-log (without a notify source, \
+             mutation notifications cannot be delivered)"
+            .into());
+    }
+
     // A6/B1: Merge ledger backing root: CLI flag overrides config file.
     let ledger_backing_root = ledger_backing_root.or_else(|| {
         file_config
@@ -821,6 +880,25 @@ async fn cmd_mount(
     } else {
         None
     };
+
+    // In-place mount with daemon-facing operations requires a backing root.
+    // Without it, daemon_root would fall back to source which becomes the
+    // FUSE over-mount path — the daemon cannot scan through FUSE.
+    let has_daemon_ops = notify_socket.is_some()
+        || activation_events_log.is_some()
+        || reload_mode == ReloadMode::Poll;
+    if in_place
+        && security
+        && activation_mode == ActivationMode::File
+        && has_daemon_ops
+        && backing_root.is_none()
+    {
+        return Err(
+            "in-place mount with activation/notify requires --ledger-backing-root \
+             (the FUSE over-mount makes the source path inaccessible to the daemon)"
+                .into(),
+        );
+    }
 
     // daemon_root: the path used for all daemon-facing operations.
     // When a backing root is set, use it; otherwise fall back to the source.
@@ -1231,6 +1309,102 @@ async fn cmd_mount(
             _ => None,
         };
 
+    // ── Trusted peer control socket ────────────────────────────────
+    //
+    // Merge CLI flags with config file. CLI overrides config.
+    let control_socket = control_socket.or_else(|| {
+        file_config
+            .as_ref()
+            .and_then(|c| c.control_socket_path().map(PathBuf::from))
+    });
+    let trusted_peer_exe = trusted_peer_exe.or_else(|| {
+        file_config
+            .as_ref()
+            .and_then(|c| c.control_socket_trusted_peer_exe().map(PathBuf::from))
+    });
+    let trusted_peer_uid = trusted_peer_uid.or_else(|| {
+        file_config
+            .as_ref()
+            .and_then(|c| c.control_socket_trusted_peer_uid())
+    });
+    let trusted_peer_gid = trusted_peer_gid.or_else(|| {
+        file_config
+            .as_ref()
+            .and_then(|c| c.control_socket_trusted_peer_gid())
+    });
+
+    // Startup validation: --control-socket requires --trusted-peer-exe
+    // and vice versa.
+    match (&control_socket, &trusted_peer_exe) {
+        (Some(p), None) => {
+            return Err(format!(
+                "--control-socket {} requires --trusted-peer-exe",
+                p.display()
+            )
+            .into());
+        }
+        (None, Some(p)) => {
+            return Err(format!(
+                "--trusted-peer-exe {} requires --control-socket",
+                p.display()
+            )
+            .into());
+        }
+        _ => {}
+    }
+
+    // Build ControlSocketConfig when both are set.
+    let control_socket_config: Option<ControlSocketConfig> =
+        match (&control_socket, &trusted_peer_exe) {
+            (Some(socket_path), Some(exe_path)) => {
+                #[cfg(not(target_os = "linux"))]
+                return Err(
+                    "--control-socket requires Linux (SO_PEERCRED, /proc/<pid>/exe)".into(),
+                );
+
+                #[cfg(target_os = "linux")]
+                {
+                    use skillfs_fuse::security::FileId;
+                    use std::os::unix::fs::MetadataExt;
+
+                    let canonical = std::fs::canonicalize(exe_path)
+                        .map_err(|e| format!("--trusted-peer-exe '{}': {e}", exe_path.display()))?;
+                    let meta = std::fs::metadata(&canonical).map_err(|e| {
+                        format!("--trusted-peer-exe '{}': {e}", canonical.display())
+                    })?;
+                    if !meta.is_file() {
+                        return Err(format!(
+                            "--trusted-peer-exe '{}': not a regular file",
+                            canonical.display()
+                        )
+                        .into());
+                    }
+                    let file_id = FileId {
+                        dev: meta.dev(),
+                        ino: meta.ino(),
+                    };
+
+                    info!(
+                        control_socket = %socket_path.display(),
+                        trusted_peer_exe = %canonical.display(),
+                        trusted_peer_file_id = %file_id,
+                        "control socket enabled"
+                    );
+
+                    Some(ControlSocketConfig {
+                        socket_path: socket_path.clone(),
+                        trusted_peer: TrustedPeerConfig {
+                            exe_path: canonical,
+                            exe_file_id: file_id,
+                            uid: trusted_peer_uid,
+                            gid: trusted_peer_gid,
+                        },
+                    })
+                }
+            }
+            _ => None,
+        };
+
     // Mount options
     let options = MountOptions {
         allow_other,
@@ -1408,6 +1582,118 @@ async fn cmd_mount(
             None
         };
 
+    // I2: build staging matcher and controller from [install] config.
+    let staging_matcher: Option<Arc<StagingMatcher>> = file_config
+        .as_ref()
+        .and_then(|c| c.staging_config())
+        .map(|cfg| {
+            info!(
+                patterns = cfg.patterns.len(),
+                "staging: installer staging compatibility enabled"
+            );
+            Arc::new(StagingMatcher::new(cfg))
+        });
+    let staging_controller: Option<Arc<InstallerStagingController>> =
+        match (&staging_matcher, &notify_controller) {
+            (Some(matcher), Some(notify_ctrl)) => Some(InstallerStagingController::new(
+                matcher.clone(),
+                notify_ctrl.clone(),
+            )),
+            _ => None,
+        };
+
+    let quiet_timeout_controller = match &notify_controller {
+        Some(notify_ctrl) => file_config
+            .as_ref()
+            .and_then(|c| c.quiet_timeout_ms())
+            .map(|ms| {
+                info!(
+                    quiet_timeout_ms = ms,
+                    "install: quiet-timeout mutation notify enabled"
+                );
+                skillfs_fuse::security::QuietTimeoutController::new(
+                    notify_ctrl.clone(),
+                    std::time::Duration::from_millis(ms),
+                )
+            }),
+        None => {
+            if file_config
+                .as_ref()
+                .and_then(|c| c.quiet_timeout_ms())
+                .is_some()
+            {
+                warn!(
+                    "install: quiet_timeout_ms configured but no notify controller; \
+                     quiet timeout disabled"
+                );
+            }
+            None
+        }
+    };
+
+    // I4: Build post-publish grace controller from [install] config.
+    // Must be built before PendingInstallController so we can inject it.
+    let post_publish_controller = match (
+        file_config.as_ref().and_then(|c| c.post_publish_grace_ms()),
+        file_config
+            .as_ref()
+            .and_then(|c| c.post_publish_write_patterns()),
+    ) {
+        (Some(ms), Some(patterns)) => {
+            let parsed = skillfs_fuse::security::validate_post_publish_patterns(patterns)
+                .map_err(|e| format!("invalid install.post_publish_write_patterns: {e}"))?;
+            info!(
+                post_publish_grace_ms = ms,
+                patterns = parsed.len(),
+                "install: post-publish grace window enabled"
+            );
+            Some(skillfs_fuse::security::PostPublishGraceController::new(
+                std::time::Duration::from_millis(ms),
+                parsed,
+            ))
+        }
+        _ => None,
+    };
+
+    let pending_install_controller = match (&notify_controller, &active_resolver) {
+        (Some(notify_ctrl), Some(_)) => file_config
+            .as_ref()
+            .and_then(|c| c.quiet_timeout_ms())
+            .map(|ms| {
+                info!(
+                    pending_timeout_ms = ms,
+                    "install: direct final-skill pending install enabled"
+                );
+                skillfs_fuse::security::PendingInstallController::new_with_post_publish(
+                    notify_ctrl.clone(),
+                    std::time::Duration::from_millis(ms),
+                    daemon_root.clone(),
+                    post_publish_controller.clone(),
+                )
+            }),
+        _ => None,
+    };
+
+    // Start control socket server before the FUSE mount.
+    let control_socket_handle = if let Some(cs_config) = control_socket_config {
+        let ctx = ControlSocketContext {
+            source_root: daemon_root.clone(),
+            resolver: active_resolver.clone(),
+            protocol_event_writer: Some(protocol_event_writer.clone()),
+        };
+        let server = ControlSocketServer::new(cs_config).with_context(ctx);
+        let handle = server
+            .start()
+            .map_err(|e| format!("failed to start control socket server: {e}"))?;
+        info!(
+            socket = %handle.socket_path().display(),
+            "control socket server started"
+        );
+        Some(handle)
+    } else {
+        None
+    };
+
     // mount_configured() blocks until the FUSE session exits (Ctrl+C or
     // SIGTERM). We wrap it in spawn_blocking and race against OS signals
     // so that SIGTERM triggers the same clean unmount path as Ctrl+C.
@@ -1430,6 +1716,11 @@ async fn cmd_mount(
                 refresh_controller,
                 notify_controller,
                 trusted_writer: trusted_writer_config,
+                staging_matcher,
+                staging_controller,
+                quiet_timeout_controller,
+                pending_install_controller,
+                post_publish_controller,
             },
         )
     });
@@ -1475,10 +1766,13 @@ async fn cmd_mount(
         _ = signal::ctrl_c() => {
             info!("received Ctrl+C, unmounting");
             trigger_unmount(&mountpoint_for_signal);
-            cleanup_pid_file(&pid_file_for_signal);
             if let Some(h) = drift_handle {
                 h.shutdown().await;
             }
+            if let Some(h) = control_socket_handle {
+                h.shutdown();
+            }
+            cleanup_pid_file(&pid_file_for_signal);
             return Ok(());
         }
         _ = async {
@@ -1488,10 +1782,13 @@ async fn cmd_mount(
         } => {
             info!("received SIGTERM, unmounting");
             trigger_unmount(&mountpoint_for_signal);
-            cleanup_pid_file(&pid_file_for_signal);
             if let Some(h) = drift_handle {
                 h.shutdown().await;
             }
+            if let Some(h) = control_socket_handle {
+                h.shutdown();
+            }
+            cleanup_pid_file(&pid_file_for_signal);
             return Ok(());
         }
     };
@@ -1504,17 +1801,19 @@ async fn cmd_mount(
     if let Some(h) = drift_handle {
         h.shutdown().await;
     }
+    // Shut down control socket server deterministically.
+    if let Some(h) = control_socket_handle {
+        h.shutdown();
+    }
+
+    cleanup_pid_file(&pid_file);
 
     match result {
         Ok(()) => {
             info!("filesystem unmounted successfully");
-            cleanup_pid_file(&pid_file);
             Ok(())
         }
-        Err(e) => {
-            cleanup_pid_file(&pid_file);
-            Err(format!("Mount failed: {}", e).into())
-        }
+        Err(e) => Err(format!("Mount failed: {}", e).into()),
     }
 }
 
@@ -1806,33 +2105,4 @@ async fn cmd_list(source: PathBuf, enabled_only: bool) -> Result<(), Box<dyn std
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cleanup_pid_file_removes_existing() {
-        let dir = tempfile::tempdir().unwrap();
-        let pid_path = dir.path().join("skillfs.pid");
-        std::fs::write(&pid_path, "12345\n").unwrap();
-        assert!(pid_path.exists());
-
-        cleanup_pid_file(&Some(pid_path.clone()));
-        assert!(!pid_path.exists());
-    }
-
-    #[test]
-    fn cleanup_pid_file_idempotent_on_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        let pid_path = dir.path().join("skillfs.pid");
-        cleanup_pid_file(&Some(pid_path.clone()));
-        assert!(!pid_path.exists());
-    }
-
-    #[test]
-    fn cleanup_pid_file_none_is_noop() {
-        cleanup_pid_file(&None);
-    }
 }

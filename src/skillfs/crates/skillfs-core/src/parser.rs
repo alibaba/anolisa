@@ -664,12 +664,13 @@ Body.
         let long_name = "a".repeat(65);
         let content = format!(
             r#"---
-name: {long_name}
+name: {}
 description: Test
 ---
 
 Body.
-"#
+"#,
+            long_name
         );
 
         let entry = parse_skill_md(&content, "fallback");

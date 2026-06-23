@@ -677,6 +677,29 @@ mod tests {
     }
 
     #[test]
+    fn pinned_status_round_trip() {
+        // Sanity check that the ledger status -> demo-mapping reasoning
+        // stays the way the plan documents it. The mapping table in
+        // `docs/security-ledger-integration-plan.md` §4.3 lists `pass`
+        // -> current, `deny` -> fallback, `none` -> hidden; the
+        // adapter is responsible for that decision, the mapping here
+        // just follows the `decision` field. Pin both directions so a
+        // future refactor that loses the decision field shows up
+        // immediately.
+        let pass = make_current();
+        assert_eq!(pass.status, LedgerStatus::Pass);
+        assert_eq!(pass.decision, LedgerDecision::Current);
+
+        let deny = make_fallback();
+        assert_eq!(deny.status, LedgerStatus::Deny);
+        assert_eq!(deny.decision, LedgerDecision::Fallback);
+
+        let none = make_hidden(false);
+        assert_eq!(none.status, LedgerStatus::None);
+        assert_eq!(none.decision, LedgerDecision::Hidden);
+    }
+
+    #[test]
     fn concurrent_read_write_no_panic_no_deadlock() {
         use std::sync::Arc;
 
@@ -728,7 +751,6 @@ mod tests {
             h.join().expect("thread must not panic");
         }
 
-        // Resolver is still usable after concurrent stress.
         resolver.set(
             "post-stress",
             ActiveTarget::Current {
@@ -737,28 +759,5 @@ mod tests {
         );
         assert!(resolver.get("post-stress").is_some());
         let _ = resolver.snapshot();
-    }
-
-    #[test]
-    fn pinned_status_round_trip() {
-        // Sanity check that the ledger status -> demo-mapping reasoning
-        // stays the way the plan documents it. The mapping table in
-        // `docs/security-ledger-integration-plan.md` §4.3 lists `pass`
-        // -> current, `deny` -> fallback, `none` -> hidden; the
-        // adapter is responsible for that decision, the mapping here
-        // just follows the `decision` field. Pin both directions so a
-        // future refactor that loses the decision field shows up
-        // immediately.
-        let pass = make_current();
-        assert_eq!(pass.status, LedgerStatus::Pass);
-        assert_eq!(pass.decision, LedgerDecision::Current);
-
-        let deny = make_fallback();
-        assert_eq!(deny.status, LedgerStatus::Deny);
-        assert_eq!(deny.decision, LedgerDecision::Fallback);
-
-        let none = make_hidden(false);
-        assert_eq!(none.status, LedgerStatus::None);
-        assert_eq!(none.decision, LedgerDecision::Hidden);
     }
 }

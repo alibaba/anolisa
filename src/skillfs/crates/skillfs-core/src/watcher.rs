@@ -320,17 +320,14 @@ async fn run_watcher(
 fn classify_event(source: &Path, path: &Path, kind: notify::EventKind) -> Option<SkillEvent> {
     use notify::EventKind;
 
-    // Check if this is a SKILL.md file
     let is_skill_md = path.file_name().and_then(|n| n.to_str()) == Some("SKILL.md");
 
-    // Check if path is inside an immediate subdirectory of source
     let is_in_skill_dir = path
         .parent()
         .and_then(|p| p.parent())
         .map(|pp| pp == source)
         .unwrap_or(false);
 
-    // Check if path IS an immediate subdirectory of source
     let is_immediate_child = path.parent().map(|p| p == source).unwrap_or(false);
 
     if is_skill_md && is_in_skill_dir {

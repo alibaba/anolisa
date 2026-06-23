@@ -66,6 +66,38 @@ impl SkillFs {
             .with_handle(fh, |entry| entry.pinned_target.clone())
             .flatten();
         let content = match path_type.clone() {
+            PathType::SkillMd { skill_name }
+                if self.is_staging_skill_root(&skill_name)
+                    || self.is_pending_install(&skill_name) =>
+            {
+                // I2/pending: staging and pending install SKILL.md reads
+                // from the physical handle.
+                let result = self.handles.with_handle(fh, |entry| {
+                    if let Some(ref file) = entry.file {
+                        let mut buf = vec![0u8; size as usize];
+                        match file.read_at(&mut buf, offset as u64) {
+                            Ok(n) => Ok(buf[..n].to_vec()),
+                            Err(e) => Err(errno(&e)),
+                        }
+                    } else {
+                        Err(libc::EBADF)
+                    }
+                });
+                match result {
+                    Some(Ok(data)) => {
+                        reply.data(&data);
+                        return;
+                    }
+                    Some(Err(e)) => {
+                        reply.error(e);
+                        return;
+                    }
+                    None => {
+                        reply.error(libc::EBADF);
+                        return;
+                    }
+                }
+            }
             PathType::SkillMd { skill_name } => {
                 match self.compiled_skill_md_pinned(&skill_name, pinned.as_ref()) {
                     Some(c) => c,
@@ -277,20 +309,38 @@ impl SkillFs {
         let mut pinned_target: Option<crate::security::ActiveTarget> = None;
         match &path_type {
             PathType::SkillMd { skill_name } | PathType::Passthrough { skill_name, .. } => {
-                if let Some(ref resolver) = self.active_resolver {
-                    pinned_target = resolver.get(skill_name);
-                }
-                match self.resolve_skill_read(skill_name) {
-                    ReadResolution::Hidden => {
-                        reply.error(libc::ENOENT);
-                        return;
+                // I2: staging roots bypass the active resolver entirely.
+                // Pending installs use the same bypass.
+                if !self.is_staging_skill_root(skill_name) && !self.is_pending_install(skill_name) {
+                    if let Some(ref resolver) = self.active_resolver {
+                        pinned_target = resolver.get(skill_name);
                     }
-                    ReadResolution::Snapshot { dir, .. } if !is_mutating_open => {
-                        if let PathType::Passthrough { relative_path, .. } = &path_type {
-                            physical = dir.join(relative_path);
+                    let grace_rel = match &path_type {
+                        PathType::Passthrough { relative_path, .. } => {
+                            Some(relative_path.as_path())
                         }
+                        // SkillMd is never grace-allowed: use the literal
+                        // "SKILL.md" path so the whitelist check rejects it.
+                        PathType::SkillMd { .. } => Some(Path::new("SKILL.md")),
+                        _ => None,
+                    };
+                    match self.resolve_skill_read(skill_name) {
+                        ReadResolution::Hidden
+                            if !self.is_post_publish_grace_allowed(skill_name, grace_rel) =>
+                        {
+                            reply.error(libc::ENOENT);
+                            return;
+                        }
+                        ReadResolution::Hidden => {
+                            // I4: grace bypass — let the open proceed against source.
+                        }
+                        ReadResolution::Snapshot { dir, .. } if !is_mutating_open => {
+                            if let PathType::Passthrough { relative_path, .. } = &path_type {
+                                physical = dir.join(relative_path);
+                            }
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
             _ => {}
@@ -410,6 +460,17 @@ impl SkillFs {
                         );
                         reply.error(err);
                     }
+                }
+            } else if self.is_staging_skill_root(skill_name) || self.is_pending_install(skill_name)
+            {
+                // I2/pending: staging and pending install SKILL.md is
+                // served as raw physical file.
+                match open_options_from_flags(flags).open(&physical) {
+                    Ok(file) => {
+                        let fh = self.handles.allocate(ino, flags, Some(file), None);
+                        reply.opened(fh, 0);
+                    }
+                    Err(e) => reply.error(errno(&e)),
                 }
             } else {
                 // Read-only open for SKILL.md: virtual content, no physical fd needed

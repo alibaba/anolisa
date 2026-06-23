@@ -226,4 +226,57 @@ impl SkillFs {
             .map(|f| (f, leaf))
             .map_err(|e| errno(&e))
     }
+
+    pub(super) fn is_staging_skill_root(&self, skill_name: &str) -> bool {
+        self.staging_matcher
+            .as_ref()
+            .is_some_and(|m| m.is_staging_root(skill_name))
+    }
+
+    pub(super) fn is_pending_install(&self, skill_name: &str) -> bool {
+        let ctrl = match self.pending_install_controller.as_ref() {
+            Some(c) => c,
+            None => return false,
+        };
+        if !ctrl.is_pending(skill_name) {
+            return false;
+        }
+        if let Some(ref resolver) = self.active_resolver {
+            if resolver.get(skill_name).is_some() {
+                ctrl.clear_if_activated(skill_name);
+                return false;
+            }
+        }
+        true
+    }
+
+    pub(super) fn should_reject_hidden_write(
+        &self,
+        skill_name: &str,
+        relative_path: Option<&std::path::Path>,
+    ) -> bool {
+        use crate::fs::read_resolution::ReadResolution;
+        if !matches!(self.resolve_skill_read(skill_name), ReadResolution::Hidden) {
+            return false;
+        }
+        if self.is_staging_skill_root(skill_name) || self.is_pending_install(skill_name) {
+            return false;
+        }
+        !self.is_post_publish_grace_allowed(skill_name, relative_path)
+    }
+
+    pub(super) fn is_post_publish_grace_allowed(
+        &self,
+        skill_name: &str,
+        relative_path: Option<&std::path::Path>,
+    ) -> bool {
+        let ctrl = match self.post_publish_controller.as_ref() {
+            Some(c) => c,
+            None => return false,
+        };
+        match relative_path {
+            Some(rel) => ctrl.is_grace_allowed(skill_name, rel),
+            None => ctrl.has_active_session(skill_name),
+        }
+    }
 }

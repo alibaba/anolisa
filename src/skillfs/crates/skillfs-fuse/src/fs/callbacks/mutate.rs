@@ -71,6 +71,20 @@ impl SkillFs {
             return;
         }
 
+        // I4: reject mkdir on hidden skills unless the path matches
+        // the post-publish grace whitelist. SkillDir mkdir is not gated
+        // — creating a new skill directory is the start of an install.
+        if let PathType::Passthrough {
+            ref skill_name,
+            ref relative_path,
+        } = path_type
+        {
+            if self.should_reject_hidden_write(skill_name, Some(relative_path)) {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        }
+
         let physical = match self.resolve_physical_path(&path_str) {
             Some(p) => p,
             None => {
@@ -246,6 +260,18 @@ impl SkillFs {
             return;
         }
 
+        // I4: reject unlink on hidden skills unless grace-allowed.
+        if let PathType::Passthrough {
+            ref skill_name,
+            ref relative_path,
+        } = path_type
+        {
+            if self.should_reject_hidden_write(skill_name, Some(relative_path)) {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        }
+
         let physical = match self.resolve_physical_path(&path_str) {
             Some(p) => p,
             None => {
@@ -374,6 +400,18 @@ impl SkillFs {
         {
             reply.error(errno);
             return;
+        }
+
+        // I4: reject rmdir on hidden skills unless grace-allowed.
+        if let PathType::Passthrough {
+            ref skill_name,
+            ref relative_path,
+        } = path_type
+        {
+            if self.should_reject_hidden_write(skill_name, Some(relative_path)) {
+                reply.error(libc::ENOENT);
+                return;
+            }
         }
 
         let physical = match self.resolve_physical_path(&path_str) {
@@ -628,6 +666,66 @@ impl SkillFs {
             return;
         }
 
+        // I4: reject renames on hidden skills unless both sides match
+        // the post-publish grace whitelist.
+        for pt in [&old_path_type, &new_path_type] {
+            let (skill_name, rel) = match pt {
+                PathType::Passthrough {
+                    skill_name,
+                    relative_path,
+                } => (skill_name.as_str(), relative_path.as_path()),
+                PathType::SkillMd { skill_name } => (skill_name.as_str(), Path::new("SKILL.md")),
+                _ => continue,
+            };
+            if self.should_reject_hidden_write(skill_name, Some(rel)) {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        }
+
+        // I2: staging-to-skill rename validation. When a staging root is
+        // renamed to a top-level skill directory, validate the target name
+        // against sensitive namespaces and invalid skill name shapes.
+        let is_staging_rename = if let Some(ref matcher) = self.staging_matcher {
+            match (&old_path_type, &new_path_type) {
+                (
+                    PathType::SkillDir {
+                        skill_name: old_name,
+                    },
+                    PathType::SkillDir {
+                        skill_name: new_name,
+                    },
+                ) if matcher.is_staging_root(old_name) => {
+                    if !crate::security::install::is_valid_staging_rename_target(new_name, matcher)
+                    {
+                        warn!(
+                            old = %old_path,
+                            new = %new_path,
+                            "rename: rejecting staging rename to invalid target"
+                        );
+                        self.emit_event(
+                            SkillEvent::new(SkillEventKind::Rename)
+                                .with_optional_skill_name(event_skill.clone())
+                                .with_optional_relative_path(event_relative.clone())
+                                .with_action(SkillEventAction::Rejected)
+                                .with_errno(libc::EACCES)
+                                .with_caller(req.uid(), req.gid())
+                                .with_detail(format!(
+                                    "class=invalid_staging_rename_target old={} new={}",
+                                    old_path, new_path
+                                )),
+                        );
+                        reply.error(libc::EACCES);
+                        return;
+                    }
+                    true
+                }
+                _ => false,
+            }
+        } else {
+            false
+        };
+
         let old_physical = match self.resolve_physical_path(&old_path) {
             Some(p) => p,
             None => {
@@ -767,6 +865,28 @@ impl SkillFs {
                     }
                 }
 
+                // I2: staging-to-skill rename triggers exactly one
+                // rename mutation notify (non-blocking enqueue).
+                // The generic old/new observe pair below is skipped for
+                // staging renames.
+                if is_staging_rename {
+                    if let PathType::SkillDir {
+                        skill_name: new_name,
+                    } = &new_type
+                    {
+                        if let Some(ref staging_ctrl) = self.staging_controller {
+                            staging_ctrl.emit_staging_rename_notify(new_name);
+                        }
+                        // I4: start post-publish grace session after staging rename.
+                        if let Some(ref pp_ctrl) = self.post_publish_controller {
+                            pp_ctrl.start_session(
+                                new_name,
+                                crate::security::PostPublishSessionKind::StagingRename,
+                            );
+                        }
+                    }
+                }
+
                 // D1.3-demo: rename observes both old and new owning
                 // skill. If they're identical the controller's
                 // per-skill debounce coalesces them; if they differ
@@ -832,16 +952,20 @@ impl SkillFs {
                         fs.observe_mutation(skill, rel, MutationKind::Rename);
                     }
                 };
-                if let Some((skill, rel, is_inbox)) = &old_skill_path {
-                    observe_pair(self, skill, rel.as_deref(), *is_inbox);
-                }
-                if let Some((new_skill, new_rel, is_inbox)) = &new_skill_path {
-                    let same_as_old = old_skill_path
-                        .as_ref()
-                        .map(|(old_skill, _, _)| old_skill == new_skill)
-                        .unwrap_or(false);
-                    if !same_as_old {
-                        observe_pair(self, new_skill, new_rel.as_deref(), *is_inbox);
+                // I2: staging renames already emitted exactly one
+                // install-complete above; skip the generic pair.
+                if !is_staging_rename {
+                    if let Some((skill, rel, is_inbox)) = &old_skill_path {
+                        observe_pair(self, skill, rel.as_deref(), *is_inbox);
+                    }
+                    if let Some((new_skill, new_rel, is_inbox)) = &new_skill_path {
+                        let same_as_old = old_skill_path
+                            .as_ref()
+                            .map(|(old_skill, _, _)| old_skill == new_skill)
+                            .unwrap_or(false);
+                        if !same_as_old {
+                            observe_pair(self, new_skill, new_rel.as_deref(), *is_inbox);
+                        }
                     }
                 }
                 self.emit_event(

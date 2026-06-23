@@ -8,10 +8,15 @@
 //! that the daemon scans and writes activation state through.
 //!
 //! SkillFS creates the backing root (optionally as a bind mount) before the
-//! FUSE over-mount becomes active. All daemon-facing operations — notify
-//! `skillDir`, activation bootstrap, activation reload, startup reconcile,
-//! and activation watching — use the backing root path. The agent-visible
-//! FUSE path is unchanged.
+//! FUSE over-mount becomes active.  When a bind mount is created, it is
+//! immediately marked `MS_PRIVATE | MS_REC` so that host mount-propagation
+//! events — most critically the in-place FUSE over-mount — are **not**
+//! propagated into the backing root.  Without this isolation the daemon
+//! would see the FUSE hidden view instead of the real source tree.
+//!
+//! All daemon-facing operations — notify `skillDir`, activation bootstrap,
+//! activation reload, startup reconcile, and activation watching — use the
+//! backing root path. The agent-visible FUSE path is unchanged.
 //!
 //! Fail-closed: if the backing root exists but ownership, permissions, path
 //! shape, or mount setup is unsafe, startup is rejected.
@@ -72,6 +77,12 @@ pub enum BackingRootError {
         backing_ino: u64,
         source_dev: u64,
         source_ino: u64,
+    },
+    /// `mount(NULL, target, NULL, MS_PRIVATE|MS_REC, NULL)` failed after
+    /// a successful bind mount.
+    MakePrivateFailed {
+        target: PathBuf,
+        error: std::io::Error,
     },
     /// `umount` failed during cleanup.
     UnmountFailed {
@@ -155,6 +166,14 @@ impl std::fmt::Display for BackingRootError {
                 source_dev,
                 source_ino
             ),
+            BackingRootError::MakePrivateFailed { target, error } => write!(
+                f,
+                "make-private on backing root '{}' failed: {} \
+                 — without propagation isolation the FUSE over-mount may \
+                 leak into the backing root",
+                target.display(),
+                error
+            ),
             BackingRootError::UnmountFailed { path, error } => {
                 write!(f, "unmount '{}' failed: {}", path.display(), error)
             }
@@ -168,6 +187,7 @@ impl std::error::Error for BackingRootError {
             BackingRootError::CreateFailed(e) => Some(e),
             BackingRootError::CanonicalizeFailed { source, .. } => Some(source),
             BackingRootError::BindMountFailed { error, .. } => Some(error),
+            BackingRootError::MakePrivateFailed { error, .. } => Some(error),
             BackingRootError::UnmountFailed { error, .. } => Some(error),
             _ => None,
         }
@@ -343,10 +363,27 @@ impl LedgerBackingRoot {
         // This gives the daemon a private alias of the live source.
         match Self::do_bind_mount(source_canon, &backing_canon) {
             Ok(()) => {
+                // Isolate propagation before the FUSE over-mount.
+                if let Err(e) = Self::do_make_private(&backing_canon) {
+                    warn!(
+                        backing_root = %backing_canon.display(),
+                        error = %e,
+                        "make-private failed — unmounting and failing closed"
+                    );
+                    let _ = Self::do_umount(&backing_canon);
+                    if let Some(ref dir) = created_temp_dir {
+                        let _ = std::fs::remove_dir_all(dir);
+                    }
+                    return Err(BackingRootError::MakePrivateFailed {
+                        target: backing_canon,
+                        error: e,
+                    });
+                }
+
                 info!(
                     source = %source_canon.display(),
                     backing_root = %backing_canon.display(),
-                    "backing root bind mount created"
+                    "backing root bind mount created (private, propagation isolated)"
                 );
                 // Verify identity after bind mount.
                 Self::verify_identity(source_canon, &backing_canon).inspect_err(|_| {
@@ -535,6 +572,35 @@ impl LedgerBackingRoot {
 
     #[cfg(not(target_os = "linux"))]
     fn do_bind_mount(_source: &Path, _target: &Path) -> std::io::Result<()> {
+        Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
+    }
+
+    /// Set `MS_PRIVATE | MS_REC` on the backing root so that subsequent
+    /// mount events (in particular the FUSE in-place over-mount) are not
+    /// propagated into this mount namespace.
+    #[cfg(target_os = "linux")]
+    fn do_make_private(target: &Path) -> std::io::Result<()> {
+        let tgt_c = CString::new(target.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+
+        let ret = unsafe {
+            libc::mount(
+                std::ptr::null(),
+                tgt_c.as_ptr(),
+                std::ptr::null(),
+                libc::MS_PRIVATE | libc::MS_REC,
+                std::ptr::null(),
+            )
+        };
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn do_make_private(_target: &Path) -> std::io::Result<()> {
         Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
     }
 

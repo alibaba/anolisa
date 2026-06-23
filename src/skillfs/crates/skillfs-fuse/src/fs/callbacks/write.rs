@@ -316,6 +316,19 @@ impl SkillFs {
             return;
         }
 
+        // I4: reject create on hidden skills unless the path matches
+        // the post-publish grace whitelist.
+        if let PathType::Passthrough {
+            ref skill_name,
+            ref relative_path,
+        } = path_type
+        {
+            if self.should_reject_hidden_write(skill_name, Some(relative_path)) {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        }
+
         let physical = match self.resolve_physical_path(&path_str) {
             Some(p) => p,
             None => {
@@ -798,6 +811,23 @@ impl SkillFs {
                 self.enforce_skill_meta(&path_type, SkillEventKind::Metadata, req, None)
             {
                 reply.error(errno);
+                return;
+            }
+        }
+
+        // I4: reject setattr mutations on hidden skills unless
+        // the path matches the post-publish grace whitelist.
+        if has_mutation {
+            let (skill_name, rel) = match &path_type {
+                PathType::Passthrough {
+                    skill_name,
+                    relative_path,
+                } => (skill_name.as_str(), relative_path.as_path()),
+                PathType::SkillMd { skill_name } => (skill_name.as_str(), Path::new("SKILL.md")),
+                _ => ("", Path::new("")),
+            };
+            if !skill_name.is_empty() && self.should_reject_hidden_write(skill_name, Some(rel)) {
+                reply.error(libc::ENOENT);
                 return;
             }
         }

@@ -119,11 +119,16 @@ impl SkillStore {
                 }
 
                 match parser::parse_skill_file_with_limit(&skill_md, config.max_skill_size) {
-                    Ok(entry) => {
-                        info!(name = %entry.metadata.name, "loaded skill");
-                        let name = entry.metadata.name.clone();
+                    Ok(mut entry) => {
+                        let dir_name = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        entry.metadata.name = dir_name.clone();
+                        info!(name = %dir_name, "loaded skill");
                         self.upsert(entry);
-                        self.skill_categories.insert(name, String::new()); // uncategorized
+                        self.skill_categories.insert(dir_name, String::new());
                         loaded_count += 1;
                     }
                     Err(e) => {
@@ -195,11 +200,16 @@ impl SkillStore {
             }
 
             match parser::parse_skill_file_with_limit(&skill_md, config.max_skill_size) {
-                Ok(entry) => {
-                    info!(name = %entry.metadata.name, category = %cat_name, "loaded skill");
-                    let name = entry.metadata.name.clone();
+                Ok(mut entry) => {
+                    let dir_name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    entry.metadata.name = dir_name.clone();
+                    info!(name = %dir_name, category = %cat_name, "loaded skill");
                     self.upsert(entry);
-                    self.skill_categories.insert(name, cat_name.to_string());
+                    self.skill_categories.insert(dir_name, cat_name.to_string());
                     *loaded_count += 1;
                 }
                 Err(e) => {

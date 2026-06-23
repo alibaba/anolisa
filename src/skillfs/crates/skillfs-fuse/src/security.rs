@@ -95,11 +95,13 @@ pub mod active;
 pub mod audit;
 pub mod backing_root;
 pub mod config;
+pub mod control_socket;
 pub mod drift;
 pub mod drift_runtime;
 pub mod event;
 pub mod event_stream;
 pub mod inbox;
+pub mod install;
 pub mod ledger;
 pub mod lifecycle;
 pub mod mode;
@@ -128,6 +130,12 @@ pub use audit::{
 };
 pub use backing_root::{BackingRootError, LedgerBackingRoot};
 pub use config::{ConfigError, SecurityConfig};
+pub use control_socket::{
+    CONTROL_SCHEMA_VERSION, ControlError, ControlRequest, ControlResponse, ControlSocketConfig,
+    ControlSocketContext, ControlSocketHandle, ControlSocketServer, PeerCredentials, PeerIdentity,
+    PeerVerifyResult, SocketPreflightError, TrustedPeerConfig, dispatch_request, identify_peer,
+    parse_request, parse_request_with_raw, preflight_socket_path, verify_peer,
+};
 pub use drift::{
     DriftChangeKind, DriftEvent, DriftScope, SourceDriftObserver, classify_drift_path,
 };
@@ -146,6 +154,12 @@ pub use inbox::{
     INBOX_DIR_NAME, INBOX_SKILL_NAME_MAX_LEN, INSTALL_COMPLETE_SENTINEL, is_inbox_dir_name,
     is_install_complete_path, is_valid_inbox_skill_name,
 };
+pub use install::{
+    InstallerStagingController, PendingInstallController, PostPublishGraceController,
+    PostPublishSessionKind, PostPublishWritePattern, QuietTimeoutController, StagingConfig,
+    StagingMatcher, StagingPattern, UnactivatedVisibility, is_valid_staging_rename_target,
+    validate_post_publish_patterns, validate_staging_patterns,
+};
 pub use ledger::{
     CliLedgerAdapter, DecisionCommand, LEDGER_SCHEMA_VERSION, LEDGER_SNAPSHOT_PREFIX,
     LedgerAdapter, LedgerDecision, LedgerError, LedgerResolveResult, LedgerStatus,
@@ -163,7 +177,7 @@ pub use notify::{
     CapturedNotify, DEFAULT_NOTIFY_DEBOUNCE_MS, DEFAULT_NOTIFY_TIMEOUT_MS, FailingNotifyClient,
     InMemoryNotifyClient, MAX_NOTIFY_PATHS, NOTIFY_METHOD, NOTIFY_SCHEMA_VERSION, NoopNotifyClient,
     NotifyChangeEvent, NotifyClient, NotifyController, NotifyError, NotifyEventKind, NotifyParams,
-    UnixSocketNotifyClient,
+    SlowNotifyClient, UnixSocketNotifyClient,
 };
 pub use path::{SKILL_META_DIR, is_skill_meta_path};
 pub use policy::{

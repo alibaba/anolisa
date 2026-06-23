@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# SkillFS external POSIX test harness.
+# SkillFS T0/T0.1 — external POSIX test harness.
 #
 # Mounts SkillFS over a temporary source, exposes a writable passthrough
 # sandbox under a normal skill directory, and runs an external pjdfstest
@@ -8,13 +8,13 @@
 # compiled-read path, skill-discover, .skill-meta, or any lifecycle
 # reserved roots.
 #
-# Harness additions:
-#   - --profile smoke|full        (default smoke = exclude manifests)
+# T0.1 additions:
+#   - --profile smoke|full        (default smoke = exclude both manifests)
 #   - --include / --exclude       (additional glob filters, comma-separated)
 #   - --rerun-failures-verbose    (prove -v rerun of unexpected fails)
 #   - --blocked-manifest <PATH>   (override blocked_dependent.txt)
-#   - report buckets: expected / blocked / caller-identity / unexpected
-#   - verdict label: UNEXPECTED_FAILURES
+#   - three report buckets: expected / blocked / unexpected
+#   - verdict label: UNEXPECTED_FAILURES (was REGRESSION)
 #
 # Hard requirements:
 #   - Must run as root (pjdfstest itself requires root).
@@ -98,9 +98,8 @@ RERUN_VERBOSE=0
 SELF_TEST=0
 
 split_csv_into() {
-	# $1 = destination array name, $2 = comma-separated string.
-	# Avoid bash 4 namerefs so the self-test also runs on macOS bash 3.
-	local out_name="$1"
+	# $1 = nameref array (bash 4.3+), $2 = comma-separated string
+	local -n _out="$1"
 	local raw="$2"
 	IFS=',' read -ra _tmp <<<"$raw"
 	local item
@@ -109,7 +108,7 @@ split_csv_into() {
 		item="${item#"${item%%[![:space:]]*}"}"
 		item="${item%"${item##*[![:space:]]}"}"
 		[[ -z "$item" ]] && continue
-		eval "$out_name+=(\"\$item\")"
+		_out+=("$item")
 	done
 }
 
@@ -259,7 +258,7 @@ SUMMARY
 
 	# Load manifests via the same reader the production path uses.
 	read_manifest_into() {
-		local arr_name="$1"
+		local -n _arr="$1"
 		local path="$2"
 		local raw stripped
 		while IFS= read -r raw; do
@@ -267,7 +266,7 @@ SUMMARY
 			stripped="${stripped#"${stripped%%[![:space:]]*}"}"
 			stripped="${stripped%"${stripped##*[![:space:]]}"}"
 			[[ -z "$stripped" ]] && continue
-			eval "$arr_name+=(\"\$stripped\")"
+			_arr+=("$stripped")
 		done < "$path"
 	}
 	matches_any() {
@@ -397,9 +396,8 @@ cargo build "${CARGO_FLAGS[@]+${CARGO_FLAGS[@]}}" --bin skillfs --manifest-path 
 # against `<rel>/<testfile>.t` under tests/).
 # ---------------------------------------------------------------------------
 read_manifest_into() {
-	# $1 = destination array name, $2 = file path.
-	# Avoid bash 4 namerefs so the self-test also runs on macOS bash 3.
-	local arr_name="$1"
+	# $1 = nameref array, $2 = file path
+	local -n _arr="$1"
 	local path="$2"
 	local raw stripped
 	while IFS= read -r raw; do
@@ -407,7 +405,7 @@ read_manifest_into() {
 		stripped="${stripped#"${stripped%%[![:space:]]*}"}"
 		stripped="${stripped%"${stripped##*[![:space:]]}"}"
 		[[ -z "$stripped" ]] && continue
-		eval "$arr_name+=(\"\$stripped\")"
+		_arr+=("$stripped")
 	done < "$path"
 }
 
@@ -439,9 +437,9 @@ matches_any() {
 #   3. drop entries that match any --exclude;
 #   4. drop entries that match either manifest when profile=smoke.
 # Manifest globs are NEVER applied as a CLI exclude when profile=full —
-# full runs every test file.
+# full reproduces the T0 baseline.
 # ---------------------------------------------------------------------------
-TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/skillfs-posix.XXXXXX")"
+TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/skillfs-t0.XXXXXX")"
 SOURCE_DIR="$TMP_ROOT/source"
 MOUNT_DIR="$TMP_ROOT/mount"
 SKILLFS_LOG="$TMP_ROOT/skillfs.log"
@@ -552,7 +550,7 @@ cat > "$SOURCE_DIR/skillfs-views.toml" <<EOF
 [[view]]
 name = "default"
 default = true
-description = "external POSIX harness view"
+description = "T0 external POSIX harness view"
 skills = ["$SKILL_NAME"]
 EOF
 
@@ -680,7 +678,7 @@ fi
 emit_report() {
 	local out_fd="$1"
 	{
-		echo "SkillFS External POSIX Harness Report"
+		echo "SkillFS T0/T0.1 — External POSIX Harness Report"
 		echo "==============================================="
 		echo "repo:           $REPO_ROOT"
 		echo "skillfs build:  $PROFILE ($SKILLFS_BIN)"

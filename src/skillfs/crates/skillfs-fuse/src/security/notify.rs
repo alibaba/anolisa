@@ -333,6 +333,25 @@ impl NotifyClient for InMemoryNotifyClient {
     }
 }
 
+/// Client that sleeps for a configured duration before returning.
+/// Used to verify that FUSE callbacks are not blocked by slow notify.
+pub struct SlowNotifyClient {
+    delay: Duration,
+}
+
+impl SlowNotifyClient {
+    pub fn new(delay: Duration) -> Self {
+        Self { delay }
+    }
+}
+
+impl NotifyClient for SlowNotifyClient {
+    fn send(&self, _event: &NotifyChangeEvent) -> Result<(), NotifyError> {
+        std::thread::sleep(self.delay);
+        Ok(())
+    }
+}
+
 /// Client that always fails, for testing failure resilience.
 #[derive(Debug, Default)]
 pub struct FailingNotifyClient;
@@ -638,6 +657,26 @@ impl NotifyController {
     /// built after the notify controller.
     pub fn set_watcher_registrar(&self, registrar: Arc<dyn WatcherRegistrar>) {
         *self.inner.watcher_registrar.lock() = Some(registrar);
+    }
+
+    /// Enqueue a notification for immediate dispatch by the background
+    /// worker. Bypasses the debounce window (fire_at = now) but does NOT
+    /// block the calling thread on socket send or activation reload poll.
+    /// The worker picks it up on its next iteration.
+    pub fn enqueue_immediate(&self, skill_name: &str, kind: MutationKind, paths: Vec<String>) {
+        let event_kind = NotifyEventKind::from_mutation_kind(kind);
+        let state = NotifyPendingState {
+            skill_name: skill_name.to_string(),
+            event_kind,
+            paths: paths.into_iter().collect(),
+            fire_at: Instant::now(),
+        };
+        self.inner
+            .pending
+            .lock()
+            .insert(skill_name.to_string(), state);
+        let _ = self.inner.sender.send(NotifyCommand::Wakeup);
+        self.inner.notify.notify_one();
     }
 
     pub fn shutdown(&self) {

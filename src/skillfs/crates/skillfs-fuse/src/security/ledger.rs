@@ -398,7 +398,7 @@ pub const MAX_SKILL_NAME_LEN: usize = 64;
 /// at an arbitrary inode. Names that pass safety but fail naming
 /// policy will surface later via the store's own load errors, where
 /// they are easier to attribute to the right source.
-fn validate_skill_name_component(name: &str) -> Result<(), LedgerError> {
+pub(crate) fn validate_skill_name_component(name: &str) -> Result<(), LedgerError> {
     if name.is_empty() {
         return Err(LedgerError::InvalidField {
             field: "skillName",

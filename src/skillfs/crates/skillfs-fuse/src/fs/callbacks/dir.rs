@@ -59,6 +59,16 @@ impl SkillFs {
                     // in case a placeholder lands in the store via mkdir
                     // before the S3 mkdir gate fires.
                     skill_names.retain(|n| !is_reserved_lifecycle_name(n));
+                    // I2: staging roots are installer-private workspaces,
+                    // not skills. Hide them from the /skills listing.
+                    if let Some(ref matcher) = self.staging_matcher {
+                        skill_names.retain(|n| !matcher.is_staging_root(n));
+                    }
+                    // Pending installs are hidden from discovery until
+                    // completeness check passes and activation exists.
+                    if self.pending_install_controller.is_some() {
+                        skill_names.retain(|n| !self.is_pending_install(n));
+                    }
                     // D1.1: mirror the opendir filter so the dynamic
                     // fallback path also hides ledger-hidden skills.
                     if self.active_resolver.is_some() {
@@ -113,53 +123,91 @@ impl SkillFs {
                     entries
                 }
                 PathType::SkillDir { skill_name } => {
-                    // D1.1: ledger-hidden skills do not list anything.
-                    if matches!(self.resolve_skill_read(&skill_name), ReadResolution::Hidden) {
-                        reply.error(libc::ENOENT);
-                        return;
-                    }
-                    let parent_ino = self.skills_dir_ino();
-                    let mut entries: Vec<(u64, FileType, String)> = vec![
-                        (ino, FileType::Directory, ".".to_string()),
-                        (parent_ino, FileType::Directory, "..".to_string()),
-                    ];
-
-                    let md_path = format!("{}/SKILL.md", path);
-                    let md_ino = self.inodes.readdir_ino(&md_path);
-                    entries.push((md_ino, FileType::RegularFile, "SKILL.md".to_string()));
-
-                    if skill_name != "skill-discover" {
-                        // D1.1: fallback skills enumerate from the
-                        // snapshot tree; current and no-resolver skills
-                        // enumerate from the live source.
-                        let phys_dir = self
-                            .skill_read_dir(&skill_name)
-                            .unwrap_or_else(|| self.skill_physical_dir(&skill_name));
+                    // I2: staging roots bypass the active resolver and
+                    // enumerate physical entries directly — no compiled
+                    // SKILL.md virtual entry, no skill-discover virtual
+                    // entries.  Pending installs use the same bypass.
+                    if self.is_staging_skill_root(&skill_name)
+                        || self.is_pending_install(&skill_name)
+                    {
+                        let parent_ino = self.skills_dir_ino();
+                        let mut entries: Vec<(u64, FileType, String)> = vec![
+                            (ino, FileType::Directory, ".".to_string()),
+                            (parent_ino, FileType::Directory, "..".to_string()),
+                        ];
+                        let phys_dir = self.source_base().join(&skill_name);
                         if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
                             for entry in dir_iter.flatten() {
                                 let name = entry.file_name().to_string_lossy().to_string();
-                                if name == "SKILL.md" {
-                                    continue;
-                                }
                                 let kind = dir_entry_file_type(&entry);
                                 let entry_path = format!("{}/{}", path, name);
                                 let entry_ino = self.inodes.readdir_ino(&entry_path);
                                 entries.push((entry_ino, kind, name));
                             }
                         }
-                    }
+                        entries
+                    } else {
+                        // D1.1: ledger-hidden skills do not list anything.
+                        // I4: grace does NOT bypass readdir — the skill stays
+                        // hidden from directory listing. Grace only allows
+                        // exact-path traversal (lookup/getattr) so the
+                        // installer can reach whitelisted files.
+                        if matches!(self.resolve_skill_read(&skill_name), ReadResolution::Hidden) {
+                            reply.error(libc::ENOENT);
+                            return;
+                        }
+                        let parent_ino = self.skills_dir_ino();
+                        let mut entries: Vec<(u64, FileType, String)> = vec![
+                            (ino, FileType::Directory, ".".to_string()),
+                            (parent_ino, FileType::Directory, "..".to_string()),
+                        ];
 
-                    entries
+                        let md_path = format!("{}/SKILL.md", path);
+                        let md_ino = self.inodes.readdir_ino(&md_path);
+                        entries.push((md_ino, FileType::RegularFile, "SKILL.md".to_string()));
+
+                        if skill_name != "skill-discover" {
+                            // D1.1: fallback skills enumerate from the
+                            // snapshot tree; current and no-resolver skills
+                            // enumerate from the live source.
+                            let phys_dir = self
+                                .skill_read_dir(&skill_name)
+                                .unwrap_or_else(|| self.skill_physical_dir(&skill_name));
+                            if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
+                                for entry in dir_iter.flatten() {
+                                    let name = entry.file_name().to_string_lossy().to_string();
+                                    if name == "SKILL.md" {
+                                        continue;
+                                    }
+                                    let kind = dir_entry_file_type(&entry);
+                                    let entry_path = format!("{}/{}", path, name);
+                                    let entry_ino = self.inodes.readdir_ino(&entry_path);
+                                    entries.push((entry_ino, kind, name));
+                                }
+                            }
+                        }
+
+                        entries
+                    }
                 }
                 PathType::Passthrough {
                     skill_name,
                     relative_path,
                 } => {
-                    let skill_dir = match self.skill_read_dir(&skill_name) {
-                        Some(d) => d,
-                        None => {
-                            reply.error(libc::ENOENT);
-                            return;
+                    // I2: staging roots use the physical source dir
+                    // directly, bypassing the active resolver.
+                    // Pending installs use the same bypass.
+                    let skill_dir = if self.is_staging_skill_root(&skill_name)
+                        || self.is_pending_install(&skill_name)
+                    {
+                        self.source_base().join(&skill_name)
+                    } else {
+                        match self.skill_read_dir(&skill_name) {
+                            Some(d) => d,
+                            None => {
+                                reply.error(libc::ENOENT);
+                                return;
+                            }
                         }
                     };
                     let parent_ino = {
@@ -337,6 +385,14 @@ impl SkillFs {
                 // so the snapshot taken at `opendir` cannot leak them
                 // even if a placeholder lands in the store later.
                 skill_names.retain(|n| !is_reserved_lifecycle_name(n));
+                // I2: staging roots are hidden from the opendir snapshot.
+                if let Some(ref matcher) = self.staging_matcher {
+                    skill_names.retain(|n| !matcher.is_staging_root(n));
+                }
+                // Pending installs are hidden from opendir snapshot.
+                if self.pending_install_controller.is_some() {
+                    skill_names.retain(|n| !self.is_pending_install(n));
+                }
                 // D1.1: ledger-hidden skills are also dropped from the
                 // opendir snapshot so readdir cannot leak them.
                 // skill-discover is exempt — it is always virtual and
@@ -402,69 +458,105 @@ impl SkillFs {
                 (entries, None)
             }
             PathType::SkillDir { ref skill_name } => {
-                // D1.1: hidden skills should not even open as a
-                // directory. Defense in depth — lookup already returns
-                // ENOENT, but a stale ino must not leak a listing.
-                if matches!(self.resolve_skill_read(skill_name), ReadResolution::Hidden) {
-                    return reply.error(libc::ENOENT);
-                }
-                let skills_dir_ino = self.skills_dir_ino();
-                let mut entries = vec![
-                    (ino, FileType::Directory, ".".to_string()),
-                    (skills_dir_ino, FileType::Directory, "..".to_string()),
-                ];
-
-                // Virtual SKILL.md always present
-                let md_path = format!("{}/SKILL.md", path);
-                let md_ino = self.inodes.readdir_ino(&md_path);
-                entries.push((md_ino, FileType::RegularFile, "SKILL.md".to_string()));
-
-                // Physical files (non skill-discover). For ledger
-                // fallback skills the snapshot directory drives the
-                // listing instead of the live source — the demo
-                // promise is that `/skills/<skill>` is read-served from
-                // the trusted snapshot tree, files and all.
-                let dir_file = if !is_skill_discover_path(skill_name) {
-                    // `skill_read_dir` returns the snapshot dir for
-                    // fallback and the live dir otherwise. Hidden is
-                    // handled by the early-return above so the
-                    // `unwrap_or` is just defensive.
-                    let phys_dir = self
-                        .skill_read_dir(skill_name)
-                        .unwrap_or_else(|| self.skill_physical_dir(skill_name));
+                // I2: staging roots bypass the active resolver and
+                // enumerate physical entries directly.
+                // Pending installs use the same bypass.
+                if self.is_staging_skill_root(skill_name) || self.is_pending_install(skill_name) {
+                    let skills_dir_ino = self.skills_dir_ino();
+                    let mut entries = vec![
+                        (ino, FileType::Directory, ".".to_string()),
+                        (skills_dir_ino, FileType::Directory, "..".to_string()),
+                    ];
+                    let phys_dir = self.source_base().join(skill_name);
                     if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
                         let mut phys_entries: Vec<_> = dir_iter.flatten().collect();
                         phys_entries.sort_by_key(|e| e.file_name());
-
                         for entry in phys_entries {
                             let name = entry.file_name().to_string_lossy().to_string();
-                            if name == "SKILL.md" {
-                                continue;
-                            }
                             let kind = dir_entry_file_type(&entry);
                             let entry_path = format!("{}/{}", path, name);
                             let entry_ino = self.inodes.readdir_ino(&entry_path);
                             entries.push((entry_ino, kind, name));
                         }
                     }
-                    std::fs::File::open(&phys_dir).ok()
+                    let dir_file = std::fs::File::open(&phys_dir).ok();
+                    (entries, dir_file)
                 } else {
-                    None
-                };
+                    // D1.1: hidden skills should not even open as a
+                    // directory. Defense in depth — lookup already returns
+                    // ENOENT, but a stale ino must not leak a listing.
+                    // I4: grace does NOT bypass opendir — same rationale
+                    // as readdir above.
+                    if matches!(self.resolve_skill_read(skill_name), ReadResolution::Hidden) {
+                        return reply.error(libc::ENOENT);
+                    }
+                    let skills_dir_ino = self.skills_dir_ino();
+                    let mut entries = vec![
+                        (ino, FileType::Directory, ".".to_string()),
+                        (skills_dir_ino, FileType::Directory, "..".to_string()),
+                    ];
 
-                (entries, dir_file)
+                    // Virtual SKILL.md always present
+                    let md_path = format!("{}/SKILL.md", path);
+                    let md_ino = self.inodes.readdir_ino(&md_path);
+                    entries.push((md_ino, FileType::RegularFile, "SKILL.md".to_string()));
+
+                    // Physical files (non skill-discover). For ledger
+                    // fallback skills the snapshot directory drives the
+                    // listing instead of the live source — the demo
+                    // promise is that `/skills/<skill>` is read-served from
+                    // the trusted snapshot tree, files and all.
+                    let dir_file = if !is_skill_discover_path(skill_name) {
+                        // `skill_read_dir` returns the snapshot dir for
+                        // fallback and the live dir otherwise. Hidden is
+                        // handled by the early-return above so the
+                        // `unwrap_or` is just defensive.
+                        let phys_dir = self
+                            .skill_read_dir(skill_name)
+                            .unwrap_or_else(|| self.skill_physical_dir(skill_name));
+                        if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
+                            let mut phys_entries: Vec<_> = dir_iter.flatten().collect();
+                            phys_entries.sort_by_key(|e| e.file_name());
+
+                            for entry in phys_entries {
+                                let name = entry.file_name().to_string_lossy().to_string();
+                                if name == "SKILL.md" {
+                                    continue;
+                                }
+                                let kind = dir_entry_file_type(&entry);
+                                let entry_path = format!("{}/{}", path, name);
+                                let entry_ino = self.inodes.readdir_ino(&entry_path);
+                                entries.push((entry_ino, kind, name));
+                            }
+                        }
+                        std::fs::File::open(&phys_dir).ok()
+                    } else {
+                        None
+                    };
+
+                    (entries, dir_file)
+                }
             }
             PathType::Passthrough {
                 ref skill_name,
                 ref relative_path,
             } => {
+                // I2: staging roots use the physical source dir
+                // directly, bypassing the active resolver.
+                // Pending installs use the same bypass.
                 // D1.1: hidden / snapshot resolution. Hidden surfaces
                 // ENOENT; snapshot drives the listing from the trusted
                 // snapshot tree so subdirectory enumerations stay
                 // consistent with what lookup/getattr/read reports.
-                let skill_dir = match self.skill_read_dir(skill_name) {
-                    Some(d) => d,
-                    None => return reply.error(libc::ENOENT),
+                let skill_dir = if self.is_staging_skill_root(skill_name)
+                    || self.is_pending_install(skill_name)
+                {
+                    self.source_base().join(skill_name)
+                } else {
+                    match self.skill_read_dir(skill_name) {
+                        Some(d) => d,
+                        None => return reply.error(libc::ENOENT),
+                    }
                 };
                 let parent_ino = {
                     let parent_path = Path::new(&path)

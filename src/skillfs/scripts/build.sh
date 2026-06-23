@@ -1,35 +1,17 @@
-#!/usr/bin/env bash
-# Build the SkillFS workspace.
-#
-# Usage:
-#   scripts/build.sh             # debug build  -> target/debug/skillfs
-#   scripts/build.sh --release   # release build -> target/release/skillfs
+#!/bin/bash
+# Build SkillFS project
 
-set -euo pipefail
+set -e
 
-PROFILE="debug"
-CARGO_FLAGS=""
-for arg in "$@"; do
-	case "$arg" in
-		--release)
-			PROFILE="release"
-			CARGO_FLAGS="--release"
-			;;
-		-h|--help)
-			sed -n '2,6p' "$0"
-			exit 0
-			;;
-		*)
-			echo "Unknown argument: $arg" >&2
-			exit 1
-			;;
-	esac
-done
-
+echo "=== Building SkillFS ==="
 cd "$(dirname "$0")/.."
 
-echo "=== Building SkillFS ($PROFILE) ==="
-cargo build --workspace $CARGO_FLAGS
+echo "Building debug version..."
+cargo build --workspace
 
-echo
-echo "Build complete. Binary at: target/$PROFILE/skillfs"
+echo ""
+echo "Build complete! Binary location:"
+echo "  Debug: target/debug/skillfs"
+echo ""
+echo "To build release version, run:"
+echo "  cargo build --release"

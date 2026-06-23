@@ -19,9 +19,10 @@ use tracing::{info, warn};
 use crate::handles::HandleManager;
 use crate::inode::InodeManager;
 use crate::security::{
-    ActiveSkillResolver, NoopEventSink, NotifyController, ProcessIdentityResolver,
-    RefreshController, SecurityPolicy, SkillEventSink, SkillMetaProtectionPolicy,
-    TrustedWriterConfig, default_identity_resolver,
+    ActiveSkillResolver, InstallerStagingController, NoopEventSink, NotifyController,
+    PendingInstallController, PostPublishGraceController, ProcessIdentityResolver,
+    QuietTimeoutController, RefreshController, SecurityPolicy, SkillEventSink,
+    SkillMetaProtectionPolicy, StagingMatcher, TrustedWriterConfig, default_identity_resolver,
 };
 use crate::sync::{SyncEvent, spawn_sync_worker};
 
@@ -105,6 +106,11 @@ pub struct SkillFs {
     /// deterministic in-memory resolver via
     /// [`SkillFs::with_trusted_writer_identity`].
     trusted_writer_identity: Arc<dyn ProcessIdentityResolver>,
+    staging_matcher: Option<Arc<StagingMatcher>>,
+    staging_controller: Option<Arc<InstallerStagingController>>,
+    quiet_timeout_controller: Option<Arc<QuietTimeoutController>>,
+    pending_install_controller: Option<Arc<PendingInstallController>>,
+    post_publish_controller: Option<Arc<PostPublishGraceController>>,
 }
 
 impl SkillFs {
@@ -177,6 +183,11 @@ impl SkillFs {
             notify_controller: None,
             trusted_writer: TrustedWriterConfig::disabled(),
             trusted_writer_identity: default_identity_resolver(),
+            staging_matcher: None,
+            staging_controller: None,
+            quiet_timeout_controller: None,
+            pending_install_controller: None,
+            post_publish_controller: None,
         };
 
         // In normal mode pre-populate the /skills inode.
@@ -307,6 +318,40 @@ impl SkillFs {
         resolver: Arc<dyn ProcessIdentityResolver>,
     ) -> Self {
         self.trusted_writer_identity = resolver;
+        self
+    }
+
+    pub fn with_staging_matcher(mut self, matcher: Arc<StagingMatcher>) -> Self {
+        self.staging_matcher = Some(matcher);
+        self
+    }
+
+    pub fn with_staging_controller(mut self, controller: Arc<InstallerStagingController>) -> Self {
+        self.staging_controller = Some(controller);
+        self
+    }
+
+    pub fn with_quiet_timeout_controller(
+        mut self,
+        controller: Arc<QuietTimeoutController>,
+    ) -> Self {
+        self.quiet_timeout_controller = Some(controller);
+        self
+    }
+
+    pub fn with_pending_install_controller(
+        mut self,
+        controller: Arc<PendingInstallController>,
+    ) -> Self {
+        self.pending_install_controller = Some(controller);
+        self
+    }
+
+    pub fn with_post_publish_controller(
+        mut self,
+        controller: Arc<PostPublishGraceController>,
+    ) -> Self {
+        self.post_publish_controller = Some(controller);
         self
     }
 

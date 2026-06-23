@@ -61,16 +61,53 @@ impl SkillFs {
             }
             PathType::SkillDir { skill_name } => {
                 // S3: lifecycle namespaces are hidden from ordinary lookup.
-                // A future management view may expose them, but no such view
-                // exists yet, so any caller that probes directly must see
-                // the same `ENOENT` they would see for a non-existent skill.
                 if is_reserved_lifecycle_name(&skill_name) {
                     reply.error(libc::ENOENT);
                     return;
                 }
+                // I2: staging roots are installer-private workspaces.
+                // They are hidden from /skills readdir but must remain
+                // accessible for lookup so installers can write inside
+                // them through the FUSE mount. Check the physical dir
+                // directly instead of the store.
+                if let Some(ref matcher) = self.staging_matcher {
+                    if matcher.is_staging_root(&skill_name) {
+                        let physical = self.source_base().join(&skill_name);
+                        if physical.is_dir() {
+                            let ino = self.inodes.allocate(&path_str, FileType::Directory, parent);
+                            self.inodes.remember(ino);
+                            let mut attr = self.dir_attr();
+                            attr.ino = ino;
+                            reply.entry(&Duration::from_secs(1), &attr, 0);
+                        } else {
+                            reply.error(libc::ENOENT);
+                        }
+                        return;
+                    }
+                }
+                // Pending installs bypass the active resolver so
+                // installers can continue writing via exact path.
+                if self.is_pending_install(&skill_name) {
+                    let physical = self.source_base().join(&skill_name);
+                    if physical.is_dir() {
+                        let ino = self.inodes.allocate(&path_str, FileType::Directory, parent);
+                        self.inodes.remember(ino);
+                        let mut attr = self.dir_attr();
+                        attr.ino = ino;
+                        reply.entry(&Duration::from_secs(1), &attr, 0);
+                    } else {
+                        reply.error(libc::ENOENT);
+                    }
+                    return;
+                }
                 // D1.1: ledger-hidden skills surface as ENOENT on direct
                 // probes, exactly as if the skill did not exist.
-                if matches!(self.resolve_skill_read(&skill_name), ReadResolution::Hidden) {
+                // I4: post-publish grace bypasses the hidden gate so
+                // installers can traverse the skill directory to reach
+                // whitelisted files within the grace window.
+                if matches!(self.resolve_skill_read(&skill_name), ReadResolution::Hidden)
+                    && !self.is_post_publish_grace_allowed(&skill_name, None)
+                {
                     reply.error(libc::ENOENT);
                     return;
                 }
@@ -94,6 +131,25 @@ impl SkillFs {
                 // bypasses readdir and probes the path directly.
                 if is_reserved_lifecycle_name(&skill_name) {
                     reply.error(libc::ENOENT);
+                    return;
+                }
+                // I2: staging roots serve SKILL.md as a raw physical
+                // file, not through the compiler/resolver.
+                // Pending installs use the same raw physical path.
+                if self.is_staging_skill_root(&skill_name) || self.is_pending_install(&skill_name) {
+                    let physical = self.source_base().join(&skill_name).join("SKILL.md");
+                    match std::fs::symlink_metadata(&physical) {
+                        Ok(meta) => {
+                            let ino =
+                                self.inodes
+                                    .allocate(&path_str, FileType::RegularFile, parent);
+                            self.inodes.remember(ino);
+                            let mut attr = file_attr_from_metadata(&meta);
+                            attr.ino = ino;
+                            reply.entry(&Duration::from_secs(1), &attr, 0);
+                        }
+                        Err(e) => reply.error(errno(&e)),
+                    }
                     return;
                 }
                 // D1.1: hidden skills also hide their virtual SKILL.md.
@@ -150,6 +206,9 @@ impl SkillFs {
                     reply.error(libc::ENOENT);
                     return;
                 }
+                // I2: staging roots use the physical source dir
+                // directly, bypassing the active resolver.
+                // Pending installs use the same bypass.
                 // D1.1: hidden skills also hide their passthrough
                 // descendants. For fallback skills we resolve against
                 // the snapshot dir so the kernel sees the snapshot's
@@ -157,11 +216,25 @@ impl SkillFs {
                 // of files that exist only in the live source surface
                 // as ENOENT, matching the contract that snapshots are
                 // the read-side ground truth.
-                let read_dir = match self.skill_read_dir(&skill_name) {
-                    Some(d) => d,
-                    None => {
-                        reply.error(libc::ENOENT);
-                        return;
+                let read_dir = if self.is_staging_skill_root(&skill_name)
+                    || self.is_pending_install(&skill_name)
+                {
+                    self.source_base().join(&skill_name)
+                } else {
+                    match self.skill_read_dir(&skill_name) {
+                        Some(d) => d,
+                        None => {
+                            // I4: grace bypass — if the skill is hidden but
+                            // the path matches the post-publish grace
+                            // whitelist, resolve against physical source.
+                            if self.is_post_publish_grace_allowed(&skill_name, Some(&relative_path))
+                            {
+                                self.source_base().join(&skill_name)
+                            } else {
+                                reply.error(libc::ENOENT);
+                                return;
+                            }
+                        }
                     }
                 };
                 let physical_path = read_dir.join(&relative_path);
@@ -313,18 +386,43 @@ impl SkillFs {
                 reply.attr(&Duration::from_secs(1), &self.dir_attr());
             }
             PathType::SkillDir { skill_name } => {
-                // D1.1: hidden skills must not surface attrs either; the
-                // S3 lifecycle reservation already returns ENOENT at
-                // lookup so we mirror the policy here for defense in
-                // depth (callers that cached an inode before the
-                // mapping flipped).
-                if matches!(self.resolve_skill_read(&skill_name), ReadResolution::Hidden) {
+                // I2: staging roots are accessible for getattr so
+                // installers can stat the directory during writes.
+                // Pending installs use the same bypass.
+                if let Some(ref matcher) = self.staging_matcher {
+                    if matcher.is_staging_root(&skill_name) {
+                        reply.attr(&Duration::from_secs(1), &self.dir_attr());
+                        return;
+                    }
+                }
+                if self.is_pending_install(&skill_name) {
+                    reply.attr(&Duration::from_secs(1), &self.dir_attr());
+                    return;
+                }
+                // I4: grace bypass for getattr on skill dir.
+                if matches!(self.resolve_skill_read(&skill_name), ReadResolution::Hidden)
+                    && !self.is_post_publish_grace_allowed(&skill_name, None)
+                {
                     reply.error(libc::ENOENT);
                     return;
                 }
                 reply.attr(&Duration::from_secs(1), &self.dir_attr());
             }
             PathType::SkillMd { skill_name } => {
+                // I2: staging roots serve SKILL.md as a raw physical file.
+                // Pending installs use the same bypass.
+                if self.is_staging_skill_root(&skill_name) || self.is_pending_install(&skill_name) {
+                    let physical = self.source_base().join(&skill_name).join("SKILL.md");
+                    match std::fs::metadata(&physical) {
+                        Ok(meta) => {
+                            let mut attr = file_attr_from_metadata(&meta);
+                            attr.ino = ino;
+                            reply.attr(&Duration::from_secs(1), &attr);
+                        }
+                        Err(e) => reply.error(errno(&e)),
+                    }
+                    return;
+                }
                 if matches!(self.resolve_skill_read(&skill_name), ReadResolution::Hidden) {
                     reply.error(libc::ENOENT);
                     return;
@@ -362,15 +460,30 @@ impl SkillFs {
                 skill_name,
                 relative_path,
             } => {
+                // I2: staging roots use the physical source dir
+                // directly, bypassing the active resolver.
+                // Pending installs use the same bypass.
                 // D1.1: hidden / snapshot resolution. Hidden surfaces
                 // ENOENT; snapshot redirects attr resolution to the
                 // snapshot tree so size/type/mtime match the bytes the
                 // kernel will receive on the next read.
-                let read_dir = match self.skill_read_dir(&skill_name) {
-                    Some(d) => d,
-                    None => {
-                        reply.error(libc::ENOENT);
-                        return;
+                let read_dir = if self.is_staging_skill_root(&skill_name)
+                    || self.is_pending_install(&skill_name)
+                {
+                    self.source_base().join(&skill_name)
+                } else {
+                    match self.skill_read_dir(&skill_name) {
+                        Some(d) => d,
+                        None => {
+                            // I4: grace bypass for getattr on passthrough path.
+                            if self.is_post_publish_grace_allowed(&skill_name, Some(&relative_path))
+                            {
+                                self.source_base().join(&skill_name)
+                            } else {
+                                reply.error(libc::ENOENT);
+                                return;
+                            }
+                        }
                     }
                 };
                 let physical_path = read_dir.join(&relative_path);

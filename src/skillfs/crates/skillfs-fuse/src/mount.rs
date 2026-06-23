@@ -14,8 +14,9 @@ use skillfs_core::SharedSkillStore;
 use tracing::{error, info, warn};
 
 use crate::security::{
-    ActiveSkillResolver, NotifyController, RefreshController, SecurityPolicy, SkillEventSink,
-    TrustedWriterConfig,
+    ActiveSkillResolver, InstallerStagingController, NotifyController, PendingInstallController,
+    PostPublishGraceController, QuietTimeoutController, RefreshController, SecurityPolicy,
+    SkillEventSink, StagingMatcher, TrustedWriterConfig,
 };
 use crate::{FuseError, MountHandle, MountOptions, SkillFs};
 
@@ -28,6 +29,11 @@ pub struct MountConfig {
     pub refresh_controller: Option<Arc<RefreshController>>,
     pub notify_controller: Option<Arc<NotifyController>>,
     pub trusted_writer: Option<TrustedWriterConfig>,
+    pub staging_matcher: Option<Arc<StagingMatcher>>,
+    pub staging_controller: Option<Arc<InstallerStagingController>>,
+    pub quiet_timeout_controller: Option<Arc<QuietTimeoutController>>,
+    pub pending_install_controller: Option<Arc<PendingInstallController>>,
+    pub post_publish_controller: Option<Arc<PostPublishGraceController>>,
 }
 
 /// Mount the SkillFS FUSE filesystem (blocking) with a unified
@@ -52,6 +58,11 @@ pub fn mount_configured(
         config.refresh_controller,
         config.notify_controller,
         config.trusted_writer,
+        config.staging_matcher,
+        config.staging_controller,
+        config.quiet_timeout_controller,
+        config.pending_install_controller,
+        config.post_publish_controller,
     )
 }
 
@@ -83,6 +94,11 @@ pub fn mount_background_configured(
             config.refresh_controller,
             config.notify_controller,
             config.trusted_writer,
+            config.staging_matcher,
+            config.staging_controller,
+            config.quiet_timeout_controller,
+            config.pending_install_controller,
+            config.post_publish_controller,
         ) {
             error!(error = %e, "background mount failed");
         }
@@ -113,6 +129,11 @@ fn mount_inner(
     refresh_controller: Option<Arc<RefreshController>>,
     notify_controller: Option<Arc<NotifyController>>,
     trusted_writer: Option<TrustedWriterConfig>,
+    staging_matcher: Option<Arc<StagingMatcher>>,
+    staging_controller: Option<Arc<InstallerStagingController>>,
+    quiet_timeout_controller: Option<Arc<QuietTimeoutController>>,
+    pending_install_controller: Option<Arc<PendingInstallController>>,
+    post_publish_controller: Option<Arc<PostPublishGraceController>>,
 ) -> Result<(), FuseError> {
     info!(mountpoint = %mountpoint.display(), source = %source.display(), in_place, "mounting SkillFS");
 
@@ -194,6 +215,21 @@ fn mount_inner(
             }
         }
     }
+    if let Some(m) = staging_matcher {
+        fs = fs.with_staging_matcher(m);
+    }
+    if let Some(c) = staging_controller {
+        fs = fs.with_staging_controller(c);
+    }
+    if let Some(c) = quiet_timeout_controller {
+        fs = fs.with_quiet_timeout_controller(c);
+    }
+    if let Some(c) = pending_install_controller {
+        fs = fs.with_pending_install_controller(c);
+    }
+    if let Some(c) = post_publish_controller {
+        fs = fs.with_post_publish_controller(c);
+    }
     info!("starting FUSE filesystem");
 
     // Neutralize the daemon process's file-creation mask. The FUSE protocol
@@ -235,7 +271,8 @@ pub fn mount(
     in_place: bool,
 ) -> Result<(), FuseError> {
     mount_inner(
-        mountpoint, source, store, options, in_place, None, None, None, None, None, None,
+        mountpoint, source, store, options, in_place, None, None, None, None, None, None, None,
+        None, None, None, None,
     )
 }
 
@@ -265,6 +302,7 @@ pub fn mount_with_security(
 ) -> Result<(), FuseError> {
     mount_inner(
         mountpoint, source, store, options, in_place, event_sink, policy, None, None, None, None,
+        None, None, None, None, None,
     )
 }
 
@@ -299,6 +337,11 @@ pub fn mount_with_security_and_active_resolver(
         event_sink,
         policy,
         active_resolver,
+        None,
+        None,
+        None,
+        None,
+        None,
         None,
         None,
         None,
@@ -337,6 +380,11 @@ pub fn mount_with_security_active_resolver_and_demo_refresh(
         policy,
         active_resolver,
         refresh_controller,
+        None,
+        None,
+        None,
+        None,
+        None,
         None,
         None,
     )
@@ -381,6 +429,11 @@ pub fn mount_with_security_active_resolver_demo_refresh_and_trusted_writer(
         refresh_controller,
         None,
         trusted_writer,
+        None,
+        None,
+        None,
+        None,
+        None,
     )
 }
 
@@ -540,6 +593,11 @@ pub fn mount_background_with_security_active_resolver_demo_refresh_and_trusted_w
             refresh_controller,
             None,
             trusted_writer,
+            None,
+            None,
+            None,
+            None,
+            None,
         ) {
             error!(error = %e, "background mount failed");
         }
