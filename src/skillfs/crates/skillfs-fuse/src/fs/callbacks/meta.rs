@@ -171,17 +171,9 @@ impl SkillFs {
                 // wants to follow the link.
                 match std::fs::symlink_metadata(&physical_path) {
                     Ok(meta) => {
-                        let ft = meta.file_type();
-                        let kind = if ft.is_symlink() {
-                            FileType::Symlink
-                        } else if ft.is_dir() {
-                            FileType::Directory
-                        } else {
-                            FileType::RegularFile
-                        };
-                        let ino = self.inodes.allocate(&path_str, kind, parent);
-                        self.inodes.remember(ino);
                         let mut attr = file_attr_from_metadata(&meta);
+                        let ino = self.inodes.allocate(&path_str, attr.kind, parent);
+                        self.inodes.remember(ino);
                         attr.ino = ino;
                         reply.entry(&Duration::from_secs(1), &attr, 0);
                     }
@@ -194,14 +186,9 @@ impl SkillFs {
                         match self.open_parent_dir_for(&path_str) {
                             Ok((parent_fd, leaf)) => match fstatat_leaf(&parent_fd, &leaf, false) {
                                 Ok(st) => {
-                                    let kind = match st.st_mode & libc::S_IFMT {
-                                        libc::S_IFLNK => FileType::Symlink,
-                                        libc::S_IFDIR => FileType::Directory,
-                                        _ => FileType::RegularFile,
-                                    };
-                                    let ino = self.inodes.allocate(&path_str, kind, parent);
-                                    self.inodes.remember(ino);
                                     let mut attr = file_attr_from_stat(&st);
+                                    let ino = self.inodes.allocate(&path_str, attr.kind, parent);
+                                    self.inodes.remember(ino);
                                     attr.ino = ino;
                                     reply.entry(&Duration::from_secs(1), &attr, 0);
                                 }
@@ -255,17 +242,9 @@ impl SkillFs {
                 let physical = self.inbox_skill_dir(&skill_name).join(&relative_path);
                 match std::fs::symlink_metadata(&physical) {
                     Ok(meta) => {
-                        let ft = meta.file_type();
-                        let kind = if ft.is_symlink() {
-                            FileType::Symlink
-                        } else if ft.is_dir() {
-                            FileType::Directory
-                        } else {
-                            FileType::RegularFile
-                        };
-                        let ino = self.inodes.allocate(&path_str, kind, parent);
-                        self.inodes.remember(ino);
                         let mut attr = file_attr_from_metadata(&meta);
+                        let ino = self.inodes.allocate(&path_str, attr.kind, parent);
+                        self.inodes.remember(ino);
                         attr.ino = ino;
                         reply.entry(&Duration::from_secs(1), &attr, 0);
                     }

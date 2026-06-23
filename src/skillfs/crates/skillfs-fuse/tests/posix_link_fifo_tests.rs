@@ -605,3 +605,107 @@ fn test_fifo_under_skill_discover_rejected() {
         "skill-discover mkfifo must be denied (EROFS or EACCES), got {err}"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Passthrough FIFO: stat / readdir kind consistency
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_passthrough_fifo_stat_and_readdir_report_fifo() {
+    skip_if_no_fuse!();
+
+    // Pre-seed a FIFO in the source tree before mounting so the lookup
+    // path in `Passthrough` must classify it correctly via
+    // `file_attr_from_metadata` rather than falling back to RegularFile.
+    let fx = MountFixture::normal(|src| {
+        create_skill_dir(src, "alpha");
+        let fifo_path = src.join("alpha").join("pipe");
+        let c_path = CString::new(fifo_path.as_os_str().as_bytes()).expect("CString");
+        let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) };
+        assert_eq!(rc, 0, "seed mkfifo must succeed");
+    });
+
+    let fifo = fx.skill_path("alpha").join("pipe");
+
+    // stat must report FIFO, not RegularFile.
+    let meta = std::fs::symlink_metadata(&fifo).expect("lstat fifo through mount");
+    assert!(
+        meta.file_type().is_fifo(),
+        "stat must report FIFO, got {:?}",
+        meta.file_type()
+    );
+
+    // readdir must list the entry and its type must agree with stat.
+    let entries = list_dir_names(&fx.skill_path("alpha"));
+    assert!(
+        entries.contains(&"pipe".to_string()),
+        "readdir must list the FIFO, got {entries:?}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Passthrough Unix socket: stat / readdir kind consistency
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_passthrough_unix_socket_stat_and_readdir_report_socket() {
+    skip_if_no_fuse!();
+
+    // Pre-seed a Unix domain socket in the source tree. The listener is
+    // dropped at closure exit but the socket file persists on disk with
+    // S_IFSOCK type.
+    let fx = MountFixture::normal(|src| {
+        create_skill_dir(src, "alpha");
+        let sock_path = src.join("alpha").join("ctrl.sock");
+        let _listener =
+            std::os::unix::net::UnixListener::bind(&sock_path).expect("bind Unix socket");
+    });
+
+    let sock = fx.skill_path("alpha").join("ctrl.sock");
+
+    // stat must report Socket, not RegularFile.
+    let meta = std::fs::symlink_metadata(&sock).expect("lstat socket through mount");
+    assert!(
+        meta.file_type().is_socket(),
+        "stat must report Socket, got {:?}",
+        meta.file_type()
+    );
+
+    // readdir must list the entry.
+    let entries = list_dir_names(&fx.skill_path("alpha"));
+    assert!(
+        entries.contains(&"ctrl.sock".to_string()),
+        "readdir must list the socket, got {entries:?}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// InboxPassthrough FIFO: lookup / stat kind correct
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_inbox_passthrough_fifo_lookup_and_stat_report_fifo() {
+    skip_if_no_fuse!();
+
+    // Pre-seed a FIFO inside a skill dir. Access it through the inbox
+    // path so the InboxPassthrough branch of lookup classifies the kind
+    // via `file_attr_from_metadata`.
+    let fx = MountFixture::normal(|src| {
+        create_skill_dir(src, "alpha");
+        let fifo_path = src.join("alpha").join("inbox-pipe");
+        let c_path = CString::new(fifo_path.as_os_str().as_bytes()).expect("CString");
+        let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) };
+        assert_eq!(rc, 0, "seed mkfifo must succeed");
+    });
+
+    // Access through the inbox path.
+    let inbox_fifo = fx.mountpoint().join(".skillfs-inbox/alpha/inbox-pipe");
+
+    // lookup + stat must report FIFO.
+    let meta = std::fs::symlink_metadata(&inbox_fifo).expect("lstat inbox FIFO");
+    assert!(
+        meta.file_type().is_fifo(),
+        "inbox stat must report FIFO, got {:?}",
+        meta.file_type()
+    );
+}
