@@ -1101,6 +1101,16 @@ def print_summary(metadata, args):
     print("  openclaw status")
     print('  openclaw agent --message "hello" --agent main')
     print("  # If agent output says EMBEDDED FALLBACK, approve the local device or fix gateway.")
+    print("\nFirst real task tip:")
+    print("  openclaw onboard --skip-bootstrap")
+    print(
+        "  # Run this if you want first real tasks to start without the "
+        "BOOTSTRAP.md introduction flow interrupting them."
+    )
+    print(
+        "  # You can still fill in or adjust IDENTITY.md, USER.md, and SOUL.md later "
+        "under the OpenClaw workspace."
+    )
     if args.dingtalk_client_id and args.dingtalk_client_secret:
         print("  openclaw channels status --probe")
 

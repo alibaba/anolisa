@@ -7,7 +7,7 @@ description: Install and configure OpenClaw non-interactively with Alibaba Cloud
 
 Use this skill to turn a user's one-sentence request into a complete local OpenClaw setup. The normal path is one script command: resolve the Alibaba Cloud Model Studio plan, validate the API key/Base URL/model combination with the official `anthropic-messages` endpoint shape, install Node.js/npm/OpenClaw when needed, write config, install/restart the local gateway service, and verify `openclaw gateway health`.
 
-Do not use `openclaw onboard` unless the user explicitly asks for interactive setup. Do not configure DingTalk unless the user provides DingTalk credentials or asks for DingTalk access.
+Do not execute `openclaw onboard` unless the user explicitly asks for interactive setup or asks to skip first-run BOOTSTRAP onboarding. After setup, always tell the user they can run `openclaw onboard --skip-bootstrap` if they want the first real task to run without the introductory BOOTSTRAP flow. Do not configure DingTalk unless the user provides DingTalk credentials or asks for DingTalk access.
 
 ## Billing
 
@@ -134,6 +134,7 @@ python3 /home/ecs-user/.copilot-shell/skills/install-openclaw/scripts/install_op
 - Starts OpenClaw through `openclaw gateway install` and `openclaw gateway restart` unless `--skip-gateway` is passed.
 - If the gateway port is occupied by OpenClaw, it clears that stale listener. If the port is occupied by another process, it stops and prints the process details for the user to decide.
 - **Auto-installs the tokenless OpenClaw plugin** after OpenClaw is installed, for token usage tracking and response compression. Pass `--skip-tokenless` to opt out.
+- Prints first-run BOOTSTRAP guidance by default. Tell the user `openclaw onboard --skip-bootstrap` keeps the first real task from being interrupted by OpenClaw's introductory `BOOTSTRAP.md` flow, and that they can still adjust `IDENTITY.md`, `USER.md`, and `SOUL.md` later under the OpenClaw workspace.
 
 ## Verify
 
