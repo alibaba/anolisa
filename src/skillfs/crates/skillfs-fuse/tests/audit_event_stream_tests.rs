@@ -31,7 +31,7 @@ use skillfs_fuse::security::{
     AuditConfig, InMemoryEventSink, JsonlFileAuditSink, SkillEventAction, SkillEventKind,
     SkillEventSink,
 };
-use skillfs_fuse::{MountHandle, MountOptions, mount_background_with_security};
+use skillfs_fuse::{MountConfig, MountHandle, MountOptions, mount_background_configured};
 
 use common::{create_skill_dir, fuse_available};
 
@@ -55,16 +55,18 @@ impl AuditedMount {
         store.load_from_directory(source.path(), &ParseConfig::default());
         let shared: SharedSkillStore = Arc::new(RwLock::new(store));
 
-        let handle = mount_background_with_security(
+        let handle = mount_background_configured(
             mountpoint.path(),
             source.path(),
             shared,
             MountOptions::default(),
             false,
-            Some(sink),
-            None,
+            MountConfig {
+                event_sink: Some(sink),
+                ..MountConfig::default()
+            },
         )
-        .expect("mount_background_with_security");
+        .expect("mount_background_configured");
 
         // Wait for the FUSE daemon to start serving requests, mirroring the
         // shared MountFixture timing.

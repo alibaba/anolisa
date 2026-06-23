@@ -32,7 +32,7 @@ use std::time::Duration;
 use parking_lot::RwLock;
 use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
 use skillfs_fuse::security::{AuditRuntimeConfig, SkillEventSink};
-use skillfs_fuse::{MountHandle, MountOptions, mount_background_with_security};
+use skillfs_fuse::{MountConfig, MountHandle, MountOptions, mount_background_configured};
 
 use common::{create_skill_dir, fuse_available};
 
@@ -63,16 +63,18 @@ impl RuntimeMount {
         // attempt happens, exactly mirroring the CLI's startup-error policy.
         let sink: Option<Arc<dyn SkillEventSink>> = runtime.build_sink()?;
 
-        let handle = mount_background_with_security(
+        let handle = mount_background_configured(
             mountpoint.path(),
             source.path(),
             shared,
             MountOptions::default(),
             false,
-            sink,
-            None,
+            MountConfig {
+                event_sink: sink,
+                ..MountConfig::default()
+            },
         )
-        .expect("mount_background_with_security");
+        .expect("mount_background_configured");
 
         std::thread::sleep(Duration::from_millis(300));
 

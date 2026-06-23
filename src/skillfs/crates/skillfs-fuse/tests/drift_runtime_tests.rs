@@ -36,7 +36,7 @@ use skillfs_fuse::security::{
     InMemoryEventSink, SkillEventAction, SkillEventKind, SkillEventSink, SourceDriftObserver,
     core_event_to_drift_event, drive_drift_watcher, spawn_drift_watcher,
 };
-use skillfs_fuse::{MountHandle, MountOptions, mount_background_with_security};
+use skillfs_fuse::{MountConfig, MountHandle, MountOptions, mount_background_configured};
 
 use common::{create_skill_dir, fuse_available};
 
@@ -263,16 +263,18 @@ impl DriftMount {
         store.load_from_directory(source.path(), &ParseConfig::default());
         let shared: SharedSkillStore = Arc::new(RwLock::new(store));
 
-        let handle = mount_background_with_security(
+        let handle = mount_background_configured(
             mountpoint.path(),
             source.path(),
             shared,
             MountOptions::default(),
             false,
-            sink,
-            None,
+            MountConfig {
+                event_sink: sink,
+                ..MountConfig::default()
+            },
         )
-        .expect("mount_background_with_security");
+        .expect("mount_background_configured");
 
         std::thread::sleep(Duration::from_millis(300));
 

@@ -1293,8 +1293,8 @@ fn test_non_meta_passthrough_mutation_still_succeeds() {
     {
         let mut f = std::fs::OpenOptions::new()
             .create(true)
-            .write(true)
             .truncate(true)
+            .write(true)
             .open(&normal)
             .expect("create regular.txt");
         f.write_all(b"hello").expect("write regular.txt");
@@ -1326,7 +1326,7 @@ fn test_neighbour_named_skill_meta2_is_not_protected() {
     {
         let mut f = std::fs::OpenOptions::new()
             .create(true)
-            .truncate(false)
+            .truncate(true)
             .write(true)
             .open(&target)
             .expect("create under .skill-meta2 must succeed");

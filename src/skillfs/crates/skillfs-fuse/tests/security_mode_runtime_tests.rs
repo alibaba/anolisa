@@ -37,7 +37,7 @@ use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
 use skillfs_fuse::security::{
     AuditRuntimeConfig, SecurityModeConfig, SecurityModeError, SkillEventSink,
 };
-use skillfs_fuse::{MountHandle, MountOptions, mount_background_with_security};
+use skillfs_fuse::{MountConfig, MountHandle, MountOptions, mount_background_configured};
 
 use common::{create_skill_dir, fuse_available};
 
@@ -92,16 +92,18 @@ impl SecurityModeMount {
         store.load_from_directory(source.path(), &ParseConfig::default());
         let shared: SharedSkillStore = Arc::new(RwLock::new(store));
 
-        let handle = mount_background_with_security(
+        let handle = mount_background_configured(
             &mount_path,
             source.path(),
             shared,
             MountOptions::default(),
             true, // in_place
-            sink,
-            None,
+            MountConfig {
+                event_sink: sink,
+                ..MountConfig::default()
+            },
         )
-        .expect("mount_background_with_security");
+        .expect("mount_background_configured");
 
         std::thread::sleep(Duration::from_millis(300));
 
@@ -134,16 +136,18 @@ impl SecurityModeMount {
         let shared: SharedSkillStore = Arc::new(RwLock::new(store));
 
         let mount_path = mountpoint.path().to_path_buf();
-        let handle = mount_background_with_security(
+        let handle = mount_background_configured(
             &mount_path,
             source.path(),
             shared,
             MountOptions::default(),
             false, // in_place
-            sink,
-            None,
+            MountConfig {
+                event_sink: sink,
+                ..MountConfig::default()
+            },
         )
-        .expect("mount_background_with_security");
+        .expect("mount_background_configured");
 
         std::thread::sleep(Duration::from_millis(300));
 

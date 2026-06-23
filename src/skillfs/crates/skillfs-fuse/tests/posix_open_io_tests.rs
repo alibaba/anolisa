@@ -22,7 +22,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use parking_lot::RwLock;
 use skillfs_core::{ParseConfig, store::SkillStore};
-use skillfs_fuse::{MountOptions, mount_background};
+use skillfs_fuse::{MountConfig, MountOptions, mount_background_configured};
 
 mod common;
 
@@ -59,8 +59,15 @@ fn mount_test(source: &Path, mountpoint: &Path) -> skillfs_fuse::MountHandle {
     let mut store = SkillStore::new();
     store.load_from_directory(source, &ParseConfig::default());
     let shared = Arc::new(RwLock::new(store));
-    mount_background(mountpoint, source, shared, MountOptions::default(), false)
-        .expect("mount_background")
+    mount_background_configured(
+        mountpoint,
+        source,
+        shared,
+        MountOptions::default(),
+        false,
+        MountConfig::default(),
+    )
+    .expect("mount_background_configured")
 }
 
 /// Cleanup: drop handle + fusermount3 unmount.

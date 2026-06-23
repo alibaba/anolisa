@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use parking_lot::RwLock;
 use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
-use skillfs_fuse::{MountHandle, MountOptions, mount_background};
+use skillfs_fuse::{MountConfig, MountHandle, MountOptions, mount_background_configured};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // FUSE availability detection
@@ -176,14 +176,15 @@ impl MountFixture {
         };
         let in_place = matches!(mode, MountMode::InPlace);
 
-        let handle = mount_background(
+        let handle = mount_background_configured(
             &mp_path,
             source.path(),
             shared,
             MountOptions::default(),
             in_place,
+            MountConfig::default(),
         )
-        .expect("mount_background");
+        .expect("mount_background_configured");
 
         // Give the FUSE daemon time to start serving requests.
         std::thread::sleep(Duration::from_millis(300));

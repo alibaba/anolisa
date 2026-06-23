@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use parking_lot::RwLock;
 use skillfs_core::{ParseConfig, store::SkillStore};
-use skillfs_fuse::{MountOptions, mount_background};
+use skillfs_fuse::{MountConfig, MountOptions, mount_background_configured};
 
 mod common;
 
@@ -82,8 +82,15 @@ fn test_write_ops_return_erofs() {
     let store = fixture_store();
     let opts = MountOptions::default();
 
-    let handle = mount_background(mountpoint.path(), &fixture_dir, store, opts, false)
-        .expect("mount_background");
+    let handle = mount_background_configured(
+        mountpoint.path(),
+        &fixture_dir,
+        store,
+        opts,
+        false,
+        MountConfig::default(),
+    )
+    .expect("mount_background_configured");
 
     // Give the FUSE daemon time to start serving.
     std::thread::sleep(Duration::from_millis(300));
@@ -143,8 +150,15 @@ fn test_read_ops_succeed() {
     let store = fixture_store();
     let opts = MountOptions::default();
 
-    let handle = mount_background(mountpoint.path(), &fixture_dir, store, opts, false)
-        .expect("mount_background");
+    let handle = mount_background_configured(
+        mountpoint.path(),
+        &fixture_dir,
+        store,
+        opts,
+        false,
+        MountConfig::default(),
+    )
+    .expect("mount_background_configured");
 
     std::thread::sleep(Duration::from_millis(300));
 
@@ -219,14 +233,15 @@ fn test_mkdir_skill_immediately_visible() {
         Arc::new(RwLock::new(s))
     };
 
-    let handle = mount_background(
+    let handle = mount_background_configured(
         mountpoint.path(),
         source_dir.path(),
         store,
         MountOptions::default(),
         false,
+        MountConfig::default(),
     )
-    .expect("mount_background");
+    .expect("mount_background_configured");
     std::thread::sleep(Duration::from_millis(300));
 
     let skills_dir = mountpoint.path().join("skills");
@@ -303,14 +318,15 @@ skills = []
         Arc::new(RwLock::new(s))
     };
 
-    let handle = mount_background(
+    let handle = mount_background_configured(
         mountpoint.path(),
         source_dir.path(),
         store,
         MountOptions::default(),
         false,
+        MountConfig::default(),
     )
-    .expect("mount_background");
+    .expect("mount_background_configured");
     std::thread::sleep(Duration::from_millis(300));
 
     let skills_dir = mountpoint.path().join("skills");
@@ -393,14 +409,15 @@ fn test_rename_skill_no_empty_window() {
         Arc::new(RwLock::new(s))
     };
 
-    let handle = mount_background(
+    let handle = mount_background_configured(
         mountpoint.path(),
         source_dir.path(),
         store,
         MountOptions::default(),
         false,
+        MountConfig::default(),
     )
-    .expect("mount_background");
+    .expect("mount_background_configured");
     std::thread::sleep(Duration::from_millis(300));
 
     let skills_dir = mountpoint.path().join("skills");
@@ -460,8 +477,15 @@ fn mount_inplace(dir: &std::path::Path) -> skillfs_fuse::MountHandle {
     let mut s = SkillStore::new();
     s.load_from_directory(dir, &ParseConfig::default());
     let store = Arc::new(RwLock::new(s));
-    mount_background(dir, dir, store, MountOptions::default(), true)
-        .expect("mount_background in-place")
+    mount_background_configured(
+        dir,
+        dir,
+        store,
+        MountOptions::default(),
+        true,
+        MountConfig::default(),
+    )
+    .expect("mount_background_configured")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -685,14 +709,15 @@ fn test_post_rename_write_does_not_resurrect_old_name() {
         Arc::new(RwLock::new(s))
     };
 
-    let handle = mount_background(
+    let handle = mount_background_configured(
         mountpoint.path(),
         source_dir.path(),
         store,
         MountOptions::default(),
         false,
+        MountConfig::default(),
     )
-    .expect("mount_background");
+    .expect("mount_background_configured");
     std::thread::sleep(Duration::from_millis(300));
 
     let skills_dir = mountpoint.path().join("skills");

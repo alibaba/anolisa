@@ -33,7 +33,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use skillfs_core::store::SkillStore;
 use skillfs_core::{ParseConfig, SharedSkillStore};
-use skillfs_fuse::{MountHandle, MountOptions, mount_background};
+use skillfs_fuse::{MountConfig, MountHandle, MountOptions, mount_background_configured};
 
 mod common;
 
@@ -212,12 +212,13 @@ impl LongSourceMount {
         let shared: SharedSkillStore = Arc::new(RwLock::new(store));
 
         let mount_path = mount_root.path().to_path_buf();
-        let handle = mount_background(
+        let handle = mount_background_configured(
             &mount_path,
             &padded_source,
             shared,
             MountOptions::default(),
             false,
+            MountConfig::default(),
         )
         .ok()?;
 
