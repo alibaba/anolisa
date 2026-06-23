@@ -366,6 +366,13 @@ pub fn default_cmdline_rules() -> Vec<CmdlineRule> {
     rules
 }
 
+/// Load both default cmdline and https rules from the embedded config.
+pub fn default_rules() -> (Vec<CmdlineRule>, Vec<HttpsRule>) {
+    let (cmdline, https, _) =
+        parse_json_rules(DEFAULT_AGENTS_JSON).expect("embedded DEFAULT_AGENTS_JSON is valid");
+    (cmdline, https)
+}
+
 // ==================== Chrome Trace Export ====================
 
 /// Check if chrome trace export is enabled (set once at startup)
@@ -1161,6 +1168,57 @@ mod tests {
         // https rules: dashscope.aliyuncs.com configured by default
         assert_eq!(https_rules.len(), 1);
         assert!(http_targets.is_empty());
+    }
+
+    #[test]
+    fn test_default_rules_returns_both_cmdline_and_https() {
+        let (cmdline, https) = default_rules();
+        assert!(
+            !cmdline.is_empty(),
+            "embedded defaults must have cmdline rules"
+        );
+        assert!(!https.is_empty(), "embedded defaults must have https rules");
+        let has_claude = cmdline
+            .iter()
+            .any(|r| r.agent_name.as_deref() == Some("Claude"));
+        assert!(has_claude, "embedded defaults must include Claude agent");
+    }
+
+    #[test]
+    fn test_load_extends_defaults_not_replaces() {
+        // Pre-seed with embedded defaults, then load user config via JSON.
+        // The final rules must contain BOTH defaults AND user additions.
+        // Discriminating: initializing cmdline_rules as Vec::new() before
+        // load_from_json would lose the defaults.
+        let mut config = AgentsightConfig::new();
+        let (default_cmdline, default_https) = default_rules();
+        config.cmdline_rules = default_cmdline;
+        config.https_rules = default_https;
+
+        let user_json = r#"{"cmdline":{"allow":[{"rule":["*my-agent*"],"agent_name":"MyAgent"}]},"https":[{"rule":["my-api.example.com"]}]}"#;
+        config.load_from_json(user_json).unwrap();
+
+        let has_claude = config
+            .cmdline_rules
+            .iter()
+            .any(|r| r.agent_name.as_deref() == Some("Claude"));
+        let has_my_agent = config
+            .cmdline_rules
+            .iter()
+            .any(|r| r.agent_name.as_deref() == Some("MyAgent"));
+        assert!(has_claude, "defaults must survive after load_from_json");
+        assert!(has_my_agent, "user rules must be appended");
+
+        let has_default_https = config
+            .https_rules
+            .iter()
+            .any(|r| r.pattern == "dashscope.aliyuncs.com");
+        let has_user_https = config
+            .https_rules
+            .iter()
+            .any(|r| r.pattern == "my-api.example.com");
+        assert!(has_default_https, "default https rules must survive");
+        assert!(has_user_https, "user https rules must be appended");
     }
 
     #[test]

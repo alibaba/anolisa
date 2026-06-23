@@ -113,6 +113,7 @@ impl AgentScanner {
             Err(_) => return discovered,
         };
 
+        let mut scanned = 0u32;
         for entry in entries.flatten() {
             let file_name = entry.file_name();
             let name_str = file_name.to_string_lossy();
@@ -122,13 +123,27 @@ impl AgentScanner {
                 Ok(p) => p,
                 Err(_) => continue,
             };
+            scanned += 1;
+
+            // Read cmdline once for both deny check and match (avoid double /proc read)
+            let cmdline = read_cmdline(&format!("/proc/{pid}/cmdline"));
+            if !cmdline.is_empty() && self.is_denied(&cmdline) {
+                continue;
+            }
 
             // Try to read process info and match against known agents
-            if let Some(discovered_agent) = self.try_match_process(pid) {
+            if let Some(discovered_agent) = self.try_match_process(pid, cmdline) {
                 self.tracked_agents
                     .insert(discovered_agent.pid, discovered_agent.clone());
                 discovered.push(discovered_agent);
             }
+        }
+
+        if discovered.is_empty() && !self.matchers.is_empty() {
+            log::warn!(
+                "Process scan found 0 agents among {scanned} /proc entries — \
+                 verify cmdline.allow rules in config"
+            );
         }
 
         discovered
@@ -224,19 +239,13 @@ impl AgentScanner {
     }
 
     /// Attempt to match a process against known agents
-    fn try_match_process(&self, pid: u32) -> Option<DiscoveredAgent> {
+    fn try_match_process(&self, pid: u32, cmdline_args: Vec<String>) -> Option<DiscoveredAgent> {
         let proc_dir = format!("/proc/{pid}");
 
-        // Read process name from /proc/[pid]/comm
         let comm_path = format!("{proc_dir}/comm");
         let comm = fs::read_to_string(&comm_path).ok()?;
         let process_name = comm.trim().to_string();
 
-        // Read full command line from /proc/[pid]/cmdline
-        let cmdline_path = format!("{proc_dir}/cmdline");
-        let cmdline_args = read_cmdline(&cmdline_path);
-
-        // Read executable path from /proc/[pid]/exe (symlink)
         let exe_path = format!("{proc_dir}/exe");
         let exe = fs::read_link(&exe_path)
             .map(|p| p.to_string_lossy().into_owned())
@@ -379,5 +388,44 @@ mod tests {
         // Deny works
         assert!(scanner.is_denied(&["deny-me-process".to_string()]));
         assert!(!scanner.is_denied(&["node".to_string(), "/path/claude-code".to_string()]));
+    }
+
+    #[test]
+    fn test_scan_zero_match_with_matchers() {
+        // With matchers that cannot match any real process (impossible pattern),
+        // scan() returns empty and the warn! diagnostic fires (matchers non-empty).
+        // Discriminating: removing the warn! condition changes nothing observable
+        // in the test, but the test validates that scan() completes cleanly with
+        // non-empty matchers and zero matches — the exact #1055 incident shape.
+        let rules = vec![CmdlineRule {
+            patterns: vec!["__impossible_agent_pattern_e2e__".to_string()],
+            agent_name: Some("Ghost".to_string()),
+            allow: true,
+        }];
+        let mut scanner = AgentScanner::from_rules(&rules, &[]);
+        assert_eq!(scanner.matcher_count(), 1);
+        let result = scanner.scan();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_is_denied_blocks_allow_match() {
+        // A process matching both allow AND deny rules must be blocked by deny.
+        // This verifies the deny-check logic that scan() now applies.
+        let rules = vec![
+            CmdlineRule {
+                patterns: vec!["*test-agent*".to_string()],
+                agent_name: Some("TestAgent".to_string()),
+                allow: true,
+            },
+            CmdlineRule {
+                patterns: vec!["*test-agent*".to_string()],
+                agent_name: None,
+                allow: false,
+            },
+        ];
+        let scanner = AgentScanner::from_rules(&rules, &[]);
+        assert_eq!(scanner.matcher_count(), 1);
+        assert!(scanner.is_denied(&["test-agent-process".to_string()]));
     }
 }

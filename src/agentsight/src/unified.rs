@@ -134,6 +134,14 @@ impl AgentSight {
         let mut config_load_ok = false;
         let mut config_load_err: Option<(PathBuf, anyhow::Error)> = None;
         if let Some(path) = config.config_path.clone() {
+            // Pre-seed with embedded defaults so user config EXTENDS rather
+            // than replaces. load_from_json's extend() appends user rules
+            // after these defaults; AgentScanner's first-match semantics mean
+            // defaults apply transparently unless the user overrides.
+            let (default_cmdline, default_https) = crate::config::default_rules();
+            config.cmdline_rules = default_cmdline;
+            config.https_rules = default_https;
+
             let load_result = if path.exists() {
                 config.load_from_file(&path)
             } else {
