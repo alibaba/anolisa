@@ -104,20 +104,23 @@ int BPF_UPROBE(probe_SSL_rw_enter, void *ssl, void *buf, int num) {
         _d->ssl_ptr = (ssl_);                                                   \
         _d->truncated = ((u32)(len_) > (u32)(TIER)) ? 1 : 0;                    \
         bpf_get_current_comm(&_d->comm, sizeof(_d->comm));                      \
-        /* Re-clamp the copy length to the tier right before the read. Two      \
+        /* Re-clamp the copy length to the tier right before the read. Three    \
          * verifier traps must be dodged: (1) a length computed earlier is      \
          * spilled across bpf_get_current_comm() and reloaded as an UNBOUNDED   \
          * scalar; (2) the outer tier-selection already proved len_ <= TIER, so \
          * clang folds a plain `if (_n > TIER)` away as dead code -- yet the     \
          * verifier does NOT carry that bound across the spill, so the clamp     \
-         * still has to execute. The asm barrier makes _n opaque to clang so the \
-         * clamp is emitted, handing bpf_probe_read_user a fresh umax=TIER bound \
-         * (TIER is a compile-time constant). Without it the load is rejected:   \
+         * still has to execute; (3) on kernel 5.15, clang may substitute the   \
+         * original signed `len` register for _n at the call site, even after   \
+         * the clamp, because it proves they hold the same value — the second   \
+         * barrier forces clang to use _n's own (clamped, unsigned) register.   \
+         * Without the barriers the load is rejected on 5.15:                   \
          * "R2 min value is negative, either use unsigned or 'var &= const'". */ \
         u32 _n = (u32)(len_);                                                   \
         asm volatile("" : "+r"(_n));                                            \
         if (_n > (u32)(TIER))                                                   \
             _n = (u32)(TIER);                                                   \
+        asm volatile("" : "+r"(_n));                                            \
         int _rc = (src_) ? bpf_probe_read_user(&_d->buf, _n, (const char *)(src_)) : -1; \
         if (_rc) { _d->buf_filled = 0; _d->buf_size = 0; }                      \
         else     { _d->buf_filled = 1; _d->buf_size = _n; }                     \
