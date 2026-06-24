@@ -20,6 +20,7 @@ const InfoTooltip: React.FC<{ text: string }> = ({ text }) => {
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const open = () => { if (timer.current) clearTimeout(timer.current); setShow(true); };
   const close = () => { timer.current = setTimeout(() => setShow(false), 120); };
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
   return (
     <span
       className="relative inline-flex items-center ml-1"
@@ -385,6 +386,7 @@ export const TokenSavingsPage: React.FC = () => {
   const totalCompoundedToolSaved = summary?.total_compounded_tool_saved ?? 0;
   const totalCompoundedMcpSaved = summary?.total_compounded_mcp_saved ?? 0;
   const compoundedSavingsRate = summary?.compounded_savings_rate ?? 0;
+  const savingsRate = baselineTokens > 0 ? (totalCompoundedSaved / baselineTokens) * 100 : 0;
 
   return (
     <main className="max-w-screen-xl mx-auto px-6 py-6 space-y-6">
@@ -597,7 +599,7 @@ export const TokenSavingsPage: React.FC = () => {
 
         {/* Card 3: Savings rate */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
-          <p className="text-sm text-gray-500">降低率</p>
+          <p className="text-sm text-gray-500">节省率</p>
           <div className="flex items-center gap-4 mt-1">
             <div className="relative w-20 h-20 flex-shrink-0">
               <svg viewBox="0 0 80 80" className="w-full h-full -rotate-90">
@@ -607,32 +609,32 @@ export const TokenSavingsPage: React.FC = () => {
                   cy="40"
                   r="34"
                   fill="none"
-                  stroke={compoundedSavingsRate >= 30 ? '#10b981' : compoundedSavingsRate >= 15 ? '#3b82f6' : '#f59e0b'}
+                  stroke={savingsRate >= 30 ? '#10b981' : savingsRate >= 15 ? '#3b82f6' : '#f59e0b'}
                   strokeWidth="6"
-                  strokeDasharray={`${(compoundedSavingsRate / 100) * 213.6} 213.6`}
+                  strokeDasharray={`${(Math.min(savingsRate, 100) / 100) * 213.6} 213.6`}
                   strokeLinecap="round"
                 />
               </svg>
               <div className="absolute inset-0 flex items-center justify-center">
                 <span className="text-lg font-bold text-gray-900">
-                  {compoundedSavingsRate.toFixed(1)}%
+                  {savingsRate.toFixed(1)}%
                 </span>
               </div>
             </div>
             <div>
               <span
                 className={`px-2 py-0.5 rounded text-xs font-medium ${
-                  compoundedSavingsRate >= 30
+                  savingsRate >= 30
                     ? 'bg-green-100 text-green-700'
-                    : compoundedSavingsRate >= 15
+                    : savingsRate >= 15
                     ? 'bg-blue-100 text-blue-700'
                     : 'bg-orange-100 text-orange-700'
                 }`}
               >
-                {compoundedSavingsRate >= 30 ? '优秀' : compoundedSavingsRate >= 15 ? '良好' : '待优化'}
+                {savingsRate >= 30 ? '优秀' : savingsRate >= 15 ? '良好' : '待优化'}
               </span>
               <p className="text-xs text-gray-400 mt-1">
-                = 已节省 / 实际消耗 x 100%
+                = 已节省 / 优化前预估 × 100%
               </p>
             </div>
           </div>
