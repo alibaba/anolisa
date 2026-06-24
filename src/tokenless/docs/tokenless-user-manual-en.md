@@ -824,6 +824,8 @@ tokenless stats summary --compare <session-A> <session-B> --json   # machine-rea
 
 In addition to SQLite stats, tokenless can append each compression as an **SLS (Simple Log Service) JSONL record** to a file, for ingestion by a log collector (e.g. ilogtail / SLS Logtail).
 
+> **File ownership**: the SLS JSONL file is owned and lifecycle-managed by the **anolisa SLS component** (it creates, rotates, and removes it). tokenless **does not manage the log file** — on each write it first checks whether the file exists, and **appends only if it exists, silently skipping otherwise** (treated as "SLS collection not ready"). tokenless never creates, truncates, or deletes the file or its directory.
+
 - **Enabled by default.** Toggle field: `sls_enabled` in `~/.tokenless/config.json` (default `true`); the `TOKENLESS_SLS_ENABLED` env var takes precedence — `1`/`true`/`yes` turns it on, anything else turns it off.
 - **Output path**: defaults to `/var/log/anolisa/sls/ops/tokenless.jsonl`, overridable via `TOKENLESS_SLS_PATH`. The path must live under `/var/log/` or `/tmp/` and must not contain `..`, otherwise it falls back to the default with a warning. Prefer `/var/log/` in production (`/tmp/` is world-writable).
 - **Recorded fields** (dot-namespaced keys matching the SLS ingestion schema):
@@ -838,7 +840,9 @@ In addition to SQLite stats, tokenless can append each compression as an **SLS (
 # Show current toggle state and source (default / config file / env override)
 tokenless stats status
 
-# Quick check (use a /tmp path, does not touch the system)
+# Quick check: the file must first exist (created by the anolisa SLS component)
+# before tokenless will write to it.
+mkdir -p /tmp && touch /tmp/tokenless-sls.jsonl
 TOKENLESS_STATS_ENABLED=1 TOKENLESS_SLS_ENABLED=1 \
 TOKENLESS_SLS_PATH=/tmp/tokenless-sls.jsonl \
 tokenless compress-response -f resp.json
@@ -848,8 +852,8 @@ tail -n1 /tmp/tokenless-sls.jsonl | jq .
 **Disabling SLS**: set `TOKENLESS_SLS_ENABLED=0`, or `"sls_enabled": false` in `~/.tokenless/config.json`.
 
 **Production notes**:
-- The default path needs root/owner write permission; pre-create the directory tree with `0o700` (the file itself is created with mode `0o600`).
-- No built-in log rotation; once the file exceeds 100 MiB a one-time warning is printed to stderr. Configure external rotation (logrotate) or point the path at a collector-managed location.
+- tokenless does not create the log file or directory — the file must be pre-created by the anolisa SLS component; if it is absent, tokenless skips the write.
+- Log rotation is handled by the anolisa SLS component; tokenless does not touch the file lifecycle.
 - Writes are fail-silent (stderr-only warning, never affects the main flow).
 
 ### 6.3 Verify Installation

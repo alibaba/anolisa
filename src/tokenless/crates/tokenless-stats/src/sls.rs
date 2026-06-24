@@ -3,23 +3,24 @@
 //! Provides SlsRecord (SLS-specific field naming via serde rename) and
 //! SlsWriter (JSONL append-only writer with fail-silent semantics).
 //!
-//! NOTE: The JSONL file grows without bound — there is no built-in log
-//! rotation. Production deployments should configure external rotation
-//! (e.g. logrotate) or set TOKENLESS_SLS_PATH to a location managed by
-//! a log collector.
+//! The JSONL file is owned and lifecycle-managed by the anolisa SLS
+//! component (it creates, rotates, and removes it). tokenless never
+//! creates, truncates, or deletes the file: on each `write()` it appends
+//! only if the file already exists, and silently skips when it does not
+//! (treated as "SLS collection not active").
 
 use crate::{StatsRecord, VERSION};
 use serde::Serialize;
-use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Default SLS JSONL output path.
-/// NOTE: /var/log/ requires write permission (typically root or adm group).
-/// The caller must ensure the directory exists and is writable, or provide
-/// an alternative path via TOKENLESS_SLS_PATH (e.g. /tmp/tokenless-sls.jsonl).
+/// NOTE: the file and its parent directory are owned by the anolisa SLS
+/// component. tokenless only appends to it when it already exists; it never
+/// creates the file or directory. Override the path via TOKENLESS_SLS_PATH
+/// (must be under /var/log/ or /tmp/, no `..`).
 pub const DEFAULT_SLS_PATH: &str = "/var/log/anolisa/sls/ops/tokenless.jsonl";
 
 /// Allowed path prefixes for TOKENLESS_SLS_PATH env var override.
@@ -229,7 +230,18 @@ impl SlsWriter {
     }
 
     /// Convert a StatsRecord to SlsRecord and append it as a JSON line.
+    ///
+    /// The JSONL file is owned by the anolisa SLS component, which is
+    /// responsible for creating, rotating, and removing it. tokenless only
+    /// appends: when the file does not yet exist the write is silently
+    /// skipped (treated as "SLS collection not active"); tokenless never
+    /// creates, truncates, or deletes the file or its parent directory.
     pub fn write(&self, record: &StatsRecord) {
+        // Skip silently when the SLS collector has not created the file yet.
+        if !self.path.exists() {
+            return;
+        }
+
         let sls_record = SlsRecord::from(record);
         let line = match serde_json::to_string(&sls_record) {
             Ok(s) => s,
@@ -239,37 +251,16 @@ impl SlsWriter {
             }
         };
 
-        // Ensure parent directory exists before writing.
-        // NOTE: create_dir_all uses the process umask (typically 0o755),
-        // so parent directories may be world-readable. Production
-        // deployments should pre-create the directory tree with appropriate
-        // ownership and permissions (e.g. 0o700) before enabling SLS.
-        if let Some(parent) = self.path.parent()
-            && let Err(e) = fs::create_dir_all(parent)
-        {
-            static CREATE_DIR_WARNED: AtomicBool = AtomicBool::new(false);
-            if !CREATE_DIR_WARNED.swap(true, Ordering::Relaxed) {
-                eprintln!(
-                    "tokenless-sls: cannot create parent directory {}: {} \
-                     (further create_dir errors suppressed)",
-                    parent.display(),
-                    e
-                );
-            }
-            return;
-        }
-
         let mut opts = OpenOptions::new();
-        opts.create(true).append(true);
+        opts.append(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
             // Refuse to open if the final path component is a symlink. The
-            // path is canonicalized at SlsWriter construction, so a legit
-            // output file is never a symlink here; O_NOFOLLOW only blocks an
-            // attacker from swapping the resolved path for a symlink between
-            // construction and write (narrowing the TOCTOU window on /tmp/).
+            // file is owned by the anolisa SLS component and tokenless never
+            // creates one, so a legit target is never a symlink here;
+            // O_NOFOLLOW blocks a swap-to-symlink between the existence
+            // check and the open (narrowing the TOCTOU window on /tmp/).
             opts.custom_flags(libc::O_NOFOLLOW);
         }
         if let Err(e) = opts.open(&self.path).and_then(|mut f| {
@@ -285,26 +276,6 @@ impl SlsWriter {
                     e
                 );
             }
-        }
-
-        // One-time warning when JSONL file exceeds 100 MiB.
-        // No built-in rotation — production deployments should configure
-        // external rotation (e.g. logrotate) or monitor file size.
-        static SIZE_WARNED: AtomicBool = AtomicBool::new(false);
-        const SLS_SIZE_WARN_THRESHOLD: u64 = 100 * 1024 * 1024; // 100 MiB
-        if !SIZE_WARNED.swap(true, Ordering::Relaxed)
-            && let Ok(meta) = fs::metadata(&self.path)
-            && meta.len() >= SLS_SIZE_WARN_THRESHOLD
-        {
-            eprintln!(
-                "tokenless-sls: JSONL file {} has reached {:.1} MiB \
-                 (threshold: {} MiB). No built-in rotation — configure \
-                 external logrotate or set TOKENLESS_SLS_PATH to a \
-                 rotation-managed location. (warning shown once)",
-                self.path.display(),
-                meta.len() as f64 / (1024.0 * 1024.0),
-                SLS_SIZE_WARN_THRESHOLD / (1024 * 1024),
-            );
         }
     }
 }
@@ -476,6 +447,8 @@ mod tests {
     fn test_sls_writer_writes_to_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.jsonl");
+        // The anolisa SLS component owns the file; tokenless only appends.
+        fs::write(&path, "").unwrap();
         let writer = SlsWriter::with_path(path.clone());
 
         let r = make_record();
@@ -491,6 +464,8 @@ mod tests {
     fn test_sls_writer_appends_multiple_records() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("multi.jsonl");
+        // The anolisa SLS component owns the file; tokenless only appends.
+        fs::write(&path, "").unwrap();
         let writer = SlsWriter::with_path(path.clone());
 
         let r1 = make_record();
@@ -510,8 +485,22 @@ mod tests {
     }
 
     #[test]
+    fn test_sls_writer_skips_when_file_missing() {
+        // tokenless never creates the file — when it is absent the write is
+        // silently skipped (SLS collection not active).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("absent.jsonl");
+        let writer = SlsWriter::with_path(path.clone());
+
+        writer.write(&make_record());
+
+        assert!(!path.exists(), "tokenless must not create the SLS file");
+    }
+
+    #[test]
     fn test_sls_writer_fail_silent_on_invalid_path() {
-        // Path in a non-existent deep directory — should not panic
+        // Path in a non-existent deep directory — the file is absent so the
+        // write is skipped silently and must not panic.
         let writer = SlsWriter::with_path(PathBuf::from("/nonexistent/deep/dir/test.jsonl"));
         let r = make_record();
         writer.write(&r); // no panic
@@ -520,14 +509,16 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_sls_writer_refuses_symlink_final_component() {
-        // O_NOFOLLOW hardening: after the file is created, swapping it for a
-        // symlink must NOT redirect the write to the symlink target. The
-        // open fails (ELOOP) and the write is skipped silently.
+        // O_NOFOLLOW hardening: a legit SLS file is never a symlink. After the
+        // SLS component creates it, an attacker swapping it for a symlink must
+        // NOT redirect the write to the symlink target — the open fails
+        // (ELOOP) and the write is skipped silently.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("out.jsonl");
+        fs::write(&path, "").unwrap(); // SLS component pre-created the file
         let writer = SlsWriter::with_path(path.clone());
 
-        // First write creates a regular file.
+        // First write appends to the regular file.
         writer.write(&make_record());
         assert!(path.is_file());
 
@@ -612,14 +603,5 @@ mod tests {
         std::os::unix::fs::symlink("/etc", &link).unwrap();
         let escaped = link.join("cron.d/evil.jsonl");
         assert!(validate_sls_path(&escaped).is_none());
-    }
-
-    #[test]
-    fn test_size_warning_threshold() {
-        // Verify the threshold constant matches the documented value.
-        const SLS_SIZE_WARN_THRESHOLD: u64 = 100 * 1024 * 1024;
-        assert_eq!(SLS_SIZE_WARN_THRESHOLD, 104857600);
-        // 100 MiB in human-readable form
-        assert_eq!(SLS_SIZE_WARN_THRESHOLD / (1024 * 1024), 100);
     }
 }
