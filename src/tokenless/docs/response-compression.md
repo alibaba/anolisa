@@ -349,6 +349,8 @@ tokenless stats summary
 
 统计启用条件：`TOKENLESS_STATS_ENABLED` 环境变量未设为 `0`/`false`，或通过 `tokenless stats enable` 启用。
 
+> **SLS 日志记录（JSONL）**：除 SQLite 统计外，tokenless 默认还会将每次压缩以 SLS JSONL 记录写入 `/var/log/anolisa/sls/ops/tokenless.jsonl`（默认开启）。开关字段 `~/.tokenless/config.json` 的 `sls_enabled`（默认 `true`），环境变量 `TOKENLESS_SLS_ENABLED` 优先；输出路径可用 `TOKENLESS_SLS_PATH` 覆盖（须位于 `/var/log/` 或 `/tmp/` 下）。仅记录度量，不含原文/敏感数据。详见用户手册 [SLS 日志记录](tokenless-user-manual-zh.md#sls-日志记录)。
+
 ### 9.3 压缩效果说明
 
 | 数据类型 | 响应压缩 | 响应压缩+TOON | 说明 |

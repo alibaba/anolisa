@@ -13,8 +13,9 @@ pub struct TokenlessConfig {
     /// Whether to record compression stats (default: true)
     #[serde(default = "default_true")]
     pub stats_enabled: bool,
-    /// Whether SLS integration is enabled (default: false)
-    #[serde(default)]
+    /// Whether SLS integration is enabled (default: true). When enabled,
+    /// each compression is also appended as a JSONL record for SLS ingestion.
+    #[serde(default = "default_true")]
     pub sls_enabled: bool,
     /// Whether compression is actually applied (default: true).
     /// When false, tokenless runs in dry-run mode: it computes and records
@@ -32,7 +33,7 @@ impl Default for TokenlessConfig {
     fn default() -> Self {
         Self {
             stats_enabled: true,
-            sls_enabled: false,
+            sls_enabled: true,
             compression_enabled: true,
         }
     }
@@ -255,9 +256,9 @@ mod tests {
     }
 
     #[test]
-    fn test_sls_enabled_default_false() {
+    fn test_sls_enabled_default_true() {
         let config = TokenlessConfig::default();
-        assert!(!config.is_sls_enabled());
+        assert!(config.is_sls_enabled());
         assert!(config.is_stats_enabled());
     }
 
@@ -266,7 +267,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         let config = TokenlessConfig::load_with_envs_and_path(None, None, None, Some(&path));
-        assert!(!config.is_sls_enabled());
+        assert!(config.is_sls_enabled());
         assert!(config.is_stats_enabled());
     }
 
@@ -274,7 +275,7 @@ mod tests {
     fn test_sls_env_override_enabled() {
         let config = TokenlessConfig::load_with_envs(Some("1"), None);
         assert!(config.is_stats_enabled());
-        assert!(!config.is_sls_enabled());
+        assert!(config.is_sls_enabled());
 
         let config = TokenlessConfig::load_with_envs(None, Some("1"));
         assert!(config.is_stats_enabled());
@@ -283,12 +284,12 @@ mod tests {
 
     #[test]
     fn test_sls_env_override_disabled() {
-        // stats_env="0" disables stats, sls stays default false
+        // stats_env="0" disables stats, sls stays default true
         let config = TokenlessConfig::load_with_envs(Some("0"), None);
         assert!(!config.is_stats_enabled());
-        assert!(!config.is_sls_enabled());
+        assert!(config.is_sls_enabled());
 
-        // sls_env="0" disables sls (already false by default)
+        // sls_env="0" explicitly disables sls
         let config = TokenlessConfig::load_with_envs(None, Some("0"));
         assert!(config.is_stats_enabled());
         assert!(!config.is_sls_enabled());
