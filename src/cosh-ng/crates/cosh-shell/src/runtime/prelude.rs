@@ -10,6 +10,7 @@ pub(crate) use crate::adapter::{
 };
 pub(crate) use crate::agent::govern_agent_events;
 pub(crate) use crate::agent::govern_agent_events_with_language;
+#[allow(unused_imports)]
 pub(crate) use crate::command::{
     classify_exit, classify_shell_handoff_command_outcome, first_program_token, ExitCodeCategory,
 };
@@ -58,12 +59,12 @@ pub(crate) use crate::types::{
     Policy, QuestionSelectionMode, ShellEvent, ShellEventKind, ShellHandoffRequest,
 };
 pub(crate) use crate::ui::{
-    approval_action_at, render_transcript, ActivityDetailsPanelModel, ActivityPanelModel,
-    ActivityRowModel, AgentStatusAnimation, ApprovalDetailsPanelModel, ApprovalJournalEntryModel,
-    ApprovalJournalPanelModel, ApprovalPanelAction, ApprovalPanelModel, ApprovalReceiptPanelModel,
-    CommandAssessmentSummaryModel, HookWarningView, MarkdownStreamBlock, NoticePanelModel, QuestionAnswerPanelModel,
-    QuestionPanelModel, RatatuiInlineRenderer, RecommendationActionPanelModel,
-    RecommendationPanelModel, hook_warning_icon,
+    approval_action_at, hook_warning_icon, render_transcript, ActivityDetailsPanelModel,
+    ActivityPanelModel, ActivityRowModel, AgentStatusAnimation, ApprovalDetailsPanelModel,
+    ApprovalJournalEntryModel, ApprovalJournalPanelModel, ApprovalPanelAction, ApprovalPanelModel,
+    ApprovalReceiptPanelModel, CommandAssessmentSummaryModel, HookWarningView, MarkdownStreamBlock,
+    NoticePanelModel, QuestionAnswerPanelModel, QuestionPanelModel, RatatuiInlineRenderer,
+    RecommendationActionPanelModel, RecommendationPanelModel,
 };
 
 #[cfg(test)]

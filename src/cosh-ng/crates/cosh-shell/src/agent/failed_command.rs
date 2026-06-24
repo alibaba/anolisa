@@ -1,10 +1,24 @@
 use crate::hooks::interrupt::command_should_skip_failure_analysis;
 use crate::runtime::prelude::*;
+use std::fs::File;
+use std::io::Read;
+
+use crate::command::{classify_failure, FailureClass};
+
+const FAILURE_OUTPUT_EXCERPT_MAX_BYTES: usize = 8192;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FailedCommandAnalysisTrigger {
     Auto,
     UserConfirmed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FailureAnalysisDisposition {
+    SilentRecord,
+    Hint,
+    ActionCard,
+    AutoAnalyze,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,20 +33,29 @@ pub(crate) fn render_failed_command_cards<W: Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {
-    if state.analysis_mode != AnalysisMode::Manual {
-        return Ok(());
-    }
+    for block in blocks {
+        if state.analyzed_blocks.contains(&block.id) || state.canceled_blocks.contains(&block.id) {
+            continue;
+        }
+        if state.rendered_failed_command_cards.contains(&block.id) {
+            continue;
+        }
 
-    for block in blocks.iter().filter(|block| {
-        should_offer_failed_command_card(block)
-            && !command_should_skip_failure_analysis(events, block)
-            && !state.analyzed_blocks.contains(&block.id)
-            && !state.canceled_blocks.contains(&block.id)
-    }) {
+        let disposition =
+            failure_analysis_disposition_for_block(events, block, state.analysis_mode);
+        if !matches!(
+            disposition,
+            FailureAnalysisDisposition::ActionCard | FailureAnalysisDisposition::Hint
+        ) {
+            continue;
+        }
+
         if !state.rendered_failed_command_cards.insert(block.id.clone()) {
             continue;
         }
 
+        let footer = (disposition == FailureAnalysisDisposition::ActionCard)
+            .then(|| state.i18n().t(MessageId::FailedCommandCardFooter));
         RatatuiInlineRenderer::for_terminal().write_notice_panel(
             output,
             NoticePanelModel {
@@ -45,7 +68,7 @@ pub(crate) fn render_failed_command_cards<W: Write>(
                         ("id", block.id.as_str()),
                     ],
                 )],
-                footer: Some(state.i18n().t(MessageId::FailedCommandCardFooter)),
+                footer,
             },
         )?;
         output.flush()?;
@@ -136,7 +159,7 @@ pub(crate) fn latest_pending_failed_block_before_event<'a>(
     event: &ShellEvent,
 ) -> Option<&'a CommandBlock> {
     blocks.iter().rev().find(|block| {
-        should_analyze_failed_block(block, state.analysis_mode)
+        can_user_confirm_failure_analysis(block)
             && !state.analyzed_blocks.contains(&block.id)
             && !state.canceled_blocks.contains(&block.id)
             && event_happened_after_block_end(event, block)
@@ -166,7 +189,7 @@ fn failed_command_card_target<'a>(
     let id = event.input.as_deref()?.trim();
     blocks.iter().find(|block| {
         block.id == id
-            && should_offer_failed_command_card(block)
+            && can_user_confirm_failure_analysis(block)
             && !state.analyzed_blocks.contains(&block.id)
             && !state.canceled_blocks.contains(&block.id)
     })
@@ -182,7 +205,7 @@ fn failed_command_card_details_target<'a>(
     let id = event.input.as_deref()?.trim();
     blocks
         .iter()
-        .find(|block| block.id == id && should_offer_failed_command_card(block))
+        .find(|block| block.id == id && can_user_confirm_failure_analysis(block))
 }
 
 fn is_failed_command_card_event(event: &ShellEvent) -> bool {
@@ -194,25 +217,86 @@ fn is_failed_command_card_event(event: &ShellEvent) -> bool {
         )
 }
 
+#[allow(dead_code)]
 pub(crate) fn should_analyze_failed_block(block: &CommandBlock, mode: AnalysisMode) -> bool {
-    if block.exit_code == 0 || block.command.trim().is_empty() {
-        return false;
+    should_auto_analyze_failed_block(&[], block, mode)
+}
+
+pub(crate) fn should_auto_analyze_failed_block(
+    events: &[ShellEvent],
+    block: &CommandBlock,
+    mode: AnalysisMode,
+) -> bool {
+    failure_analysis_disposition_for_block(events, block, mode)
+        == FailureAnalysisDisposition::AutoAnalyze
+}
+
+pub(crate) fn failure_analysis_disposition_for_block(
+    events: &[ShellEvent],
+    block: &CommandBlock,
+    mode: AnalysisMode,
+) -> FailureAnalysisDisposition {
+    let excerpt = failure_output_excerpt(block);
+    failure_analysis_disposition(events, block, mode, excerpt.as_deref())
+}
+
+fn failure_analysis_disposition(
+    events: &[ShellEvent],
+    block: &CommandBlock,
+    mode: AnalysisMode,
+    output_excerpt: Option<&str>,
+) -> FailureAnalysisDisposition {
+    if block.command.trim().is_empty() || command_should_skip_failure_analysis(events, block) {
+        return FailureAnalysisDisposition::SilentRecord;
     }
-    if mode == AnalysisMode::Manual {
-        return false;
-    }
-    let category = classify_exit(block.exit_code, &block.command);
-    match category {
-        ExitCodeCategory::Success
-        | ExitCodeCategory::UserInterrupt
-        | ExitCodeCategory::PipelineNormal => false,
-        ExitCodeCategory::CommandSpecificNormal => mode == AnalysisMode::Auto,
-        _ => true,
+
+    let semantics = classify_failure(block, events, output_excerpt);
+    match semantics.class {
+        FailureClass::Success
+        | FailureClass::ExpectedNoResult
+        | FailureClass::InteractiveCancel
+        | FailureClass::UserInterrupt
+        | FailureClass::PipelineNormal
+        | FailureClass::ProviderOrInternalArtifact => FailureAnalysisDisposition::SilentRecord,
+        FailureClass::UsageOrHelp => match mode {
+            AnalysisMode::Auto => FailureAnalysisDisposition::Hint,
+            AnalysisMode::Manual | AnalysisMode::Smart => FailureAnalysisDisposition::SilentRecord,
+        },
+        FailureClass::CommandNotFound
+        | FailureClass::PermissionDenied
+        | FailureClass::AbnormalSignal
+        | FailureClass::BuildOrTestFailure => match mode {
+            AnalysisMode::Auto => FailureAnalysisDisposition::AutoAnalyze,
+            AnalysisMode::Smart | AnalysisMode::Manual => FailureAnalysisDisposition::ActionCard,
+        },
+        FailureClass::GenericRuntimeFailure => match mode {
+            AnalysisMode::Auto => FailureAnalysisDisposition::AutoAnalyze,
+            AnalysisMode::Smart => FailureAnalysisDisposition::Hint,
+            AnalysisMode::Manual => FailureAnalysisDisposition::ActionCard,
+        },
+        FailureClass::UnknownFailure => match mode {
+            AnalysisMode::Auto => FailureAnalysisDisposition::ActionCard,
+            AnalysisMode::Smart | AnalysisMode::Manual => FailureAnalysisDisposition::Hint,
+        },
     }
 }
 
-fn should_offer_failed_command_card(block: &CommandBlock) -> bool {
-    should_analyze_failed_block(block, AnalysisMode::Auto)
+fn can_user_confirm_failure_analysis(block: &CommandBlock) -> bool {
+    block.exit_code != 0
+        && !block.command.trim().is_empty()
+        && !matches!(
+            block.origin,
+            CommandOrigin::ProviderTool | CommandOrigin::ShellInternal
+        )
+}
+
+fn failure_output_excerpt(block: &CommandBlock) -> Option<String> {
+    let path = block.output.terminal_output_ref.as_deref()?;
+    let file = File::open(path).ok()?;
+    let mut reader = file.take(FAILURE_OUTPUT_EXCERPT_MAX_BYTES as u64);
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn event_requests_failed_command_details(event: &ShellEvent) -> bool {
@@ -253,10 +337,8 @@ pub(crate) fn start_agent_for_block<W: Write>(
     options: FailedCommandAgentStartOptions,
 ) -> std::io::Result<()> {
     let should_start = match options.trigger {
-        FailedCommandAnalysisTrigger::Auto => {
-            should_analyze_failed_block(block, state.analysis_mode)
-        }
-        FailedCommandAnalysisTrigger::UserConfirmed => should_offer_failed_command_card(block),
+        FailedCommandAnalysisTrigger::Auto => true,
+        FailedCommandAnalysisTrigger::UserConfirmed => can_user_confirm_failure_analysis(block),
     };
     if !should_start {
         return Ok(());
@@ -369,6 +451,19 @@ mod tests {
         }
     }
 
+    fn write_output(content: &[u8]) -> String {
+        let path = std::env::temp_dir().join(format!(
+            "cosh-failure-output-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        std::fs::write(&path, content).expect("write output");
+        path.to_string_lossy().into_owned()
+    }
+
     fn card_event(message: &str, input: Option<&str>) -> ShellEvent {
         ShellEvent {
             kind: ShellEventKind::UserInputIntercepted,
@@ -403,11 +498,90 @@ mod tests {
 
     #[test]
     fn failed_command_analysis_keeps_real_failures() {
-        let block = failed_block(2, "ls --bad-flag");
+        let block = failed_block(2, "cargo test");
 
-        assert!(should_analyze_failed_block(&block, AnalysisMode::Auto));
-        assert!(should_analyze_failed_block(&block, AnalysisMode::Smart));
-        assert!(!should_analyze_failed_block(&block, AnalysisMode::Manual));
+        assert_eq!(
+            failure_analysis_disposition(
+                &[],
+                &block,
+                AnalysisMode::Auto,
+                Some("test result: FAILED. 1 failed")
+            ),
+            FailureAnalysisDisposition::AutoAnalyze
+        );
+        assert_eq!(
+            failure_analysis_disposition(
+                &[],
+                &block,
+                AnalysisMode::Smart,
+                Some("test result: FAILED. 1 failed")
+            ),
+            FailureAnalysisDisposition::ActionCard
+        );
+        assert_eq!(
+            failure_analysis_disposition(
+                &[],
+                &block,
+                AnalysisMode::Manual,
+                Some("test result: FAILED. 1 failed")
+            ),
+            FailureAnalysisDisposition::ActionCard
+        );
+    }
+
+    #[test]
+    fn failure_disposition_quiets_usage_help() {
+        let block = failed_block(2, "demo --bad");
+        let output = "error: unexpected argument '--bad'\nUsage: demo [OPTIONS]\n";
+
+        assert_eq!(
+            failure_analysis_disposition(&[], &block, AnalysisMode::Auto, Some(output)),
+            FailureAnalysisDisposition::Hint
+        );
+        assert_eq!(
+            failure_analysis_disposition(&[], &block, AnalysisMode::Smart, Some(output)),
+            FailureAnalysisDisposition::SilentRecord
+        );
+        assert_eq!(
+            failure_analysis_disposition(&[], &block, AnalysisMode::Manual, Some(output)),
+            FailureAnalysisDisposition::SilentRecord
+        );
+    }
+
+    #[test]
+    fn failure_output_excerpt_is_bounded() {
+        let mut block = failed_block(2, "demo --bad");
+        let path = write_output(&vec![b'a'; FAILURE_OUTPUT_EXCERPT_MAX_BYTES + 1024]);
+        block.output.terminal_output_ref = Some(path.clone());
+
+        let excerpt = failure_output_excerpt(&block).expect("excerpt");
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(excerpt.len(), FAILURE_OUTPUT_EXCERPT_MAX_BYTES);
+    }
+
+    #[test]
+    fn explicit_failed_command_target_skips_internal_origins() {
+        let mut user_block = failed_block(2, "demo --bad");
+        user_block.id = "user".to_string();
+        user_block.origin = CommandOrigin::UserInteractive;
+        user_block.ended_at_ms = 10;
+        let mut provider_block = failed_block(1, "provider helper");
+        provider_block.id = "provider".to_string();
+        provider_block.origin = CommandOrigin::ProviderTool;
+        provider_block.ended_at_ms = 20;
+        let mut internal_block = failed_block(1, "validation helper");
+        internal_block.id = "internal".to_string();
+        internal_block.origin = CommandOrigin::ShellInternal;
+        internal_block.ended_at_ms = 30;
+        let blocks = vec![user_block, provider_block, internal_block];
+        let event = ShellEvent::user_input_intercepted("session-1", "/explain last error");
+        let state = InlineState::default();
+
+        let target =
+            latest_pending_failed_block_before_event(&blocks, &state, &event).expect("target");
+
+        assert_eq!(target.id, "user");
     }
 
     #[test]
@@ -422,7 +596,7 @@ mod tests {
         previous_failed.id = "previous-failed".to_string();
         previous_failed.ended_at_ms = 20;
         previous_failed.output.terminal_output_ref = Some("/tmp/previous-output.txt".to_string());
-        let mut target = failed_block(2, "ls --bad-context");
+        let mut target = failed_block(127, "missing-context-command");
         target.id = "target".to_string();
         target.cwd = "/repo".to_string();
         target.end_cwd = "/repo".to_string();
@@ -431,7 +605,10 @@ mod tests {
         let blocks = vec![setup.clone(), previous_failed.clone(), target.clone()];
         let findings = findings_from_blocks(&blocks);
         let adapter = AdapterInstance::Fake(FakeAgentAdapter);
-        let mut state = InlineState::default();
+        let mut state = InlineState {
+            analysis_mode: AnalysisMode::Auto,
+            ..InlineState::default()
+        };
         let mut output = Vec::new();
 
         start_agent_for_block(
@@ -463,7 +640,7 @@ mod tests {
 
     #[test]
     fn manual_mode_renders_failed_command_action_card() {
-        let mut block = failed_block(2, "ls --bad-flag");
+        let mut block = failed_block(127, "missing-command");
         block.id = "target".to_string();
         let mut state = InlineState {
             analysis_mode: AnalysisMode::Manual,
@@ -476,7 +653,7 @@ mod tests {
 
         let rendered = String::from_utf8(output).expect("utf8");
         assert!(rendered.contains("Command failed"), "{rendered}");
-        assert!(rendered.contains("ls --bad-flag"), "{rendered}");
+        assert!(rendered.contains("missing-command"), "{rendered}");
         assert!(
             rendered.contains("[Analyze] [Dismiss] [Details]"),
             "{rendered}"
@@ -529,8 +706,11 @@ mod tests {
         )
         .expect("handle card analyze");
 
-        assert!(state.agent_run.active.is_some());
         assert!(state.analyzed_blocks.contains("target"));
+        assert!(
+            state.agent_run.active.is_some() || !state.agent_run.queued_requests.is_empty(),
+            "expected active or queued Agent run"
+        );
     }
 
     #[test]

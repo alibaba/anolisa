@@ -160,7 +160,7 @@ fn raw_cli_mode_approval_and_analysis_use_zh_language_env() {
     assert!(output.contains("模式已设置为 trust。"), "{output}");
     assert!(output.contains("分析模式"), "{output}");
     assert!(
-        output.contains("命令失败时评估 hooks；自动触发 Agent 分析。"),
+        output.contains("命令失败时评估 hooks；只对真实失败自动触发 Agent 分析。"),
         "{output}"
     );
     assert!(

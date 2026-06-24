@@ -580,8 +580,10 @@ fn raw_cli_ctrl_c_drops_late_fake_tool_artifact() {
 
 #[test]
 fn raw_cli_ctrl_c_clears_queued_failed_command_analysis() {
-    let output = run_raw_cli_with_delayed_input(
+    let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",
+        &[],
+        &[("COSH_SHELL_ANALYSIS_MODE", "auto")],
         vec![
             (b"?? very slow agent\n".to_vec(), Duration::ZERO),
             (

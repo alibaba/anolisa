@@ -328,7 +328,7 @@ pub(super) fn message(id: MessageId) -> &'static str {
             "Hooks evaluate on failure; findings shown for review."
         }
         MessageId::AnalysisModeAutoFooter => {
-            "Hooks evaluate on failure; Agent auto-triggered for failed commands."
+            "Hooks evaluate on failure; Agent auto-triggers for real command failures."
         }
         MessageId::AnalysisModeManualFooter => {
             "Hooks and automatic analysis disabled; use slash commands to trigger."

@@ -4,14 +4,13 @@ use crate::activity::runtime::{record_approved_shell_handoff_blocks, render_acti
 use crate::agent::events::flush_held_agent_events;
 use crate::agent::failed_command::{
     block_end_event_index, render_failed_command_cards, render_post_failure_actions,
-    should_analyze_failed_block, start_agent_for_block, FailedCommandAgentStartOptions,
+    should_auto_analyze_failed_block, start_agent_for_block, FailedCommandAgentStartOptions,
     FailedCommandAnalysisTrigger,
 };
 use crate::agent::intercept::render_intercept_agent_guidance;
 use crate::agent::poll::{poll_active_agent_run, poll_active_agent_run_deferred};
 use crate::agent::run::{start_agent_run, stop_active_agent_run_without_rendering};
 use crate::approval::runtime::render_approval_actions;
-use crate::hooks::interrupt::command_should_skip_failure_analysis;
 use crate::question::runtime::{
     render_question_answer_actions, render_question_cancel_actions, render_question_focus_actions,
     render_question_input_actions, render_question_toggle_actions,
@@ -182,10 +181,11 @@ fn render_inline_guidance_from_batch<W: Write>(
     )?;
 
     let analysis_mode = state.analysis_mode;
-    for block in ledger.blocks.iter().filter(|block| {
-        should_analyze_failed_block(block, analysis_mode)
-            && !command_should_skip_failure_analysis(events, block)
-    }) {
+    for block in ledger
+        .blocks
+        .iter()
+        .filter(|block| should_auto_analyze_failed_block(events, block, analysis_mode))
+    {
         start_agent_for_block(
             block,
             &ledger.blocks,

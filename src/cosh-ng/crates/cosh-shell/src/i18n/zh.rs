@@ -267,7 +267,9 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::AnalysisModeUnknownBody => "未知分析模式: {mode}",
         MessageId::AnalysisModeUsageFooter => "使用 /mode analysis smart|auto|manual。",
         MessageId::AnalysisModeSmartFooter => "命令失败时评估 hooks；展示发现供你复核。",
-        MessageId::AnalysisModeAutoFooter => "命令失败时评估 hooks；自动触发 Agent 分析。",
+        MessageId::AnalysisModeAutoFooter => {
+            "命令失败时评估 hooks；只对真实失败自动触发 Agent 分析。"
+        }
         MessageId::AnalysisModeManualFooter => "已禁用 hooks 和自动分析；使用 slash 命令手动触发。",
         MessageId::AgentThinking => "正在思考...",
         MessageId::AgentThinkingElapsed => "正在思考... {elapsed}s · {detail}",
