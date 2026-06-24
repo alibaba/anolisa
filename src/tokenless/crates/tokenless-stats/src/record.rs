@@ -65,16 +65,17 @@ impl CompressionMode {
     pub fn as_str(&self) -> &'static str {
         match self {
             CompressionMode::Active => "active",
-            CompressionMode::DryRun => "dryrun",
+            CompressionMode::DryRun => "dry-run",
         }
     }
 
     /// Parse a stored mode value. Unknown/empty values (legacy rows with no
     /// `mode` column, or NULLs) fall back to `Active` rather than erroring,
-    /// so historical data remains readable.
+    /// so historical data remains readable. Accepts both `dry-run` (current
+    /// serde/db form) and legacy `dryrun` for backward compatibility.
     pub fn from_db(s: &str) -> Self {
         match s {
-            "dryrun" => CompressionMode::DryRun,
+            "dry-run" | "dryrun" => CompressionMode::DryRun,
             _ => CompressionMode::Active,
         }
     }
@@ -351,8 +352,10 @@ mod tests {
     #[test]
     fn test_compression_mode_roundtrip() {
         assert_eq!(CompressionMode::Active.as_str(), "active");
-        assert_eq!(CompressionMode::DryRun.as_str(), "dryrun");
+        assert_eq!(CompressionMode::DryRun.as_str(), "dry-run");
         assert_eq!(CompressionMode::from_db("active"), CompressionMode::Active);
+        assert_eq!(CompressionMode::from_db("dry-run"), CompressionMode::DryRun);
+        // Legacy "dryrun" form still readable (backward compatibility)
         assert_eq!(CompressionMode::from_db("dryrun"), CompressionMode::DryRun);
         // Unknown / empty (legacy NULL) fall back to Active
         assert_eq!(CompressionMode::from_db(""), CompressionMode::Active);

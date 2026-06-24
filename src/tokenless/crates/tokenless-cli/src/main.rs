@@ -333,7 +333,8 @@ fn run() -> Result<(), (String, i32)> {
                 after_compact.clone()
             };
 
-            let compression_on = TokenlessConfig::load().is_compression_enabled();
+            let config = TokenlessConfig::load();
+            let compression_on = config.is_compression_enabled();
             let mode = resolve_mode(compression_on, before_tokens, after_tokens);
             let emit_text = if compression_on {
                 output_text.clone()
@@ -343,6 +344,7 @@ fn run() -> Result<(), (String, i32)> {
             println!("{}", emit_text);
 
             record_compression_stats(
+                &config,
                 OperationType::CompressSchema,
                 agent_id,
                 session_id,
@@ -390,7 +392,8 @@ fn run() -> Result<(), (String, i32)> {
                 after_compact.clone()
             };
 
-            let compression_on = TokenlessConfig::load().is_compression_enabled();
+            let config = TokenlessConfig::load();
+            let compression_on = config.is_compression_enabled();
             let mode = resolve_mode(compression_on, before_tokens, after_tokens);
             let emit_text = if compression_on {
                 output_text.clone()
@@ -400,6 +403,7 @@ fn run() -> Result<(), (String, i32)> {
             println!("{}", emit_text);
 
             record_compression_stats(
+                &config,
                 OperationType::CompressResponse,
                 agent_id,
                 session_id,
@@ -563,7 +567,8 @@ fn run() -> Result<(), (String, i32)> {
                 );
             }
 
-            let compression_on = TokenlessConfig::load().is_compression_enabled();
+            let config = TokenlessConfig::load();
+            let compression_on = config.is_compression_enabled();
             let mode = resolve_mode(compression_on, before_tokens, after_tokens);
             // Active: emit the TOON result (or original if no savings).
             // Dry-run: emit the original so context stays uncompressed, but
@@ -579,6 +584,7 @@ fn run() -> Result<(), (String, i32)> {
             // TOON did not reduce size), so dry-run captures the prediction.
             let record_after = if no_savings { input.clone() } else { output };
             record_compression_stats(
+                &config,
                 OperationType::CompressToon,
                 agent_id,
                 session_id,
@@ -658,7 +664,9 @@ fn warn_mode_mismatch(label: &str, records: &[StatsRecord], expected: Compressio
 ///
 /// All metrics (chars, tokens) are derived from actual text content,
 /// never from caller-supplied estimates.
+#[allow(clippy::too_many_arguments)]
 fn record_compression_stats(
+    config: &TokenlessConfig,
     op: OperationType,
     agent_id: Option<String>,
     session_id: Option<String>,
@@ -667,8 +675,6 @@ fn record_compression_stats(
     after_text: String,
     mode: CompressionMode,
 ) {
-    let config = TokenlessConfig::load();
-
     // Short-circuit only if both stats and SLS are disabled.
     if !config.is_stats_enabled() && !config.is_sls_enabled() {
         return;

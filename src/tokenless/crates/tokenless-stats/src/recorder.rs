@@ -364,11 +364,11 @@ mod tests {
     use super::*;
     use crate::record::OperationType;
 
-    fn new_recorder() -> StatsRecorder {
+    fn new_recorder() -> (StatsRecorder, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("stats.db");
-        std::mem::forget(dir); // keep dir for test lifetime
-        StatsRecorder::new(&db).unwrap()
+        let rec = StatsRecorder::new(&db).unwrap();
+        (rec, dir)
     }
 
     fn sample(op: OperationType, mode: CompressionMode, session: &str) -> StatsRecord {
@@ -379,7 +379,7 @@ mod tests {
 
     #[test]
     fn records_and_reads_mode() {
-        let rec = new_recorder();
+        let (rec, _dir) = new_recorder();
         let id = rec
             .record(&sample(
                 OperationType::CompressSchema,
@@ -394,7 +394,7 @@ mod tests {
 
     #[test]
     fn default_mode_is_active() {
-        let rec = new_recorder();
+        let (rec, _dir) = new_recorder();
         let id = rec
             .record(&sample(
                 OperationType::CompressSchema,
@@ -408,7 +408,7 @@ mod tests {
 
     #[test]
     fn records_by_session_filters() {
-        let rec = new_recorder();
+        let (rec, _dir) = new_recorder();
         rec.record(&sample(
             OperationType::CompressResponse,
             CompressionMode::Active,
