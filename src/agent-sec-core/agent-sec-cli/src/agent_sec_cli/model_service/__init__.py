@@ -34,11 +34,21 @@ def create_client(
 
     Parameters are resolved in order: explicit argument > environment variable > default.
     """
-    resolved_backend = backend or os.environ.get(_ENV_BACKEND, _DEFAULT_BACKEND)
-    resolved_base_url = base_url or os.environ.get(_ENV_BASE_URL, _DEFAULT_BASE_URL)
+    resolved_backend = (
+        backend
+        if backend is not None
+        else os.environ.get(_ENV_BACKEND, _DEFAULT_BACKEND)
+    )
+    resolved_base_url = (
+        base_url
+        if base_url is not None
+        else os.environ.get(_ENV_BASE_URL, _DEFAULT_BASE_URL)
+    )
     try:
-        resolved_timeout = timeout or int(
-            os.environ.get(_ENV_TIMEOUT, str(_DEFAULT_TIMEOUT))
+        resolved_timeout = (
+            timeout
+            if timeout is not None
+            else int(os.environ.get(_ENV_TIMEOUT, str(_DEFAULT_TIMEOUT)))
         )
     except ValueError:
         resolved_timeout = _DEFAULT_TIMEOUT

@@ -181,6 +181,13 @@ class TestCreateClient(unittest.TestCase):
         client = create_client(timeout=60)
         self.assertEqual(client._timeout, 60)
 
+    def test_timeout_zero_is_preserved(self) -> None:
+        # Regression: ``timeout=0`` (disable timeout) must not be swallowed by a
+        # truthy fallback to env var / default.
+        with patch.dict(os.environ, {"AGENT_SEC_MODEL_SERVICE_TIMEOUT": "45"}):
+            client = create_client(timeout=0)
+            self.assertEqual(client._timeout, 0)
+
     def test_unsupported_backend_raises(self) -> None:
         with self.assertRaises(ValueError) as ctx:
             create_client(backend="vllm")
