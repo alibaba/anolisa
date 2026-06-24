@@ -5,9 +5,11 @@
 //!
 //! Design contract:
 //!
+//! * The target file must already exist. Deployment owns file creation,
+//!   ownership, permissions, and logrotate policy. SkillFS only appends to
+//!   the pre-created file.
 //! * Every write opens the file, appends one JSONL line, and closes the
-//!   handle. This satisfies the logrotate requirement in the log rotation contract
-//!   (rename-based rotation must not strand writes in a stale fd).
+//!   handle, so rename-based rotation never strands writes in a stale fd.
 //! * No background thread, no bounded channel. The summary is written
 //!   synchronously at mount exit — typically once per session.
 //! * Write failures are logged via `tracing::warn` but never propagate as
@@ -26,10 +28,10 @@ pub const SKILLFS_SESSION_METRICS_LOG_PATH: &str = "/var/log/anolisa/sls/ops/ski
 
 /// Best-effort JSONL summary writer.
 ///
-/// Each call to [`SessionStatsWriter::write_summary`] opens the target file
-/// in append mode, writes one JSON line, and closes the handle. Errors are
-/// surfaced as `tracing::warn` and returned as `Err` so callers can decide
-/// whether to retry — but in practice the CLI should not retry or abort.
+/// Each call to [`SessionStatsWriter::write_summary`] opens an existing target
+/// file in append mode, writes one JSON line, and closes the handle. Missing
+/// files are treated as deployment/configuration errors. Errors are surfaced as
+/// `tracing::warn` and returned as `Err`, but the CLI must not retry or abort.
 pub struct SessionStatsWriter {
     path: PathBuf,
 }
@@ -58,11 +60,10 @@ impl SessionStatsWriter {
         let mut line = serialize_session_summary(summary);
         line.push('\n');
 
-        // Production: the file should already exist (pre-created with mode
-        // 666 by the deployment setup). create(true) is a
-        // dev/fallback path only — it inherits umask, not the expected 666.
+        // Deployment owns file creation, ownership, permissions, and
+        // logrotate policy. Do not create the file here; a missing path should
+        // surface as a non-fatal configuration error.
         let result = std::fs::OpenOptions::new()
-            .create(true)
             .append(true)
             .open(&self.path)
             .and_then(|mut file| file.write_all(line.as_bytes()));
@@ -93,6 +94,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let log_path = dir.path().join("skillfs.jsonl");
 
+        std::fs::File::create(&log_path).unwrap();
+
         let writer = SessionStatsWriter::new(&log_path);
         let stats = SkillfsSessionStats::new();
         stats.set_skill_counts(20, 6);
@@ -122,6 +125,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let log_path = dir.path().join("skillfs.jsonl");
 
+        std::fs::File::create(&log_path).unwrap();
+
         let writer = SessionStatsWriter::new(&log_path);
 
         let stats1 = SkillfsSessionStats::new();
@@ -142,6 +147,25 @@ mod tests {
         assert_eq!(first["session_id"], "session-a");
         assert_eq!(second["session_id"], "session-b");
         assert_eq!(second["allow_times"], 1);
+    }
+
+    #[test]
+    fn missing_log_file_returns_not_found_and_does_not_create() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("missing-skillfs.jsonl");
+
+        let writer = SessionStatsWriter::new(&log_path);
+        let stats = SkillfsSessionStats::new();
+        let summary = stats.build_summary("missing-file-test", "agent");
+        let err = writer
+            .write_summary(&summary)
+            .expect_err("missing log file must not be created implicitly");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert!(
+            !log_path.exists(),
+            "writer must not create missing session metrics log"
+        );
     }
 
     #[test]
