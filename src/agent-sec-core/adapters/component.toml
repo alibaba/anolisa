@@ -45,7 +45,7 @@ adapter_type = "plugin"
 trust = "first-party"
 plugin_id = "agent-sec-core-hermes-plugin"
 source = "adapters/sec-core/hermes"
-dest = "/opt/agent-sec/hermes-plugin/"
+dest = "/opt/agent-sec/hermes-plugin/src/"
 detect = { binary = "hermes" }
 
 [adapters.bundle]

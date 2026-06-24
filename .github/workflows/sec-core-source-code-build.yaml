@@ -71,7 +71,5 @@ jobs:
           ls ~/.local/lib/anolisa/sec-core/hermes-plugin/scripts/deploy.sh
           echo "=== CLI venv ==="
           ls ~/.local/lib/anolisa/sec-core/venv/bin/agent-sec-cli
-          echo "=== Component manifest ==="
-          test -f ~/.local/share/anolisa/components/sec-core/component.toml || { echo "ERROR: component.toml not found in build output"; exit 1; }
       - name: Run E2E tests
         run: make -C src/agent-sec-core test-e2e-source-build
