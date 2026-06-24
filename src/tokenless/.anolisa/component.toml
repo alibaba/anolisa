@@ -14,3 +14,25 @@ adapter_type = "plugin"
 plugin_id = "tokenless"
 source = "adapters/openclaw"
 dest = "{datadir}/adapters/{component}/openclaw/"
+
+[adapters.bundle]
+# Entry-point manifest inside the bundle directory (the file the OpenClaw
+# driver reads to identify the plugin). Declared explicitly rather than
+# relying on the driver's "openclaw.plugin.json" default, so the contract is
+# self-describing and survives driver default changes.
+entry = "openclaw.plugin.json"
+
+[[adapters]]
+framework = "hermes"
+adapter_type = "plugin"
+plugin_id = "tokenless"
+source = "adapters/hermes"
+dest = "{datadir}/adapters/{component}/hermes/"
+
+[adapters.bundle]
+# Hermes-native plugin manifest at the bundle root. The driver scans this
+# file for the plugin id when plugin_id is not declared; we declare
+# plugin_id above so the driver need not parse it, but keep entry explicit
+# so the contract names the platform entry manifest (matches the file
+# shipped at the dest root: adapters/<component>/hermes/plugin.yaml).
+entry = "plugin.yaml"
