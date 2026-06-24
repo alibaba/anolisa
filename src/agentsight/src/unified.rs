@@ -1916,7 +1916,7 @@ mod tests {
     }
 
     #[test]
-    fn test_complete_pending_skips_insert_when_row_already_interrupted() {
+    fn test_complete_pending_recovers_interrupted_row() {
         let dir = unique_tmp_dir("cp-interrupted");
         let db_path = dir.join("genai_events.db");
         let store = Arc::new(GenAISqliteStore::new_with_path(&db_path).expect("create test store"));
@@ -1929,11 +1929,11 @@ mod tests {
             .mark_pending_interrupted_for_pid(1234, "agent_crash")
             .expect("mark interrupted");
 
-        // Now complete_pending should NOT create a duplicate row
+        // complete_pending should recover the interrupted row to 'complete'
         let event = GenAISemanticEvent::LLMCall(make_test_llm_call("call-1"));
         store.complete_pending(&event).expect("complete_pending");
 
-        // Verify: exactly 1 row, status = interrupted (not a second 'complete' row)
+        // Verify: exactly 1 row, status = complete (recovered from interrupted)
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         let count: i64 = conn
             .query_row(
@@ -1951,7 +1951,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(status, "interrupted");
+        assert_eq!(status, "complete");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

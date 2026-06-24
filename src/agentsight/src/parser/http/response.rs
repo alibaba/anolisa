@@ -30,13 +30,42 @@ impl ParsedResponse {
         self.headers.get("content-encoding").map(|e| e.as_str())
     }
 
+    fn is_chunked(&self) -> bool {
+        self.headers
+            .get("transfer-encoding")
+            .map(|v| v.to_lowercase().contains("chunked"))
+            .unwrap_or(false)
+    }
+
+    fn dechunked_body(&self) -> Option<Vec<u8>> {
+        if !self.is_chunked() {
+            return None;
+        }
+        let dechunked = crate::utils::decompress::dechunk_body(self.body());
+        if dechunked.is_empty() && self.body_len > 0 {
+            None
+        } else {
+            Some(dechunked)
+        }
+    }
+
     /// 获取解压后的 body 字节（应用于完整组装的响应，非部分 SSL 事件）
     pub fn decompressed_body(&self) -> Vec<u8> {
+        if let Some(dechunked) = self.dechunked_body() {
+            return crate::utils::decompress::decompress_body(&dechunked, self.content_encoding());
+        }
         crate::utils::decompress::decompress_body(self.body(), self.content_encoding())
     }
 
     /// 获取解压后的 body 字符串（应用于完整组装的响应）
     pub fn body_str_decompressed(&self) -> String {
+        if let Some(dechunked) = self.dechunked_body() {
+            return crate::utils::decompress::decompress_body_to_string(
+                &dechunked,
+                self.content_encoding(),
+            )
+            .unwrap_or_default();
+        }
         crate::utils::decompress::decompress_body_to_string(self.body(), self.content_encoding())
             .unwrap_or_default()
     }

@@ -382,4 +382,41 @@ mod tests {
         assert_eq!(event.connection_id(), (42, 0x2000));
         assert_eq!(event.buf_size(), 5);
     }
+
+    #[test]
+    fn test_chunked_gzip_response_body_decompresses() {
+        use std::io::Write;
+        let json_body =
+            b"{\"id\":\"chatcmpl-123\",\"choices\":[{\"message\":{\"content\":\"hello\"}}]}";
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(json_body).unwrap();
+        let gzipped = encoder.finish().unwrap();
+
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("{:x}\r\n", gzipped.len()).as_bytes());
+        body.extend_from_slice(&gzipped);
+        body.extend_from_slice(b"\r\n0\r\n\r\n");
+
+        let mut data = Vec::new();
+        data.extend_from_slice(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n");
+        data.extend_from_slice(&body);
+
+        let event = make_ssl_event(&data);
+        let parser = HttpParser::new();
+        let result = parser.parse(event).unwrap();
+        match result {
+            ParsedHttpMessage::Response(resp) => {
+                assert_eq!(resp.status_code, 200);
+                assert!(resp.body_len > 0);
+                let parsed = resp.json_body();
+                assert!(
+                    parsed.is_some(),
+                    "chunked+gzip body should decompress to valid JSON"
+                );
+                let val = parsed.unwrap();
+                assert_eq!(val["id"], "chatcmpl-123");
+            }
+            _ => panic!("Expected Response"),
+        }
+    }
 }

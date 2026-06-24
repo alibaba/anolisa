@@ -576,7 +576,7 @@ impl GenAISqliteStore {
                         sse_event_count     = ?26,
                         event_json          = ?27,
                         tool_call_ids       = ?28
-                    WHERE call_id = ?29 AND status = 'pending'",
+                    WHERE call_id = ?29 AND status IN ('pending', 'interrupted')",
                     params![
                         call.metadata.get("response_id"),
                         call.metadata.get("conversation_id"),
@@ -616,15 +616,12 @@ impl GenAISqliteStore {
 
                 if updated > 0 {
                     log::debug!(
-                        "[GenAI] Promoted pending→complete for call_id={}",
+                        "[GenAI] Promoted pending/interrupted→complete for call_id={}",
                         call.call_id
                     );
                     return Ok(());
                 }
-                // No pending row with status='pending' — check if the row
-                // already exists with a different status (e.g. 'interrupted'
-                // by crash detection).  If so, skip the fallback INSERT to
-                // avoid creating a duplicate row for the same call_id.
+                // Row exists with status='complete' — already done, skip.
                 let exists: bool = conn.query_row(
                     "SELECT EXISTS(SELECT 1 FROM genai_events WHERE call_id = ?1)",
                     params![call.call_id],
@@ -632,7 +629,7 @@ impl GenAISqliteStore {
                 )?;
                 if exists {
                     log::debug!(
-                        "[GenAI] Row already exists for call_id={} (non-pending), skipping insert",
+                        "[GenAI] Row already exists for call_id={} (complete), skipping",
                         call.call_id
                     );
                     return Ok(());
