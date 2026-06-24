@@ -98,7 +98,7 @@ pub use service::{
     DeactivationOutcome, FakeServiceManager, NotSupportedServiceManager, ServiceActivation,
     ServiceError, ServiceManager, ServiceOp, ServiceOutcome, ServiceRequest, ServiceRunOutcome,
     ServiceState, SystemdServiceManager, apply_services, deactivate_services,
-    for_install_mode as service_for_install_mode,
+    for_install_mode as service_for_install_mode, user_service_for_install_mode,
 };
 pub use state::{
     BackupRecord, ExternalModifiedFile, FileOwner, HealthEntry, InstallMode, InstalledObject,

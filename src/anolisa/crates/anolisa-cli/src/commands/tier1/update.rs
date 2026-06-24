@@ -48,8 +48,9 @@ use anolisa_core::transaction::{
     TransactionStepStatus,
 };
 use anolisa_core::{
-    CapabilityRunOutcome, ServiceActivation, ServiceRequest, ServiceRunOutcome, apply_capabilities,
-    apply_services, capability_for_install_mode, service_for_install_mode,
+    CapabilityRunOutcome, ServiceActivation, ServiceRequest, ServiceRunOutcome, ServiceScope,
+    apply_capabilities, apply_services, capability_for_install_mode, service_for_install_mode,
+    user_service_for_install_mode,
 };
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError};
@@ -844,9 +845,18 @@ fn execute_raw_update(
 
     // Upgrade restarts (not just starts) so the new binary is loaded.
     // Best-effort: failures warn, never roll back, because the component
-    // record and new files are already committed.
+    // record and new files are already committed. Pick the scope-matched
+    // backend like install does: a purely user-scope contract restarts
+    // through `systemctl --user`, so a user service is actually reloaded onto
+    // the new binary instead of being left running on the replaced files.
+    let service_manager =
+        if !services.is_empty() && services.iter().all(|s| s.scope == ServiceScope::User) {
+            user_service_for_install_mode(ctx.install_mode.as_str(), &env)
+        } else {
+            service_for_install_mode(ctx.install_mode.as_str(), &env)
+        };
     let service_run = apply_services(
-        service_for_install_mode(ctx.install_mode.as_str(), &env).as_ref(),
+        service_manager.as_ref(),
         &services,
         ServiceActivation::Restart,
         Some(&log),

@@ -1381,6 +1381,57 @@ fn execute_uninstall_or_purge(
         ));
         combined.push(msg);
     }
+
+    // Step 8.5 — daemon-reload AFTER the owned unit files are gone, so the
+    // manager drops the now-deleted units from its database (the
+    // uninstall-side mirror of the install reload — without it systemd keeps
+    // a stale unit until the next manual reload). Best-effort: a failed
+    // reload only warns. Runs only when the component declared service units
+    // (whose files were just removed) on a host that drives systemd.
+    //
+    // A user-mode install places (and reloads) its units under the user
+    // manager, so the post-removal reload selects the user-scope factory in
+    // user mode — `for_install_mode("user")` is unsupported and would skip
+    // the `systemctl --user daemon-reload` the removed `~/.config/systemd/user`
+    // units need. (Per-unit user-scope stop/disable in a *system*-mode
+    // uninstall still waits on `ServiceRef` recording scope.)
+    if live_plan.components.iter().any(|c| !c.services.is_empty()) {
+        let env = EnvService::detect();
+        let manager = if install_mode == "user" {
+            service::user_service_for_install_mode(install_mode, &env)
+        } else {
+            service::for_install_mode(install_mode, &env)
+        };
+        if manager.supported() {
+            match manager.daemon_reload() {
+                Ok(_) => service::record_service_op(
+                    Some(&central),
+                    service::ServiceOp::DaemonReload,
+                    target_name,
+                    "",
+                    &operation_id,
+                    actor,
+                    install_mode,
+                    None,
+                ),
+                Err(err) => {
+                    let msg = format!("daemon-reload after unit removal failed: {err}");
+                    service::record_service_op(
+                        Some(&central),
+                        service::ServiceOp::DaemonReload,
+                        target_name,
+                        "",
+                        &operation_id,
+                        actor,
+                        install_mode,
+                        Some(&msg),
+                    );
+                    combined.push(msg);
+                }
+            }
+        }
+    }
+
     let warnings = combined;
 
     // Best-effort cleanup of backups on the success path.
@@ -2023,6 +2074,72 @@ mod tests {
                 Some("agentsight"),
             );
         }
+    }
+
+    /// The uninstall-side daemon-reload is gated on the component actually
+    /// declaring service units: a component with none must never emit a
+    /// `service:daemon-reload` record — the manager is not even built, so
+    /// the gate also keeps the no-service uninstall free of systemctl.
+    #[test]
+    #[cfg(unix)]
+    fn uninstall_without_services_does_not_daemon_reload() {
+        let root = tempdir().expect("tempdir");
+        let layout = fixture_layout(root.path());
+        std_fs::create_dir_all(&layout.bin_dir).unwrap();
+        let owned_path = layout.bin_dir.join("os-skills-marker");
+        std_fs::write(&owned_path, b"owned").unwrap();
+
+        std_fs::create_dir_all(&layout.state_dir).expect("mkdir state");
+        let mut state = InstalledState::default();
+        state.upsert_object(InstalledObject {
+            kind: ObjectKind::Component,
+            name: "os-skills".to_string(),
+            version: "0.2.0".to_string(),
+            status: ObjectStatus::Installed,
+            manifest_digest: None,
+            distribution_source: Some("file:///fake".to_string()),
+            raw_package: None,
+            install_backend: Some("raw".to_string()),
+            ownership: None,
+            rpm_metadata: None,
+            installed_at: "2026-06-01T10:00:00Z".to_string(),
+            last_operation_id: Some("op-prior".to_string()),
+            managed: true,
+            adopted: false,
+            subscription_scope: Default::default(),
+            enabled_features: Vec::new(),
+            component_refs: Vec::new(),
+            files: vec![OwnedFile {
+                path: owned_path.clone(),
+                owner: StateFileOwner::Anolisa,
+                sha256: Some("0".repeat(64)),
+            }],
+            external_modified_files: Vec::new(),
+            services: Vec::new(),
+            health: Vec::new(),
+        });
+        state
+            .save(&layout.state_dir.join("installed.toml"))
+            .expect("seed state save");
+
+        let hooks = ResolvedLifecycleHooks {
+            pre_uninstall: Vec::new(),
+            post_uninstall: Vec::new(),
+        };
+        let plan = LifecyclePlan::for_component_uninstall(
+            "os-skills",
+            &InstalledState::load(&layout.state_dir.join("installed.toml")).unwrap(),
+        );
+        execute_plan(&plan, &layout, "tester", "system", &hooks).expect("uninstall ok");
+
+        let lines = read_log_lines(&layout.central_log);
+        assert!(
+            !lines.iter().any(|l| {
+                l.get("command").and_then(|v| v.as_str()) == Some("service:daemon-reload")
+            }),
+            "no service units declared — must not daemon-reload: {lines:?}",
+        );
+        assert!(!owned_path.exists(), "owned file should be removed");
     }
 
     /// ws-ckpt semantics: a **non-strict** pre_uninstall hook that fails

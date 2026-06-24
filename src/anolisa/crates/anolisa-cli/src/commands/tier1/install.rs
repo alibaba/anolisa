@@ -46,9 +46,9 @@ use anolisa_core::state::{
 use anolisa_core::{
     ArtifactType, CapabilityRequest, ComponentManifest, DistributionEntry, DistributionIndex,
     FileKind, HookPhase, HookSpec, ResolveQuery, ServiceActivation, ServiceManager, ServiceRequest,
-    ServiceRunOutcome, apply_capabilities, apply_services, capability_for_install_mode,
-    deactivate_services, expand_layout_placeholders, resolve_manifest_hooks, run_hooks,
-    service_for_install_mode,
+    ServiceRunOutcome, ServiceScope, apply_capabilities, apply_services,
+    capability_for_install_mode, deactivate_services, expand_layout_placeholders,
+    resolve_manifest_hooks, run_hooks, service_for_install_mode, user_service_for_install_mode,
 };
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError};
@@ -2681,12 +2681,23 @@ fn execute_raw(
     }
 
     // Capabilities done; bring declared services up (issue order: setcap →
-    // service enable/start). The manager gates itself to system + Linux +
-    // non-container; user-scope units and unsupported hosts are quiet skips.
-    // Activation is best-effort — a failed enable/start is a warning, not an
-    // abort: the component's files are installed and an operator can fix the
-    // unit out of band. Reuse the env + log opened for the capability step.
-    let service_manager = service_for_install_mode(ctx.install_mode.as_str(), &env);
+    // service enable/start). Activation is best-effort — a failed enable/start
+    // is a warning, not an abort: the component's files are installed and an
+    // operator can fix the unit out of band. Reuse the env + log opened for
+    // the capability step.
+    //
+    // A contract's services are single-scope in practice (a component is
+    // either a system daemon or a per-user service). Pick the matching
+    // backend: an all-user-scope set drives `systemctl --user` (and only in a
+    // user-mode install); otherwise the system backend. A request the chosen
+    // backend does not handle (a hypothetical mixed-scope contract) is skipped
+    // by `apply_services` via `handles_scope`, so this never mis-drives.
+    let service_manager: Box<dyn ServiceManager> =
+        if !services.is_empty() && services.iter().all(|s| s.scope == ServiceScope::User) {
+            user_service_for_install_mode(ctx.install_mode.as_str(), &env)
+        } else {
+            service_for_install_mode(ctx.install_mode.as_str(), &env)
+        };
     let service_run = apply_services(
         service_manager.as_ref(),
         &services,

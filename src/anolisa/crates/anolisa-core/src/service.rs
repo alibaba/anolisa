@@ -5,13 +5,15 @@
 //! systemctl status on `anolisa restart`. This module wraps the minimum
 //! amount of `systemctl` we need without a dbus dependency.
 //!
-//! The trait surface is small on purpose. Any platform that does not
-//! match the alpha factory rules — non-Linux, install_mode == "user",
-//! container runtime detected — gets a [`NotSupportedServiceManager`]
-//! whose ops succeed with `state: NotSupported, supported: false,
-//! changed: false`. Callers treat that as a quiet skip rather than a
-//! warning, so the lifecycle on macOS / inside CI containers / under
-//! user-mode installs stays a no-op for services.
+//! The trait surface is small on purpose. A non-Linux host or a detected
+//! container runtime gets a [`NotSupportedServiceManager`] whose ops
+//! succeed with `state: NotSupported, supported: false, changed: false`;
+//! callers treat that as a quiet skip rather than a warning. Install mode
+//! selects the *scope* instead of disabling services outright: system mode
+//! drives system units via `systemctl`, user mode drives the caller's user
+//! units via `systemctl --user`. A manager only acts on requests of its
+//! own scope (see [`ServiceManager::handles_scope`]); a request for the
+//! other scope is a documented skip.
 //!
 //! `FakeServiceManager` is the executor used by `service.rs`'s own unit
 //! tests and by integration tests that need to assert which ops the
@@ -160,6 +162,16 @@ pub trait ServiceManager: Send + Sync {
         None
     }
 
+    /// Whether this manager drives units of `scope`. A systemd backend is
+    /// bound to a single scope by install mode — `systemctl` for
+    /// [`ServiceScope::System`], `systemctl --user` for
+    /// [`ServiceScope::User`] — and orchestrators skip any request whose
+    /// scope it does not handle. Default `true` for scope-agnostic
+    /// backends (the not-supported skip and the test fake's default).
+    fn handles_scope(&self, _scope: ServiceScope) -> bool {
+        true
+    }
+
     /// Reload the manager's unit database so a freshly-installed unit file
     /// becomes loadable (`systemctl daemon-reload`). Default is a no-op
     /// for backends that don't drive systemd; override only where a real
@@ -191,9 +203,13 @@ pub trait ServiceManager: Send + Sync {
     fn disable_service(&self, unit: &str) -> Result<ServiceOutcome, ServiceError>;
 }
 
-/// Pick a backend for the current host + install mode. Linux + system
-/// mode + no container → real `systemctl` driver; everything else →
-/// quiet skip.
+/// Pick the **system-scope** backend for the current host + install mode.
+/// Linux + system mode + no container → real `systemctl` driver;
+/// everything else (non-Linux, user mode, container) → quiet skip. This is
+/// the manager used to enable/stop system units and to probe systemd
+/// health checks, so user mode is deliberately unsupported here — a
+/// user-mode install cannot manage system units. User-scope activation has
+/// its own factory, [`user_service_for_install_mode`].
 pub fn for_install_mode(install_mode: &str, env: &EnvFacts) -> Box<dyn ServiceManager> {
     if env.os != "linux" {
         return Box::new(NotSupportedServiceManager::new(format!(
@@ -212,6 +228,40 @@ pub fn for_install_mode(install_mode: &str, env: &EnvFacts) -> Box<dyn ServiceMa
         )));
     }
     Box::new(SystemdServiceManager::new())
+}
+
+/// Pick the **user-scope** backend (`systemctl --user`) for activating user
+/// units. Unlike [`for_install_mode`], user units are auto-activated only in
+/// a **user**-mode install: that install runs as the owning user with their
+/// session bus, so `systemctl --user enable/start` targets the right
+/// manager. A system-mode install *places* a user unit (under
+/// `{userunitdir}`) for all users but leaves activation to the user — root
+/// has no single target user session — so it is a quiet skip here.
+///
+/// Linux + user mode + no container → user-scope `systemctl --user` driver;
+/// everything else → quiet skip.
+pub fn user_service_for_install_mode(
+    install_mode: &str,
+    env: &EnvFacts,
+) -> Box<dyn ServiceManager> {
+    if env.os != "linux" {
+        return Box::new(NotSupportedServiceManager::new(format!(
+            "user-scope service manager unsupported on os '{}'",
+            env.os,
+        )));
+    }
+    if install_mode != "user" {
+        return Box::new(NotSupportedServiceManager::new(format!(
+            "user-scope service not auto-activated in install_mode='{install_mode}' — \
+             unit is placed; enable per-user with `systemctl --user enable`",
+        )));
+    }
+    if let Some(rt) = env.container.as_deref() {
+        return Box::new(NotSupportedServiceManager::new(format!(
+            "container runtime '{rt}' detected — refusing to drive systemctl --user from inside a container",
+        )));
+    }
+    Box::new(SystemdServiceManager::with_scope(ServiceScope::User))
 }
 
 /// Quiet-skip backend. Every op succeeds with `state: NotSupported`.
@@ -272,18 +322,41 @@ impl ServiceManager for NotSupportedServiceManager {
 /// downgrade them to warnings.
 pub struct SystemdServiceManager {
     binary: PathBuf,
+    /// System vs user manager. A user-scoped instance prefixes every
+    /// invocation with `--user`, so ops target the caller's `systemd
+    /// --user` instance instead of the system manager. Set from install
+    /// mode by [`for_install_mode`].
+    scope: ServiceScope,
 }
 
 impl SystemdServiceManager {
-    /// Build a manager that invokes `systemctl` from `PATH`.
+    /// Build a **system**-scope manager that invokes `systemctl` from
+    /// `PATH`.
     pub fn new() -> Self {
+        Self::with_scope(ServiceScope::System)
+    }
+
+    /// Build a manager bound to `scope`. A [`ServiceScope::User`] manager
+    /// prefixes every `systemctl` call with `--user`.
+    pub fn with_scope(scope: ServiceScope) -> Self {
         Self {
             binary: PathBuf::from("systemctl"),
+            scope,
         }
     }
 
-    fn probe_state(&self, unit: &str) -> Result<ServiceState, ServiceError> {
+    /// `systemctl` command seeded with `--user` when this manager is
+    /// user-scoped, so probe / op / reload all target the right manager.
+    fn command(&self) -> Command {
         let mut cmd = Command::new(&self.binary);
+        if self.scope == ServiceScope::User {
+            cmd.arg("--user");
+        }
+        cmd
+    }
+
+    fn probe_state(&self, unit: &str) -> Result<ServiceState, ServiceError> {
+        let mut cmd = self.command();
         cmd.arg("is-active").arg(unit);
         let output = cmd
             .output()
@@ -308,7 +381,7 @@ impl SystemdServiceManager {
         let prior = self.probe_state(unit)?;
         if matches!(op, ServiceOp::Probe) {
             return Ok(ServiceOutcome {
-                manager: "systemd".to_string(),
+                manager: self.manager().to_string(),
                 unit: unit.to_string(),
                 op,
                 state: prior,
@@ -317,7 +390,7 @@ impl SystemdServiceManager {
                 message: format!("systemctl is-active reported {}", prior.as_str()),
             });
         }
-        let mut cmd = Command::new(&self.binary);
+        let mut cmd = self.command();
         cmd.arg(op.as_str()).arg(unit);
         let output = cmd
             .output()
@@ -341,7 +414,7 @@ impl SystemdServiceManager {
             ServiceOp::Probe | ServiceOp::DaemonReload => false,
         };
         Ok(ServiceOutcome {
-            manager: "systemd".to_string(),
+            manager: self.manager().to_string(),
             unit: unit.to_string(),
             op,
             state: post,
@@ -365,13 +438,23 @@ impl Default for SystemdServiceManager {
 
 impl ServiceManager for SystemdServiceManager {
     fn manager(&self) -> &str {
-        "systemd"
+        // Report the scope in the label so central-log and probe outcomes
+        // match install state, which records `systemd-user` for user mode.
+        // A user-scoped instance drives `systemctl --user`, so it is a
+        // distinct manager namespace from the system one.
+        match self.scope {
+            ServiceScope::System => "systemd",
+            ServiceScope::User => "systemd-user",
+        }
     }
     fn supported(&self) -> bool {
         true
     }
+    fn handles_scope(&self, scope: ServiceScope) -> bool {
+        self.scope == scope
+    }
     fn daemon_reload(&self) -> Result<ServiceOutcome, ServiceError> {
-        let mut cmd = Command::new(&self.binary);
+        let mut cmd = self.command();
         cmd.arg("daemon-reload");
         let output = cmd
             .output()
@@ -387,7 +470,7 @@ impl ServiceManager for SystemdServiceManager {
             });
         }
         Ok(ServiceOutcome {
-            manager: "systemd".to_string(),
+            manager: self.manager().to_string(),
             unit: String::new(),
             op: ServiceOp::DaemonReload,
             // daemon-reload doesn't target a unit, so there is no post-state.
@@ -423,21 +506,33 @@ impl ServiceManager for SystemdServiceManager {
 pub struct FakeServiceManager {
     manager_name: String,
     supported: bool,
+    /// Scope this fake claims to drive (see [`ServiceManager::handles_scope`]).
+    /// Defaults to [`ServiceScope::System`] so existing system-mode tests
+    /// drive their requests and user-scope requests are skipped.
+    scope: ServiceScope,
     state: Mutex<ServiceState>,
     calls: Mutex<Vec<(ServiceOp, String)>>,
     fail_ops: Mutex<HashSet<(ServiceOp, String)>>,
 }
 
 impl FakeServiceManager {
-    /// Build a supported fake manager with an initially inactive unit
-    /// state and no injected failures.
+    /// Build a supported, **system**-scope fake manager with an initially
+    /// inactive unit state and no injected failures.
     pub fn new() -> Self {
         Self {
             manager_name: "fake".to_string(),
             supported: true,
+            scope: ServiceScope::System,
             state: Mutex::new(ServiceState::Inactive),
             calls: Mutex::new(Vec::new()),
             fail_ops: Mutex::new(HashSet::new()),
+        }
+    }
+    /// Build a fake bound to `scope`, for exercising user-scope routing.
+    pub fn with_scope(scope: ServiceScope) -> Self {
+        Self {
+            scope,
+            ..Self::new()
         }
     }
     /// Snapshot of every call recorded so far, in dispatch order.
@@ -506,6 +601,9 @@ impl ServiceManager for FakeServiceManager {
     }
     fn supported(&self) -> bool {
         self.supported
+    }
+    fn handles_scope(&self, scope: ServiceScope) -> bool {
+        self.scope == scope
     }
     fn daemon_reload(&self) -> Result<ServiceOutcome, ServiceError> {
         self.record(ServiceOp::DaemonReload, "")
@@ -705,8 +803,10 @@ pub struct ServiceRunOutcome {
 ///
 /// Skips, in priority order, each producing a documented `Info` audit line
 /// and no warning:
-/// - `scope == user`: user-scope activation is not yet supported.
-/// - `!manager.supported()`: non-Linux, user mode, or container host.
+/// - `!manager.supported()`: non-Linux or container host.
+/// - `!manager.handles_scope(req.scope)`: the request's scope is not the
+///   one this install mode drives (e.g. a user-scope unit in a system
+///   install) — the unit is placed but not activated here.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_services(
     manager: &dyn ServiceManager,
@@ -723,13 +823,13 @@ pub fn apply_services(
     // Freshly-installed unit files aren't loadable until the manager reloads
     // its database, so a unit placed this run would otherwise fail `start`
     // with "not found". Reload once up-front when we'll actually drive
-    // systemd: a supported backend with at least one system-scope unit to
-    // act on. User-scope units are skipped in the loop below, so no
-    // `systemctl --user daemon-reload` is attempted here.
+    // systemd: a supported backend with at least one request whose scope it
+    // handles. A user-scope manager reloads via `systemctl --user`; requests
+    // of the scope it does not handle are skipped in the loop below.
     if manager.supported()
         && requests
             .iter()
-            .any(|req| req.scope != ServiceScope::User && (req.enable || req.start))
+            .any(|req| manager.handles_scope(req.scope) && (req.enable || req.start))
     {
         match manager.daemon_reload() {
             Ok(_) => record_service_op(
@@ -770,21 +870,6 @@ pub fn apply_services(
             ServiceOp::Start
         };
 
-        if req.scope == ServiceScope::User {
-            record_service_op_unsupported(
-                log,
-                primary_op,
-                component,
-                &req.unit,
-                operation_id,
-                actor,
-                install_mode,
-                manager.manager(),
-                Some("user-scope service activation not yet supported"),
-            );
-            continue;
-        }
-
         if !manager.supported() {
             record_service_op_unsupported(
                 log,
@@ -796,6 +881,35 @@ pub fn apply_services(
                 install_mode,
                 manager.manager(),
                 manager.unsupported_reason(),
+            );
+            continue;
+        }
+
+        // The manager is bound to one scope by install mode. A unit of the
+        // other scope is placed but not activated here: a user-scope unit in
+        // a system install is left for `systemctl --user enable`; a
+        // system-scope unit in a user install needs a system-mode install.
+        if !manager.handles_scope(req.scope) {
+            let reason = match req.scope {
+                ServiceScope::User => {
+                    "user-scope service not activated in this install mode — \
+                     unit placed; enable per-user with `systemctl --user enable`"
+                }
+                ServiceScope::System => {
+                    "system-scope service not activated in user install mode — \
+                     needs a system-mode install"
+                }
+            };
+            record_service_op_unsupported(
+                log,
+                primary_op,
+                component,
+                &req.unit,
+                operation_id,
+                actor,
+                install_mode,
+                manager.manager(),
+                Some(reason),
             );
             continue;
         }
@@ -1099,14 +1213,47 @@ mod tests {
         let m = for_install_mode("system", &fake_env("linux", None));
         assert_eq!(m.manager(), "systemd");
         assert!(m.supported());
+        // System mode drives system units, not user units.
+        assert!(m.handles_scope(ServiceScope::System));
+        assert!(!m.handles_scope(ServiceScope::User));
     }
 
     #[test]
     fn factory_skips_user_install_mode_on_linux() {
+        // The system-scope factory stays unsupported in user mode: a
+        // user-mode install cannot manage system units (this also keeps
+        // systemd health checks degrading to not_supported in user mode).
         let m = for_install_mode("user", &fake_env("linux", None));
         assert!(!m.supported());
         assert_eq!(m.manager(), "not-supported");
         assert!(m.unsupported_reason().unwrap().contains("install_mode"));
+    }
+
+    #[test]
+    fn user_factory_drives_user_scope_only_in_user_mode() {
+        // The user-scope factory drives `systemctl --user` in user mode,
+        // handling only user-scope requests, and labels itself `systemd-user`
+        // so diagnostics distinguish it from the system manager.
+        let m = user_service_for_install_mode("user", &fake_env("linux", None));
+        assert!(m.supported());
+        assert_eq!(m.manager(), "systemd-user");
+        assert!(m.handles_scope(ServiceScope::User));
+        assert!(!m.handles_scope(ServiceScope::System));
+    }
+
+    #[test]
+    fn user_factory_skips_system_mode_as_place_only() {
+        // System mode places the user unit but does not auto-activate it.
+        let m = user_service_for_install_mode("system", &fake_env("linux", None));
+        assert!(!m.supported());
+        assert!(m.unsupported_reason().unwrap().contains("placed"));
+    }
+
+    #[test]
+    fn user_factory_skips_inside_containers() {
+        let m = user_service_for_install_mode("user", &fake_env("linux", Some("docker")));
+        assert!(!m.supported());
+        assert!(m.unsupported_reason().unwrap().contains("docker"));
     }
 
     #[test]
@@ -1500,7 +1647,10 @@ mod tests {
     }
 
     #[test]
-    fn apply_services_user_scope_is_skipped_without_touching_manager() {
+    fn apply_services_user_scope_is_skipped_by_a_system_manager() {
+        // Default fake is system-scope (mirrors a system-mode install). A
+        // user-scope request is not handled, so the manager is never called
+        // — not even a daemon-reload, which only precedes work it handles.
         let m = FakeServiceManager::new();
         let reqs = vec![ServiceRequest {
             unit: "anolisa-memory@alice.service".to_string(),
@@ -1518,11 +1668,48 @@ mod tests {
             "cli",
             "system",
         );
-        // user-scope activation is out of scope: the manager is never called
-        // — not even a daemon-reload, which only precedes system-scope work.
         assert!(m.calls().is_empty());
         assert!(out.enabled_units.is_empty());
         assert!(out.started_units.is_empty());
+        assert!(out.warnings.is_empty());
+    }
+
+    #[test]
+    fn apply_services_drives_user_scope_when_manager_handles_it() {
+        // A user-scope manager (user-mode install) drives a user-scope unit:
+        // reload precedes enable+start, all recorded against it.
+        let m = FakeServiceManager::with_scope(ServiceScope::User);
+        let reqs = vec![ServiceRequest {
+            unit: "anolisa-memory@alice.service".to_string(),
+            scope: ServiceScope::User,
+            enable: true,
+            start: true,
+        }];
+        let out = apply_services(
+            &m,
+            &reqs,
+            ServiceActivation::Start,
+            None,
+            "comp",
+            "op1",
+            "cli",
+            "user",
+        );
+        let calls = m.calls();
+        assert_eq!(calls[0], (ServiceOp::DaemonReload, String::new()));
+        assert!(calls.contains(&(
+            ServiceOp::Enable,
+            "anolisa-memory@alice.service".to_string()
+        )));
+        assert!(calls.contains(&(ServiceOp::Start, "anolisa-memory@alice.service".to_string())));
+        assert_eq!(
+            out.enabled_units,
+            vec!["anolisa-memory@alice.service".to_string()]
+        );
+        assert_eq!(
+            out.started_units,
+            vec!["anolisa-memory@alice.service".to_string()]
+        );
         assert!(out.warnings.is_empty());
     }
 
