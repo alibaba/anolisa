@@ -385,7 +385,7 @@ impl AdapterManager {
         let _lock = InstallLock::acquire(&self.layout.lock_file)?;
         let mut state = InstalledState::load(&self.state_path)?;
 
-        let (manifest, scoped_datadir_roots) =
+        let (manifest, scoped_datadir_roots, contract_datadir_root) =
             self.load_visible_component_manifest(component, &state)?;
         let framework = self.resolve_framework(component, framework, &manifest)?;
 
@@ -444,8 +444,13 @@ impl AdapterManager {
                     framework: framework.clone(),
                 })?;
 
-        let (resource_root, effective_datadir) =
-            self.resolve_resource_root(component, &framework, &manifest, &scoped_datadir_roots)?;
+        let (resource_root, effective_datadir) = self.resolve_resource_root(
+            component,
+            &framework,
+            &manifest,
+            &scoped_datadir_roots,
+            contract_datadir_root.as_deref(),
+        )?;
         let skills = resolve_skill_sources(
             skill_specs,
             &self.layout,
@@ -850,7 +855,9 @@ impl AdapterManager {
     }
 
     /// Load the component contract for an installed component and return
-    /// the matched visible root's contract datadir roots.
+    /// the matched visible root's contract datadir roots plus the datadir
+    /// root that actually supplied the contract, when the winning contract
+    /// came from a datadir path rather than a state snapshot.
     ///
     /// The component must be recorded as installed in a visible state root.
     /// Once that gate passes, the contract is resolved using only the
@@ -863,19 +870,25 @@ impl AdapterManager {
         &self,
         component: &str,
         current_state: &InstalledState,
-    ) -> Result<(ComponentManifest, Vec<PathBuf>), AdapterError> {
+    ) -> Result<(ComponentManifest, Vec<PathBuf>, Option<PathBuf>), AdapterError> {
         let vr = self
             .find_component_visible_root(component, current_state)?
             .ok_or_else(|| AdapterError::ComponentNotInstalled {
                 component: component.to_string(),
             })?;
 
-        let manifest = super::contract::resolve_component_contract(
+        let resolved = super::contract::resolve_component_contract_with_source(
             component,
             std::slice::from_ref(&vr.state_dir),
             &vr.contract_datadir_roots,
         )
         .map_err(|err| map_contract_error(component, err))?;
+        let contract_datadir_root = contract_datadir_root_from_source(
+            component,
+            &resolved.path,
+            &vr.contract_datadir_roots,
+        );
+        let manifest = resolved.manifest;
 
         if manifest.component.name != component {
             return Err(AdapterError::AdapterManifest {
@@ -884,7 +897,11 @@ impl AdapterManager {
                 reason: format!("manifest declares component '{}'", manifest.component.name),
             });
         }
-        Ok((manifest, vr.contract_datadir_roots.clone()))
+        Ok((
+            manifest,
+            vr.contract_datadir_roots.clone(),
+            contract_datadir_root,
+        ))
     }
 
     /// First visible root whose installed state contains `component` in
@@ -1075,14 +1092,28 @@ impl AdapterManager {
         framework: &str,
         manifest: &ComponentManifest,
         scoped_datadir_roots: &[PathBuf],
+        contract_datadir_root: Option<&Path>,
     ) -> Result<(PathBuf, PathBuf), AdapterError> {
         let dest_template = declared_dest(manifest, framework);
         match dest_template {
             Some(template) => {
+                let dest_uses_datadir = template.contains("{datadir}");
                 let mut last_expanded = None;
                 for datadir in scoped_datadir_roots {
                     match self.expand_dest_template(&template, component, datadir) {
-                        Ok(path) if path.is_dir() => return Ok((path, datadir.clone())),
+                        Ok(path) if path.is_dir() => {
+                            let effective = if dest_uses_datadir {
+                                datadir.clone()
+                            } else {
+                                contract_datadir_root
+                                    .map(Path::to_path_buf)
+                                    .or_else(|| {
+                                        self.manifest_datadir_root(component, scoped_datadir_roots)
+                                    })
+                                    .unwrap_or_else(|| datadir.clone())
+                            };
+                            return Ok((path, effective));
+                        }
                         Ok(path) => {
                             last_expanded = Some((path, datadir.clone()));
                         }
@@ -1135,6 +1166,24 @@ impl AdapterManager {
                 if path.is_dir() {
                     return Some(path);
                 }
+            }
+        }
+        None
+    }
+
+    /// First datadir root in `scoped_datadir_roots` that actually
+    /// contains the component contract file on disk. Used to determine
+    /// the authoritative `effective_datadir` when the adapter `dest` is
+    /// an absolute path (not relative to `{datadir}`).
+    fn manifest_datadir_root(
+        &self,
+        component: &str,
+        scoped_datadir_roots: &[PathBuf],
+    ) -> Option<PathBuf> {
+        for root in scoped_datadir_roots {
+            let contract = FsLayout::component_contract_path(root, component);
+            if contract.is_file() {
+                return Some(root.clone());
             }
         }
         None
@@ -1637,6 +1686,36 @@ fn declared_adapter_type(manifest: &ComponentManifest, framework: &str) -> Optio
 /// Both fully-installed and adopted components should be adapter-visible.
 fn is_adapter_visible_status(status: ObjectStatus) -> bool {
     matches!(status, ObjectStatus::Installed | ObjectStatus::Adopted)
+}
+
+/// Return the datadir root that supplied a resolved component contract.
+///
+/// Direct datadir hits are identified by path. State snapshots do not yet
+/// persist explicit source metadata, so for snapshot hits we match the
+/// snapshot content against scoped datadir contracts. This preserves the
+/// normal install/adopt behavior where the snapshot is a verbatim copy of
+/// a datadir contract, without adding state-schema surface.
+fn contract_datadir_root_from_source(
+    component: &str,
+    contract_path: &Path,
+    scoped_datadir_roots: &[PathBuf],
+) -> Option<PathBuf> {
+    if let Some(root) = scoped_datadir_roots
+        .iter()
+        .find(|root| FsLayout::component_contract_path(root, component) == contract_path)
+        .cloned()
+    {
+        return Some(root);
+    }
+
+    let snapshot_content = std::fs::read(contract_path).ok()?;
+    scoped_datadir_roots
+        .iter()
+        .find(|root| {
+            let candidate = FsLayout::component_contract_path(root, component);
+            std::fs::read(candidate).is_ok_and(|content| content == snapshot_content)
+        })
+        .cloned()
 }
 
 fn declared_plugin_id(manifest: &ComponentManifest, framework: &str) -> Option<String> {
@@ -2367,11 +2446,17 @@ source = "adapters/openclaw"
 
         // resolve_resource_root (used by enable) must return the custom path.
         let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
-        let (manifest, scoped_roots) = manager
+        let (manifest, scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
         let (resolved, _effective_datadir) = manager
-            .resolve_resource_root("sec-core", "openclaw", &manifest, &scoped_roots)
+            .resolve_resource_root(
+                "sec-core",
+                "openclaw",
+                &manifest,
+                &scoped_roots,
+                contract_datadir_root.as_deref(),
+            )
             .expect("resolve");
         assert_eq!(
             resolved, custom_root,
@@ -2421,11 +2506,17 @@ source = "adapters/openclaw"
         // resolve_resource_root: must return ContractResourceRootNotFound,
         // NOT silently fall back to convention.
         let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
-        let (manifest, scoped_roots) = manager
+        let (manifest, scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
         let err = manager
-            .resolve_resource_root("sec-core", "openclaw", &manifest, &scoped_roots)
+            .resolve_resource_root(
+                "sec-core",
+                "openclaw",
+                &manifest,
+                &scoped_roots,
+                contract_datadir_root.as_deref(),
+            )
             .expect_err("must fail when contract dest directory is absent");
         assert!(
             matches!(err, AdapterError::ContractResourceRootNotFound { .. }),
@@ -2485,11 +2576,17 @@ source = "adapters/openclaw"
 
         // resolve_resource_root must error, not fall back.
         let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
-        let (manifest, scoped_roots) = manager
+        let (manifest, scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
         let err = manager
-            .resolve_resource_root("sec-core", "openclaw", &manifest, &scoped_roots)
+            .resolve_resource_root(
+                "sec-core",
+                "openclaw",
+                &manifest,
+                &scoped_roots,
+                contract_datadir_root.as_deref(),
+            )
             .expect_err("must not fall back to convention");
         assert!(
             matches!(err, AdapterError::ContractResourceRootNotFound { .. }),
@@ -2620,11 +2717,17 @@ source = "{datadir}/skills/code-scanner/"
 
         // Resolve resource root — must come from system datadir.
         let state = InstalledState::load(&manager.state_path).expect("load state");
-        let (manifest, scoped_roots) = manager
+        let (manifest, scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
         let (resource_root, effective_datadir) = manager
-            .resolve_resource_root("sec-core", "openclaw", &manifest, &scoped_roots)
+            .resolve_resource_root(
+                "sec-core",
+                "openclaw",
+                &manifest,
+                &scoped_roots,
+                contract_datadir_root.as_deref(),
+            )
             .expect("resolve resource root");
         assert_eq!(resource_root, custom_root);
         assert_eq!(
@@ -2785,11 +2888,17 @@ source = "{datadir}/skills/code-scanner/"
 
         // Verify resolve_resource_root returns the package datadir path.
         let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
-        let (manifest, scoped_roots) = manager
+        let (manifest, scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
         let (resource_root, effective_datadir) = manager
-            .resolve_resource_root("sec-core", "openclaw", &manifest, &scoped_roots)
+            .resolve_resource_root(
+                "sec-core",
+                "openclaw",
+                &manifest,
+                &scoped_roots,
+                contract_datadir_root.as_deref(),
+            )
             .expect("resolve resource root");
         assert_eq!(
             effective_datadir, package_datadir,
@@ -2856,13 +2965,19 @@ source = "{datadir}/skills/code-scanner/"
         manager.all_datadir_roots = vec![package_datadir.clone()];
 
         let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
-        let (manifest, scoped_roots) = manager
+        let (manifest, scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
 
         // resource root must be under the package datadir.
         let (resource_root, effective_datadir) = manager
-            .resolve_resource_root("sec-core", "openclaw", &manifest, &scoped_roots)
+            .resolve_resource_root(
+                "sec-core",
+                "openclaw",
+                &manifest,
+                &scoped_roots,
+                contract_datadir_root.as_deref(),
+            )
             .expect("resolve resource root");
         assert_eq!(
             resource_root, adapter_root,
@@ -3272,5 +3387,215 @@ source = "{datadir}/skills/code-scanner/"
         .expect("no source must be accepted");
         assert_eq!(skills.len(), 1);
         assert!(skills[0].source.is_none());
+    }
+
+    // -- absolute dest keeps manifest datadir for skill sources ----------------
+
+    /// Regression (#1104): when adapter dest is an absolute path (e.g.
+    /// `/opt/agent-sec/openclaw-plugin/`), the effective_datadir must be
+    /// the datadir root where the component contract was actually found,
+    /// not whichever root happens to iterate first. This ensures
+    /// `{datadir}` in skill sources expands to the correct root.
+    #[test]
+    fn absolute_dest_uses_manifest_datadir_for_skill_sources() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("var/lib/anolisa");
+        let local_datadir = tmp.path().join("usr/local/share/anolisa");
+        let pkg_datadir = tmp.path().join("usr/share/anolisa");
+        let abs_dest = tmp.path().join("opt/agent-sec/openclaw-plugin");
+
+        seed_installed_state(&state_dir, "sec-core", ObjectStatus::Adopted);
+
+        // Contract lives under pkg_datadir (simulates RPM install to
+        // /usr/share/anolisa). No contract under local_datadir.
+        let contract = format!(
+            r#"
+[component]
+name = "sec-core"
+version = "0.1.0"
+layer = "runtime"
+
+[[adapters]]
+framework = "openclaw"
+adapter_type = "plugin"
+plugin_id = "sec-core"
+dest = "{}"
+
+[[adapters.openclaw.skills]]
+name = "code-scanner"
+source = "{{datadir}}/skills/code-scanner/"
+"#,
+            abs_dest.display()
+        );
+        write_contract_with_content(&pkg_datadir, "sec-core", &contract);
+
+        // Resource root at the absolute path.
+        std::fs::create_dir_all(&abs_dest).expect("mkdir abs_dest");
+        std::fs::write(abs_dest.join("openclaw.plugin.json"), b"{}").expect("write plugin");
+
+        // Skill source under the package datadir (where the contract lives).
+        let skill_source = pkg_datadir.join("skills").join("code-scanner");
+        std::fs::create_dir_all(&skill_source).expect("mkdir skill source");
+        std::fs::write(skill_source.join("manifest.json"), b"{}").expect("write skill");
+
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let mut manager = AdapterManager::new(
+            layout.clone(),
+            Some(tmp.path().to_path_buf()),
+            "test".into(),
+        );
+        manager.state_path = state_dir.join("installed.toml");
+        // local_datadir is first — before the fix, effective_datadir
+        // would incorrectly be local_datadir.
+        manager.visible_roots = vec![VisibleRoot {
+            state_dir: state_dir.clone(),
+            contract_datadir_roots: vec![local_datadir.clone(), pkg_datadir.clone()],
+        }];
+        manager.all_datadir_roots = vec![local_datadir.clone(), pkg_datadir.clone()];
+
+        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let (manifest, scoped_roots, contract_datadir_root) = manager
+            .load_visible_component_manifest("sec-core", &state)
+            .expect("load manifest");
+
+        // resource_root must be the absolute dest path.
+        let (resource_root, effective_datadir) = manager
+            .resolve_resource_root(
+                "sec-core",
+                "openclaw",
+                &manifest,
+                &scoped_roots,
+                contract_datadir_root.as_deref(),
+            )
+            .expect("resolve resource root");
+        assert_eq!(
+            resource_root, abs_dest,
+            "resource_root must be the absolute dest path"
+        );
+        // effective_datadir must be pkg_datadir (where the contract lives),
+        // NOT local_datadir (which was first in the list).
+        assert_eq!(
+            effective_datadir, pkg_datadir,
+            "effective_datadir must be the manifest's matched datadir root, not the first candidate"
+        );
+
+        // Skill source must expand {datadir} to pkg_datadir.
+        let skill_specs = declared_skills(&manifest, "openclaw");
+        let skills = resolve_skill_sources(
+            skill_specs,
+            &layout,
+            &effective_datadir,
+            "sec-core",
+            "openclaw",
+            &resource_root,
+        )
+        .expect("resolve skills");
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "code-scanner");
+        assert_eq!(
+            skills[0].source.as_ref(),
+            Some(&skill_source),
+            "skill source must resolve to pkg_datadir path (/usr/share/anolisa/skills/code-scanner/), \
+             not local_datadir (/usr/local/share/anolisa/skills/code-scanner/)"
+        );
+    }
+
+    /// State snapshots have higher contract priority than datadir
+    /// contracts. If the snapshot was copied from the package datadir and
+    /// an earlier local datadir still contains a stale same-component
+    /// contract, absolute-dest resolution must keep using the snapshot's
+    /// package datadir source for `{datadir}` skill expansion.
+    #[test]
+    fn snapshot_contract_uses_matching_datadir_for_absolute_dest_skill_sources() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("var/lib/anolisa");
+        let local_datadir = tmp.path().join("usr/local/share/anolisa");
+        let pkg_datadir = tmp.path().join("usr/share/anolisa");
+        let abs_dest = tmp.path().join("opt/agent-sec/openclaw-plugin");
+
+        seed_installed_state(&state_dir, "sec-core", ObjectStatus::Adopted);
+
+        let package_contract = format!(
+            r#"
+[component]
+name = "sec-core"
+version = "0.1.0"
+layer = "runtime"
+
+[[adapters]]
+framework = "openclaw"
+adapter_type = "plugin"
+plugin_id = "sec-core"
+dest = "{}"
+
+[[adapters.openclaw.skills]]
+name = "code-scanner"
+source = "{{datadir}}/skills/code-scanner/"
+"#,
+            abs_dest.display()
+        );
+        let stale_local_contract =
+            contract_toml_with_custom_dest("sec-core", "{datadir}/stale/sec-core/openclaw/");
+
+        write_contract_with_content(&local_datadir, "sec-core", &stale_local_contract);
+        write_contract_with_content(&pkg_datadir, "sec-core", &package_contract);
+
+        let snapshot = FsLayout::component_manifest_snapshot_path(&state_dir, "sec-core");
+        std::fs::create_dir_all(snapshot.parent().expect("snapshot parent")).expect("mkdir");
+        std::fs::write(&snapshot, &package_contract).expect("write snapshot");
+
+        std::fs::create_dir_all(&abs_dest).expect("mkdir abs_dest");
+        std::fs::write(abs_dest.join("openclaw.plugin.json"), b"{}").expect("write plugin");
+
+        let skill_source = pkg_datadir.join("skills").join("code-scanner");
+        std::fs::create_dir_all(&skill_source).expect("mkdir skill source");
+        std::fs::write(skill_source.join("manifest.json"), b"{}").expect("write skill");
+
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let mut manager = AdapterManager::new(
+            layout.clone(),
+            Some(tmp.path().to_path_buf()),
+            "test".into(),
+        );
+        manager.state_path = state_dir.join("installed.toml");
+        manager.visible_roots = vec![VisibleRoot {
+            state_dir: state_dir.clone(),
+            contract_datadir_roots: vec![local_datadir.clone(), pkg_datadir.clone()],
+        }];
+        manager.all_datadir_roots = vec![local_datadir.clone(), pkg_datadir.clone()];
+
+        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let (manifest, scoped_roots, contract_datadir_root) = manager
+            .load_visible_component_manifest("sec-core", &state)
+            .expect("load manifest");
+        assert_eq!(
+            contract_datadir_root.as_ref(),
+            Some(&pkg_datadir),
+            "snapshot content should match the package datadir contract, not the stale local one"
+        );
+
+        let (resource_root, effective_datadir) = manager
+            .resolve_resource_root(
+                "sec-core",
+                "openclaw",
+                &manifest,
+                &scoped_roots,
+                contract_datadir_root.as_deref(),
+            )
+            .expect("resolve resource root");
+        assert_eq!(resource_root, abs_dest);
+        assert_eq!(effective_datadir, pkg_datadir);
+
+        let skill_specs = declared_skills(&manifest, "openclaw");
+        let skills = resolve_skill_sources(
+            skill_specs,
+            &layout,
+            &effective_datadir,
+            "sec-core",
+            "openclaw",
+            &resource_root,
+        )
+        .expect("resolve skills");
+        assert_eq!(skills[0].source.as_ref(), Some(&skill_source));
     }
 }

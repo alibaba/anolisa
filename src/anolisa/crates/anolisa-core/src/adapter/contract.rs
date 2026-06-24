@@ -18,6 +18,15 @@ use anolisa_platform::fs_layout::FsLayout;
 
 use crate::manifest::{ComponentManifest, ManifestError};
 
+/// A resolved component contract plus the concrete file that supplied it.
+#[derive(Debug, Clone)]
+pub struct ResolvedComponentContract {
+    /// Parsed component manifest.
+    pub manifest: ComponentManifest,
+    /// Candidate path that won contract resolution.
+    pub path: PathBuf,
+}
+
 /// Errors from component contract resolution.
 #[derive(Debug, thiserror::Error)]
 pub enum ContractError {
@@ -84,8 +93,20 @@ pub fn resolve_component_contract(
     state_roots: &[PathBuf],
     datadir_roots: &[PathBuf],
 ) -> Result<ComponentManifest, ContractError> {
+    resolve_component_contract_with_source(component, state_roots, datadir_roots)
+        .map(|resolved| resolved.manifest)
+}
+
+/// Resolve the component contract and return the file path that supplied
+/// the manifest. Use this when callers need to keep layout placeholder
+/// expansion scoped to the actual contract source.
+pub fn resolve_component_contract_with_source(
+    component: &str,
+    state_roots: &[PathBuf],
+    datadir_roots: &[PathBuf],
+) -> Result<ResolvedComponentContract, ContractError> {
     let candidates = candidate_paths(component, state_roots, datadir_roots);
-    resolve_from_candidates(component, &candidates)
+    resolve_from_candidates_with_source(component, &candidates)
 }
 
 /// Try each candidate path in order and return the first valid manifest.
@@ -97,11 +118,25 @@ pub fn resolve_from_candidates(
     component: &str,
     candidates: &[PathBuf],
 ) -> Result<ComponentManifest, ContractError> {
+    resolve_from_candidates_with_source(component, candidates).map(|resolved| resolved.manifest)
+}
+
+/// Try each candidate path in order and return the first valid manifest
+/// with its source path.
+pub fn resolve_from_candidates_with_source(
+    component: &str,
+    candidates: &[PathBuf],
+) -> Result<ResolvedComponentContract, ContractError> {
     let mut searched = Vec::new();
 
     for path in candidates {
         match try_load_contract(path) {
-            TryLoad::Loaded(manifest) => return Ok(*manifest),
+            TryLoad::Loaded(manifest) => {
+                return Ok(ResolvedComponentContract {
+                    manifest: *manifest,
+                    path: path.clone(),
+                });
+            }
             TryLoad::NotFound => {
                 searched.push(path.clone());
             }
