@@ -224,6 +224,7 @@ export interface SessionSavings {
   total_input_tokens: number;
   total_output_tokens: number;
   total_tokens: number;
+  baseline_tokens: number;
   saved_tokens: number;
   compounded_saved: number;
   savings_rate: number;
@@ -245,6 +246,7 @@ export interface SavingsSummary {
   total_input_tokens: number;
   total_output_tokens: number;
   total_tokens: number;
+  baseline_tokens: number;
   total_saved_tokens: number;
   total_compounded_saved: number;
   savings_rate: number;
