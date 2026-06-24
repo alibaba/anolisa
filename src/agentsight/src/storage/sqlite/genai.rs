@@ -1046,6 +1046,44 @@ impl GenAISqliteStore {
         Ok(result)
     }
 
+    /// Query a single session's savings summary by `session_id`.
+    ///
+    /// Unlike `list_sessions_for_savings` which scans a time range,
+    /// this targets the index on `session_id` directly — O(1) lookup.
+    pub fn get_session_for_savings(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<SavingsSessionSummary>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap();
+
+        let sql = "SELECT session_id,
+                    MAX(agent_name)                  AS agent_name,
+                    COALESCE(SUM(input_tokens), 0)   AS total_input,
+                    COALESCE(SUM(output_tokens), 0)  AS total_output,
+                    COUNT(*)                         AS request_count
+             FROM genai_events
+             WHERE event_type = 'llm_call'
+               AND session_id = ?1
+             GROUP BY session_id";
+
+        let mut stmt = conn.prepare(sql)?;
+        let mut rows = stmt.query_map(rusqlite::params![session_id], |row| {
+            Ok(SavingsSessionSummary {
+                session_id: row.get(0)?,
+                agent_name: row.get(1)?,
+                total_input_tokens: row.get(2)?,
+                total_output_tokens: row.get(3)?,
+                request_count: row.get(4)?,
+            })
+        })?;
+
+        match rows.next() {
+            Some(Ok(summary)) => Ok(Some(summary)),
+            Some(Err(e)) => Err(Box::new(e)),
+            None => Ok(None),
+        }
+    }
+
     /// Get the turn index (1-based) for each llm_call in a session.
     ///
     /// Returns a map from `call_id` to its position in the time-ordered
