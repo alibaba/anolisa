@@ -17,6 +17,7 @@ mod provider;
 mod registry;
 mod session;
 mod skill;
+mod state;
 mod tool;
 mod truncator;
 

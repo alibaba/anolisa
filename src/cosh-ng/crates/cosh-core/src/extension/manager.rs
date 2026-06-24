@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use super::config::{ExtensionConfig, ExtensionHooks};
+use super::config::{flatten_hook_groups, ExtensionConfig, ExtensionHooks};
 use super::variables::{hydrate_config, VariableContext};
 use super::{
     Extension, InstallMetadata, EXTENSION_CONFIG_FILENAME, INSTALL_METADATA_FILENAME,
@@ -70,6 +70,15 @@ impl ExtensionManager {
         // Collect into sorted vec
         let mut exts: Vec<Extension> = extensions_map.into_values().collect();
         exts.sort_by(|a, b| a.name.cmp(&b.name));
+
+        // Apply disable state from ~/.copilot-shell/states/extensions.json
+        let disabled = crate::state::load_disabled(crate::state::EXTENSIONS_STATE);
+        for ext in &mut exts {
+            if disabled.contains(&ext.name) {
+                ext.is_active = false;
+            }
+        }
+
         self.extensions = exts;
     }
 
@@ -108,6 +117,33 @@ impl ExtensionManager {
     /// Return the list of loaded extensions.
     pub fn list(&self) -> &[Extension] {
         &self.extensions
+    }
+
+    /// Get all hook names defined by a specific extension.
+    /// Used for cleanup when enabling an extension (remove its hooks from hooks.json disabled).
+    pub fn extension_hook_names(&self, ext_name: &str) -> HashSet<String> {
+        let mut names = HashSet::new();
+        let Some(ext) = self.extensions.iter().find(|e| e.name == ext_name) else {
+            return names;
+        };
+        let all_groups = [
+            &ext.config.hooks.pre_tool_use,
+            &ext.config.hooks.post_tool_use,
+            &ext.config.hooks.post_tool_use_failure,
+            &ext.config.hooks.user_prompt_submit,
+            &ext.config.hooks.session_start,
+            &ext.config.hooks.stop,
+            &ext.config.hooks.before_model,
+            &ext.config.hooks.after_model,
+        ];
+        for groups in all_groups {
+            for def in flatten_hook_groups(groups) {
+                if let Some(name) = def.name {
+                    names.insert(name);
+                }
+            }
+        }
+        names
     }
 
     // ─── Private helpers ─────────────────────────────────────────────

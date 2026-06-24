@@ -82,8 +82,6 @@ fn default_max_tool_calls() -> u32 {
 pub struct HooksConfig {
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default)]
-    pub disabled: Vec<String>,
     #[serde(default, rename = "PreToolUse")]
     pub pre_tool_use: Vec<HookDefinition>,
     #[serde(default, rename = "PostToolUse")]

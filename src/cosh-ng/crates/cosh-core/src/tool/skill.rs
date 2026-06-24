@@ -58,11 +58,16 @@ impl Tool for SkillTool {
 
         match action {
             "list" => {
+                let disabled = crate::state::load_disabled(crate::state::SKILLS_STATE);
                 let skills = self.manager.list().await;
-                if skills.is_empty() {
+                let active_skills: Vec<_> = skills
+                    .iter()
+                    .filter(|s| !disabled.contains(&s.name))
+                    .collect();
+                if active_skills.is_empty() {
                     return Ok(ToolResult::success("No skills found."));
                 }
-                let list: Vec<String> = skills
+                let list: Vec<String> = active_skills
                     .iter()
                     .map(|s| {
                         format!(
@@ -80,6 +85,15 @@ impl Tool for SkillTool {
                     .get("name")
                     .and_then(|v| v.as_str())
                     .ok_or("missing 'name' parameter for 'invoke' action")?;
+
+                // Check if skill is disabled
+                let disabled = crate::state::load_disabled(crate::state::SKILLS_STATE);
+                if disabled.contains(name) {
+                    return Ok(ToolResult::error(format!(
+                        "Skill '{}' is disabled. Use /skills enable {} to re-enable it.",
+                        name, name
+                    )));
+                }
 
                 match self.manager.load(name).await {
                     Some(skill) => {

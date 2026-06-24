@@ -76,7 +76,7 @@ async fn handle_registry_request(
     match domain {
         "extensions" => handle_extensions(request_id, action, params, ext_manager),
         "skills" => handle_skills(request_id, action, params, skill_manager).await,
-        "hooks" => handle_hooks(request_id, action, ext_manager),
+        "hooks" => handle_hooks(request_id, action, params, ext_manager),
         _ => OutputMessage::RegistryResponse {
             request_id: request_id.to_string(),
             success: false,
@@ -143,6 +143,86 @@ fn handle_extensions(
                 },
             }
         }
+        "enable" => {
+            let name = params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if name.is_empty() {
+                return OutputMessage::RegistryResponse {
+                    request_id: request_id.to_string(),
+                    success: false,
+                    data: None,
+                    error: Some("missing 'name' parameter".to_string()),
+                };
+            }
+            // Validate extension exists
+            if !ext_manager.list().iter().any(|e| e.name == name) {
+                return OutputMessage::RegistryResponse {
+                    request_id: request_id.to_string(),
+                    success: false,
+                    data: None,
+                    error: Some(format!("extension not found: {name}")),
+                };
+            }
+            // Remove extension from disabled list
+            if let Err(e) = crate::state::remove_disabled(crate::state::EXTENSIONS_STATE, name) {
+                return OutputMessage::RegistryResponse {
+                    request_id: request_id.to_string(),
+                    success: false,
+                    data: None,
+                    error: Some(format!("failed to enable extension: {e}")),
+                };
+            }
+            // Cleanup: remove extension's hooks from hooks.json disabled list
+            let hook_names = ext_manager.extension_hook_names(name);
+            if !hook_names.is_empty() {
+                let _ = crate::state::remove_disabled_set(crate::state::HOOKS_STATE, &hook_names);
+            }
+            OutputMessage::RegistryResponse {
+                request_id: request_id.to_string(),
+                success: true,
+                data: Some(serde_json::json!({ "enabled": name })),
+                error: None,
+            }
+        }
+        "disable" => {
+            let name = params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if name.is_empty() {
+                return OutputMessage::RegistryResponse {
+                    request_id: request_id.to_string(),
+                    success: false,
+                    data: None,
+                    error: Some("missing 'name' parameter".to_string()),
+                };
+            }
+            // Validate extension exists
+            if !ext_manager.list().iter().any(|e| e.name == name) {
+                return OutputMessage::RegistryResponse {
+                    request_id: request_id.to_string(),
+                    success: false,
+                    data: None,
+                    error: Some(format!("extension not found: {name}")),
+                };
+            }
+            if let Err(e) = crate::state::add_disabled(crate::state::EXTENSIONS_STATE, name) {
+                return OutputMessage::RegistryResponse {
+                    request_id: request_id.to_string(),
+                    success: false,
+                    data: None,
+                    error: Some(format!("failed to disable extension: {e}")),
+                };
+            }
+            OutputMessage::RegistryResponse {
+                request_id: request_id.to_string(),
+                success: true,
+                data: Some(serde_json::json!({ "disabled": name })),
+                error: None,
+            }
+        }
         _ => OutputMessage::RegistryResponse {
             request_id: request_id.to_string(),
             success: false,
@@ -160,15 +240,18 @@ async fn handle_skills(
 ) -> OutputMessage {
     match action {
         "list" => {
+            let disabled = crate::state::load_disabled(crate::state::SKILLS_STATE);
             let skills: Vec<Value> = skill_manager
                 .list()
                 .await
                 .iter()
                 .map(|s| {
+                    let is_disabled = disabled.contains(&s.name);
                     serde_json::json!({
                         "name": s.name,
                         "description": s.description,
                         "level": s.level.to_string(),
+                        "disabled": is_disabled,
                     })
                 })
                 .collect();
@@ -186,11 +269,14 @@ async fn handle_skills(
                 .unwrap_or("");
             match skill_manager.load(name).await {
                 Some(skill) => {
+                    let disabled = crate::state::load_disabled(crate::state::SKILLS_STATE);
+                    let is_disabled = disabled.contains(&skill.name);
                     let detail = serde_json::json!({
                         "name": skill.name,
                         "description": skill.description,
                         "level": skill.level.to_string(),
                         "base_dir": skill.base_dir.to_string_lossy(),
+                        "disabled": is_disabled,
                     });
                     OutputMessage::RegistryResponse {
                         request_id: request_id.to_string(),
@@ -207,6 +293,62 @@ async fn handle_skills(
                 },
             }
         }
+        "enable" => {
+            let name = params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if name.is_empty() {
+                return OutputMessage::RegistryResponse {
+                    request_id: request_id.to_string(),
+                    success: false,
+                    data: None,
+                    error: Some("missing 'name' parameter".to_string()),
+                };
+            }
+            if let Err(e) = crate::state::remove_disabled(crate::state::SKILLS_STATE, name) {
+                return OutputMessage::RegistryResponse {
+                    request_id: request_id.to_string(),
+                    success: false,
+                    data: None,
+                    error: Some(format!("failed to enable skill: {e}")),
+                };
+            }
+            OutputMessage::RegistryResponse {
+                request_id: request_id.to_string(),
+                success: true,
+                data: Some(serde_json::json!({ "enabled": name })),
+                error: None,
+            }
+        }
+        "disable" => {
+            let name = params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if name.is_empty() {
+                return OutputMessage::RegistryResponse {
+                    request_id: request_id.to_string(),
+                    success: false,
+                    data: None,
+                    error: Some("missing 'name' parameter".to_string()),
+                };
+            }
+            if let Err(e) = crate::state::add_disabled(crate::state::SKILLS_STATE, name) {
+                return OutputMessage::RegistryResponse {
+                    request_id: request_id.to_string(),
+                    success: false,
+                    data: None,
+                    error: Some(format!("failed to disable skill: {e}")),
+                };
+            }
+            OutputMessage::RegistryResponse {
+                request_id: request_id.to_string(),
+                success: true,
+                data: Some(serde_json::json!({ "disabled": name })),
+                error: None,
+            }
+        }
         _ => OutputMessage::RegistryResponse {
             request_id: request_id.to_string(),
             success: false,
@@ -219,10 +361,12 @@ async fn handle_skills(
 fn handle_hooks(
     request_id: &str,
     action: &str,
+    params: &Value,
     ext_manager: &ExtensionManager,
 ) -> OutputMessage {
     match action {
         "list" => {
+            let disabled = crate::state::load_disabled(crate::state::HOOKS_STATE);
             let mut hooks_list: Vec<Value> = Vec::new();
             for ext in ext_manager.list() {
                 if !ext.is_active || ext.config.hooks.is_empty() {
@@ -245,12 +389,14 @@ fn handle_hooks(
                             .name
                             .as_deref()
                             .unwrap_or(&hook_def.command);
+                        let is_disabled = disabled.contains(name);
                         hooks_list.push(serde_json::json!({
                             "name": name,
                             "event": event_name,
                             "extension": ext.name,
                             "command": hook_def.command,
                             "matcher": hook_def.matcher,
+                            "disabled": is_disabled,
                         }));
                     }
                 }
@@ -262,6 +408,82 @@ fn handle_hooks(
                 error: None,
             }
         }
+        "enable" => {
+            let name = params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if name.is_empty() {
+                return OutputMessage::RegistryResponse {
+                    request_id: request_id.to_string(),
+                    success: false,
+                    data: None,
+                    error: Some("missing 'name' parameter".to_string()),
+                };
+            }
+            // Validate hook exists in known extensions
+            let known = collect_all_hook_names(ext_manager);
+            if !known.contains(name) {
+                return OutputMessage::RegistryResponse {
+                    request_id: request_id.to_string(),
+                    success: false,
+                    data: None,
+                    error: Some(format!("unknown hook: {name}")),
+                };
+            }
+            if let Err(e) = crate::state::remove_disabled(crate::state::HOOKS_STATE, name) {
+                return OutputMessage::RegistryResponse {
+                    request_id: request_id.to_string(),
+                    success: false,
+                    data: None,
+                    error: Some(format!("failed to enable hook: {e}")),
+                };
+            }
+            OutputMessage::RegistryResponse {
+                request_id: request_id.to_string(),
+                success: true,
+                data: Some(serde_json::json!({ "enabled": name })),
+                error: None,
+            }
+        }
+        "disable" => {
+            let name = params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if name.is_empty() {
+                return OutputMessage::RegistryResponse {
+                    request_id: request_id.to_string(),
+                    success: false,
+                    data: None,
+                    error: Some("missing 'name' parameter".to_string()),
+                };
+            }
+            // Validate hook exists in known extensions
+            let known = collect_all_hook_names(ext_manager);
+            if !known.contains(name) {
+                return OutputMessage::RegistryResponse {
+                    request_id: request_id.to_string(),
+                    success: false,
+                    data: None,
+                    error: Some(format!("unknown hook: {name}")),
+                };
+            }
+            if let Err(e) = crate::state::add_disabled(crate::state::HOOKS_STATE, name) {
+                return OutputMessage::RegistryResponse {
+                    request_id: request_id.to_string(),
+                    success: false,
+                    data: None,
+                    error: Some(format!("failed to disable hook: {e}")),
+                };
+            }
+            OutputMessage::RegistryResponse {
+                request_id: request_id.to_string(),
+                success: true,
+                data: Some(serde_json::json!({ "disabled": name })),
+                error: None,
+            }
+        }
         _ => OutputMessage::RegistryResponse {
             request_id: request_id.to_string(),
             success: false,
@@ -269,6 +491,30 @@ fn handle_hooks(
             error: Some(format!("unsupported action for hooks: {action}")),
         },
     }
+}
+
+fn collect_all_hook_names(ext_manager: &ExtensionManager) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    for ext in ext_manager.list() {
+        let events = [
+            &ext.config.hooks.pre_tool_use,
+            &ext.config.hooks.post_tool_use,
+            &ext.config.hooks.post_tool_use_failure,
+            &ext.config.hooks.user_prompt_submit,
+            &ext.config.hooks.session_start,
+            &ext.config.hooks.stop,
+            &ext.config.hooks.before_model,
+            &ext.config.hooks.after_model,
+        ];
+        for groups in events {
+            for def in flatten_hook_groups(groups) {
+                if let Some(name) = def.name {
+                    names.insert(name);
+                }
+            }
+        }
+    }
+    names
 }
 
 fn emit<W: Write>(writer: &mut W, msg: &OutputMessage) {

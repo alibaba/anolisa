@@ -142,17 +142,34 @@ pub struct HookSystem {
 impl HookSystem {
     pub fn from_config(config: &HooksConfig) -> Self {
         let enabled = config.enabled;
-        let disabled: HashSet<String> = config.disabled.iter().cloned().collect();
+
+        // Read disabled hooks from states/hooks.json
+        let disabled = crate::state::load_disabled(crate::state::HOOKS_STATE);
+
+        // Filter out hooks without name (enforced for all sources).
+        let filter_named = |defs: &[HookDefinition]| -> Vec<HookDefinition> {
+            defs.iter()
+                .filter(|d| {
+                    if d.name.is_none() {
+                        eprintln!("[cosh-hook] Skipping config hook without name: {}", d.command);
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .cloned()
+                .collect()
+        };
 
         let mut hooks: HashMap<HookEventName, Vec<HookDefinition>> = HashMap::new();
-        hooks.insert(HookEventName::PreToolUse, config.pre_tool_use.clone());
-        hooks.insert(HookEventName::PostToolUse, config.post_tool_use.clone());
-        hooks.insert(HookEventName::PostToolUseFailure, config.post_tool_use_failure.clone());
-        hooks.insert(HookEventName::UserPromptSubmit, config.user_prompt_submit.clone());
-        hooks.insert(HookEventName::SessionStart, config.session_start.clone());
-        hooks.insert(HookEventName::Stop, config.stop.clone());
-        hooks.insert(HookEventName::BeforeModel, config.before_model.clone());
-        hooks.insert(HookEventName::AfterModel, config.after_model.clone());
+        hooks.insert(HookEventName::PreToolUse, filter_named(&config.pre_tool_use));
+        hooks.insert(HookEventName::PostToolUse, filter_named(&config.post_tool_use));
+        hooks.insert(HookEventName::PostToolUseFailure, filter_named(&config.post_tool_use_failure));
+        hooks.insert(HookEventName::UserPromptSubmit, filter_named(&config.user_prompt_submit));
+        hooks.insert(HookEventName::SessionStart, filter_named(&config.session_start));
+        hooks.insert(HookEventName::Stop, filter_named(&config.stop));
+        hooks.insert(HookEventName::BeforeModel, filter_named(&config.before_model));
+        hooks.insert(HookEventName::AfterModel, filter_named(&config.after_model));
 
         Self { enabled, disabled, hooks }
     }
@@ -185,38 +202,53 @@ impl HookSystem {
         // Auto-enable: extensions are user-installed, so their hooks should fire.
         self.enabled = true;
 
+        // Helper: flatten hook groups and filter out hooks without a name field.
+        let filter_named = |groups: &[crate::extension::config::HookGroup]| -> Vec<HookDefinition> {
+            flatten_hook_groups(groups)
+                .into_iter()
+                .filter(|d| {
+                    if d.name.is_none() {
+                        eprintln!("[cosh-hook] Skipping hook without name: {}", d.command);
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .collect()
+        };
+
         self.hooks
             .entry(HookEventName::PreToolUse)
             .or_default()
-            .extend(flatten_hook_groups(&hooks.pre_tool_use));
+            .extend(filter_named(&hooks.pre_tool_use));
         self.hooks
             .entry(HookEventName::PostToolUse)
             .or_default()
-            .extend(flatten_hook_groups(&hooks.post_tool_use));
+            .extend(filter_named(&hooks.post_tool_use));
         self.hooks
             .entry(HookEventName::UserPromptSubmit)
             .or_default()
-            .extend(flatten_hook_groups(&hooks.user_prompt_submit));
+            .extend(filter_named(&hooks.user_prompt_submit));
         self.hooks
             .entry(HookEventName::SessionStart)
             .or_default()
-            .extend(flatten_hook_groups(&hooks.session_start));
+            .extend(filter_named(&hooks.session_start));
         self.hooks
             .entry(HookEventName::Stop)
             .or_default()
-            .extend(flatten_hook_groups(&hooks.stop));
+            .extend(filter_named(&hooks.stop));
         self.hooks
             .entry(HookEventName::PostToolUseFailure)
             .or_default()
-            .extend(flatten_hook_groups(&hooks.post_tool_use_failure));
+            .extend(filter_named(&hooks.post_tool_use_failure));
         self.hooks
             .entry(HookEventName::BeforeModel)
             .or_default()
-            .extend(flatten_hook_groups(&hooks.before_model));
+            .extend(filter_named(&hooks.before_model));
         self.hooks
             .entry(HookEventName::AfterModel)
             .or_default()
-            .extend(flatten_hook_groups(&hooks.after_model));
+            .extend(filter_named(&hooks.after_model));
     }
 
     fn active_hooks(&self, event: HookEventName) -> Vec<&HookDefinition> {
@@ -225,10 +257,10 @@ impl HookSystem {
             .map(|defs| {
                 defs.iter()
                     .filter(|d| {
-                        if let Some(ref name) = d.name {
-                            !self.disabled.contains(name)
-                        } else {
-                            true
+                        match &d.name {
+                            Some(name) => !self.disabled.contains(name),
+                            // Defensive: hooks without name from config.toml still execute
+                            None => true,
                         }
                     })
                     .collect()
@@ -1021,7 +1053,7 @@ mod tests {
     async fn fire_pre_tool_use_with_blocking_hook() {
         let config = HooksConfig {
             enabled: true,
-            disabled: vec![],
+
             pre_tool_use: vec![HookDefinition {
                 command: "echo '{\"decision\":\"block\",\"reason\":\"no rm allowed\"}'".to_string(),
                 name: Some("block-rm".to_string()),
@@ -1056,7 +1088,7 @@ mod tests {
     async fn fire_pre_tool_use_no_match() {
         let config = HooksConfig {
             enabled: true,
-            disabled: vec![],
+
             pre_tool_use: vec![HookDefinition {
                 command: "echo '{\"decision\":\"block\",\"reason\":\"no\"}'".to_string(),
                 name: None,
@@ -1090,7 +1122,7 @@ mod tests {
     async fn exit_code_2_means_block() {
         let config = HooksConfig {
             enabled: true,
-            disabled: vec![],
+
             pre_tool_use: vec![HookDefinition {
                 command: "sh -c 'echo blocked >&2; exit 2'".to_string(),
                 name: Some("exit2-hook".to_string()),
@@ -1245,7 +1277,7 @@ mod tests {
         // hook 脚本输出使用输入中的 tool_name 与 tool_use_id 作为上下文验证。
         let config = HooksConfig {
             enabled: true,
-            disabled: vec![],
+
             pre_tool_use: vec![],
             post_tool_use: vec![HookDefinition {
                 command: r#"python3 -c 'import sys,json; d=json.load(sys.stdin); print(json.dumps({"hook_specific_output": {"additionalContext": d["tool_name"]+"|"+d["tool_use_id"]}}))'"#.to_string(),
@@ -1286,7 +1318,7 @@ mod tests {
         // PostToolUse 路径验证（不同处理器但同样读 skill_context）。
         let config = HooksConfig {
             enabled: true,
-            disabled: vec![],
+
             pre_tool_use: vec![],
             post_tool_use: vec![HookDefinition {
                 command: r#"python3 -c 'import sys,json; d=json.load(sys.stdin); ctx=d.get("skill_context",{}); print(json.dumps({"hook_specific_output":{"additionalContext": ctx.get("file_path","none")}}))'"#.to_string(),

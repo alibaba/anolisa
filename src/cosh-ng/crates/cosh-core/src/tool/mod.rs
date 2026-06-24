@@ -123,13 +123,16 @@ impl ToolRegistry {
     /// Return `(name, description)` pairs for all currently loaded skills.
     /// Used to inject an `# Available Skills` section into the system prompt
     /// so the LLM can proactively discover and invoke skills.
+    /// Disabled skills are excluded from the list (agent cannot see them).
     pub async fn skill_summaries(&self) -> Vec<(String, String)> {
         let Some(mgr) = &self.skill_manager else {
             return Vec::new();
         };
+        let disabled = crate::state::load_disabled(crate::state::SKILLS_STATE);
         mgr.list()
             .await
             .into_iter()
+            .filter(|s| !disabled.contains(&s.name))
             .map(|s| (s.name, s.description))
             .collect()
     }
