@@ -24,9 +24,10 @@ use skillfs_fuse::security::{
     DEFAULT_RELOAD_INTERVAL_MS, DEFAULT_RELOAD_TIMEOUT_MS, DecisionCommand,
     InstallerStagingController, JsonlProtocolEventWriter, JsonlSecurityEventWriter, LedgerAdapter,
     LedgerBackingRoot, NoopProtocolEventWriter, NoopSecurityEventWriter, NotifyController,
-    ProtocolEventWriter, RefreshController, ReloadMode, SecurityConfig, SecurityEventWriter,
-    SecurityModeConfig, SourceDriftObserver, StagingMatcher, TrustedPeerConfig,
-    TrustedWriterConfig, UnixSocketNotifyClient, bootstrap_activation, resolve_events_path,
+    ProtocolEventWriter, RefreshController, ReloadMode, RuntimeDecisionOutcome, SecurityConfig,
+    SecurityEventWriter, SecurityModeConfig, SessionStatsWriter, SkillfsSessionStats,
+    SourceDriftObserver, StagingMatcher, TrustedPeerConfig, TrustedWriterConfig,
+    UnixSocketNotifyClient, bootstrap_activation, resolve_events_path,
     resolve_protocol_events_path, spawn_drift_watcher,
 };
 use skillfs_fuse::{FuseError as FuseErr, MountConfig, MountOptions, mount_configured};
@@ -1743,6 +1744,110 @@ async fn cmd_mount(
     // cmd_mount returns. The Drop impl calls cleanup(), which unmounts
     // the bind mount and removes the temp dir. The bind mount is
     // independent of the FUSE mount, so cleanup order does not matter.
+
+    // --- Session stats: create collector before mount starts ---
+    let session_stats = Arc::new(SkillfsSessionStats::new());
+    {
+        // Load ViewsConfig once; derive all metrics from a single canonical set.
+        let store_guard = shared_store.read();
+        let total_skills = store_guard.len() as u64;
+        let views_config = ViewsConfig::load(&source);
+
+        // Build the canonical "real existing default-view skills" set.
+        // Deduplicates and filters out stale/typo names not in the store.
+        let default_served: std::collections::HashSet<&str> = if let Some(ref cfg) = views_config {
+            cfg.views
+                .iter()
+                .find(|v| v.default)
+                .map(|v| {
+                    v.skills
+                        .iter()
+                        .map(|s| s.as_str())
+                        .filter(|n| store_guard.get(n).is_some())
+                        .collect()
+                })
+                .unwrap_or_else(|| {
+                    // Config exists but no default view — treat all as default.
+                    store_guard.list().into_iter().collect()
+                })
+        } else {
+            // No views config => all skills are default.
+            store_guard.list().into_iter().collect()
+        };
+
+        let default_exposed_count = default_served.len() as u64;
+        session_stats.set_skill_counts(total_skills, default_exposed_count);
+
+        // prompt_token_saved_estimate: body chars of pruned skills / 4.
+        // Pruned = in store but NOT in default_served.
+        let has_views_config = views_config.is_some();
+        let token_estimate = if has_views_config {
+            let mut pruned_chars: u64 = 0;
+            for name in store_guard.list() {
+                if !default_served.contains(name) {
+                    if let Some(entry) = store_guard.get(name) {
+                        pruned_chars += entry.body.len() as u64;
+                    }
+                }
+            }
+            pruned_chars / 4
+        } else {
+            // No views config => nothing pruned => 0.
+            0
+        };
+        session_stats.set_prompt_token_saved_estimate(token_estimate);
+
+        // V1 skill_hit_times: default-view served skills (deduplicated).
+        for name in &default_served {
+            session_stats.record_skill_hit(name);
+        }
+    }
+
+    // Feed initial decision outcomes from activation bootstrap.
+    // When active_resolver exists, count from resolver snapshot.
+    // When absent (non-security / normal mount), all default-served skills
+    // are effectively "allowed" (live source passthrough).
+    if let Some(ref resolver) = active_resolver {
+        for (_name, target) in resolver.snapshot() {
+            match &target {
+                skillfs_fuse::security::ActiveTarget::Current { .. } => {
+                    session_stats.record_decision(RuntimeDecisionOutcome::Allow);
+                }
+                skillfs_fuse::security::ActiveTarget::Snapshot { .. } => {
+                    session_stats.record_decision(RuntimeDecisionOutcome::Fallback);
+                }
+                skillfs_fuse::security::ActiveTarget::Hidden { .. } => {
+                    session_stats.record_decision(RuntimeDecisionOutcome::Deny);
+                }
+            }
+        }
+    } else {
+        // No security resolver => all served skills are implicitly allowed.
+        // Use pruned_skill_count helper: default_exposed = total - pruned.
+        let default_exposed = shared_store.read().len() as u64 - session_stats.pruned_skill_count();
+        for _ in 0..default_exposed {
+            session_stats.record_decision(RuntimeDecisionOutcome::Allow);
+        }
+    }
+
+    // Generate session ID from PID + nanosecond timestamp (collision-resistant).
+    let session_id_for_flush = format!(
+        "{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    // Resolve agent_name: env var ANOLISA_AGENT_NAME, default "agent".
+    let agent_name_for_flush =
+        std::env::var("ANOLISA_AGENT_NAME").unwrap_or_else(|_| "agent".to_string());
+    let stats_for_flush = session_stats.clone();
+
+    // Mark mount ready immediately before spawning — the FUSE session
+    // start is the closest signal we have.
+    session_stats.mark_mount_ready();
+
     let mount_task = tokio::task::spawn_blocking(move || {
         mount_configured(
             &mountpoint,
@@ -1788,6 +1893,31 @@ async fn cmd_mount(
         }
     }
 
+    /// Flush session stats summary to the session metrics log (at most once).
+    /// Best-effort: failure only warns, never changes exit status.
+    fn flush_session_stats(stats: &SkillfsSessionStats, session_id: &str, agent_name: &str) {
+        let Some(summary) = stats.try_build_summary_once(session_id, agent_name) else {
+            // Already flushed by another exit path — skip.
+            return;
+        };
+        let writer = SessionStatsWriter::default_path();
+        if let Err(e) = writer.write_summary(&summary) {
+            warn!(
+                error = %e,
+                path = %writer.path().display(),
+                "session stats: failed to flush summary (non-fatal)"
+            );
+        } else {
+            info!(
+                path = %writer.path().display(),
+                session_id = %session_id,
+                mount_duration_ms = summary.mount_duration_ms,
+                skill_hit_times = summary.skill_hit_times,
+                "session stats: summary flushed to session metrics log"
+            );
+        }
+    }
+
     /// Trigger a clean FUSE unmount by calling fusermount3 -u.
     /// This causes fuser::mount2 event loop to exit, which unblocks the
     /// spawn_blocking thread and allows the process to exit cleanly.
@@ -1807,6 +1937,8 @@ async fn cmd_mount(
         _ = signal::ctrl_c() => {
             info!("received Ctrl+C, unmounting");
             trigger_unmount(&mountpoint_for_signal);
+            // Flush session stats before exit.
+            flush_session_stats(&stats_for_flush, &session_id_for_flush, &agent_name_for_flush);
             if let Some(h) = drift_handle {
                 h.shutdown().await;
             }
@@ -1823,6 +1955,8 @@ async fn cmd_mount(
         } => {
             info!("received SIGTERM, unmounting");
             trigger_unmount(&mountpoint_for_signal);
+            // Flush session stats before exit.
+            flush_session_stats(&stats_for_flush, &session_id_for_flush, &agent_name_for_flush);
             if let Some(h) = drift_handle {
                 h.shutdown().await;
             }
@@ -1851,10 +1985,21 @@ async fn cmd_mount(
 
     match result {
         Ok(()) => {
+            // Only flush session stats on successful mount exit.
+            // Failed mounts must not write mount_times=1.
+            flush_session_stats(
+                &stats_for_flush,
+                &session_id_for_flush,
+                &agent_name_for_flush,
+            );
             info!("filesystem unmounted successfully");
             Ok(())
         }
-        Err(e) => Err(format!("Mount failed: {}", e).into()),
+        Err(e) => {
+            // Mount failed — do NOT write a success summary.
+            info!("mount failed; skipping session stats flush");
+            Err(format!("Mount failed: {}", e).into())
+        }
     }
 }
 
