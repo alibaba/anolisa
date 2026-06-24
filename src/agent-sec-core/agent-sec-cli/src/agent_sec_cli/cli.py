@@ -276,12 +276,13 @@ def verify(
 def code_scan(
     code: str = typer.Option("", "--code", help="Source code to scan"),
     language: str = typer.Option("bash", "--language", help="Language: bash or python"),
+    mode: str = typer.Option("regex", "--mode", help="Engine mode: regex or llm"),
 ) -> None:
     """Scan code for security issues."""
     if not code.strip():
         typer.echo("Error: --code is required (use --code '<source>')", err=True)
         raise typer.Exit(code=1)
-    result = invoke("code_scan", code=code, language=language)
+    result = invoke("code_scan", code=code, language=language, mode=mode)
     if result.stdout:
         typer.echo(result.stdout)
     if result.error:

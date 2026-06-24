@@ -30,3 +30,18 @@ class ModelServiceClient(Protocol):
         Raises RuntimeError if the service is unreachable or returns an error.
         """
         ...  # pragma: no cover
+
+    def chat(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        *,
+        format: str | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Send a chat request with structured messages and return the response.
+
+        Messages should follow the [{"role": ..., "content": ...}] format.
+        Raises RuntimeError if the service is unreachable or returns an error.
+        """
+        ...  # pragma: no cover

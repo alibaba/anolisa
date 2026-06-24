@@ -4,6 +4,7 @@ from typing import List, Optional
 from agent_sec_cli.code_scanner.engine.code_extractor import (
     extract_inline_code,
 )
+from agent_sec_cli.code_scanner.engine.llm_engine import scan_with_llm
 from agent_sec_cli.code_scanner.engine.regex_engine import run_regex_rules
 from agent_sec_cli.code_scanner.errors import (
     CodeScanError,
@@ -62,7 +63,11 @@ def _error_result(
 
 
 def scan(
-    code: str, language: Language, *, rules: Optional[List[str]] = None
+    code: str,
+    language: Language,
+    *,
+    rules: Optional[List[str]] = None,
+    mode: str = "regex",
 ) -> ScanResult:
     """Scan *code* written in *language* for security issues.
 
@@ -73,11 +78,16 @@ def scan(
         language: The programming language of the code.
         rules: Optional list of rule_ids to enable. When ``None`` (default),
             all rules for the given language are used.
+        mode: Engine mode — ``"regex"`` (default) or ``"llm"``.
     """
     start = time.monotonic_ns()
 
     if not code or not code.strip():
         return _error_result(language, 0, ErrInputEmpty())
+
+    # LLM mode: delegate to LLM engine, bypass regex rules entirely.
+    if mode == "llm":
+        return scan_with_llm(code, language)
 
     try:
         # For bash code, attempt inline extraction to detect nested python etc.

@@ -44,7 +44,9 @@ def test_trace_context_is_hidden_global_option_and_commands_do_not_forward_it(
         clear_process_trace_context()
 
     assert result.exit_code == 0
-    mock_invoke.assert_called_once_with("code_scan", code="echo ok", language="bash")
+    mock_invoke.assert_called_once_with(
+        "code_scan", code="echo ok", language="bash", mode="regex"
+    )
 
 
 @patch("agent_sec_cli.cli.invoke")
@@ -61,7 +63,9 @@ def test_trace_context_option_is_declared_but_not_used_by_typer_callback(mock_in
 
     assert result.exit_code == 0
     assert get_current_trace_context() is None
-    mock_invoke.assert_called_once_with("code_scan", code="echo ok", language="bash")
+    mock_invoke.assert_called_once_with(
+        "code_scan", code="echo ok", language="bash", mode="regex"
+    )
 
 
 def test_trace_context_option_is_hidden_from_help():
@@ -231,7 +235,9 @@ def test_main_initializes_process_trace_context_once(
     mock_init_process_trace_context.assert_called_once_with(
         TraceContext(session_id="session-1", run_id="run-1")
     )
-    mock_invoke.assert_called_once_with("code_scan", code="echo ok", language="bash")
+    mock_invoke.assert_called_once_with(
+        "code_scan", code="echo ok", language="bash", mode="regex"
+    )
 
 
 @patch("agent_sec_cli.cli.app")

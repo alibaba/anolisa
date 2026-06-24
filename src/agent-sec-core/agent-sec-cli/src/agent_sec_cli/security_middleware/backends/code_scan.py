@@ -11,11 +11,15 @@ from agent_sec_cli.security_middleware.result import ActionResult
 
 
 class CodeScanBackend(BaseBackend):
-    """Scan code snippets for security issues using the regex-based code_scanner engine."""
+    """Scan code snippets for security issues using the code_scanner engine.
+
+    Supports regex (default) and LLM modes, selected via the `mode` kwarg.
+    """
 
     def execute(self, ctx: RequestContext, **kwargs: Any) -> ActionResult:
         code = kwargs.get("code", "")
         language_str = kwargs.get("language", "bash")
+        mode = kwargs.get("mode", "regex")
         try:
             language = Language(language_str)
         except ValueError:
@@ -25,7 +29,7 @@ class CodeScanBackend(BaseBackend):
                 error=f"scan error: {err.message}",
                 exit_code=1,
             )
-        result = scan(code, language)
+        result = scan(code, language, mode=mode)
         return ActionResult(
             success=result.ok,
             data=result.model_dump(),

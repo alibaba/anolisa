@@ -169,6 +169,7 @@ class TestBasicScan:
         assert telemetry["seccore.request"] == {
             "code": "echo telemetry",
             "language": "bash",
+            "mode": "regex",
         }
 
 

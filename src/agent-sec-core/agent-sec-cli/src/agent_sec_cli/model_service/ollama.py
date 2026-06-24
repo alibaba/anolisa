@@ -92,3 +92,45 @@ class OllamaClient:
             ) from exc
         except Exception as exc:
             raise RuntimeError(f"Ollama request error: {exc}") from exc
+
+    def chat(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        *,
+        format: str | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """POST /api/chat — send a chat request with structured messages.
+
+        Returns the parsed JSON response body.
+        Raises RuntimeError if Ollama is unreachable or returns an HTTP error.
+        """
+        payload_dict: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+        }
+        if format is not None:
+            payload_dict["format"] = format
+        if options is not None:
+            payload_dict["options"] = options
+
+        payload = json.dumps(payload_dict).encode("utf-8")
+
+        req = urllib.request.Request(
+            f"{self._base_url}/api/chat",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                return json.loads(resp.read())
+        except urllib.error.URLError as exc:
+            raise RuntimeError(
+                f"Ollama chat request failed (url={self._base_url}): {exc}"
+            ) from exc
+        except Exception as exc:
+            raise RuntimeError(f"Ollama chat request error: {exc}") from exc

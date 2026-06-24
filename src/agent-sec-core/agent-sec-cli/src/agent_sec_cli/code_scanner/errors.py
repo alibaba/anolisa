@@ -5,6 +5,7 @@ Error code ranges (prefix ``1`` identifies the code_scanner module):
 - 110-119: input layer
 - 120-129: rule layer
 - 130-139: engine layer
+- 140-149: LLM engine layer
 """
 
 
@@ -108,3 +109,16 @@ class ErrEngineTimeout(CodeScanError):
 class ErrEngineResource(CodeScanError):
     code = 131
     message = "engine resource exhausted"
+
+
+# -- LLM engine layer (140-149) --
+
+
+class ErrLlmUnavailable(CodeScanError):
+    code = 140
+    message = "LLM model not available"
+
+
+class ErrLlmUnparsable(CodeScanError):
+    code = 141
+    message = "LLM response unparsable"
