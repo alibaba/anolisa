@@ -54,7 +54,13 @@ module.exports = {
       rewrites: [
         { from: /^\/_p\/\d+\//, to: '/index.html' }
       ]
-    }
+    },
+    proxy: [
+      {
+        context: ['/api'],
+        target: 'http://127.0.0.1:7396',
+      }
+    ]
   },
   performance: {
     hints: false
