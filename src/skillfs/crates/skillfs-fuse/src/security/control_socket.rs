@@ -1,9 +1,11 @@
 //! Trusted peer control socket.
 //!
 //! Provides a Unix domain socket control plane authenticated via
-//! `SO_PEERCRED` + executable identity. External daemons connect to
-//! this socket; SkillFS verifies the peer's pid/uid/gid and resolves
-//! the peer's `/proc/<pid>/exe` to match a pinned `(dev, ino)`.
+//! `SO_PEERCRED` + executable identity + starttime. External daemons
+//! connect to this socket; SkillFS verifies the peer's pid/uid/gid,
+//! resolves the peer's `/proc/<pid>/exe` to match a pinned `(dev, ino)`,
+//! and reads `/proc/<pid>/stat` field 22 (starttime) for PID reuse
+//! defense.
 //!
 //! ## Protocol
 //!
@@ -27,10 +29,13 @@
 //!
 //! ## Security
 //!
+//! - Socket parent directory permissions: `0o700` (owner-only).
 //! - Socket file permissions: `0o600` (owner-only).
 //! - Peer credentials obtained via `SO_PEERCRED` (`getsockopt`).
 //! - Peer executable resolved via `/proc/<pid>/exe` readlink + stat.
-//! - Both credential and executable identity must match configuration.
+//! - Peer starttime read from `/proc/<pid>/stat` field 22 for PID
+//!   reuse protection.
+//! - Credential, executable identity, and starttime must all match.
 //! - Failed verification returns an error and closes the connection.
 //! - Linux-only; non-Linux targets fail at startup when configured.
 
@@ -117,6 +122,12 @@ pub struct PeerIdentity {
     pub credentials: PeerCredentials,
     pub exe_path: Option<PathBuf>,
     pub exe_file_id: Option<FileId>,
+    /// Starttime read *before* exe resolution — used together with
+    /// `starttime_after` to bracket the `/proc/<pid>/exe` read and
+    /// detect PID reuse during identity collection.
+    pub starttime_before: Option<u64>,
+    /// Starttime read *after* exe resolution.
+    pub starttime_after: Option<u64>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -240,17 +251,38 @@ pub fn resolve_peer_exe(_pid: u32) -> Option<(PathBuf, FileId)> {
     None
 }
 
+/// Read starttime (field 22) from `/proc/<pid>/stat` for PID reuse defense.
+#[cfg(target_os = "linux")]
+pub fn resolve_peer_starttime(pid: u32) -> Option<u64> {
+    let stat_path = PathBuf::from(format!("/proc/{pid}/stat"));
+    super::trusted_writer::read_starttime_from_stat(&stat_path)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn resolve_peer_starttime(_pid: u32) -> Option<u64> {
+    None
+}
+
 /// Build a full [`PeerIdentity`] from a connected stream.
+///
+/// Reads starttime *before* and *after* the `/proc/<pid>/exe`
+/// resolution to bracket the identity collection window. If the
+/// PID is reused between the two reads, the starttimes will differ
+/// and `verify_peer` will reject the connection.
 pub fn identify_peer(stream: &UnixStream) -> std::io::Result<PeerIdentity> {
     let creds = get_peer_credentials(stream)?;
+    let starttime_before = resolve_peer_starttime(creds.pid);
     let (exe_path, exe_file_id) = match resolve_peer_exe(creds.pid) {
         Some((p, fid)) => (Some(p), Some(fid)),
         None => (None, None),
     };
+    let starttime_after = resolve_peer_starttime(creds.pid);
     Ok(PeerIdentity {
         credentials: creds,
         exe_path,
         exe_file_id,
+        starttime_before,
+        starttime_after,
     })
 }
 
@@ -266,6 +298,8 @@ pub enum PeerVerifyResult {
     DeniedExeUnresolved,
     DeniedExePathMismatch { expected: PathBuf, actual: PathBuf },
     DeniedExeFileIdMismatch { expected: FileId, actual: FileId },
+    DeniedStarttimeUnresolved,
+    DeniedStarttimeMismatch { pid: u32, pinned: u64, actual: u64 },
 }
 
 impl PeerVerifyResult {
@@ -291,6 +325,16 @@ impl PeerVerifyResult {
             Self::DeniedExeFileIdMismatch { expected, actual } => Some(format!(
                 "exe file id mismatch: expected {expected}, got {actual}"
             )),
+            Self::DeniedStarttimeUnresolved => {
+                Some("peer starttime could not be resolved".to_string())
+            }
+            Self::DeniedStarttimeMismatch {
+                pid,
+                pinned,
+                actual,
+            } => Some(format!(
+                "starttime mismatch for pid {pid}: pinned {pinned}, got {actual}"
+            )),
         }
     }
 }
@@ -310,6 +354,27 @@ pub fn verify_peer(config: &TrustedPeerConfig, identity: &PeerIdentity) -> PeerV
             return PeerVerifyResult::DeniedGidMismatch {
                 expected: expected_gid,
                 actual: identity.credentials.gid,
+            };
+        }
+    }
+
+    // Starttime bracketing: both before and after exe resolution must
+    // be present and equal, otherwise the PID was reused mid-collection.
+    #[cfg(target_os = "linux")]
+    {
+        let before = match identity.starttime_before {
+            Some(st) => st,
+            None => return PeerVerifyResult::DeniedStarttimeUnresolved,
+        };
+        let after = match identity.starttime_after {
+            Some(st) => st,
+            None => return PeerVerifyResult::DeniedStarttimeUnresolved,
+        };
+        if before != after {
+            return PeerVerifyResult::DeniedStarttimeMismatch {
+                pid: identity.credentials.pid,
+                pinned: before,
+                actual: after,
             };
         }
     }
@@ -886,6 +951,44 @@ pub fn preflight_socket_path(path: &Path) -> Result<(), SocketPreflightError> {
     Ok(())
 }
 
+/// Ensure the socket parent directory exists with permissions `0o700`.
+///
+/// - If the parent does not exist, creates it (and ancestors) and sets
+///   permissions to `0o700`.
+/// - If the parent exists, verifies it is a directory (not a symlink)
+///   and sets permissions to `0o700`.
+/// - Fails closed if the parent is not a directory or permissions
+///   cannot be set.
+pub fn secure_socket_parent(socket_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let parent = match socket_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => return Ok(()),
+    };
+
+    if !parent.exists() {
+        std::fs::create_dir_all(parent)?;
+        let perms = std::fs::Permissions::from_mode(0o700);
+        std::fs::set_permissions(parent, perms)?;
+        return Ok(());
+    }
+
+    let meta = std::fs::symlink_metadata(parent)?;
+    if !meta.file_type().is_dir() {
+        return Err(format!(
+            "socket parent '{}' exists but is not a directory",
+            parent.display()
+        )
+        .into());
+    }
+
+    let perms = std::fs::Permissions::from_mode(0o700);
+    std::fs::set_permissions(parent, perms)?;
+
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Server
 // ─────────────────────────────────────────────────────────────────────────────
@@ -951,6 +1054,12 @@ impl ControlSocketServer {
     /// Start the server on a dedicated thread. Returns a handle for
     /// shutdown coordination.
     pub fn start(self) -> Result<ControlSocketHandle, Box<dyn std::error::Error>> {
+        // Secure socket parent directory to 0o700 before bind to
+        // eliminate the bind-to-chmod permission window. Runs before
+        // preflight so that create_dir_all satisfies the parent
+        // existence check.
+        secure_socket_parent(&self.config.socket_path)?;
+
         preflight_socket_path(&self.config.socket_path)?;
 
         let listener = UnixListener::bind(&self.config.socket_path)?;
@@ -1798,6 +1907,8 @@ mod tests {
             },
             exe_path: Some(PathBuf::from("/usr/local/bin/agent-sec-cli")),
             exe_file_id: Some(FileId { dev: 10, ino: 20 }),
+            starttime_before: Some(9876543),
+            starttime_after: Some(9876543),
         }
     }
 
@@ -1882,6 +1993,8 @@ mod tests {
             },
             exe_path: None,
             exe_file_id: None,
+            starttime_before: Some(100),
+            starttime_after: Some(100),
         };
         let result = verify_peer(&config, &identity);
         assert!(!result.is_accepted());
@@ -1899,6 +2012,8 @@ mod tests {
             },
             exe_path: Some(PathBuf::from("/usr/bin/imposter")),
             exe_file_id: Some(FileId { dev: 99, ino: 99 }),
+            starttime_before: Some(100),
+            starttime_after: Some(100),
         };
         let result = verify_peer(&config, &identity);
         assert!(!result.is_accepted());
@@ -1919,6 +2034,8 @@ mod tests {
             },
             exe_path: Some(PathBuf::from("/usr/local/bin/agent-sec-cli")),
             exe_file_id: Some(FileId { dev: 10, ino: 999 }),
+            starttime_before: Some(100),
+            starttime_after: Some(100),
         };
         let result = verify_peer(&config, &identity);
         assert!(!result.is_accepted());
@@ -1947,6 +2064,8 @@ mod tests {
             },
             exe_path: None,
             exe_file_id: None,
+            starttime_before: None,
+            starttime_after: None,
         };
         let result = verify_peer(&config, &identity);
         assert!(
@@ -2000,6 +2119,95 @@ mod tests {
             .unwrap()
             .contains("file id")
         );
+        assert!(
+            PeerVerifyResult::DeniedStarttimeUnresolved
+                .denial_message()
+                .unwrap()
+                .contains("starttime")
+        );
+        assert!(
+            PeerVerifyResult::DeniedStarttimeMismatch {
+                pid: 42,
+                pinned: 100,
+                actual: 200,
+            }
+            .denial_message()
+            .unwrap()
+            .contains("starttime")
+        );
+    }
+
+    // ── Starttime bracket verification ─────────────────────────────────
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn verify_missing_starttime_before_denied() {
+        let config = test_peer_config();
+        let identity = PeerIdentity {
+            starttime_before: None,
+            starttime_after: Some(100),
+            ..test_peer_identity()
+        };
+        let result = verify_peer(&config, &identity);
+        assert!(!result.is_accepted());
+        assert!(
+            matches!(result, PeerVerifyResult::DeniedStarttimeUnresolved),
+            "missing starttime_before must deny on Linux, got {result:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn verify_missing_starttime_after_denied() {
+        let config = test_peer_config();
+        let identity = PeerIdentity {
+            starttime_before: Some(100),
+            starttime_after: None,
+            ..test_peer_identity()
+        };
+        let result = verify_peer(&config, &identity);
+        assert!(!result.is_accepted());
+        assert!(
+            matches!(result, PeerVerifyResult::DeniedStarttimeUnresolved),
+            "missing starttime_after must deny on Linux, got {result:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn verify_starttime_before_after_mismatch_denied() {
+        let config = test_peer_config();
+        let identity = PeerIdentity {
+            starttime_before: Some(100),
+            starttime_after: Some(200),
+            ..test_peer_identity()
+        };
+        let result = verify_peer(&config, &identity);
+        assert!(!result.is_accepted());
+        match result {
+            PeerVerifyResult::DeniedStarttimeMismatch {
+                pid,
+                pinned,
+                actual,
+            } => {
+                assert_eq!(pid, 1234);
+                assert_eq!(pinned, 100);
+                assert_eq!(actual, 200);
+            }
+            other => panic!("expected DeniedStarttimeMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_with_matching_starttime_accepted() {
+        let config = test_peer_config();
+        let identity = PeerIdentity {
+            starttime_before: Some(42),
+            starttime_after: Some(42),
+            ..test_peer_identity()
+        };
+        let result = verify_peer(&config, &identity);
+        assert!(result.is_accepted());
     }
 
     // ── Server integration (Linux only) ──────────────────────────────────
@@ -2292,6 +2500,62 @@ mod tests {
             assert_eq!(
                 mode, 0o600,
                 "socket file permissions must be 0600, got {mode:o}"
+            );
+
+            handle.shutdown();
+        }
+
+        #[test]
+        fn socket_parent_permissions_are_0700() {
+            let dir = tempfile::tempdir().unwrap();
+            let subdir = dir.path().join("sock-parent");
+            let socket_path = subdir.join("test.sock");
+            let config = ControlSocketConfig {
+                socket_path: socket_path.clone(),
+                trusted_peer: self_exe_config(),
+            };
+            let server = ControlSocketServer::new(config);
+            let handle = server.start().unwrap();
+
+            use std::os::unix::fs::PermissionsExt;
+            let parent_meta = std::fs::metadata(&subdir).unwrap();
+            let parent_mode = parent_meta.permissions().mode() & 0o777;
+            assert_eq!(
+                parent_mode, 0o700,
+                "socket parent directory must be 0700, got {parent_mode:o}"
+            );
+
+            let sock_meta = std::fs::metadata(&socket_path).unwrap();
+            let sock_mode = sock_meta.permissions().mode() & 0o777;
+            assert_eq!(
+                sock_mode, 0o600,
+                "socket file must still be 0600, got {sock_mode:o}"
+            );
+
+            handle.shutdown();
+        }
+
+        #[test]
+        fn socket_parent_existing_gets_tightened_to_0700() {
+            let dir = tempfile::tempdir().unwrap();
+            let subdir = dir.path().join("loose-parent");
+            std::fs::create_dir(&subdir).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&subdir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+            let socket_path = subdir.join("test.sock");
+            let config = ControlSocketConfig {
+                socket_path: socket_path.clone(),
+                trusted_peer: self_exe_config(),
+            };
+            let server = ControlSocketServer::new(config);
+            let handle = server.start().unwrap();
+
+            let parent_meta = std::fs::metadata(&subdir).unwrap();
+            let parent_mode = parent_meta.permissions().mode() & 0o777;
+            assert_eq!(
+                parent_mode, 0o700,
+                "existing parent must be tightened to 0700, got {parent_mode:o}"
             );
 
             handle.shutdown();

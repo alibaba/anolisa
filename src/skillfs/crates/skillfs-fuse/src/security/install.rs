@@ -743,17 +743,22 @@ impl Drop for PendingInstallController {
 }
 
 /// Check whether a skill directory has a complete skill shape:
-/// - directory exists
-/// - `SKILL.md` exists
+/// - directory exists as a real directory (not a symlink)
+/// - `SKILL.md` exists as a real regular file (not a symlink)
 /// - `SKILL.md` can be parsed successfully (Ok or Degraded status)
+///
+/// Uses `symlink_metadata` (no-follow) to prevent external symlinks
+/// from triggering a pending install notification.
 fn is_skill_complete(source_root: &std::path::Path, skill_name: &str) -> bool {
     let skill_dir = source_root.join(skill_name);
-    if !skill_dir.is_dir() {
-        return false;
+    match std::fs::symlink_metadata(&skill_dir) {
+        Ok(meta) if meta.file_type().is_dir() => {}
+        _ => return false,
     }
     let skill_md = skill_dir.join("SKILL.md");
-    if !skill_md.is_file() {
-        return false;
+    match std::fs::symlink_metadata(&skill_md) {
+        Ok(meta) if meta.file_type().is_file() => {}
+        _ => return false,
     }
     match skillfs_core::parser::parse_skill_file(&skill_md) {
         Ok(entry) => !entry.parse_status.is_error(),
@@ -1406,6 +1411,81 @@ mod tests {
         assert_eq!(
             UnactivatedVisibility::default(),
             UnactivatedVisibility::Hidden
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // is_skill_complete — no-follow symlink checks
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn is_skill_complete_real_dir_and_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill = dir.path().join("good-skill");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: good-skill\ndescription: test\n---\n",
+        )
+        .unwrap();
+        assert!(
+            super::is_skill_complete(dir.path(), "good-skill"),
+            "real dir + real SKILL.md must be complete"
+        );
+    }
+
+    #[test]
+    fn is_skill_complete_symlink_dir_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real-skill");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(
+            real.join("SKILL.md"),
+            "---\nname: real-skill\ndescription: test\n---\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&real, dir.path().join("link-skill")).unwrap();
+        assert!(
+            !super::is_skill_complete(dir.path(), "link-skill"),
+            "symlink skill dir must not be considered complete"
+        );
+    }
+
+    #[test]
+    fn is_skill_complete_symlink_skill_md_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill = dir.path().join("sym-md-skill");
+        std::fs::create_dir_all(&skill).unwrap();
+        let real_md = dir.path().join("external-SKILL.md");
+        std::fs::write(
+            &real_md,
+            "---\nname: sym-md-skill\ndescription: test\n---\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&real_md, skill.join("SKILL.md")).unwrap();
+        assert!(
+            !super::is_skill_complete(dir.path(), "sym-md-skill"),
+            "symlink SKILL.md must not be considered complete"
+        );
+    }
+
+    #[test]
+    fn is_skill_complete_missing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            !super::is_skill_complete(dir.path(), "nonexistent"),
+            "missing directory must not be complete"
+        );
+    }
+
+    #[test]
+    fn is_skill_complete_missing_skill_md() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill = dir.path().join("no-md");
+        std::fs::create_dir_all(&skill).unwrap();
+        assert!(
+            !super::is_skill_complete(dir.path(), "no-md"),
+            "missing SKILL.md must not be complete"
         );
     }
 
