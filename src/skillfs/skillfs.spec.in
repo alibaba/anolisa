@@ -1,0 +1,58 @@
+%global         rustflags -C opt-level=3 -C codegen-units=1
+%global         debug_package %{nil}
+%global         _localbindir /usr/local/bin
+
+Name:           skillfs
+Version:        @VERSION@
+Release:        1%{?dist}
+Summary:        AI agent skill management via virtual filesystem
+
+License:        Apache-2.0
+URL:            https://github.com/alibaba/anolisa
+Source0:        %{name}-%{version}.tar.gz
+Source1:        %{name}-%{version}-vendor.tar.gz
+
+# Cargo.toml specifies rust-version = "1.86", edition = "2024".
+BuildRequires:  rust >= 1.86
+BuildRequires:  cargo
+# Required by Rust crates with C build scripts and fuser/libfuse bindings.
+BuildRequires:  gcc
+BuildRequires:  make
+BuildRequires:  pkgconfig(fuse3)
+
+Requires:       fuse3
+Requires:       fuse3-libs%{?_isa}
+
+%description
+SkillFS is a FUSE-based filesystem that exposes AI agent skills through
+filesystem views, while preserving ordinary POSIX passthrough behavior and
+SkillFS-specific security boundaries.
+
+%prep
+%setup -q -a 1 -n %{name}-%{version}
+
+%build
+export RUSTFLAGS="%{rustflags}"
+cargo build --release --workspace --locked --offline
+
+%install
+rm -rf %{buildroot}
+
+install -d -m 0755 %{buildroot}%{_localbindir}
+install -p -m 0755 target/release/skillfs %{buildroot}%{_localbindir}/skillfs
+
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/runtime/skills/skillfs
+cp -rp docs/skills/skillfs-mount/. \
+    %{buildroot}%{_datadir}/anolisa/runtime/skills/skillfs/
+
+%files
+%license LICENSE
+%doc README.md CHANGELOG.md
+%attr(0755,root,root) %{_localbindir}/skillfs
+%dir %{_datadir}/anolisa/runtime
+%dir %{_datadir}/anolisa/runtime/skills
+%{_datadir}/anolisa/runtime/skills/skillfs/
+
+%changelog
+* Wed Jun 24 2026 Kongche <kongche.jbw@alibaba-inc.com> - 0.2.0-1
+- Package SkillFS from the ANOLISA monorepo.

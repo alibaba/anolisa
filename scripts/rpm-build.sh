@@ -5,7 +5,7 @@
 #   ./scripts/rpm-build.sh <package>        Build a single package
 #   ./scripts/rpm-build.sh all              Build all packages
 #
-# Packages: copilot-shell, agent-sec-core, os-skills, agentsight, tokenless, agent-memory
+# Packages: copilot-shell, agent-sec-core, os-skills, agentsight, tokenless, agent-memory, skillfs
 #
 # Environment variables:
 #   VERSION    Override version for .spec.in templates (default: auto-detect)
@@ -26,6 +26,7 @@ SKILLS_DIR="${ROOT_DIR}/src/os-skills"
 SIGHT_DIR="${ROOT_DIR}/src/agentsight"
 TOKEN_DIR="${ROOT_DIR}/src/tokenless"
 MEM_DIR="${ROOT_DIR}/src/agent-memory"
+SKILLFS_DIR="${ROOT_DIR}/src/skillfs"
 SANDBOX_PKG_DIR="${ROOT_DIR}/src/anolisa/packaging/sandbox"
 
 # gVisor upstream release (overridable via env). Format: YYYYMMDD
@@ -604,6 +605,85 @@ build_agent_memory() {
 }
 
 # =============================================================================
+# skillfs
+# =============================================================================
+build_skillfs() {
+    log "=========================================="
+    log "Building RPM: skillfs"
+    log "=========================================="
+
+    local spec_in="${SKILLFS_DIR}/skillfs.spec.in"
+    if [ ! -f "$spec_in" ]; then
+        err "Spec template not found: $spec_in"
+        return 1
+    fi
+
+    local version="${VERSION:-}"
+    if [ -z "$version" ]; then
+        version=$(grep -m1 '^version = ' "${SKILLFS_DIR}/Cargo.toml" | sed 's/version = "\(.*\)"/\1/' 2>/dev/null || true)
+    fi
+    if [ -z "$version" ]; then
+        version=$(grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' "$spec_in" | head -1)
+    fi
+    if [ -z "$version" ]; then
+        err "Cannot determine skillfs version. Set VERSION env or ensure Cargo.toml/spec exists."
+        return 1
+    fi
+
+    local pkg_name
+    pkg_name=$(parse_spec_name "$spec_in")
+    local tarball_name="${pkg_name}-${version}.tar.gz"
+    local vendor_tarball_name="${pkg_name}-${version}-vendor.tar.gz"
+    local spec_file
+    spec_file=$(process_spec_template "$spec_in" "$version")
+
+    log "Step 1/3: Creating source tarball ${tarball_name}..."
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
+    mkdir -p "$pkg_dir"
+
+    tar -cf - -C "$SKILLFS_DIR" \
+        --exclude='target' \
+        --exclude='vendor' \
+        --exclude='.cargo' \
+        . | tar -xf - -C "$pkg_dir"
+
+    if [ -L "${pkg_dir}/LICENSE" ] && [ -f "${ROOT_DIR}/LICENSE" ]; then
+        rm -f "${pkg_dir}/LICENSE"
+        cp -p "${ROOT_DIR}/LICENSE" "${pkg_dir}/LICENSE"
+    fi
+
+    tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
+    rm -rf "$tmp_dir"
+
+    log "Step 2/3: Creating vendor tarball ${vendor_tarball_name}..."
+    local vendor_tmp
+    vendor_tmp=$(mktemp -d)
+    mkdir -p "${vendor_tmp}/.cargo"
+    (
+        cd "$SKILLFS_DIR"
+        cargo vendor --locked "${vendor_tmp}/vendor" >/dev/null
+    )
+    cat > "${vendor_tmp}/.cargo/config.toml" <<'EOF'
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"
+EOF
+    tar -czf "${BUILD_DIR}/SOURCES/${vendor_tarball_name}" -C "$vendor_tmp" vendor .cargo
+    rm -rf "$vendor_tmp"
+
+    log "Step 3/3: Running rpmbuild..."
+    "$RPMBUILD" -ba --nodeps \
+        --define "_topdir ${BUILD_DIR}" \
+        "$spec_file"
+
+    ok "skillfs RPM built successfully"
+}
+
+# =============================================================================
 # sandbox: shared helpers
 # =============================================================================
 
@@ -875,13 +955,14 @@ usage() {
     echo "  agentsight                Build agentsight RPM"
     echo "  tokenless                 Build tokenless RPM"
     echo "  agent-memory              Build agent-memory RPM"
+    echo "  skillfs                   Build skillfs RPM"
     echo "  gvisor-runsc              Build gvisor-runsc RPM (sandbox)"
     echo "  containerd-shim-runsc-v1  Build containerd-shim-runsc-v1 RPM (sandbox)"
     echo "  atelet                    Build atelet RPM (sandbox, placeholder)"
     echo "  ateom-gvisor              Build ateom-gvisor RPM (sandbox, placeholder)"
     echo "  sandbox-all               Build all 4 sandbox RPMs"
     echo "  sandbox-repo              Generate yum/dnf repo metadata (createrepo_c) for sandbox RPMs"
-    echo "  all                       Build all RPM packages (legacy 6 only)"
+    echo "  all                       Build all primary RPM packages"
     echo ""
     echo "Environment variables:"
     echo "  VERSION                   Override version for .spec.in templates"
@@ -928,6 +1009,9 @@ case "$TARGET" in
     agent-memory)
         build_agent_memory
         ;;
+    skillfs)
+        build_skillfs
+        ;;
     gvisor-runsc)
         build_gvisor_runsc
         ;;
@@ -953,6 +1037,7 @@ case "$TARGET" in
         build_agentsight
         build_tokenless
         build_agent_memory
+        build_skillfs
         ;;
     *)
         err "Unknown package: $TARGET"

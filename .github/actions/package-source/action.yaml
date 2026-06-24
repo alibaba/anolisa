@@ -53,6 +53,7 @@ runs:
           os-skills)      SRC_DIR="src/os-skills" ;;
           ws-ckpt)        SRC_DIR="src/ws-ckpt" ;;
           agent-memory)   SRC_DIR="src/agent-memory" ;;
+          skillfs)        SRC_DIR="src/skillfs" ;;
           *)
             echo "ERROR: Unknown component: $COMPONENT"
             exit 1

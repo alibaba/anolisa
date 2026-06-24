@@ -35,6 +35,7 @@ jobs:
       tokenless-version: ${{ steps.tokenless.outputs.version }}
       ws-ckpt-version: ${{ steps.ws-ckpt.outputs.version }}
       agent-memory-version: ${{ steps.agent-memory.outputs.version }}
+      skillfs-version: ${{ steps.skillfs.outputs.version }}
       image-version: ${{ steps.image.outputs.version }}
       image-version-tag: ${{ steps.image.outputs.version_tag }}
     steps:
@@ -106,6 +107,12 @@ jobs:
         with:
           tag-match: "memory/v*"
 
+      - name: "Version: skillfs"
+        id: skillfs
+        uses: ./.github/actions/calculate-version
+        with:
+          tag-match: "skillfs/v*"
+
       - name: Summary
         run: |
           echo "## Component Versions" >> $GITHUB_STEP_SUMMARY
@@ -118,6 +125,7 @@ jobs:
           echo "| tokenless | \`${{ steps.tokenless.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| ws-ckpt | \`${{ steps.ws-ckpt.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| agent-memory | \`${{ steps.agent-memory.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| skillfs | \`${{ steps.skillfs.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| **image** | \`${{ steps.image.outputs.version }}\` (tag: \`${{ steps.image.outputs.version_tag }}\`) |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           if [ "${{ inputs.dry-run }}" = "true" ]; then
@@ -217,6 +225,29 @@ jobs:
         with:
           component: agent-memory
           version: ${{ needs.versions.outputs.agent-memory-version }}
+          artifact-suffix: ".nightly"
+          retention-days: "7"
+
+  package-skillfs:
+    name: "Package: skillfs"
+    runs-on: [self-hosted, ubuntu]
+    needs: versions
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/package-source
+        with:
+          component: skillfs
+          version: ${{ needs.versions.outputs.skillfs-version }}
+          artifact-suffix: ".nightly"
+          retention-days: "7"
+
+      - name: Package vendor archive
+        uses: ./.github/actions/package-vendor
+        with:
+          component: skillfs
+          version: ${{ needs.versions.outputs.skillfs-version }}
           artifact-suffix: ".nightly"
           retention-days: "7"
 
@@ -365,6 +396,21 @@ jobs:
       vendor-artifact: "agent-memory-${{ needs.versions.outputs.agent-memory-version }}.nightly-vendor"
       artifact-suffix: ".nightly"
 
+  rpm-skillfs:
+    name: "RPM: skillfs (${{ matrix.arch }})"
+    needs: [versions, package-skillfs]
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    uses: ./.github/workflows/_rpm-build.yaml
+    with:
+      component: skillfs
+      version: ${{ needs.versions.outputs.skillfs-version }}
+      arch: ${{ matrix.arch }}
+      source-artifact: "skillfs-${{ needs.versions.outputs.skillfs-version }}.nightly"
+      vendor-artifact: "skillfs-${{ needs.versions.outputs.skillfs-version }}.nightly-vendor"
+      artifact-suffix: ".nightly"
+
   # ===========================================================================
   # Job 4: Build and push Docker image
   # ===========================================================================
@@ -379,6 +425,7 @@ jobs:
       - rpm-tokenless
       - rpm-ws-ckpt
       - rpm-agent-memory
+      - rpm-skillfs
       # TODO: uncomment when agentsight is integrated
       # - rpm-sight
     steps:
@@ -485,6 +532,7 @@ jobs:
           echo "| tokenless | \`${{ needs.versions.outputs.tokenless-version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| ws-ckpt | \`${{ needs.versions.outputs.ws-ckpt-version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| agent-memory | \`${{ needs.versions.outputs.agent-memory-version }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| skillfs | \`${{ needs.versions.outputs.skillfs-version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Images" >> $GITHUB_STEP_SUMMARY
           echo "- \`${{ env.GHCR_IMAGE }}:${IMAGE_TAG}\`" >> $GITHUB_STEP_SUMMARY
