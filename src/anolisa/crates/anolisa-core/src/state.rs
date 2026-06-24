@@ -19,6 +19,7 @@ use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::adapter::claim::AdapterClaim;
+use crate::manifest::ServiceScope;
 
 /// Current `installed.toml` schema version. Bump on incompatible changes.
 /// When bumped, [`InstalledState::load`] must migrate older on-disk versions
@@ -231,6 +232,12 @@ pub struct ServiceRef {
     /// Desired enabled-on-boot state when a manager supports it.
     #[serde(default)]
     pub enabled: bool,
+    /// Manager scope: `system` units are driven by `systemctl`, `user`
+    /// units by `systemctl --user`. Persisted so uninstall can pick the
+    /// right manager. State files written before this field deserialize as
+    /// [`ServiceScope::System`].
+    #[serde(default)]
+    pub scope: ServiceScope,
 }
 
 /// Last-known health probe result for an object.
@@ -722,6 +729,23 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn service_ref_scope_defaults_to_system_when_absent() {
+        // State files written before `scope` existed must load as System so
+        // uninstall keeps driving them through the (root) system manager.
+        let legacy: ServiceRef = toml::from_str(
+            "name = \"agentsight.service\"\nmanager = \"systemd\"\nrestartable = true\nenabled = true\n",
+        )
+        .expect("legacy ServiceRef parses");
+        assert_eq!(legacy.scope, ServiceScope::System);
+
+        let user: ServiceRef = toml::from_str(
+            "name = \"anolisa-memory@alice.service\"\nmanager = \"systemd-user\"\nscope = \"user\"\n",
+        )
+        .expect("user-scope ServiceRef parses");
+        assert_eq!(user.scope, ServiceScope::User);
+    }
+
     fn sample_object(kind: ObjectKind, name: &str, version: &str) -> InstalledObject {
         InstalledObject {
             kind,
@@ -752,6 +776,7 @@ mod tests {
                 manager: "systemd".to_string(),
                 restartable: true,
                 enabled: true,
+                scope: ServiceScope::System,
             }],
             health: vec![HealthEntry {
                 name: "binary".to_string(),

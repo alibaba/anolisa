@@ -7,10 +7,12 @@
 //!      `INVALID_ARGUMENT`.
 //!   2. Collects the component's restartable service units.
 //!   3. If the set is empty → `INVALID_ARGUMENT` (nothing to restart).
-//!   4. Picks a [`anolisa_core::ServiceManager`] via `service::for_install_mode`.
-//!      Unsupported backends (user mode, non-Linux, container) short-circuit
-//!      with a `not_supported` outcome — caller sees a clear
-//!      "skipped" instead of a misleading success.
+//!   4. Routes each unit through the [`anolisa_core::ServiceManager`] for
+//!      its own scope — system units via `systemctl`, user units via
+//!      `systemctl --user` — the same per-scope partitioning uninstall uses.
+//!      A unit whose scope has no driver here (a user unit in a system-mode
+//!      restart, non-Linux, container) is a per-unit `not_supported` skip,
+//!      never mis-driven through another namespace.
 //!   5. Calls `restart_service(unit)` per unit. Per-unit failures are
 //!      collected as warnings on the outcome; a unit that systemctl
 //!      refuses does NOT abort the whole op.
@@ -24,7 +26,9 @@
 use clap::Parser;
 
 use anolisa_core::{
-    InstalledState, ObjectKind, ServiceState, service_for_install_mode as service_factory,
+    InstalledState, ObjectKind, ServiceManager, ServiceScope, ServiceState,
+    service_for_install_mode as service_factory,
+    user_service_for_install_mode as user_service_factory,
 };
 use anolisa_env::EnvService;
 
@@ -76,7 +80,7 @@ pub fn handle(args: RestartArgs, ctx: &CliContext) -> Result<(), CliError> {
         .map(|svc| RestartUnit {
             component: args.component.clone(),
             unit: svc.name.clone(),
-            manager: svc.manager.clone(),
+            scope: svc.scope,
         })
         .collect();
 
@@ -91,64 +95,91 @@ pub fn handle(args: RestartArgs, ctx: &CliContext) -> Result<(), CliError> {
     }
 
     let env = EnvService::detect();
-    let manager = service_factory(install_mode, &env);
+    // Restart routes each unit through the manager for its own scope — the
+    // same per-scope partitioning uninstall uses. System units drive
+    // `systemctl`, user units drive `systemctl --user`, so a mixed-scope
+    // component never mis-drives a user unit through the system manager (or
+    // vice versa): a unit whose scope has no driver here is a per-unit
+    // `not_supported` skip rather than a wrong-namespace call.
+    let sys_manager = service_factory(install_mode, &env);
+    let user_manager = user_service_factory(install_mode, &env);
+
+    // Summary fields describe the set of scopes actually present. The op is
+    // "supported" if at least one unit's manager can drive it, and the label
+    // combines the distinct namespaces in play (just one for the common
+    // single-scope component).
+    let used_sys = units.iter().any(|u| u.scope == ServiceScope::System);
+    let used_user = units.iter().any(|u| u.scope == ServiceScope::User);
+    let supported =
+        (used_sys && sys_manager.supported()) || (used_user && user_manager.supported());
+    let manager_label = match (used_sys, used_user) {
+        (true, true) => format!("{}+{}", sys_manager.manager(), user_manager.manager()),
+        (true, false) => sys_manager.manager().to_string(),
+        (false, true) => user_manager.manager().to_string(),
+        // `units` is non-empty (checked above), so at least one scope is used.
+        (false, false) => unreachable!("restartable units present but no scope flagged"),
+    };
 
     let mut results: Vec<RestartResult> = Vec::with_capacity(units.len());
     let mut warnings: Vec<String> = Vec::new();
 
-    if !manager.supported() {
-        // Quiet skip: every unit reports `not_supported` so the caller
-        // sees the boundary explicitly rather than guessing.
-        let reason = manager
-            .unsupported_reason()
-            .unwrap_or("service manager not supported in this environment")
-            .to_string();
-        for u in &units {
+    for u in &units {
+        let manager: &dyn ServiceManager = match u.scope {
+            ServiceScope::System => sys_manager.as_ref(),
+            ServiceScope::User => user_manager.as_ref(),
+        };
+        if !manager.supported() {
+            // Quiet skip: this unit's scope has no driver here (a user unit
+            // in a system-mode restart, container, non-Linux). Reported
+            // `not_supported` per unit so the boundary is explicit and the
+            // unit is never mis-driven through another namespace.
+            let reason = manager
+                .unsupported_reason()
+                .unwrap_or("service manager not supported in this environment")
+                .to_string();
             results.push(RestartResult {
                 component: u.component.clone(),
                 unit: u.unit.clone(),
                 state: "not_supported".to_string(),
                 changed: false,
                 manager: manager.manager().to_string(),
-                message: reason.clone(),
+                message: reason,
             });
+            continue;
         }
-    } else {
-        for u in &units {
-            match manager.restart_service(&u.unit) {
-                Ok(outcome) => {
-                    results.push(RestartResult {
-                        component: u.component.clone(),
-                        unit: u.unit.clone(),
-                        state: outcome.state.as_str().to_string(),
-                        changed: outcome.changed,
-                        manager: outcome.manager,
-                        message: outcome.message,
-                    });
-                    if matches!(outcome.state, ServiceState::Failed | ServiceState::Unknown) {
-                        warnings.push(format!(
-                            "{}/{} reports state '{}' after restart",
-                            u.component,
-                            u.unit,
-                            outcome.state.as_str()
-                        ));
-                    }
-                }
-                Err(err) => {
-                    let msg = format!("{err}");
+        match manager.restart_service(&u.unit) {
+            Ok(outcome) => {
+                results.push(RestartResult {
+                    component: u.component.clone(),
+                    unit: u.unit.clone(),
+                    state: outcome.state.as_str().to_string(),
+                    changed: outcome.changed,
+                    manager: outcome.manager,
+                    message: outcome.message,
+                });
+                if matches!(outcome.state, ServiceState::Failed | ServiceState::Unknown) {
                     warnings.push(format!(
-                        "service restart skipped for {}/{}: {msg}",
-                        u.component, u.unit
+                        "{}/{} reports state '{}' after restart",
+                        u.component,
+                        u.unit,
+                        outcome.state.as_str()
                     ));
-                    results.push(RestartResult {
-                        component: u.component.clone(),
-                        unit: u.unit.clone(),
-                        state: "unknown".to_string(),
-                        changed: false,
-                        manager: manager.manager().to_string(),
-                        message: msg,
-                    });
                 }
+            }
+            Err(err) => {
+                let msg = format!("{err}");
+                warnings.push(format!(
+                    "service restart skipped for {}/{}: {msg}",
+                    u.component, u.unit
+                ));
+                results.push(RestartResult {
+                    component: u.component.clone(),
+                    unit: u.unit.clone(),
+                    state: "unknown".to_string(),
+                    changed: false,
+                    manager: manager.manager().to_string(),
+                    message: msg,
+                });
             }
         }
     }
@@ -157,8 +188,8 @@ pub fn handle(args: RestartArgs, ctx: &CliContext) -> Result<(), CliError> {
         let payload = RestartPayload {
             component: args.component.clone(),
             install_mode: install_mode.to_string(),
-            manager: manager.manager().to_string(),
-            supported: manager.supported(),
+            manager: manager_label.clone(),
+            supported,
             units: results.clone(),
             warnings: warnings.clone(),
         };
@@ -168,8 +199,8 @@ pub fn handle(args: RestartArgs, ctx: &CliContext) -> Result<(), CliError> {
     if !ctx.quiet {
         render_human(
             &args.component,
-            manager.manager(),
-            manager.supported(),
+            &manager_label,
+            supported,
             &results,
             &warnings,
             ctx.no_color,
@@ -182,8 +213,7 @@ pub fn handle(args: RestartArgs, ctx: &CliContext) -> Result<(), CliError> {
 struct RestartUnit {
     component: String,
     unit: String,
-    #[allow(dead_code)]
-    manager: String,
+    scope: ServiceScope,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

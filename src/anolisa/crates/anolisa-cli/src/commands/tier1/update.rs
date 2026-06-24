@@ -472,21 +472,19 @@ fn update_raw_component(
 }
 
 fn raw_update_service_refs(
-    ctx: &CliContext,
     services: &[ServiceRequest],
     service_run: Option<&ServiceRunOutcome>,
 ) -> Vec<ServiceRef> {
-    let manager = match ctx.install_mode {
-        crate::context::InstallMode::System => "systemd",
-        crate::context::InstallMode::User => "systemd-user",
-    };
     services
         .iter()
         .map(|svc| ServiceRef {
             name: svc.unit.clone(),
-            manager: manager.to_string(),
+            // Label follows the unit's scope (not install mode), consistent
+            // with install so `manager` never disagrees with `scope`.
+            manager: svc.scope.manager_label().to_string(),
             restartable: true,
             enabled: service_run.is_some_and(|run| run.enabled_units.contains(&svc.unit)),
+            scope: svc.scope,
         })
         .collect()
 }
@@ -796,7 +794,7 @@ fn execute_raw_update(
     // Service activation happens after this durable state write, so the first
     // save records the service declarations with conservative `enabled=false`;
     // a best-effort second save below backfills the actual enable result.
-    obj.services = raw_update_service_refs(ctx, &services, None);
+    obj.services = raw_update_service_refs(&services, None);
     obj.status = ObjectStatus::Installed;
     obj.health = Vec::new();
     obj.external_modified_files = Vec::new();
@@ -869,7 +867,7 @@ fn execute_raw_update(
     let mut activation_state_warnings = Vec::new();
     if !services.is_empty() {
         if let Some(obj) = state.find_object_mut(ObjectKind::Component, component) {
-            obj.services = raw_update_service_refs(ctx, &services, Some(&service_run));
+            obj.services = raw_update_service_refs(&services, Some(&service_run));
             if let Err(err) = state.save(&state_path) {
                 activation_state_warnings.push(format!(
                     "failed to persist service activation result after update: {err}"
@@ -1746,15 +1744,6 @@ mod tests {
 
     #[test]
     fn raw_update_service_refs_are_conservative_until_activation_runs() {
-        let ctx = CliContext {
-            install_mode: InstallMode::System,
-            prefix: None,
-            json: false,
-            dry_run: false,
-            verbose: false,
-            quiet: true,
-            no_color: true,
-        };
         let services = vec![ServiceRequest {
             unit: "agentsight.service".to_string(),
             scope: anolisa_core::ServiceScope::System,
@@ -1762,7 +1751,7 @@ mod tests {
             start: true,
         }];
 
-        let before_activation = raw_update_service_refs(&ctx, &services, None);
+        let before_activation = raw_update_service_refs(&services, None);
         assert!(!before_activation[0].enabled);
 
         let run = ServiceRunOutcome {
@@ -1770,8 +1759,33 @@ mod tests {
             started_units: Vec::new(),
             warnings: Vec::new(),
         };
-        let after_activation = raw_update_service_refs(&ctx, &services, Some(&run));
+        let after_activation = raw_update_service_refs(&services, Some(&run));
         assert!(after_activation[0].enabled);
+    }
+
+    #[test]
+    fn raw_update_service_refs_manager_label_follows_scope() {
+        // The persisted `manager` label is derived from each unit's scope,
+        // not install mode, so it never disagrees with `scope`.
+        let services = vec![
+            ServiceRequest {
+                unit: "agentsight.service".to_string(),
+                scope: anolisa_core::ServiceScope::System,
+                enable: false,
+                start: false,
+            },
+            ServiceRequest {
+                unit: "anolisa-memory@alice.service".to_string(),
+                scope: anolisa_core::ServiceScope::User,
+                enable: false,
+                start: false,
+            },
+        ];
+        let refs = raw_update_service_refs(&services, None);
+        assert_eq!(refs[0].manager, "systemd");
+        assert_eq!(refs[0].scope, anolisa_core::ServiceScope::System);
+        assert_eq!(refs[1].manager, "systemd-user");
+        assert_eq!(refs[1].scope, anolisa_core::ServiceScope::User);
     }
 
     #[test]
@@ -2664,6 +2678,7 @@ sha256 = "{sha}"
                 manager: "systemd".to_string(),
                 restartable: true,
                 enabled: false,
+                scope: ServiceScope::System,
             }];
             state.save(&path).expect("save poisoned state");
         }

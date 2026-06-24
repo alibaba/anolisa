@@ -438,14 +438,11 @@ impl Default for SystemdServiceManager {
 
 impl ServiceManager for SystemdServiceManager {
     fn manager(&self) -> &str {
-        // Report the scope in the label so central-log and probe outcomes
-        // match install state, which records `systemd-user` for user mode.
-        // A user-scoped instance drives `systemctl --user`, so it is a
-        // distinct manager namespace from the system one.
-        match self.scope {
-            ServiceScope::System => "systemd",
-            ServiceScope::User => "systemd-user",
-        }
+        // Report the scope in the label (a user-scoped instance drives
+        // `systemctl --user`, a distinct namespace). Shared with the install
+        // state writers via `ServiceScope::manager_label` so the running
+        // manager and the persisted `ServiceRef.manager` never diverge.
+        self.scope.manager_label()
     }
     fn supported(&self) -> bool {
         true

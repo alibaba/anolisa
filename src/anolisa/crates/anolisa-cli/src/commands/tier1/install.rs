@@ -2248,7 +2248,7 @@ fn resolve_manifest_contract(
         &resolution.component,
     )?);
 
-    let services = resolve_manifest_services(manifest, &resolution.component)?;
+    let services = resolve_manifest_services(manifest, &resolution.component, mode)?;
     let capabilities = resolve_manifest_capabilities(manifest, layout, &resolution.component)?;
 
     Ok((files, services, capabilities))
@@ -2265,7 +2265,26 @@ fn resolve_manifest_contract(
 fn resolve_manifest_services(
     manifest: &ComponentManifest,
     component: &str,
+    mode: &str,
 ) -> Result<Vec<ServiceRequest>, CliError> {
+    // The `%u` instance specifier resolves to the caller's login name, but
+    // only in a user-mode install where the unit is activated as that user.
+    // A system-mode install merely *places* a user-scope template for later
+    // per-user `systemctl --user enable`, so it leaves `%u` un-resolved
+    // (the bare template) rather than baking in root's name. Detect the user
+    // at most once, and only when a `%u` instance actually needs it.
+    let caller = if mode == "user"
+        && manifest
+            .install
+            .services
+            .iter()
+            .any(|s| s.instance.as_deref().is_some_and(|i| i.contains("%u")))
+    {
+        Some(anolisa_env::EnvService::detect().user)
+    } else {
+        None
+    };
+
     let mut requests = Vec::with_capacity(manifest.install.services.len());
     for spec in &manifest.install.services {
         if spec.unit.trim().is_empty() {
@@ -2279,7 +2298,12 @@ fn resolve_manifest_services(
         // Template unit (`name@.service`) + instance → `name@<instance>.service`.
         let unit = match &spec.instance {
             Some(instance) if spec.unit.contains("@.") => {
-                spec.unit.replacen("@.", &format!("@{instance}."), 1)
+                match resolve_service_instance(instance, caller.as_deref()) {
+                    Some(resolved) => spec.unit.replacen("@.", &format!("@{resolved}."), 1),
+                    // `%u` with no resolved user (system-mode place-only):
+                    // keep the bare template; per-user enable instantiates it.
+                    None => spec.unit.clone(),
+                }
             }
             _ => spec.unit.clone(),
         };
@@ -2291,6 +2315,21 @@ fn resolve_manifest_services(
         });
     }
     Ok(requests)
+}
+
+/// Resolve a systemd template instance, expanding the `%u` specifier to the
+/// caller's login name.
+///
+/// `%u` is a systemd specifier that systemd does *not* expand in the instance
+/// portion of a command-line unit name, so anolisa resolves it itself. Returns
+/// `None` when the instance uses `%u` but no caller name is available (a
+/// system-mode install that only places the template) — the caller then keeps
+/// the bare template. A literal instance is returned verbatim in every mode.
+fn resolve_service_instance(instance: &str, caller: Option<&str>) -> Option<String> {
+    if !instance.contains("%u") {
+        return Some(instance.to_string());
+    }
+    caller.map(|user| instance.replace("%u", user))
 }
 
 /// Render the manifest's `[install.files]` against the layout: expand
@@ -2767,11 +2806,6 @@ fn execute_raw(
         .collect();
     installed_paths.push(manifest_path.display().to_string());
 
-    let service_manager_label = match ctx.install_mode {
-        crate::context::InstallMode::System => "systemd",
-        crate::context::InstallMode::User => "systemd-user",
-    };
-
     // Migrate away legacy capability rows on this state write; surfaced
     // in the result warnings and audited in the central log below. A
     // state-save failure rolls the prune back with the rest of the write.
@@ -2816,10 +2850,14 @@ fn execute_raw(
             .iter()
             .map(|svc| ServiceRef {
                 name: svc.unit.clone(),
-                manager: service_manager_label.to_string(),
+                // Label follows the unit's scope, not install mode: a
+                // place-only user-scope unit in a system install is still
+                // `systemd-user`, keeping `manager` consistent with `scope`.
+                manager: svc.scope.manager_label().to_string(),
                 restartable: true,
                 // Reflect what the executor actually enabled this run.
                 enabled: service_run.enabled_units.contains(&svc.unit),
+                scope: svc.scope,
             })
             .collect(),
         health: Vec::new(),
@@ -4403,7 +4441,7 @@ sha256 = "{sha}"
     fn resolve_manifest_services_carries_spec_and_expands_instance() {
         let toml = service_manifest("anolisa-memory@.service", true, false, Some("alice"));
         let manifest = ComponentManifest::from_toml_str(&toml).expect("parse manifest");
-        let reqs = resolve_manifest_services(&manifest, "agentsight").expect("resolve");
+        let reqs = resolve_manifest_services(&manifest, "agentsight", "system").expect("resolve");
         assert_eq!(reqs.len(), 1);
         assert_eq!(reqs[0].unit, "anolisa-memory@alice.service");
         assert!(reqs[0].enable);
@@ -4414,11 +4452,54 @@ sha256 = "{sha}"
     fn resolve_manifest_services_plain_unit_unchanged() {
         let toml = service_manifest("agentsight.service", true, true, None);
         let manifest = ComponentManifest::from_toml_str(&toml).expect("parse manifest");
-        let reqs = resolve_manifest_services(&manifest, "agentsight").expect("resolve");
+        let reqs = resolve_manifest_services(&manifest, "agentsight", "system").expect("resolve");
         assert_eq!(reqs.len(), 1);
         assert_eq!(reqs[0].unit, "agentsight.service");
         assert!(reqs[0].enable && reqs[0].start);
         assert_eq!(reqs[0].scope, anolisa_core::ServiceScope::System);
+    }
+
+    #[test]
+    fn resolve_service_instance_expands_percent_u_only_with_a_caller() {
+        // `%u` resolves to the caller; a literal instance passes through in
+        // every mode; `%u` with no caller (system-mode place-only) stays None.
+        assert_eq!(
+            resolve_service_instance("%u", Some("alice")).as_deref(),
+            Some("alice")
+        );
+        assert_eq!(resolve_service_instance("%u", None), None);
+        assert_eq!(
+            resolve_service_instance("0", Some("alice")).as_deref(),
+            Some("0")
+        );
+        assert_eq!(resolve_service_instance("0", None).as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn resolve_manifest_services_resolves_percent_u_in_user_mode() {
+        let toml = service_manifest("anolisa-memory@.service", false, false, Some("%u"));
+        let manifest = ComponentManifest::from_toml_str(&toml).expect("parse manifest");
+        let reqs = resolve_manifest_services(&manifest, "agent-memory", "user").expect("resolve");
+        // The exact name is the live login user, but `%u` must be gone and the
+        // template must be instantiated.
+        assert!(
+            !reqs[0].unit.contains("%u"),
+            "unit must not keep the literal specifier: {}",
+            reqs[0].unit
+        );
+        assert!(reqs[0].unit.starts_with("anolisa-memory@"));
+        assert!(reqs[0].unit.ends_with(".service"));
+        assert_ne!(reqs[0].unit, "anolisa-memory@.service");
+    }
+
+    #[test]
+    fn resolve_manifest_services_keeps_percent_u_template_in_system_mode() {
+        // System mode is place-only for user-scope templates: leave `%u`
+        // un-resolved so per-user `systemctl --user enable` instantiates it.
+        let toml = service_manifest("anolisa-memory@.service", false, false, Some("%u"));
+        let manifest = ComponentManifest::from_toml_str(&toml).expect("parse manifest");
+        let reqs = resolve_manifest_services(&manifest, "agent-memory", "system").expect("resolve");
+        assert_eq!(reqs[0].unit, "anolisa-memory@.service");
     }
 
     /// Minimal-schema manifest with the given `[[component.hooks]]` entries

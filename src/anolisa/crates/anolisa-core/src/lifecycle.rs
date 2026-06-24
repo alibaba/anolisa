@@ -69,6 +69,7 @@ use anolisa_platform::fs_layout::FsLayout;
 use crate::central_log::{CentralLog, CentralLogError, LogKind, LogRecord, LogStatus, Severity};
 use crate::hooks::{HookSpec, run_hooks};
 use crate::lock::{InstallLock, LockError};
+use crate::manifest::ServiceScope;
 use crate::service;
 use crate::state::{
     ExternalModifiedFile, FileOwner as StateFileOwner, InstalledObject, InstalledState, ObjectKind,
@@ -209,6 +210,10 @@ pub struct ServiceAction {
     pub name: String,
     /// Planned behavior for the unit.
     pub action: ServiceActionKind,
+    /// Manager scope, carried from the installed `ServiceRef` so the
+    /// uninstall executor can drive user units via `systemctl --user`.
+    #[serde(default)]
+    pub scope: ServiceScope,
     /// Explanation when a service action is skipped or deferred.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -426,12 +431,61 @@ fn plan_services(services: &[ServiceRef]) -> Vec<ServiceAction> {
         .map(|s| ServiceAction {
             name: s.name.clone(),
             action: ServiceActionKind::Stop,
+            scope: s.scope,
             reason: Some(
-                "stops and disables via systemd in system mode; skipped on user/non-linux/container hosts"
+                "stops and disables via systemd; user-scope units via `systemctl --user`; skipped on non-linux/container hosts"
                     .to_string(),
             ),
         })
         .collect()
+}
+
+/// Run `daemon-reload` for one scope after its unit files were removed, record
+/// the audit line, and return a warning string on failure.
+///
+/// Best-effort: a `NotSupported` manager (non-linux / container / wrong mode)
+/// is a quiet skip returning `None`, and a reload error warns without failing
+/// uninstall. `component` labels the audit record.
+fn reload_after_unit_removal(
+    manager: &dyn service::ServiceManager,
+    central: &CentralLog,
+    component: &str,
+    operation_id: &str,
+    actor: &str,
+    install_mode: &str,
+) -> Option<String> {
+    if !manager.supported() {
+        return None;
+    }
+    match manager.daemon_reload() {
+        Ok(_) => {
+            service::record_service_op(
+                Some(central),
+                service::ServiceOp::DaemonReload,
+                component,
+                "",
+                operation_id,
+                actor,
+                install_mode,
+                None,
+            );
+            None
+        }
+        Err(err) => {
+            let msg = format!("daemon-reload after unit removal failed: {err}");
+            service::record_service_op(
+                Some(central),
+                service::ServiceOp::DaemonReload,
+                component,
+                "",
+                operation_id,
+                actor,
+                install_mode,
+                Some(&msg),
+            );
+            Some(msg)
+        }
+    }
 }
 
 /// Configuration fragments to drop on `Purge`. Today we only purge the
@@ -930,24 +984,42 @@ fn execute_uninstall_or_purge(
     // fail uninstall — they surface on `LifecycleOutcome.warnings`.
     let mut warnings_pre_delete: Vec<String> = pre_uninstall.warnings;
     {
-        let mut units: Vec<(String, String)> = Vec::new();
+        // Partition by scope: system units stop/disable via `systemctl`, user
+        // units via `systemctl --user`. Each scope is driven by its matching
+        // factory so a user-mode uninstall tears down per-user units and a
+        // system-mode uninstall leaves them (place-only, mirroring install).
+        let mut sys_units: Vec<(String, String)> = Vec::new();
+        let mut user_units: Vec<(String, String)> = Vec::new();
         for c in &live_plan.components {
             for s in &c.services {
-                units.push((c.name.clone(), s.name.clone()));
+                match s.scope {
+                    ServiceScope::User => user_units.push((c.name.clone(), s.name.clone())),
+                    ServiceScope::System => sys_units.push((c.name.clone(), s.name.clone())),
+                }
             }
         }
-        if !units.is_empty() {
+        if !sys_units.is_empty() || !user_units.is_empty() {
             let env = EnvService::detect();
-            let manager = service::for_install_mode(install_mode, &env);
-            let deactivation = service::deactivate_services(
-                manager.as_ref(),
-                &units,
-                Some(&central),
-                &operation_id,
-                actor,
-                install_mode,
-            );
-            warnings_pre_delete.extend(deactivation.warnings);
+            for (units, manager) in [
+                (sys_units, service::for_install_mode(install_mode, &env)),
+                (
+                    user_units,
+                    service::user_service_for_install_mode(install_mode, &env),
+                ),
+            ] {
+                if units.is_empty() {
+                    continue;
+                }
+                let deactivation = service::deactivate_services(
+                    manager.as_ref(),
+                    &units,
+                    Some(&central),
+                    &operation_id,
+                    actor,
+                    install_mode,
+                );
+                warnings_pre_delete.extend(deactivation.warnings);
+            }
         }
     }
 
@@ -1386,46 +1458,41 @@ fn execute_uninstall_or_purge(
     // manager drops the now-deleted units from its database (the
     // uninstall-side mirror of the install reload — without it systemd keeps
     // a stale unit until the next manual reload). Best-effort: a failed
-    // reload only warns. Runs only when the component declared service units
-    // (whose files were just removed) on a host that drives systemd.
-    //
-    // A user-mode install places (and reloads) its units under the user
-    // manager, so the post-removal reload selects the user-scope factory in
-    // user mode — `for_install_mode("user")` is unsupported and would skip
-    // the `systemctl --user daemon-reload` the removed `~/.config/systemd/user`
-    // units need. (Per-unit user-scope stop/disable in a *system*-mode
-    // uninstall still waits on `ServiceRef` recording scope.)
-    if live_plan.components.iter().any(|c| !c.services.is_empty()) {
-        let env = EnvService::detect();
-        let manager = if install_mode == "user" {
-            service::user_service_for_install_mode(install_mode, &env)
-        } else {
-            service::for_install_mode(install_mode, &env)
-        };
-        if manager.supported() {
-            match manager.daemon_reload() {
-                Ok(_) => service::record_service_op(
-                    Some(&central),
-                    service::ServiceOp::DaemonReload,
+    // reload only warns. Reload each scope that had units removed through its
+    // own manager, so a user-scope teardown issues `systemctl --user
+    // daemon-reload` and a system-scope one issues the plain reload.
+    {
+        let has_sys = live_plan
+            .components
+            .iter()
+            .any(|c| c.services.iter().any(|s| s.scope == ServiceScope::System));
+        let has_user = live_plan
+            .components
+            .iter()
+            .any(|c| c.services.iter().any(|s| s.scope == ServiceScope::User));
+        if has_sys || has_user {
+            let env = EnvService::detect();
+            if has_sys {
+                if let Some(msg) = reload_after_unit_removal(
+                    service::for_install_mode(install_mode, &env).as_ref(),
+                    &central,
                     target_name,
-                    "",
                     &operation_id,
                     actor,
                     install_mode,
-                    None,
-                ),
-                Err(err) => {
-                    let msg = format!("daemon-reload after unit removal failed: {err}");
-                    service::record_service_op(
-                        Some(&central),
-                        service::ServiceOp::DaemonReload,
-                        target_name,
-                        "",
-                        &operation_id,
-                        actor,
-                        install_mode,
-                        Some(&msg),
-                    );
+                ) {
+                    combined.push(msg);
+                }
+            }
+            if has_user {
+                if let Some(msg) = reload_after_unit_removal(
+                    service::user_service_for_install_mode(install_mode, &env).as_ref(),
+                    &central,
+                    target_name,
+                    &operation_id,
+                    actor,
+                    install_mode,
+                ) {
                     combined.push(msg);
                 }
             }
@@ -1956,6 +2023,7 @@ mod tests {
                 manager: "systemd".to_string(),
                 restartable: true,
                 enabled: false,
+                scope: ServiceScope::System,
             }],
             health: Vec::new(),
         });
@@ -2140,6 +2208,118 @@ mod tests {
             "no service units declared — must not daemon-reload: {lines:?}",
         );
         assert!(!owned_path.exists(), "owned file should be removed");
+    }
+
+    #[test]
+    fn plan_services_carries_scope_from_service_ref() {
+        let refs = vec![
+            ServiceRef {
+                name: "agentsight.service".to_string(),
+                manager: "systemd".to_string(),
+                restartable: true,
+                enabled: true,
+                scope: ServiceScope::System,
+            },
+            ServiceRef {
+                name: "anolisa-memory@alice.service".to_string(),
+                manager: "systemd-user".to_string(),
+                restartable: false,
+                enabled: false,
+                scope: ServiceScope::User,
+            },
+        ];
+        let actions = plan_services(&refs);
+        assert!(matches!(actions[0].scope, ServiceScope::System));
+        assert!(matches!(actions[1].scope, ServiceScope::User));
+    }
+
+    /// A `scope = user` unit removed under a **system-mode** uninstall is
+    /// place-only: the user manager is `NotSupported` (mirroring install,
+    /// where a system-mode install only places per-user templates), so
+    /// teardown is a recorded skip with no `systemctl --user daemon-reload`,
+    /// while the owned files are still removed.
+    #[test]
+    #[cfg(unix)]
+    fn uninstall_user_scope_service_in_system_mode_is_place_only() {
+        let root = tempdir().expect("tempdir");
+        let layout = fixture_layout(root.path());
+        std_fs::create_dir_all(&layout.bin_dir).unwrap();
+        let owned_path = layout.bin_dir.join("anolisa-memory");
+        std_fs::write(&owned_path, b"owned").unwrap();
+
+        std_fs::create_dir_all(&layout.state_dir).expect("mkdir state");
+        let mut state = InstalledState::default();
+        state.upsert_object(InstalledObject {
+            kind: ObjectKind::Component,
+            name: "agent-memory".to_string(),
+            version: "0.1.0".to_string(),
+            status: ObjectStatus::Installed,
+            manifest_digest: None,
+            distribution_source: Some("file:///fake".to_string()),
+            raw_package: None,
+            install_backend: Some("raw".to_string()),
+            ownership: None,
+            rpm_metadata: None,
+            installed_at: "2026-06-01T10:00:00Z".to_string(),
+            last_operation_id: Some("op-prior".to_string()),
+            managed: true,
+            adopted: false,
+            subscription_scope: Default::default(),
+            enabled_features: Vec::new(),
+            component_refs: Vec::new(),
+            files: vec![OwnedFile {
+                path: owned_path.clone(),
+                owner: StateFileOwner::Anolisa,
+                sha256: Some("0".repeat(64)),
+            }],
+            external_modified_files: Vec::new(),
+            services: vec![ServiceRef {
+                name: "anolisa-memory@%u.service".to_string(),
+                manager: "systemd-user".to_string(),
+                restartable: false,
+                enabled: false,
+                scope: ServiceScope::User,
+            }],
+            health: Vec::new(),
+        });
+        state
+            .save(&layout.state_dir.join("installed.toml"))
+            .expect("seed state save");
+
+        let hooks = ResolvedLifecycleHooks {
+            pre_uninstall: Vec::new(),
+            post_uninstall: Vec::new(),
+        };
+        let plan = LifecyclePlan::for_component_uninstall(
+            "agent-memory",
+            &InstalledState::load(&layout.state_dir.join("installed.toml")).unwrap(),
+        );
+        execute_plan(&plan, &layout, "tester", "system", &hooks).expect("uninstall ok");
+
+        let lines = read_log_lines(&layout.central_log);
+        assert!(
+            !lines.iter().any(|l| {
+                l.get("command").and_then(|v| v.as_str()) == Some("service:daemon-reload")
+            }),
+            "user-scope teardown in system mode must not daemon-reload: {lines:?}",
+        );
+        let stop = lines
+            .iter()
+            .find(|l| l.get("command").and_then(|v| v.as_str()) == Some("service:stop"))
+            .expect("user unit stop must be recorded");
+        let msg = stop.get("message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            msg.contains("anolisa-memory@%u.service"),
+            "stop record must target the user unit: {msg}",
+        );
+        assert!(
+            msg.contains("skipped"),
+            "system-mode user teardown is a recorded skip, not a drive: {msg}",
+        );
+        assert!(
+            !owned_path.exists(),
+            "owned unit file should still be removed"
+        );
     }
 
     /// ws-ckpt semantics: a **non-strict** pre_uninstall hook that fails

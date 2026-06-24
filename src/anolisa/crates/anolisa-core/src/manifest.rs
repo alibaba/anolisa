@@ -302,6 +302,19 @@ pub enum ServiceScope {
     User,
 }
 
+impl ServiceScope {
+    /// systemd manager namespace recorded as `ServiceRef.manager` and shown
+    /// in diagnostics: `systemd` for system units, `systemd-user` for user
+    /// units (driven by `systemctl --user`). Single source of truth so the
+    /// persisted label can never disagree with a unit's scope.
+    pub fn manager_label(self) -> &'static str {
+        match self {
+            Self::System => "systemd",
+            Self::User => "systemd-user",
+        }
+    }
+}
+
 /// systemd unit lifecycle declaration from `[[component.services]]`.
 ///
 /// Drives `enable`/`start` on install and `stop`/`disable` on uninstall.
