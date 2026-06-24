@@ -32,3 +32,4 @@ AgentSight 为开发者提供的 AI coding skill 集合，帮助 AI agent 遵循
 | `agentsight-pr-body` | 分析分支变更，按 anolisa 规范生成/更新 PR 标题和正文 |
 | `agentsight-code-review` | 6 维度代码审查：硬性规则、eBPF 安全、FFI 边界、Footprint Ladder、流水线测试、文档同步 |
 | `agentsight-auto-format` | 编辑代码后自动运行 rustfmt/ruff/prettier，保持代码风格一致 |
+| `agentsight-bugfix` | Fix issues 流程：测试环境复现、数据流断点分析、构建部署验证的标准化调试迭代循环 |
