@@ -65,10 +65,68 @@ pub(super) fn render_skills_command<W: Write>(
                 ),
             }
         }
+        "enable" => {
+            let name = arg.unwrap_or("");
+            if name.is_empty() {
+                return render_notice_panel(
+                    output,
+                    i18n.t(MessageId::SlashSkillsTitle),
+                    vec!["Usage: /skills enable <name>".to_string()],
+                    None,
+                );
+            }
+            let params = serde_json::json!({ "name": name });
+            match cosh_core.registry_query("skills", "enable", params) {
+                Ok(_) => render_notice_panel(
+                    output,
+                    i18n.t(MessageId::SlashSkillsTitle),
+                    vec![format!("  Skill \"{name}\" enabled.")],
+                    None,
+                ),
+                Err(e) => render_notice_panel(
+                    output,
+                    i18n.t(MessageId::SlashSkillsTitle),
+                    vec![format!("Error: {e}")],
+                    None,
+                ),
+            }
+        }
+        "disable" => {
+            let name = arg.unwrap_or("");
+            if name.is_empty() {
+                return render_notice_panel(
+                    output,
+                    i18n.t(MessageId::SlashSkillsTitle),
+                    vec!["Usage: /skills disable <name>".to_string()],
+                    None,
+                );
+            }
+            let params = serde_json::json!({ "name": name });
+            match cosh_core.registry_query("skills", "disable", params) {
+                Ok(_) => render_notice_panel(
+                    output,
+                    i18n.t(MessageId::SlashSkillsTitle),
+                    vec![format!("  Skill \"{name}\" disabled.")],
+                    None,
+                ),
+                Err(e) => render_notice_panel(
+                    output,
+                    i18n.t(MessageId::SlashSkillsTitle),
+                    vec![format!("Error: {e}")],
+                    None,
+                ),
+            }
+        }
         _ => render_notice_panel(
             output,
             i18n.t(MessageId::SlashSkillsTitle),
-            vec![format!("Unknown subcommand: {action}")],
+            vec![
+                "Usage: /skills <subcommand>".to_string(),
+                "  list              List all skills".to_string(),
+                "  detail <name>     Show skill details".to_string(),
+                "  enable <name>     Enable a disabled skill".to_string(),
+                "  disable <name>    Disable a skill".to_string(),
+            ],
             None,
         ),
     }
@@ -86,7 +144,12 @@ fn format_skills_list(data: &Value, i18n: &I18n) -> Vec<String> {
             let name = skill.get("name")?.as_str()?;
             let desc = skill.get("description").and_then(|v| v.as_str()).unwrap_or("");
             let level = skill.get("level").and_then(|v| v.as_str()).unwrap_or("?");
-            Some(format!("  {name} [{level}] — {desc}"))
+            let disabled = skill.get("disabled").and_then(|v| v.as_bool()).unwrap_or(false);
+            if disabled {
+                Some(format!("  ○ {name} [{level}] [disabled] — {desc}"))
+            } else {
+                Some(format!("  • {name} [{level}] — {desc}"))
+            }
         })
         .collect()
 }

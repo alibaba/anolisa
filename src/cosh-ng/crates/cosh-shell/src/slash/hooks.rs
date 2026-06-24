@@ -108,24 +108,90 @@ pub(crate) fn render_hooks_command<W: Write>(
         (Some("untrust-project"), None, None) => render_project_hook_trust(false, state, output),
         (Some("clear-project-trust"), None, None) => render_clear_project_hook_trust(state, output),
         (Some("enable"), Some(id), None) => {
-            state.hooks.disabled.remove(id);
-            let i18n = state.i18n();
-            render_notice_panel(
-                output,
-                i18n.t(MessageId::SlashHooksEnabledTitle),
-                vec![i18n.format(MessageId::SlashHooksEnabledBody, &[("id", id)])],
-                None,
-            )
+            // Waterfall routing: shell hooks first, then cosh-core registry
+            let shell_hooks = state.hooks.engine.registered_hooks();
+            if shell_hooks.contains(&id) {
+                // Shell hook: session-level enable
+                state.hooks.disabled.remove(id);
+                let i18n = state.i18n();
+                render_notice_panel(
+                    output,
+                    i18n.t(MessageId::SlashHooksEnabledTitle),
+                    vec![i18n.format(MessageId::SlashHooksEnabledBody, &[("id", id)])],
+                    None,
+                )
+            } else if let AdapterInstance::CoshCore(cosh_core) = adapter {
+                // Agent hook: persistent enable via registry
+                let params = serde_json::json!({ "name": id });
+                let i18n = state.i18n();
+                match cosh_core.registry_query("hooks", "enable", params) {
+                    Ok(_) => render_notice_panel(
+                        output,
+                        i18n.t(MessageId::SlashHooksEnabledTitle),
+                        vec![format!("  Agent hook \"{id}\" enabled (persisted).")],
+                        None,
+                    ),
+                    Err(e) => render_notice_panel(
+                        output,
+                        i18n.t(MessageId::SlashHooksEnabledTitle),
+                        vec![format!("Error: {e}")],
+                        None,
+                    ),
+                }
+            } else {
+                // No CoshCore adapter: fallback to session-level enable
+                state.hooks.disabled.remove(id);
+                let i18n = state.i18n();
+                render_notice_panel(
+                    output,
+                    i18n.t(MessageId::SlashHooksEnabledTitle),
+                    vec![i18n.format(MessageId::SlashHooksEnabledBody, &[("id", id)])],
+                    None,
+                )
+            }
         }
         (Some("disable"), Some(id), None) => {
-            state.hooks.disabled.insert(id.to_string());
-            let i18n = state.i18n();
-            render_notice_panel(
-                output,
-                i18n.t(MessageId::SlashHooksDisabledTitle),
-                vec![i18n.format(MessageId::SlashHooksDisabledBody, &[("id", id)])],
-                None,
-            )
+            // Waterfall routing: shell hooks first, then cosh-core registry
+            let shell_hooks = state.hooks.engine.registered_hooks();
+            if shell_hooks.contains(&id) {
+                // Shell hook: session-level disable
+                state.hooks.disabled.insert(id.to_string());
+                let i18n = state.i18n();
+                render_notice_panel(
+                    output,
+                    i18n.t(MessageId::SlashHooksDisabledTitle),
+                    vec![i18n.format(MessageId::SlashHooksDisabledBody, &[("id", id)])],
+                    None,
+                )
+            } else if let AdapterInstance::CoshCore(cosh_core) = adapter {
+                // Agent hook: persistent disable via registry
+                let params = serde_json::json!({ "name": id });
+                let i18n = state.i18n();
+                match cosh_core.registry_query("hooks", "disable", params) {
+                    Ok(_) => render_notice_panel(
+                        output,
+                        i18n.t(MessageId::SlashHooksDisabledTitle),
+                        vec![format!("  Agent hook \"{id}\" disabled (persisted).")],
+                        None,
+                    ),
+                    Err(e) => render_notice_panel(
+                        output,
+                        i18n.t(MessageId::SlashHooksDisabledTitle),
+                        vec![format!("Error: {e}")],
+                        None,
+                    ),
+                }
+            } else {
+                // No CoshCore adapter: fallback to session-level disable
+                state.hooks.disabled.insert(id.to_string());
+                let i18n = state.i18n();
+                render_notice_panel(
+                    output,
+                    i18n.t(MessageId::SlashHooksDisabledTitle),
+                    vec![i18n.format(MessageId::SlashHooksDisabledBody, &[("id", id)])],
+                    None,
+                )
+            }
         }
         _ => {
             let i18n = state.i18n();
@@ -621,7 +687,12 @@ fn format_agent_hooks_list(data: &Value) -> Vec<String> {
             let name = hook.get("name")?.as_str()?;
             let event = hook.get("event").and_then(|v| v.as_str()).unwrap_or("?");
             let ext = hook.get("extension").and_then(|v| v.as_str()).unwrap_or("?");
-            Some(format!("  • {name} [{event}] (ext: {ext})"))
+            let disabled = hook.get("disabled").and_then(|v| v.as_bool()).unwrap_or(false);
+            if disabled {
+                Some(format!("  ○ {name} [{event}] (ext: {ext}) [disabled]"))
+            } else {
+                Some(format!("  • {name} [{event}] (ext: {ext})"))
+            }
         })
         .collect()
 }

@@ -65,10 +65,68 @@ pub(super) fn render_extensions_command<W: Write>(
                 ),
             }
         }
+        "enable" => {
+            let name = arg.unwrap_or("");
+            if name.is_empty() {
+                return render_notice_panel(
+                    output,
+                    i18n.t(MessageId::SlashExtensionsTitle),
+                    vec!["Usage: /extensions enable <name>".to_string()],
+                    None,
+                );
+            }
+            let params = serde_json::json!({ "name": name });
+            match cosh_core.registry_query("extensions", "enable", params) {
+                Ok(_) => render_notice_panel(
+                    output,
+                    i18n.t(MessageId::SlashExtensionsTitle),
+                    vec![format!("  Extension \"{name}\" enabled.")],
+                    None,
+                ),
+                Err(e) => render_notice_panel(
+                    output,
+                    i18n.t(MessageId::SlashExtensionsTitle),
+                    vec![format!("Error: {e}")],
+                    None,
+                ),
+            }
+        }
+        "disable" => {
+            let name = arg.unwrap_or("");
+            if name.is_empty() {
+                return render_notice_panel(
+                    output,
+                    i18n.t(MessageId::SlashExtensionsTitle),
+                    vec!["Usage: /extensions disable <name>".to_string()],
+                    None,
+                );
+            }
+            let params = serde_json::json!({ "name": name });
+            match cosh_core.registry_query("extensions", "disable", params) {
+                Ok(_) => render_notice_panel(
+                    output,
+                    i18n.t(MessageId::SlashExtensionsTitle),
+                    vec![format!("  Extension \"{name}\" disabled.")],
+                    None,
+                ),
+                Err(e) => render_notice_panel(
+                    output,
+                    i18n.t(MessageId::SlashExtensionsTitle),
+                    vec![format!("Error: {e}")],
+                    None,
+                ),
+            }
+        }
         _ => render_notice_panel(
             output,
             i18n.t(MessageId::SlashExtensionsTitle),
-            vec![format!("Unknown subcommand: {action}")],
+            vec![
+                "Usage: /extensions <subcommand>".to_string(),
+                "  list              List all extensions".to_string(),
+                "  detail <name>     Show extension details".to_string(),
+                "  enable <name>     Enable a disabled extension".to_string(),
+                "  disable <name>    Disable an extension".to_string(),
+            ],
             None,
         ),
     }
@@ -86,8 +144,11 @@ fn format_extensions_list(data: &Value, i18n: &I18n) -> Vec<String> {
             let name = ext.get("name")?.as_str()?;
             let version = ext.get("version").and_then(|v| v.as_str()).unwrap_or("?");
             let active = ext.get("is_active").and_then(|v| v.as_bool()).unwrap_or(false);
-            let status = if active { "active" } else { "inactive" };
-            Some(format!("  {name} v{version} ({status})"))
+            if active {
+                Some(format!("  • {name} v{version} (active)"))
+            } else {
+                Some(format!("  ○ {name} v{version} [disabled]"))
+            }
         })
         .collect()
 }
