@@ -3,6 +3,7 @@
 //! Responsibilities:
 //! - Create `/var/log/anolisa/sls/ops/` directory
 //! - Pre-create component `.jsonl` files
+//! - Configure logrotate for ops `.jsonl` files
 //! - Enable / remove agentsight SLS log marker
 //! - Write `instance.jsonl` snapshot
 
@@ -62,6 +63,41 @@ impl<'a> OpsTelemetrySetup<'a> {
                 use std::os::unix::fs::PermissionsExt;
                 fs::set_permissions(&file_path, fs::Permissions::from_mode(0o666))?;
             }
+        }
+        Ok(())
+    }
+
+    /// Write logrotate config for ops `.jsonl` files.
+    ///
+    /// Creates `/etc/logrotate.d/anolisa` with a `size 30M / rotate 1` policy
+    /// using rename-mode rotation so ilogtail inode offsets are preserved.
+    pub fn setup_logrotate(&self) -> Result<(), TelemetryError> {
+        let config_path = &self.config.logrotate_config_path;
+        if let Some(parent) = config_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let glob = self.config.ops_dir.join("*.jsonl");
+        let content = format!(
+            "{glob} {{\n    size 30M\n    rotate 1\n    missingok\n    notifempty\n    create 0666 root root\n}}\n",
+            glob = glob.display()
+        );
+        fs::write(config_path, content)?;
+
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(config_path, fs::Permissions::from_mode(0o644))?;
+        }
+
+        Ok(())
+    }
+
+    /// Remove logrotate config for ops `.jsonl` files.
+    pub fn remove_logrotate(&self) -> Result<(), TelemetryError> {
+        let config_path = &self.config.logrotate_config_path;
+        if config_path.exists() {
+            fs::remove_file(config_path)?;
         }
         Ok(())
     }
@@ -162,6 +198,52 @@ mod tests {
         let ops_dir = dir.path().join("ops");
         let instance_file = ops_dir.join("instance.jsonl");
         assert!(instance_file.exists());
+    }
+
+    #[test]
+    fn test_setup_logrotate_creates_config() {
+        let dir = TempDir::new().unwrap();
+        let cfg = test_config(&dir);
+        let ops = OpsTelemetrySetup::new(&cfg);
+        ops.setup_logrotate().unwrap();
+
+        let content = fs::read_to_string(&cfg.logrotate_config_path).unwrap();
+        assert!(content.contains("size 30M"));
+        assert!(content.contains("rotate 1"));
+        assert!(content.contains("create 0666 root root"));
+        assert!(content.contains("*.jsonl"));
+    }
+
+    #[test]
+    fn test_setup_logrotate_idempotent() {
+        let dir = TempDir::new().unwrap();
+        let cfg = test_config(&dir);
+        let ops = OpsTelemetrySetup::new(&cfg);
+        ops.setup_logrotate().unwrap();
+        ops.setup_logrotate().unwrap();
+
+        let content = fs::read_to_string(&cfg.logrotate_config_path).unwrap();
+        assert_eq!(content.matches("size 30M").count(), 1);
+    }
+
+    #[test]
+    fn test_remove_logrotate_noop_when_absent() {
+        let dir = TempDir::new().unwrap();
+        let cfg = test_config(&dir);
+        let ops = OpsTelemetrySetup::new(&cfg);
+        assert!(ops.remove_logrotate().is_ok());
+    }
+
+    #[test]
+    fn test_remove_logrotate_deletes_config() {
+        let dir = TempDir::new().unwrap();
+        let cfg = test_config(&dir);
+        let ops = OpsTelemetrySetup::new(&cfg);
+        ops.setup_logrotate().unwrap();
+        assert!(cfg.logrotate_config_path.exists());
+
+        ops.remove_logrotate().unwrap();
+        assert!(!cfg.logrotate_config_path.exists());
     }
 
     #[test]

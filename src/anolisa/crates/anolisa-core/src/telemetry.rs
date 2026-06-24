@@ -59,6 +59,8 @@ pub struct TelemetryConfig {
     pub ops_user_defined_ids: Vec<String>,
     /// Ops directory for component .jsonl files
     pub ops_dir: PathBuf,
+    /// logrotate config path for ops .jsonl files
+    pub logrotate_config_path: PathBuf,
     /// Instance ID cache path
     pub instance_id_cache_path: PathBuf,
     /// Path to `/etc/machine-id` (used as instance ID fallback)
@@ -108,6 +110,7 @@ impl Default for TelemetryConfig {
             ops_sls_account_id: default_ops_id,
             ops_user_defined_ids: vec!["anolisa-livetrace".into()],
             ops_dir: PathBuf::from("/var/log/anolisa/sls/ops"),
+            logrotate_config_path: PathBuf::from("/etc/logrotate.d/anolisa"),
             instance_id_cache_path: PathBuf::from("/var/lib/anolisa/instance-id.cache"),
             machine_id_path: PathBuf::from("/etc/machine-id"),
             release_path: PathBuf::from("/etc/anolisa-release"),
@@ -213,10 +216,11 @@ impl TelemetryStarter {
             installer.configure_ops_user_defined_ids(),
         )?;
 
-        // 7-10. Ops telemetry setup
+        // 7-11. Ops telemetry setup
         let ops = OpsTelemetrySetup::new(&self.config);
         Self::run_step("create ops directory", ops.create_ops_dir())?;
         Self::run_step("create ops jsonl files", ops.create_ops_jsonl_files())?;
+        Self::run_step("setup logrotate", ops.setup_logrotate())?;
         Self::run_step("enable sls log marker", ops.enable_sls_log_marker())?;
         let instance_info = Self::run_step(
             "write instance snapshot",
@@ -248,9 +252,11 @@ impl TelemetryStarter {
     ///
     /// Called after `anolisa unregister` successfully writes register.json.
     /// Note: does not uninstall ilogtail itself, only revokes upload configuration.
-    /// Ops directory and .jsonl files are preserved (components still write locally).
+    /// Ops directory, .jsonl files and logrotate config are preserved
+    /// (components still write locally, disk size still needs to be bounded).
     pub fn stop(&self) -> Result<(), TelemetryError> {
         // 0. Remove agentsight SLS log marker file
+        //    (logrotate config is preserved — components still write to .jsonl files)
         let ops = OpsTelemetrySetup::new(&self.config);
         ops.remove_sls_log_marker()?;
 
@@ -283,6 +289,7 @@ pub(crate) fn test_config(dir: &tempfile::TempDir) -> TelemetryConfig {
         ops_sls_account_id: "987654321".into(),
         ops_user_defined_ids: vec!["anolisa-livetrace".into()],
         ops_dir: dir.path().join("ops"),
+        logrotate_config_path: dir.path().join("logrotate-anolisa"),
         instance_id_cache_path: dir.path().join("instance-id.cache"),
         machine_id_path: dir.path().join("machine-id"),
         release_path: dir.path().join("anolisa-release"),
