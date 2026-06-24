@@ -30,6 +30,10 @@ entry = "openclaw.plugin.json"
 schema = 1
 entry = "openclaw.plugin.json"
 
+[[adapters.openclaw.config]]
+key = "plugins.entries.agent-sec.hooks.allowConversationAccess"
+value = true
+
 [adapters.openclaw]
 skills = [
   { name = "code-scanner", source = "{datadir}/skills/code-scanner/" },
