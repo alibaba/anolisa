@@ -380,6 +380,13 @@ pub fn expand_layout_placeholders(
     replacements.insert("log_dir", &layout.log_dir);
     replacements.insert("cachedir", &layout.cache_dir);
     replacements.insert("cache_dir", &layout.cache_dir);
+    // systemd unit search dirs: `{unitdir}` for system-scope units,
+    // `{userunitdir}` for user-scope template units. Both are mode-aware
+    // via the layout (see `FsLayout::systemd_user_unit_dir`).
+    replacements.insert("unitdir", &layout.systemd_unit_dir);
+    replacements.insert("unit_dir", &layout.systemd_unit_dir);
+    replacements.insert("userunitdir", &layout.systemd_user_unit_dir);
+    replacements.insert("user_unit_dir", &layout.systemd_user_unit_dir);
 
     let mut result = template.to_string();
     let mut search_from = 0;
@@ -617,6 +624,41 @@ mod tests {
         let r2 = expand_layout_placeholders("{lib_dir}/plugin.so", &layout, &[]).unwrap();
         assert_eq!(r1, r2);
         assert_eq!(r1, PathBuf::from("/usr/local/lib/anolisa/plugin.so"));
+    }
+
+    #[test]
+    fn expand_unitdir_system() {
+        // System-scope units resolve under the system unit search dir.
+        let layout = test_layout();
+        let r1 = expand_layout_placeholders("{unitdir}/agentsight.service", &layout, &[]).unwrap();
+        let r2 = expand_layout_placeholders("{unit_dir}/agentsight.service", &layout, &[]).unwrap();
+        assert_eq!(r1, r2);
+        assert_eq!(
+            r1,
+            PathBuf::from("/usr/local/lib/systemd/system/agentsight.service")
+        );
+    }
+
+    #[test]
+    fn expand_userunitdir_system_vs_user() {
+        // User-scope template units resolve under the *user* unit dir: the
+        // system-wide one in system mode, the per-user one in user mode.
+        let sys = FsLayout::system(None);
+        let r =
+            expand_layout_placeholders("{userunitdir}/anolisa-memory@.service", &sys, &[]).unwrap();
+        assert_eq!(
+            r,
+            PathBuf::from("/usr/local/lib/systemd/user/anolisa-memory@.service")
+        );
+
+        let user =
+            FsLayout::user_with_overrides(PathBuf::from("/tmp/h"), None, None, None, None, None);
+        let r2 = expand_layout_placeholders("{user_unit_dir}/anolisa-memory@.service", &user, &[])
+            .unwrap();
+        assert_eq!(
+            r2,
+            PathBuf::from("/tmp/h/.config/systemd/user/anolisa-memory@.service")
+        );
     }
 
     #[test]

@@ -58,6 +58,12 @@ mod fhs {
     pub const LOG: &str = "/var/log/anolisa";
     pub const RUNTIME: &str = "/run/anolisa";
     pub const SYSTEMD_UNITS: &str = "/usr/local/lib/systemd/system";
+    /// System-wide *user* unit search dir. Per-user template units
+    /// (`foo@.service` driven by `systemctl --user`) install here so every
+    /// user's manager can find them — the `/usr/local` analogue of the
+    /// distro `/usr/lib/systemd/user`. Distinct from [`SYSTEMD_UNITS`],
+    /// which holds system-manager units.
+    pub const SYSTEMD_USER_UNITS: &str = "/usr/local/lib/systemd/user";
 }
 
 // ---- User-mode (file-hierarchy(7)) leaf names ---------------------------
@@ -145,8 +151,16 @@ pub struct FsLayout {
     pub runtime_dir: PathBuf,
     /// Catalog overlay directory for this install mode.
     pub manifests_overlay: PathBuf,
-    /// Distribution-specific systemd unit search directory.
+    /// Distribution-specific systemd *system* unit search directory.
+    /// Targets system-scope units (`{unitdir}` placeholder).
     pub systemd_unit_dir: PathBuf,
+    /// Systemd *user* unit search directory (`{userunitdir}` placeholder).
+    /// Targets user-scope template units. In system mode this is the
+    /// system-wide user-unit dir (`/usr/local/lib/systemd/user`); in user
+    /// mode it coincides with [`systemd_unit_dir`](Self::systemd_unit_dir)
+    /// at `~/.config/systemd/user`, since a user install has no
+    /// system-manager units.
+    pub systemd_user_unit_dir: PathBuf,
 }
 
 impl FsLayout {
@@ -183,6 +197,7 @@ impl FsLayout {
             runtime_dir: rebase(fhs::RUNTIME),
             manifests_overlay,
             systemd_unit_dir: rebase(fhs::SYSTEMD_UNITS),
+            systemd_user_unit_dir: rebase(fhs::SYSTEMD_USER_UNITS),
             prefix,
         }
     }
@@ -260,7 +275,10 @@ impl FsLayout {
             .unwrap_or_else(|| state_dir.join(fh_user::RUNTIME_FALLBACK_SUB));
 
         let manifests_overlay = etc_dir.join(OVERLAY_NAME);
+        // A user install has no system-manager units, so the system and
+        // user unit dirs coincide at `~/.config/systemd/user`.
         let systemd_unit_dir = config.join(fh_user::SYSTEMD_USER_SUB);
+        let systemd_user_unit_dir = systemd_unit_dir.clone();
 
         Self {
             mode: InstallMode::User,
@@ -281,6 +299,7 @@ impl FsLayout {
             runtime_dir,
             manifests_overlay,
             systemd_unit_dir,
+            systemd_user_unit_dir,
         }
     }
 
@@ -409,6 +428,10 @@ mod tests {
             PathBuf::from("/usr/local/lib/systemd/system")
         );
         assert_eq!(
+            layout.systemd_user_unit_dir,
+            PathBuf::from("/usr/local/lib/systemd/user")
+        );
+        assert_eq!(
             layout.central_log,
             PathBuf::from("/var/log/anolisa/central.jsonl")
         );
@@ -451,6 +474,10 @@ mod tests {
         assert_eq!(
             layout.systemd_unit_dir,
             PathBuf::from("/opt/x/usr/local/lib/systemd/system")
+        );
+        assert_eq!(
+            layout.systemd_user_unit_dir,
+            PathBuf::from("/opt/x/usr/local/lib/systemd/user")
         );
     }
 
@@ -505,6 +532,11 @@ mod tests {
             layout.systemd_unit_dir,
             PathBuf::from("/tmp/h/.config/systemd/user")
         );
+        // User mode has no system-manager units: both unit dirs coincide.
+        assert_eq!(
+            layout.systemd_user_unit_dir,
+            PathBuf::from("/tmp/h/.config/systemd/user")
+        );
     }
 
     #[test]
@@ -526,6 +558,10 @@ mod tests {
         assert_eq!(layout.lock_file, PathBuf::from("/state/anolisa/lock"));
         assert_eq!(layout.runtime_dir, PathBuf::from("/run/user/1000/anolisa"));
         assert_eq!(layout.systemd_unit_dir, PathBuf::from("/conf/systemd/user"));
+        assert_eq!(
+            layout.systemd_user_unit_dir,
+            PathBuf::from("/conf/systemd/user")
+        );
         // bin/lib/libexec are HOME-rooted regardless of the data-root
         // override: file-hierarchy(7) places them under ~/.local/bin and
         // ~/.local/lib, decoupled from the data root.

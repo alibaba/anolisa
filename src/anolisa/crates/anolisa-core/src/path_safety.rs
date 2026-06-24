@@ -57,6 +57,14 @@ pub fn lexical_roots(layout: &FsLayout) -> Vec<&Path> {
         layout.datadir.as_path(),
         layout.log_dir.as_path(),
         layout.cache_dir.as_path(),
+        // systemd unit dirs are owned so contracts can place units via
+        // `{unitdir}`/`{userunitdir}` and uninstall removes them again.
+        // In system mode these sit outside the `/usr/local/share/anolisa`
+        // tree (`/usr/local/lib/systemd/{system,user}`); in user mode the
+        // user-unit dir (`~/.config/systemd/user`) is outside `etc_dir`
+        // (`~/.config/anolisa`) — so both must be listed explicitly.
+        layout.systemd_unit_dir.as_path(),
+        layout.systemd_user_unit_dir.as_path(),
     ]
 }
 
@@ -152,6 +160,23 @@ mod tests {
         std::fs::create_dir_all(&layout.bin_dir).unwrap();
         let dest = layout.bin_dir.join("agentsight");
         validate_owned_path(&layout, &dest).expect("clean path must accept");
+    }
+
+    #[test]
+    fn accepts_unit_targets_under_systemd_dirs() {
+        // `{unitdir}`/`{userunitdir}` targets must be owned so contracts can
+        // place (and uninstall can remove) systemd units.
+        let tmp = tempdir().unwrap();
+        let layout = fixture(tmp.path());
+        std::fs::create_dir_all(&layout.systemd_unit_dir).unwrap();
+        std::fs::create_dir_all(&layout.systemd_user_unit_dir).unwrap();
+        validate_owned_path(&layout, &layout.systemd_unit_dir.join("agentsight.service"))
+            .expect("system unit target must accept");
+        validate_owned_path(
+            &layout,
+            &layout.systemd_user_unit_dir.join("anolisa-memory@.service"),
+        )
+        .expect("user unit target must accept");
     }
 
     #[test]

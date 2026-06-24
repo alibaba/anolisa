@@ -42,6 +42,10 @@ pub enum ServiceOp {
     Enable,
     /// Disable service startup.
     Disable,
+    /// Reload the manager's unit database (`systemctl daemon-reload`).
+    /// Not tied to a specific unit; run once after new unit files land so
+    /// they become loadable.
+    DaemonReload,
 }
 
 impl ServiceOp {
@@ -54,6 +58,7 @@ impl ServiceOp {
             Self::Restart => "restart",
             Self::Enable => "enable",
             Self::Disable => "disable",
+            Self::DaemonReload => "daemon-reload",
         }
     }
 }
@@ -153,6 +158,23 @@ pub trait ServiceManager: Send + Sync {
     /// Reason text when `supported() == false`. `None` for active backends.
     fn unsupported_reason(&self) -> Option<&str> {
         None
+    }
+
+    /// Reload the manager's unit database so a freshly-installed unit file
+    /// becomes loadable (`systemctl daemon-reload`). Default is a no-op
+    /// for backends that don't drive systemd; override only where a real
+    /// reload applies. Not tied to a unit, so the returned outcome's
+    /// `unit` is empty.
+    fn daemon_reload(&self) -> Result<ServiceOutcome, ServiceError> {
+        Ok(ServiceOutcome {
+            manager: self.manager().to_string(),
+            unit: String::new(),
+            op: ServiceOp::DaemonReload,
+            state: ServiceState::NotSupported,
+            supported: false,
+            changed: false,
+            message: "daemon-reload skipped: manager does not drive systemd".to_string(),
+        })
     }
 
     /// Probe the service without attempting mutation.
@@ -316,7 +338,7 @@ impl SystemdServiceManager {
             ServiceOp::Stop => prior == ServiceState::Active && post != ServiceState::Active,
             ServiceOp::Restart => true,
             ServiceOp::Enable | ServiceOp::Disable => true,
-            ServiceOp::Probe => false,
+            ServiceOp::Probe | ServiceOp::DaemonReload => false,
         };
         Ok(ServiceOutcome {
             manager: "systemd".to_string(),
@@ -347,6 +369,33 @@ impl ServiceManager for SystemdServiceManager {
     }
     fn supported(&self) -> bool {
         true
+    }
+    fn daemon_reload(&self) -> Result<ServiceOutcome, ServiceError> {
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("daemon-reload");
+        let output = cmd
+            .output()
+            .map_err(|source| ServiceError::Spawn { source })?;
+        if !output.status.success() {
+            let code = output.status.code().unwrap_or(-1);
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(ServiceError::NonZeroExit {
+                op: "daemon-reload".to_string(),
+                unit: String::new(),
+                code,
+                stderr,
+            });
+        }
+        Ok(ServiceOutcome {
+            manager: "systemd".to_string(),
+            unit: String::new(),
+            op: ServiceOp::DaemonReload,
+            // daemon-reload doesn't target a unit, so there is no post-state.
+            state: ServiceState::Unknown,
+            supported: true,
+            changed: true,
+            message: "systemctl daemon-reload ok".to_string(),
+        })
     }
     fn probe_service(&self, unit: &str) -> Result<ServiceOutcome, ServiceError> {
         self.run_op(ServiceOp::Probe, unit)
@@ -457,6 +506,9 @@ impl ServiceManager for FakeServiceManager {
     }
     fn supported(&self) -> bool {
         self.supported
+    }
+    fn daemon_reload(&self) -> Result<ServiceOutcome, ServiceError> {
+        self.record(ServiceOp::DaemonReload, "")
     }
     fn probe_service(&self, unit: &str) -> Result<ServiceOutcome, ServiceError> {
         self.record(ServiceOp::Probe, unit)
@@ -667,6 +719,48 @@ pub fn apply_services(
     install_mode: &str,
 ) -> ServiceRunOutcome {
     let mut outcome = ServiceRunOutcome::default();
+
+    // Freshly-installed unit files aren't loadable until the manager reloads
+    // its database, so a unit placed this run would otherwise fail `start`
+    // with "not found". Reload once up-front when we'll actually drive
+    // systemd: a supported backend with at least one system-scope unit to
+    // act on. User-scope units are skipped in the loop below, so no
+    // `systemctl --user daemon-reload` is attempted here.
+    if manager.supported()
+        && requests
+            .iter()
+            .any(|req| req.scope != ServiceScope::User && (req.enable || req.start))
+    {
+        match manager.daemon_reload() {
+            Ok(_) => record_service_op(
+                log,
+                ServiceOp::DaemonReload,
+                component,
+                "",
+                operation_id,
+                actor,
+                install_mode,
+                None,
+            ),
+            Err(err) => {
+                let msg = err.to_string();
+                record_service_op(
+                    log,
+                    ServiceOp::DaemonReload,
+                    component,
+                    "",
+                    operation_id,
+                    actor,
+                    install_mode,
+                    Some(&msg),
+                );
+                outcome
+                    .warnings
+                    .push(format!("daemon-reload failed: {msg}"));
+            }
+        }
+    }
+
     for req in requests {
         // Representative op for skip records: prefer the first op we would
         // have run so the audit line names a meaningful action.
@@ -1250,6 +1344,7 @@ mod tests {
         assert_eq!(
             m.calls(),
             vec![
+                (ServiceOp::DaemonReload, "".to_string()),
                 (ServiceOp::Enable, "a.service".to_string()),
                 (ServiceOp::Start, "a.service".to_string()),
             ]
@@ -1273,7 +1368,13 @@ mod tests {
             "cli",
             "system",
         );
-        assert_eq!(m.calls(), vec![(ServiceOp::Start, "a.service".to_string())]);
+        assert_eq!(
+            m.calls(),
+            vec![
+                (ServiceOp::DaemonReload, "".to_string()),
+                (ServiceOp::Start, "a.service".to_string()),
+            ]
+        );
         assert!(out.enabled_units.is_empty());
         assert_eq!(out.started_units, vec!["a.service".to_string()]);
     }
@@ -1294,7 +1395,10 @@ mod tests {
         );
         assert_eq!(
             m.calls(),
-            vec![(ServiceOp::Enable, "a.service".to_string())]
+            vec![
+                (ServiceOp::DaemonReload, "".to_string()),
+                (ServiceOp::Enable, "a.service".to_string()),
+            ]
         );
         assert_eq!(out.enabled_units, vec!["a.service".to_string()]);
         assert!(out.started_units.is_empty());
@@ -1316,7 +1420,10 @@ mod tests {
         );
         assert_eq!(
             m.calls(),
-            vec![(ServiceOp::Restart, "a.service".to_string())]
+            vec![
+                (ServiceOp::DaemonReload, "".to_string()),
+                (ServiceOp::Restart, "a.service".to_string()),
+            ]
         );
         assert_eq!(out.started_units, vec!["a.service".to_string()]);
     }
@@ -1340,6 +1447,7 @@ mod tests {
         assert_eq!(
             m.calls(),
             vec![
+                (ServiceOp::DaemonReload, "".to_string()),
                 (ServiceOp::Enable, "a.service".to_string()),
                 (ServiceOp::Start, "a.service".to_string()),
             ]
@@ -1410,11 +1518,42 @@ mod tests {
             "cli",
             "system",
         );
-        // user-scope activation is out of scope: the manager is never called.
+        // user-scope activation is out of scope: the manager is never called
+        // — not even a daemon-reload, which only precedes system-scope work.
         assert!(m.calls().is_empty());
         assert!(out.enabled_units.is_empty());
         assert!(out.started_units.is_empty());
         assert!(out.warnings.is_empty());
+    }
+
+    #[test]
+    fn apply_services_daemon_reload_failure_warns_but_still_activates() {
+        let m = FakeServiceManager::new();
+        m.fail(ServiceOp::DaemonReload, "");
+        let reqs = vec![svc_req("a.service", true, true)];
+        let out = apply_services(
+            &m,
+            &reqs,
+            ServiceActivation::Start,
+            None,
+            "comp",
+            "op1",
+            "cli",
+            "system",
+        );
+        // Reload is attempted first and fails, but activation continues.
+        assert_eq!(
+            m.calls(),
+            vec![
+                (ServiceOp::DaemonReload, "".to_string()),
+                (ServiceOp::Enable, "a.service".to_string()),
+                (ServiceOp::Start, "a.service".to_string()),
+            ]
+        );
+        assert_eq!(out.enabled_units, vec!["a.service".to_string()]);
+        assert_eq!(out.started_units, vec!["a.service".to_string()]);
+        assert_eq!(out.warnings.len(), 1);
+        assert!(out.warnings[0].contains("daemon-reload"));
     }
 
     #[test]
@@ -1444,11 +1583,17 @@ mod tests {
             .filter(|l| !l.trim().is_empty())
             .map(|l| serde_json::from_str(l).expect("parse line"))
             .collect();
-        assert_eq!(lines.len(), 2, "one record per attempted op");
+        assert_eq!(
+            lines.len(),
+            3,
+            "one record per attempted op: daemon-reload, enable, start"
+        );
 
+        // A new unit file landed this run, so a daemon-reload precedes
+        // activation — recorded as an Info audit line.
         assert_eq!(
             lines[0].get("command").and_then(|v| v.as_str()),
-            Some("service:enable"),
+            Some("service:daemon-reload"),
         );
         assert_eq!(
             lines[0].get("severity").and_then(|v| v.as_str()),
@@ -1456,14 +1601,22 @@ mod tests {
         );
         assert_eq!(
             lines[1].get("command").and_then(|v| v.as_str()),
-            Some("service:start"),
+            Some("service:enable"),
         );
         assert_eq!(
             lines[1].get("severity").and_then(|v| v.as_str()),
+            Some("info"),
+        );
+        assert_eq!(
+            lines[2].get("command").and_then(|v| v.as_str()),
+            Some("service:start"),
+        );
+        assert_eq!(
+            lines[2].get("severity").and_then(|v| v.as_str()),
             Some("warn"),
             "a failed start must be Warn so audit pipelines can grep",
         );
-        let msg = lines[1]
+        let msg = lines[2]
             .get("message")
             .and_then(|v| v.as_str())
             .unwrap_or("");
