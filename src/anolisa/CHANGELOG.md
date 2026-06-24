@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.14] - 2026-06-24
+
+### Added
+
+- Raw components can now place systemd unit files with `{unitdir}`.
+- Raw components can now place user service unit files with `{userunitdir}`.
+- User-mode `anolisa install` now activates declared user-scope services.
+
+### Changed
+
+- User-mode `anolisa install` now resolves `%u` service templates to the current user.
+- System-mode `anolisa install` now preserves `%u` user service templates for later per-user activation.
+- `anolisa uninstall` now reloads systemd after removing declared service unit files.
+- `anolisa restart <component>` now restarts user-scope services from user-mode installs.
+
+### Fixed
+
+- `anolisa install` now starts freshly installed service units without a manual systemd reload.
+- `anolisa uninstall` now deactivates user-scope services from user-mode installs.
+- `anolisa adapter enable` now finds `{datadir}` skills from the package directory that provides the adapter.
+
 ## [0.1.13] - 2026-06-23
 
 ### Added
@@ -263,6 +284,27 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.1.14] - 2026-06-24
+
+### 新增
+
+- raw 组件现可用 `{unitdir}` 放置系统单元。
+- raw 组件现可用 `{userunitdir}` 放置用户单元。
+- 用户模式 `anolisa install` 现会激活用户服务。
+
+### 变更
+
+- 用户模式 `anolisa install` 现将 `%u` 展开为当前用户。
+- 系统模式 `anolisa install` 现保留 `%u` 用户模板。
+- `anolisa uninstall` 删除单元文件后现会重载 systemd。
+- `anolisa restart <component>` 现会重启用户服务。
+
+### 修复
+
+- `anolisa install` 现无需手动重载即可启动新单元。
+- `anolisa uninstall` 现会停用用户模式安装的服务。
+- `anolisa adapter enable` 现从包目录查找 `{datadir}` 技能。
 
 ## [0.1.13] - 2026-06-23
 
