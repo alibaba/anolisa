@@ -91,6 +91,9 @@ impl GenAIBuilder {
         let first_user_raw = Self::extract_first_user_raw(&request).unwrap_or_default();
         let last_user_raw = Self::extract_last_user_raw(&request).unwrap_or_default();
 
+        // Classify call_kind from request content
+        let call_kind = super::helpers::classify_call_kind(&request);
+
         // 提取 LLM API 的 response_id（如 chatcmpl-xxx），用作 trace_id
         // 同时作为 call_id 的首选值：trace_id 有值时直接复用，避免两套 ID；
         // SysOM / 解析失败等无 response_id 的场景 fallback 到内部生成的 internal_id。
@@ -239,6 +242,7 @@ impl GenAIBuilder {
                 } else if http.path.contains("/api/v1/copilot/generate_copilot") {
                     meta.insert("operation_name".to_string(), "chat".to_string());
                 }
+                meta.insert("call_kind".to_string(), call_kind.as_str().to_string());
                 // conversation_id: 对话ID，同一 user query 触发的所有调用共享
                 if let Some(ref cid) = conversation_id {
                     meta.insert("conversation_id".to_string(), cid.clone());

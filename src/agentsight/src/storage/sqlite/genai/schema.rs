@@ -86,6 +86,8 @@ impl GenAISqliteStore {
                 sse_event_count INTEGER,
                 -- Interruption type detected for this call (nullable)
                 interruption_type TEXT,
+                -- Call kind classification (main/recap/web_search)
+                call_kind TEXT NOT NULL DEFAULT 'main',
                 -- Full event as JSON (fallback)
                 event_json TEXT NOT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -175,6 +177,13 @@ impl GenAISqliteStore {
 
         // v5: tool_call_ids JSON array for output tool calls
         ensure_col!("tool_call_ids", "TEXT");
+
+        // v6: call_kind classification (main/recap/web_search)
+        ensure_col!(
+            "call_kind",
+            "TEXT NOT NULL DEFAULT 'main'",
+            "idx_genai_call_kind"
+        );
 
         Ok(())
     }

@@ -696,8 +696,7 @@ impl AgentSight {
                         }
                     } else {
                         log::warn!(
-                            "Deferred GenAI call queued without pending_info (response_id={}), crash detection blind spot remains",
-                            pending_resp_id
+                            "Deferred GenAI call queued without pending_info (response_id={pending_resp_id}), crash detection blind spot remains"
                         );
                     }
                     self.pending_genai.push(PendingGenAI {
@@ -1905,6 +1904,7 @@ mod tests {
             is_sse: false,
             model: Some("gpt-4".to_string()),
             provider: Some("openai".to_string()),
+            call_kind: "main".to_string(),
         }
     }
 

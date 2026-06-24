@@ -59,9 +59,15 @@ impl GenAISqliteStore {
         &self,
         start_ns: i64,
         end_ns: i64,
+        include_auxiliary: bool,
     ) -> Result<Vec<SessionSummary>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
+        let call_kind_filter = if include_auxiliary {
+            ""
+        } else {
+            " AND (call_kind = 'main' OR call_kind IS NULL)"
+        };
+        let sql = format!(
             "SELECT session_id,
                     COUNT(DISTINCT conversation_id) AS conversation_count,
                     MIN(start_timestamp_ns)  AS first_seen_ns,
@@ -73,10 +79,11 @@ impl GenAISqliteStore {
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND session_id IS NOT NULL
-               AND start_timestamp_ns BETWEEN ?1 AND ?2
+               AND start_timestamp_ns BETWEEN ?1 AND ?2{call_kind_filter}
              GROUP BY session_id
-             ORDER BY last_seen_ns DESC",
-        )?;
+             ORDER BY last_seen_ns DESC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params![start_ns, end_ns], |row| {
             Ok(SessionSummary {
                 session_id: row.get(0)?,
@@ -298,63 +305,19 @@ impl GenAISqliteStore {
         session_id: &str,
         start_ns: Option<i64>,
         end_ns: Option<i64>,
+        include_auxiliary: bool,
     ) -> Result<Vec<TraceSummary>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap();
 
+        let call_kind_filter = if include_auxiliary {
+            ""
+        } else {
+            " AND (call_kind = 'main' OR call_kind IS NULL)"
+        };
+
         // When both start_ns and end_ns are present, rewrite with BETWEEN
         let sql = if start_ns.is_some() && end_ns.is_some() {
-            "SELECT conversation_id,
-                        COUNT(*)                        AS call_count,
-                        COALESCE(SUM(input_tokens), 0)  AS total_input,
-                        COALESCE(SUM(output_tokens), 0) AS total_output,
-                        MIN(start_timestamp_ns)         AS start_ns,
-                        MAX(end_timestamp_ns)           AS end_ns,
-                        MAX(model)                      AS model,
-                        MIN(user_query)                 AS user_query
-                 FROM genai_events
-                 WHERE event_type = 'llm_call'
-                   AND session_id = ?1
-                   AND conversation_id IS NOT NULL
-                   AND start_timestamp_ns BETWEEN ?2 AND ?3
-                 GROUP BY conversation_id
-                 ORDER BY start_ns DESC"
-                .to_string()
-        } else if start_ns.is_some() {
-            "SELECT conversation_id,
-                        COUNT(*)                        AS call_count,
-                        COALESCE(SUM(input_tokens), 0)  AS total_input,
-                        COALESCE(SUM(output_tokens), 0) AS total_output,
-                        MIN(start_timestamp_ns)         AS start_ns,
-                        MAX(end_timestamp_ns)           AS end_ns,
-                        MAX(model)                      AS model,
-                        MIN(user_query)                 AS user_query
-                 FROM genai_events
-                 WHERE event_type = 'llm_call'
-                   AND session_id = ?1
-                   AND conversation_id IS NOT NULL
-                   AND start_timestamp_ns >= ?2
-                 GROUP BY conversation_id
-                 ORDER BY start_ns DESC"
-                .to_string()
-        } else if end_ns.is_some() {
-            "SELECT conversation_id,
-                        COUNT(*)                        AS call_count,
-                        COALESCE(SUM(input_tokens), 0)  AS total_input,
-                        COALESCE(SUM(output_tokens), 0) AS total_output,
-                        MIN(start_timestamp_ns)         AS start_ns,
-                        MAX(end_timestamp_ns)           AS end_ns,
-                        MAX(model)                      AS model,
-                        MIN(user_query)                 AS user_query
-                 FROM genai_events
-                 WHERE event_type = 'llm_call'
-                   AND session_id = ?1
-                   AND conversation_id IS NOT NULL
-                   AND start_timestamp_ns <= ?2
-                 GROUP BY conversation_id
-                 ORDER BY start_ns DESC"
-                .to_string()
-        } else {
-            String::from(
+            format!(
                 "SELECT conversation_id,
                         COUNT(*)                        AS call_count,
                         COALESCE(SUM(input_tokens), 0)  AS total_input,
@@ -367,8 +330,62 @@ impl GenAISqliteStore {
                  WHERE event_type = 'llm_call'
                    AND session_id = ?1
                    AND conversation_id IS NOT NULL
+                   AND start_timestamp_ns BETWEEN ?2 AND ?3{call_kind_filter}
                  GROUP BY conversation_id
-                 ORDER BY start_ns DESC",
+                 ORDER BY start_ns DESC"
+            )
+        } else if start_ns.is_some() {
+            format!(
+                "SELECT conversation_id,
+                        COUNT(*)                        AS call_count,
+                        COALESCE(SUM(input_tokens), 0)  AS total_input,
+                        COALESCE(SUM(output_tokens), 0) AS total_output,
+                        MIN(start_timestamp_ns)         AS start_ns,
+                        MAX(end_timestamp_ns)           AS end_ns,
+                        MAX(model)                      AS model,
+                        MIN(user_query)                 AS user_query
+                 FROM genai_events
+                 WHERE event_type = 'llm_call'
+                   AND session_id = ?1
+                   AND conversation_id IS NOT NULL
+                   AND start_timestamp_ns >= ?2{call_kind_filter}
+                 GROUP BY conversation_id
+                 ORDER BY start_ns DESC"
+            )
+        } else if end_ns.is_some() {
+            format!(
+                "SELECT conversation_id,
+                        COUNT(*)                        AS call_count,
+                        COALESCE(SUM(input_tokens), 0)  AS total_input,
+                        COALESCE(SUM(output_tokens), 0) AS total_output,
+                        MIN(start_timestamp_ns)         AS start_ns,
+                        MAX(end_timestamp_ns)           AS end_ns,
+                        MAX(model)                      AS model,
+                        MIN(user_query)                 AS user_query
+                 FROM genai_events
+                 WHERE event_type = 'llm_call'
+                   AND session_id = ?1
+                   AND conversation_id IS NOT NULL
+                   AND start_timestamp_ns <= ?2{call_kind_filter}
+                 GROUP BY conversation_id
+                 ORDER BY start_ns DESC"
+            )
+        } else {
+            format!(
+                "SELECT conversation_id,
+                        COUNT(*)                        AS call_count,
+                        COALESCE(SUM(input_tokens), 0)  AS total_input,
+                        COALESCE(SUM(output_tokens), 0) AS total_output,
+                        MIN(start_timestamp_ns)         AS start_ns,
+                        MAX(end_timestamp_ns)           AS end_ns,
+                        MAX(model)                      AS model,
+                        MIN(user_query)                 AS user_query
+                 FROM genai_events
+                 WHERE event_type = 'llm_call'
+                   AND session_id = ?1
+                   AND conversation_id IS NOT NULL{call_kind_filter}
+                 GROUP BY conversation_id
+                 ORDER BY start_ns DESC"
             )
         };
 

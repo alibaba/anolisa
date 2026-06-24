@@ -41,6 +41,8 @@ pub struct PendingCallInfo {
     pub model: Option<String>,
     /// Provider name (extracted from request path)
     pub provider: Option<String>,
+    /// Call kind classification: "main" | "recap" | "web_search"
+    pub call_kind: String,
 }
 
 /// Data extracted from captured SSE events for enriching a pending record.
@@ -71,14 +73,14 @@ impl GenAISqliteStore {
                 start_timestamp_ns, pid, process_name, agent_name,
                 http_method, http_path, is_sse,
                 input_messages, system_instructions, user_query,
-                model, provider,
+                model, provider, call_kind,
                 event_json
             ) VALUES (
                 'llm_call', 'pending', ?1, ?2, ?3, ?4, ?5,
                 ?6, ?7, ?8, ?9,
                 ?10, ?11, ?12,
                 ?13, ?14, ?15,
-                ?16, ?17,
+                ?16, ?17, ?18,
                 '{}'
             )",
             params![
@@ -99,6 +101,7 @@ impl GenAISqliteStore {
                 info.user_query,
                 info.model,
                 info.provider,
+                info.call_kind,
             ],
         )?;
         Ok(())
@@ -233,8 +236,9 @@ impl GenAISqliteStore {
                         status_code         = ?25,
                         sse_event_count     = ?26,
                         event_json          = ?27,
-                        tool_call_ids       = ?28
-                    WHERE call_id = ?29 AND status IN ('pending', 'interrupted')",
+                        tool_call_ids       = ?28,
+                        call_kind           = ?29
+                    WHERE call_id = ?30 AND status IN ('pending', 'interrupted')",
                     params![
                         call.metadata.get("response_id"),
                         call.metadata.get("conversation_id"),
@@ -268,6 +272,10 @@ impl GenAISqliteStore {
                             .and_then(|s| s.parse::<i64>().ok()),
                         event_json,
                         tool_call_ids,
+                        call.metadata
+                            .get("call_kind")
+                            .map(|s| s.as_str())
+                            .unwrap_or("main"),
                         call.call_id,
                     ],
                 )?;

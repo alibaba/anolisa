@@ -145,6 +145,11 @@ impl GenAIBuilder {
                 is_sse: llm_call.request.stream,
                 model: Some(llm_call.model.clone()),
                 provider: Some(llm_call.provider.clone()),
+                call_kind: llm_call
+                    .metadata
+                    .get("call_kind")
+                    .cloned()
+                    .unwrap_or_else(|| "main".to_string()),
             });
 
             events.push(GenAISemanticEvent::LLMCall(llm_call));
@@ -300,6 +305,10 @@ impl GenAIBuilder {
                 (None, None, None, String::new(), String::new())
             };
 
+        // Classify call_kind from request content
+        let call_kind =
+            super::helpers::classify_call_kind_from_raw(&system_instructions, &first_user_text);
+
         // Extract model from request body JSON "model" field
         let model = body
             .as_ref()
@@ -379,6 +388,7 @@ impl GenAIBuilder {
             is_sse,
             model,
             provider,
+            call_kind: call_kind.to_string(),
         })
     }
 

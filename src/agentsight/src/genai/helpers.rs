@@ -11,6 +11,148 @@ use crate::analyzer::ParsedApiMessage;
 use crate::config::default_cmdline_rules;
 use crate::discovery::matcher::{CmdlineGlobMatcher, ProcessContext};
 
+/// LLM call classification: Main (normal), Recap (compaction/summary), WebSearch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CallKind {
+    Main,
+    Recap,
+    WebSearch,
+}
+
+impl CallKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CallKind::Main => "main",
+            CallKind::Recap => "recap",
+            CallKind::WebSearch => "web_search",
+        }
+    }
+}
+
+/// Classify an LLM call based on request content (dual-path: system + first-user).
+///
+/// Conservative: unmatched → Main (zero false positives > recall).
+/// Signatures are from real captures (case-sensitive .contains()).
+pub(super) fn classify_call_kind(request: &LLMRequest) -> CallKind {
+    // Collect system instructions text
+    let system_text: String = request
+        .messages
+        .iter()
+        .filter(|m| m.role == "system")
+        .filter_map(|m| m.parts.first())
+        .filter_map(|p| match p {
+            MessagePart::Text { content } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // ① Check system_instructions (Cosh patterns)
+    if !system_text.is_empty() {
+        // Cosh recap/compaction: both markers present
+        if system_text.contains("summarizes internal chat history")
+            && system_text.contains("<state_snapshot>")
+        {
+            return CallKind::Recap;
+        }
+        // Cosh recap/project-summary
+        if system_text.contains("specialized context summarizer") {
+            return CallKind::Recap;
+        }
+    }
+
+    // ② Check first-user text (Claude Code patterns + Cosh tool-output)
+    let first_user_text: Option<&str> = request
+        .messages
+        .iter()
+        .filter(|m| m.role == "user")
+        .filter_map(|m| m.parts.first())
+        .filter_map(|p| match p {
+            MessagePart::Text { content } => Some(content.as_str()),
+            _ => None,
+        })
+        .next();
+
+    if let Some(text) = first_user_text {
+        // Cosh tool-output + Claude Code recap (both → Recap)
+        if text.starts_with("Summarize the following tool output to be a maximum of")
+            || (text
+                .contains("Your task is to create a detailed summary of the conversation so far")
+                && text.contains("Do NOT call any tools"))
+        {
+            return CallKind::Recap;
+        }
+        // Claude Code web_search
+        if text.contains("Perform a web search for the query:") {
+            return CallKind::WebSearch;
+        }
+    }
+
+    // ③ Default: Main (conservative, zero false positives)
+    CallKind::Main
+}
+
+/// Classify an LLM call from raw JSON strings (pending-write path).
+///
+/// `system_instructions` is the serialized JSON array of system messages.
+/// `first_user_text` is the extracted first user message text.
+///
+/// This mirrors [`classify_call_kind`] but operates on raw strings from the
+/// HTTP body rather than the structured `LLMRequest`, used in
+/// `build_pending_from_request` where full semantic parsing has not occurred.
+pub(super) fn classify_call_kind_from_raw(
+    system_instructions: &Option<String>,
+    first_user_text: &str,
+) -> &'static str {
+    let sys_text = system_instructions
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<Vec<serde_json::Value>>(s).ok())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| {
+                    let c = m.get("content")?;
+                    if let Some(s) = c.as_str() {
+                        return Some(s.to_string());
+                    }
+                    if let Some(arr) = c.as_array() {
+                        let text: String = arr
+                            .iter()
+                            .filter_map(|item| {
+                                if item.get("type").and_then(|t| t.as_str()) == Some("text") {
+                                    item.get("text").and_then(|t| t.as_str())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        if !text.is_empty() {
+                            return Some(text);
+                        }
+                    }
+                    None
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+
+    if (sys_text.contains("summarizes internal chat history")
+        && sys_text.contains("<state_snapshot>"))
+        || sys_text.contains("specialized context summarizer")
+        || first_user_text.starts_with("Summarize the following tool output to be a maximum of")
+        || (first_user_text
+            .contains("Your task is to create a detailed summary of the conversation so far")
+            && first_user_text.contains("Do NOT call any tools"))
+    {
+        "recap"
+    } else if first_user_text.contains("Perform a web search for the query:") {
+        "web_search"
+    } else {
+        "main"
+    }
+}
+
 impl GenAIBuilder {
     /// Check if the path indicates an LLM API call
     pub(super) fn is_llm_api_path(&self, path: &str) -> bool {
@@ -285,6 +427,112 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    fn make_llm_request(messages: Vec<InputMessage>) -> LLMRequest {
+        LLMRequest {
+            messages,
+            temperature: None,
+            max_tokens: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            top_p: None,
+            top_k: None,
+            seed: None,
+            stop_sequences: None,
+            stream: false,
+            tools: None,
+            raw_body: None,
+        }
+    }
+
+    #[test]
+    fn test_classify_cosh_compaction_recap() {
+        let req = make_llm_request(vec![InputMessage {
+            role: "system".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "This summarizes internal chat history with <state_snapshot> data"
+                    .to_string(),
+            }],
+            name: None,
+        }]);
+        assert_eq!(classify_call_kind(&req), CallKind::Recap);
+    }
+
+    #[test]
+    fn test_classify_cosh_project_summary_recap() {
+        let req = make_llm_request(vec![InputMessage {
+            role: "system".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "You are a specialized context summarizer for project files".to_string(),
+            }],
+            name: None,
+        }]);
+        assert_eq!(classify_call_kind(&req), CallKind::Recap);
+    }
+
+    #[test]
+    fn test_classify_cosh_tool_output_recap() {
+        let req = make_llm_request(vec![InputMessage {
+            role: "user".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "Summarize the following tool output to be a maximum of 500 tokens: ..."
+                    .to_string(),
+            }],
+            name: None,
+        }]);
+        assert_eq!(classify_call_kind(&req), CallKind::Recap);
+    }
+
+    #[test]
+    fn test_classify_claude_web_search() {
+        let req = make_llm_request(vec![InputMessage {
+            role: "user".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "Perform a web search for the query: rust async programming".to_string(),
+            }],
+            name: None,
+        }]);
+        assert_eq!(classify_call_kind(&req), CallKind::WebSearch);
+    }
+
+    #[test]
+    fn test_classify_claude_recap() {
+        let req = make_llm_request(vec![InputMessage {
+            role: "user".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "Your task is to create a detailed summary of the conversation so far. Do NOT call any tools during this.".to_string(),
+            }],
+            name: None,
+        }]);
+        assert_eq!(classify_call_kind(&req), CallKind::Recap);
+    }
+
+    #[test]
+    fn test_classify_normal_call_not_misclassified() {
+        let req = make_llm_request(vec![
+            InputMessage {
+                role: "system".to_string(),
+                parts: vec![MessagePart::Text {
+                    content: "You are Copilot Shell, a helpful assistant.".to_string(),
+                }],
+                name: None,
+            },
+            InputMessage {
+                role: "user".to_string(),
+                parts: vec![MessagePart::Text {
+                    content: "explain this code".to_string(),
+                }],
+                name: None,
+            },
+        ]);
+        assert_eq!(classify_call_kind(&req), CallKind::Main);
+    }
+
+    #[test]
+    fn test_classify_empty_request_is_main() {
+        let req = make_llm_request(vec![]);
+        assert_eq!(classify_call_kind(&req), CallKind::Main);
+    }
+
     #[test]
     fn test_is_llm_api_path() {
         let builder = GenAIBuilder::new();
@@ -454,6 +702,131 @@ mod tests {
         let cache = HashMap::new();
         let result = GenAIBuilder::resolve_agent_name_from_comm("random_process", 99, &cache);
         assert!(result.is_none());
+    }
+
+    // ─── classify_call_kind_from_raw tests ─────────────────────────────────────
+
+    use super::classify_call_kind_from_raw;
+
+    #[test]
+    fn test_raw_classify_recap_cosh_compaction() {
+        // system_instructions contains both markers
+        let sys = Some(
+            serde_json::to_string(&serde_json::json!([
+                {"content": "This summarizes internal chat history and <state_snapshot> data"}
+            ]))
+            .unwrap(),
+        );
+        assert_eq!(classify_call_kind_from_raw(&sys, ""), "recap");
+    }
+
+    #[test]
+    fn test_raw_classify_recap_specialized_summarizer() {
+        let sys = Some(
+            serde_json::to_string(&serde_json::json!([
+                {"content": "You are a specialized context summarizer"}
+            ]))
+            .unwrap(),
+        );
+        assert_eq!(classify_call_kind_from_raw(&sys, ""), "recap");
+    }
+
+    #[test]
+    fn test_raw_classify_recap_tool_output() {
+        let first_user = "Summarize the following tool output to be a maximum of 500 tokens: ...";
+        assert_eq!(classify_call_kind_from_raw(&None, first_user), "recap");
+    }
+
+    #[test]
+    fn test_raw_classify_recap_claude_code() {
+        let first_user = "Your task is to create a detailed summary of the conversation so far. Please Do NOT call any tools in this turn.";
+        assert_eq!(classify_call_kind_from_raw(&None, first_user), "recap");
+    }
+
+    #[test]
+    fn test_raw_classify_web_search() {
+        let first_user = "Perform a web search for the query: rust async";
+        assert_eq!(classify_call_kind_from_raw(&None, first_user), "web_search");
+    }
+
+    #[test]
+    fn test_raw_classify_main_default() {
+        assert_eq!(
+            classify_call_kind_from_raw(&None, "explain this code"),
+            "main"
+        );
+    }
+
+    #[test]
+    fn test_raw_classify_main_no_sys_instructions() {
+        assert_eq!(classify_call_kind_from_raw(&None, ""), "main");
+    }
+
+    #[test]
+    fn test_raw_classify_content_array_format() {
+        // system_instructions with content as array of {type, text} objects
+        let sys = Some(
+            serde_json::to_string(&serde_json::json!([
+                {"content": [{"type": "text", "text": "This summarizes internal chat history"}, {"type": "text", "text": "and <state_snapshot> data"}]}
+            ]))
+            .unwrap(),
+        );
+        assert_eq!(classify_call_kind_from_raw(&sys, ""), "recap");
+    }
+
+    #[test]
+    fn test_raw_classify_invalid_json_sys_instructions() {
+        // Invalid JSON in system_instructions → falls through to first_user_text
+        let sys = Some("not valid json".to_string());
+        assert_eq!(classify_call_kind_from_raw(&sys, ""), "main");
+    }
+
+    #[test]
+    fn test_raw_classify_partial_recap_markers_not_enough() {
+        // Only one of the two markers → not recap
+        let sys = Some(
+            serde_json::to_string(&serde_json::json!([
+                {"content": "This summarizes internal chat history without snapshot"}
+            ]))
+            .unwrap(),
+        );
+        assert_eq!(classify_call_kind_from_raw(&sys, ""), "main");
+    }
+
+    #[test]
+    fn test_call_kind_as_str() {
+        assert_eq!(CallKind::Main.as_str(), "main");
+        assert_eq!(CallKind::Recap.as_str(), "recap");
+        assert_eq!(CallKind::WebSearch.as_str(), "web_search");
+    }
+
+    #[test]
+    fn test_classify_with_non_text_parts_system() {
+        // System message with only a ToolCall part → no text extracted → Main
+        let req = make_llm_request(vec![InputMessage {
+            role: "system".to_string(),
+            parts: vec![MessagePart::ToolCall {
+                id: None,
+                name: "read_file".to_string(),
+                arguments: None,
+            }],
+            name: None,
+        }]);
+        assert_eq!(classify_call_kind(&req), CallKind::Main);
+    }
+
+    #[test]
+    fn test_classify_with_non_text_parts_user() {
+        // User message with ToolCallResponse part → first_user_text is None → Main
+        let req = make_llm_request(vec![InputMessage {
+            role: "user".to_string(),
+            parts: vec![MessagePart::ToolCallResponse {
+                id: Some("tc-1".to_string()),
+                response: serde_json::json!({"result": "ok"}),
+            }],
+            name: None,
+        }]);
+        assert_eq!(classify_call_kind(&req), CallKind::Main);
     }
 
     #[test]

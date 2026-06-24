@@ -216,14 +216,12 @@ impl LogtailExporter {
         let label = if dynamic { "dynamic" } else { "fixed" };
         if encryptor.is_none() {
             log::info!(
-                "Logtail exporter ({}): encryption disabled (no public key configured)",
-                label
+                "Logtail exporter ({label}): encryption disabled (no public key configured)"
             );
         }
         if !trace_enabled {
             log::info!(
-                "Logtail exporter ({}): traceEnabled=false, conversation content fields (gen_ai.system_instructions, gen_ai.input.messages, gen_ai.output.messages) will NOT be uploaded",
-                label
+                "Logtail exporter ({label}): traceEnabled=false, conversation content fields (gen_ai.system_instructions, gen_ai.input.messages, gen_ai.output.messages) will NOT be uploaded"
             );
         }
         LogtailExporter {

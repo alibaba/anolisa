@@ -651,6 +651,7 @@ mod tests {
                 is_sse: false,
                 model: None,
                 provider: None,
+                call_kind: "main".to_string(),
             })
             .unwrap();
 

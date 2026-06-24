@@ -436,7 +436,9 @@ fn test_get_agent_token_summary_empty() {
 #[test]
 fn test_list_sessions() {
     let (store, path) = create_populated_store("list_sess");
-    let r = store.list_sessions(BASE_NS, BASE_NS + 6 * STEP_NS).unwrap();
+    let r = store
+        .list_sessions(BASE_NS, BASE_NS + 6 * STEP_NS, true)
+        .unwrap();
     assert_eq!(r.len(), 2);
     // sess-1 last_seen=base+5s > sess-2 base+4s
     assert_eq!(r[0].session_id, "sess-1");
@@ -518,7 +520,9 @@ fn test_get_tool_call_turn_indices() {
 #[test]
 fn test_list_traces_by_session() {
     let (store, path) = create_populated_store("traces");
-    let r = store.list_traces_by_session("sess-1", None, None).unwrap();
+    let r = store
+        .list_traces_by_session("sess-1", None, None, true)
+        .unwrap();
     assert_eq!(r.len(), 2);
     let c1 = r.iter().find(|t| t.conversation_id == "conv-1").unwrap();
     assert_eq!(c1.call_count, 3);
@@ -533,7 +537,7 @@ fn test_list_traces_by_session() {
 fn test_list_traces_by_session_with_time_range() {
     let (store, path) = create_populated_store("traces_range");
     let r = store
-        .list_traces_by_session("sess-1", Some(BASE_NS), Some(BASE_NS + STEP_NS))
+        .list_traces_by_session("sess-1", Some(BASE_NS), Some(BASE_NS + STEP_NS), true)
         .unwrap();
     assert_eq!(r.len(), 1); // only conv-1
     assert_eq!(r[0].call_count, 2); // call-1, call-2
@@ -654,6 +658,7 @@ fn test_insert_pending() {
         is_sse: true,
         model: Some("gpt-4".to_string()),
         provider: Some("openai".to_string()),
+        call_kind: "main".to_string(),
     };
     store.insert_pending(&info).unwrap();
     let conn = store.conn.lock().unwrap();
@@ -793,4 +798,111 @@ fn test_wal_checkpoint_methods() {
     store.checkpoint().unwrap();
     store.wal_checkpoint().unwrap();
     cleanup_db(&path);
+}
+
+// ─── list_sessions / list_traces call_kind filter tests ──────────────────────
+
+fn make_store_with_pending(records: &[(&str, &str, &str, &str, i64)]) -> GenAISqliteStore {
+    let path = std::env::temp_dir().join(format!(
+        "test_ck_{}.db",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+    for (call_id, sid, cid, kind, ts) in records {
+        let info = PendingCallInfo {
+            call_id: call_id.to_string(),
+            trace_id: None,
+            conversation_id: Some(cid.to_string()),
+            session_id: Some(sid.to_string()),
+            start_timestamp_ns: *ts as u64,
+            pid: 1,
+            process_name: "test".to_string(),
+            agent_name: Some("test-agent".to_string()),
+            http_method: None,
+            http_path: None,
+            input_messages: None,
+            system_instructions: None,
+            user_query: None,
+            is_sse: false,
+            model: Some("gpt-4".to_string()),
+            provider: Some("openai".to_string()),
+            call_kind: kind.to_string(),
+        };
+        store.insert_pending(&info).unwrap();
+    }
+    store
+}
+
+#[test]
+fn test_list_sessions_excludes_auxiliary() {
+    let store = make_store_with_pending(&[
+        ("c1", "sess-a", "conv-1", "main", 1000),
+        ("c2", "sess-a", "conv-2", "recap", 2000),
+        ("c3", "sess-b", "conv-3", "web_search", 3000),
+        ("c4", "sess-b", "conv-4", "main", 4000),
+    ]);
+    let sessions = store.list_sessions(0, 10000, false).unwrap();
+    assert_eq!(sessions.len(), 2);
+    for s in &sessions {
+        assert!(s.conversation_count >= 1);
+    }
+    let sessions_all = store.list_sessions(0, 10000, true).unwrap();
+    assert_eq!(sessions_all.len(), 2);
+    let total_convs: i64 = sessions_all.iter().map(|s| s.conversation_count).sum();
+    assert_eq!(total_convs, 4);
+}
+
+#[test]
+fn test_list_sessions_only_auxiliary_hidden() {
+    let store = make_store_with_pending(&[
+        ("c1", "sess-recap", "conv-1", "recap", 1000),
+        ("c2", "sess-recap", "conv-2", "web_search", 2000),
+    ]);
+    let sessions = store.list_sessions(0, 10000, false).unwrap();
+    assert!(
+        sessions.is_empty(),
+        "sessions with only auxiliary calls should be hidden"
+    );
+    let sessions_all = store.list_sessions(0, 10000, true).unwrap();
+    assert_eq!(sessions_all.len(), 1);
+}
+
+#[test]
+fn test_list_traces_by_session_excludes_auxiliary() {
+    let store = make_store_with_pending(&[
+        ("c1", "sess-x", "conv-main", "main", 1000),
+        ("c2", "sess-x", "conv-recap", "recap", 2000),
+        ("c3", "sess-x", "conv-main", "main", 3000),
+    ]);
+    let traces = store
+        .list_traces_by_session("sess-x", None, None, false)
+        .unwrap();
+    assert_eq!(traces.len(), 1);
+    assert_eq!(traces[0].conversation_id, "conv-main");
+    assert_eq!(traces[0].call_count, 2);
+    let traces_all = store
+        .list_traces_by_session("sess-x", None, None, true)
+        .unwrap();
+    assert_eq!(traces_all.len(), 2);
+}
+
+#[test]
+fn test_list_traces_call_kind_filter_with_time_range() {
+    let store = make_store_with_pending(&[
+        ("c1", "sess-t", "conv-a", "main", 1000),
+        ("c2", "sess-t", "conv-b", "recap", 2000),
+        ("c3", "sess-t", "conv-c", "main", 5000),
+    ]);
+    let traces = store
+        .list_traces_by_session("sess-t", Some(0), Some(3000), false)
+        .unwrap();
+    assert_eq!(traces.len(), 1);
+    assert_eq!(traces[0].conversation_id, "conv-a");
+    let traces_all = store
+        .list_traces_by_session("sess-t", Some(0), Some(3000), true)
+        .unwrap();
+    assert_eq!(traces_all.len(), 2);
 }

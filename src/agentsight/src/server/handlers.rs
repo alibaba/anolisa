@@ -42,6 +42,8 @@ pub struct SessionQuery {
     pub start_ns: Option<i64>,
     /// End of time range in nanoseconds (default: now)
     pub end_ns: Option<i64>,
+    /// Include auxiliary calls (recap, web_search) in results (default: false)
+    pub include_auxiliary: Option<bool>,
 }
 
 /// GET /api/sessions?start_ns=<i64>&end_ns=<i64>
@@ -60,11 +62,13 @@ pub async fn list_sessions(
         .unwrap_or_else(|| end_ns - 86_400_000_000_000i64); // 24 h
 
     match GenAISqliteStore::new_with_path(db_path) {
-        Ok(store) => match store.list_sessions(start_ns, end_ns) {
-            Ok(sessions) => HttpResponse::Ok().json(sessions),
-            Err(e) => HttpResponse::InternalServerError()
-                .json(serde_json::json!({"error": e.to_string()})),
-        },
+        Ok(store) => {
+            match store.list_sessions(start_ns, end_ns, query.include_auxiliary.unwrap_or(false)) {
+                Ok(sessions) => HttpResponse::Ok().json(sessions),
+                Err(e) => HttpResponse::InternalServerError()
+                    .json(serde_json::json!({"error": e.to_string()})),
+            }
+        }
         Err(e) => {
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
         }
@@ -88,7 +92,12 @@ pub async fn list_traces_by_session(
     let end_ns = query.end_ns;
 
     match GenAISqliteStore::new_with_path(db_path) {
-        Ok(store) => match store.list_traces_by_session(&session_id, start_ns, end_ns) {
+        Ok(store) => match store.list_traces_by_session(
+            &session_id,
+            start_ns,
+            end_ns,
+            query.include_auxiliary.unwrap_or(false),
+        ) {
             Ok(traces) => HttpResponse::Ok().json(traces),
             Err(e) => HttpResponse::InternalServerError()
                 .json(serde_json::json!({"error": e.to_string()})),
@@ -152,6 +161,8 @@ pub async fn get_conversation_events(
 pub struct TimeRangeQuery {
     pub start_ns: Option<i64>,
     pub end_ns: Option<i64>,
+    /// Include auxiliary calls (recap, web_search) in results (default: false)
+    pub include_auxiliary: Option<bool>,
 }
 
 /// Query parameters for time-series endpoints
