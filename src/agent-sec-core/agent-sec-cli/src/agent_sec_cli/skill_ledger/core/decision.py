@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import shutil
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -13,8 +15,12 @@ from agent_sec_cli.skill_ledger.core.checker import check
 from agent_sec_cli.skill_ledger.core.exposure import build_exposure_summary
 from agent_sec_cli.skill_ledger.core.file_hasher import (
     compute_file_hashes,
-    compute_snapshot_file_hashes,
     diff_file_hashes,
+)
+from agent_sec_cli.skill_ledger.core.manifest_helpers import (
+    safe_load_latest_manifest,
+    snapshot_matches_manifest,
+    user_decision_to_dict,
 )
 from agent_sec_cli.skill_ledger.core.manifest_integrity import (
     verify_manifest_integrity,
@@ -42,6 +48,7 @@ from agent_sec_cli.skill_ledger.utils import utc_now_iso, validate_skill_dir
 _TRUSTED_CURRENT_STATUSES = {"pass", "warn", "deny"}
 _ALLOWING_DECISIONS = {"allow", "always_allow", "rollback"}
 _ROOT_COPY_EXCLUDED = {SKILL_META_DIR, ".git"}
+_DECISION_LOCK = "decision.lock"
 
 
 def decide_skill(
@@ -68,10 +75,11 @@ def decide_skill(
             "decision action must be one of: allow, always_allow, block, rollback"
         )
 
-    manifest, status_result = _ensure_current_signed_version(skill_dir, backend)
-    manifest.userDecision = UserDecision(action=action, reason=reason)
-    _sign_and_save(skill_dir, manifest, backend)
-    activation = _refresh_activation(skill_dir, backend)
+    with _skill_decision_lock(skill_dir):
+        manifest, status_result = _ensure_current_signed_version(skill_dir, backend)
+        manifest.userDecision = UserDecision(action=action, reason=reason)
+        _sign_and_save(skill_dir, manifest, backend)
+        activation = _refresh_activation(skill_dir, backend)
     return _decision_payload(
         skill_dir,
         manifest,
@@ -83,15 +91,20 @@ def decide_skill(
 def clear_decision(skill_dir: str, backend: SigningBackend) -> dict[str, Any]:
     """Remove the latest version's user decision and refresh activation."""
     validate_skill_dir(skill_dir)
-    manifest = load_latest_manifest(skill_dir)
-    if manifest is None:
-        raise SkillLedgerError("cannot clear decision: skill has no signed manifest")
-    valid, error = verify_manifest_integrity(manifest, backend)
-    if not valid:
-        raise SkillLedgerError(f"cannot clear decision on untrusted manifest: {error}")
-    manifest.userDecision = None
-    _sign_and_save(skill_dir, manifest, backend)
-    activation = _refresh_activation(skill_dir, backend)
+    with _skill_decision_lock(skill_dir):
+        manifest = load_latest_manifest(skill_dir)
+        if manifest is None:
+            raise SkillLedgerError(
+                "cannot clear decision: skill has no signed manifest"
+            )
+        valid, error = verify_manifest_integrity(manifest, backend)
+        if not valid:
+            raise SkillLedgerError(
+                f"cannot clear decision on untrusted manifest: {error}"
+            )
+        manifest.userDecision = None
+        _sign_and_save(skill_dir, manifest, backend)
+        activation = _refresh_activation(skill_dir, backend)
     return _decision_payload(skill_dir, manifest, status=None, activation=activation)
 
 
@@ -104,40 +117,41 @@ def rollback_skill(
 ) -> dict[str, Any]:
     """Restore a trusted snapshot to the root and record rollback as a new version."""
     validate_skill_dir(skill_dir)
-    target_manifest = _load_trusted_version(skill_dir, target_version_id, backend)
-    target_snapshot = snapshot_dir_path(skill_dir, target_version_id)
-    if not target_snapshot.is_dir():
-        raise SkillLedgerError(f"rollback snapshot not found: {target_version_id}")
-    if not _snapshot_matches_manifest(target_snapshot, target_manifest):
-        raise SkillLedgerError(
-            f"rollback snapshot does not match manifest: {target_version_id}"
-        )
+    with _skill_decision_lock(skill_dir):
+        target_manifest = _load_trusted_version(skill_dir, target_version_id, backend)
+        target_snapshot = snapshot_dir_path(skill_dir, target_version_id)
+        if not target_snapshot.is_dir():
+            raise SkillLedgerError(f"rollback snapshot not found: {target_version_id}")
+        if not snapshot_matches_manifest(target_snapshot, target_manifest):
+            raise SkillLedgerError(
+                f"rollback snapshot does not match manifest: {target_version_id}"
+            )
 
-    backup_dir = _backup_root(skill_dir)
-    try:
-        _replace_root_from_snapshot(skill_dir, target_snapshot)
-        scan_skill(skill_dir, backend, force=True)
-        manifest = load_latest_manifest(skill_dir)
-        if manifest is None:
-            raise SkillLedgerError("rollback scan did not create a manifest")
-        manifest.userDecision = UserDecision(
-            action="rollback",
-            targetVersionId=target_version_id,
-            reason=reason,
-        )
-        _sign_and_save(skill_dir, manifest, backend)
-    except BaseException:
-        _replace_root_from_snapshot(skill_dir, backup_dir)
-        raise
+        backup_dir = _backup_root(skill_dir)
+        try:
+            _replace_root_from_snapshot(skill_dir, target_snapshot)
+            scan_skill(skill_dir, backend, force=True)
+            manifest = load_latest_manifest(skill_dir)
+            if manifest is None:
+                raise SkillLedgerError("rollback scan did not create a manifest")
+            manifest.userDecision = UserDecision(
+                action="rollback",
+                targetVersionId=target_version_id,
+                reason=reason,
+            )
+            _sign_and_save(skill_dir, manifest, backend)
+        except BaseException:
+            _replace_root_from_snapshot(skill_dir, backup_dir)
+            raise
 
-    activation = _refresh_activation(skill_dir, backend)
-    return _decision_payload(
-        skill_dir,
-        manifest,
-        status=manifest.scanStatus,
-        activation=activation,
-        extra={"rollbackBackup": str(backup_dir)},
-    )
+        activation = _refresh_activation(skill_dir, backend)
+        return _decision_payload(
+            skill_dir,
+            manifest,
+            status=manifest.scanStatus,
+            activation=activation,
+            extra={"rollbackBackup": str(backup_dir)},
+        )
 
 
 def show_skill(
@@ -152,8 +166,12 @@ def show_skill(
         {"activationPolicy": policy} if policy is not None else None
     )
     status_result = check(skill_dir, backend)
-    summary = build_exposure_summary(skill_dir, backend)
-    latest_manifest = _safe_load_latest_manifest(skill_dir)
+    summary = build_exposure_summary(
+        skill_dir,
+        backend,
+        status_result=status_result,
+    )
+    latest_manifest = safe_load_latest_manifest(skill_dir)
     active_version = summary.get("activeVersionId")
     active_manifest = (
         load_version_manifest(skill_dir, active_version) if active_version else None
@@ -196,7 +214,7 @@ def export_skill(
     snapshot = snapshot_dir_path(skill_dir, version_id)
     if not snapshot.is_dir():
         raise SkillLedgerError(f"snapshot not found for version {version_id}")
-    if not _snapshot_matches_manifest(snapshot, manifest):
+    if not snapshot_matches_manifest(snapshot, manifest):
         raise SkillLedgerError(f"export snapshot does not match manifest: {version_id}")
     out_dir = Path(output)
     if out_dir.exists() and any(out_dir.iterdir()):
@@ -320,14 +338,7 @@ def _decision_payload(
 def _decision_dict(manifest: SignedManifest | None) -> dict[str, Any] | None:
     if manifest is None or manifest.userDecision is None:
         return None
-    return manifest.userDecision.model_dump(exclude_none=True)
-
-
-def _safe_load_latest_manifest(skill_dir: str) -> SignedManifest | None:
-    try:
-        return load_latest_manifest(skill_dir)
-    except (json.JSONDecodeError, ValueError):
-        return None
+    return user_decision_to_dict(manifest.userDecision)
 
 
 def _manifest_summary(
@@ -417,7 +428,7 @@ def _newest_trusted_decision(
         valid, _ = verify_manifest_integrity(manifest, backend)
         if not valid:
             continue
-        if not _snapshot_matches_manifest(
+        if not snapshot_matches_manifest(
             snapshot_dir_path(skill_dir, version_id),
             manifest,
         ):
@@ -479,15 +490,16 @@ def _collect_findings(manifest: SignedManifest) -> list[dict[str, Any]]:
     return [finding for scan in manifest.scans for finding in scan.findings]
 
 
-def _snapshot_matches_manifest(
-    snapshot: Path,
-    manifest: SignedManifest,
-) -> bool:
-    try:
-        snapshot_hashes = compute_snapshot_file_hashes(snapshot)
-    except ValueError:
-        return False
-    return bool(diff_file_hashes(manifest.fileHashes, snapshot_hashes)["match"])
+@contextmanager
+def _skill_decision_lock(skill_dir: str):
+    meta = ensure_skill_meta(skill_dir)
+    lock_path = meta / _DECISION_LOCK
+    with lock_path.open("a", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _backup_root(skill_dir: str) -> Path:
@@ -506,8 +518,12 @@ def _replace_root_from_snapshot(skill_dir: str, snapshot: Path) -> None:
     for entry in list(root.iterdir()):
         if entry.name in _ROOT_COPY_EXCLUDED:
             continue
-        if entry.is_dir():
+        if entry.is_symlink():
+            entry.unlink()
+        elif entry.is_dir():
             shutil.rmtree(entry)
+        elif entry.is_file():
+            entry.unlink()
         else:
             entry.unlink()
     _copy_root(snapshot, root)
@@ -515,11 +531,15 @@ def _replace_root_from_snapshot(skill_dir: str, snapshot: Path) -> None:
 
 def _copy_root(src: Path, dst: Path) -> None:
     dst.mkdir(parents=True, exist_ok=True)
-    for entry in sorted(src.iterdir()):
-        if entry.name in _ROOT_COPY_EXCLUDED:
+    for entry in sorted(src.rglob("*")):
+        if entry.is_symlink():
             continue
-        target = dst / entry.name
+        rel = entry.relative_to(src)
+        if any(part in _ROOT_COPY_EXCLUDED for part in rel.parts):
+            continue
+        target = dst / rel
         if entry.is_dir():
-            shutil.copytree(entry, target, symlinks=False)
+            target.mkdir(parents=True, exist_ok=True)
         elif entry.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(entry, target)

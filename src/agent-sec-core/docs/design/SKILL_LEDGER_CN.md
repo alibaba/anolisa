@@ -154,6 +154,8 @@ AI Agent 通过加载 Skill（结构化指令 + 辅助脚本）扩展能力。Sk
 
 `allow` 只允许当前版本；`always_allow` 允许当前版本并继承到后续新版本，直到用户改为其它决策或清除；`block` 只作用于当前最新版本，不继承到未来版本；`rollback` 会把目标 snapshot 恢复到 skill 根目录，扫描生成新版本，并在新版本记录回退决策。`userDecision = null` 表示没有用户决策，此时回到全局 activation 行为。旧 `policy` 字段仅为兼容保留，新逻辑不读取。
 
+`userDecision` 参与 `manifestHash` 与签名计算，这是为了防止用户决策被离线篡改。带 `userDecision` 字段的 manifest 属于本版本 schema；混合部署时，旧版 `agent-sec-cli` 可能无法按新字段重算相同 manifest hash，从而把该 manifest 判为 tampered。生产环境应将写入与读取 Skill Ledger manifest 的组件一起升级。
+
 ### 防篡改签名架构
 
 #### 威胁模型

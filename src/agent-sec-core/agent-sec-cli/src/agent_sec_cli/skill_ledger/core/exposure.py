@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -10,9 +9,10 @@ from agent_sec_cli.skill_ledger.activation_policy import (
     allowed_scan_statuses_for_policy,
 )
 from agent_sec_cli.skill_ledger.core.checker import check
-from agent_sec_cli.skill_ledger.core.file_hasher import (
-    compute_snapshot_file_hashes,
-    diff_file_hashes,
+from agent_sec_cli.skill_ledger.core.manifest_helpers import (
+    safe_load_latest_manifest,
+    snapshot_matches_manifest,
+    user_decision_to_dict,
 )
 from agent_sec_cli.skill_ledger.core.manifest_integrity import (
     verify_manifest_integrity,
@@ -21,7 +21,6 @@ from agent_sec_cli.skill_ledger.core.version_chain import (
     SKILL_META_DIR,
     VERSIONS_DIR,
     list_version_ids,
-    load_latest_manifest,
     load_version_manifest,
     snapshot_dir_path,
 )
@@ -40,7 +39,12 @@ PENDING_DECISION_SNAPSHOT = "__pending_decision__.snapshot"
 PENDING_DECISION_TARGET = f"{SKILL_META_DIR}/{VERSIONS_DIR}/{PENDING_DECISION_SNAPSHOT}"
 
 
-def build_exposure_summary(skill_dir: str, backend: SigningBackend) -> dict[str, Any]:
+def build_exposure_summary(
+    skill_dir: str,
+    backend: SigningBackend,
+    *,
+    status_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Return the single source of truth for runtime exposure and warnings.
 
     The summary intentionally stays small so hooks, ``show``, and activation
@@ -48,9 +52,10 @@ def build_exposure_summary(skill_dir: str, backend: SigningBackend) -> dict[str,
     branches.
     """
     validate_skill_dir(skill_dir)
-    status_result = check(skill_dir, backend)
+    if status_result is None:
+        status_result = check(skill_dir, backend)
     latest_status = str(status_result.get("status", "unknown"))
-    latest_manifest = _safe_load_latest_manifest(skill_dir)
+    latest_manifest = safe_load_latest_manifest(skill_dir)
     latest_version = _latest_version_id(status_result, latest_manifest)
 
     decision_candidate = _find_user_decision_candidate(skill_dir, backend)
@@ -175,7 +180,7 @@ def _summary(
         "latestVersionId": latest_version,
         "activeVersionId": active_version,
         "target": target,
-        "userDecision": _decision_dict(user_decision),
+        "userDecision": user_decision_to_dict(user_decision),
         "reasonCode": reason_code,
         "message": message,
     }
@@ -202,13 +207,6 @@ def _latest_version_id(
     if latest_manifest is not None:
         return latest_manifest.versionId
     return None
-
-
-def _safe_load_latest_manifest(skill_dir: str) -> SignedManifest | None:
-    try:
-        return load_latest_manifest(skill_dir)
-    except (json.JSONDecodeError, ValueError):
-        return None
 
 
 def _find_user_decision_candidate(
@@ -295,25 +293,8 @@ def _load_trusted_activation_manifest(
     valid, _ = verify_manifest_integrity(manifest, backend)
     if not valid:
         return None
-    if not _snapshot_matches_manifest(skill_dir, version_id, manifest):
+    if not snapshot_matches_manifest(
+        snapshot_dir_path(skill_dir, version_id), manifest
+    ):
         return None
     return manifest
-
-
-def _snapshot_matches_manifest(
-    skill_dir: str | Path,
-    version_id: str,
-    manifest: SignedManifest,
-) -> bool:
-    snapshot = snapshot_dir_path(skill_dir, version_id)
-    try:
-        snapshot_hashes = compute_snapshot_file_hashes(snapshot)
-    except ValueError:
-        return False
-    return bool(diff_file_hashes(manifest.fileHashes, snapshot_hashes)["match"])
-
-
-def _decision_dict(decision: UserDecision | None) -> dict[str, Any] | None:
-    if decision is None:
-        return None
-    return decision.model_dump(exclude_none=True)

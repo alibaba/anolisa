@@ -23,12 +23,15 @@ import os
 import re
 import shutil
 import tempfile
+import types
 from dataclasses import dataclass
 from pathlib import Path
 
 import agent_sec_cli.security_events as security_events
 import pytest
 from agent_sec_cli.cli import app as cli_app
+from agent_sec_cli.skill_ledger.core import decision as decision_core
+from agent_sec_cli.skill_ledger.core import exposure as exposure_core
 from agent_sec_cli.skill_ledger.core import resolver as resolver_core
 from agent_sec_cli.skill_ledger.core.resolver import resolve_activation
 from agent_sec_cli.skill_ledger.errors import KeyNotFoundError
@@ -2123,6 +2126,82 @@ def test_decide_rollback_restores_pass_snapshot_and_records_new_version(ws):
     assert activation["target"] == ".skill-meta/versions/v000003.snapshot"
 
 
+def test_decide_rollback_skips_root_symlinks_when_backup_restores(ws):
+    """Rollback must not follow current-root symlinks into backups or restores."""
+    skill = make_skill(ws.skills_dir, "decision-rollback-symlink", {"data.txt": "safe"})
+    env = ws.env()
+    pass_findings = write_findings_file(
+        ws.fixtures,
+        "decision-rollback-symlink-pass.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    deny_findings = write_findings_file(
+        ws.fixtures,
+        "decision-rollback-symlink-deny.json",
+        [{"rule": "deny", "level": "deny", "message": "deny"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(pass_findings)], env_extra=env
+    )
+    (skill / "data.txt").write_text("risky")
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(deny_findings)], env_extra=env
+    )
+    outside = ws.root / "outside-secret"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("do not copy")
+    (skill / "outside").symlink_to(outside, target_is_directory=True)
+
+    r = run_skill_ledger(
+        ["decide", str(skill), "--action", "rollback", "--version", "v000001"],
+        env_extra=env,
+    )
+    assert r.returncode == 0, f"rollback exit {r.returncode}: {r.stderr}"
+    out = parse_json_output(r.stdout)
+
+    backup = Path(out["rollbackBackup"])
+    assert not (backup / "outside").exists()
+    assert not (skill / "outside").exists()
+    assert (skill / "data.txt").read_text() == "safe"
+
+
+def test_decide_rollback_acquires_skill_lock(ws, monkeypatch):
+    skill = make_skill(ws.skills_dir, "decision-rollback-lock", {"data.txt": "safe"})
+    env = ws.env()
+    pass_findings = write_findings_file(
+        ws.fixtures,
+        "decision-rollback-lock-pass.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    deny_findings = write_findings_file(
+        ws.fixtures,
+        "decision-rollback-lock-deny.json",
+        [{"rule": "deny", "level": "deny", "message": "deny"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(pass_findings)], env_extra=env
+    )
+    (skill / "data.txt").write_text("risky")
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(deny_findings)], env_extra=env
+    )
+    flock_calls = []
+    fake_fcntl = types.SimpleNamespace(
+        LOCK_EX=1,
+        LOCK_UN=2,
+        flock=lambda _fd, operation: flock_calls.append(operation),
+    )
+    monkeypatch.setattr(decision_core, "fcntl", fake_fcntl, raising=False)
+
+    r = run_skill_ledger(
+        ["decide", str(skill), "--action", "rollback", "--version", "v000001"],
+        env_extra=env,
+    )
+
+    assert r.returncode == 0, f"rollback exit {r.returncode}: {r.stderr}"
+    assert flock_calls == [fake_fcntl.LOCK_EX, fake_fcntl.LOCK_UN]
+
+
 def test_decide_rollback_defaults_to_active_version(ws):
     """Rollback without --version restores the currently active snapshot."""
     write_skill_ledger_config(ws.root, {"activationPolicy": "pass_only"})
@@ -2183,6 +2262,19 @@ def test_decide_rollback_without_version_errors_when_active_is_empty(ws):
     assert "no active version" in r.stderr
 
 
+def test_decide_clear_and_action_are_mutually_exclusive(ws):
+    """The CLI rejects ambiguous decide input before reaching the backend."""
+    skill = make_skill(ws.skills_dir, "decision-clear-action", {"data.txt": "v1"})
+
+    r = run_skill_ledger(
+        ["decide", str(skill), "--clear", "--action", "allow"],
+        env_extra=ws.env(),
+    )
+
+    assert r.returncode == 1
+    assert "--clear and --action are mutually exclusive" in r.stderr
+
+
 def test_show_reports_active_latest_decision_and_root_match(ws):
     skill = make_skill(ws.skills_dir, "decision-show", {"data.txt": "v1"})
     env = ws.env()
@@ -2221,6 +2313,42 @@ def test_show_reports_active_latest_decision_and_root_match(ws):
     assert out["activationPolicy"] == "pass_warn_only"
     assert "active version is v000001" in out["consistencyReason"]
     assert out["warnings"]
+
+
+def test_show_reuses_exposure_summary_check_result(ws, monkeypatch):
+    """show should not check the same skill once directly and once via summary."""
+    skill = make_skill(ws.skills_dir, "decision-show-single-check", {"data.txt": "v1"})
+    env = ws.env()
+    pass_findings = write_findings_file(
+        ws.fixtures,
+        "decision-show-single-check-pass.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(pass_findings)], env_extra=env
+    )
+    real_check = decision_core.check
+    check_calls = []
+
+    def counted_check(skill_dir, backend):
+        check_calls.append(skill_dir)
+        return real_check(skill_dir, backend)
+
+    monkeypatch.setattr(decision_core, "check", counted_check)
+    monkeypatch.setattr(exposure_core, "check", counted_check)
+    previous = {key: os.environ.get(key) for key in env}
+    os.environ.update(env)
+    try:
+        out = decision_core.show_skill(str(skill), NativeEd25519Backend())
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    assert out["latestStatus"] == "pass"
+    assert check_calls == [str(skill)]
 
 
 def test_export_writes_snapshot_manifest_and_findings(ws):
@@ -2279,6 +2407,120 @@ def test_export_rejects_snapshot_hash_mismatch(ws):
 
     assert r.returncode != 0
     assert "snapshot does not match manifest" in r.stderr
+
+
+def test_export_active_rejects_pending_stub_without_real_active_version(ws):
+    """`active` export only accepts real ledger versions, not the review stub."""
+    skill = make_skill(
+        ws.skills_dir, "decision-export-active-pending", {"data.txt": "risk"}
+    )
+    env = ws.env()
+    findings = write_findings_file(
+        ws.fixtures,
+        "decision-export-active-pending-deny.json",
+        [{"rule": "deny", "level": "deny", "message": "deny"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(findings)], env_extra=env
+    )
+    out = resolve_skill_activation(skill, env, policy="pass_warn_only")
+    assert out["target"] == PENDING_DECISION_TARGET
+    assert out["activeVersionId"] is None
+
+    r = run_skill_ledger(
+        [
+            "export",
+            str(skill),
+            "--version",
+            "active",
+            "--output",
+            str(ws.root / "exported-active-pending"),
+        ],
+        env_extra=env,
+    )
+
+    assert r.returncode != 0
+    assert "no active version" in r.stderr
+
+
+def test_export_rejects_unknown_version_and_nonempty_output(ws):
+    skill = make_skill(ws.skills_dir, "decision-export-errors", {"data.txt": "v1"})
+    env = ws.env()
+    findings = write_findings_file(
+        ws.fixtures,
+        "decision-export-errors-pass.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(findings)], env_extra=env
+    )
+
+    unknown = run_skill_ledger(
+        [
+            "export",
+            str(skill),
+            "--version",
+            "v999999",
+            "--output",
+            str(ws.root / "exported-unknown"),
+        ],
+        env_extra=env,
+    )
+    assert unknown.returncode != 0
+    assert "unknown export version" in unknown.stderr
+
+    out_dir = ws.root / "exported-nonempty"
+    out_dir.mkdir()
+    (out_dir / "keep.txt").write_text("existing")
+    nonempty = run_skill_ledger(
+        [
+            "export",
+            str(skill),
+            "--version",
+            "latest",
+            "--output",
+            str(out_dir),
+        ],
+        env_extra=env,
+    )
+    assert nonempty.returncode != 0
+    assert "already exists and is not empty" in nonempty.stderr
+
+
+def test_resolver_target_helpers_and_empty_active_lookup(ws):
+    skill = make_skill(ws.skills_dir, "resolve-helper-targets", {"data.txt": "risk"})
+    env = ws.env()
+    findings = write_findings_file(
+        ws.fixtures,
+        "resolve-helper-targets-deny.json",
+        [{"rule": "deny", "level": "deny", "message": "deny"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(findings)], env_extra=env
+    )
+
+    previous = {key: os.environ.get(key) for key in env}
+    os.environ.update(env)
+    try:
+        backend = NativeEd25519Backend()
+        assert resolver_core.snapshot_target("v000007") == (
+            ".skill-meta/versions/v000007.snapshot"
+        )
+        assert resolver_core.pending_snapshot_target() == PENDING_DECISION_TARGET
+        assert (
+            resolver_core.find_latest_activation_snapshot(
+                skill,
+                backend,
+                policy="pass_warn_only",
+            )
+            is None
+        )
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def test_resolve_legacy_latest_scanned_policy_normalizes_and_activates_warn_snapshot(

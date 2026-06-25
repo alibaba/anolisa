@@ -1,7 +1,11 @@
 """Unit tests for security_middleware.backends.skill_ledger."""
 
+import json
 from copy import deepcopy
 
+from agent_sec_cli.security_middleware.backends import (
+    skill_ledger as backend_module,
+)
 from agent_sec_cli.security_middleware.backends.skill_ledger import (
     SkillLedgerBackend,
 )
@@ -377,3 +381,142 @@ def test_event_details_are_safe_copies_with_redacted_request():
         "key_created": True,
     }
     assert data == original
+
+
+def test_decide_backend_requires_action_unless_clear(monkeypatch):
+    backend = SkillLedgerBackend()
+
+    monkeypatch.setattr(backend, "_ensure_keys", lambda: (False, None, []))
+    monkeypatch.setattr(backend_module, "NativeEd25519Backend", lambda: object())
+
+    result = backend._do_decide(None, skill_dir="/tmp/demo")
+
+    assert result.success is False
+    assert result.exit_code == 1
+    assert "--action is required" in result.error
+
+
+def test_decide_backend_clear_includes_key_and_warnings(monkeypatch):
+    backend = SkillLedgerBackend()
+    key = {
+        "fingerprint": "sha256:key",
+        "publicKeyPath": "/keys/pub",
+        "privateKeyPath": "/keys/private",
+        "encrypted": False,
+    }
+
+    monkeypatch.setattr(
+        backend,
+        "_ensure_keys",
+        lambda: (True, key, ["created unencrypted test key"]),
+    )
+    monkeypatch.setattr(backend_module, "NativeEd25519Backend", lambda: object())
+
+    def fake_clear_decision(skill_dir, signing_backend):
+        return {
+            "status": "decided",
+            "skillName": "demo",
+            "versionId": "v000001",
+            "userDecision": None,
+        }
+
+    monkeypatch.setattr(backend_module, "clear_decision", fake_clear_decision)
+
+    result = backend._do_decide(None, skill_dir="/tmp/demo", clear=True)
+
+    assert result.success is True
+    data = json.loads(result.stdout)
+    assert data["command"] == "decide"
+    assert data["keyCreated"] is True
+    assert data["key"] == key
+    assert data["warnings"] == ["created unencrypted test key"]
+    assert result.data == data
+
+
+def test_decide_backend_maps_core_errors_to_action_result(monkeypatch):
+    backend = SkillLedgerBackend()
+
+    monkeypatch.setattr(backend, "_ensure_keys", lambda: (False, None, []))
+    monkeypatch.setattr(backend_module, "NativeEd25519Backend", lambda: object())
+
+    def fake_decide_skill(*args, **kwargs):
+        raise RuntimeError("decision failed")
+
+    monkeypatch.setattr(backend_module, "decide_skill", fake_decide_skill)
+
+    result = backend._do_decide(
+        None,
+        skill_dir="/tmp/demo",
+        decision_action="allow",
+    )
+
+    assert result.success is False
+    assert result.exit_code == 1
+    assert result.error == "decision failed"
+
+
+def test_show_backend_maps_core_errors_to_action_result(monkeypatch):
+    backend = SkillLedgerBackend()
+
+    monkeypatch.setattr(backend_module, "NativeEd25519Backend", lambda: object())
+
+    def fake_show_skill(*args, **kwargs):
+        raise RuntimeError("show failed")
+
+    monkeypatch.setattr(backend_module, "show_skill", fake_show_skill)
+
+    result = backend._do_show(None, skill_dir="/tmp/demo")
+
+    assert result.success is False
+    assert result.exit_code == 1
+    assert result.error == "show failed"
+
+
+def test_export_backend_success_and_failure(monkeypatch):
+    backend = SkillLedgerBackend()
+
+    monkeypatch.setattr(backend_module, "NativeEd25519Backend", lambda: object())
+
+    def fake_export_skill(skill_dir, signing_backend, *, version, output, policy):
+        return {
+            "skillName": "demo",
+            "versionId": version,
+            "output": output,
+            "policy": policy,
+        }
+
+    monkeypatch.setattr(backend_module, "export_skill", fake_export_skill)
+
+    result = backend._do_export(
+        None,
+        skill_dir="/tmp/demo",
+        version="latest",
+        output="/tmp/out",
+        policy="pass_warn_only",
+    )
+
+    assert result.success is True
+    data = json.loads(result.stdout)
+    assert data == {
+        "command": "export",
+        "skillName": "demo",
+        "versionId": "latest",
+        "output": "/tmp/out",
+        "policy": "pass_warn_only",
+    }
+    assert result.data == data
+
+    def fake_export_error(*args, **kwargs):
+        raise RuntimeError("export failed")
+
+    monkeypatch.setattr(backend_module, "export_skill", fake_export_error)
+
+    failed = backend._do_export(
+        None,
+        skill_dir="/tmp/demo",
+        version="latest",
+        output="/tmp/out",
+    )
+    assert failed.success is False
+    assert failed.exit_code == 1
+    assert failed.error == "export failed"
