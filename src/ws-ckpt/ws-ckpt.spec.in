@@ -138,6 +138,21 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Thu Jun 25 2026 ziqi02 <ziqi02@alibaba-inc.com> - 0.4.0-1
+- Added plugin install/uninstall subcommand
+- Added component.toml for anolisa-cli adapter discovery
+- Added rollback preview support with --preview parameter
+- Added elapsed time display after each CLI operation
+- Added auto-generated snapshot ID when --snapshot is omitted
+- Added SLS ops log output for dashboard metrics
+- Added optional -t flag for diff to compare snapshot against current workspace
+- Added rollback-by-ancestor-count and snapshot DAG tracking
+- Added cron-based scheduled checkpoint snapshots
+- Fixed --snapshot/-s as primary flag and aligned plugin flag handling
+- Fixed SKILL.md to sync with actual CLI/plugin implementation
+- Fixed init and recover to guard against replaced workspace symlink
+- Fixed init rsync by dropping --copy-unsafe-links
+
 * Fri Jun 05 2026 ziqi02 <ziqi02@alibaba-inc.com> - 0.3.3-1
 - Added per-workspace policy override with hermes/openclaw plugin support
 - Added /proc cwd occupant guard for init and rollback

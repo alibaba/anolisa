@@ -162,7 +162,7 @@ mod tests {
     fn record_serialization() {
         let record = OpsRecord {
             component_name: "ws-ckpt",
-            component_version: "0.3.3",
+            component_version: env!("CARGO_PKG_VERSION"),
             component_agent_name: "user",
             ops_id: "1719100800000-1234".to_string(),
             ops_name: "ckpt",
@@ -179,7 +179,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
 
         assert_eq!(parsed["component.name"], "ws-ckpt");
-        assert_eq!(parsed["component.version"], "0.3.3");
+        assert_eq!(parsed["component.version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(parsed["component.agent_name"], "user");
         assert_eq!(parsed["ops_name"], "ckpt");
         assert_eq!(parsed["ckpt_time"], 1);
@@ -192,7 +192,7 @@ mod tests {
     fn record_with_error() {
         let record = OpsRecord {
             component_name: "ws-ckpt",
-            component_version: "0.3.3",
+            component_version: env!("CARGO_PKG_VERSION"),
             component_agent_name: "hermes",
             ops_id: "1719100800000-1234".to_string(),
             ops_name: "roll",
@@ -223,7 +223,7 @@ mod tests {
 
         let record = OpsRecord {
             component_name: "ws-ckpt",
-            component_version: "0.3.3",
+            component_version: env!("CARGO_PKG_VERSION"),
             component_agent_name: "user",
             ops_id: "test-id".to_string(),
             ops_name: "list",

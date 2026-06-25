@@ -41,28 +41,34 @@ cwd 占用的拦截由 daemon 层统一处理,skill 不再做前置守卫。
 ### checkpoint — 创建快照
 
 ```bash
-ws-ckpt checkpoint -w <workspace> -i <id> [-m <message>]
+ws-ckpt checkpoint -w <workspace> [-s <snapshot-id>] [-m <message>] [--metadata <json>]
 ```
 
 - `-w`:工作区路径(必填)
-- `-i`:快照 ID,自定义名称,同一工作区内唯一(必填)
+- `-s`:快照 ID(可选，省略时自动生成）
 - `-m`:快照描述(可选)
+- `--metadata`:附加 JSON 元数据(可选)
 
 ```bash
-ws-ckpt checkpoint -w <path-to-workspace> -i before-refactor -m "重构前备份"
+ws-ckpt checkpoint -w <path-to-workspace> -s before-refactor -m "重构前备份"
+ws-ckpt checkpoint -w <path-to-workspace>  # ID 自动生成
 ```
 
 ### rollback — 回滚到快照
 
 ```bash
-ws-ckpt rollback -w <workspace> -s <snapshot>
+ws-ckpt rollback -w <workspace> [-s <snapshot> | -n <steps>] [--preview]
 ```
 
 - `-w`:工作区路径(必填)
-- `-s`:目标快照 ID(必填)
+- `-s`:目标快照 ID（与 `-n` 互斥）
+- `-n`:沿父链回滚 N 步（与 `-s` 互斥）
+- `--preview`:预览文件变更，不实际执行回滚
 
 ```bash
 ws-ckpt rollback -w <path-to-workspace> -s before-refactor
+ws-ckpt rollback -w <path-to-workspace> -n 1          # 回滚到上一个快照
+ws-ckpt rollback -w <path-to-workspace> -s snap1 --preview  # 仅预览
 ```
 
 ### diff — 查看快照间差异
@@ -145,6 +151,6 @@ ws-ckpt config -w <path-to-workspace> --reset     # 删除 policy.toml,沿用全
 
 ## 注意事项
 
-- checkpoint 用 `-i` 指定快照 ID;rollback 和 delete 用 `-s` 指定快照 ID,不要混淆
+- checkpoint 用 `-s` 指定快照 ID（可省略，自动生成）；rollback 和 delete 也用 `-s` 指定快照 ID
 - daemon 必须运行中(`systemctl status ws-ckpt` 确认),否则所有命令报连接错误
 - 执行破坏性操作前务必先 checkpoint

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.0
+
+### Breaking Changes
+- **BREAKING** checkpoint `-i`/`--id` flag replaced by `-s`/`--snapshot` as primary; `-i` remains as hidden alias but may be removed in a future release (#1064)
+
+### Features
+- Added plugin install/uninstall subcommand (#1005)
+- Added component.toml for anolisa-cli adapter discovery (#1005)
+- Added rollback preview support with --preview parameter (#1103)
+- Added elapsed time display after each CLI operation (#1075)
+- Added auto-generated snapshot ID when --snapshot is omitted (#1064)
+- Added SLS ops log output for dashboard metrics (#1059)
+- Added optional -t flag for diff to compare snapshot against current workspace (#848)
+- Added rollback-by-ancestor-count and snapshot DAG tracking (#877)
+- Added cron-based scheduled checkpoint snapshots (#819)
+
+### Bug Fixes
+- Fixed --snapshot/-s as primary flag and aligned plugin flag handling (#1103, #1064)
+- Fixed SKILL.md to sync with actual CLI/plugin implementation (#847)
+- Fixed init and recover to guard against replaced workspace symlink (#860)
+- Fixed init rsync by dropping --copy-unsafe-links (#873)
+
 ## 0.3.3
 
 ### Features
