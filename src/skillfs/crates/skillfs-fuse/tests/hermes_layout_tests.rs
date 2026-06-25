@@ -3,6 +3,8 @@
 mod common;
 
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
 use common::{MountFixture, create_skill_dir, list_dir_names};
 
@@ -260,4 +262,92 @@ fn hermes_nested_skill_path_preserved() {
         }
         other => panic!("expected NestedPassthrough, got: {:?}", other),
     }
+}
+
+// -----------------------------------------------------------------------
+// 8. Management path writes do not trigger notify
+// -----------------------------------------------------------------------
+
+#[test]
+fn hermes_management_path_write_no_notify() {
+    skip_if_no_fuse!();
+
+    use parking_lot::RwLock;
+    use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
+    use skillfs_fuse::security::{InMemoryNotifyClient, NotifyController};
+    use skillfs_fuse::{MountConfig, MountOptions, SkillLayout, mount_background_configured};
+
+    let source = tempfile::tempdir().unwrap();
+    seed_hermes_workspace(source.path());
+
+    let mut store = SkillStore::new();
+    store.load_from_directory(source.path(), &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+    let mountpoint = tempfile::tempdir().unwrap();
+
+    let notify_client = Arc::new(InMemoryNotifyClient::new());
+    let notify_ctrl = NotifyController::new(
+        notify_client.clone(),
+        source.path().to_path_buf(),
+        Duration::from_millis(50),
+        5000,
+    );
+
+    let config = MountConfig {
+        notify_controller: Some(notify_ctrl.clone()),
+        skill_layout: Some(SkillLayout::Hermes),
+        ..MountConfig::default()
+    };
+
+    let _handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        shared,
+        MountOptions::default(),
+        true,
+        config,
+    )
+    .unwrap();
+
+    std::thread::sleep(Duration::from_millis(300));
+
+    let mp = mountpoint.path();
+
+    // Write to a management path — should NOT trigger notify.
+    std::fs::write(mp.join(".hub/new-file.json"), r#"{"test": true}"#).unwrap();
+    std::fs::write(mp.join(".bundled_manifest"), "updated-manifest").unwrap();
+
+    // Wait and check no notify was produced.
+    std::thread::sleep(Duration::from_millis(300));
+    notify_ctrl.flush_for_testing();
+    assert!(
+        notify_client.is_empty(),
+        "management path writes must not trigger notify, got {} events",
+        notify_client.len()
+    );
+}
+
+// -----------------------------------------------------------------------
+// 9. Non-skill subdirectory under category is accessible
+// -----------------------------------------------------------------------
+
+#[test]
+fn hermes_non_skill_subdir_accessible() {
+    skip_if_no_fuse!();
+
+    let fix = MountFixture::in_place_hermes(|dir| {
+        seed_hermes_workspace(dir);
+        let docs = dir.join("apple/docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("readme.txt"), "documentation").unwrap();
+    });
+
+    let docs = fix.mountpoint().join("apple/docs");
+    let meta = std::fs::metadata(&docs).expect("stat apple/docs");
+    assert!(meta.is_dir(), "non-skill subdir must be a directory");
+
+    let readme = fix.mountpoint().join("apple/docs/readme.txt");
+    let content = std::fs::read_to_string(&readme).expect("read readme.txt");
+    assert_eq!(content, "documentation");
 }

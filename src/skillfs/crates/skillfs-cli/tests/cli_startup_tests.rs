@@ -1769,3 +1769,89 @@ fn control_socket_created_and_accepts_ping() {
         eprintln!("SKIP: control socket not created (FUSE mount likely unavailable)");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Hermes layout + security mutual exclusion
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hermes_layout_with_security_fails_startup() {
+    let source = empty_source();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--skill-layout",
+            "hermes",
+            "--security",
+            "--activation-mode",
+            "file",
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success(), "hermes + security must fail startup");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("incompatible"),
+        "error must mention incompatibility: {stderr}"
+    );
+}
+
+#[test]
+fn hermes_layout_with_notify_socket_fails_startup() {
+    let source = empty_source();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--skill-layout",
+            "hermes",
+            "--notify-socket",
+            "/tmp/nonexistent.sock",
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(
+        !out.status.success(),
+        "hermes + notify-socket must fail startup"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("incompatible"),
+        "error must mention incompatibility: {stderr}"
+    );
+}
+
+#[test]
+fn hermes_layout_without_security_passes_gate() {
+    let source = empty_source();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let mut child = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--skill-layout",
+            "hermes",
+            "--foreground",
+        ])
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn skillfs");
+
+    // Wait briefly — if the incompatibility gate fires it exits
+    // immediately; if it passes the gate it either starts FUSE or
+    // fails later on FUSE availability.
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let _ = child.kill();
+    let output = child.wait_with_output().expect("wait");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("incompatible"),
+        "hermes without security must not trigger incompatibility gate: {stderr}"
+    );
+}

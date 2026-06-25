@@ -256,9 +256,15 @@ enum Commands {
         /// Skill directory layout mode.
         ///
         /// `flat` (default): each top-level directory under SOURCE is a
-        /// skill with SKILL.md. `hermes`: SOURCE is a Hermes hub
-        /// workspace with management paths (.hub, .bundled_manifest)
-        /// and categorized skills (category/skill/SKILL.md).
+        /// skill containing SKILL.md. `hermes`: SOURCE is a Hermes hub
+        /// workspace — management paths (.hub, .bundled_manifest,
+        /// .no-bundled-skills) are passthrough; skills live at
+        /// category/skill/SKILL.md.
+        ///
+        /// Hermes mode is a discovery compatibility layer. It does not
+        /// provide activation, fallback, security runtime, or daemon
+        /// notify for nested skills. Incompatible with --security,
+        /// --activation-mode, --notify-socket, and --control-socket.
         #[arg(long, value_name = "MODE", help_heading = help_text::HEADING_MOUNT)]
         skill_layout: Option<String>,
     },
@@ -658,6 +664,24 @@ async fn cmd_mount(
                 _ => skillfs_fuse::SkillLayout::Flat,
             }),
     };
+
+    // Hermes layout is a discovery/filesystem compatibility mode.
+    // H1 does not implement nested skill activation, notify, or
+    // security runtime, so reject those combinations at startup.
+    if skill_layout == Some(skillfs_fuse::SkillLayout::Hermes) {
+        if security {
+            return Err("--skill-layout hermes is incompatible with --security \
+                 (hermes mode is a discovery compatibility layer; \
+                 nested skill activation is not yet implemented)"
+                .into());
+        }
+        if notify_socket.is_some() {
+            return Err("--skill-layout hermes is incompatible with --notify-socket".into());
+        }
+        if control_socket.is_some() {
+            return Err("--skill-layout hermes is incompatible with --control-socket".into());
+        }
+    }
 
     // Parse reload mode: CLI flag (if present) overrides config file.
     let reload_mode = match activation_reload_mode_raw.as_deref() {

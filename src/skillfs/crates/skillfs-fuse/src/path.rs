@@ -17,11 +17,24 @@ pub enum SkillLayout {
     /// Traditional flat layout: `{source}/{skill}/SKILL.md`.
     #[default]
     Flat,
-    /// Hermes hub workspace layout.
+    /// Hermes hub workspace layout (H1: discovery compatibility).
     ///
     /// Management paths (`.hub/`, `.bundled_manifest`,
     /// `.no-bundled-skills`) are passthrough. Skills live at
     /// `{source}/{category}/{skill}/SKILL.md`.
+    ///
+    /// **H1 scope:** filesystem visibility and POSIX traversal only.
+    /// Nested skills are served as raw physical passthrough — no
+    /// compiled SKILL.md, no activation/fallback/hidden gating, no
+    /// daemon notify on mutation. Incompatible with `--security`,
+    /// `--activation-mode file`, `--notify-socket`, and
+    /// `--control-socket` at startup.
+    ///
+    /// **Parser model:** purely lexical. Every non-management
+    /// top-level entry is classified as `CategoryDir`; every second-
+    /// level entry as `NestedSkillDir`. The parser does not probe
+    /// for `SKILL.md` — a subdirectory without `SKILL.md` is still
+    /// a valid `NestedSkillDir` for POSIX traversal purposes.
     Hermes,
 }
 
