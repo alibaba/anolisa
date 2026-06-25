@@ -13,6 +13,7 @@ use std::time::Duration;
 use skillfs_core::SharedSkillStore;
 use tracing::{error, info, warn};
 
+use crate::path::SkillLayout;
 use crate::security::{
     ActiveSkillResolver, InstallerStagingController, NotifyController, PendingInstallController,
     PostPublishGraceController, QuietTimeoutController, RefreshController, RuntimeMetricsSink,
@@ -37,6 +38,7 @@ pub struct MountConfig {
     /// Best-effort runtime metric delta sink. When `Some`, agent-visible skill
     /// opens and security/policy decisions emit `runtime_metric` JSONL records.
     pub runtime_metrics: Option<Arc<RuntimeMetricsSink>>,
+    pub skill_layout: Option<SkillLayout>,
 }
 
 /// Mount the SkillFS FUSE filesystem (blocking) with a unified
@@ -67,6 +69,7 @@ pub fn mount_configured(
         config.pending_install_controller,
         config.post_publish_controller,
         config.runtime_metrics,
+        config.skill_layout,
     )
 }
 
@@ -104,6 +107,7 @@ pub fn mount_background_configured(
             config.pending_install_controller,
             config.post_publish_controller,
             config.runtime_metrics,
+            config.skill_layout,
         ) {
             error!(error = %e, "background mount failed");
         }
@@ -140,6 +144,7 @@ fn mount_inner(
     pending_install_controller: Option<Arc<PendingInstallController>>,
     post_publish_controller: Option<Arc<PostPublishGraceController>>,
     runtime_metrics: Option<Arc<RuntimeMetricsSink>>,
+    skill_layout: Option<SkillLayout>,
 ) -> Result<(), FuseError> {
     info!(mountpoint = %mountpoint.display(), source = %source.display(), in_place, "mounting SkillFS");
 
@@ -238,6 +243,9 @@ fn mount_inner(
     }
     if let Some(s) = runtime_metrics {
         fs = fs.with_runtime_metrics(s);
+    }
+    if let Some(layout) = skill_layout {
+        fs = fs.with_skill_layout(layout);
     }
     info!("starting FUSE filesystem");
 

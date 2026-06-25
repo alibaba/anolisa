@@ -9,7 +9,7 @@ use tracing::{debug, warn};
 use super::super::SkillFs;
 use super::super::read_resolution::ReadResolution;
 use crate::handles::open_options_from_flags;
-use crate::path::{PathType, is_skill_discover_path, parse_path};
+use crate::path::{PathType, is_skill_discover_path};
 use crate::security::{SkillEventAction, SkillEventKind};
 use crate::sync::SyncEvent;
 use crate::sys::{errno, openat_leaf};
@@ -56,7 +56,7 @@ impl SkillFs {
             }
         };
 
-        let path_type = parse_path(Path::new(&path), self.in_place);
+        let path_type = self.parse_fuse_path(Path::new(&path));
 
         // Read events are high-volume so we emit only on failure to keep the
         // audit stream useful without flooding it with per-syscall successes.
@@ -115,7 +115,12 @@ impl SkillFs {
                     }
                 }
             }
-            PathType::Passthrough { .. } | PathType::InboxPassthrough { .. } => {
+            PathType::Passthrough { .. }
+            | PathType::InboxPassthrough { .. }
+            | PathType::HermesMeta { .. }
+            | PathType::HermesMetaChild { .. }
+            | PathType::NestedSkillMd { .. }
+            | PathType::NestedPassthrough { .. } => {
                 // Use fd-backed read via handle
                 let result = self.handles.with_handle(fh, |entry| {
                     if let Some(ref file) = entry.file {
@@ -202,7 +207,7 @@ impl SkillFs {
             }
         };
 
-        let path_type = parse_path(Path::new(&path), self.in_place);
+        let path_type = self.parse_fuse_path(Path::new(&path));
         let access_mode = flags & libc::O_ACCMODE;
         let is_write = access_mode == libc::O_WRONLY || access_mode == libc::O_RDWR;
 
@@ -232,6 +237,17 @@ impl SkillFs {
             PathType::InboxPassthrough { skill_name, .. } => {
                 if !Self::is_inbox_skill_name_allowed(skill_name) {
                     reply.error(libc::ENOENT);
+                    return;
+                }
+            }
+            PathType::CategoryDir { .. } | PathType::NestedSkillDir { .. } => {
+                reply.error(libc::EISDIR);
+                return;
+            }
+            PathType::HermesMeta { name } => {
+                let physical = self.source_base().join(name);
+                if physical.is_dir() {
+                    reply.error(libc::EISDIR);
                     return;
                 }
             }

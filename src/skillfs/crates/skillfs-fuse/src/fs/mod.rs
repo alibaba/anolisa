@@ -18,6 +18,7 @@ use tracing::{info, warn};
 
 use crate::handles::HandleManager;
 use crate::inode::InodeManager;
+use crate::path::SkillLayout;
 use crate::security::{
     ActiveSkillResolver, InstallerStagingController, NoopEventSink, NotifyController,
     PendingInstallController, PostPublishGraceController, ProcessIdentityResolver,
@@ -55,6 +56,8 @@ pub struct SkillFs {
     source_dirfd: Option<std::fs::File>,
     /// Whether we are mounted in-place (source == mountpoint).
     in_place: bool,
+    /// Skill directory layout mode (flat or hermes).
+    skill_layout: SkillLayout,
     /// Channel to send sync events to the background sync worker.
     sync_tx: Option<std::sync::mpsc::Sender<SyncEvent>>,
     /// Skill Security policy. The S1 default is
@@ -180,6 +183,7 @@ impl SkillFs {
             views_config,
             source_dirfd,
             in_place,
+            skill_layout: SkillLayout::Flat,
             sync_tx: Some(sync_tx),
             policy: Arc::new(SkillMetaProtectionPolicy),
             event_sink: Arc::new(NoopEventSink),
@@ -395,6 +399,16 @@ impl SkillFs {
         if let Some(s) = &self.runtime_metrics {
             s.record_policy_denied();
         }
+    }
+
+    pub fn with_skill_layout(mut self, layout: SkillLayout) -> Self {
+        self.skill_layout = layout;
+        self
+    }
+
+    /// Parse a FUSE path using this filesystem's layout and in-place mode.
+    pub(super) fn parse_fuse_path(&self, path: &std::path::Path) -> crate::path::PathType {
+        crate::path::parse_path_with_layout(path, self.in_place, self.skill_layout)
     }
 
     fn virtual_file_attr(&self, size: u64) -> FileAttr {

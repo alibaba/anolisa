@@ -8,7 +8,7 @@ use tracing::{debug, warn};
 
 use super::super::SkillFs;
 use crate::attr::file_attr_from_metadata;
-use crate::path::{PathType, is_skill_discover_path, parse_path};
+use crate::path::{PathType, is_skill_discover_path};
 use crate::security::{
     self, SkillEvent, SkillEventAction, SkillEventKind, lifecycle::is_reserved_lifecycle_name,
 };
@@ -23,7 +23,7 @@ impl SkillFs {
             None => return reply.error(libc::ENOENT),
         };
 
-        match parse_path(Path::new(&path), self.in_place) {
+        match self.parse_fuse_path(Path::new(&path)) {
             // Virtual directories are never symlinks; readlink on a
             // non-symlink returns EINVAL on Linux.
             PathType::Root
@@ -140,6 +140,36 @@ impl SkillFs {
                     }
                 }
             }
+            PathType::HermesMeta { .. }
+            | PathType::CategoryDir { .. }
+            | PathType::NestedSkillDir { .. } => {
+                reply.error(libc::EINVAL);
+            }
+            PathType::HermesMetaChild {
+                name,
+                relative_path,
+            }
+            | PathType::NestedPassthrough {
+                category: name,
+                skill_name: _,
+                relative_path,
+            } => {
+                let physical = match self.resolve_physical_path(&path) {
+                    Some(p) => p,
+                    None => return reply.error(libc::ENOENT),
+                };
+                let _ = (&name, &relative_path);
+                match std::fs::read_link(&physical) {
+                    Ok(target) => {
+                        use std::os::unix::ffi::OsStrExt;
+                        reply.data(target.as_os_str().as_bytes());
+                    }
+                    Err(e) => reply.error(errno(&e)),
+                }
+            }
+            PathType::NestedSkillMd { .. } => {
+                reply.error(libc::EINVAL);
+            }
             PathType::Invalid => {
                 self.emit_event(
                     SkillEvent::new(SkillEventKind::Readlink)
@@ -166,7 +196,7 @@ impl SkillFs {
                 return;
             }
         };
-        let path_type = parse_path(Path::new(&path_str), self.in_place);
+        let path_type = self.parse_fuse_path(Path::new(&path_str));
         let target_str = target.display().to_string();
 
         // Only Passthrough leaves under an ordinary skill may host a new
@@ -439,7 +469,7 @@ impl SkillFs {
                 return;
             }
         };
-        let new_path_type = parse_path(Path::new(&new_path_str), self.in_place);
+        let new_path_type = self.parse_fuse_path(Path::new(&new_path_str));
 
         // Resolve the source FUSE path from its inode. Without a path
         // mapping we cannot reason about same-skill / cross-skill — the
@@ -460,7 +490,7 @@ impl SkillFs {
                 return;
             }
         };
-        let source_path_type = parse_path(Path::new(&source_path_str), self.in_place);
+        let source_path_type = self.parse_fuse_path(Path::new(&source_path_str));
 
         // Destination must be a passthrough leaf.
         let (dst_skill, dst_rel) = match &new_path_type {

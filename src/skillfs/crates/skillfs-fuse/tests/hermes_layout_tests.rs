@@ -1,0 +1,263 @@
+//! Integration tests for the Hermes skill layout mode.
+
+mod common;
+
+use std::path::Path;
+
+use common::{MountFixture, create_skill_dir, list_dir_names};
+
+fn seed_hermes_workspace(dir: &Path) {
+    std::fs::create_dir_all(dir.join(".hub")).unwrap();
+    std::fs::write(dir.join(".hub/config.json"), r#"{"version": 1}"#).unwrap();
+    std::fs::write(dir.join(".bundled_manifest"), "manifest-content").unwrap();
+    std::fs::write(dir.join(".no-bundled-skills"), "").unwrap();
+
+    let apple_notes = dir.join("apple/apple-notes");
+    std::fs::create_dir_all(&apple_notes).unwrap();
+    std::fs::write(
+        apple_notes.join("SKILL.md"),
+        "---\nname: apple-notes\ndescription: notes\n---\nApple Notes skill body.\n",
+    )
+    .unwrap();
+
+    let apple_music = dir.join("apple/apple-music");
+    std::fs::create_dir_all(&apple_music).unwrap();
+    std::fs::write(
+        apple_music.join("SKILL.md"),
+        "---\nname: apple-music\ndescription: music\n---\n",
+    )
+    .unwrap();
+}
+
+// -----------------------------------------------------------------------
+// 1. Flat mode behavior unchanged
+// -----------------------------------------------------------------------
+
+#[test]
+fn flat_mode_in_place_unchanged() {
+    skip_if_no_fuse!();
+
+    let fix = MountFixture::in_place(|dir| {
+        create_skill_dir(dir, "my-skill");
+    });
+
+    let md_path = fix.mountpoint().join("my-skill/SKILL.md");
+    let content = std::fs::read_to_string(&md_path).expect("read SKILL.md");
+    assert!(
+        content.contains("my-skill"),
+        "flat in-place SKILL.md should be readable"
+    );
+}
+
+// -----------------------------------------------------------------------
+// 2. Hermes mode management path passthrough
+// -----------------------------------------------------------------------
+
+#[test]
+fn hermes_management_path_stat() {
+    skip_if_no_fuse!();
+
+    let fix = MountFixture::in_place_hermes(|dir| {
+        seed_hermes_workspace(dir);
+    });
+
+    let hub = fix.mountpoint().join(".hub");
+    let meta = std::fs::metadata(&hub).expect("stat .hub");
+    assert!(meta.is_dir(), ".hub must be a directory");
+}
+
+#[test]
+fn hermes_management_path_readdir() {
+    skip_if_no_fuse!();
+
+    let fix = MountFixture::in_place_hermes(|dir| {
+        seed_hermes_workspace(dir);
+    });
+
+    let hub = fix.mountpoint().join(".hub");
+    let entries = list_dir_names(&hub);
+    assert!(
+        entries.contains(&"config.json".to_string()),
+        ".hub readdir should contain config.json, got: {:?}",
+        entries
+    );
+}
+
+#[test]
+fn hermes_management_path_mkdir_eexist() {
+    skip_if_no_fuse!();
+
+    let fix = MountFixture::in_place_hermes(|dir| {
+        seed_hermes_workspace(dir);
+    });
+
+    let hub = fix.mountpoint().join(".hub");
+    assert!(hub.exists(), "stat .hub should succeed first");
+    let err = std::fs::create_dir(&hub).expect_err("mkdir .hub should fail");
+    assert_eq!(
+        err.raw_os_error(),
+        Some(libc::EEXIST),
+        "mkdir existing .hub must return EEXIST, got: {}",
+        err
+    );
+}
+
+// -----------------------------------------------------------------------
+// 3. Hermes mode manifest passthrough
+// -----------------------------------------------------------------------
+
+#[test]
+fn hermes_manifest_stat_and_read() {
+    skip_if_no_fuse!();
+
+    let fix = MountFixture::in_place_hermes(|dir| {
+        seed_hermes_workspace(dir);
+    });
+
+    let manifest = fix.mountpoint().join(".bundled_manifest");
+    let meta = std::fs::metadata(&manifest).expect("stat .bundled_manifest");
+    assert!(meta.is_file(), ".bundled_manifest must be a regular file");
+
+    let content = std::fs::read_to_string(&manifest).expect("read .bundled_manifest");
+    assert_eq!(content, "manifest-content");
+}
+
+// -----------------------------------------------------------------------
+// 4. Hermes mode category dir is container
+// -----------------------------------------------------------------------
+
+#[test]
+fn hermes_category_dir_readdir() {
+    skip_if_no_fuse!();
+
+    let fix = MountFixture::in_place_hermes(|dir| {
+        seed_hermes_workspace(dir);
+    });
+
+    let apple = fix.mountpoint().join("apple");
+    let entries = list_dir_names(&apple);
+    assert!(
+        entries.contains(&"apple-notes".to_string()),
+        "apple/ readdir should contain apple-notes, got: {:?}",
+        entries
+    );
+    assert!(
+        entries.contains(&"apple-music".to_string()),
+        "apple/ readdir should contain apple-music, got: {:?}",
+        entries
+    );
+}
+
+// -----------------------------------------------------------------------
+// 5. Hermes mode nested skill leaf readable
+// -----------------------------------------------------------------------
+
+#[test]
+fn hermes_nested_skill_md_readable() {
+    skip_if_no_fuse!();
+
+    let fix = MountFixture::in_place_hermes(|dir| {
+        seed_hermes_workspace(dir);
+    });
+
+    let md = fix.mountpoint().join("apple/apple-notes/SKILL.md");
+    let content = std::fs::read_to_string(&md).expect("read nested SKILL.md");
+    assert!(
+        content.contains("Apple Notes skill body"),
+        "nested SKILL.md should be readable with correct content"
+    );
+}
+
+// -----------------------------------------------------------------------
+// 6. Management path changes do not trigger notify
+//    (path classification unit test — management paths produce HermesMeta
+//     which mutate callbacks skip for observe_mutation)
+// -----------------------------------------------------------------------
+
+#[test]
+fn hermes_path_classification_management() {
+    use skillfs_fuse::path::{
+        PathType, SkillLayout, is_hermes_management_path, parse_path_with_layout,
+    };
+
+    assert!(is_hermes_management_path(".hub"));
+    assert!(is_hermes_management_path(".bundled_manifest"));
+    assert!(is_hermes_management_path(".no-bundled-skills"));
+    assert!(!is_hermes_management_path("apple"));
+
+    let pt = parse_path_with_layout(Path::new("/.hub"), true, SkillLayout::Hermes);
+    assert!(
+        matches!(pt, PathType::HermesMeta { ref name } if name == ".hub"),
+        "expected HermesMeta, got: {:?}",
+        pt
+    );
+
+    let pt = parse_path_with_layout(Path::new("/.hub/config.json"), true, SkillLayout::Hermes);
+    assert!(
+        matches!(pt, PathType::HermesMetaChild { ref name, .. } if name == ".hub"),
+        "expected HermesMetaChild, got: {:?}",
+        pt
+    );
+
+    let pt = parse_path_with_layout(Path::new("/apple"), true, SkillLayout::Hermes);
+    assert!(
+        matches!(pt, PathType::CategoryDir { ref category } if category == "apple"),
+        "expected CategoryDir, got: {:?}",
+        pt
+    );
+}
+
+// -----------------------------------------------------------------------
+// 7. Nested skill source-relative path preserved
+// -----------------------------------------------------------------------
+
+#[test]
+fn hermes_nested_skill_path_preserved() {
+    use skillfs_fuse::path::{PathType, SkillLayout, parse_path_with_layout};
+
+    let pt = parse_path_with_layout(Path::new("/apple/apple-notes"), true, SkillLayout::Hermes);
+    match pt {
+        PathType::NestedSkillDir {
+            category,
+            skill_name,
+        } => {
+            assert_eq!(category, "apple");
+            assert_eq!(skill_name, "apple-notes");
+        }
+        other => panic!("expected NestedSkillDir, got: {:?}", other),
+    }
+
+    let pt = parse_path_with_layout(
+        Path::new("/apple/apple-notes/SKILL.md"),
+        true,
+        SkillLayout::Hermes,
+    );
+    match pt {
+        PathType::NestedSkillMd {
+            category,
+            skill_name,
+        } => {
+            assert_eq!(category, "apple");
+            assert_eq!(skill_name, "apple-notes");
+        }
+        other => panic!("expected NestedSkillMd, got: {:?}", other),
+    }
+
+    let pt = parse_path_with_layout(
+        Path::new("/apple/apple-notes/scripts/run.sh"),
+        true,
+        SkillLayout::Hermes,
+    );
+    match pt {
+        PathType::NestedPassthrough {
+            category,
+            skill_name,
+            relative_path,
+        } => {
+            assert_eq!(category, "apple");
+            assert_eq!(skill_name, "apple-notes");
+            assert_eq!(relative_path, std::path::PathBuf::from("scripts/run.sh"));
+        }
+        other => panic!("expected NestedPassthrough, got: {:?}", other),
+    }
+}

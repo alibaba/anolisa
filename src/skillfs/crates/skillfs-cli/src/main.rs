@@ -252,6 +252,15 @@ enum Commands {
         /// `SO_PEERCRED`) must match this value.
         #[arg(long, value_name = "GID", help_heading = help_text::HEADING_TRUSTED_PEER)]
         trusted_peer_gid: Option<u32>,
+
+        /// Skill directory layout mode.
+        ///
+        /// `flat` (default): each top-level directory under SOURCE is a
+        /// skill with SKILL.md. `hermes`: SOURCE is a Hermes hub
+        /// workspace with management paths (.hub, .bundled_manifest)
+        /// and categorized skills (category/skill/SKILL.md).
+        #[arg(long, value_name = "MODE", help_heading = help_text::HEADING_MOUNT)]
+        skill_layout: Option<String>,
     },
 
     /// Generate or update skillfs-views.toml from a skill directory
@@ -417,6 +426,7 @@ async fn run(cli: Cli, raw_args: Vec<String>) -> Result<(), Box<dyn std::error::
             trusted_peer_exe,
             trusted_peer_uid,
             trusted_peer_gid,
+            skill_layout,
         } => {
             if managed {
                 // Managed mode: spawn a detached supervisor and return once
@@ -457,6 +467,7 @@ async fn run(cli: Cli, raw_args: Vec<String>) -> Result<(), Box<dyn std::error::
                 trusted_peer_exe,
                 trusted_peer_uid,
                 trusted_peer_gid,
+                skill_layout,
             )
             .await;
             sls_ops::log_command("mount", start, err_reason(&result));
@@ -607,6 +618,7 @@ async fn cmd_mount(
     trusted_peer_exe: Option<PathBuf>,
     trusted_peer_uid: Option<u32>,
     trusted_peer_gid: Option<u32>,
+    skill_layout_raw: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!(source = %source.display(), mountpoint = %mountpoint.display(), security_mode, "mounting SkillFS");
 
@@ -629,6 +641,22 @@ async fn cmd_mount(
             .as_ref()
             .map(|c| c.activation_mode())
             .unwrap_or_default(),
+    };
+
+    // Parse skill layout: CLI flag overrides config file.
+    let skill_layout = match skill_layout_raw.as_deref() {
+        Some("flat") => Some(skillfs_fuse::SkillLayout::Flat),
+        Some("hermes") => Some(skillfs_fuse::SkillLayout::Hermes),
+        Some(other) => {
+            return Err(format!("invalid --skill-layout '{other}'; allowed: flat, hermes").into());
+        }
+        None => file_config
+            .as_ref()
+            .and_then(|c| c.skills_layout())
+            .map(|s| match s {
+                "hermes" => skillfs_fuse::SkillLayout::Hermes,
+                _ => skillfs_fuse::SkillLayout::Flat,
+            }),
     };
 
     // Parse reload mode: CLI flag (if present) overrides config file.
@@ -2118,6 +2146,7 @@ async fn cmd_mount(
                 pending_install_controller,
                 post_publish_controller,
                 runtime_metrics: Some(mount_runtime_metrics),
+                skill_layout,
             },
         )
     });

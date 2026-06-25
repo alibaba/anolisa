@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use fuser::FUSE_ROOT_ID;
 
 use super::SkillFs;
-use crate::path::{PathType, is_skill_discover_path, parse_path};
+use crate::path::{PathType, is_skill_discover_path};
 use crate::security::{
     inbox::{is_inbox_dir_name, is_valid_inbox_skill_name},
     lifecycle::is_reserved_lifecycle_name,
@@ -157,7 +157,7 @@ impl SkillFs {
     /// Uses `source_base()` (which goes through `/proc/self/fd/{n}` in
     /// in-place mode) so that all I/O bypasses the FUSE layer.
     pub(super) fn resolve_physical_path(&self, fuse_path: &str) -> Option<PathBuf> {
-        match parse_path(Path::new(fuse_path), self.in_place) {
+        match self.parse_fuse_path(Path::new(fuse_path)) {
             PathType::SkillDir { skill_name } => Some(self.source_base().join(&skill_name)),
             PathType::SkillMd { skill_name } => {
                 Some(self.source_base().join(&skill_name).join("SKILL.md"))
@@ -175,6 +175,35 @@ impl SkillFs {
                 skill_name,
                 relative_path,
             } => Some(self.source_base().join(&skill_name).join(&relative_path)),
+            PathType::HermesMeta { name } => Some(self.source_base().join(&name)),
+            PathType::HermesMetaChild {
+                name,
+                relative_path,
+            } => Some(self.source_base().join(&name).join(&relative_path)),
+            PathType::CategoryDir { category } => Some(self.source_base().join(&category)),
+            PathType::NestedSkillDir {
+                category,
+                skill_name,
+            } => Some(self.source_base().join(&category).join(&skill_name)),
+            PathType::NestedSkillMd {
+                category,
+                skill_name,
+            } => Some(
+                self.source_base()
+                    .join(&category)
+                    .join(&skill_name)
+                    .join("SKILL.md"),
+            ),
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } => Some(
+                self.source_base()
+                    .join(&category)
+                    .join(&skill_name)
+                    .join(&relative_path),
+            ),
             _ => None,
         }
     }
@@ -203,7 +232,11 @@ impl SkillFs {
             Some(s) => s.to_string(),
             None => return Err(libc::EINVAL),
         };
-        let parent_physical = match parse_path(parent_fuse, self.in_place) {
+        let parent_physical = match crate::path::parse_path_with_layout(
+            parent_fuse,
+            self.in_place,
+            self.skill_layout,
+        ) {
             PathType::SkillDir { skill_name } | PathType::InboxSkillDir { skill_name } => {
                 self.source_base().join(&skill_name)
             }
@@ -218,6 +251,33 @@ impl SkillFs {
                 skill_name,
                 relative_path,
             } => self.source_base().join(&skill_name).join(&relative_path),
+            PathType::HermesMeta { name } => self.source_base().join(&name),
+            PathType::HermesMetaChild {
+                name,
+                relative_path,
+            } => self.source_base().join(&name).join(&relative_path),
+            PathType::CategoryDir { category } => self.source_base().join(&category),
+            PathType::NestedSkillDir {
+                category,
+                skill_name,
+            } => self.source_base().join(&category).join(&skill_name),
+            PathType::NestedSkillMd {
+                category,
+                skill_name,
+            } => self
+                .source_base()
+                .join(&category)
+                .join(&skill_name)
+                .join("SKILL.md"),
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } => self
+                .source_base()
+                .join(&category)
+                .join(&skill_name)
+                .join(&relative_path),
             PathType::SkillsDir | PathType::Root | PathType::InboxDir => self.source_base(),
             PathType::Invalid => return Err(libc::ENOTDIR),
         };

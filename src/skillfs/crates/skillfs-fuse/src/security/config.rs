@@ -29,6 +29,13 @@ pub struct SecurityConfig {
     pub ledger: Option<LedgerSection>,
     pub install: Option<InstallSection>,
     pub control_socket: Option<ControlSocketSection>,
+    pub skills: Option<SkillsSection>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillsSection {
+    pub layout: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -351,6 +358,18 @@ impl SecurityConfig {
                 }
             }
         }
+        if let Some(value) = self.skills.as_ref().and_then(|s| s.layout.as_deref()) {
+            match value {
+                "flat" | "hermes" => {}
+                other => {
+                    return Err(ConfigError::InvalidValue {
+                        field: "skills.layout",
+                        value: other.to_string(),
+                        allowed: "flat, hermes",
+                    });
+                }
+            }
+        }
         if let Some(ref cs) = self.control_socket {
             let has_path = cs
                 .path
@@ -562,6 +581,13 @@ impl SecurityConfig {
             .as_ref()
             .and_then(|i| i.post_publish_write_patterns.as_deref())
             .filter(|p| !p.is_empty())
+    }
+
+    pub fn skills_layout(&self) -> Option<&str> {
+        self.skills
+            .as_ref()
+            .and_then(|s| s.layout.as_deref())
+            .filter(|s| !s.trim().is_empty())
     }
 
     /// Validate that the backing root is configured and accessible when

@@ -5,7 +5,6 @@ use std::path::Path;
 use fuser::{ReplyEmpty, ReplyXattr, Request};
 
 use super::super::SkillFs;
-use crate::path::parse_path;
 use crate::security::{SkillEventAction, SkillEventKind};
 use crate::xattr::{
     XattrNamespace, filter_user_xattr_list, path_type_supports_xattr_passthrough, xattr_lget,
@@ -25,7 +24,7 @@ impl SkillFs {
             Some(p) => p,
             None => return reply.error(libc::ENOENT),
         };
-        let path_type = parse_path(Path::new(&path), self.in_place);
+        let path_type = self.parse_fuse_path(Path::new(&path));
 
         if !path_type_supports_xattr_passthrough(&path_type) {
             return reply.error(libc::EOPNOTSUPP);
@@ -69,7 +68,7 @@ impl SkillFs {
             Some(p) => p,
             None => return reply.error(libc::ENOENT),
         };
-        let path_type = parse_path(Path::new(&path), self.in_place);
+        let path_type = self.parse_fuse_path(Path::new(&path));
 
         if !path_type_supports_xattr_passthrough(&path_type) {
             return reply.error(libc::EOPNOTSUPP);
@@ -115,7 +114,7 @@ impl SkillFs {
             Some(p) => p,
             None => return reply.error(libc::ENOENT),
         };
-        let path_type = parse_path(Path::new(&path), self.in_place);
+        let path_type = self.parse_fuse_path(Path::new(&path));
 
         if !path_type_supports_xattr_passthrough(&path_type) {
             self.emit_xattr_event(
@@ -206,7 +205,7 @@ impl SkillFs {
             Some(p) => p,
             None => return reply.error(libc::ENOENT),
         };
-        let path_type = parse_path(Path::new(&path), self.in_place);
+        let path_type = self.parse_fuse_path(Path::new(&path));
 
         if !path_type_supports_xattr_passthrough(&path_type) {
             self.emit_xattr_event(

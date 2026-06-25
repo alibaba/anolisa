@@ -11,9 +11,30 @@ use std::path::{Path, PathBuf};
 
 use crate::security::inbox::is_inbox_dir_name;
 
+/// Skill directory layout mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SkillLayout {
+    /// Traditional flat layout: `{source}/{skill}/SKILL.md`.
+    #[default]
+    Flat,
+    /// Hermes hub workspace layout.
+    ///
+    /// Management paths (`.hub/`, `.bundled_manifest`,
+    /// `.no-bundled-skills`) are passthrough. Skills live at
+    /// `{source}/{category}/{skill}/SKILL.md`.
+    Hermes,
+}
+
+/// Well-known Hermes management paths that must be passthrough.
+const HERMES_MANAGEMENT_PATHS: &[&str] = &[".hub", ".bundled_manifest", ".no-bundled-skills"];
+
+pub fn is_hermes_management_path(name: &str) -> bool {
+    HERMES_MANAGEMENT_PATHS.contains(&name)
+}
+
 /// Types of paths in the SkillFS filesystem.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum PathType {
+pub enum PathType {
     /// Root directory (/)
     Root,
     /// Skills directory (/skills)
@@ -43,6 +64,37 @@ pub(crate) enum PathType {
         skill_name: String,
         relative_path: PathBuf,
     },
+    /// Hermes management top-level entry (`.hub`, `.bundled_manifest`,
+    /// `.no-bundled-skills`). Physical passthrough, not a skill.
+    HermesMeta { name: String },
+    /// Child path under a Hermes management entry
+    /// (e.g. `.hub/some/file`).
+    HermesMetaChild {
+        name: String,
+        relative_path: PathBuf,
+    },
+    /// Category container directory in Hermes layout
+    /// (e.g. `apple/`). Not a skill.
+    CategoryDir { category: String },
+    /// Nested skill directory in Hermes layout
+    /// (e.g. `apple/apple-notes/`).
+    NestedSkillDir {
+        category: String,
+        skill_name: String,
+    },
+    /// SKILL.md under a nested skill in Hermes layout
+    /// (e.g. `apple/apple-notes/SKILL.md`).
+    NestedSkillMd {
+        category: String,
+        skill_name: String,
+    },
+    /// Passthrough path under a nested skill in Hermes layout
+    /// (e.g. `apple/apple-notes/scripts/run.sh`).
+    NestedPassthrough {
+        category: String,
+        skill_name: String,
+        relative_path: PathBuf,
+    },
     /// Unknown/invalid path
     Invalid,
 }
@@ -51,7 +103,7 @@ pub(crate) enum PathType {
 ///
 /// When `in_place` is true the FUSE root IS the skills directory, so
 /// paths have no `/skills/` prefix: `/{skill}`, `/{skill}/SKILL.md`, etc.
-pub(crate) fn parse_path(path: &Path, in_place: bool) -> PathType {
+pub fn parse_path(path: &Path, in_place: bool) -> PathType {
     let components: Vec<_> = path.components().collect();
 
     // Try the L1 inbox namespace first in both modes. The inbox root is a
@@ -126,6 +178,124 @@ pub(crate) fn parse_path(path: &Path, in_place: bool) -> PathType {
             }
             _ => PathType::Invalid,
         }
+    }
+}
+
+/// Parse a path with an explicit layout mode.
+///
+/// Delegates to [`parse_path`] for [`SkillLayout::Flat`]. For
+/// [`SkillLayout::Hermes`] the in-place arm recognises management paths,
+/// category directories, and nested skill directories.
+pub fn parse_path_with_layout(path: &Path, in_place: bool, layout: SkillLayout) -> PathType {
+    if layout == SkillLayout::Flat {
+        return parse_path(path, in_place);
+    }
+
+    let components: Vec<_> = path.components().collect();
+
+    // Inbox namespace: same in every layout.
+    if components.len() >= 2 {
+        let second = components[1].as_os_str().to_string_lossy();
+        if is_inbox_dir_name(&second) {
+            return parse_inbox_components(&components);
+        }
+    }
+
+    if in_place {
+        parse_hermes_in_place(&components)
+    } else {
+        // Normal (non-in-place) Hermes: skills live under /skills/.
+        // The /skills/ prefix is stripped and the remainder is parsed as
+        // Hermes layout.
+        match components.as_slice() {
+            [] => PathType::Root,
+            [root] if root.as_os_str() == "/" => PathType::Root,
+            [_, skills] if skills.as_os_str() == "skills" => PathType::SkillsDir,
+            [_, skills, rest @ ..] if skills.as_os_str() == "skills" => {
+                // Synthesise a fake in-place component slice: ["/", rest...]
+                let mut synth: Vec<std::path::Component<'_>> = Vec::with_capacity(rest.len() + 1);
+                synth.push(components[0]); // "/"
+                synth.extend_from_slice(rest);
+                parse_hermes_in_place(&synth)
+            }
+            _ => PathType::Invalid,
+        }
+    }
+}
+
+/// Hermes in-place path classification. The root is the skills
+/// directory; top-level entries are either management paths or category
+/// directories.
+fn parse_hermes_in_place(components: &[std::path::Component<'_>]) -> PathType {
+    match components {
+        [] => PathType::SkillsDir,
+        [root] if root.as_os_str() == "/" => PathType::SkillsDir,
+        [_, first] => {
+            let name = first.as_os_str().to_string_lossy().to_string();
+            if is_hermes_management_path(&name) {
+                PathType::HermesMeta { name }
+            } else {
+                PathType::CategoryDir { category: name }
+            }
+        }
+        [_, first, second] => {
+            let first_name = first.as_os_str().to_string_lossy().to_string();
+            if is_hermes_management_path(&first_name) {
+                return PathType::HermesMetaChild {
+                    name: first_name,
+                    relative_path: PathBuf::from(second.as_os_str()),
+                };
+            }
+            let second_name = second.as_os_str().to_string_lossy().to_string();
+            PathType::NestedSkillDir {
+                category: first_name,
+                skill_name: second_name,
+            }
+        }
+        [_, first, second, third] => {
+            let first_name = first.as_os_str().to_string_lossy().to_string();
+            if is_hermes_management_path(&first_name) {
+                let relative_path: PathBuf =
+                    components[2..].iter().map(|c| c.as_os_str()).collect();
+                return PathType::HermesMetaChild {
+                    name: first_name,
+                    relative_path,
+                };
+            }
+            let second_name = second.as_os_str().to_string_lossy().to_string();
+            let third_name = third.as_os_str().to_string_lossy();
+            if third_name == "SKILL.md" {
+                PathType::NestedSkillMd {
+                    category: first_name,
+                    skill_name: second_name,
+                }
+            } else {
+                PathType::NestedPassthrough {
+                    category: first_name,
+                    skill_name: second_name,
+                    relative_path: PathBuf::from(third.as_os_str()),
+                }
+            }
+        }
+        [_, first, second, rest @ ..] => {
+            let first_name = first.as_os_str().to_string_lossy().to_string();
+            if is_hermes_management_path(&first_name) {
+                let relative_path: PathBuf =
+                    components[2..].iter().map(|c| c.as_os_str()).collect();
+                return PathType::HermesMetaChild {
+                    name: first_name,
+                    relative_path,
+                };
+            }
+            let second_name = second.as_os_str().to_string_lossy().to_string();
+            let relative_path: PathBuf = rest.iter().map(|c| c.as_os_str()).collect();
+            PathType::NestedPassthrough {
+                category: first_name,
+                skill_name: second_name,
+                relative_path,
+            }
+        }
+        _ => PathType::Invalid,
     }
 }
 

@@ -20,13 +20,14 @@ mod fs;
 mod handles;
 mod inode;
 mod mount;
-mod path;
+pub mod path;
 mod sync;
 mod sys;
 mod xattr;
 
 pub use fs::SkillFs;
 pub use mount::{MountConfig, mount_background_configured, mount_configured};
+pub use path::SkillLayout;
 
 #[allow(deprecated)]
 pub use mount::{

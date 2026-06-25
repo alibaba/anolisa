@@ -9,7 +9,7 @@ use skillfs_core::parser;
 use tracing::{debug, info, warn};
 
 use super::super::SkillFs;
-use crate::path::{PathType, parse_path};
+use crate::path::PathType;
 use crate::security::{MutationKind, SkillEvent, SkillEventAction, SkillEventKind};
 use crate::sync::SyncEvent;
 use crate::sys::{errno, mkdirat_leaf, rename_noreplace, renameat2_leaf, unlinkat_leaf};
@@ -31,7 +31,7 @@ impl SkillFs {
                 return;
             }
         };
-        let path_type = parse_path(Path::new(&path_str), self.in_place);
+        let path_type = self.parse_fuse_path(Path::new(&path_str));
 
         // L1: the inbox virtual root is always present — refuse to
         // shadow it with a real directory. The inbox-skill case lands
@@ -232,7 +232,7 @@ impl SkillFs {
                 return;
             }
         };
-        let path_type = parse_path(Path::new(&path_str), self.in_place);
+        let path_type = self.parse_fuse_path(Path::new(&path_str));
         let (skill_name_for_event, relative_for_event) = match &path_type {
             PathType::Passthrough {
                 skill_name,
@@ -383,7 +383,7 @@ impl SkillFs {
                 return;
             }
         };
-        let path_type = parse_path(Path::new(&path_str), self.in_place);
+        let path_type = self.parse_fuse_path(Path::new(&path_str));
 
         // S3: refuse to rmdir a reserved lifecycle namespace or any
         // directory beneath one. The gate fires before any physical
@@ -543,8 +543,8 @@ impl SkillFs {
                 return;
             }
         };
-        let old_path_type = parse_path(Path::new(&old_path), self.in_place);
-        let new_path_type = parse_path(Path::new(&new_path), self.in_place);
+        let old_path_type = self.parse_fuse_path(Path::new(&old_path));
+        let new_path_type = self.parse_fuse_path(Path::new(&new_path));
         let (event_skill, event_relative) = match &old_path_type {
             PathType::Passthrough {
                 skill_name,

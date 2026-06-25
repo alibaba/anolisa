@@ -160,10 +160,31 @@ impl MountFixture {
         Self::mount_now(MountMode::InPlace, source, None)
     }
 
+    /// Mount in in-place mode with Hermes layout.
+    pub fn in_place_hermes<F: FnOnce(&Path)>(seed: F) -> Self {
+        let source = tempfile::tempdir().expect("source tempdir");
+        seed(source.path());
+        Self::mount_now_with_layout(
+            MountMode::InPlace,
+            source,
+            None,
+            Some(skillfs_fuse::SkillLayout::Hermes),
+        )
+    }
+
     fn mount_now(
         mode: MountMode,
         source: tempfile::TempDir,
         mountpoint: Option<tempfile::TempDir>,
+    ) -> Self {
+        Self::mount_now_with_layout(mode, source, mountpoint, None)
+    }
+
+    fn mount_now_with_layout(
+        mode: MountMode,
+        source: tempfile::TempDir,
+        mountpoint: Option<tempfile::TempDir>,
+        skill_layout: Option<skillfs_fuse::SkillLayout>,
     ) -> Self {
         let mut store = SkillStore::new();
         store.load_from_directory(source.path(), &ParseConfig::default());
@@ -176,13 +197,18 @@ impl MountFixture {
         };
         let in_place = matches!(mode, MountMode::InPlace);
 
+        let config = MountConfig {
+            skill_layout,
+            ..MountConfig::default()
+        };
+
         let handle = mount_background_configured(
             &mp_path,
             source.path(),
             shared,
             MountOptions::default(),
             in_place,
-            MountConfig::default(),
+            config,
         )
         .expect("mount_background_configured");
 

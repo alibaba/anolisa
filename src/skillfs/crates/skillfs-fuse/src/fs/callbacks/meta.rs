@@ -9,7 +9,7 @@ use tracing::debug;
 use super::super::SkillFs;
 use super::super::read_resolution::ReadResolution;
 use crate::attr::{file_attr_from_metadata, file_attr_from_stat};
-use crate::path::{PathType, is_skill_discover_path, parse_path};
+use crate::path::{PathType, is_skill_discover_path};
 use crate::security::{SkillEventKind, lifecycle::is_reserved_lifecycle_name};
 use crate::sys::{errno, fstatat_leaf};
 
@@ -39,7 +39,7 @@ impl SkillFs {
         };
         let path = Path::new(&path_str);
 
-        match parse_path(path, self.in_place) {
+        match self.parse_fuse_path(path) {
             PathType::Root => {
                 let attr = self.dir_attr();
                 self.inodes.remember(FUSE_ROOT_ID);
@@ -369,6 +369,105 @@ impl SkillFs {
                     Err(e) => reply.error(errno(&e)),
                 }
             }
+            PathType::HermesMeta { name } => {
+                let physical = self.source_base().join(&name);
+                match std::fs::symlink_metadata(&physical) {
+                    Ok(meta) => {
+                        let mut attr = file_attr_from_metadata(&meta);
+                        let ino = self.inodes.allocate(&path_str, attr.kind, parent);
+                        self.inodes.remember(ino);
+                        attr.ino = ino;
+                        reply.entry(&Duration::from_secs(1), &attr, 0);
+                    }
+                    Err(e) => reply.error(errno(&e)),
+                }
+            }
+            PathType::HermesMetaChild {
+                name,
+                relative_path,
+            } => {
+                let physical = self.source_base().join(&name).join(&relative_path);
+                match std::fs::symlink_metadata(&physical) {
+                    Ok(meta) => {
+                        let mut attr = file_attr_from_metadata(&meta);
+                        let ino = self.inodes.allocate(&path_str, attr.kind, parent);
+                        self.inodes.remember(ino);
+                        attr.ino = ino;
+                        reply.entry(&Duration::from_secs(1), &attr, 0);
+                    }
+                    Err(e) => reply.error(errno(&e)),
+                }
+            }
+            PathType::CategoryDir { category } => {
+                let physical = self.source_base().join(&category);
+                if physical.is_dir() {
+                    let ino = self.inodes.allocate(&path_str, FileType::Directory, parent);
+                    self.inodes.remember(ino);
+                    let mut attr = self.dir_attr();
+                    attr.ino = ino;
+                    reply.entry(&Duration::from_secs(1), &attr, 0);
+                } else {
+                    reply.error(libc::ENOENT);
+                }
+            }
+            PathType::NestedSkillDir {
+                category,
+                skill_name,
+            } => {
+                let physical = self.source_base().join(&category).join(&skill_name);
+                if physical.is_dir() {
+                    let ino = self.inodes.allocate(&path_str, FileType::Directory, parent);
+                    self.inodes.remember(ino);
+                    let mut attr = self.dir_attr();
+                    attr.ino = ino;
+                    reply.entry(&Duration::from_secs(1), &attr, 0);
+                } else {
+                    reply.error(libc::ENOENT);
+                }
+            }
+            PathType::NestedSkillMd {
+                category,
+                skill_name,
+            } => {
+                let physical = self
+                    .source_base()
+                    .join(&category)
+                    .join(&skill_name)
+                    .join("SKILL.md");
+                match std::fs::symlink_metadata(&physical) {
+                    Ok(meta) => {
+                        let mut attr = file_attr_from_metadata(&meta);
+                        let ino = self
+                            .inodes
+                            .allocate(&path_str, FileType::RegularFile, parent);
+                        self.inodes.remember(ino);
+                        attr.ino = ino;
+                        reply.entry(&Duration::from_secs(1), &attr, 0);
+                    }
+                    Err(e) => reply.error(errno(&e)),
+                }
+            }
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } => {
+                let physical = self
+                    .source_base()
+                    .join(&category)
+                    .join(&skill_name)
+                    .join(&relative_path);
+                match std::fs::symlink_metadata(&physical) {
+                    Ok(meta) => {
+                        let mut attr = file_attr_from_metadata(&meta);
+                        let ino = self.inodes.allocate(&path_str, attr.kind, parent);
+                        self.inodes.remember(ino);
+                        attr.ino = ino;
+                        reply.entry(&Duration::from_secs(1), &attr, 0);
+                    }
+                    Err(e) => reply.error(errno(&e)),
+                }
+            }
             PathType::Invalid => reply.error(libc::ENOENT),
         }
     }
@@ -426,7 +525,7 @@ impl SkillFs {
             }
         };
 
-        match parse_path(Path::new(&path), self.in_place) {
+        match self.parse_fuse_path(Path::new(&path)) {
             PathType::Root | PathType::SkillsDir => {
                 reply.attr(&Duration::from_secs(1), &self.dir_attr());
             }
@@ -636,6 +735,93 @@ impl SkillFs {
                     Err(e) => reply.error(errno(&e)),
                 }
             }
+            PathType::HermesMeta { name } => {
+                let physical = self.source_base().join(&name);
+                match std::fs::symlink_metadata(&physical) {
+                    Ok(meta) => {
+                        let mut attr = file_attr_from_metadata(&meta);
+                        attr.ino = ino;
+                        reply.attr(&Duration::from_secs(1), &attr);
+                    }
+                    Err(e) => reply.error(errno(&e)),
+                }
+            }
+            PathType::HermesMetaChild {
+                name,
+                relative_path,
+            } => {
+                let physical = self.source_base().join(&name).join(&relative_path);
+                match std::fs::symlink_metadata(&physical) {
+                    Ok(meta) => {
+                        let mut attr = file_attr_from_metadata(&meta);
+                        attr.ino = ino;
+                        reply.attr(&Duration::from_secs(1), &attr);
+                    }
+                    Err(e) => reply.error(errno(&e)),
+                }
+            }
+            PathType::CategoryDir { category } => {
+                let physical = self.source_base().join(&category);
+                match std::fs::symlink_metadata(&physical) {
+                    Ok(meta) => {
+                        let mut attr = file_attr_from_metadata(&meta);
+                        attr.ino = ino;
+                        reply.attr(&Duration::from_secs(1), &attr);
+                    }
+                    Err(e) => reply.error(errno(&e)),
+                }
+            }
+            PathType::NestedSkillDir {
+                category,
+                skill_name,
+            } => {
+                let physical = self.source_base().join(&category).join(&skill_name);
+                match std::fs::symlink_metadata(&physical) {
+                    Ok(meta) => {
+                        let mut attr = file_attr_from_metadata(&meta);
+                        attr.ino = ino;
+                        reply.attr(&Duration::from_secs(1), &attr);
+                    }
+                    Err(e) => reply.error(errno(&e)),
+                }
+            }
+            PathType::NestedSkillMd {
+                category,
+                skill_name,
+            } => {
+                let physical = self
+                    .source_base()
+                    .join(&category)
+                    .join(&skill_name)
+                    .join("SKILL.md");
+                match std::fs::symlink_metadata(&physical) {
+                    Ok(meta) => {
+                        let mut attr = file_attr_from_metadata(&meta);
+                        attr.ino = ino;
+                        reply.attr(&Duration::from_secs(1), &attr);
+                    }
+                    Err(e) => reply.error(errno(&e)),
+                }
+            }
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } => {
+                let physical = self
+                    .source_base()
+                    .join(&category)
+                    .join(&skill_name)
+                    .join(&relative_path);
+                match std::fs::symlink_metadata(&physical) {
+                    Ok(meta) => {
+                        let mut attr = file_attr_from_metadata(&meta);
+                        attr.ino = ino;
+                        reply.attr(&Duration::from_secs(1), &attr);
+                    }
+                    Err(e) => reply.error(errno(&e)),
+                }
+            }
             PathType::Invalid => reply.error(libc::ENOENT),
         }
     }
@@ -682,7 +868,7 @@ impl SkillFs {
             None => return reply.error(libc::ENOENT),
         };
 
-        let path_type = parse_path(Path::new(&path), self.in_place);
+        let path_type = self.parse_fuse_path(Path::new(&path));
 
         match path_type {
             PathType::Root | PathType::SkillsDir | PathType::InboxDir => {
@@ -831,6 +1017,34 @@ impl SkillFs {
                     } else {
                         reply.error(result);
                     }
+                }
+            }
+            PathType::HermesMeta { .. }
+            | PathType::HermesMetaChild { .. }
+            | PathType::CategoryDir { .. } => {
+                let physical = match self.resolve_physical_path(&path) {
+                    Some(p) => p,
+                    None => return reply.error(libc::ENOENT),
+                };
+                let result = self.check_physical_access_result(&physical, mask, req);
+                if result == 0 {
+                    reply.ok();
+                } else {
+                    reply.error(result);
+                }
+            }
+            PathType::NestedSkillDir { .. }
+            | PathType::NestedSkillMd { .. }
+            | PathType::NestedPassthrough { .. } => {
+                let physical = match self.resolve_physical_path(&path) {
+                    Some(p) => p,
+                    None => return reply.error(libc::ENOENT),
+                };
+                let result = self.check_physical_access_result(&physical, mask, req);
+                if result == 0 {
+                    reply.ok();
+                } else {
+                    reply.error(result);
                 }
             }
             PathType::Invalid => {

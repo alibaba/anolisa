@@ -10,7 +10,7 @@ use tracing::{debug, warn};
 use super::super::SkillFs;
 use crate::attr::{file_attr_from_metadata, file_attr_from_stat};
 use crate::handles::open_options_from_flags;
-use crate::path::{PathType, is_skill_discover_path, parse_path};
+use crate::path::{PathType, is_skill_discover_path};
 use crate::security::{MutationKind, SkillEventAction, SkillEventKind};
 use crate::sync::SyncEvent;
 use crate::sys::{errno, fstatat_leaf, openat_leaf};
@@ -69,7 +69,7 @@ impl SkillFs {
             }
         };
 
-        let path_type = parse_path(Path::new(&path), self.in_place);
+        let path_type = self.parse_fuse_path(Path::new(&path));
 
         // skill-discover namespace is always read-only
         match &path_type {
@@ -234,7 +234,7 @@ impl SkillFs {
                 return;
             }
         };
-        let path_type = parse_path(Path::new(&path_str), self.in_place);
+        let path_type = self.parse_fuse_path(Path::new(&path_str));
 
         // L1: the inbox virtual root is a directory; refuse to shadow it
         // with a regular file (e.g. a stray `touch /.skillfs-inbox` from
@@ -519,7 +519,7 @@ impl SkillFs {
                 return;
             }
         };
-        let path_type = parse_path(Path::new(&path_str), self.in_place);
+        let path_type = self.parse_fuse_path(Path::new(&path_str));
 
         // T2 mknod policy: FIFO is the only special file SkillFS creates.
         // Sockets, block/char devices, and any other S_IFMT bit are
@@ -704,7 +704,7 @@ impl SkillFs {
             }
         };
 
-        let path_type = parse_path(Path::new(&path), self.in_place);
+        let path_type = self.parse_fuse_path(Path::new(&path));
 
         // Determine whether any mutation is requested.
         let has_mutation = size.is_some()
@@ -817,6 +817,14 @@ impl SkillFs {
                 }
                 // Fall through to physical mutation; lifecycle and
                 // `.skill-meta` gates run below.
+            }
+            PathType::HermesMeta { .. }
+            | PathType::HermesMetaChild { .. }
+            | PathType::CategoryDir { .. }
+            | PathType::NestedSkillDir { .. }
+            | PathType::NestedSkillMd { .. }
+            | PathType::NestedPassthrough { .. } => {
+                // Hermes paths fall through to physical mutation.
             }
             PathType::Invalid => {
                 reply.error(libc::ENOENT);

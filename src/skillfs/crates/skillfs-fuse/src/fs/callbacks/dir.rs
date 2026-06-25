@@ -8,7 +8,7 @@ use tracing::{debug, warn};
 use super::super::SkillFs;
 use super::super::read_resolution::ReadResolution;
 use crate::attr::dir_entry_file_type;
-use crate::path::{PathType, is_skill_discover_path, parse_path};
+use crate::path::{PathType, is_skill_discover_path};
 use crate::security::{
     SKILL_META_DIR, inbox::INBOX_DIR_NAME, lifecycle::is_reserved_lifecycle_name,
 };
@@ -30,9 +30,42 @@ impl SkillFs {
             }
         };
 
-        let entries: Vec<(u64, FileType, String)> =
-            match parse_path(Path::new(&path), self.in_place) {
-                PathType::Root => {
+        let entries: Vec<(u64, FileType, String)> = match self.parse_fuse_path(Path::new(&path)) {
+            PathType::Root => {
+                let inbox_ino = self
+                    .inodes
+                    .lookup_by_path("/.skillfs-inbox")
+                    .unwrap_or_else(|| {
+                        self.inodes
+                            .allocate("/.skillfs-inbox", FileType::Directory, FUSE_ROOT_ID)
+                    });
+                vec![
+                    (FUSE_ROOT_ID, FileType::Directory, ".".to_string()),
+                    (FUSE_ROOT_ID, FileType::Directory, "..".to_string()),
+                    (
+                        self.inodes.lookup_by_path("/skills").unwrap_or(2),
+                        FileType::Directory,
+                        "skills".to_string(),
+                    ),
+                    (inbox_ino, FileType::Directory, INBOX_DIR_NAME.to_string()),
+                ]
+            }
+            PathType::SkillsDir if self.skill_layout == crate::path::SkillLayout::Hermes => {
+                let skills_dir_ino = self.skills_dir_ino();
+                let mut entries: Vec<(u64, FileType, String)> = vec![
+                    (ino, FileType::Directory, ".".to_string()),
+                    (FUSE_ROOT_ID, FileType::Directory, "..".to_string()),
+                ];
+                if let Ok(dir_iter) = std::fs::read_dir(self.source_base()) {
+                    for entry in dir_iter.flatten() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        let kind = dir_entry_file_type(&entry);
+                        let entry_path = self.skill_inode_path(&name);
+                        let entry_ino = self.inodes.readdir_ino(&entry_path);
+                        entries.push((entry_ino, kind, name));
+                    }
+                }
+                if self.in_place {
                     let inbox_ino = self
                         .inodes
                         .lookup_by_path("/.skillfs-inbox")
@@ -40,109 +73,144 @@ impl SkillFs {
                             self.inodes.allocate(
                                 "/.skillfs-inbox",
                                 FileType::Directory,
-                                FUSE_ROOT_ID,
+                                skills_dir_ino,
                             )
                         });
-                    vec![
-                        (FUSE_ROOT_ID, FileType::Directory, ".".to_string()),
-                        (FUSE_ROOT_ID, FileType::Directory, "..".to_string()),
-                        (
-                            self.inodes.lookup_by_path("/skills").unwrap_or(2),
-                            FileType::Directory,
-                            "skills".to_string(),
-                        ),
-                        (inbox_ino, FileType::Directory, INBOX_DIR_NAME.to_string()),
-                    ]
+                    entries.push((inbox_ino, FileType::Directory, INBOX_DIR_NAME.to_string()));
                 }
-                PathType::SkillsDir => {
-                    let mut skill_names = self.primary_skill_names();
-                    // S3: lifecycle namespaces never appear in ordinary
-                    // `/skills` listings. The store loader already skips
-                    // hidden top-level directories, but defend in depth here
-                    // in case a placeholder lands in the store via mkdir
-                    // before the S3 mkdir gate fires.
-                    skill_names.retain(|n| !is_reserved_lifecycle_name(n));
-                    // I2: staging roots are installer-private workspaces,
-                    // not skills. Hide them from the /skills listing.
-                    if let Some(ref matcher) = self.staging_matcher {
-                        skill_names.retain(|n| !matcher.is_staging_root(n));
-                    }
-                    // Pending installs are hidden from discovery until
-                    // completeness check passes and activation exists.
-                    if self.pending_install_controller.is_some() {
-                        skill_names.retain(|n| !self.is_pending_install(n));
-                    }
-                    // D1.1: mirror the opendir filter so the dynamic
-                    // fallback path also hides ledger-hidden skills.
-                    if self.active_resolver.is_some() {
-                        skill_names.retain(|n| {
-                            n == "skill-discover"
-                                || !matches!(self.resolve_skill_read(n), ReadResolution::Hidden)
-                        });
-                    }
-                    let skills_dir_ino = self.skills_dir_ino();
+                entries
+            }
+            PathType::SkillsDir => {
+                let mut skill_names = self.primary_skill_names();
+                // S3: lifecycle namespaces never appear in ordinary
+                // `/skills` listings. The store loader already skips
+                // hidden top-level directories, but defend in depth here
+                // in case a placeholder lands in the store via mkdir
+                // before the S3 mkdir gate fires.
+                skill_names.retain(|n| !is_reserved_lifecycle_name(n));
+                // I2: staging roots are installer-private workspaces,
+                // not skills. Hide them from the /skills listing.
+                if let Some(ref matcher) = self.staging_matcher {
+                    skill_names.retain(|n| !matcher.is_staging_root(n));
+                }
+                // Pending installs are hidden from discovery until
+                // completeness check passes and activation exists.
+                if self.pending_install_controller.is_some() {
+                    skill_names.retain(|n| !self.is_pending_install(n));
+                }
+                // D1.1: mirror the opendir filter so the dynamic
+                // fallback path also hides ledger-hidden skills.
+                if self.active_resolver.is_some() {
+                    skill_names.retain(|n| {
+                        n == "skill-discover"
+                            || !matches!(self.resolve_skill_read(n), ReadResolution::Hidden)
+                    });
+                }
+                let skills_dir_ino = self.skills_dir_ino();
 
+                let mut entries: Vec<(u64, FileType, String)> = vec![
+                    (ino, FileType::Directory, ".".to_string()),
+                    (FUSE_ROOT_ID, FileType::Directory, "..".to_string()),
+                ];
+
+                for name in &skill_names {
+                    let skill_path = self.skill_inode_path(name);
+                    let skill_ino = self.inodes.readdir_ino(&skill_path);
+                    entries.push((skill_ino, FileType::Directory, name.clone()));
+                }
+
+                if !skill_names.iter().any(|n| n == "skill-discover") {
+                    let discover_path = self.skill_inode_path("skill-discover");
+                    let discover_ino = self.inodes.readdir_ino(&discover_path);
+                    entries.push((
+                        discover_ino,
+                        FileType::Directory,
+                        "skill-discover".to_string(),
+                    ));
+                }
+
+                // L1: in in-place mode, the FUSE root IS the skills
+                // directory, so the inbox appears here. In normal
+                // mode the inbox lives under `/` and is exposed by
+                // the `Root` branch above; this gate avoids
+                // double-listing it when readdir descends into
+                // `/skills`.
+                if self.in_place {
+                    let inbox_ino = self
+                        .inodes
+                        .lookup_by_path("/.skillfs-inbox")
+                        .unwrap_or_else(|| {
+                            self.inodes.allocate(
+                                "/.skillfs-inbox",
+                                FileType::Directory,
+                                skills_dir_ino,
+                            )
+                        });
+                    entries.push((inbox_ino, FileType::Directory, INBOX_DIR_NAME.to_string()));
+                }
+
+                entries
+            }
+            PathType::SkillDir { skill_name } => {
+                // I2: staging roots bypass the active resolver and
+                // enumerate physical entries directly — no compiled
+                // SKILL.md virtual entry, no skill-discover virtual
+                // entries.  Pending installs use the same bypass.
+                if self.is_staging_skill_root(&skill_name) || self.is_pending_install(&skill_name) {
+                    let show_meta = self.should_show_skill_meta_in_listing(&skill_name, req);
+                    let parent_ino = self.skills_dir_ino();
                     let mut entries: Vec<(u64, FileType, String)> = vec![
                         (ino, FileType::Directory, ".".to_string()),
-                        (FUSE_ROOT_ID, FileType::Directory, "..".to_string()),
+                        (parent_ino, FileType::Directory, "..".to_string()),
+                    ];
+                    let phys_dir = self.source_base().join(&skill_name);
+                    if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
+                        for entry in dir_iter.flatten() {
+                            let name = entry.file_name().to_string_lossy().to_string();
+                            if name == SKILL_META_DIR && !show_meta {
+                                continue;
+                            }
+                            let kind = dir_entry_file_type(&entry);
+                            let entry_path = format!("{}/{}", path, name);
+                            let entry_ino = self.inodes.readdir_ino(&entry_path);
+                            entries.push((entry_ino, kind, name));
+                        }
+                    }
+                    entries
+                } else {
+                    // D1.1: ledger-hidden skills do not list anything.
+                    // I4: grace does NOT bypass readdir — the skill stays
+                    // hidden from directory listing. Grace only allows
+                    // exact-path traversal (lookup/getattr) so the
+                    // installer can reach whitelisted files.
+                    if matches!(self.resolve_skill_read(&skill_name), ReadResolution::Hidden) {
+                        reply.error(libc::ENOENT);
+                        return;
+                    }
+                    let parent_ino = self.skills_dir_ino();
+                    let mut entries: Vec<(u64, FileType, String)> = vec![
+                        (ino, FileType::Directory, ".".to_string()),
+                        (parent_ino, FileType::Directory, "..".to_string()),
                     ];
 
-                    for name in &skill_names {
-                        let skill_path = self.skill_inode_path(name);
-                        let skill_ino = self.inodes.readdir_ino(&skill_path);
-                        entries.push((skill_ino, FileType::Directory, name.clone()));
-                    }
+                    let md_path = format!("{}/SKILL.md", path);
+                    let md_ino = self.inodes.readdir_ino(&md_path);
+                    entries.push((md_ino, FileType::RegularFile, "SKILL.md".to_string()));
 
-                    if !skill_names.iter().any(|n| n == "skill-discover") {
-                        let discover_path = self.skill_inode_path("skill-discover");
-                        let discover_ino = self.inodes.readdir_ino(&discover_path);
-                        entries.push((
-                            discover_ino,
-                            FileType::Directory,
-                            "skill-discover".to_string(),
-                        ));
-                    }
-
-                    // L1: in in-place mode, the FUSE root IS the skills
-                    // directory, so the inbox appears here. In normal
-                    // mode the inbox lives under `/` and is exposed by
-                    // the `Root` branch above; this gate avoids
-                    // double-listing it when readdir descends into
-                    // `/skills`.
-                    if self.in_place {
-                        let inbox_ino = self
-                            .inodes
-                            .lookup_by_path("/.skillfs-inbox")
-                            .unwrap_or_else(|| {
-                                self.inodes.allocate(
-                                    "/.skillfs-inbox",
-                                    FileType::Directory,
-                                    skills_dir_ino,
-                                )
-                            });
-                        entries.push((inbox_ino, FileType::Directory, INBOX_DIR_NAME.to_string()));
-                    }
-
-                    entries
-                }
-                PathType::SkillDir { skill_name } => {
-                    // I2: staging roots bypass the active resolver and
-                    // enumerate physical entries directly — no compiled
-                    // SKILL.md virtual entry, no skill-discover virtual
-                    // entries.  Pending installs use the same bypass.
-                    if self.is_staging_skill_root(&skill_name)
-                        || self.is_pending_install(&skill_name)
-                    {
+                    if skill_name != "skill-discover" {
                         let show_meta = self.should_show_skill_meta_in_listing(&skill_name, req);
-                        let parent_ino = self.skills_dir_ino();
-                        let mut entries: Vec<(u64, FileType, String)> = vec![
-                            (ino, FileType::Directory, ".".to_string()),
-                            (parent_ino, FileType::Directory, "..".to_string()),
-                        ];
-                        let phys_dir = self.source_base().join(&skill_name);
+                        // D1.1: fallback skills enumerate from the
+                        // snapshot tree; current and no-resolver skills
+                        // enumerate from the live source.
+                        let phys_dir = self
+                            .skill_read_dir(&skill_name)
+                            .unwrap_or_else(|| self.skill_physical_dir(&skill_name));
                         if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
                             for entry in dir_iter.flatten() {
                                 let name = entry.file_name().to_string_lossy().to_string();
+                                if name == "SKILL.md" {
+                                    continue;
+                                }
                                 if name == SKILL_META_DIR && !show_meta {
                                     continue;
                                 }
@@ -152,242 +220,313 @@ impl SkillFs {
                                 entries.push((entry_ino, kind, name));
                             }
                         }
-                        entries
-                    } else {
-                        // D1.1: ledger-hidden skills do not list anything.
-                        // I4: grace does NOT bypass readdir — the skill stays
-                        // hidden from directory listing. Grace only allows
-                        // exact-path traversal (lookup/getattr) so the
-                        // installer can reach whitelisted files.
-                        if matches!(self.resolve_skill_read(&skill_name), ReadResolution::Hidden) {
-                            reply.error(libc::ENOENT);
-                            return;
-                        }
-                        let parent_ino = self.skills_dir_ino();
+                    }
+
+                    entries
+                }
+            }
+            PathType::Passthrough {
+                skill_name,
+                relative_path,
+            } => {
+                let pt = PathType::Passthrough {
+                    skill_name: skill_name.clone(),
+                    relative_path: relative_path.clone(),
+                };
+                match self.is_trusted_skill_meta_access(&pt, req) {
+                    Some(false) => {
+                        reply.error(libc::ENOENT);
+                        return;
+                    }
+                    Some(true) => {
+                        let phys_dir = self.skill_physical_dir(&skill_name).join(&relative_path);
+                        let parent_ino = {
+                            let parent_path = Path::new(&path)
+                                .parent()
+                                .map(|p| p.to_string_lossy().to_string())
+                                .unwrap_or_default();
+                            self.inodes.lookup_by_path(&parent_path).unwrap_or(ino)
+                        };
                         let mut entries: Vec<(u64, FileType, String)> = vec![
                             (ino, FileType::Directory, ".".to_string()),
                             (parent_ino, FileType::Directory, "..".to_string()),
                         ];
-
-                        // Only synthesize the virtual SKILL.md when the
-                        // manifest is actually readable (physical file
-                        // present in the resolved read dir, or the always
-                        // -virtual skill-discover). A newly-created empty
-                        // skill dir has none yet and must list as empty.
-                        if self.skill_md_listable(&skill_name) {
-                            let md_path = format!("{}/SKILL.md", path);
-                            let md_ino = self.inodes.readdir_ino(&md_path);
-                            entries.push((md_ino, FileType::RegularFile, "SKILL.md".to_string()));
-                        }
-
-                        if skill_name != "skill-discover" {
-                            let show_meta =
-                                self.should_show_skill_meta_in_listing(&skill_name, req);
-                            // D1.1: fallback skills enumerate from the
-                            // snapshot tree; current and no-resolver skills
-                            // enumerate from the live source.
-                            let phys_dir = self
-                                .skill_read_dir(&skill_name)
-                                .unwrap_or_else(|| self.skill_physical_dir(&skill_name));
-                            if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
-                                for entry in dir_iter.flatten() {
-                                    let name = entry.file_name().to_string_lossy().to_string();
-                                    if name == "SKILL.md" {
-                                        continue;
-                                    }
-                                    if name == SKILL_META_DIR && !show_meta {
-                                        continue;
-                                    }
-                                    let kind = dir_entry_file_type(&entry);
-                                    let entry_path = format!("{}/{}", path, name);
-                                    let entry_ino = self.inodes.readdir_ino(&entry_path);
-                                    entries.push((entry_ino, kind, name));
-                                }
+                        if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
+                            for entry in dir_iter.flatten() {
+                                let name = entry.file_name().to_string_lossy().to_string();
+                                let kind = dir_entry_file_type(&entry);
+                                let entry_path = format!("{}/{}", path, name);
+                                let entry_ino = self.inodes.readdir_ino(&entry_path);
+                                entries.push((entry_ino, kind, name));
                             }
                         }
-
+                        entries
+                    }
+                    None => {
+                        // I2: staging roots use the physical source dir
+                        // directly, bypassing the active resolver.
+                        // Pending installs use the same bypass.
+                        let skill_dir = if self.is_staging_skill_root(&skill_name)
+                            || self.is_pending_install(&skill_name)
+                        {
+                            self.source_base().join(&skill_name)
+                        } else {
+                            match self.skill_read_dir(&skill_name) {
+                                Some(d) => d,
+                                None => {
+                                    reply.error(libc::ENOENT);
+                                    return;
+                                }
+                            }
+                        };
+                        let parent_ino = {
+                            let parent_path = Path::new(&path)
+                                .parent()
+                                .map(|p| p.to_string_lossy().to_string())
+                                .unwrap_or_default();
+                            self.inodes.lookup_by_path(&parent_path).unwrap_or(ino)
+                        };
+                        let phys_dir = skill_dir.join(&relative_path);
+                        let mut entries: Vec<(u64, FileType, String)> = vec![
+                            (ino, FileType::Directory, ".".to_string()),
+                            (parent_ino, FileType::Directory, "..".to_string()),
+                        ];
+                        if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
+                            for entry in dir_iter.flatten() {
+                                let name = entry.file_name().to_string_lossy().to_string();
+                                let kind = dir_entry_file_type(&entry);
+                                let entry_path = format!("{}/{}", path, name);
+                                let entry_ino = self.inodes.readdir_ino(&entry_path);
+                                entries.push((entry_ino, kind, name));
+                            }
+                        }
                         entries
                     }
                 }
-                PathType::Passthrough {
-                    skill_name,
-                    relative_path,
-                } => {
-                    let pt = PathType::Passthrough {
-                        skill_name: skill_name.clone(),
-                        relative_path: relative_path.clone(),
-                    };
-                    match self.is_trusted_skill_meta_access(&pt, req) {
-                        Some(false) => {
-                            reply.error(libc::ENOENT);
-                            return;
+            }
+            PathType::InboxDir => {
+                let parent_ino = FUSE_ROOT_ID;
+                let mut entries: Vec<(u64, FileType, String)> = vec![
+                    (ino, FileType::Directory, ".".to_string()),
+                    (parent_ino, FileType::Directory, "..".to_string()),
+                ];
+                if let Ok(dir_iter) = std::fs::read_dir(self.source_base()) {
+                    for entry in dir_iter.flatten() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if !Self::is_inbox_skill_name_allowed(&name) {
+                            continue;
                         }
-                        Some(true) => {
-                            let phys_dir =
-                                self.skill_physical_dir(&skill_name).join(&relative_path);
-                            let parent_ino = {
-                                let parent_path = Path::new(&path)
-                                    .parent()
-                                    .map(|p| p.to_string_lossy().to_string())
-                                    .unwrap_or_default();
-                                self.inodes.lookup_by_path(&parent_path).unwrap_or(ino)
-                            };
-                            let mut entries: Vec<(u64, FileType, String)> = vec![
-                                (ino, FileType::Directory, ".".to_string()),
-                                (parent_ino, FileType::Directory, "..".to_string()),
-                            ];
-                            if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
-                                for entry in dir_iter.flatten() {
-                                    let name = entry.file_name().to_string_lossy().to_string();
-                                    let kind = dir_entry_file_type(&entry);
-                                    let entry_path = format!("{}/{}", path, name);
-                                    let entry_ino = self.inodes.readdir_ino(&entry_path);
-                                    entries.push((entry_ino, kind, name));
-                                }
-                            }
-                            entries
+                        let meta = match entry.metadata() {
+                            Ok(m) => m,
+                            Err(_) => continue,
+                        };
+                        if !meta.is_dir() {
+                            continue;
                         }
-                        None => {
-                            // I2: staging roots use the physical source dir
-                            // directly, bypassing the active resolver.
-                            // Pending installs use the same bypass.
-                            let skill_dir = if self.is_staging_skill_root(&skill_name)
-                                || self.is_pending_install(&skill_name)
-                            {
-                                self.source_base().join(&skill_name)
-                            } else {
-                                match self.skill_read_dir(&skill_name) {
-                                    Some(d) => d,
-                                    None => {
-                                        reply.error(libc::ENOENT);
-                                        return;
-                                    }
-                                }
-                            };
-                            let parent_ino = {
-                                let parent_path = Path::new(&path)
-                                    .parent()
-                                    .map(|p| p.to_string_lossy().to_string())
-                                    .unwrap_or_default();
-                                self.inodes.lookup_by_path(&parent_path).unwrap_or(ino)
-                            };
-                            let phys_dir = skill_dir.join(&relative_path);
-                            let mut entries: Vec<(u64, FileType, String)> = vec![
-                                (ino, FileType::Directory, ".".to_string()),
-                                (parent_ino, FileType::Directory, "..".to_string()),
-                            ];
-                            if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
-                                for entry in dir_iter.flatten() {
-                                    let name = entry.file_name().to_string_lossy().to_string();
-                                    let kind = dir_entry_file_type(&entry);
-                                    let entry_path = format!("{}/{}", path, name);
-                                    let entry_ino = self.inodes.readdir_ino(&entry_path);
-                                    entries.push((entry_ino, kind, name));
-                                }
-                            }
-                            entries
-                        }
+                        let entry_path = format!("/.skillfs-inbox/{}", name);
+                        let entry_ino = self.inodes.readdir_ino(&entry_path);
+                        entries.push((entry_ino, FileType::Directory, name));
                     }
                 }
-                PathType::InboxDir => {
-                    let parent_ino = FUSE_ROOT_ID;
-                    let mut entries: Vec<(u64, FileType, String)> = vec![
-                        (ino, FileType::Directory, ".".to_string()),
-                        (parent_ino, FileType::Directory, "..".to_string()),
-                    ];
-                    if let Ok(dir_iter) = std::fs::read_dir(self.source_base()) {
-                        for entry in dir_iter.flatten() {
-                            let name = entry.file_name().to_string_lossy().to_string();
-                            if !Self::is_inbox_skill_name_allowed(&name) {
-                                continue;
-                            }
-                            let meta = match entry.metadata() {
-                                Ok(m) => m,
-                                Err(_) => continue,
-                            };
-                            if !meta.is_dir() {
-                                continue;
-                            }
-                            let entry_path = format!("/.skillfs-inbox/{}", name);
-                            let entry_ino = self.inodes.readdir_ino(&entry_path);
-                            entries.push((entry_ino, FileType::Directory, name));
-                        }
-                    }
-                    entries
-                }
-                PathType::InboxSkillDir { skill_name } => {
-                    if !Self::is_inbox_skill_name_allowed(&skill_name) {
-                        reply.error(libc::ENOENT);
-                        return;
-                    }
-                    let parent_ino = self
-                        .inodes
-                        .lookup_by_path("/.skillfs-inbox")
-                        .unwrap_or(FUSE_ROOT_ID);
-                    let phys_dir = self.inbox_skill_dir(&skill_name);
-                    let mut entries: Vec<(u64, FileType, String)> = vec![
-                        (ino, FileType::Directory, ".".to_string()),
-                        (parent_ino, FileType::Directory, "..".to_string()),
-                    ];
-                    match std::fs::read_dir(&phys_dir) {
-                        Ok(dir_iter) => {
-                            for entry in dir_iter.flatten() {
-                                let name = entry.file_name().to_string_lossy().to_string();
-                                let kind = dir_entry_file_type(&entry);
-                                let entry_path = format!("{}/{}", path, name);
-                                let entry_ino = self.inodes.readdir_ino(&entry_path);
-                                entries.push((entry_ino, kind, name));
-                            }
-                        }
-                        Err(e) => {
-                            reply.error(errno(&e));
-                            return;
-                        }
-                    }
-                    entries
-                }
-                PathType::InboxPassthrough {
-                    skill_name,
-                    relative_path,
-                } => {
-                    if !Self::is_inbox_skill_name_allowed(&skill_name) {
-                        reply.error(libc::ENOENT);
-                        return;
-                    }
-                    let phys_dir = self.inbox_skill_dir(&skill_name).join(&relative_path);
-                    let parent_ino = {
-                        let parent_path = Path::new(&path)
-                            .parent()
-                            .map(|p| p.to_string_lossy().to_string())
-                            .unwrap_or_default();
-                        self.inodes.lookup_by_path(&parent_path).unwrap_or(ino)
-                    };
-                    let mut entries: Vec<(u64, FileType, String)> = vec![
-                        (ino, FileType::Directory, ".".to_string()),
-                        (parent_ino, FileType::Directory, "..".to_string()),
-                    ];
-                    match std::fs::read_dir(&phys_dir) {
-                        Ok(dir_iter) => {
-                            for entry in dir_iter.flatten() {
-                                let name = entry.file_name().to_string_lossy().to_string();
-                                let kind = dir_entry_file_type(&entry);
-                                let entry_path = format!("{}/{}", path, name);
-                                let entry_ino = self.inodes.readdir_ino(&entry_path);
-                                entries.push((entry_ino, kind, name));
-                            }
-                        }
-                        Err(e) => {
-                            reply.error(errno(&e));
-                            return;
-                        }
-                    }
-                    entries
-                }
-                _ => {
-                    reply.error(libc::ENOTDIR);
+                entries
+            }
+            PathType::InboxSkillDir { skill_name } => {
+                if !Self::is_inbox_skill_name_allowed(&skill_name) {
+                    reply.error(libc::ENOENT);
                     return;
                 }
-            };
+                let parent_ino = self
+                    .inodes
+                    .lookup_by_path("/.skillfs-inbox")
+                    .unwrap_or(FUSE_ROOT_ID);
+                let phys_dir = self.inbox_skill_dir(&skill_name);
+                let mut entries: Vec<(u64, FileType, String)> = vec![
+                    (ino, FileType::Directory, ".".to_string()),
+                    (parent_ino, FileType::Directory, "..".to_string()),
+                ];
+                match std::fs::read_dir(&phys_dir) {
+                    Ok(dir_iter) => {
+                        for entry in dir_iter.flatten() {
+                            let name = entry.file_name().to_string_lossy().to_string();
+                            let kind = dir_entry_file_type(&entry);
+                            let entry_path = format!("{}/{}", path, name);
+                            let entry_ino = self.inodes.readdir_ino(&entry_path);
+                            entries.push((entry_ino, kind, name));
+                        }
+                    }
+                    Err(e) => {
+                        reply.error(errno(&e));
+                        return;
+                    }
+                }
+                entries
+            }
+            PathType::InboxPassthrough {
+                skill_name,
+                relative_path,
+            } => {
+                if !Self::is_inbox_skill_name_allowed(&skill_name) {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+                let phys_dir = self.inbox_skill_dir(&skill_name).join(&relative_path);
+                let parent_ino = {
+                    let parent_path = Path::new(&path)
+                        .parent()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    self.inodes.lookup_by_path(&parent_path).unwrap_or(ino)
+                };
+                let mut entries: Vec<(u64, FileType, String)> = vec![
+                    (ino, FileType::Directory, ".".to_string()),
+                    (parent_ino, FileType::Directory, "..".to_string()),
+                ];
+                match std::fs::read_dir(&phys_dir) {
+                    Ok(dir_iter) => {
+                        for entry in dir_iter.flatten() {
+                            let name = entry.file_name().to_string_lossy().to_string();
+                            let kind = dir_entry_file_type(&entry);
+                            let entry_path = format!("{}/{}", path, name);
+                            let entry_ino = self.inodes.readdir_ino(&entry_path);
+                            entries.push((entry_ino, kind, name));
+                        }
+                    }
+                    Err(e) => {
+                        reply.error(errno(&e));
+                        return;
+                    }
+                }
+                entries
+            }
+            PathType::HermesMeta { name: meta_name } => {
+                let phys_dir = self.source_base().join(&meta_name);
+                let parent_ino = self.skills_dir_ino();
+                let mut entries: Vec<(u64, FileType, String)> = vec![
+                    (ino, FileType::Directory, ".".to_string()),
+                    (parent_ino, FileType::Directory, "..".to_string()),
+                ];
+                if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
+                    for entry in dir_iter.flatten() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        let kind = dir_entry_file_type(&entry);
+                        let entry_path = format!("{}/{}", path, name);
+                        let entry_ino = self.inodes.readdir_ino(&entry_path);
+                        entries.push((entry_ino, kind, name));
+                    }
+                }
+                entries
+            }
+            PathType::HermesMetaChild {
+                name: meta_name,
+                relative_path,
+            } => {
+                let phys_dir = self.source_base().join(&meta_name).join(&relative_path);
+                let parent_ino = {
+                    let parent_path = Path::new(&path)
+                        .parent()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    self.inodes.lookup_by_path(&parent_path).unwrap_or(ino)
+                };
+                let mut entries: Vec<(u64, FileType, String)> = vec![
+                    (ino, FileType::Directory, ".".to_string()),
+                    (parent_ino, FileType::Directory, "..".to_string()),
+                ];
+                if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
+                    for entry in dir_iter.flatten() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        let kind = dir_entry_file_type(&entry);
+                        let entry_path = format!("{}/{}", path, name);
+                        let entry_ino = self.inodes.readdir_ino(&entry_path);
+                        entries.push((entry_ino, kind, name));
+                    }
+                }
+                entries
+            }
+            PathType::CategoryDir { category } => {
+                let phys_dir = self.source_base().join(&category);
+                let parent_ino = self.skills_dir_ino();
+                let mut entries: Vec<(u64, FileType, String)> = vec![
+                    (ino, FileType::Directory, ".".to_string()),
+                    (parent_ino, FileType::Directory, "..".to_string()),
+                ];
+                if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
+                    for entry in dir_iter.flatten() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if !entry.path().is_dir() {
+                            continue;
+                        }
+                        let entry_path = format!("{}/{}", path, name);
+                        let entry_ino = self.inodes.readdir_ino(&entry_path);
+                        entries.push((entry_ino, FileType::Directory, name));
+                    }
+                }
+                entries
+            }
+            PathType::NestedSkillDir {
+                category,
+                skill_name,
+            } => {
+                let phys_dir = self.source_base().join(&category).join(&skill_name);
+                let parent_ino = {
+                    let parent_path = Path::new(&path)
+                        .parent()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    self.inodes.lookup_by_path(&parent_path).unwrap_or(ino)
+                };
+                let mut entries: Vec<(u64, FileType, String)> = vec![
+                    (ino, FileType::Directory, ".".to_string()),
+                    (parent_ino, FileType::Directory, "..".to_string()),
+                ];
+                if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
+                    for entry in dir_iter.flatten() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        let kind = dir_entry_file_type(&entry);
+                        let entry_path = format!("{}/{}", path, name);
+                        let entry_ino = self.inodes.readdir_ino(&entry_path);
+                        entries.push((entry_ino, kind, name));
+                    }
+                }
+                entries
+            }
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } => {
+                let phys_dir = self
+                    .source_base()
+                    .join(&category)
+                    .join(&skill_name)
+                    .join(&relative_path);
+                let parent_ino = {
+                    let parent_path = Path::new(&path)
+                        .parent()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    self.inodes.lookup_by_path(&parent_path).unwrap_or(ino)
+                };
+                let mut entries: Vec<(u64, FileType, String)> = vec![
+                    (ino, FileType::Directory, ".".to_string()),
+                    (parent_ino, FileType::Directory, "..".to_string()),
+                ];
+                if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
+                    for entry in dir_iter.flatten() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        let kind = dir_entry_file_type(&entry);
+                        let entry_path = format!("{}/{}", path, name);
+                        let entry_ino = self.inodes.readdir_ino(&entry_path);
+                        entries.push((entry_ino, kind, name));
+                    }
+                }
+                entries
+            }
+            _ => {
+                reply.error(libc::ENOTDIR);
+                return;
+            }
+        };
 
         for (i, (entry_ino, kind, name)) in entries.iter().enumerate().skip(offset as usize) {
             if reply.add(*entry_ino, (i + 1) as i64, *kind, name.as_str()) {
@@ -409,7 +548,7 @@ impl SkillFs {
             None => return reply.error(libc::ENOENT),
         };
 
-        let path_type = parse_path(Path::new(&path), self.in_place);
+        let path_type = self.parse_fuse_path(Path::new(&path));
 
         let (entries, dir_file) = match path_type {
             PathType::Root => {
@@ -433,6 +572,42 @@ impl SkillFs {
                     ],
                     None,
                 )
+            }
+            PathType::SkillsDir if self.skill_layout == crate::path::SkillLayout::Hermes => {
+                let skills_dir_ino = self.skills_dir_ino();
+                let mut entries = vec![
+                    (ino, FileType::Directory, ".".to_string()),
+                    (FUSE_ROOT_ID, FileType::Directory, "..".to_string()),
+                ];
+                let dir_file = match std::fs::read_dir(self.source_base()) {
+                    Ok(dir_iter) => {
+                        let mut phys_entries: Vec<_> = dir_iter.flatten().collect();
+                        phys_entries.sort_by_key(|e| e.file_name());
+                        for entry in phys_entries {
+                            let name = entry.file_name().to_string_lossy().to_string();
+                            let kind = dir_entry_file_type(&entry);
+                            let entry_path = self.skill_inode_path(&name);
+                            let entry_ino = self.inodes.readdir_ino(&entry_path);
+                            entries.push((entry_ino, kind, name));
+                        }
+                        std::fs::File::open(self.source_base()).ok()
+                    }
+                    Err(e) => return reply.error(errno(&e)),
+                };
+                if self.in_place {
+                    let inbox_ino = self
+                        .inodes
+                        .lookup_by_path("/.skillfs-inbox")
+                        .unwrap_or_else(|| {
+                            self.inodes.allocate(
+                                "/.skillfs-inbox",
+                                FileType::Directory,
+                                skills_dir_ino,
+                            )
+                        });
+                    entries.push((inbox_ino, FileType::Directory, INBOX_DIR_NAME.to_string()));
+                }
+                (entries, dir_file)
             }
             PathType::SkillsDir => {
                 let mut skill_names = self.primary_skill_names();
@@ -787,8 +962,81 @@ impl SkillFs {
                 };
                 (entries, dir_file)
             }
+            PathType::HermesMeta { name: meta_name }
+            | PathType::HermesMetaChild {
+                name: meta_name, ..
+            }
+            | PathType::CategoryDir {
+                category: meta_name,
+            } => {
+                let phys_dir = match self.resolve_physical_path(&path) {
+                    Some(p) => p,
+                    None => return reply.error(libc::ENOENT),
+                };
+                let parent_ino = {
+                    let parent_path = Path::new(&path)
+                        .parent()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    self.inodes.lookup_by_path(&parent_path).unwrap_or(ino)
+                };
+                let _ = meta_name;
+                let mut entries = vec![
+                    (ino, FileType::Directory, ".".to_string()),
+                    (parent_ino, FileType::Directory, "..".to_string()),
+                ];
+                let dir_file = match std::fs::read_dir(&phys_dir) {
+                    Ok(dir_iter) => {
+                        let mut phys_entries: Vec<_> = dir_iter.flatten().collect();
+                        phys_entries.sort_by_key(|e| e.file_name());
+                        for entry in phys_entries {
+                            let name = entry.file_name().to_string_lossy().to_string();
+                            let kind = dir_entry_file_type(&entry);
+                            let entry_path = format!("{}/{}", path, name);
+                            let entry_ino = self.inodes.readdir_ino(&entry_path);
+                            entries.push((entry_ino, kind, name));
+                        }
+                        std::fs::File::open(&phys_dir).ok()
+                    }
+                    Err(e) => return reply.error(errno(&e)),
+                };
+                (entries, dir_file)
+            }
+            PathType::NestedSkillDir { .. } | PathType::NestedPassthrough { .. } => {
+                let phys_dir = match self.resolve_physical_path(&path) {
+                    Some(p) => p,
+                    None => return reply.error(libc::ENOENT),
+                };
+                let parent_ino = {
+                    let parent_path = Path::new(&path)
+                        .parent()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    self.inodes.lookup_by_path(&parent_path).unwrap_or(ino)
+                };
+                let mut entries = vec![
+                    (ino, FileType::Directory, ".".to_string()),
+                    (parent_ino, FileType::Directory, "..".to_string()),
+                ];
+                let dir_file = match std::fs::read_dir(&phys_dir) {
+                    Ok(dir_iter) => {
+                        let mut phys_entries: Vec<_> = dir_iter.flatten().collect();
+                        phys_entries.sort_by_key(|e| e.file_name());
+                        for entry in phys_entries {
+                            let name = entry.file_name().to_string_lossy().to_string();
+                            let kind = dir_entry_file_type(&entry);
+                            let entry_path = format!("{}/{}", path, name);
+                            let entry_ino = self.inodes.readdir_ino(&entry_path);
+                            entries.push((entry_ino, kind, name));
+                        }
+                        std::fs::File::open(&phys_dir).ok()
+                    }
+                    Err(e) => return reply.error(errno(&e)),
+                };
+                (entries, dir_file)
+            }
             _ => {
-                // SkillMd, Invalid — not a directory
+                // SkillMd, NestedSkillMd, Invalid — not a directory
                 return reply.error(libc::ENOTDIR);
             }
         };
@@ -859,7 +1107,7 @@ impl SkillFs {
             None => return reply.error(libc::ENOENT),
         };
 
-        let path_type = parse_path(Path::new(&path), self.in_place);
+        let path_type = self.parse_fuse_path(Path::new(&path));
 
         match path_type {
             PathType::Root | PathType::SkillsDir | PathType::InboxDir => {
@@ -918,7 +1166,35 @@ impl SkillFs {
                     Err(e) => reply.error(errno(&e)),
                 }
             }
-            PathType::SkillMd { .. } => {
+            PathType::HermesMeta { .. }
+            | PathType::HermesMetaChild { .. }
+            | PathType::CategoryDir { .. }
+            | PathType::NestedSkillDir { .. }
+            | PathType::NestedPassthrough { .. } => {
+                let dir_path = match self.resolve_physical_path(&path) {
+                    Some(p) => p,
+                    None => return reply.error(libc::ENOENT),
+                };
+                match std::fs::metadata(&dir_path) {
+                    Ok(m) if m.is_dir() => match std::fs::File::open(&dir_path) {
+                        Ok(dir_file) => {
+                            let result = if datasync {
+                                dir_file.sync_data()
+                            } else {
+                                dir_file.sync_all()
+                            };
+                            match result {
+                                Ok(()) => reply.ok(),
+                                Err(e) => reply.error(errno(&e)),
+                            }
+                        }
+                        Err(e) => reply.error(errno(&e)),
+                    },
+                    Ok(_) => reply.error(libc::ENOTDIR),
+                    Err(e) => reply.error(errno(&e)),
+                }
+            }
+            PathType::SkillMd { .. } | PathType::NestedSkillMd { .. } => {
                 reply.error(libc::ENOTDIR);
             }
             PathType::Invalid => {
