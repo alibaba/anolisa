@@ -132,6 +132,7 @@ pub struct AgentsightLLMData {
     pub pid: i32,
     pub process_name: [c_char; 16],
     pub agent_name: *const c_char,
+    pub container_id: *const c_char,
     pub timestamp_ns: u64,
     pub duration_ns: u64,
     pub request_url: *const c_char,
@@ -215,6 +216,7 @@ struct LlmDataHolder {
     _conversation_id: Option<CString>,
     _session_id: Option<CString>,
     _agent_name: Option<CString>,
+    _container_id: Option<CString>,
     _request_url: CString,
     _provider: CString,
     _model: CString,
@@ -271,6 +273,8 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
         .map(|s| safe_cstring(s));
     let session_id = call.metadata.get("session_id").map(|s| safe_cstring(s));
     let agent_name = call.agent_name.as_ref().map(|s| safe_cstring(s));
+    let container_id =
+        crate::container::extract_container_id(call.pid as u32).map(|s| safe_cstring(&s));
 
     // Construct request_url from metadata
     let server_addr = call
@@ -348,6 +352,7 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
         pid: call.pid,
         process_name: copy_process_name(&call.process_name),
         agent_name: agent_name.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
+        container_id: container_id.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
         timestamp_ns: call.start_timestamp_ns,
         duration_ns: call.duration_ns,
         request_url: request_url.as_ptr(),
@@ -378,6 +383,7 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
         _conversation_id: conversation_id,
         _session_id: session_id,
         _agent_name: agent_name,
+        _container_id: container_id,
         _request_url: request_url,
         _provider: provider,
         _model: model,

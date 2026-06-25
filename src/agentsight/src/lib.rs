@@ -35,6 +35,7 @@
 //! ```
 
 pub mod config;
+pub mod container;
 mod logging;
 pub mod probes;
 
