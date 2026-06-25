@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.15] - 2026-06-25
+
+### Added
+
+- `anolisa doctor` now reports component health, dependency status, and suggested fixes.
+- Raw components can now declare runtime dependencies for install and update preflight checks.
+- `anolisa install --dry-run` now previews runtime dependency status for raw components.
+
+### Changed
+
+- `anolisa install` and `update <component>` now refuse raw components with missing runtime dependencies before changing files.
+- `anolisa restart <component>` now restarts service units shipped by RPM-backed components.
+- `anolisa restart <component>` now shows guidance for RPM-backed template services instead of failing.
+
+### Fixed
+
+- `anolisa adapter enable` now expands `{datadir}` from the package that provided the adapter metadata.
+- After `anolisa uninstall` or `forget`, adapter commands no longer see stale component metadata.
+
 ## [0.1.14] - 2026-06-24
 
 ### Added
@@ -284,6 +303,25 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.1.15] - 2026-06-25
+
+### 新增
+
+- `anolisa doctor` 现输出组件健康、依赖和修复建议。
+- raw 组件现可声明运行依赖供安装和更新检查。
+- `anolisa install --dry-run` 现预览 raw 组件依赖状态。
+
+### 变更
+
+- `anolisa install` 和 `update <component>` 缺依赖时先停止。
+- `anolisa restart <component>` 现重启 RPM 组件服务。
+- `anolisa restart <component>` 遇到 RPM 模板服务时给出指引。
+
+### 修复
+
+- `anolisa adapter enable` 现按包内元数据展开 `{datadir}`。
+- `anolisa uninstall` 和 `forget` 后 adapter 不再见旧元数据。
 
 ## [0.1.14] - 2026-06-24
 
