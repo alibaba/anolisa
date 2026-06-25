@@ -1987,6 +1987,7 @@ mod tests {
             backends: ManifestBackends::default(),
             env_requirements: EnvRequirements::default(),
             dependencies: DependenciesSpec::default(),
+            runtime_deps: Vec::new(),
             features: Vec::new(),
             adapters: vec![AdapterSpec {
                 framework: Some("openclaw".to_string()),

@@ -44,9 +44,10 @@ use anolisa_core::state::{
     ObjectStatus, OperationRecord, OwnedFile, Ownership, RpmMetadata, ServiceRef,
 };
 use anolisa_core::{
-    ArtifactType, CapabilityRequest, ComponentManifest, DistributionEntry, DistributionIndex,
-    FileKind, HookPhase, HookSpec, ResolveQuery, ServiceActivation, ServiceManager, ServiceRequest,
-    ServiceRunOutcome, ServiceScope, apply_capabilities, apply_services,
+    ArtifactType, CapabilityRequest, ComponentManifest, DependencyKind, DependencyResolution,
+    DependencyResolver, DependencyStatus, DistributionEntry, DistributionIndex, FileKind,
+    HookPhase, HookSpec, ResolveQuery, ResolverEnv, ServiceActivation, ServiceManager,
+    ServiceRequest, ServiceRunOutcome, ServiceScope, apply_capabilities, apply_services,
     capability_for_install_mode, deactivate_services, expand_layout_placeholders,
     resolve_manifest_hooks, run_hooks, service_for_install_mode, user_service_for_install_mode,
 };
@@ -123,6 +124,58 @@ struct InstallPreview {
     files: Vec<ResolvedInstallFile>,
     services: Vec<ServiceRequest>,
     capabilities: Vec<CapabilityRequest>,
+    /// Runtime-dependency preflight outcomes. Empty when the artifact was not
+    /// downloaded (file/service details unavailable) or the component declares
+    /// none.
+    dependencies: Vec<DependencyResolution>,
+}
+
+/// Project detected host facts onto the slice the dependency resolver needs.
+fn resolver_env_from_facts(facts: &anolisa_env::EnvFacts) -> ResolverEnv {
+    ResolverEnv {
+        kernel: facts.kernel.clone(),
+        // `os_id` (raw `/etc/os-release` ID) maps to the coarse rpm/deb family;
+        // the legacy `EnvFacts::pkg_base` is Anolis-specific and unsuitable here.
+        pkg_base: facts
+            .os_id
+            .as_deref()
+            .and_then(anolisa_env::pkg_base_from_id),
+        btf: facts.btf,
+        cap_bpf: facts.cap_bpf,
+    }
+}
+
+/// Runtime-dependency preflight shared by the fresh-install (`execute_raw`) and
+/// update (`execute_raw_update`) paths. Probes every declared dependency
+/// through the system resolver and returns the satisfied plan's (soft)
+/// warnings, or an error listing every miss so the caller can refuse **before
+/// touching the host**. Empty `runtime_deps` is a no-op. The RPM backend never
+/// calls this — dnf owns its `Requires`, so a dependency is never resolved
+/// twice. Pure probe: never mutates.
+pub(crate) fn run_runtime_preflight(
+    manifest: &ComponentManifest,
+    env: &anolisa_env::EnvFacts,
+    command: &str,
+) -> Result<Vec<String>, CliError> {
+    if manifest.runtime_deps.is_empty() {
+        return Ok(Vec::new());
+    }
+    let plan = DependencyResolver::system()
+        .resolve(&manifest.runtime_deps, &resolver_env_from_facts(env))
+        .map_err(|err| CliError::Runtime {
+            command: command.to_string(),
+            reason: format!("invalid runtime dependency declaration: {err}"),
+        })?;
+    if !plan.is_satisfied() {
+        return Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "missing runtime dependencies; no files were changed:\n  {}",
+                plan.unsatisfied_lines().join("\n  ")
+            ),
+        });
+    }
+    Ok(plan.warnings)
 }
 
 /// Execution input after the artifact has been verified and its install
@@ -180,8 +233,75 @@ struct InstallPlanPayload {
     /// Human-readable `path: cap,cap` lines for the capabilities install
     /// would apply. Rendered for `--dry-run`; setcap is never run here.
     capabilities: Vec<String>,
+    /// Runtime-dependency preflight rows the real install would enforce.
+    /// Reported only; `--dry-run` never fails on a missing dependency.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    dependencies: Vec<DependencyPlanRow>,
     dry_run: bool,
     warnings: Vec<String>,
+}
+
+/// Flat preflight status for the dry-run wire. Projects the data-carrying
+/// [`DependencyStatus`] onto a serializable tag; its payload moves to
+/// [`DependencyPlanRow::note`].
+#[derive(Serialize, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+enum DependencyPlanStatus {
+    Resolved,
+    Unresolved,
+    Unresolvable,
+}
+
+impl DependencyPlanStatus {
+    /// Display spelling, matching the serde representation.
+    fn as_str(self) -> &'static str {
+        match self {
+            DependencyPlanStatus::Resolved => "resolved",
+            DependencyPlanStatus::Unresolved => "unresolved",
+            DependencyPlanStatus::Unresolvable => "unresolvable",
+        }
+    }
+}
+
+/// One dependency row in the `--dry-run` plan, mirroring a
+/// [`DependencyResolution`] onto the wire.
+#[derive(Serialize)]
+struct DependencyPlanRow {
+    /// Logical dependency name.
+    name: String,
+    /// Dependency kind; serializes kebab-case (e.g. `system-package`).
+    kind: DependencyKind,
+    /// Preflight outcome.
+    status: DependencyPlanStatus,
+    /// Remediation command (`unresolved`) or reason (`unresolvable`); absent
+    /// when resolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
+    /// Optional human note (e.g. an unverified version constraint).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+}
+
+impl DependencyPlanRow {
+    /// Project a resolver outcome onto the dry-run wire row.
+    fn from_resolution(r: &DependencyResolution) -> Self {
+        let (status, note) = match &r.status {
+            DependencyStatus::Resolved => (DependencyPlanStatus::Resolved, None),
+            DependencyStatus::Unresolved { remediation } => {
+                (DependencyPlanStatus::Unresolved, Some(remediation.clone()))
+            }
+            DependencyStatus::Unresolvable { reason } => {
+                (DependencyPlanStatus::Unresolvable, Some(reason.clone()))
+            }
+        };
+        DependencyPlanRow {
+            name: r.name.clone(),
+            kind: r.kind,
+            status,
+            note,
+            detail: r.detail.clone(),
+        }
+    }
 }
 
 /// Wire shape for a completed install.
@@ -1926,6 +2046,7 @@ fn build_install_preview(
             files: Vec::new(),
             services: Vec::new(),
             capabilities: Vec::new(),
+            dependencies: Vec::new(),
         });
     };
 
@@ -1947,12 +2068,43 @@ fn build_install_preview(
         Err(err) => return Err(err),
     };
 
+    let dependencies = preview_dependencies(&contract.manifest, &mut resolution);
+
     Ok(InstallPreview {
         resolution,
         files,
         services,
         capabilities,
+        dependencies,
     })
+}
+
+/// Run the runtime-dependency preflight for `--dry-run` (read-only). Reports
+/// per-dependency status without ever failing the preview: a missing dependency
+/// is informational here, and a declaration error degrades to a warning rather
+/// than aborting the plan.
+fn preview_dependencies(
+    manifest: &ComponentManifest,
+    resolution: &mut RawResolution,
+) -> Vec<DependencyResolution> {
+    if manifest.runtime_deps.is_empty() {
+        return Vec::new();
+    }
+    let env = anolisa_env::EnvService::detect();
+    match DependencyResolver::system()
+        .resolve(&manifest.runtime_deps, &resolver_env_from_facts(&env))
+    {
+        Ok(plan) => {
+            resolution.warnings.extend(plan.warnings);
+            plan.resolutions
+        }
+        Err(err) => {
+            resolution
+                .warnings
+                .push(format!("dependency preflight skipped: {err}"));
+            Vec::new()
+        }
+    }
 }
 
 pub(crate) fn prepare_raw_execution(
@@ -2621,6 +2773,18 @@ fn execute_raw(
             command: command.to_string(),
             reason: format!("failed to parse component manifest for hook resolution: {err}"),
         })?;
+
+    // Runtime-dependency preflight — probe declared dependencies while the lock
+    // is held but before any filesystem mutation, so a missing dependency fails
+    // fast with a remediation instead of a service that silently dies after a
+    // "successful" install. The RPM backend never reaches here (dnf resolves its
+    // `Requires`), so a dependency is never resolved twice. Host facts are
+    // detected once and reused for the capability step below.
+    let env = anolisa_env::EnvService::detect();
+    resolution
+        .warnings
+        .extend(run_runtime_preflight(&manifest, &env, command)?);
+
     let hooks = resolve_install_hooks(&manifest, layout, &resolution.component)?;
     let log = CentralLog::open(layout.central_log.clone());
 
@@ -2671,8 +2835,8 @@ fn execute_raw(
     // A required (non-optional) failure aborts: roll back files + manifest
     // while the lock is still held and before any state is persisted, so no
     // half-installed component survives. Optional failures degrade to
-    // warnings. Reuses the `log` handle opened before file layout.
-    let env = anolisa_env::EnvService::detect();
+    // warnings. Reuses the `log` handle opened before file layout and the
+    // `env` facts detected for the dependency preflight above.
     let cap_manager = capability_for_install_mode(ctx.install_mode.as_str(), &env);
     let cap_outcome = apply_capabilities(
         cap_manager.as_ref(),
@@ -3039,6 +3203,11 @@ fn render_plan(ctx: &CliContext, preview: &InstallPreview) -> Result<(), CliErro
             .iter()
             .map(|c| format!("{}: {}", c.path.display(), c.caps.join(",")))
             .collect(),
+        dependencies: preview
+            .dependencies
+            .iter()
+            .map(DependencyPlanRow::from_resolution)
+            .collect(),
         dry_run: true,
         warnings: resolved.warnings.clone(),
     };
@@ -3088,6 +3257,19 @@ fn render_plan(ctx: &CliContext, preview: &InstallPreview) -> Result<(), CliErro
         println!("{}", color.header("capabilities (applied on install):"));
         for c in &payload.capabilities {
             println!("  - {c}");
+        }
+    }
+    if !payload.dependencies.is_empty() {
+        println!("{}", color.header("dependencies (preflight):"));
+        for d in &payload.dependencies {
+            let (kind, status) = (d.kind.as_str(), d.status.as_str());
+            match &d.note {
+                Some(note) => println!("  - {} [{kind}]: {status} — {note}", d.name),
+                None => println!("  - {} [{kind}]: {status}", d.name),
+            }
+            if let Some(detail) = &d.detail {
+                println!("      {detail}");
+            }
         }
     }
     render_warnings(&payload.warnings, &color);
@@ -3442,6 +3624,59 @@ mod tests {
             repo: None,
             package: None,
         }
+    }
+
+    #[test]
+    fn dependency_plan_row_projects_each_status() {
+        let resolved = DependencyResolution {
+            name: "btrfs-progs".to_string(),
+            kind: DependencyKind::SystemPackage,
+            status: DependencyStatus::Resolved,
+            detail: None,
+        };
+        let row = DependencyPlanRow::from_resolution(&resolved);
+        assert!(matches!(row.kind, DependencyKind::SystemPackage));
+        assert_eq!(row.status.as_str(), "resolved");
+        assert!(row.note.is_none());
+
+        let missing = DependencyResolution {
+            name: "btrfs-progs".to_string(),
+            kind: DependencyKind::SystemPackage,
+            status: DependencyStatus::Unresolved {
+                remediation: "sudo dnf install btrfs-progs".to_string(),
+            },
+            detail: None,
+        };
+        let row = DependencyPlanRow::from_resolution(&missing);
+        assert_eq!(row.status.as_str(), "unresolved");
+        assert_eq!(row.note.as_deref(), Some("sudo dnf install btrfs-progs"));
+
+        let cap = DependencyResolution {
+            name: "btrfs".to_string(),
+            kind: DependencyKind::PlatformCapability,
+            status: DependencyStatus::Unresolvable {
+                reason: "requires kernel >= 5.4, host is 3.10".to_string(),
+            },
+            detail: None,
+        };
+        let row = DependencyPlanRow::from_resolution(&cap);
+        assert_eq!(row.status.as_str(), "unresolvable");
+        assert!(row.note.unwrap().contains("kernel >= 5.4"));
+    }
+
+    #[test]
+    fn dependency_plan_row_serializes_kind_and_status_kebab_case() {
+        // The enum-typed `kind`/`status` must reach the wire as kebab-case so
+        // the JSON contract is unchanged by using enums instead of strings.
+        let row = DependencyPlanRow::from_resolution(&DependencyResolution {
+            name: "btrfs-progs".to_string(),
+            kind: DependencyKind::SystemPackage,
+            status: DependencyStatus::Resolved,
+            detail: None,
+        });
+        let json = serde_json::to_string(&row).expect("serialize");
+        assert!(json.contains("\"kind\":\"system-package\""), "{json}");
+        assert!(json.contains("\"status\":\"resolved\""), "{json}");
     }
 
     #[test]

@@ -58,6 +58,15 @@ pub struct ComponentManifest {
     /// (e.g. resolver only follows `components`, doctor only checks
     /// `runtime`).
     pub dependencies: DependenciesSpec,
+    /// Structured `[[component.dependencies]]` entries the raw backend
+    /// preflights before laying files. Distinct from the flat
+    /// [`dependencies`](Self::dependencies): each entry carries a
+    /// [`DependencyKind`] and probe/remediation metadata so the resolver can
+    /// fail fast on a missing runtime dependency instead of letting a service
+    /// silently die after install. Empty for components with no declared
+    /// runtime dependencies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_deps: Vec<RuntimeDependency>,
     /// Feature toggles exposed by this component manifest.
     pub features: Vec<FeatureSpec>,
     /// `[[adapters]]` declarations preserved verbatim. The component schema
@@ -454,6 +463,100 @@ impl DependenciesSpec {
     }
 }
 
+/// Resolution bucket for a [`RuntimeDependency`]. The kind decides what the
+/// preflight does when the dependency is missing — the strategy is dispatched
+/// by bucket, never hard-coded per dependency name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DependencyKind {
+    /// A language interpreter/runtime (e.g. Node). Vendored into the
+    /// component's isolated prefix; never touches the user's global install.
+    LanguageRuntime,
+    /// A system package installed by the host package manager (e.g.
+    /// `btrfs-progs`). Shared infrastructure: the preflight reports the install
+    /// command but never removes it on uninstall.
+    SystemPackage,
+    /// A kernel/platform capability that no package manager can install (e.g.
+    /// in-kernel btrfs support, eBPF BTF / `CAP_BPF`). Check-only; a miss is
+    /// fatal with a kernel/capability requirement.
+    PlatformCapability,
+}
+
+impl DependencyKind {
+    /// Wire/display spelling (kebab-case), matching the serde representation.
+    /// Shared by the resolver and CLI so labels never drift from the schema.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DependencyKind::LanguageRuntime => "language-runtime",
+            DependencyKind::SystemPackage => "system-package",
+            DependencyKind::PlatformCapability => "platform-capability",
+        }
+    }
+}
+
+/// Per-package-format names for a [`DependencyKind::SystemPackage`].
+///
+/// The same logical dependency is often packaged under different names across
+/// distributions; this maps the package name by format (`rpm` → dnf, `deb` →
+/// apt). An absent entry for the host's format falls back to the dependency's
+/// [`name`](RuntimeDependency::name).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PackageNames {
+    /// Package name on `rpm`-based hosts (dnf).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpm: Option<String>,
+    /// Package name on `deb`-based hosts (apt).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deb: Option<String>,
+}
+
+impl PackageNames {
+    /// Whether no package-name mapping is present (used by `skip_serializing_if`
+    /// so dependencies without an explicit map round-trip cleanly).
+    pub fn is_empty(&self) -> bool {
+        self.rpm.is_none() && self.deb.is_none()
+    }
+}
+
+/// One structured `[[component.dependencies]]` entry from the artifact
+/// contract.
+///
+/// Drives the raw-backend preflight ([`crate::resolver`]): each entry is probed
+/// before any filesystem mutation, and a miss is reported with a
+/// kind-appropriate remediation. The RPM backend ignores these — dnf resolves
+/// `Requires` instead — so the same dependency is never resolved twice.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeDependency {
+    /// Logical dependency identifier (e.g. `btrfs-progs`, `node`).
+    pub name: String,
+    /// Resolution bucket; see [`DependencyKind`].
+    pub kind: DependencyKind,
+    /// Optional version constraint (e.g. `>=20`). Presence-first: an
+    /// unparseable constraint or probed version does not fail the preflight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Command whose success means the dependency is satisfied (e.g.
+    /// `btrfs version`). Absent system packages fall back to a native
+    /// package-manager query.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe: Option<String>,
+    /// Distribution-source identifier for a [`DependencyKind::LanguageRuntime`]
+    /// (surfaced in the manual-install hint while vendoring is unimplemented).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Per-format package names for a [`DependencyKind::SystemPackage`].
+    #[serde(default, skip_serializing_if = "PackageNames::is_empty")]
+    pub packages: PackageNames,
+    /// Built-in capability check identifier for a
+    /// [`DependencyKind::PlatformCapability`] (e.g. `btrfs`, `btf`, `cap_bpf`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<String>,
+    /// Minimum kernel version for a [`DependencyKind::PlatformCapability`]
+    /// (e.g. `5.4`). The one hard version gate in the preflight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_kernel: Option<String>,
+}
+
 /// One `[[adapters]]` entry. We keep every field the loader can parse so
 /// later tooling (adapter registry, doctor, build planner) does not have
 /// to re-read the TOML. `detect` is captured as a free-form map because
@@ -790,6 +893,13 @@ struct ComponentMetaRaw {
     // directly into the internally-tagged `CheckSpec` (`type = "..."`).
     #[serde(default)]
     health_check: Option<CheckSpec>,
+    // `[[component.dependencies]]` — structured runtime dependency entries, a
+    // sibling of `[component.layout]`. Nested under `[component]`, so it never
+    // collides with the top-level `[dependencies]` parsed into
+    // `ComponentManifestRaw::dependencies`. RuntimeDependency deserializes
+    // directly: `name` + `kind` are required, the rest defaults.
+    #[serde(default)]
+    dependencies: Vec<RuntimeDependency>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1043,6 +1153,7 @@ impl From<ComponentManifestRaw> for ComponentManifest {
             capabilities: component_capabilities,
             hooks: component_hooks,
             health_check,
+            dependencies: component_runtime_deps,
         } = raw.component;
 
         let component = ComponentMeta {
@@ -1170,6 +1281,13 @@ impl From<ComponentManifestRaw> for ComponentManifest {
             components: raw.dependencies.components,
         };
 
+        // Drop nameless entries, mirroring the empty-unit/empty-script filters
+        // applied to services and hooks above.
+        let runtime_deps = component_runtime_deps
+            .into_iter()
+            .filter(|d| !d.name.is_empty())
+            .collect();
+
         let features = raw
             .features
             .into_iter()
@@ -1241,6 +1359,7 @@ impl From<ComponentManifestRaw> for ComponentManifest {
             backends: raw.backends,
             env_requirements,
             dependencies,
+            runtime_deps,
             features,
             adapters,
             health_check,
@@ -2005,6 +2124,136 @@ mod tests {
         assert_eq!(m.dependencies.build, vec!["rust>=1.91", "clang>=14"]);
         assert_eq!(m.dependencies.runtime, vec!["kernel-headers"]);
         assert_eq!(m.dependencies.components, vec!["sec-core"]);
+    }
+
+    #[test]
+    fn runtime_deps_parse_system_package_with_packages_map() {
+        let toml_text = r#"
+            [component]
+            name = "ws-ckpt"
+            version = "0.3.3"
+
+            [[component.dependencies]]
+            name = "btrfs-progs"
+            kind = "system-package"
+            probe = "btrfs version"
+            packages = { rpm = "btrfs-progs", deb = "btrfs-progs" }
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        assert_eq!(m.runtime_deps.len(), 1);
+        let d = &m.runtime_deps[0];
+        assert_eq!(d.name, "btrfs-progs");
+        assert_eq!(d.kind, DependencyKind::SystemPackage);
+        assert_eq!(d.probe.as_deref(), Some("btrfs version"));
+        assert_eq!(d.packages.rpm.as_deref(), Some("btrfs-progs"));
+        assert_eq!(d.packages.deb.as_deref(), Some("btrfs-progs"));
+    }
+
+    #[test]
+    fn runtime_deps_parse_platform_capability_check_and_min_kernel() {
+        let toml_text = r#"
+            [component]
+            name = "ws-ckpt"
+            version = "0.3.3"
+
+            [[component.dependencies]]
+            name = "btrfs"
+            kind = "platform-capability"
+            check = "btrfs"
+            min_kernel = "5.4"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        assert_eq!(m.runtime_deps.len(), 1);
+        let d = &m.runtime_deps[0];
+        assert_eq!(d.kind, DependencyKind::PlatformCapability);
+        assert_eq!(d.check.as_deref(), Some("btrfs"));
+        assert_eq!(d.min_kernel.as_deref(), Some("5.4"));
+        assert!(d.packages.is_empty());
+    }
+
+    #[test]
+    fn runtime_deps_parse_language_runtime_with_version_and_source() {
+        let toml_text = r#"
+            [component]
+            name = "cosh"
+            version = "1.0.0"
+
+            [[component.dependencies]]
+            name = "node"
+            kind = "language-runtime"
+            version = ">=20"
+            probe = "node --version"
+            source = "nodejs-official"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let d = &m.runtime_deps[0];
+        assert_eq!(d.kind, DependencyKind::LanguageRuntime);
+        assert_eq!(d.version.as_deref(), Some(">=20"));
+        assert_eq!(d.source.as_deref(), Some("nodejs-official"));
+    }
+
+    #[test]
+    fn runtime_deps_kind_kebab_case_roundtrip() {
+        // The wire spelling is kebab-case; serializing back must preserve it so
+        // a contract round-trips byte-stably.
+        let dep = RuntimeDependency {
+            name: "node".into(),
+            kind: DependencyKind::LanguageRuntime,
+            version: None,
+            probe: None,
+            source: None,
+            packages: PackageNames::default(),
+            check: None,
+            min_kernel: None,
+        };
+        let text = toml::to_string(&dep).expect("serialize");
+        assert!(
+            text.contains("kind = \"language-runtime\""),
+            "kebab-case kind expected, got: {text}"
+        );
+    }
+
+    #[test]
+    fn runtime_deps_distinct_from_flat_dependencies() {
+        // The structured `[[component.dependencies]]` and the flat top-level
+        // `[dependencies]` are independent fields at different TOML paths; a
+        // manifest may carry both without either shadowing the other.
+        let toml_text = r#"
+            [component]
+            name = "ws-ckpt"
+            version = "0.3.3"
+
+            [dependencies]
+            runtime = ["legacy-flat"]
+
+            [[component.dependencies]]
+            name = "btrfs-progs"
+            kind = "system-package"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        assert_eq!(m.dependencies.runtime, vec!["legacy-flat"]);
+        assert_eq!(m.runtime_deps.len(), 1);
+        assert_eq!(m.runtime_deps[0].name, "btrfs-progs");
+    }
+
+    #[test]
+    fn runtime_deps_empty_name_entry_dropped() {
+        let toml_text = r#"
+            [component]
+            name = "ws-ckpt"
+            version = "0.3.3"
+
+            [[component.dependencies]]
+            name = ""
+            kind = "system-package"
+
+            [[component.dependencies]]
+            name = "btrfs-progs"
+            kind = "system-package"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        assert_eq!(m.runtime_deps.len(), 1);
+        assert_eq!(m.runtime_deps[0].name, "btrfs-progs");
     }
 
     #[test]

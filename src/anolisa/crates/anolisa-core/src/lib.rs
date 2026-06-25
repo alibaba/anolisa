@@ -29,6 +29,7 @@ pub mod path_safety;
 pub mod process;
 pub mod register;
 pub mod registry;
+pub mod resolver;
 pub mod sandbox_manifest;
 pub mod self_update;
 pub mod service;
@@ -79,7 +80,8 @@ pub use lifecycle::{
 };
 pub use lock::{InstallLock, LockError};
 pub use manifest::{
-    AdapterSpec, ComponentManifest, DistributionSelector, FileKind, HealthSpec, ServiceScope,
+    AdapterSpec, ComponentManifest, DependencyKind, DistributionSelector, FileKind, HealthSpec,
+    PackageNames, RuntimeDependency, ServiceScope,
 };
 pub use metadata::MetadataClient;
 pub use register::{
@@ -89,6 +91,10 @@ pub use register::{
 pub use registry::{
     FetchFailure, FetchedMeta, HttpFetch, IndexFreshness, Registry, RegistryClient, RegistryConfig,
     RegistryError, UreqFetch,
+};
+pub use resolver::{
+    DependencyResolution, DependencyResolver, DependencyStatus, ResolutionPlan, ResolverEnv,
+    ResolverError,
 };
 pub use self_update::{
     ReleaseArtifact, ReleaseManifest, SelfUpdateError, SelfUpdateOutcome, check_and_update,

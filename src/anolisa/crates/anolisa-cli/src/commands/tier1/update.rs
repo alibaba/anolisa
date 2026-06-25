@@ -48,9 +48,9 @@ use anolisa_core::transaction::{
     TransactionStepStatus,
 };
 use anolisa_core::{
-    CapabilityRunOutcome, ServiceActivation, ServiceRequest, ServiceRunOutcome, ServiceScope,
-    apply_capabilities, apply_services, capability_for_install_mode, service_for_install_mode,
-    user_service_for_install_mode,
+    CapabilityRunOutcome, ComponentManifest, ServiceActivation, ServiceRequest, ServiceRunOutcome,
+    ServiceScope, apply_capabilities, apply_services, capability_for_install_mode,
+    service_for_install_mode, user_service_for_install_mode,
 };
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError};
@@ -61,7 +61,8 @@ use anolisa_platform::rpm_transaction::RpmTransaction;
 
 use super::install::{
     PreparedInstall, artifact_type_wire, available_raw_versions, prepare_raw_execution,
-    resolve_raw, resolve_raw_inputs_for_component, write_installed_component_manifest,
+    resolve_raw, resolve_raw_inputs_for_component, run_runtime_preflight,
+    write_installed_component_manifest,
 };
 use crate::color::Palette;
 use crate::commands::common;
@@ -586,6 +587,21 @@ fn execute_raw_update(
     let artifact_url = resolution.artifact_url.clone();
     let artifact_type = artifact_type_wire(&resolution.entry.artifact_type);
 
+    // Runtime-dependency preflight — a newer artifact may declare dependencies
+    // the installed version did not; replacing files on a host that misses them
+    // would strand the component exactly like a fresh install. Probe before the
+    // first filesystem mutation (Phase 1 backup/remove below) and before the
+    // transaction opens, so a miss aborts with nothing touched. RPM never here.
+    let preflight_warnings = {
+        let manifest =
+            ComponentManifest::from_toml_str(&manifest_toml).map_err(|err| CliError::Runtime {
+                command: command.to_string(),
+                reason: format!("failed to parse component manifest for preflight: {err}"),
+            })?;
+        let env = anolisa_env::EnvService::detect();
+        run_runtime_preflight(&manifest, &env, command)?
+    };
+
     let state_path = layout.state_dir.join("installed.toml");
     let journal_dir = layout.state_dir.join("journal");
     let mut tx = Transaction::begin("update", state_path.clone(), &journal_dir).map_err(|err| {
@@ -886,6 +902,7 @@ fn execute_raw_update(
     let mut execution_warnings = cap_warnings;
     execution_warnings.extend(service_run.warnings);
     execution_warnings.extend(activation_state_warnings);
+    execution_warnings.extend(preflight_warnings);
     let mut all_warnings = warnings.to_vec();
     all_warnings.extend(execution_warnings.clone());
     let record = LogRecord {
@@ -2653,6 +2670,66 @@ sha256 = "{sha}"
                 .as_deref(),
             Some("0.2.0"),
             "refused downgrade must not change the recorded version"
+        );
+    }
+
+    /// A newer artifact that declares a dependency the host lacks must be
+    /// refused before any file is touched: the raw update path runs the same
+    /// runtime preflight as a fresh install. Regression for the update path
+    /// previously bypassing the resolver entirely.
+    #[test]
+    fn raw_update_refuses_when_new_artifact_adds_unmet_dependency() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
+        let old_body: &[u8] = b"installed 0.1.0\n";
+        seed_installed_raw(&c, "foo", "0.1.0", old_body);
+
+        // v2's contract adds a system-package whose probe can never succeed, so
+        // the preflight fails on every host.
+        let deps = r#"
+[[component.dependencies]]
+name = "absent-tool"
+kind = "system-package"
+probe = "anolisa-nonexistent-probe-xyz --version"
+packages = { rpm = "absent-tool", deb = "absent-tool" }
+"#;
+        let manifest = format!("{}{}", raw_manifest("foo", "0.2.0"), deps);
+        let new_body: &[u8] = b"#!/bin/sh\necho foo v2\n";
+        let artifact = tar_gz(&[
+            (".anolisa/component.toml", manifest.as_bytes()),
+            ("bin/foo", new_body),
+        ]);
+        publish_raw_repo(
+            &tmp.path().join("repo"),
+            &common::resolve_layout(&c),
+            "foo",
+            "0.2.0",
+            &artifact,
+        );
+
+        let err = update_raw_component("foo", "raw", "0.1.0", None, &c, "update foo")
+            .expect_err("update must refuse when the new artifact adds an unmet dependency");
+        assert_eq!(err.code(), "EXECUTION_FAILED");
+        assert!(
+            err.reason().contains("missing runtime dependencies"),
+            "error must come from the runtime preflight, got: {}",
+            err.reason()
+        );
+
+        // Preflight runs before Phase 1, so nothing was touched.
+        let layout = common::resolve_layout(&c);
+        assert_eq!(
+            std::fs::read(layout.bin_dir.join("foo")).expect("read bin"),
+            old_body,
+            "refused update must not touch the old binary"
+        );
+        assert_eq!(
+            load_state(&c)
+                .find_object(ObjectKind::Component, "foo")
+                .map(|o| o.version.clone())
+                .as_deref(),
+            Some("0.1.0"),
+            "refused update must not change the recorded version"
         );
     }
 
