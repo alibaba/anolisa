@@ -21,7 +21,7 @@ jobs:
       matrix:
         include:
           - name: Ubuntu 22.04
-            runner: ubuntu-22.04
+            runner: self-22.04
             container: ''
           - name: Alinux4
             runner: ubuntu
