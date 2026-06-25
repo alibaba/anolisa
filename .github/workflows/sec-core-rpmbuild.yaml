@@ -16,7 +16,8 @@ permissions:
 jobs:
   build-rpm:
     name: Build agent-sec-core RPM
-    runs-on: [self-hosted, ubuntu]
+    # workflow_dispatch (手动触发/fork) → GitHub-hosted; pull_request → self-hosted
+    runs-on: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["ubuntu-22.04"]' || '["self-hosted", "ubuntu"]') }}
     container:
       image: alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4:latest
     steps:
