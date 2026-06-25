@@ -1,5 +1,10 @@
 //! Container ID extraction from `/proc/{pid}/cgroup`.
 //!
+//! Standalone module (Footprint Ladder Level 3) because container detection
+//! will expand to cover cgroup v2 unified hierarchy, runtime-specific
+//! parsing, and optional container-name resolution via containerd API.
+//! Keeping it separate from `ffi.rs` avoids bloating the FFI boundary file.
+//!
 //! Supports Docker (cgroup v1 & v2), containerd, and Kubernetes cgroup
 //! layouts.  Returns `None` for non-container processes.
 
@@ -7,6 +12,12 @@
 ///
 /// Returns `None` when the process is not running inside a container or
 /// when the cgroup file cannot be read.
+///
+/// # Panic safety
+///
+/// This function and all callees are guaranteed no-panic: only infallible
+/// string operations and `Option`-returning methods are used.  Safe to call
+/// from FFI (`build_llm_data`).
 pub fn extract_container_id(pid: u32) -> Option<String> {
     let path = format!("/proc/{pid}/cgroup");
     match std::fs::read_to_string(&path) {
@@ -44,11 +55,11 @@ pub fn parse_container_id_from_cgroup(content: &str) -> Option<String> {
 
 /// Try to extract a container ID from a single cgroup path string.
 fn try_extract_from_path(path: &str) -> Option<String> {
-    // 1. Docker cgroup v1: .../docker/<64hex>
+    // 1. Docker cgroup v1: .../docker/<64hex>  (skip overlay2 layer paths)
     if let Some(pos) = path.find("/docker/") {
         let candidate = &path[pos + "/docker/".len()..];
-        // Strip any trailing path segments
-        let candidate = candidate.split('/').next().unwrap_or(candidate);
+        // split('/').next() always returns Some for non-empty input
+        let candidate = candidate.split('/').next().unwrap_or("");
         if is_64_hex(candidate) {
             return Some(candidate.to_string());
         }
@@ -67,7 +78,7 @@ fn try_extract_from_path(path: &str) -> Option<String> {
 
     // 3. Kubernetes: /kubepods/.../<64hex>
     if path.contains("/kubepods") {
-        // The container ID is the last 64-hex segment.
+        // rsplit('/').next() always returns Some (at least the full string)
         if let Some(segment) = path.rsplit('/').next() {
             if is_64_hex(segment) {
                 return Some(segment.to_string());
@@ -85,7 +96,7 @@ fn try_extract_from_path(path: &str) -> Option<String> {
     None
 }
 
-/// Returns `true` when `s` is exactly 64 lowercase-hex characters.
+/// Returns `true` when `s` is exactly 64 hex characters (case-insensitive).
 fn is_64_hex(s: &str) -> bool {
     s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
@@ -166,5 +177,35 @@ mod tests {
         // 32 chars — too short for a container ID
         let content = "0::/docker/a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4\n";
         assert!(parse_container_id_from_cgroup(content).is_none());
+    }
+
+    #[test]
+    fn overlay2_is_not_container_id() {
+        // overlay2 layer IDs are long hex but sit under /docker/overlay2/, not /docker/<id>
+        let content = "0::/system.slice/docker-abcdef.scope/docker/overlay2/a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2/merged\n";
+        // Should match the docker-abcdef.scope pattern (if 64 hex), NOT the overlay2 layer
+        // In this case docker-abcdef.scope only has 6 hex chars, so no match at all
+        assert!(parse_container_id_from_cgroup(content).is_none());
+    }
+
+    #[test]
+    fn uppercase_hex_accepted() {
+        let content =
+            "0::/docker/A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2\n";
+        let id = parse_container_id_from_cgroup(content).unwrap();
+        assert_eq!(
+            id,
+            "A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2"
+        );
+    }
+
+    #[test]
+    fn no_trailing_newline() {
+        let content = "0::/docker/a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+        let id = parse_container_id_from_cgroup(content).unwrap();
+        assert_eq!(
+            id,
+            "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+        );
     }
 }
