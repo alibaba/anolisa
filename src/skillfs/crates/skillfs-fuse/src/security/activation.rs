@@ -604,6 +604,44 @@ impl std::fmt::Display for ActivationMode {
 // Startup bootstrap
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Enumerate Hermes nested skill leaves under `source_root`.
+///
+/// Walks the source root physically: first-level dirs are categories
+/// (skipping management paths), second-level dirs with `SKILL.md` are
+/// skill leaves. Returns skill ids as `"category/skill"`.
+pub fn enumerate_hermes_skill_leaves(source_root: &Path) -> Vec<String> {
+    use crate::path::is_hermes_management_path;
+
+    let mut leaves = Vec::new();
+    let entries = match std::fs::read_dir(source_root) {
+        Ok(e) => e,
+        Err(_) => return leaves,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if is_hermes_management_path(&name) || name.starts_with('.') {
+            continue;
+        }
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let cat_entries = match std::fs::read_dir(entry.path()) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for child in cat_entries.flatten() {
+            let child_name = child.file_name().to_string_lossy().to_string();
+            if !child.path().is_dir() {
+                continue;
+            }
+            if child.path().join("SKILL.md").exists() {
+                leaves.push(format!("{}/{}", name, child_name));
+            }
+        }
+    }
+    leaves
+}
+
 /// Load activation state for every skill in `skill_names` and install
 /// into the given resolver. Errors are non-fatal: each failing skill is
 /// mapped to hidden with a diagnostic log line.

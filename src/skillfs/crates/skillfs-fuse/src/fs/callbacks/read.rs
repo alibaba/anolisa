@@ -240,7 +240,21 @@ impl SkillFs {
                     return;
                 }
             }
-            PathType::CategoryDir { .. } | PathType::NestedSkillDir { .. } => {
+            PathType::CategoryDir { .. } => {
+                reply.error(libc::EISDIR);
+                return;
+            }
+            PathType::NestedSkillDir {
+                category,
+                skill_name,
+            } => {
+                if matches!(
+                    self.resolve_hermes_nested_read(category, skill_name),
+                    ReadResolution::Hidden
+                ) {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
                 reply.error(libc::EISDIR);
                 return;
             }
@@ -450,6 +464,30 @@ impl SkillFs {
                     }
                 }
             }
+            PathType::NestedSkillMd {
+                category,
+                skill_name,
+            }
+            | PathType::NestedPassthrough {
+                category,
+                skill_name,
+                ..
+            } => match self.resolve_hermes_nested_read(category, skill_name) {
+                ReadResolution::Hidden => {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+                ReadResolution::Snapshot { dir, .. } if !is_mutating_open => match &path_type {
+                    PathType::NestedSkillMd { .. } => {
+                        physical = dir.join("SKILL.md");
+                    }
+                    PathType::NestedPassthrough { relative_path, .. } => {
+                        physical = dir.join(relative_path);
+                    }
+                    _ => {}
+                },
+                _ => {}
+            },
             _ => {}
         }
 

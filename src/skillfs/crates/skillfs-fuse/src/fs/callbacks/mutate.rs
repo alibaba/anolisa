@@ -207,6 +207,25 @@ impl SkillFs {
                             MutationKind::Mkdir,
                         );
                     }
+                    PathType::NestedSkillDir {
+                        category,
+                        skill_name,
+                    } => {
+                        let nested_id = Self::hermes_skill_id(category, skill_name);
+                        self.observe_mutation(&nested_id, None, MutationKind::Mkdir);
+                    }
+                    PathType::NestedPassthrough {
+                        category,
+                        skill_name,
+                        relative_path,
+                    } => {
+                        let nested_id = Self::hermes_skill_id(category, skill_name);
+                        self.observe_mutation(
+                            &nested_id,
+                            Some(relative_path.as_path()),
+                            MutationKind::Mkdir,
+                        );
+                    }
                     _ => {}
                 }
 
@@ -343,6 +362,29 @@ impl SkillFs {
                         relative_path.as_path(),
                         MutationKind::Unlink,
                     ),
+                    PathType::NestedSkillMd {
+                        category,
+                        skill_name,
+                    } => {
+                        let nested_id = Self::hermes_skill_id(category, skill_name);
+                        self.observe_mutation(
+                            &nested_id,
+                            Some(Path::new("SKILL.md")),
+                            MutationKind::Unlink,
+                        );
+                    }
+                    PathType::NestedPassthrough {
+                        category,
+                        skill_name,
+                        relative_path,
+                    } => {
+                        let nested_id = Self::hermes_skill_id(category, skill_name);
+                        self.observe_mutation(
+                            &nested_id,
+                            Some(relative_path.as_path()),
+                            MutationKind::Unlink,
+                        );
+                    }
                     _ => {}
                 }
                 self.emit_event(
@@ -486,6 +528,25 @@ impl SkillFs {
                         relative_path.as_path(),
                         MutationKind::Rmdir,
                     ),
+                    PathType::NestedSkillDir {
+                        category,
+                        skill_name,
+                    } => {
+                        let nested_id = Self::hermes_skill_id(category, skill_name);
+                        self.observe_mutation(&nested_id, None, MutationKind::Rmdir);
+                    }
+                    PathType::NestedPassthrough {
+                        category,
+                        skill_name,
+                        relative_path,
+                    } => {
+                        let nested_id = Self::hermes_skill_id(category, skill_name);
+                        self.observe_mutation(
+                            &nested_id,
+                            Some(relative_path.as_path()),
+                            MutationKind::Rmdir,
+                        );
+                    }
                     _ => {}
                 }
                 reply.ok();

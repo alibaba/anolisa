@@ -443,9 +443,10 @@ impl SkillFs {
                 }
                 entries
             }
-            PathType::CategoryDir { category } => {
-                let phys_dir = self.source_base().join(&category);
+            PathType::CategoryDir { ref category } => {
+                let phys_dir = self.source_base().join(category);
                 let parent_ino = self.skills_dir_ino();
+                let has_resolver = self.active_resolver.is_some();
                 let mut entries: Vec<(u64, FileType, String)> = vec![
                     (ino, FileType::Directory, ".".to_string()),
                     (parent_ino, FileType::Directory, "..".to_string()),
@@ -456,6 +457,15 @@ impl SkillFs {
                         if !entry.path().is_dir() {
                             continue;
                         }
+                        if has_resolver {
+                            let is_skill_leaf = entry.path().join("SKILL.md").exists();
+                            if is_skill_leaf {
+                                let resolution = self.resolve_hermes_nested_read(category, &name);
+                                if matches!(resolution, ReadResolution::Hidden) {
+                                    continue;
+                                }
+                            }
+                        }
                         let entry_path = format!("{}/{}", path, name);
                         let entry_ino = self.inodes.readdir_ino(&entry_path);
                         entries.push((entry_ino, FileType::Directory, name));
@@ -464,10 +474,19 @@ impl SkillFs {
                 entries
             }
             PathType::NestedSkillDir {
-                category,
-                skill_name,
+                ref category,
+                ref skill_name,
             } => {
-                let phys_dir = self.source_base().join(&category).join(&skill_name);
+                if matches!(
+                    self.resolve_hermes_nested_read(category, skill_name),
+                    ReadResolution::Hidden
+                ) {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+                let phys_dir = self
+                    .hermes_nested_skill_read_dir(category, skill_name)
+                    .unwrap_or_else(|| self.source_base().join(category).join(skill_name));
                 let parent_ino = {
                     let parent_path = Path::new(&path)
                         .parent()
@@ -491,15 +510,25 @@ impl SkillFs {
                 entries
             }
             PathType::NestedPassthrough {
-                category,
-                skill_name,
-                relative_path,
+                ref category,
+                ref skill_name,
+                ref relative_path,
             } => {
-                let phys_dir = self
-                    .source_base()
-                    .join(&category)
-                    .join(&skill_name)
-                    .join(&relative_path);
+                if matches!(
+                    self.resolve_hermes_nested_read(category, skill_name),
+                    ReadResolution::Hidden
+                ) {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+                let phys_dir = match self.resolve_hermes_nested_read(category, skill_name) {
+                    ReadResolution::Snapshot { dir, .. } => dir.join(relative_path),
+                    _ => self
+                        .source_base()
+                        .join(category)
+                        .join(skill_name)
+                        .join(relative_path),
+                };
                 let parent_ino = {
                     let parent_path = Path::new(&path)
                         .parent()
@@ -962,13 +991,7 @@ impl SkillFs {
                 };
                 (entries, dir_file)
             }
-            PathType::HermesMeta { name: meta_name }
-            | PathType::HermesMetaChild {
-                name: meta_name, ..
-            }
-            | PathType::CategoryDir {
-                category: meta_name,
-            } => {
+            PathType::HermesMeta { .. } | PathType::HermesMetaChild { .. } => {
                 let phys_dir = match self.resolve_physical_path(&path) {
                     Some(p) => p,
                     None => return reply.error(libc::ENOENT),
@@ -980,7 +1003,6 @@ impl SkillFs {
                         .unwrap_or_default();
                     self.inodes.lookup_by_path(&parent_path).unwrap_or(ino)
                 };
-                let _ = meta_name;
                 let mut entries = vec![
                     (ino, FileType::Directory, ".".to_string()),
                     (parent_ino, FileType::Directory, "..".to_string()),
@@ -1002,10 +1024,109 @@ impl SkillFs {
                 };
                 (entries, dir_file)
             }
-            PathType::NestedSkillDir { .. } | PathType::NestedPassthrough { .. } => {
+            PathType::CategoryDir { ref category } => {
                 let phys_dir = match self.resolve_physical_path(&path) {
                     Some(p) => p,
                     None => return reply.error(libc::ENOENT),
+                };
+                let parent_ino = {
+                    let parent_path = Path::new(&path)
+                        .parent()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    self.inodes.lookup_by_path(&parent_path).unwrap_or(ino)
+                };
+                let mut entries = vec![
+                    (ino, FileType::Directory, ".".to_string()),
+                    (parent_ino, FileType::Directory, "..".to_string()),
+                ];
+                let has_resolver = self.active_resolver.is_some();
+                let dir_file = match std::fs::read_dir(&phys_dir) {
+                    Ok(dir_iter) => {
+                        let mut phys_entries: Vec<_> = dir_iter.flatten().collect();
+                        phys_entries.sort_by_key(|e| e.file_name());
+                        for entry in phys_entries {
+                            let name = entry.file_name().to_string_lossy().to_string();
+                            if has_resolver && entry.path().is_dir() {
+                                let is_skill_leaf = entry.path().join("SKILL.md").exists();
+                                if is_skill_leaf {
+                                    let resolution =
+                                        self.resolve_hermes_nested_read(category, &name);
+                                    if matches!(resolution, ReadResolution::Hidden) {
+                                        continue;
+                                    }
+                                }
+                            }
+                            let kind = dir_entry_file_type(&entry);
+                            let entry_path = format!("{}/{}", path, name);
+                            let entry_ino = self.inodes.readdir_ino(&entry_path);
+                            entries.push((entry_ino, kind, name));
+                        }
+                        std::fs::File::open(&phys_dir).ok()
+                    }
+                    Err(e) => return reply.error(errno(&e)),
+                };
+                (entries, dir_file)
+            }
+            PathType::NestedSkillDir {
+                ref category,
+                ref skill_name,
+            } => {
+                if matches!(
+                    self.resolve_hermes_nested_read(category, skill_name),
+                    ReadResolution::Hidden
+                ) {
+                    return reply.error(libc::ENOENT);
+                }
+                let phys_dir = self
+                    .hermes_nested_skill_read_dir(category, skill_name)
+                    .unwrap_or_else(|| self.hermes_skill_physical_dir(category, skill_name));
+                let parent_ino = {
+                    let parent_path = Path::new(&path)
+                        .parent()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    self.inodes.lookup_by_path(&parent_path).unwrap_or(ino)
+                };
+                let mut entries = vec![
+                    (ino, FileType::Directory, ".".to_string()),
+                    (parent_ino, FileType::Directory, "..".to_string()),
+                ];
+                let dir_file = match std::fs::read_dir(&phys_dir) {
+                    Ok(dir_iter) => {
+                        let mut phys_entries: Vec<_> = dir_iter.flatten().collect();
+                        phys_entries.sort_by_key(|e| e.file_name());
+                        for entry in phys_entries {
+                            let name = entry.file_name().to_string_lossy().to_string();
+                            let kind = dir_entry_file_type(&entry);
+                            let entry_path = format!("{}/{}", path, name);
+                            let entry_ino = self.inodes.readdir_ino(&entry_path);
+                            entries.push((entry_ino, kind, name));
+                        }
+                        std::fs::File::open(&phys_dir).ok()
+                    }
+                    Err(e) => return reply.error(errno(&e)),
+                };
+                (entries, dir_file)
+            }
+            PathType::NestedPassthrough {
+                ref category,
+                ref skill_name,
+                ref relative_path,
+            } => {
+                if matches!(
+                    self.resolve_hermes_nested_read(category, skill_name),
+                    ReadResolution::Hidden
+                ) {
+                    return reply.error(libc::ENOENT);
+                }
+                let phys_dir = match self.resolve_hermes_nested_read(category, skill_name) {
+                    ReadResolution::Snapshot { dir, .. } => dir.join(relative_path),
+                    _ => self
+                        .source_base()
+                        .join(category)
+                        .join(skill_name)
+                        .join(relative_path),
                 };
                 let parent_ino = {
                     let parent_path = Path::new(&path)

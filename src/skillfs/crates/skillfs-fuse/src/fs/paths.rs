@@ -339,4 +339,14 @@ impl SkillFs {
             None => ctrl.has_active_session(skill_name),
         }
     }
+
+    /// Canonical Hermes skill id: `"category/skill"`.
+    pub(super) fn hermes_skill_id(category: &str, skill_name: &str) -> String {
+        format!("{}/{}", category, skill_name)
+    }
+
+    /// Physical source dir for a Hermes nested skill leaf.
+    pub(super) fn hermes_skill_physical_dir(&self, category: &str, skill_name: &str) -> PathBuf {
+        self.source_base().join(category).join(skill_name)
+    }
 }

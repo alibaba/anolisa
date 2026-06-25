@@ -216,4 +216,64 @@ impl SkillFs {
             Err(_) => snapshot_dir.to_path_buf(),
         }
     }
+
+    /// Resolve read for a Hermes nested skill leaf.
+    ///
+    /// Consults the active_resolver with `"category/skill"`.
+    pub(super) fn resolve_hermes_nested_read(
+        &self,
+        category: &str,
+        skill_name: &str,
+    ) -> ReadResolution {
+        let nested_id = Self::hermes_skill_id(category, skill_name);
+        let resolver = match self.active_resolver.as_ref() {
+            Some(r) => r,
+            None => return ReadResolution::Source,
+        };
+        match resolver.get(&nested_id) {
+            None => ReadResolution::Hidden,
+            Some(ActiveTarget::Hidden { .. }) => ReadResolution::Hidden,
+            Some(ActiveTarget::Current { .. }) => ReadResolution::Source,
+            Some(ActiveTarget::Snapshot {
+                snapshot_dir,
+                version,
+            }) => {
+                let dir = self.snapshot_read_dir(&nested_id, &snapshot_dir);
+                ReadResolution::Snapshot { dir, version }
+            }
+        }
+    }
+
+    /// Compiled SKILL.md for a Hermes nested skill.
+    #[allow(dead_code)]
+    pub(super) fn compiled_hermes_nested_skill_md(
+        &self,
+        category: &str,
+        skill_name: &str,
+    ) -> Option<String> {
+        let physical_path = match self.resolve_hermes_nested_read(category, skill_name) {
+            ReadResolution::Hidden => return None,
+            ReadResolution::Source => self
+                .source_base()
+                .join(category)
+                .join(skill_name)
+                .join("SKILL.md"),
+            ReadResolution::Snapshot { dir, .. } => dir.join("SKILL.md"),
+        };
+        let raw = std::fs::read_to_string(&physical_path).ok()?;
+        Some(compiler::compile(&raw, &self.env_profile))
+    }
+
+    /// Physical read dir for a Hermes nested skill.
+    pub(super) fn hermes_nested_skill_read_dir(
+        &self,
+        category: &str,
+        skill_name: &str,
+    ) -> Option<PathBuf> {
+        match self.resolve_hermes_nested_read(category, skill_name) {
+            ReadResolution::Hidden => None,
+            ReadResolution::Source => Some(self.source_base().join(category).join(skill_name)),
+            ReadResolution::Snapshot { dir, .. } => Some(dir),
+        }
+    }
 }

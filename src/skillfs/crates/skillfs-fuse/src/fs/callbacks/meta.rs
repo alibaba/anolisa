@@ -411,10 +411,19 @@ impl SkillFs {
                 }
             }
             PathType::NestedSkillDir {
-                category,
-                skill_name,
+                ref category,
+                ref skill_name,
             } => {
-                let physical = self.source_base().join(&category).join(&skill_name);
+                if matches!(
+                    self.resolve_hermes_nested_read(category, skill_name),
+                    crate::fs::read_resolution::ReadResolution::Hidden
+                ) {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+                let physical = self
+                    .hermes_nested_skill_read_dir(category, skill_name)
+                    .unwrap_or_else(|| self.source_base().join(category).join(skill_name));
                 if physical.is_dir() {
                     let ino = self.inodes.allocate(&path_str, FileType::Directory, parent);
                     self.inodes.remember(ino);
@@ -426,14 +435,26 @@ impl SkillFs {
                 }
             }
             PathType::NestedSkillMd {
-                category,
-                skill_name,
+                ref category,
+                ref skill_name,
             } => {
-                let physical = self
-                    .source_base()
-                    .join(&category)
-                    .join(&skill_name)
-                    .join("SKILL.md");
+                if matches!(
+                    self.resolve_hermes_nested_read(category, skill_name),
+                    crate::fs::read_resolution::ReadResolution::Hidden
+                ) {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+                let physical = match self.resolve_hermes_nested_read(category, skill_name) {
+                    crate::fs::read_resolution::ReadResolution::Snapshot { dir, .. } => {
+                        dir.join("SKILL.md")
+                    }
+                    _ => self
+                        .source_base()
+                        .join(category)
+                        .join(skill_name)
+                        .join("SKILL.md"),
+                };
                 match std::fs::symlink_metadata(&physical) {
                     Ok(meta) => {
                         let mut attr = file_attr_from_metadata(&meta);
@@ -448,15 +469,27 @@ impl SkillFs {
                 }
             }
             PathType::NestedPassthrough {
-                category,
-                skill_name,
-                relative_path,
+                ref category,
+                ref skill_name,
+                ref relative_path,
             } => {
-                let physical = self
-                    .source_base()
-                    .join(&category)
-                    .join(&skill_name)
-                    .join(&relative_path);
+                if matches!(
+                    self.resolve_hermes_nested_read(category, skill_name),
+                    crate::fs::read_resolution::ReadResolution::Hidden
+                ) {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+                let physical = match self.resolve_hermes_nested_read(category, skill_name) {
+                    crate::fs::read_resolution::ReadResolution::Snapshot { dir, .. } => {
+                        dir.join(relative_path)
+                    }
+                    _ => self
+                        .source_base()
+                        .join(category)
+                        .join(skill_name)
+                        .join(relative_path),
+                };
                 match std::fs::symlink_metadata(&physical) {
                     Ok(meta) => {
                         let mut attr = file_attr_from_metadata(&meta);
@@ -772,10 +805,19 @@ impl SkillFs {
                 }
             }
             PathType::NestedSkillDir {
-                category,
-                skill_name,
+                ref category,
+                ref skill_name,
             } => {
-                let physical = self.source_base().join(&category).join(&skill_name);
+                if matches!(
+                    self.resolve_hermes_nested_read(category, skill_name),
+                    crate::fs::read_resolution::ReadResolution::Hidden
+                ) {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+                let physical = self
+                    .hermes_nested_skill_read_dir(category, skill_name)
+                    .unwrap_or_else(|| self.source_base().join(category).join(skill_name));
                 match std::fs::symlink_metadata(&physical) {
                     Ok(meta) => {
                         let mut attr = file_attr_from_metadata(&meta);
@@ -786,14 +828,26 @@ impl SkillFs {
                 }
             }
             PathType::NestedSkillMd {
-                category,
-                skill_name,
+                ref category,
+                ref skill_name,
             } => {
-                let physical = self
-                    .source_base()
-                    .join(&category)
-                    .join(&skill_name)
-                    .join("SKILL.md");
+                if matches!(
+                    self.resolve_hermes_nested_read(category, skill_name),
+                    crate::fs::read_resolution::ReadResolution::Hidden
+                ) {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+                let physical = match self.resolve_hermes_nested_read(category, skill_name) {
+                    crate::fs::read_resolution::ReadResolution::Snapshot { dir, .. } => {
+                        dir.join("SKILL.md")
+                    }
+                    _ => self
+                        .source_base()
+                        .join(category)
+                        .join(skill_name)
+                        .join("SKILL.md"),
+                };
                 match std::fs::symlink_metadata(&physical) {
                     Ok(meta) => {
                         let mut attr = file_attr_from_metadata(&meta);
@@ -804,15 +858,27 @@ impl SkillFs {
                 }
             }
             PathType::NestedPassthrough {
-                category,
-                skill_name,
-                relative_path,
+                ref category,
+                ref skill_name,
+                ref relative_path,
             } => {
-                let physical = self
-                    .source_base()
-                    .join(&category)
-                    .join(&skill_name)
-                    .join(&relative_path);
+                if matches!(
+                    self.resolve_hermes_nested_read(category, skill_name),
+                    crate::fs::read_resolution::ReadResolution::Hidden
+                ) {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+                let physical = match self.resolve_hermes_nested_read(category, skill_name) {
+                    crate::fs::read_resolution::ReadResolution::Snapshot { dir, .. } => {
+                        dir.join(relative_path)
+                    }
+                    _ => self
+                        .source_base()
+                        .join(category)
+                        .join(skill_name)
+                        .join(relative_path),
+                };
                 match std::fs::symlink_metadata(&physical) {
                     Ok(meta) => {
                         let mut attr = file_attr_from_metadata(&meta);
