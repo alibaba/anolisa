@@ -126,24 +126,24 @@ mod tests {
     #[test]
     fn hidden_and_contextual_commands_are_not_public_hints() {
         assert!(slash_hints("/co").iter().any(|hint| hint.name == "/config"));
-        for prefix in [
-            "/ag", "/ca", "/de", "/au", "/se", "/co", "/send", "/debug",
-        ] {
+        for prefix in ["/ag", "/ca", "/de", "/au", "/se", "/co", "/send", "/debug"] {
             let hints = slash_hints(prefix);
             assert!(
-                hints
-                    .iter()
-                    .all(|hint| matches!(
-                        hint.name,
-                        "/config" | "/mode" | "/hooks" | "/extensions" | "/skills"
-                    )),
+                hints.iter().all(|hint| matches!(
+                    hint.name,
+                    "/config" | "/mode" | "/hooks" | "/extensions" | "/skills"
+                )),
                 "{prefix} returned non-public hints: {:?}",
                 hints.iter().map(|hint| hint.name).collect::<Vec<_>>()
             );
         }
         // /ex and /skill now match public commands
-        assert!(slash_hints("/ex").iter().any(|hint| hint.name == "/extensions"));
-        assert!(slash_hints("/skill").iter().any(|hint| hint.name == "/skills"));
+        assert!(slash_hints("/ex")
+            .iter()
+            .any(|hint| hint.name == "/extensions"));
+        assert!(slash_hints("/skill")
+            .iter()
+            .any(|hint| hint.name == "/skills"));
     }
 
     fn slash_hints(prefix: &str) -> Vec<&'static SlashCommandSpec> {

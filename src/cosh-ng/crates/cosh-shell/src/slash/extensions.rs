@@ -29,12 +29,7 @@ pub(super) fn render_extensions_command<W: Write>(
             match cosh_core.registry_query("extensions", "list", params) {
                 Ok(data) => {
                     let body = format_extensions_list(&data, &i18n);
-                    render_notice_panel(
-                        output,
-                        i18n.t(MessageId::SlashExtensionsTitle),
-                        body,
-                        None,
-                    )
+                    render_notice_panel(output, i18n.t(MessageId::SlashExtensionsTitle), body, None)
                 }
                 Err(e) => render_notice_panel(
                     output,
@@ -50,12 +45,7 @@ pub(super) fn render_extensions_command<W: Write>(
             match cosh_core.registry_query("extensions", "detail", params) {
                 Ok(data) => {
                     let body = format_extension_detail(&data);
-                    render_notice_panel(
-                        output,
-                        i18n.t(MessageId::SlashExtensionsTitle),
-                        body,
-                        None,
-                    )
+                    render_notice_panel(output, i18n.t(MessageId::SlashExtensionsTitle), body, None)
                 }
                 Err(e) => render_notice_panel(
                     output,
@@ -143,7 +133,10 @@ fn format_extensions_list(data: &Value, i18n: &I18n) -> Vec<String> {
         .filter_map(|ext| {
             let name = ext.get("name")?.as_str()?;
             let version = ext.get("version").and_then(|v| v.as_str()).unwrap_or("?");
-            let active = ext.get("is_active").and_then(|v| v.as_bool()).unwrap_or(false);
+            let active = ext
+                .get("is_active")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             if active {
                 Some(format!("  • {name} v{version} (active)"))
             } else {

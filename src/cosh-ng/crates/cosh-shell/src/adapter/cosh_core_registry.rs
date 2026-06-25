@@ -93,7 +93,10 @@ impl CoshCoreAdapter {
         let resp: Value =
             serde_json::from_str(&response_line).map_err(|e| format!("parse error: {e}"))?;
 
-        let success = resp.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        let success = resp
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if success {
             Ok(resp.get("data").cloned().unwrap_or(Value::Null))
         } else {

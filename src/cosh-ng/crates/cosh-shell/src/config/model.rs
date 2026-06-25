@@ -13,9 +13,55 @@ pub struct CoshConfig {
     pub startup_hooks: bool,
     pub debug: bool,
     pub ai_enabled: bool,
+    pub health: HealthConfig,
     pub trusted_commands: Vec<String>,
     pub trusted_project_roots: Vec<PathBuf>,
     pub(super) readonly: RuntimeReadonlyConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HealthConfig {
+    pub enabled: bool,
+    pub role: Option<String>,
+    pub memory_sensitive: bool,
+    pub critical_mounts: Vec<String>,
+    pub verbose: bool,
+    pub services: Vec<HealthServiceConfig>,
+}
+
+impl Default for HealthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            role: None,
+            memory_sensitive: false,
+            critical_mounts: vec!["/".to_string()],
+            verbose: false,
+            services: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HealthServiceConfig {
+    pub name: String,
+    pub expected: HealthServiceExpectedState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HealthServiceExpectedState {
+    Active,
+    Inactive,
+}
+
+impl HealthServiceExpectedState {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "active" => Some(Self::Active),
+            "inactive" => Some(Self::Inactive),
+            _ => None,
+        }
+    }
 }
 
 impl Default for CoshConfig {
@@ -30,6 +76,7 @@ impl Default for CoshConfig {
             startup_hooks: false,
             debug: false,
             ai_enabled: true,
+            health: HealthConfig::default(),
             trusted_commands: Vec::new(),
             trusted_project_roots: Vec::new(),
             readonly: RuntimeReadonlyConfig::default(),

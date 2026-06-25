@@ -127,7 +127,7 @@ fn prompt_includes_hook_routing_hints() {
     };
 
     let prompt = prompt_from_request(&request);
-    assert!(prompt.contains("Hook routing hints:"), "{prompt}");
+    assert!(prompt.contains("Runtime context hints:"), "{prompt}");
     assert!(
         prompt.contains("output_id=terminal-output://session-1/cmd-1"),
         "{prompt}"
@@ -138,9 +138,46 @@ fn prompt_includes_hook_routing_hints() {
         "{prompt}"
     );
     assert!(
-        prompt.contains("Treat these as routing hints only"),
+        prompt.contains("Treat these as routing/context hints only"),
         "{prompt}"
     );
+}
+
+#[test]
+fn prompt_includes_bounded_health_context_without_local_paths() {
+    let request = AgentRequest {
+        id: "agent-request-health-1".to_string(),
+        session_id: "session-1".to_string(),
+        command_block: command_block("input-1", "分析一下这台机器内存风险", 0, None),
+        context_blocks: Vec::new(),
+        context_hints: vec![
+            "health_scan scan_id=health-1 overall_severity=warning facts=[memory.available_ratio:memory.available_ratio=0.080] findings=[J06:warning:HealthFindingMemoryAvailableLow:evidence=memory.available_ratio] bounded_facts_only=true no_collector_stdout=true"
+                .to_string(),
+        ],
+        user_input: Some("分析一下这台机器内存风险".to_string()),
+        findings: Vec::new(),
+        mode: AgentMode::RecommendOnly,
+        user_confirmed: true,
+        hook_finding: None,
+        recommended_skill: None,
+    };
+
+    let prompt = prompt_from_request(&request);
+
+    assert!(prompt.contains("Runtime context hints:"), "{prompt}");
+    assert!(prompt.contains("scan_id=health-1"), "{prompt}");
+    assert!(
+        prompt.contains("HealthFindingMemoryAvailableLow"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("evidence=memory.available_ratio"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("bounded_facts_only=true"), "{prompt}");
+    assert!(!prompt.contains("journalctl -k"), "{prompt}");
+    assert!(!prompt.contains("dmesg"), "{prompt}");
+    assert!(!prompt.contains("/tmp/cosh"), "{prompt}");
 }
 
 #[test]
@@ -384,7 +421,7 @@ fn prompt_context_budget_tiers_are_trigger_scoped() {
         recommended_skill: None,
     });
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(hook.contains("Hook routing hints:"), "{hook}");
+    assert!(hook.contains("Runtime context hints:"), "{hook}");
     assert!(hook.contains("Hook finding: Memory pressure"), "{hook}");
     assert!(
         hook.contains("id=terminal-output://session-1/cmd-ctx"),

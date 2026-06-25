@@ -4,10 +4,7 @@ use super::*;
 
 #[test]
 fn slash_extensions_with_fake_backend_shows_degradation() {
-    let output = run_raw_cli_with_input(
-        "fake",
-        "/extensions\necho after-ext\nexit\n",
-    );
+    let output = run_raw_cli_with_input("fake", "/extensions\necho after-ext\nexit\n");
 
     // Fake adapter cannot query registry, should show degradation
     assert!(
@@ -20,10 +17,7 @@ fn slash_extensions_with_fake_backend_shows_degradation() {
 
 #[test]
 fn slash_skills_with_fake_backend_shows_degradation() {
-    let output = run_raw_cli_with_input(
-        "fake",
-        "/skills\necho after-skills\nexit\n",
-    );
+    let output = run_raw_cli_with_input("fake", "/skills\necho after-skills\nexit\n");
 
     // Fake adapter cannot query registry, should show degradation
     assert!(
@@ -66,10 +60,7 @@ fn slash_skills_with_fake_backend_zh_shows_degradation() {
 
 #[test]
 fn slash_hooks_with_fake_backend_shows_shell_hooks_section() {
-    let output = run_raw_cli_with_input(
-        "fake",
-        "/hooks\necho after-hooks\nexit\n",
-    );
+    let output = run_raw_cli_with_input("fake", "/hooks\necho after-hooks\nexit\n");
 
     // Should show Shell Hooks section header
     assert!(
@@ -98,6 +89,9 @@ fn slash_extensions_not_intercepted_as_shell_command() {
 
     // Should not leak to bash as a file path
     assert!(!output.contains("bash: /extensions"), "{output}");
-    assert!(!output.contains("No such file or directory: /extensions"), "{output}");
+    assert!(
+        !output.contains("No such file or directory: /extensions"),
+        "{output}"
+    );
     assert!(output.contains("done"), "{output}");
 }

@@ -9,6 +9,7 @@ const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
 pub(super) struct CandidateLineBuffer {
     pub(super) bytes: Vec<u8>,
     pub(super) relayed_len: usize,
+    pub(super) force_agent_intercept: bool,
 }
 
 impl CandidateLineBuffer {
@@ -50,10 +51,12 @@ impl CandidateLineBuffer {
     pub(super) fn clear(&mut self) {
         self.bytes.clear();
         self.relayed_len = 0;
+        self.force_agent_intercept = false;
     }
 
     pub(super) fn take(&mut self) -> Vec<u8> {
         self.relayed_len = 0;
+        self.force_agent_intercept = false;
         std::mem::take(&mut self.bytes)
     }
 

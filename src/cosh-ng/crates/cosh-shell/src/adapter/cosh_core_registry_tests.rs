@@ -24,11 +24,7 @@ fn write_mock_script(label: &str, body: &str) -> std::path::PathBuf {
     ));
     // Remove stale script if it exists (avoid ETXTBSY)
     let _ = std::fs::remove_file(&script);
-    std::fs::write(
-        &script,
-        format!("#!/bin/sh\n{body}\n"),
-    )
-    .expect("write mock script");
+    std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).expect("write mock script");
     let mut permissions = std::fs::metadata(&script)
         .expect("mock script metadata")
         .permissions();
@@ -70,7 +66,11 @@ printf '%s\n' '{"type":"registry_response","request_id":"reg-test","success":fal
     );
 
     let adapter = test_adapter_with_program(&script.to_string_lossy());
-    let result = adapter.registry_query("extensions", "detail", serde_json::json!({"name": "nonexistent"}));
+    let result = adapter.registry_query(
+        "extensions",
+        "detail",
+        serde_json::json!({"name": "nonexistent"}),
+    );
     let _ = std::fs::remove_file(&script);
 
     let err = result.expect_err("should return error");
@@ -86,10 +86,7 @@ fn registry_query_handles_spawn_failure() {
     let result = adapter.registry_query("extensions", "list", Value::Null);
 
     let err = result.expect_err("should fail on spawn");
-    assert!(
-        err.contains("failed to spawn"),
-        "unexpected error: {err}"
-    );
+    assert!(err.contains("failed to spawn"), "unexpected error: {err}");
 }
 
 #[test]
@@ -147,8 +144,5 @@ printf '%s\n' 'this is not valid json'
     let _ = std::fs::remove_file(&script);
 
     let err = result.expect_err("should fail on invalid json");
-    assert!(
-        err.contains("parse error"),
-        "unexpected error: {err}"
-    );
+    assert!(err.contains("parse error"), "unexpected error: {err}");
 }

@@ -2,7 +2,11 @@ use std::collections::HashSet;
 use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
+use crate::diagnostics::health::{
+    record_startup_health_recommendations, HealthScanReport, HealthSeverity,
+};
 use crate::runtime::cli_args::RawShellKind;
 use crate::runtime::prelude::*;
 
@@ -26,6 +30,7 @@ const LOGO_COLORS: &[&str] = &[
 
 const RESET: &str = "\x1b[0m";
 const LOGO_MIN_WIDTH: u16 = 42;
+const STARTUP_HEALTH_ROW_WAIT: Duration = Duration::from_millis(150);
 
 pub(crate) fn render_startup_banner<W: Write>(
     events: &[ShellEvent],
@@ -51,7 +56,7 @@ pub(crate) fn render_startup_banner<W: Write>(
     let startup_hook = evaluate_startup_hooks(cwd, i18n);
 
     write!(output, "\r\x1b[2K")?;
-    let renderer = RatatuiInlineRenderer::for_terminal();
+    let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
 
     let term_width = ratatui::crossterm::terminal::size()
         .map(|(cols, _)| cols)
@@ -77,6 +82,16 @@ pub(crate) fn render_startup_banner<W: Write>(
         i18n.format(MessageId::StartupCwdLine, &[("cwd", cwd)]),
         i18n.t(MessageId::StartupCommandsLine).to_string(),
     ];
+    state.startup_health.wait_ready(STARTUP_HEALTH_ROW_WAIT);
+    if let Some(report) = state.startup_health.report.as_ref() {
+        state.pending_input_ghost = startup_health_prompt_ghost(report, i18n);
+        if health_uses_startup_row(report) {
+            body.push(renderer.startup_section_separator_line());
+            body.extend(renderer.health_startup_row_lines(HealthBannerModel { report }));
+            state.startup_health.rendered = true;
+            record_startup_health_recommendations(report);
+        }
+    }
     if let Some(markdown) = startup_hook.markdown {
         body.push(String::new());
         body.push(startup_hook.summary);
@@ -86,12 +101,70 @@ pub(crate) fn render_startup_banner<W: Write>(
     }
     renderer.write_banner(output, i18n.t(MessageId::StartupTitle), body, None)?;
     writeln!(output)?;
+    restore_startup_prompt(state, output)?;
+    output.flush()
+}
+
+pub(crate) fn render_startup_health_banner<W: Write>(
+    state: &mut InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
+    if !state.rendered_startup_banner || state.startup_health.rendered {
+        return Ok(());
+    }
+
+    state.startup_health.poll_ready();
+    let Some(report) = state.startup_health.report.as_ref() else {
+        return Ok(());
+    };
+
+    state.startup_health.rendered = true;
+    state.pending_input_ghost = startup_health_prompt_ghost(report, state.i18n());
+    write!(output, "\r\x1b[2K")?;
+    let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
+    renderer.write_health_banner(output, HealthBannerModel { report })?;
+    record_startup_health_recommendations(report);
+    writeln!(output)?;
+    restore_startup_prompt(state, output)?;
+    output.flush()
+}
+
+fn restore_startup_prompt<W: Write>(
+    state: &mut InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
     if std::env::var("COSH_SHELL_ISOLATED").is_ok() {
         write!(output, "cosh-osc$ ")?;
     } else {
         state.trigger_pty_prompt = true;
     }
-    output.flush()
+    Ok(())
+}
+
+fn startup_health_prompt_ghost(report: &HealthScanReport, i18n: crate::I18n) -> Option<String> {
+    startup_prompt_ghost_allowed(report).then(|| primary_health_prompt_suggestion(report, i18n))?
+}
+
+fn startup_prompt_ghost_allowed(report: &HealthScanReport) -> bool {
+    if std::env::var("COSH_SHELL_ISOLATED").is_ok() || std::env::var("NO_COLOR").is_ok() {
+        return false;
+    }
+    if std::env::var("TERM")
+        .map(|term| term.eq_ignore_ascii_case("dumb"))
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    if std::env::var("COSH_SHELL_RENDER")
+        .map(|mode| mode.eq_ignore_ascii_case("plain") || mode.eq_ignore_ascii_case("text"))
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    !matches!(
+        report.overall_severity,
+        HealthSeverity::Unavailable | HealthSeverity::Degraded
+    )
 }
 
 fn startup_banner_enabled() -> bool {

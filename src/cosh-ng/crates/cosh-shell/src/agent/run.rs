@@ -2,6 +2,7 @@ use std::time::Instant;
 
 use crate::agent::continuation::provider_mode_for_agent_run;
 use crate::agent::poll::poll_active_agent_run;
+use crate::diagnostics::health::health_context_hint;
 use crate::evidence::request::ParsedCoshRequest;
 use crate::evidence::stream::{CoshRequestAuditRecord, CoshRequestStreamFilter};
 use crate::runtime::prelude::*;
@@ -95,6 +96,7 @@ fn start_agent_run_with_queue_policy<W: Write>(
     output.flush()?;
 
     let mut request = request.clone();
+    attach_health_context_hint(&mut request, state);
     attach_continuity_prompt_hint(&mut request, state);
     let provider_mode = provider_mode_for_agent_run(&request, state.approval_mode);
     let handle = adapter.start_cancellable(request.clone(), provider_mode);
@@ -131,6 +133,23 @@ fn start_agent_run_with_queue_policy<W: Write>(
 
 fn queue_agent_request(state: &mut InlineState, pending: PendingAgentRequest) {
     state.agent_run.queue_request(pending);
+}
+
+fn attach_health_context_hint(request: &mut AgentRequest, state: &mut InlineState) {
+    state.startup_health.poll_ready();
+    let Some(report) = state.startup_health.report.as_ref() else {
+        return;
+    };
+    let Some(hint) = health_context_hint(report) else {
+        return;
+    };
+    if !request
+        .context_hints
+        .iter()
+        .any(|existing| existing.starts_with("health_scan "))
+    {
+        request.context_hints.push(hint);
+    }
 }
 
 fn attach_continuity_prompt_hint(request: &mut AgentRequest, state: &InlineState) {
@@ -175,4 +194,121 @@ pub(super) fn has_queued_run_before_held_text(state: &InlineState) -> bool {
         .queued_requests
         .iter()
         .any(|pending| pending.before_held_text)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+
+    use super::*;
+    use crate::diagnostics::health::{
+        HealthFact, HealthFactCategory, HealthFactSource, HealthFactValue, HealthScanReport,
+        HealthSeverity,
+    };
+
+    #[test]
+    fn health_context_hint_is_attached_to_agent_request() {
+        let mut state = InlineState::default();
+        state.startup_health.report = Some(test_health_report());
+        let mut request = test_agent_request();
+
+        attach_health_context_hint(&mut request, &mut state);
+
+        let hint = request
+            .context_hints
+            .iter()
+            .find(|hint| hint.starts_with("health_scan "))
+            .expect("health context hint");
+        assert!(hint.contains("scan_id=health-1"), "{hint}");
+        assert!(hint.contains("overall_severity=warning"), "{hint}");
+        assert!(hint.contains("bounded_facts_only=true"), "{hint}");
+        assert!(hint.contains("no_collector_stdout=true"), "{hint}");
+        assert!(!hint.contains("/tmp/cosh"), "{hint}");
+    }
+
+    #[test]
+    fn health_context_hint_polls_ready_startup_report() {
+        let (sender, receiver) = mpsc::channel();
+        sender.send(Some(test_health_report())).unwrap();
+        let mut state = InlineState::default();
+        state.startup_health.pending = Some(receiver);
+        let mut request = test_agent_request();
+
+        attach_health_context_hint(&mut request, &mut state);
+
+        assert!(state.startup_health.pending.is_none());
+        assert!(state.startup_health.report.is_some());
+        assert!(request
+            .context_hints
+            .iter()
+            .any(|hint| hint.starts_with("health_scan ")));
+    }
+
+    #[test]
+    fn health_context_hint_dedupes_existing_health_hint() {
+        let mut state = InlineState::default();
+        state.startup_health.report = Some(test_health_report());
+        let mut request = test_agent_request();
+        request
+            .context_hints
+            .push("health_scan scan_id=existing".to_string());
+
+        attach_health_context_hint(&mut request, &mut state);
+
+        assert_eq!(
+            request
+                .context_hints
+                .iter()
+                .filter(|hint| hint.starts_with("health_scan "))
+                .count(),
+            1
+        );
+    }
+
+    fn test_health_report() -> HealthScanReport {
+        let mut report = HealthScanReport::new("health-1", 0);
+        report.overall_severity = HealthSeverity::Warning;
+        report.facts.push(HealthFact {
+            id: "memory.available_ratio".to_string(),
+            category: HealthFactCategory::Memory,
+            key: "memory.available_ratio".to_string(),
+            value: HealthFactValue::Float(0.08),
+            unit: None,
+            source: HealthFactSource::Fixture,
+            elapsed_ms: 0,
+        });
+        report
+    }
+
+    fn test_agent_request() -> AgentRequest {
+        AgentRequest {
+            id: "agent-request-health".to_string(),
+            session_id: "session-1".to_string(),
+            command_block: CommandBlock {
+                id: "cmd-1".to_string(),
+                session_id: "session-1".to_string(),
+                command: "分析一下这台机器内存风险".to_string(),
+                origin: CommandOrigin::UserInteractive,
+                cwd: "/repo".to_string(),
+                end_cwd: "/repo".to_string(),
+                started_at_ms: 1,
+                ended_at_ms: 2,
+                duration_ms: 1,
+                exit_code: 0,
+                status: CommandStatus::Completed,
+                output: OutputRefs {
+                    terminal_output_ref: None,
+                    terminal_output_bytes: 0,
+                },
+            },
+            context_blocks: Vec::new(),
+            context_hints: Vec::new(),
+            user_input: Some("分析一下这台机器内存风险".to_string()),
+            findings: Vec::new(),
+            mode: AgentMode::RecommendOnly,
+            user_confirmed: true,
+            hook_finding: None,
+            recommended_skill: None,
+        }
+    }
 }

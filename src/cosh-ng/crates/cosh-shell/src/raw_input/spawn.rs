@@ -15,8 +15,8 @@ use super::event_parser::{CandidateLineBuffer, NativeLineState};
 use super::mode::{current_raw_input_mode, RawInputMode};
 use super::pty::{set_pty_winsize, signal_process_group, write_all_pty};
 use super::relay::{
-    relay_delayed_input, relay_passthrough_input, send_held_input_events, send_raw_input_events,
-    ExplicitExitTracker, InputRelayContext,
+    relay_delayed_input, relay_passthrough_input, relay_prompt_ghost_input, send_held_input_events,
+    send_raw_input_events, ExplicitExitTracker, InputRelayContext,
 };
 use super::{RawInputEvent, RawRelayAction};
 
@@ -86,6 +86,21 @@ where
                             exit_tracker: &mut exit_tracker,
                         };
                         if relay_passthrough_input(&buffer[..n], &mut relay)? {
+                            continue;
+                        }
+                    }
+                    RawInputMode::PromptGhost(ghost_text) => {
+                        card_state.reset();
+                        let mut relay = InputRelayContext {
+                            master: &mut master,
+                            input_classifier: &input_classifier,
+                            input_events: &input_events,
+                            input_mode: &input_mode,
+                            line_buffer: &mut line_buffer,
+                            native_line_state: &mut native_line_state,
+                            exit_tracker: &mut exit_tracker,
+                        };
+                        if relay_prompt_ghost_input(&buffer[..n], &ghost_text, &mut relay)? {
                             continue;
                         }
                     }
@@ -163,6 +178,21 @@ pub(crate) fn spawn_raw_action_relay(
                                 exit_tracker: &mut exit_tracker,
                             };
                             if relay_passthrough_input(&bytes, &mut relay)? {
+                                continue;
+                            }
+                        }
+                        RawInputMode::PromptGhost(ghost_text) => {
+                            card_state.reset();
+                            let mut relay = InputRelayContext {
+                                master: &mut master,
+                                input_classifier: &input_classifier,
+                                input_events: &input_events,
+                                input_mode: &input_mode,
+                                line_buffer: &mut line_buffer,
+                                native_line_state: &mut native_line_state,
+                                exit_tracker: &mut exit_tracker,
+                            };
+                            if relay_prompt_ghost_input(&bytes, &ghost_text, &mut relay)? {
                                 continue;
                             }
                         }

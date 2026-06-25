@@ -1,14 +1,20 @@
 use super::{
     strip_ansi_escape, ActivityDetailsPanelModel, ActivityPanelModel, ActivityRowModel,
     ApprovalDetailsPanelModel, ApprovalJournalEntryModel, ApprovalJournalPanelModel,
-    ApprovalPanelAction, ApprovalPanelModel, ApprovalReceiptPanelModel, NoticePanelModel,
-    QuestionAnswerPanelModel, QuestionPanelModel, RatatuiInlineRenderer,
+    ApprovalPanelAction, ApprovalPanelModel, ApprovalReceiptPanelModel, HealthBannerModel,
+    NoticePanelModel, QuestionAnswerPanelModel, QuestionPanelModel, RatatuiInlineRenderer,
     RecommendationActionPanelModel, RecommendationPanelModel,
+};
+use crate::diagnostics::health::{
+    HealthCollector, HealthFact, HealthFactCategory, HealthFactSource, HealthFactValue,
+    HealthFinding, HealthFindingCategory, HealthMessageId, HealthScanReport, HealthSeverity,
+    HealthTryItem, HealthTryKind, HealthUnavailableReason, UnavailableCollector,
 };
 use crate::types::{
     AgentEvent, GovernanceDecision, GovernancePolicyDecision, GovernedEvent, QuestionSelectionMode,
 };
 use ratatui::text::Span;
+use std::collections::BTreeMap;
 
 mod approval;
 mod markdown;
@@ -1000,6 +1006,666 @@ fn renderer_snapshot_matrix_keeps_plain_output_within_width() {
 }
 
 #[test]
+fn health_banner_snapshot_matrix_keeps_rich_output_compact() {
+    let report = warning_health_report();
+
+    for width in [40, 80, 120] {
+        let renderer = RatatuiInlineRenderer::with_width(width);
+        let text = renderer
+            .health_banner_lines(HealthBannerModel { report: &report })
+            .join("\n");
+
+        assert!(text.lines().count() <= 14, "{text}");
+        assert_rendered_width(&text, width as usize);
+        assert_box_lines_aligned(&text, width as usize);
+        assert!(text.contains("Health check"), "{text}");
+        assert!(text.contains("critical"), "{text}");
+        assert!(text.contains("Load"), "{text}");
+        assert!(text.contains("Resources"), "{text}");
+        assert!(text.contains("1m 10.4 / 4 cores (2.6x)"), "{text}");
+        assert!(!text.contains("Load  Load 1m"), "{text}");
+        assert!(text.contains("Mem used"), "{text}");
+        assert!(!text.contains("Mem avail 8% ▕"), "{text}");
+        assert!(!text.contains("Memory 8%"), "{text}");
+        if width >= 80 {
+            assert!(text.contains("Disk / used"), "{text}");
+            assert!(text.contains("Disk /data used"), "{text}");
+        }
+        let meter_widths = meter_cell_widths(&text);
+        if width >= 120 {
+            assert!(!meter_widths.is_empty(), "{text}");
+            assert!(meter_widths.iter().all(|width| *width <= 8), "{text}");
+        } else if width >= 80 {
+            assert!(!meter_widths.is_empty(), "{text}");
+            assert!(meter_widths.iter().all(|width| *width <= 6), "{text}");
+        } else {
+            assert!(meter_widths.is_empty(), "{text}");
+        }
+        assert!(!text.contains("██████████"), "{text}");
+        assert!(text.contains("Findings"), "{text}");
+        assert!(text.contains("Suggested Prompts"), "{text}");
+        if width >= 80 {
+            assert!(
+                text.contains("You can type these prompts to the agent:"),
+                "{text}"
+            );
+        } else {
+            assert!(text.contains("You can type these prompts"), "{text}");
+        }
+        assert!(!text.contains("more finding"), "{text}");
+        assert!(text.contains("available memory is low"), "{text}");
+        let prompt_count = text.matches('›').count();
+        if width >= 120 {
+            assert_eq!(prompt_count, 3, "{text}");
+        } else if width >= 80 {
+            assert!(prompt_count >= 1, "{text}");
+        } else {
+            assert_eq!(prompt_count, 1, "{text}");
+        }
+        if width >= 80 {
+            assert!(text.contains("Inspect the risky mount"), "{text}");
+        }
+        if width >= 120 {
+            assert!(text.contains("Analyze memory pressure"), "{text}");
+        } else {
+            assert!(text.contains('›'), "{text}");
+        }
+        assert!(!text.contains("Next:"), "{text}");
+        assert!(!text.contains(" · "), "{text}");
+    }
+}
+
+#[test]
+fn health_banner_matches_standard_panel_width_and_padding() {
+    let report = warning_health_report();
+    let renderer = RatatuiInlineRenderer::with_width(160);
+    let health = renderer
+        .health_banner_lines(HealthBannerModel { report: &report })
+        .join("\n");
+
+    let mut agent_output = Vec::new();
+    renderer
+        .write_agent_response(&mut agent_output, "Agent body", None)
+        .unwrap();
+    let agent = String::from_utf8(agent_output).unwrap();
+
+    assert_box_lines_aligned(&health, 160);
+    assert_box_lines_aligned(&agent, 160);
+    assert!(
+        health.lines().any(|line| line.starts_with("│ Resources")),
+        "{health}"
+    );
+    assert!(
+        !health.lines().any(|line| line.starts_with("│Resources")),
+        "{health}"
+    );
+}
+
+#[test]
+fn health_banner_uses_zh_catalog_without_translating_commands() {
+    let report = warning_health_report();
+
+    for width in [40, 80, 120] {
+        let renderer =
+            RatatuiInlineRenderer::with_width(width).with_language(crate::Language::ZhCn);
+        let text = renderer
+            .health_banner_lines(HealthBannerModel { report: &report })
+            .join("\n");
+
+        assert!(text.lines().count() <= 14, "{text}");
+        assert_rendered_width(&text, width as usize);
+        assert_box_lines_aligned(&text, width as usize);
+        assert!(text.contains("健康检查"), "{text}");
+        assert!(text.contains("严重"), "{text}");
+        assert!(text.contains("负载"), "{text}");
+        assert!(text.contains("资源"), "{text}");
+        assert!(text.contains("1分钟 10.4 / 4核（2.6倍）"), "{text}");
+        assert!(!text.contains("负载  1分钟负载"), "{text}");
+        assert!(text.contains("内存已用"), "{text}");
+        if width >= 80 {
+            assert!(text.contains("磁盘 /data 已用"), "{text}");
+        }
+        let meter_widths = meter_cell_widths(&text);
+        if width >= 120 {
+            assert!(!meter_widths.is_empty(), "{text}");
+            assert!(meter_widths.iter().all(|width| *width <= 8), "{text}");
+        } else if width >= 80 {
+            assert!(!meter_widths.is_empty(), "{text}");
+            assert!(meter_widths.iter().all(|width| *width <= 6), "{text}");
+        } else {
+            assert!(meter_widths.is_empty(), "{text}");
+        }
+        assert!(!text.contains("██████████"), "{text}");
+        assert!(text.contains("发现的问题"), "{text}");
+        assert!(text.contains("建议下一步"), "{text}");
+        if width >= 80 {
+            assert!(text.contains("以下提示词可直接输入给 Agent："), "{text}");
+        } else {
+            assert!(text.contains("以下提示词可直接输入"), "{text}");
+        }
+        assert!(!text.contains("另有"), "{text}");
+        if width >= 120 {
+            assert!(text.contains("可用内存偏低"), "{text}");
+        }
+        let prompt_count = text.matches('›').count();
+        if width >= 120 {
+            assert_eq!(prompt_count, 3, "{text}");
+        } else if width >= 80 {
+            assert!(prompt_count >= 1, "{text}");
+        } else {
+            assert_eq!(prompt_count, 1, "{text}");
+        }
+        if width >= 80 {
+            assert!(text.contains("检查高风险挂载点"), "{text}");
+        }
+        if width >= 120 {
+            assert!(text.contains("分析内存压力"), "{text}");
+        } else {
+            assert!(text.contains('›'), "{text}");
+        }
+        assert!(!text.contains("Health check"), "{text}");
+        assert!(!text.contains("Next:"), "{text}");
+    }
+}
+
+#[test]
+fn health_banner_long_mount_ellipsis_and_gauge_semantics() {
+    let mut report = warning_health_report();
+    let long_mount = "/home/quejianming.linux/.copilot-shell/cache/runtime/artifacts";
+    for fact in &mut report.facts {
+        if fact.key == "filesystem.riskiest_mount" {
+            fact.value = HealthFactValue::String(long_mount.to_string());
+        }
+    }
+
+    let text = RatatuiInlineRenderer::with_width(120)
+        .health_banner_lines(HealthBannerModel { report: &report })
+        .join("\n");
+
+    assert_rendered_width(&text, 120);
+    assert!(text.contains("..."), "{text}");
+    assert!(!text.contains(long_mount), "{text}");
+    assert!(text.contains("Mem used 92% ▕████████▏"), "{text}");
+    assert!(!text.contains("Mem avail 8% ▕"), "{text}");
+    assert!(!text.contains("CPU load 2.6x/core ["), "{text}");
+}
+
+#[test]
+fn health_banner_hides_riskiest_disk_metric_without_disk_finding() {
+    let mut report = warning_health_report();
+    report
+        .findings
+        .retain(|finding| finding.title_id != HealthMessageId::HealthFindingDiskHigh);
+    report.try_items.retain(|item| item.finding_id != "J09");
+    report.recompute_overall_severity();
+
+    let text = RatatuiInlineRenderer::with_width(120)
+        .health_banner_lines(HealthBannerModel { report: &report })
+        .join("\n");
+
+    assert!(text.contains("Disk / used 41%"), "{text}");
+    assert!(!text.contains("Disk /data used"), "{text}");
+    assert!(!text.contains("Inspect the risky mount"), "{text}");
+}
+
+#[test]
+fn health_banner_wraps_prompt_suggestions_without_ellipsis_truncation() {
+    let report = warning_health_report();
+
+    let text = RatatuiInlineRenderer::with_width(40)
+        .health_banner_lines(HealthBannerModel { report: &report })
+        .join("\n");
+    let compact = compact_without_box_chars(&text);
+
+    assert_rendered_width(&text, 40);
+    assert!(text.lines().count() <= 14, "{text}");
+    assert!(text.contains("Suggested Prompts"), "{text}");
+    assert!(
+        compact.contains("Inspect the risky mount and suggest"),
+        "{text}"
+    );
+    if text.lines().count() < 14 {
+        assert!(compact.contains("safe disk cleanup targets."), "{text}");
+    }
+    assert!(!text.contains("..."), "{text}");
+}
+
+#[test]
+fn health_banner_oom_prompt_wraps_fully_at_narrow_width() {
+    let report = oom_health_report();
+
+    let text = RatatuiInlineRenderer::with_width(40)
+        .health_banner_lines(HealthBannerModel { report: &report })
+        .join("\n");
+    let compact = compact_without_box_chars(&text);
+
+    assert_rendered_width(&text, 40);
+    assert!(text.lines().count() <= 14, "{text}");
+    assert!(text.contains("Suggested Prompts"), "{text}");
+    assert!(compact.contains("memory state around the event."), "{text}");
+    assert!(!text.contains("..."), "{text}");
+}
+
+#[test]
+fn health_banner_shows_cpu_used_only_when_utilization_fact_exists() {
+    let without_cpu_used = RatatuiInlineRenderer::with_width(120)
+        .health_banner_lines(HealthBannerModel {
+            report: &warning_health_report(),
+        })
+        .join("\n");
+    assert!(!without_cpu_used.contains("CPU used"), "{without_cpu_used}");
+    assert!(!without_cpu_used.contains("CPU 已用"), "{without_cpu_used}");
+
+    let mut report = warning_health_report();
+    report
+        .facts
+        .push(health_float_fact("cpu.utilization_ratio", 0.37));
+
+    let text = RatatuiInlineRenderer::with_width(120)
+        .health_banner_lines(HealthBannerModel { report: &report })
+        .join("\n");
+    assert!(text.contains("CPU used 37% ▕███░░░░░▏"), "{text}");
+    assert!(text.contains("1m 10.4 / 4 cores (2.6x)"), "{text}");
+    assert!(!text.contains("Load  Load 1m"), "{text}");
+
+    let zh_text = RatatuiInlineRenderer::with_width(120)
+        .with_language(crate::Language::ZhCn)
+        .health_banner_lines(HealthBannerModel { report: &report })
+        .join("\n");
+    assert!(zh_text.contains("CPU 已用 37% ▕███░░░░░▏"), "{zh_text}");
+    assert!(zh_text.contains("1分钟 10.4 / 4核（2.6倍）"), "{zh_text}");
+    assert!(!zh_text.contains("负载  1分钟负载"), "{zh_text}");
+}
+
+#[test]
+fn health_banner_recent_oom_uses_compact_evidence_without_raw_fact_dump() {
+    let report = oom_health_report();
+
+    let text = RatatuiInlineRenderer::with_width(120)
+        .with_language(crate::Language::ZhCn)
+        .health_banner_lines(HealthBannerModel { report: &report })
+        .join("\n");
+
+    assert_rendered_width(&text, 120);
+    assert!(text.contains("最近一次 OOM"), "{text}");
+    assert!(text.contains("OOM"), "{text}");
+    assert!(text.contains("python3"), "{text}");
+    assert!(
+        compact_without_box_chars(&text).contains("PID 49991"),
+        "{text}"
+    );
+    assert!(text.contains("cgroup 内存限制触发"), "{text}");
+    assert!(!text.contains("CONSTRAINT_MEMCG"), "{text}");
+    assert!(!text.contains("CONSTRAINT_"), "{text}");
+    assert!(text.contains("建议下一步"), "{text}");
+    assert!(text.contains("帮我分析最近一次 OOM 的原因"), "{text}");
+    assert!(!text.contains("解释当前资源压力"), "{text}");
+    assert!(!text.contains("OOM age"), "{text}");
+    assert!(!text.contains("process "), "{text}");
+    assert!(!text.contains("pid "), "{text}");
+    assert!(!text.contains("constraint "), "{text}");
+    assert!(!text.contains("task cgroup"), "{text}");
+    assert!(!text.contains("oom cgroup"), "{text}");
+}
+
+#[test]
+fn health_banner_recent_oom_scope_label_id_wins_over_raw_constraint() {
+    let mut report = oom_health_report();
+    for fact in &mut report.facts {
+        if fact.key == "kernel.oom_latest_constraint" {
+            fact.value = HealthFactValue::String("CONSTRAINT_NONE".to_string());
+        }
+    }
+    report.facts.push(health_string_fact(
+        "kernel.oom_latest_scope_label_id",
+        "memcg",
+    ));
+
+    let text = RatatuiInlineRenderer::with_width(120)
+        .with_language(crate::Language::ZhCn)
+        .health_banner_lines(HealthBannerModel { report: &report })
+        .join("\n");
+
+    assert!(text.contains("cgroup 内存限制触发"), "{text}");
+    assert!(!text.contains("整机内存不足触发"), "{text}");
+    assert!(!text.contains("CONSTRAINT_"), "{text}");
+}
+
+#[test]
+fn health_banner_styled_output_keeps_finding_body_primary() {
+    let report = oom_health_report();
+    let renderer = RatatuiInlineRenderer {
+        width: 120,
+        plain: false,
+        styled: true,
+        language: crate::Language::EnUs,
+    };
+    let mut output = Vec::new();
+
+    renderer
+        .write_health_banner(&mut output, HealthBannerModel { report: &report })
+        .expect("render styled health banner");
+
+    let text = String::from_utf8(output).expect("utf8 health banner");
+    let clean = strip_ansi_escape(&text);
+    let body = "the latest OOM has already happened";
+    assert!(clean.contains(body), "{clean}");
+    assert!(
+        text.contains(";31m") || text.contains("[31m"),
+        "critical border/title should carry red styling: {text:?}"
+    );
+    let active_style = active_ansi_style_before(&text, body);
+    assert!(
+        !active_style.contains("31") && !active_style.contains("33"),
+        "finding body should not inherit severity color, active style={active_style:?}\n{text:?}"
+    );
+}
+
+#[test]
+fn health_banner_styled_labels_are_readable_not_dim_only() {
+    let report = oom_health_report();
+    let renderer = RatatuiInlineRenderer {
+        width: 120,
+        plain: false,
+        styled: true,
+        language: crate::Language::EnUs,
+    };
+    let mut output = Vec::new();
+
+    renderer
+        .write_health_banner(&mut output, HealthBannerModel { report: &report })
+        .expect("render styled health banner");
+
+    let text = String::from_utf8(output).expect("utf8 health banner");
+    let clean = strip_ansi_escape(&text);
+    assert!(clean.contains("Load"), "{clean}");
+    assert!(clean.contains("Findings"), "{clean}");
+    assert!(clean.contains("Suggested Prompts"), "{clean}");
+    assert!(
+        clean.contains("You can type these prompts to the agent:"),
+        "{clean}"
+    );
+
+    for label in [
+        "Load",
+        "Findings",
+        "Suggested Prompts",
+        "You can type these prompts to the agent:",
+    ] {
+        let style = active_ansi_style_before(&text, label);
+        assert!(
+            !style.contains("90") && !style.contains("31") && !style.contains("33"),
+            "{label} should be readable muted text, active style={style:?}\n{text:?}"
+        );
+    }
+}
+
+#[test]
+fn health_banner_oom_prompts_are_cause_oriented_in_both_languages() {
+    let mut report = oom_health_report();
+    report.try_items = vec![health_try_for(
+        "T07",
+        HealthMessageId::HealthTryInspectProcessMemory,
+        HealthMessageId::HealthTryReasonRecentOom,
+        120,
+        "J11",
+    )];
+    report.try_items[0]
+        .prompt_args
+        .insert("process".to_string(), "python3".to_string());
+
+    let zh_text = RatatuiInlineRenderer::with_width(120)
+        .with_language(crate::Language::ZhCn)
+        .health_banner_lines(HealthBannerModel { report: &report })
+        .join("\n");
+    assert!(
+        zh_text.contains("帮我分析最近一次 OOM 为什么杀掉 python3"),
+        "{zh_text}"
+    );
+    assert!(zh_text.contains("cgroup 和内存上限"), "{zh_text}");
+    assert!(!zh_text.contains("检查 python3 的内存占用"), "{zh_text}");
+    assert!(!zh_text.contains("是否导致了最新 OOM"), "{zh_text}");
+
+    let en_text = RatatuiInlineRenderer::with_width(120)
+        .with_language(crate::Language::EnUs)
+        .health_banner_lines(HealthBannerModel { report: &report })
+        .join("\n");
+    let en_compact = compact_words(&en_text);
+    assert!(
+        en_compact.contains("Help me analyze why the latest OOM killed python3"),
+        "{en_text}"
+    );
+    assert!(
+        en_compact.contains("cgroup scope and memory limits"),
+        "{en_text}"
+    );
+    assert!(
+        !en_text.contains("whether it caused the latest OOM"),
+        "{en_text}"
+    );
+    assert!(!en_text.contains("current pressure"), "{en_text}");
+}
+
+#[test]
+fn health_banner_plain_fallback_keeps_content_without_box_art() {
+    let report = warning_health_report();
+    let renderer = RatatuiInlineRenderer::plain_with_width(50);
+
+    let text = renderer
+        .health_banner_lines(HealthBannerModel { report: &report })
+        .join("\n");
+
+    assert!(text.contains("Health check:"), "{text}");
+    assert!(text.contains("critical"), "{text}");
+    assert!(text.contains("Mem used"), "{text}");
+    assert!(text.contains("Findings"), "{text}");
+    assert!(text.contains("Suggested Prompts"), "{text}");
+    assert!(
+        text.contains("You can type these prompts to the agent:"),
+        "{text}"
+    );
+    assert!(!text.contains("▕"), "{text}");
+    assert!(!text.contains('╭'), "{text}");
+    assert!(!text.contains('│'), "{text}");
+    assert_rendered_width(&text, 50);
+}
+
+#[test]
+fn health_banner_compresses_healthy_report() {
+    let mut report = HealthScanReport::new("health-ok", 0);
+    report.elapsed_ms = 24;
+    report.health_score = Some(98);
+    report.facts = vec![
+        health_float_fact("cpu.load_per_core_1m", 0.2),
+        health_float_fact("cpu.load_1m", 0.8),
+        health_float_fact("cpu.cores", 4.0),
+        health_float_fact("memory.available_ratio", 0.62),
+        health_float_fact("memory.used_ratio", 0.38),
+        health_float_fact("memory.swap_used_ratio", 0.0),
+        health_string_fact("filesystem.riskiest_mount", "/cache"),
+        health_float_fact("filesystem.max_used_ratio", 0.69),
+        health_float_fact("filesystem.root_used_ratio", 0.41),
+    ];
+    report.recompute_overall_severity();
+
+    let text = RatatuiInlineRenderer::with_width(80)
+        .health_banner_lines(HealthBannerModel { report: &report })
+        .join("\n");
+
+    assert!(text.lines().count() <= 2, "{text}");
+    assert!(text.contains("Health: ok"), "{text}");
+    assert!(text.contains("Load 1m 0.8 / 4 cores (0.2x)"), "{text}");
+    assert!(text.contains("Mem used 38%"), "{text}");
+    assert!(!text.contains("Mem avail"), "{text}");
+    assert!(!text.contains("Swap used 0%"), "{text}");
+    assert!(compact_words(&text).contains("Disk / used 41%"), "{text}");
+    assert!(!text.contains("/cache"), "{text}");
+    assert!(!text.contains("98/100"), "{text}");
+    assert!(!text.contains("▕"), "{text}");
+    assert!(!text.contains("Suggested Prompt"), "{text}");
+}
+
+#[test]
+fn health_banner_caps_try_lines_and_hides_suppressed_try_items() {
+    let mut report = warning_health_report();
+    report.findings.clear();
+    report.try_items.push(health_try(
+        "T04",
+        HealthMessageId::HealthTryInspectHighLoad,
+        HealthMessageId::HealthTryReasonHighLoad,
+        70,
+    ));
+    report.overall_severity = HealthSeverity::Warning;
+
+    let text = RatatuiInlineRenderer::with_width(80)
+        .health_banner_lines(HealthBannerModel { report: &report })
+        .join("\n");
+    assert_eq!(
+        text.matches("You can type these prompts to the agent:")
+            .count(),
+        1,
+        "{text}"
+    );
+    assert!(text.matches('›').count() <= 3, "{text}");
+
+    report.findings = vec![health_finding(
+        "J06",
+        HealthSeverity::Warning,
+        HealthMessageId::HealthFindingMemoryAvailableLow,
+    )];
+    report.try_items.clear();
+    let suppressed_text = RatatuiInlineRenderer::with_width(80)
+        .health_banner_lines(HealthBannerModel { report: &report })
+        .join("\n");
+    assert!(suppressed_text.contains("warning"), "{suppressed_text}");
+    assert!(
+        !suppressed_text.contains("Suggested Prompt"),
+        "{suppressed_text}"
+    );
+}
+
+#[test]
+fn health_banner_filters_prompts_for_hidden_findings() {
+    let mut report = warning_health_report();
+    report.findings.push(health_finding(
+        "J02",
+        HealthSeverity::Warning,
+        HealthMessageId::HealthFindingCpuLoadHigh,
+    ));
+    report.findings.push(health_finding(
+        "J99",
+        HealthSeverity::Warning,
+        HealthMessageId::HealthFindingServiceFailed,
+    ));
+    report.try_items.push(health_try_for(
+        "T99",
+        HealthMessageId::HealthTryInspectServiceStatus,
+        HealthMessageId::HealthTryReasonServiceState,
+        1000,
+        "J99",
+    ));
+    report.recompute_overall_severity();
+
+    let text = RatatuiInlineRenderer::with_width(120)
+        .health_banner_lines(HealthBannerModel { report: &report })
+        .join("\n");
+
+    assert!(text.contains("Findings"), "{text}");
+    assert_eq!(text.matches('›').count(), 3, "{text}");
+    assert!(!text.contains("configured service"), "{text}");
+    assert!(
+        !text.contains("Inspect the configured service state"),
+        "{text}"
+    );
+    assert!(!text.contains("service unit"), "{text}");
+    if text.contains("Suggested Prompts") {
+        assert!(text.contains('›'), "{text}");
+    }
+}
+
+#[test]
+fn health_banner_service_only_prompt_aligns_with_service_finding() {
+    let mut report = HealthScanReport::new("health-service", 0);
+    report.elapsed_ms = 8;
+    report.facts = vec![
+        health_float_fact("cpu.load_per_core_1m", 0.1),
+        health_float_fact("cpu.load_1m", 0.4),
+        health_float_fact("cpu.cores", 4.0),
+        health_float_fact("memory.used_ratio", 0.31),
+        health_float_fact("filesystem.root_used_ratio", 0.22),
+        health_string_fact("service.redis.service.status", "failed"),
+    ];
+    let mut service_finding = health_finding(
+        "J15:redis.service",
+        HealthSeverity::Critical,
+        HealthMessageId::HealthFindingServiceFailed,
+    );
+    service_finding
+        .detail_args
+        .insert("service".to_string(), "redis.service".to_string());
+    service_finding
+        .detail_args
+        .insert("observed".to_string(), "failed".to_string());
+    service_finding
+        .detail_args
+        .insert("expected".to_string(), "active".to_string());
+    service_finding.evidence_fact_ids = vec!["service.redis.service.status".to_string()];
+    report.findings = vec![service_finding];
+    report.try_items = vec![health_try_for(
+        "T20",
+        HealthMessageId::HealthTryInspectServiceStatus,
+        HealthMessageId::HealthTryReasonServiceState,
+        100,
+        "J15:redis.service",
+    )];
+    report.recompute_overall_severity();
+
+    let text = RatatuiInlineRenderer::with_width(120)
+        .health_banner_lines(HealthBannerModel { report: &report })
+        .join("\n");
+
+    assert!(text.contains("service unit redis.service"), "{text}");
+    assert!(text.contains("observed failed, expected active"), "{text}");
+    assert!(
+        text.contains("Inspect the configured service state"),
+        "{text}"
+    );
+    assert!(!text.contains("OOM"), "{text}");
+
+    let zh_text = RatatuiInlineRenderer::with_width(120)
+        .with_language(crate::Language::ZhCn)
+        .health_banner_lines(HealthBannerModel { report: &report })
+        .join("\n");
+    assert!(zh_text.contains("服务单元 redis.service"), "{zh_text}");
+    assert!(zh_text.contains("当前 failed，预期 active"), "{zh_text}");
+    assert!(zh_text.contains("检查配置服务状态"), "{zh_text}");
+}
+
+#[test]
+fn health_banner_merges_degraded_unavailable_checks() {
+    let mut report = HealthScanReport::new("health-degraded", 0);
+    report.health_score = Some(80);
+    report.unavailable.push(UnavailableCollector {
+        collector: HealthCollector::KernelSignal,
+        reason: HealthUnavailableReason::PermissionDenied,
+        severity: HealthSeverity::Degraded,
+        elapsed_ms: 3,
+    });
+    report.recompute_overall_severity();
+
+    let text = RatatuiInlineRenderer::with_width(80)
+        .health_banner_lines(HealthBannerModel { report: &report })
+        .join("\n");
+
+    assert!(text.contains("degraded"), "{text}");
+    assert!(text.contains("Unavailable:"), "{text}");
+    assert!(text.contains("Signal"), "{text}");
+    assert!(text.contains("permission denied"), "{text}");
+    assert!(text.contains("80/100"), "{text}");
+    assert!(text.contains("▕"), "{text}");
+}
+
+#[test]
 fn streaming_snapshot_keeps_footer_within_width() {
     for width in [40, 80, 120] {
         let renderer = RatatuiInlineRenderer::with_width(width);
@@ -1106,9 +1772,269 @@ fn snapshot_width(line: &str) -> usize {
     Span::raw(strip_ansi_escape(line)).width()
 }
 
+fn meter_cell_widths(text: &str) -> Vec<usize> {
+    let mut widths = Vec::new();
+    let mut inside = false;
+    let mut width = 0;
+    for ch in text.chars() {
+        if ch == '▕' {
+            inside = true;
+            width = 0;
+            continue;
+        }
+        if inside && ch == '▏' {
+            widths.push(width);
+            inside = false;
+            continue;
+        }
+        if inside {
+            width += 1;
+        }
+    }
+    widths
+}
+
+fn active_ansi_style_before(text: &str, needle: &str) -> String {
+    let index = text
+        .find(needle)
+        .unwrap_or_else(|| panic!("missing {needle:?} in {text:?}"));
+    text[..index]
+        .rsplit("\u{1b}[")
+        .next()
+        .and_then(|part| part.split('m').next())
+        .unwrap_or("")
+        .to_string()
+}
+
 fn line_index(lines: &[String], needle: &str) -> usize {
     lines
         .iter()
         .position(|line| line.contains(needle))
         .unwrap_or_else(|| panic!("missing {needle:?} in {lines:?}"))
+}
+
+fn warning_health_report() -> HealthScanReport {
+    let mut report = HealthScanReport::new("health-warning", 100);
+    report.elapsed_ms = 145;
+    report.health_score = Some(62);
+    report.facts = vec![
+        health_float_fact("cpu.load_per_core_1m", 2.6),
+        health_float_fact("cpu.load_per_core_5m", 1.4),
+        health_float_fact("cpu.load_1m", 10.4),
+        health_float_fact("cpu.load_5m", 5.6),
+        health_float_fact("cpu.cores", 4.0),
+        health_float_fact("memory.available_ratio", 0.08),
+        health_float_fact("memory.used_ratio", 0.92),
+        health_float_fact("memory.swap_used_ratio", 0.55),
+        health_string_fact("filesystem.riskiest_mount", "/data"),
+        health_float_fact("filesystem.max_used_ratio", 0.96),
+        health_float_fact("filesystem.available_gib", 2.0),
+        health_float_fact("filesystem.root_used_ratio", 0.41),
+    ];
+    report.findings = vec![
+        health_finding(
+            "J06",
+            HealthSeverity::Warning,
+            HealthMessageId::HealthFindingMemoryAvailableLow,
+        ),
+        health_finding(
+            "J09",
+            HealthSeverity::Critical,
+            HealthMessageId::HealthFindingDiskHigh,
+        ),
+    ];
+    report.try_items = vec![
+        health_try(
+            "T01",
+            HealthMessageId::HealthTryAnalyzeMemoryPressure,
+            HealthMessageId::HealthTryReasonMemoryLow,
+            100,
+        ),
+        health_try_for(
+            "T02",
+            HealthMessageId::HealthTryInspectDiskUsage,
+            HealthMessageId::HealthTryReasonDiskHigh,
+            90,
+            "J09",
+        ),
+        health_try(
+            "T03",
+            HealthMessageId::HealthTryCheckSwapPressure,
+            HealthMessageId::HealthTryReasonSwapWithContext,
+            80,
+        ),
+    ];
+    report.recompute_overall_severity();
+    report
+}
+
+fn oom_health_report() -> HealthScanReport {
+    let mut report = HealthScanReport::new("health-oom", 100);
+    report.elapsed_ms = 9;
+    report.facts = vec![
+        health_float_fact("cpu.load_per_core_1m", 0.1),
+        health_float_fact("cpu.load_1m", 0.4),
+        health_float_fact("cpu.cores", 4.0),
+        health_float_fact("memory.available_ratio", 0.11),
+        health_float_fact("memory.used_ratio", 0.89),
+        health_float_fact("memory.swap_used_ratio", 0.0),
+        health_float_fact("filesystem.root_used_ratio", 0.31),
+        health_float_fact("kernel.oom_latest_age_seconds", 3.0),
+        health_string_fact("kernel.oom_killed_process", "python3"),
+        health_float_fact("kernel.oom_latest_pid", 49991.0),
+        health_string_fact("kernel.oom_latest_constraint", "CONSTRAINT_MEMCG"),
+        health_string_fact(
+            "kernel.oom_latest_oom_cgroup",
+            "/user.slice/user-1000.slice/session-5.scope",
+        ),
+    ];
+    report.findings = vec![health_finding(
+        "J11",
+        HealthSeverity::Critical,
+        HealthMessageId::HealthFindingRecentOom,
+    )];
+    report.try_items = vec![health_try_for(
+        "T11",
+        HealthMessageId::HealthTryCheckRecentOom,
+        HealthMessageId::HealthTryReasonRecentOom,
+        100,
+        "J11",
+    )];
+    report.recompute_overall_severity();
+    report
+}
+
+fn health_float_fact(key: &str, value: f64) -> HealthFact {
+    HealthFact {
+        id: key.to_string(),
+        category: HealthFactCategory::Memory,
+        key: key.to_string(),
+        value: HealthFactValue::Float(value),
+        unit: None,
+        source: HealthFactSource::Fixture,
+        elapsed_ms: 0,
+    }
+}
+
+fn health_string_fact(key: &str, value: &str) -> HealthFact {
+    HealthFact {
+        id: key.to_string(),
+        category: HealthFactCategory::Disk,
+        key: key.to_string(),
+        value: HealthFactValue::String(value.to_string()),
+        unit: None,
+        source: HealthFactSource::Fixture,
+        elapsed_ms: 0,
+    }
+}
+
+fn compact_words(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn compact_without_box_chars(text: &str) -> String {
+    text.chars()
+        .map(|ch| {
+            if matches!(ch, '│' | '╭' | '╰' | '─' | '╮' | '╯') {
+                ' '
+            } else {
+                ch
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn health_finding(id: &str, severity: HealthSeverity, title_id: HealthMessageId) -> HealthFinding {
+    let evidence_fact_ids = match title_id {
+        HealthMessageId::HealthFindingMemoryAvailableLow => {
+            vec!["memory.available_ratio".to_string()]
+        }
+        HealthMessageId::HealthFindingDiskHigh => vec![
+            "filesystem.max_used_ratio".to_string(),
+            "filesystem.available_gib".to_string(),
+            "filesystem.riskiest_mount".to_string(),
+        ],
+        HealthMessageId::HealthFindingRecentOom => vec![
+            "kernel.oom_latest_age_seconds".to_string(),
+            "kernel.oom_killed_process".to_string(),
+            "kernel.oom_latest_pid".to_string(),
+            "kernel.oom_latest_constraint".to_string(),
+            "kernel.oom_latest_oom_cgroup".to_string(),
+        ],
+        _ => Vec::new(),
+    };
+    HealthFinding {
+        id: id.to_string(),
+        severity,
+        category: HealthFindingCategory::Anomaly,
+        title_id,
+        detail_id: None,
+        detail_args: BTreeMap::new(),
+        evidence_fact_ids,
+        suggested_try_ids: Vec::new(),
+    }
+}
+
+fn health_try(
+    id: &str,
+    label_id: HealthMessageId,
+    reason_id: HealthMessageId,
+    score: i32,
+) -> HealthTryItem {
+    health_try_for(id, label_id, reason_id, score, "J06")
+}
+
+fn health_try_for(
+    id: &str,
+    label_id: HealthMessageId,
+    reason_id: HealthMessageId,
+    score: i32,
+    finding_id: &str,
+) -> HealthTryItem {
+    HealthTryItem {
+        id: id.to_string(),
+        label_id,
+        label_args: BTreeMap::new(),
+        prompt_id: test_prompt_id(label_id),
+        prompt_args: BTreeMap::new(),
+        kind: HealthTryKind::AskAgent,
+        command: None,
+        reason_id,
+        reason_args: BTreeMap::new(),
+        score,
+        finding_id: finding_id.to_string(),
+    }
+}
+
+fn test_prompt_id(label_id: HealthMessageId) -> Option<HealthMessageId> {
+    match label_id {
+        HealthMessageId::HealthTryAnalyzeMemoryPressure => {
+            Some(HealthMessageId::HealthPromptAnalyzeMemoryPressure)
+        }
+        HealthMessageId::HealthTryCheckSwapPressure => {
+            Some(HealthMessageId::HealthPromptCheckSwapPressure)
+        }
+        HealthMessageId::HealthTryCheckRecentOom => {
+            Some(HealthMessageId::HealthPromptCheckRecentOom)
+        }
+        HealthMessageId::HealthTryInspectDiskUsage => {
+            Some(HealthMessageId::HealthPromptInspectDiskUsage)
+        }
+        HealthMessageId::HealthTryInspectServiceStatus => {
+            Some(HealthMessageId::HealthPromptInspectServiceStatus)
+        }
+        HealthMessageId::HealthTryInspectHighLoad => {
+            Some(HealthMessageId::HealthPromptInspectHighLoad)
+        }
+        HealthMessageId::HealthTryInspectProcessMemory => {
+            Some(HealthMessageId::HealthPromptInspectProcessMemory)
+        }
+        HealthMessageId::HealthTryReviewUnavailableChecks => {
+            Some(HealthMessageId::HealthPromptReviewUnavailableChecks)
+        }
+        _ => None,
+    }
 }

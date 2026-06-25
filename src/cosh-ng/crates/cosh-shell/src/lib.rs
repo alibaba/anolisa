@@ -6,6 +6,8 @@ mod command;
 #[allow(dead_code, unused_imports)]
 mod config;
 #[allow(dead_code, unused_imports)]
+mod diagnostics;
+#[allow(dead_code, unused_imports)]
 #[path = "evidence/public.rs"]
 mod evidence;
 #[allow(dead_code, unused_imports)]

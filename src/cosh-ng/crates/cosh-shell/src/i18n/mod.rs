@@ -29,6 +29,10 @@ impl I18n {
         }
         text
     }
+
+    pub fn language(&self) -> Language {
+        self.language
+    }
 }
 
 fn message(language: Language, id: MessageId) -> &'static str {

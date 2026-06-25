@@ -176,7 +176,7 @@ fn raw_cli_natural_language_includes_recent_failed_command_fact_without_hook_hin
     );
     let compact = compact_terminal_words(&output);
     assert!(
-        compact.contains("Hook routing hints visible to Agent: <none>"),
+        compact.contains("Runtime context hints visible to Agent: <none>"),
         "{output}"
     );
     assert!(

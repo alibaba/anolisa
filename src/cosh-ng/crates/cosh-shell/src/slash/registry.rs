@@ -192,7 +192,6 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
             scope: "session",
             state: SlashCommandState::Hidden,
         },
-
         SlashCommandSpec {
             name: "/approval-mode",
             usage: "/approval-mode [recommend|auto|trust]",

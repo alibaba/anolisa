@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::approval::handoff::trust_key_from_command;
+use crate::diagnostics::health::{spawn_startup_health_scan, startup_health_scan_enabled_for_env};
 use crate::hooks::{
     dirs_for_hook_loading, is_trusted_project_root, load_hook_feedback_preferences,
     project_hook_root_from_cwd,
@@ -101,6 +102,10 @@ pub(crate) fn run_raw(adapter_name: &str, shell_kind: RawShellKind) -> i32 {
 
     let adapter = build_adapter(kind);
     let mut inline_state = InlineState::with_raw_session_dir(&config.work_dir);
+    if startup_health_scan_enabled_for_env(&cosh_config.health) {
+        inline_state.startup_health.pending =
+            Some(spawn_startup_health_scan(cosh_config.health.clone()));
+    }
     let hook_feedback = load_hook_feedback_preferences();
     inline_state.hooks.feedback = hook_feedback.feedback;
     inline_state.hooks.noisy_groups = hook_feedback.noisy_groups;

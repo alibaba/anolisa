@@ -17,7 +17,7 @@ pub use language::{
     LanguageSetting,
 };
 pub use load::load_config;
-pub use model::CoshConfig;
+pub use model::{CoshConfig, HealthConfig, HealthServiceConfig, HealthServiceExpectedState};
 pub use trust::{clear_project_trust_store, trust_project_root, untrust_project_root};
 
 #[cfg(test)]

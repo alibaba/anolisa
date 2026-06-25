@@ -1,9 +1,11 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::activity::runtime::RuntimeActivityRow;
 use crate::agent::run::{ActiveAgentRun, PendingAgentRequest};
+use crate::diagnostics::health::HealthScanReport;
 use crate::hooks::state::HookRuntimeState;
 use crate::question::runtime::RuntimeUserQuestion;
 use crate::runtime::events::ShellEventCursor;
@@ -85,8 +87,65 @@ pub(crate) struct InlineState {
     pub(crate) debug: bool,
     pub(crate) analysis_throttle: AnalysisThrottle,
     pub(crate) trigger_pty_prompt: bool,
+    pub(crate) pending_input_ghost: Option<String>,
     pub(crate) pending_shell_handoff_timeout_notice: Option<Duration>,
     pub(crate) continuity: ContinuityState,
+    pub(crate) startup_health: StartupHealthState,
+}
+
+#[derive(Default)]
+pub(crate) struct StartupHealthState {
+    pub(crate) pending: Option<mpsc::Receiver<Option<HealthScanReport>>>,
+    pub(crate) report: Option<HealthScanReport>,
+    pub(crate) rendered: bool,
+}
+
+impl StartupHealthState {
+    pub(crate) fn wait_ready(&mut self, timeout: Duration) {
+        if self.report.is_some() || self.rendered {
+            return;
+        }
+        let Some(receiver) = &self.pending else {
+            return;
+        };
+        match receiver.recv_timeout(timeout) {
+            Ok(report) => {
+                self.report = report;
+                self.pending = None;
+                if self.report.is_none() {
+                    self.rendered = true;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                self.pending = None;
+                self.rendered = true;
+            }
+        }
+    }
+
+    pub(crate) fn poll_ready(&mut self) {
+        if self.report.is_some() || self.rendered {
+            return;
+        }
+        let Some(receiver) = &self.pending else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(report) => {
+                self.report = report;
+                self.pending = None;
+                if self.report.is_none() {
+                    self.rendered = true;
+                }
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.pending = None;
+                self.rendered = true;
+            }
+        }
+    }
 }
 
 #[derive(Default)]

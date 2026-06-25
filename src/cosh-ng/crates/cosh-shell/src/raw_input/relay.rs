@@ -3,7 +3,7 @@ use std::io;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
-use crate::input::{InputClassifier, InputDecision};
+use crate::input::{InputClassifier, InputDecision, InterceptReason};
 
 use super::event_parser::{
     candidate_inline_hint, candidate_line_status, native_candidate_should_return_to_shell,
@@ -46,6 +46,32 @@ pub(super) fn relay_passthrough_input(
     relay.exit_tracker.observe_shell_bytes(bytes);
     write_all_pty(relay.master, bytes)?;
     Ok(false)
+}
+
+pub(super) fn relay_prompt_ghost_input(
+    bytes: &[u8],
+    ghost_text: &str,
+    relay: &mut InputRelayContext<'_>,
+) -> io::Result<bool> {
+    if bytes.starts_with(b"\t") && !relay.line_buffer.is_active() {
+        let _ = relay.input_events.send(RawInputEvent::PromptGhostClear);
+        relay.line_buffer.push(ghost_text.as_bytes());
+        relay.line_buffer.force_agent_intercept = true;
+        redraw_candidate_line(relay.input_events, relay.line_buffer);
+        if let Ok(mut mode) = relay.input_mode.lock() {
+            *mode = RawInputMode::Passthrough;
+        }
+        let remainder = &bytes[1..];
+        if !remainder.is_empty() {
+            relay_passthrough_input(remainder, relay)?;
+        }
+        return Ok(true);
+    }
+    if let Ok(mut mode) = relay.input_mode.lock() {
+        *mode = RawInputMode::Passthrough;
+    }
+    let _ = relay.input_events.send(RawInputEvent::PromptGhostClear);
+    relay_passthrough_input(bytes, relay)
 }
 
 pub(super) fn send_held_input_events(bytes: &[u8], input_events: &Sender<RawInputEvent>) {
@@ -108,8 +134,25 @@ fn relay_candidate_line(relay: &mut InputRelayContext<'_>) -> io::Result<bool> {
             relay.exit_tracker,
         ),
         CandidateLineStatus::Complete { line, line_len } => {
+            let force_agent_intercept = relay.line_buffer.force_agent_intercept;
             let mut bytes = relay.line_buffer.take();
             let remainder = bytes.split_off(line_len);
+            if force_agent_intercept {
+                let _ = relay
+                    .input_events
+                    .send(RawInputEvent::CandidateCommit(line.as_bytes().to_vec()));
+                if let Ok(mut mode) = relay.input_mode.lock() {
+                    *mode = RawInputMode::Delay;
+                }
+                let _ = relay.input_events.send(RawInputEvent::UserIntercept(
+                    line,
+                    InterceptReason::NaturalLanguage,
+                ));
+                if !remainder.is_empty() {
+                    relay_passthrough_input(&remainder, relay)?;
+                }
+                return Ok(true);
+            }
             match relay.input_classifier.classify(&line) {
                 InputDecision::Intercept { input, reason } => {
                     let _ = relay

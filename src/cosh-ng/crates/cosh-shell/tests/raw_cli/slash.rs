@@ -27,10 +27,7 @@ fn raw_cli_help_renders_slash_command_reference() {
         output.contains("/extensions [list|detail] [name]"),
         "{output}"
     );
-    assert!(
-        output.contains("/skills [list|detail] [name]"),
-        "{output}"
-    );
+    assert!(output.contains("/skills [list|detail] [name]"), "{output}");
     assert!(!output.contains("/agent"), "{output}");
     assert!(!output.contains("/explain"), "{output}");
     assert!(!output.contains("/cancel"), "{output}");

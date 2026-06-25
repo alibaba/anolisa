@@ -27,6 +27,7 @@ pub(crate) enum RawInputEvent {
         hint: Option<String>,
     },
     CandidateCommit(Vec<u8>),
+    PromptGhostClear,
     CandidateClearLine,
     UserIntercept(String, InterceptReason),
     CardFocus(String, usize),

@@ -44,7 +44,9 @@ fn render_raw_inline_events<W: Write>(
     }
     if inline_state.trigger_pty_prompt {
         inline_state.trigger_pty_prompt = false;
-        return Ok(RawObserverAction::RestorePrompt);
+        return Ok(RawObserverAction::RestorePrompt {
+            ghost_text: inline_state.pending_input_ghost.take(),
+        });
     }
     let shell_busy = shell_has_active_foreground_command(snapshot.events());
     if let Some(action) =

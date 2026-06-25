@@ -59,13 +59,13 @@ pub(crate) use crate::types::{
     Policy, QuestionSelectionMode, ShellEvent, ShellEventKind, ShellHandoffRequest,
 };
 pub(crate) use crate::ui::{
-    approval_action_at, hook_approval_action_at, hook_warning_icon, render_transcript,
-    ActivityDetailsPanelModel, ActivityPanelModel, ActivityRowModel, AgentStatusAnimation,
-    ApprovalDetailsPanelModel, ApprovalJournalEntryModel, ApprovalJournalPanelModel,
-    ApprovalPanelAction, ApprovalPanelModel, ApprovalReceiptPanelModel,
-    CommandAssessmentSummaryModel, HookWarningView, MarkdownStreamBlock, NoticePanelModel,
-    QuestionAnswerPanelModel, QuestionPanelModel, RatatuiInlineRenderer,
-    RecommendationActionPanelModel, RecommendationPanelModel,
+    approval_action_at, health_uses_startup_row, hook_approval_action_at, hook_warning_icon,
+    primary_health_prompt_suggestion, render_transcript, ActivityDetailsPanelModel,
+    ActivityPanelModel, ActivityRowModel, AgentStatusAnimation, ApprovalDetailsPanelModel,
+    ApprovalJournalEntryModel, ApprovalJournalPanelModel, ApprovalPanelAction, ApprovalPanelModel,
+    ApprovalReceiptPanelModel, CommandAssessmentSummaryModel, HealthBannerModel, HookWarningView,
+    MarkdownStreamBlock, NoticePanelModel, QuestionAnswerPanelModel, QuestionPanelModel,
+    RatatuiInlineRenderer, RecommendationActionPanelModel, RecommendationPanelModel,
 };
 
 #[cfg(test)]

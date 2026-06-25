@@ -41,10 +41,16 @@ pub(crate) fn render_hooks_command<W: Write>(
                 };
 
             let mut body = Vec::new();
-            body.push(format!("── {} ──", i18n.t(MessageId::SlashHooksShellSection)));
+            body.push(format!(
+                "── {} ──",
+                i18n.t(MessageId::SlashHooksShellSection)
+            ));
             body.extend(shell_body);
             body.push(String::new());
-            body.push(format!("── {} ──", i18n.t(MessageId::SlashHooksAgentSection)));
+            body.push(format!(
+                "── {} ──",
+                i18n.t(MessageId::SlashHooksAgentSection)
+            ));
             body.extend(agent_body);
 
             let total_hook_count = hooks.len() + agent_hook_count;
@@ -686,8 +692,14 @@ fn format_agent_hooks_list(data: &Value) -> Vec<String> {
         .filter_map(|hook| {
             let name = hook.get("name")?.as_str()?;
             let event = hook.get("event").and_then(|v| v.as_str()).unwrap_or("?");
-            let ext = hook.get("extension").and_then(|v| v.as_str()).unwrap_or("?");
-            let disabled = hook.get("disabled").and_then(|v| v.as_bool()).unwrap_or(false);
+            let ext = hook
+                .get("extension")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let disabled = hook
+                .get("disabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             if disabled {
                 Some(format!("  ○ {name} [{event}] (ext: {ext}) [disabled]"))
             } else {

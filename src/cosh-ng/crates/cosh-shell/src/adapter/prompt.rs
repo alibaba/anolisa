@@ -295,11 +295,22 @@ fn runtime_frame_prompt(
     format!(
         "\n\nruntime_frame:\n\
          cwd: {}\n\
-         mode: {:?}{}{}",
+         mode: {:?}{}{}{}",
         request.command_block.cwd,
         request.mode,
+        recommended_skill_prompt(request),
         rich_context_prompt(request, access, allow_output_requests),
-        hook_routing_hints_prompt(request)
+        runtime_context_hints_prompt(request)
+    )
+}
+
+fn recommended_skill_prompt(request: &AgentRequest) -> String {
+    let Some(skill) = request.recommended_skill.as_deref() else {
+        return String::new();
+    };
+    format!(
+        "\nrecommended_skill: {skill}\n\
+         If this skill matches the task or runtime hints, invoke it before ad hoc shell probing."
     )
 }
 
@@ -328,7 +339,7 @@ fn rich_context_prompt(
     format_context_prompt_with_policy(&entries, access, allow_output_requests)
 }
 
-fn hook_routing_hints_prompt(request: &AgentRequest) -> String {
+fn runtime_context_hints_prompt(request: &AgentRequest) -> String {
     if request.context_hints.is_empty() {
         return String::new();
     }
@@ -341,7 +352,7 @@ fn hook_routing_hints_prompt(request: &AgentRequest) -> String {
         .join("\n");
 
     format!(
-        "\n\nHook routing hints:\n{}\nTreat these as routing hints only; use included bounded evidence or request more through cosh-shell evidence requests.",
+        "\n\nRuntime context hints:\n{}\nTreat these as routing/context hints only; use included bounded evidence or request more through cosh-shell evidence requests.",
         lines
     )
 }

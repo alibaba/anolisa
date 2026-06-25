@@ -11,7 +11,7 @@ pub enum RawObserverAction {
     CaptureInput(RawInputCapture),
     EmitToPty(ShellHandoffRequest),
     InterruptForeground,
-    RestorePrompt,
+    RestorePrompt { ghost_text: Option<String> },
 }
 
 impl RawObserverAction {
@@ -29,6 +29,7 @@ pub(crate) enum RawInputMode {
     RawPassthrough,
     Hold,
     Delay,
+    PromptGhost(String),
     Capture(RawInputCapture),
 }
 
@@ -71,15 +72,25 @@ pub(crate) fn update_input_mode(input_mode: &Arc<Mutex<RawInputMode>>, action: &
     let Ok(mut mode) = input_mode.lock() else {
         return;
     };
+    if matches!(
+        action,
+        RawObserverAction::Continue | RawObserverAction::RawPassthrough
+    ) && matches!(&*mode, RawInputMode::PromptGhost(_))
+    {
+        return;
+    }
     *mode = match action {
         RawObserverAction::CaptureInput(capture) => RawInputMode::Capture(capture.clone()),
         RawObserverAction::HoldShellOutput => RawInputMode::Hold,
         RawObserverAction::DelayShellOutput => RawInputMode::Delay,
         RawObserverAction::RawPassthrough => RawInputMode::RawPassthrough,
+        RawObserverAction::RestorePrompt {
+            ghost_text: Some(text),
+        } => RawInputMode::PromptGhost(text.clone()),
         RawObserverAction::Continue
         | RawObserverAction::EmitToPty(_)
         | RawObserverAction::InterruptForeground
-        | RawObserverAction::RestorePrompt => RawInputMode::Passthrough,
+        | RawObserverAction::RestorePrompt { ghost_text: None } => RawInputMode::Passthrough,
     };
 }
 

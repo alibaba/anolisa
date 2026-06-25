@@ -18,6 +18,7 @@ mod approval_journal;
 mod approval_receipt;
 mod card;
 mod consultation;
+mod health;
 mod markdown;
 mod notice;
 mod question;
@@ -32,12 +33,14 @@ pub use actions::{
     APPROVAL_PANEL_ACTIONS,
 };
 pub use activity::{ActivityDetailsPanelModel, ActivityPanelModel, ActivityRowModel};
-pub use approval::{ApprovalPanelModel, HookWarningView};
 pub(crate) use approval::hook_warning_icon;
+pub use approval::{ApprovalPanelModel, HookWarningView};
 pub use approval_details::{ApprovalDetailsPanelModel, CommandAssessmentSummaryModel};
 pub use approval_journal::{ApprovalJournalEntryModel, ApprovalJournalPanelModel};
 pub use approval_receipt::ApprovalReceiptPanelModel;
 pub use consultation::ConsultationCardModel;
+pub use health::HealthBannerModel;
+pub(crate) use health::{health_uses_startup_row, primary_health_prompt_suggestion};
 use markdown::MarkdownRenderModel;
 pub use notice::NoticePanelModel;
 pub use question::{QuestionAnswerPanelModel, QuestionPanelModel};
@@ -236,6 +239,10 @@ impl RatatuiInlineRenderer {
         }
     }
 
+    pub(crate) fn startup_section_separator_line(&self) -> String {
+        "─".repeat(self.content_width())
+    }
+
     fn render_lines(&self, lines: Vec<Line<'static>>, width: usize) -> Vec<String> {
         let mut rendered = lines
             .into_iter()
@@ -305,7 +312,7 @@ impl RatatuiInlineRenderer {
         let inner_width = width.saturating_sub(4).max(1) as usize;
         let content_height = body
             .iter()
-            .map(|line| display_width(line).max(1).div_ceil(inner_width).max(1))
+            .map(|line| wrap_plain_line(line, inner_width).len().max(1))
             .sum::<usize>()
             .max(1);
         let height = content_height.saturating_add(2).min(200) as u16;
@@ -343,7 +350,7 @@ impl RatatuiInlineRenderer {
         let content_height = body
             .iter()
             .map(line_to_string)
-            .map(|line| display_width(&line).max(1).div_ceil(inner_width).max(1))
+            .map(|line| wrap_plain_line(&line, inner_width).len().max(1))
             .sum::<usize>()
             .max(1);
         let height = content_height.saturating_add(2).min(200) as u16;

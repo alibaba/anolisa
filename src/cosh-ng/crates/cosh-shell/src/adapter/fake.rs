@@ -229,7 +229,7 @@ impl AgentAdapter for FakeAgentAdapter {
                     .map(provider_safe_command_fact_line)
                     .collect::<Vec<_>>()
                     .join("\n");
-                let hook_hints = request.context_hints.join("\n");
+                let runtime_hints = request.context_hints.join("\n");
                 return Ok(vec![
                     AgentEvent::StatusChanged {
                         run_id: run_id.clone(),
@@ -239,16 +239,16 @@ impl AgentAdapter for FakeAgentAdapter {
                     AgentEvent::TextDelta {
                         run_id: run_id.clone(),
                         text: format!(
-                            "Recent context visible to Agent:\n{}\nHook routing hints visible to Agent:\n{}",
+                            "Recent context visible to Agent:\n{}\nRuntime context hints visible to Agent:\n{}",
                             if context.is_empty() {
                                 "<none>".to_string()
                             } else {
                                 context
                             },
-                            if hook_hints.is_empty() {
+                            if runtime_hints.is_empty() {
                                 "<none>".to_string()
                             } else {
-                                hook_hints
+                                runtime_hints
                             }
                         ),
                     },

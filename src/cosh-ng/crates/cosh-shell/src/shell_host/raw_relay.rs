@@ -72,6 +72,7 @@ where
             terminal.as_raw_fd(),
             parser,
             output,
+            input_mode,
             observer_action,
             &mut display_start,
             &mut replayed_prompt_prefix,
@@ -115,6 +116,7 @@ where
                             terminal.as_raw_fd(),
                             parser,
                             output,
+                            input_mode,
                             observer_action,
                             &mut display_start,
                             &mut replayed_prompt_prefix,
@@ -141,6 +143,7 @@ where
                         terminal.as_raw_fd(),
                         parser,
                         output,
+                        input_mode,
                         observer_action,
                         &mut display_start,
                         &mut replayed_prompt_prefix,
@@ -212,6 +215,7 @@ where
             terminal.as_raw_fd(),
             parser,
             output,
+            input_mode,
             observer_action,
             &mut display_start,
             &mut replayed_prompt_prefix,
@@ -332,7 +336,7 @@ fn drain_raw_input_events<W: Write>(
                     write!(output, "\r\x1b[2K{prompt}")?;
                     output.write_all(&input)?;
                     if let Some(hint) = hint {
-                        write!(output, "\x1b[s\x1b[2m  {hint}\x1b[0m\x1b[u")?;
+                        write!(output, "\x1b[s\x1b[2m {hint}\x1b[0m\x1b[u")?;
                     }
                 }
                 output.flush()?;
@@ -350,6 +354,9 @@ fn drain_raw_input_events<W: Write>(
                 }
                 writeln!(output)?;
                 output.flush()?;
+            }
+            RawInputEvent::PromptGhostClear => {
+                clear_prompt_ghost_line(parser, output, prompt, native_candidate_echoed_len)?;
             }
             RawInputEvent::CandidateClearLine => {
                 if native_mode {
@@ -411,6 +418,23 @@ fn drain_raw_input_events<W: Write>(
     Ok(())
 }
 
+fn clear_prompt_ghost_line<W: Write>(
+    parser: &OscParser,
+    output: &mut W,
+    fallback_prompt: &str,
+    native_candidate_echoed_len: &mut usize,
+) -> io::Result<()> {
+    write!(output, "\r\x1b[2K")?;
+    let replay = prompt_replay_bytes(parser.last_prompt_display());
+    if replay.is_empty() {
+        output.write_all(fallback_prompt.as_bytes())?;
+    } else {
+        output.write_all(replay)?;
+    }
+    *native_candidate_echoed_len = 0;
+    output.flush()
+}
+
 fn shell_has_active_foreground_command(events: &[ShellEvent]) -> bool {
     let mut active = std::collections::HashSet::new();
     for event in events {
@@ -461,12 +485,14 @@ fn write_handoff_request(path: &Path, command: &str) -> io::Result<()> {
     std::fs::write(path, command.as_bytes())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_pty_emit<W: Write>(
     master: &mut File,
     child_pid: u32,
     terminal_fd: i32,
     parser: &mut OscParser,
     output: &mut W,
+    input_mode: &Arc<Mutex<RawInputMode>>,
     action: RawObserverAction,
     display_start: &mut usize,
     replayed_prompt_prefix: &mut Option<Vec<u8>>,
@@ -507,7 +533,7 @@ fn resolve_pty_emit<W: Write>(
             parser.push_control_event("timeout_interrupt");
             Ok(RawObserverAction::Continue)
         }
-        RawObserverAction::RestorePrompt => {
+        RawObserverAction::RestorePrompt { ghost_text } => {
             output.flush()?;
             if parser.display.len() > *display_start {
                 return Ok(RawObserverAction::Continue);
@@ -517,12 +543,20 @@ fn resolve_pty_emit<W: Write>(
             if prompt.is_empty() {
                 write_all_pty(master, b"\n")?;
             } else {
+                if let Some(text) = &ghost_text {
+                    if let Ok(mut mode) = input_mode.lock() {
+                        *mode = RawInputMode::PromptGhost(text.clone());
+                    }
+                }
                 output.write_all(prompt)?;
+                if let Some(text) = &ghost_text {
+                    write!(output, "\x1b[s\x1b[2m {text}\x1b[0m\x1b[u")?;
+                }
                 output.flush()?;
                 mark_pending_prompt_replayed(parser, raw_prompt, display_start);
                 *replayed_prompt_prefix = Some(raw_prompt.to_vec());
             }
-            Ok(RawObserverAction::Continue)
+            Ok(RawObserverAction::RestorePrompt { ghost_text })
         }
         other => Ok(other),
     }

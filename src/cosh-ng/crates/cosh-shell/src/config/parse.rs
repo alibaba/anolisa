@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use super::language::apply_language_value;
 use super::readonly::{parse_disabled_rules, parse_runtime_spec, string_array};
-use super::CoshConfig;
+use super::{CoshConfig, HealthServiceConfig, HealthServiceExpectedState};
 
 pub(super) fn parse_simple_config(content: &str, config: &mut CoshConfig) {
     for line in content.lines() {
@@ -32,6 +32,14 @@ pub(super) fn parse_simple_config(content: &str, config: &mut CoshConfig) {
                 "ui.startup_banner" => config.startup_banner = parse_bool_value(value),
                 "ui.startup_hooks" => config.startup_hooks = parse_bool_value(value),
                 "ui.debug" => config.debug = parse_bool_value(value),
+                "health.enabled" => config.health.enabled = parse_bool_value(value),
+                "health.role" => {
+                    config.health.role = non_empty_string(value);
+                }
+                "health.memory_sensitive" => {
+                    config.health.memory_sensitive = parse_bool_value(value);
+                }
+                "health.verbose" => config.health.verbose = parse_bool_value(value),
                 _ => {}
             }
         }
@@ -66,6 +74,7 @@ pub(super) fn parse_toml_config(content: &str, config: &mut CoshConfig) {
         }
     }
     parse_shell_toml_config(&value, config);
+    parse_health_toml_config(&value, config);
 }
 
 fn parse_shell_toml_config(value: &toml::Value, config: &mut CoshConfig) {
@@ -139,6 +148,67 @@ fn parse_readonly_table(
             Err(err) => config.readonly.errors.push(err),
         }
     }
+}
+
+fn parse_health_toml_config(value: &toml::Value, config: &mut CoshConfig) {
+    let Some(health) = value.get("health").and_then(toml::Value::as_table) else {
+        return;
+    };
+
+    if let Some(enabled) = health.get("enabled").and_then(toml::Value::as_bool) {
+        config.health.enabled = enabled;
+    }
+    if let Some(role) = health.get("role").and_then(toml::Value::as_str) {
+        config.health.role = non_empty_string(role);
+    }
+    if let Some(memory_sensitive) = health
+        .get("memory_sensitive")
+        .and_then(toml::Value::as_bool)
+    {
+        config.health.memory_sensitive = memory_sensitive;
+    }
+    if let Some(verbose) = health.get("verbose").and_then(toml::Value::as_bool) {
+        config.health.verbose = verbose;
+    }
+    if let Some(critical_mounts) = health.get("critical_mounts") {
+        if let Ok(mounts) = string_array(critical_mounts, "health.critical_mounts") {
+            let mounts = mounts
+                .into_iter()
+                .filter(|mount| !mount.trim().is_empty())
+                .collect::<Vec<_>>();
+            if !mounts.is_empty() {
+                config.health.critical_mounts = mounts;
+            }
+        }
+    }
+    if let Some(services) = health.get("services").and_then(toml::Value::as_array) {
+        config.health.services = services
+            .iter()
+            .filter_map(parse_health_service)
+            .collect::<Vec<_>>();
+    }
+}
+
+fn parse_health_service(value: &toml::Value) -> Option<HealthServiceConfig> {
+    let table = value.as_table()?;
+    let name = table.get("name").and_then(toml::Value::as_str)?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let expected = table
+        .get("expected")
+        .and_then(toml::Value::as_str)
+        .and_then(HealthServiceExpectedState::parse)
+        .unwrap_or(HealthServiceExpectedState::Active);
+    Some(HealthServiceConfig {
+        name: name.to_string(),
+        expected,
+    })
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 pub(super) fn parse_bool_value(value: &str) -> bool {

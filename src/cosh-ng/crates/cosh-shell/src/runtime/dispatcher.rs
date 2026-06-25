@@ -33,7 +33,7 @@ use crate::slash::runtime::render_slash_actions;
 
 use super::controller::{pending_card_capture, shell_has_active_foreground_command};
 use super::events::{ShellEventBatch, ShellEventCursor, ShellEventSnapshot};
-use super::startup::render_startup_banner;
+use super::startup::{render_startup_banner, render_startup_health_banner};
 
 pub(crate) enum RuntimeAction {
     AdvanceEventCursor(ShellEventCursor),
@@ -125,6 +125,7 @@ fn render_inline_guidance_from_batch<W: Write>(
     }
 
     render_startup_banner(events, adapter, shell_label, state, output)?;
+    render_startup_health_banner(state, output)?;
     let question_actions =
         QuestionConsumer::consume(action_events, adapter, state, output, event_index_base)?;
     RuntimeDispatcher::apply_actions(question_actions, state);

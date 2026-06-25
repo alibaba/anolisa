@@ -12,7 +12,10 @@ use super::trust::{
     project_trust_store_path_in_dir, read_trusted_project_roots_from_store_path,
     remove_trusted_project_root_from_store_path, write_trusted_project_roots_to_store_path,
 };
-use super::{parse_language_setting, CoshConfig, HookFeedbackPreference, LanguageSetting};
+use super::{
+    parse_language_setting, CoshConfig, HealthServiceExpectedState, HookFeedbackPreference,
+    LanguageSetting,
+};
 
 fn temp_config_path(label: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
@@ -50,6 +53,12 @@ fn default_config_values() {
     assert!(!cfg.startup_hooks);
     assert!(!cfg.debug);
     assert!(cfg.ai_enabled);
+    assert!(cfg.health.enabled);
+    assert_eq!(cfg.health.role, None);
+    assert!(!cfg.health.memory_sensitive);
+    assert_eq!(cfg.health.critical_mounts, vec!["/"]);
+    assert!(!cfg.health.verbose);
+    assert!(cfg.health.services.is_empty());
     assert!(cfg.trusted_project_roots.is_empty());
     assert!(cfg.readonly.disabled.is_empty());
     assert!(cfg.readonly.overrides.is_empty());
@@ -210,6 +219,90 @@ adapter_default = "qwen"
     let mut cfg = CoshConfig::default();
     parse_toml_config(content, &mut cfg);
     assert_eq!(cfg.adapter_default, "qwen");
+}
+
+#[test]
+fn parse_simple_health_flags() {
+    let content = r#"
+health.enabled = false
+health.role = mysql-primary
+health.memory_sensitive = true
+health.verbose = on
+"#;
+    let mut cfg = CoshConfig::default();
+    parse_simple_config(content, &mut cfg);
+
+    assert!(!cfg.health.enabled);
+    assert_eq!(cfg.health.role.as_deref(), Some("mysql-primary"));
+    assert!(cfg.health.memory_sensitive);
+    assert!(cfg.health.verbose);
+    assert_eq!(cfg.health.critical_mounts, vec!["/"]);
+    assert!(cfg.health.services.is_empty());
+}
+
+#[test]
+fn parse_toml_health_config() {
+    let content = r#"
+[health]
+enabled = true
+role = "mysql-primary"
+memory_sensitive = true
+critical_mounts = ["/", "/data"]
+verbose = false
+
+[[health.services]]
+name = "mysql"
+expected = "active"
+
+[[health.services]]
+name = "backup-worker"
+expected = "inactive"
+"#;
+    let mut cfg = CoshConfig::default();
+    parse_toml_config(content, &mut cfg);
+
+    assert!(cfg.health.enabled);
+    assert_eq!(cfg.health.role.as_deref(), Some("mysql-primary"));
+    assert!(cfg.health.memory_sensitive);
+    assert_eq!(cfg.health.critical_mounts, vec!["/", "/data"]);
+    assert!(!cfg.health.verbose);
+    assert_eq!(cfg.health.services.len(), 2);
+    assert_eq!(cfg.health.services[0].name, "mysql");
+    assert_eq!(
+        cfg.health.services[0].expected,
+        HealthServiceExpectedState::Active
+    );
+    assert_eq!(cfg.health.services[1].name, "backup-worker");
+    assert_eq!(
+        cfg.health.services[1].expected,
+        HealthServiceExpectedState::Inactive
+    );
+}
+
+#[test]
+fn parse_toml_health_services_ignore_invalid_entries() {
+    let content = r#"
+[health]
+critical_mounts = []
+
+[[health.services]]
+name = ""
+expected = "active"
+
+[[health.services]]
+name = "redis"
+expected = "unexpected"
+"#;
+    let mut cfg = CoshConfig::default();
+    parse_toml_config(content, &mut cfg);
+
+    assert_eq!(cfg.health.critical_mounts, vec!["/"]);
+    assert_eq!(cfg.health.services.len(), 1);
+    assert_eq!(cfg.health.services[0].name, "redis");
+    assert_eq!(
+        cfg.health.services[0].expected,
+        HealthServiceExpectedState::Active
+    );
 }
 
 #[test]

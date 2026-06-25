@@ -29,12 +29,7 @@ pub(super) fn render_skills_command<W: Write>(
             match cosh_core.registry_query("skills", "list", params) {
                 Ok(data) => {
                     let body = format_skills_list(&data, &i18n);
-                    render_notice_panel(
-                        output,
-                        i18n.t(MessageId::SlashSkillsTitle),
-                        body,
-                        None,
-                    )
+                    render_notice_panel(output, i18n.t(MessageId::SlashSkillsTitle), body, None)
                 }
                 Err(e) => render_notice_panel(
                     output,
@@ -50,12 +45,7 @@ pub(super) fn render_skills_command<W: Write>(
             match cosh_core.registry_query("skills", "detail", params) {
                 Ok(data) => {
                     let body = format_skill_detail(&data);
-                    render_notice_panel(
-                        output,
-                        i18n.t(MessageId::SlashSkillsTitle),
-                        body,
-                        None,
-                    )
+                    render_notice_panel(output, i18n.t(MessageId::SlashSkillsTitle), body, None)
                 }
                 Err(e) => render_notice_panel(
                     output,
@@ -142,9 +132,15 @@ fn format_skills_list(data: &Value, i18n: &I18n) -> Vec<String> {
     arr.iter()
         .filter_map(|skill| {
             let name = skill.get("name")?.as_str()?;
-            let desc = skill.get("description").and_then(|v| v.as_str()).unwrap_or("");
+            let desc = skill
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let level = skill.get("level").and_then(|v| v.as_str()).unwrap_or("?");
-            let disabled = skill.get("disabled").and_then(|v| v.as_bool()).unwrap_or(false);
+            let disabled = skill
+                .get("disabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             if disabled {
                 Some(format!("  ○ {name} [{level}] [disabled] — {desc}"))
             } else {
