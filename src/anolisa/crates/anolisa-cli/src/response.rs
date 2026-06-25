@@ -104,6 +104,14 @@ pub enum CliError {
     /// triggering a second JSON render in [`render_error`].
     #[error("batch completed with failures")]
     BatchPartial { command: String },
+
+    /// Diagnostic command rendered its complete report and found problems.
+    ///
+    /// Like [`CliError::BatchPartial`], this carries only the exit status
+    /// signal. The handler has already printed the structured diagnostics, so
+    /// top-level error rendering must not emit a second envelope.
+    #[error("diagnostics found issues")]
+    DiagnosticsFound { command: String },
 }
 
 impl CliError {
@@ -115,6 +123,7 @@ impl CliError {
             Self::Degraded { .. } => "DEGRADED",
             Self::PermissionDenied { .. } => "PERMISSION_DENIED",
             Self::BatchPartial { .. } => "BATCH_PARTIAL",
+            Self::DiagnosticsFound { .. } => "DIAGNOSTICS_FOUND",
         }
     }
 
@@ -126,6 +135,7 @@ impl CliError {
             Self::Degraded { .. } => 2,
             Self::PermissionDenied { .. } => 5,
             Self::BatchPartial { .. } => 1,
+            Self::DiagnosticsFound { .. } => 2,
         }
     }
 
@@ -137,6 +147,7 @@ impl CliError {
             Self::Degraded { command, .. } => command,
             Self::PermissionDenied { command, .. } => command,
             Self::BatchPartial { command } => command,
+            Self::DiagnosticsFound { command } => command,
         }
     }
 
@@ -148,6 +159,7 @@ impl CliError {
             Self::Degraded { .. } => None,
             Self::PermissionDenied { hint, .. } => hint.as_deref(),
             Self::BatchPartial { .. } => None,
+            Self::DiagnosticsFound { .. } => None,
         }
     }
 
@@ -161,6 +173,7 @@ impl CliError {
             Self::Degraded { reason, .. } => reason.clone(),
             Self::PermissionDenied { reason, .. } => reason.clone(),
             Self::BatchPartial { .. } => "batch completed with failures".to_string(),
+            Self::DiagnosticsFound { .. } => "diagnostics found issues".to_string(),
         }
     }
 
@@ -192,7 +205,8 @@ impl CliError {
             | Self::Runtime { command: c, .. }
             | Self::Degraded { command: c, .. }
             | Self::PermissionDenied { command: c, .. }
-            | Self::BatchPartial { command: c } => *c = command,
+            | Self::BatchPartial { command: c }
+            | Self::DiagnosticsFound { command: c } => *c = command,
         }
         self
     }
@@ -271,10 +285,13 @@ pub fn render_ok(command: &str) -> Result<(), CliError> {
 /// stderr but still return the original error's exit code so callers
 /// see the failure they expected.
 pub fn render_error(ctx: &CliContext, err: &CliError) -> ExitCode {
-    // BatchPartial means the handler already rendered the complete batch
-    // summary (JSON or human). Skip the error render entirely and just
+    // BatchPartial / DiagnosticsFound mean the handler already rendered the
+    // complete report (JSON or human). Skip the error render entirely and just
     // propagate the non-zero exit code.
-    if let CliError::BatchPartial { .. } = err {
+    if matches!(
+        err,
+        CliError::BatchPartial { .. } | CliError::DiagnosticsFound { .. }
+    ) {
         return ExitCode::from(err.exit_code());
     }
     if ctx.json {
@@ -350,5 +367,25 @@ mod tests {
             }
             other => panic!("expected CliError::Runtime, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn diagnostics_found_propagates_exit_without_error_render() {
+        let ctx = CliContext {
+            install_mode: crate::context::InstallMode::User,
+            prefix: None,
+            json: true,
+            dry_run: false,
+            verbose: false,
+            quiet: false,
+            no_color: true,
+        };
+        let err = CliError::DiagnosticsFound {
+            command: "doctor".to_string(),
+        };
+
+        assert_eq!(err.code(), "DIAGNOSTICS_FOUND");
+        assert_eq!(err.exit_code(), 2);
+        assert_eq!(render_error(&ctx, &err), ExitCode::from(2));
     }
 }

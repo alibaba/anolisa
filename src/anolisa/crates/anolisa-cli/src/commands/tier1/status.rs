@@ -70,18 +70,18 @@ pub struct StatusArgs {
 /// `AdapterManager::scan()`. Included in the component status record
 /// when adapter declarations/resources/receipts exist.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-struct AdapterSummaryRecord {
-    component: String,
-    framework: String,
-    declared: bool,
-    resource_present: bool,
+pub(crate) struct AdapterSummaryRecord {
+    pub(crate) component: String,
+    pub(crate) framework: String,
+    pub(crate) declared: bool,
+    pub(crate) resource_present: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    resource_root: Option<String>,
-    driver_available: bool,
-    framework_detected: bool,
-    enabled: bool,
+    pub(crate) resource_root: Option<String>,
+    pub(crate) driver_available: bool,
+    pub(crate) framework_detected: bool,
+    pub(crate) enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    claim_status: Option<ClaimStatus>,
+    pub(crate) claim_status: Option<ClaimStatus>,
 }
 
 /// JSON-shaped record for a single component, used in both the wire
@@ -89,37 +89,37 @@ struct AdapterSummaryRecord {
 /// the matching [`InstalledObject`] on disk; optional/empty fields are
 /// skipped when absent so synthetic `not_installed` records stay compact.
 #[derive(Debug, Serialize, PartialEq, Eq)]
-struct ComponentRecord {
-    name: String,
-    status: String,
+pub(crate) struct ComponentRecord {
+    pub(crate) name: String,
+    pub(crate) status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    version: Option<String>,
+    pub(crate) version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    installed_at: Option<String>,
+    pub(crate) installed_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    last_operation_id: Option<String>,
+    pub(crate) last_operation_id: Option<String>,
     /// Feature flags the install record marks as enabled.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    enabled_features: Vec<String>,
+    pub(crate) enabled_features: Vec<String>,
     /// Last-known health probe entries persisted in state. Empty until a
     /// background probe wires up — but still surfaced verbatim today so
     /// users see whatever the install runner recorded.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    health: Vec<HealthEntry>,
+    pub(crate) health: Vec<HealthEntry>,
     /// Associated adapter summaries from `AdapterManager::scan()`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    adapters: Vec<AdapterSummaryRecord>,
+    pub(crate) adapters: Vec<AdapterSummaryRecord>,
     /// RPM package name, set only for `observed` rows (rpmdb hit, no state)
     /// and adopted `rpm-observed` rows (§8). Absent for raw components.
     #[serde(skip_serializing_if = "Option::is_none")]
-    rpm_package: Option<String>,
+    pub(crate) rpm_package: Option<String>,
     /// Full EVR of the RPM, paired with [`rpm_package`](Self::rpm_package).
     #[serde(skip_serializing_if = "Option::is_none")]
-    rpm_evr: Option<String>,
+    pub(crate) rpm_evr: Option<String>,
     /// Source repo/label that supplied the RPM (e.g. `@System`); `None` when
     /// it could not be determined.
     #[serde(skip_serializing_if = "Option::is_none")]
-    rpm_source_repo: Option<String>,
+    pub(crate) rpm_source_repo: Option<String>,
 }
 
 pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
@@ -183,7 +183,7 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
 /// optionally filtered to a single name. Extracted so tests can exercise
 /// the filtering/synthetic-not-installed logic without mocking
 /// `CliContext` or touching the filesystem.
-fn select_components(
+pub(crate) fn select_components(
     state: &InstalledState,
     layout: &FsLayout,
     catalog: Option<&Catalog>,
