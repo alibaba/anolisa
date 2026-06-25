@@ -342,6 +342,8 @@ pub enum CoreControlRequest {
         direction: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         lines: Option<u16>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bypass_recent_filter: Option<bool>,
     },
 }
 
@@ -642,6 +644,7 @@ impl OutputMessage {
                 output_id: None,
                 direction: None,
                 lines: None,
+                bypass_recent_filter: None,
             },
         }
     }
@@ -652,6 +655,7 @@ impl OutputMessage {
         output_id: &str,
         direction: &str,
         lines: u16,
+        bypass_recent_filter: bool,
     ) -> Self {
         Self::ControlRequest {
             request_id: request_id.to_string(),
@@ -663,6 +667,7 @@ impl OutputMessage {
                 output_id: Some(output_id.to_string()),
                 direction: Some(direction.to_string()),
                 lines: Some(lines),
+                bypass_recent_filter: bypass_recent_filter.then_some(true),
             },
         }
     }
@@ -853,6 +858,7 @@ mod tests {
             "terminal-output://raw-session-a1b2/cmd-1",
             "tail",
             120,
+            true,
         );
         let json = serde_json::to_string(&msg).unwrap();
         let v: Value = serde_json::from_str(&json).unwrap();
@@ -867,6 +873,7 @@ mod tests {
         );
         assert_eq!(v["request"]["direction"], "tail");
         assert_eq!(v["request"]["lines"], 120);
+        assert_eq!(v["request"]["bypass_recent_filter"], true);
     }
 
     #[test]

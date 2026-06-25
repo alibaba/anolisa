@@ -12,7 +12,7 @@ impl Tool for ShellEvidenceTool {
     }
 
     fn description(&self) -> &str {
-        "List recorded shell command evidence or read a bounded output excerpt captured by cosh-shell. Use only for the current cosh-shell evidence ledger."
+        "List recorded shell command evidence or read a bounded output excerpt captured by cosh-shell. Use current shell tool results first; use this only for older ledger output or missing/truncated output coverage in the current cosh-shell evidence ledger."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -54,6 +54,11 @@ impl Tool for ShellEvidenceTool {
                             "minimum": 1,
                             "maximum": 300,
                             "default": 120
+                        },
+                        "bypass_recent_filter": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Rare retry escape hatch for read_output only. Leave false by default; set true only after a previous read_output returned already_delivered and the needed content is not in current context. Does not bypass ledger, redaction, or output caps."
                         }
                     },
                     "required": ["action", "output_id"],
@@ -91,6 +96,11 @@ impl Tool for ShellEvidenceTool {
                     "minimum": 1,
                     "maximum": 300,
                     "default": 120
+                },
+                "bypass_recent_filter": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Rare retry escape hatch for read_output only; normally omit."
                 }
             },
             "required": ["action"]

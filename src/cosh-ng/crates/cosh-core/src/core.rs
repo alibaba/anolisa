@@ -879,7 +879,10 @@ impl CoshCore {
         let request_id = self.next_request_id();
         match action {
             "list_commands" => {
-                if params.get("output_id").is_some() || params.get("lines").is_some() {
+                if params.get("output_id").is_some()
+                    || params.get("lines").is_some()
+                    || params.get("bypass_recent_filter").is_some()
+                {
                     return ToolResult::error(
                         "cosh_shell_evidence action=list_commands accepts only limit and cursor",
                     );
@@ -946,6 +949,17 @@ impl CoshCore {
                     Ok(lines) => lines.unwrap_or(120).clamp(1, 300) as u16,
                     Err(result) => return result,
                 };
+                let bypass_recent_filter = match params.get("bypass_recent_filter") {
+                    Some(value) => match value.as_bool() {
+                        Some(value) => value,
+                        None => {
+                            return ToolResult::error(
+                                "cosh_shell_evidence action=read_output bypass_recent_filter must be a boolean",
+                            );
+                        }
+                    },
+                    None => false,
+                };
 
                 self.emit(
                     writer,
@@ -955,6 +969,7 @@ impl CoshCore {
                         output_id,
                         direction,
                         lines,
+                        bypass_recent_filter,
                     ),
                 );
             }
@@ -1006,7 +1021,9 @@ impl CoshCore {
                             .as_ref()
                             .and_then(|m| m.get("excerpt_status"))
                             .and_then(serde_json::Value::as_str)
-                            .is_some_and(|status| status != "available");
+                            .is_some_and(|status| {
+                                !matches!(status, "available" | "already_delivered")
+                            });
                     let is_error = is_error
                         || result
                             .metadata
@@ -1823,6 +1840,10 @@ mod tests {
         );
         assert!(output_str.contains(r#""lines":42"#), "{output_str}");
         assert!(
+            !output_str.contains(r#""bypass_recent_filter""#),
+            "{output_str}"
+        );
+        assert!(
             output_str.contains(r#""type":"tool_result""#),
             "{output_str}"
         );
@@ -1961,6 +1982,57 @@ mod tests {
             }
             _ => panic!("expected text tool result"),
         }
+    }
+
+    #[tokio::test]
+    async fn cosh_shell_evidence_read_output_forwards_bypass_recent_filter() {
+        let provider = MockProvider::new(vec![
+            vec![
+                GenerateEvent::ToolCallStart {
+                    index: 0,
+                    id: "call-evidence".to_string(),
+                    name: "cosh_shell_evidence".to_string(),
+                },
+                GenerateEvent::ToolCallDelta {
+                    index: 0,
+                    arguments_delta: r#"{"action":"read_output","output_id":"terminal-output://raw-session-a1b2/cmd-1","bypass_recent_filter":true}"#.to_string(),
+                },
+                GenerateEvent::ToolCallEnd { index: 0 },
+                GenerateEvent::MessageEnd,
+            ],
+            vec![GenerateEvent::MessageEnd],
+        ]);
+
+        let tools = ToolRegistry::new().with_shell_evidence();
+        let mut core = CoshCore::new(CoreConfig::default(), Box::new(provider), tools);
+
+        let response = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"shell_evidence","result":{"llmContent":"ShellEvidenceExcerpt\noutput_id: terminal-output://raw-session-a1b2/cmd-1\nexcerpt_status: available\nstdout","returnDisplay":"captured output","metadata":{"action":"read_output","output_id":"terminal-output://raw-session-a1b2/cmd-1","excerpt_status":"available","is_error":false}}}}}"#;
+        let input = format!("{response}\n");
+        let mut reader = BufReader::new(input.as_bytes()).lines();
+        let mut output = Vec::new();
+
+        core.handle_user_message("read output", &mut reader, &mut output)
+            .await
+            .unwrap();
+
+        let output_str = String::from_utf8(output).unwrap();
+        assert!(
+            output_str.contains(r#""bypass_recent_filter":true"#),
+            "{output_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cosh_shell_evidence_already_delivered_is_not_error() {
+        let core = make_core(MockProvider::new(vec![]));
+        let response = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"shell_evidence","result":{"llmContent":"ShellEvidenceExcerpt\noutput_id: terminal-output://raw-session/cmd-1\nexcerpt_status: already_delivered\nreason: already_delivered_recent_shell_tool_output","returnDisplay":null,"metadata":{"action":"read_output","output_id":"terminal-output://raw-session/cmd-1","excerpt_status":"already_delivered","is_error":false,"reason":"already_delivered_recent_shell_tool_output"}}}}}"#;
+        let input = format!("{response}\n");
+        let mut reader = BufReader::new(input.as_bytes()).lines();
+
+        let result = core.wait_for_shell_evidence("req-0", &mut reader).await;
+
+        assert!(!result.is_error, "{}", result.output);
+        assert!(result.output.contains("excerpt_status: already_delivered"));
     }
 
     #[tokio::test]
@@ -2139,6 +2211,32 @@ mod tests {
 
         assert!(result.is_error);
         assert!(result.output.contains("limit must be an integer"));
+        assert!(String::from_utf8(output).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cosh_shell_evidence_rejects_invalid_bypass_recent_filter_type() {
+        let core = make_core(MockProvider::new(vec![]));
+        let mut reader = empty_reader().await;
+        let mut output = Vec::new();
+
+        let result = core
+            .handle_shell_evidence(
+                "call-evidence",
+                &serde_json::json!({
+                    "action":"read_output",
+                    "output_id":"terminal-output://raw-session/cmd-1",
+                    "bypass_recent_filter":"true"
+                }),
+                &mut reader,
+                &mut output,
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert!(result
+            .output
+            .contains("bypass_recent_filter must be a boolean"));
         assert!(String::from_utf8(output).unwrap().is_empty());
     }
 
