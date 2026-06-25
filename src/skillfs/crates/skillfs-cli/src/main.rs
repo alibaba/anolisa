@@ -34,13 +34,17 @@ use skillfs_fuse::{FuseError as FuseErr, MountConfig, MountOptions, mount_config
 use tokio::signal;
 use tracing::{error, info, warn};
 
+mod help_text;
+
 // ---------------------------------------------------------------------------
 // CLI Arguments
 // ---------------------------------------------------------------------------
 
 #[derive(Parser)]
 #[command(name = "skillfs")]
-#[command(about = "AI agent skill management via virtual filesystem and MCP")]
+#[command(about = "Expose curated agent skills through a virtual filesystem")]
+#[command(long_about = help_text::CLI_LONG_ABOUT)]
+#[command(after_help = help_text::CLI_AFTER_HELP)]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 struct Cli {
     #[command(subcommand)]
@@ -50,9 +54,10 @@ struct Cli {
     #[arg(short, long, global = true)]
     verbose: bool,
 
-    /// Write log output to this file instead of stderr.
-    /// The filename may contain `{pid}` which will be replaced with the
-    /// process ID, e.g. `/tmp/skillfs-{pid}.log`.
+    /// Write SkillFS process logs to this file instead of stderr.
+    ///
+    /// The filename may contain `{pid}`, for example
+    /// `/tmp/skillfs-{pid}.log`. This is daemon logging, not audit JSONL.
     #[arg(long, value_name = "PATH", global = true)]
     log_file: Option<PathBuf>,
 }
@@ -61,79 +66,78 @@ struct Cli {
 #[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Mount the SkillFS virtual filesystem
+    #[command(long_about = help_text::MOUNT_LONG_ABOUT)]
+    #[command(after_help = help_text::MOUNT_AFTER_HELP)]
     Mount {
-        /// Source directory containing skills
-        #[arg(value_name = "SOURCE")]
+        /// Directory that stores skill folders, SKILL.md, and skillfs-views.toml.
+        #[arg(value_name = "SOURCE", help_heading = help_text::HEADING_MOUNT)]
         source: PathBuf,
 
-        /// Mount point for the filesystem
-        #[arg(value_name = "MOUNTPOINT")]
+        /// Directory where SkillFS exposes the virtual /skills view.
+        #[arg(value_name = "MOUNTPOINT", help_heading = help_text::HEADING_MOUNT)]
         mountpoint: PathBuf,
 
-        /// Allow other users to access the mount
-        #[arg(long)]
+        /// Allow users other than the mounter to access the FUSE mount.
+        #[arg(long, help_heading = help_text::HEADING_MOUNT)]
         allow_other: bool,
 
-        /// Run in foreground (don't daemonize)
-        #[arg(long)]
+        /// Keep SkillFS in the foreground; useful for tests and systemd.
+        #[arg(long, help_heading = help_text::HEADING_PROCESS)]
         foreground: bool,
 
-        /// Write the process PID to this file after mount starts.
-        /// Use `kill $(cat <file>)` or `kill -TERM $(cat <file>)` to unmount.
-        #[arg(long, value_name = "PATH")]
+        /// Write the SkillFS process PID after the mount starts.
+        ///
+        /// Use `kill -TERM $(cat <file>)` to stop the foreground daemon and
+        /// unmount cleanly.
+        #[arg(long, value_name = "PATH", help_heading = help_text::HEADING_PROCESS)]
         pid_file: Option<PathBuf>,
 
-        /// Enable best-effort JSONL audit logging by writing one event per
-        /// line to this file. The file is opened in append mode and created
-        /// if missing. When omitted, audit logging is disabled (the default
-        /// in-process sink drops every event).
+        /// Append best-effort filesystem audit events as JSONL.
         ///
-        /// If the path cannot be opened, the mount fails before the FUSE
-        /// session starts rather than silently downgrading to a no-op sink.
-        #[arg(long, value_name = "PATH")]
+        /// Records policy decisions, link/xattr attempts, selected reads and
+        /// writes, and source drift observations. If the path cannot be opened,
+        /// startup fails before mounting.
+        #[arg(long, value_name = "PATH", help_heading = help_text::HEADING_OBSERVABILITY)]
         audit_log: Option<PathBuf>,
 
-        /// Bounded queue capacity for the audit writer thread. `0` (the
-        /// default) maps to the built-in default capacity. Only meaningful
-        /// when `--audit-log` is also set.
-        #[arg(long, value_name = "N", default_value_t = 0)]
+        /// Queue size for the audit writer thread.
+        ///
+        /// `0` uses the built-in default. Only applies with `--audit-log`.
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = 0,
+            help_heading = help_text::HEADING_OBSERVABILITY
+        )]
         audit_queue_capacity: usize,
 
-        /// Refuse to mount unless `SOURCE` and `MOUNTPOINT` resolve to the
-        /// same directory (in-place / over-mount layout). In that layout
-        /// FUSE intercepts every read and write to the physical source
-        /// path, so `.skill-meta` policy and the audit log cover all
-        /// userspace operations.
+        /// Require in-place mounting: SOURCE and MOUNTPOINT must be the same.
         ///
-        /// Without this flag the existing non-in-place layout is allowed
-        /// for compatibility, but it can only observe operations that go
-        /// through the FUSE mountpoint — direct writes to the source path
-        /// bypass SkillFS entirely.
-        #[arg(long)]
+        /// Use this when security policy or audit must cover normal source-path
+        /// access. Without it, non-in-place mounts remain allowed but direct
+        /// writes to SOURCE bypass SkillFS.
+        #[arg(long, help_heading = help_text::HEADING_SECURITY)]
         security_mode: bool,
 
-        /// External decision-provider command prefix. Either a single
-        /// binary like `/usr/local/bin/xxx-cli`, or a whitespace-split
-        /// command prefix like `agent-sec-cli skill-ledger`. The first
-        /// token is the executable; subsequent tokens are fixed
-        /// arguments. SkillFS appends `scan <skill_dir> --json` and
-        /// `resolve <skill_dir> --json` per call and spawns the
-        /// program directly (no shell, no quoting). Required when
-        /// `--security` is set; empty or whitespace-only values are
-        /// rejected at startup.
-        #[arg(long, value_name = "COMMAND")]
+        /// External command used by the legacy scan/resolve security flow.
+        ///
+        /// SkillFS appends `scan <skill_dir> --json` and
+        /// `resolve <skill_dir> --json`. Mutually exclusive with
+        /// `--activation-mode file`.
+        #[arg(long, value_name = "COMMAND", help_heading = help_text::HEADING_SECURITY)]
         decision_command: Option<String>,
 
-        /// Enable the security pipeline. When set, the mount wires the
-        /// active skill resolver and a debounced scan-then-resolve
-        /// refresh controller against `--decision-command`. Without
-        /// this flag the mount falls back to passthrough behavior.
-        #[arg(long)]
+        /// Enable the security pipeline.
+        ///
+        /// Requires either `--decision-command` or `--activation-mode file`.
+        /// Without this flag, mounted skills use the default passthrough view.
+        #[arg(long, help_heading = help_text::HEADING_SECURITY)]
         security: bool,
 
-        /// Path to the security events JSONL output. Only meaningful
-        /// with `--security`; an unopenable path is a startup error.
-        #[arg(long, value_name = "PATH")]
+        /// Write security decision events as JSONL for the legacy flow.
+        ///
+        /// Only applies with `--security` and `--decision-command`.
+        #[arg(long, value_name = "PATH", help_heading = help_text::HEADING_OBSERVABILITY)]
         events_log: Option<PathBuf>,
 
         /// [DEPRECATED / compatibility] Trusted writer process-name
@@ -142,7 +146,7 @@ enum Commands {
         /// `prctl(PR_SET_NAME)` or by exec'ing a same-basename
         /// binary; NOT production-strength. Use
         /// `--trusted-writer-exe` instead.
-        #[arg(long, value_name = "NAME")]
+        #[arg(long, value_name = "NAME", help_heading = help_text::HEADING_TRUSTED_WRITERS)]
         trusted_writer: Option<String>,
 
         /// [RECOMMENDED] Trusted writer executable identity gate.
@@ -150,62 +154,58 @@ enum Commands {
         /// against the configured canonical path and on-disk file
         /// identity `(dev, ino)`. Resistant to process-name spoofing.
         /// Requires Linux. The path must exist and be a regular file.
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", help_heading = help_text::HEADING_TRUSTED_WRITERS)]
         trusted_writer_exe: Option<PathBuf>,
 
-        /// Path to a TOML configuration file for security settings.
-        /// CLI flags override values from the config file.
-        #[arg(long, value_name = "PATH")]
+        /// TOML configuration file for security, activation, and logging.
+        ///
+        /// CLI flags override values from this file.
+        #[arg(long, value_name = "PATH", help_heading = help_text::HEADING_CONFIG)]
         config: Option<PathBuf>,
 
-        /// Activation file consumption mode. When set to `file`, SkillFS
-        /// reads `<skill_dir>/.skill-meta/activation.json` at startup to
-        /// populate the active-skill resolver. When set to `off` (the
-        /// default), the existing `--decision-command` path is unchanged.
-        /// Requires `--security`. Mutually exclusive with
+        /// Activation source: `off` or `file`.
+        ///
+        /// `file` reads `<skill_dir>/.skill-meta/activation.json` to decide
+        /// whether each skill is current, served from snapshot, or hidden.
+        /// Requires `--security` and is mutually exclusive with
         /// `--decision-command`.
-        #[arg(long, value_name = "MODE")]
+        #[arg(long, value_name = "MODE", help_heading = help_text::HEADING_LEDGER)]
         activation_mode: Option<String>,
 
-        /// Unix domain socket path for the N2 notify change client.
-        /// When set, SkillFS sends `skill_ledger.skillfs_notify_change`
-        /// notifications to the external daemon after debounced FUSE
-        /// mutations. The daemon owns scan, reconcile, and activation
-        /// refresh. Requires `--security --activation-mode file`.
-        /// Mutually exclusive with `--decision-command`.
-        #[arg(long, value_name = "PATH")]
+        /// Notify a ledger daemon after debounced FUSE mutations.
+        ///
+        /// SkillFS sends change notifications over this Unix socket. The
+        /// daemon owns scan, reconcile, and activation refresh. Requires
+        /// `--security --activation-mode file` and is mutually exclusive
+        /// with `--decision-command`.
+        #[arg(long, value_name = "PATH", help_heading = help_text::HEADING_LEDGER)]
         notify_socket: Option<PathBuf>,
 
-        /// Path to the N3 activation protocol event log (JSONL).
-        /// When set, SkillFS writes an append-only JSONL line for each
-        /// debounced FUSE mutation that passes notify filtering. The
-        /// log is a reconcile aid for the daemon; write failures only
-        /// warn and never affect FUSE or the notify client.
-        /// Requires `--security --activation-mode file`.
-        /// Mutually exclusive with `--decision-command`.
-        #[arg(long, value_name = "PATH")]
+        /// Write daemon protocol events as JSONL.
+        ///
+        /// Records debounced FUSE mutations that should be reconciled by an
+        /// external ledger daemon. Write failures warn but do not affect FUSE.
+        /// Requires `--security --activation-mode file` and is mutually
+        /// exclusive with `--decision-command`.
+        #[arg(long, value_name = "PATH", help_heading = help_text::HEADING_OBSERVABILITY)]
         activation_events_log: Option<PathBuf>,
 
-        /// A3: Runtime activation reload mode. When set to `poll`,
-        /// SkillFS re-reads activation.json / xattr after each debounced
-        /// notify send and updates the active-skill resolver without
-        /// requiring a remount. Default `off`.
-        /// Requires `--security --activation-mode file`.
-        #[arg(long, value_name = "MODE")]
+        /// Activation reload mode: `off` or `poll`.
+        ///
+        /// `poll` re-reads activation.json / xattr after debounced notify
+        /// events and updates active skill mapping without a remount. Requires
+        /// `--security --activation-mode file`.
+        #[arg(long, value_name = "MODE", help_heading = help_text::HEADING_LEDGER)]
         activation_reload_mode: Option<String>,
 
-        /// A6/B1: Private source-side work path for the external security
-        /// daemon. When set, all daemon-facing operations (notify skillDir,
-        /// activation bootstrap, activation reload, startup reconcile,
-        /// activation watcher) use this path instead of the source path.
-        /// In in-place mounts, SkillFS creates a bind mount from the
-        /// source to this path before the FUSE over-mount so the daemon
-        /// can scan the live source tree. Fail-closed: unsafe backing
-        /// root (world-writable, inside mount path, wrong owner) rejects
-        /// startup.
-        /// Requires `--security --activation-mode file`.
-        /// Mutually exclusive with `--decision-command`.
-        #[arg(long, value_name = "PATH")]
+        /// Private source-side work path for the ledger daemon.
+        ///
+        /// Use this with in-place security mounts so the daemon can inspect
+        /// the live source tree while agents see the FUSE over-mount. SkillFS
+        /// validates the path and fails closed if ownership, permissions, or
+        /// mount layout are unsafe. Requires `--security --activation-mode
+        /// file` and is mutually exclusive with `--decision-command`.
+        #[arg(long, value_name = "PATH", help_heading = help_text::HEADING_LEDGER)]
         ledger_backing_root: Option<PathBuf>,
 
         /// Unix domain socket path for the trusted peer control
@@ -213,7 +213,7 @@ enum Commands {
         /// path and accepts connections from trusted peers. Peer
         /// identity is verified via `SO_PEERCRED` + executable identity.
         /// Requires `--trusted-peer-exe`. Linux only.
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", help_heading = help_text::HEADING_TRUSTED_PEER)]
         control_socket: Option<PathBuf>,
 
         /// Trusted peer executable path for control socket
@@ -221,23 +221,24 @@ enum Commands {
         /// canonical path and its on-disk `(dev, ino)` file identity.
         /// Requires `--control-socket`. The path must exist and be a
         /// regular file.
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", help_heading = help_text::HEADING_TRUSTED_PEER)]
         trusted_peer_exe: Option<PathBuf>,
 
         /// Optional trusted peer UID constraint for control
         /// socket authentication. When set, the peer's UID (from
         /// `SO_PEERCRED`) must match this value.
-        #[arg(long, value_name = "UID")]
+        #[arg(long, value_name = "UID", help_heading = help_text::HEADING_TRUSTED_PEER)]
         trusted_peer_uid: Option<u32>,
 
         /// Optional trusted peer GID constraint for control
         /// socket authentication. When set, the peer's GID (from
         /// `SO_PEERCRED`) must match this value.
-        #[arg(long, value_name = "GID")]
+        #[arg(long, value_name = "GID", help_heading = help_text::HEADING_TRUSTED_PEER)]
         trusted_peer_gid: Option<u32>,
     },
 
     /// Generate or update skillfs-views.toml from a skill directory
+    #[command(after_help = help_text::CLASSIFY_AFTER_HELP)]
     Classify {
         /// Source directory containing skills
         #[arg(value_name = "SOURCE")]
