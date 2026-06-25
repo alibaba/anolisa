@@ -25,7 +25,10 @@ from agent_sec_cli.skill_ledger.core.version_chain import (
     load_version_manifest,
     snapshot_dir_path,
 )
-from agent_sec_cli.skill_ledger.models.manifest import SignedManifest, UserDecision
+from agent_sec_cli.skill_ledger.models.manifest import (
+    SignedManifest,
+    UserDecision,
+)
 from agent_sec_cli.skill_ledger.signing.base import SigningBackend
 from agent_sec_cli.skill_ledger.utils import validate_skill_dir
 
@@ -247,7 +250,10 @@ def _newest_block_decision(
         )
         if manifest is None:
             continue
-        if manifest.userDecision is not None and manifest.userDecision.action == "block":
+        if (
+            manifest.userDecision is not None
+            and manifest.userDecision.action == "block"
+        ):
             return manifest.userDecision
     return None
 

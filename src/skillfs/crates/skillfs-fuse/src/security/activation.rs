@@ -650,19 +650,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_pending_decision_snapshot_target() {
-        let json = r#"{"schemaVersion": 1, "target": ".skill-meta/versions/__pending_decision__.snapshot"}"#;
-        let r = ActivationRecord::from_json_str(json).unwrap();
-        assert_eq!(r.schema_version, 1);
-        assert_eq!(
-            r.target,
-            Some(PathBuf::from(
-                ".skill-meta/versions/__pending_decision__.snapshot"
-            ))
-        );
-    }
-
-    #[test]
     fn parses_null_target_as_hidden() {
         let json = r#"{"schemaVersion": 1, "target": null}"#;
         let r = ActivationRecord::from_json_str(json).unwrap();
@@ -809,33 +796,6 @@ mod tests {
             } => {
                 assert_eq!(snapshot_dir, snap);
                 assert_eq!(version, "v000001.snapshot");
-            }
-            other => panic!("expected Snapshot, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn resolve_pending_decision_snapshot_yields_snapshot_target() {
-        let dir = tempfile::tempdir().unwrap();
-        let snap = dir
-            .path()
-            .join(".skill-meta/versions/__pending_decision__.snapshot");
-        std::fs::create_dir_all(&snap).unwrap();
-
-        let record = ActivationRecord {
-            schema_version: 1,
-            target: Some(PathBuf::from(
-                ".skill-meta/versions/__pending_decision__.snapshot",
-            )),
-        };
-        let target = resolve_activation(dir.path(), &record).unwrap();
-        match target {
-            ActiveTarget::Snapshot {
-                snapshot_dir,
-                version,
-            } => {
-                assert_eq!(snapshot_dir, snap);
-                assert_eq!(version, "__pending_decision__.snapshot");
             }
             other => panic!("expected Snapshot, got {other:?}"),
         }

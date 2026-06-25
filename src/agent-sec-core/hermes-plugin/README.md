@@ -122,19 +122,22 @@ Hermes 支持的 hook 及其回调签名：
 
 ### Skill Ledger
 
-推荐部署模式是 SkillFS + Skill Ledger daemon activation：SkillFS 捕获 skill 变更，daemon 刷新 `.skill-meta/activation.json`/xattr。Hermes `skill-ledger` capability 默认仍注册，但默认 `policy = "debug"`：在 Hermes `skill_view` 读取技能前执行完整性检查，只写 debug 诊断，不阻断、不向最终回复追加 warning。
+推荐部署模式是 SkillFS + Skill Ledger daemon activation：SkillFS 捕获 skill 变更，daemon 刷新 `.skill-meta/activation.json`/xattr。Hermes `skill-ledger` capability 默认仍注册，默认 `policy = "ask"`：在 Hermes `skill_view` 读取技能前读取统一 exposure summary；Hermes 没有交互确认能力，因此 `ask` 会降级为用户可见 warning 并放行。
 
 - `enabled = false`：完全不注册 Hermes hook。
-- `policy = "debug"`：默认静默兼容模式；非 `pass`、CLI 失败或 JSON 解析失败都 fail-open，只写 debug。
-- `policy = "warn"`：恢复 warning-only 兼容模式；非 `pass` 状态会缓存为本轮告警，并通过
+- `policy = "ask"`：默认策略；当 summary `message` 非空时缓存为本轮告警，并通过
   `transform_llm_output` 追加到最终回复开头，确保用户可见。
-- `policy = "block"`：命中 `block_statuses` 时直接返回 Hermes block 结果；未命中状态仅写 warning 诊断。
+- `policy = "debug"`：静默兼容模式；summary `message` 非空、CLI 失败或 JSON 解析失败都 fail-open，只写 debug。
+- `policy = "warn"`：warning-only 兼容模式；summary `message` 非空时缓存为本轮告警，并通过
+  `transform_llm_output` 追加到最终回复开头，确保用户可见。
+- `policy = "block"`：summary `message` 非空时直接返回 Hermes block 结果。
 - 未配置 `policy` 的旧配置仍兼容：`enable_block = true` 映射为 `block`，`enable_block = false` 映射为 `warn`。
 - 当前版本仅覆盖 Hermes 默认本地技能目录 `~/.hermes/skills`，按 Hermes `skill_view`
   的本地目录规则解析 `category/skill` 或裸 skill 名称；`skills.external_dirs` 和
   plugin-provided skills 暂不覆盖，hook 会 fail-open 跳过。
 - `file_path` / `path` 仅表示 skill 内 supporting file，不参与 skill 目录定位。
-- `max_warnings_per_turn = 0` 仅影响 `policy = "warn"` 的用户可见 warning 注入。
+- `block_statuses` 是 legacy 兼容配置；当前 `policy = "block"` 不再按状态过滤。
+- `max_warnings_per_turn = 0` 影响 `policy = "ask"` / `policy = "warn"` 的用户可见 warning 注入。
 - Skill Ledger 全局 `activationPolicy` 属于 SkillFS/daemon activation；这里的 hook `policy`
   只控制宿主 hook 的可见行为和日志等级。
 
@@ -144,14 +147,14 @@ Hermes 支持的 hook 及其回调签名：
 [capabilities.skill-ledger]
 enabled = true
 timeout = 5
-policy = "debug"
+policy = "ask"
 enable_block = false
 block_statuses = ["none", "drifted", "deny", "tampered"]
 max_warnings_per_turn = 5
 max_warning_contexts = 128
 ```
 
-无 SkillFS 且希望用户可见提示或阻断时，将 `policy` 显式改为 `warn` 或 `block`。
+无 SkillFS 且希望用户可见提示或阻断时，将 `policy` 显式改为 `ask`、`warn` 或 `block`。
 
 ### observability
 

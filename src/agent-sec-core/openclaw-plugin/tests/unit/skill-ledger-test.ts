@@ -41,7 +41,7 @@ function registerHandlers(pluginConfig: Record<string, any> = {}) {
   return { beforeToolCall, hooks, logs };
 }
 
-function policyConfig(policy: "debug" | "warn" | "block"): Record<string, any> {
+function policyConfig(policy: "ask" | "debug" | "warn" | "block"): Record<string, any> {
   return {
     capabilities: {
       "skill-ledger": { policy },
@@ -450,7 +450,7 @@ describe("skill-ledger", () => {
     });
   }
 
-  it("invalid explicit policy falls back to default block policy", async () => {
+  it("invalid explicit policy falls back to default ask policy", async () => {
     mockSkillLedgerStatus("deny", 1);
     const { beforeToolCall, logs } = registerHandlers({
       capabilities: {
@@ -466,9 +466,22 @@ describe("skill-ledger", () => {
     assert.ok(result?.requireApproval);
     assert.ok(
       logs.some((log) =>
-        log.includes("[WARN] [skill-ledger] invalid policy=\"blcok\"; using block"),
+        log.includes("[WARN] [skill-ledger] invalid policy=\"blcok\"; using ask"),
       ),
     );
+  });
+
+  it("block policy hard-blocks with the summary message", async () => {
+    mockSkillLedgerStatus("deny", 1);
+    const { beforeToolCall } = registerHandlers(policyConfig("block"));
+
+    const result = await beforeToolCall.handler(
+      readSkillEvent("/skills/deny/SKILL.md"),
+      {},
+    );
+
+    assert.equal(result?.block, true);
+    assert.match(result?.blockReason, /summary message for deny/);
   });
 
   for (const status of ["warn", "error", "mystery"]) {
@@ -509,6 +522,7 @@ describe("skill-ledger", () => {
 
     const result = await beforeToolCall.handler(readSkillEvent("/skills/deny/SKILL.md"), {});
 
-    assert.ok(result?.requireApproval);
+    assert.equal(result?.block, true);
+    assert.match(result?.blockReason, /summary message for deny/);
   });
 });

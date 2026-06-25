@@ -250,6 +250,9 @@ agent-sec-cli verify
 | `init` | 初始化密钥，并为已覆盖 Skill 执行快速扫描 |
 | `scan <dir>` | 执行内置快速扫描并签名写入 manifest |
 | `check <dir>` | 检测 Skill 文件是否漂移或被篡改 |
+| `show <dir>` | 展示 latest/active 暴露摘要、用户决策、告警信息和 findings |
+| `export <dir> --version latest --output <path>` | 导出签名 snapshot、manifest 和 findings 供审查 |
+| `decide <dir> --action allow|always_allow|block|rollback` | 记录用户决策并刷新 activation |
 | `certify <dir> --findings <file>` | 导入外部扫描结果并签名写入 manifest |
 | `status` | 系统级健康概览（密钥、配置、聚合完整性） |
 | `audit <dir>` | 查看版本历史与签名链 |
@@ -263,6 +266,13 @@ agent-sec-cli skill-ledger init
 
 # 检查完整性，不修改 ledger 元数据
 agent-sec-cli skill-ledger check /path/to/skill
+
+# 查看运行态暴露与用户决策状态
+agent-sec-cli skill-ledger show /path/to/skill
+
+# 导出隐藏的 latest 版本供审查，然后做出决策
+agent-sec-cli skill-ledger export /path/to/skill --version latest --output /tmp/skill-review
+agent-sec-cli skill-ledger decide /path/to/skill --action allow --reason "reviewed manually"
 
 # 快速扫描并签名
 agent-sec-cli skill-ledger scan /path/to/skill

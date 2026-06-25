@@ -20,9 +20,10 @@ Input schema::
 Output mapping:
 
     summary.message is null → { "decision": "allow" }
+    policy "ask" (default)   → summary.message asks for confirmation
     policy "debug"           → summary.message only writes debug stderr
     policy "warn"            → summary.message allows with visible reason
-    policy "block" (default) → summary.message asks for confirmation
+    policy "block"           → summary.message blocks execution
 
 Optional copilot-shell settings.json configuration::
 
@@ -60,8 +61,8 @@ _TOOL_NAME = "skill"
 _CHECK_TIMEOUT = 5  # seconds for the CLI show call
 _INIT_TIMEOUT = 3  # seconds for key initialization
 
-_DEFAULT_POLICY = "block"
-_VALID_POLICIES = frozenset({"debug", "warn", "block"})
+_DEFAULT_POLICY = "ask"
+_VALID_POLICIES = frozenset({"ask", "debug", "warn", "block"})
 
 # -- helpers -----------------------------------------------------------------
 
@@ -79,6 +80,11 @@ def _allow_with_reason(reason: str) -> str:
 def _ask_with_reason(reason: str) -> str:
     """Return an ask decision with a confirmation reason for display."""
     return json.dumps({"decision": "ask", "reason": reason}, ensure_ascii=False)
+
+
+def _block_with_reason(reason: str) -> str:
+    """Return a block decision with a user-visible reason."""
+    return json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False)
 
 
 def _debug(message: str) -> None:
@@ -266,6 +272,8 @@ def _format_cosh(summary: dict, skill_name: str, policy: str) -> str:
         return _allow()
     if policy == "warn":
         return _allow_with_reason(reason)
+    if policy == "block":
+        return _block_with_reason(reason)
     return _ask_with_reason(reason)
 
 

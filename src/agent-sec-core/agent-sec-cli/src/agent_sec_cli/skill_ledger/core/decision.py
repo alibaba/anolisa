@@ -196,6 +196,8 @@ def export_skill(
     snapshot = snapshot_dir_path(skill_dir, version_id)
     if not snapshot.is_dir():
         raise SkillLedgerError(f"snapshot not found for version {version_id}")
+    if not _snapshot_matches_manifest(snapshot, manifest):
+        raise SkillLedgerError(f"export snapshot does not match manifest: {version_id}")
     out_dir = Path(output)
     if out_dir.exists() and any(out_dir.iterdir()):
         raise SkillLedgerError(

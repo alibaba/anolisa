@@ -21,7 +21,7 @@ warning_ttl_seconds = 300
 [capabilities.skill-ledger]
 enabled = true
 timeout = 5
-policy = "warn"
+policy = "ask"
 enable_block = false
 block_statuses = ["none", "drifted", "deny", "tampered"]
 max_warnings_per_turn = 5

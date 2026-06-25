@@ -7,10 +7,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
-
 from agent_sec_cli.skill_ledger.models.scan import ScanEntry
 from agent_sec_cli.skill_ledger.utils import utc_now_iso
+from pydantic import BaseModel, Field, model_validator
 
 
 class ManifestSignature(BaseModel):

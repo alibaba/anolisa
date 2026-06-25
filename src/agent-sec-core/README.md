@@ -250,6 +250,9 @@ Ed25519-based integrity ledger for skill directories. Tracks file hashes, versio
 | `init` | Initialize keys and quick-scan covered skills |
 | `scan <dir>` | Run built-in quick scanners and sign the manifest |
 | `check <dir>` | Detect drift / tampering against the manifest |
+| `show <dir>` | Show latest/active exposure summary, user decision, warnings, and findings |
+| `export <dir> --version latest --output <path>` | Export a signed snapshot, manifest, and findings for review |
+| `decide <dir> --action allow|always_allow|block|rollback` | Record a user decision and refresh activation |
 | `certify <dir> --findings <file>` | Import external scanner findings and sign the manifest |
 | `status` | System-wide health overview (keys, config, aggregate integrity) |
 | `audit <dir>` | Show version history and signature chain |
@@ -263,6 +266,13 @@ agent-sec-cli skill-ledger init
 
 # Check integrity without modifying ledger metadata
 agent-sec-cli skill-ledger check /path/to/skill
+
+# Inspect runtime exposure and user-decision state
+agent-sec-cli skill-ledger show /path/to/skill
+
+# Export a hidden latest version for review, then decide
+agent-sec-cli skill-ledger export /path/to/skill --version latest --output /tmp/skill-review
+agent-sec-cli skill-ledger decide /path/to/skill --action allow --reason "reviewed manually"
 
 # Quick scan, create/update a signed version, and snapshot
 agent-sec-cli skill-ledger scan /path/to/skill

@@ -15,11 +15,10 @@ type ExposureSummary = {
   [key: string]: unknown;
 };
 
-type SkillLedgerPolicy = "debug" | "warn" | "block";
+type SkillLedgerPolicy = "ask" | "debug" | "warn" | "block";
 
 type SkillLedgerConfig = {
   policy: SkillLedgerPolicy;
-  blockStatuses: Set<string>;
 };
 
 // ---------------------------------------------------------------------------
@@ -29,9 +28,8 @@ type SkillLedgerConfig = {
 const READ_TOOL_NAMES = ["read"];
 const PATH_PARAM_NAMES = ["file_path", "path"];
 const DEFAULT_TIMEOUT_MS = 5_000;
-const DEFAULT_POLICY: SkillLedgerPolicy = "block";
-const VALID_POLICIES = new Set<SkillLedgerPolicy>(["debug", "warn", "block"]);
-const DEFAULT_BLOCK_STATUSES = ["none", "drifted", "deny", "tampered"];
+const DEFAULT_POLICY: SkillLedgerPolicy = "ask";
+const VALID_POLICIES = new Set<SkillLedgerPolicy>(["ask", "debug", "warn", "block"]);
 
 // ---------------------------------------------------------------------------
 // Confirmation policy
@@ -133,25 +131,10 @@ function readPolicy(
   return DEFAULT_POLICY;
 }
 
-function readBlockStatuses(capabilityConfig: Record<string, any>): Set<string> {
-  const raw = capabilityConfig.blockStatuses ?? capabilityConfig.block_statuses;
-  if (!Array.isArray(raw)) {
-    return new Set(DEFAULT_BLOCK_STATUSES);
-  }
-  const statuses = raw
-    .filter(
-      (status): status is string =>
-        typeof status === "string" && status.trim().length > 0,
-    )
-    .map((status) => status.trim());
-  return new Set(statuses.length ? statuses : DEFAULT_BLOCK_STATUSES);
-}
-
 function readConfig(pluginConfig: Record<string, any>, api: any): SkillLedgerConfig {
   const capabilityConfig = pluginConfig.capabilities?.["skill-ledger"] ?? {};
   return {
     policy: readPolicy(capabilityConfig, api),
-    blockStatuses: readBlockStatuses(capabilityConfig),
   };
 }
 
@@ -281,8 +264,12 @@ export const skillLedger: SecurityCapability = {
           }
 
           api.logger.warn(`[skill-ledger] ${message}`);
+          if (cfg.policy === "block") {
+            return { block: true, blockReason: message };
+          }
+
           const severity = confirmationSeverity(status);
-          if (cfg.policy === "block" && severity && cfg.blockStatuses.has(status)) {
+          if (cfg.policy === "ask" && severity) {
             return {
               requireApproval: {
                 title: "Skill Ledger Security Check",

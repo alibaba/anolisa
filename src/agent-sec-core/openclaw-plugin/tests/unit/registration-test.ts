@@ -44,4 +44,16 @@ describe("capability registration defaults", () => {
 
     assert.equal(Object.hasOwn(enableBlock, "default"), false);
   });
+
+  it("defaults skill-ledger policy to ask", () => {
+    const manifest = JSON.parse(
+      readFileSync(resolve("openclaw.plugin.json"), "utf8"),
+    );
+    const policy =
+      manifest.configSchema.properties.capabilities.properties[
+        "skill-ledger"
+      ].properties.policy;
+
+    assert.equal(policy.default, "ask");
+  });
 });

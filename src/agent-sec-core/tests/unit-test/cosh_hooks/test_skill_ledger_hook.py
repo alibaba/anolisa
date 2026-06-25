@@ -100,7 +100,7 @@ def _create_skill_dir(parent, name="test-skill", manifest_name=None):
 
 
 def test_cosh_manifest_registers_skill_ledger_by_default():
-    """Default Cosh installs keep the hook mounted in debug policy."""
+    """Default Cosh installs keep the Skill Ledger hook mounted."""
     manifest = json.loads(_COSH_MANIFEST.read_text(encoding="utf-8"))
     registered_hook_names = [
         hook.get("name")
@@ -473,6 +473,9 @@ def mock_cli_env(tmp_path):
 class TestOutputMapping:
     """Verify exposure summary message → decision/reason mapping."""
 
+    def test_default_policy_is_ask(self):
+        assert skill_ledger_hook._DEFAULT_POLICY == "ask"
+
     def test_warn_null_message_returns_silent_allow(self, mock_cli_env):
         """latestStatus=warn with message=null → allow with NO reason field."""
         env = mock_cli_env["make_env"](
@@ -543,6 +546,24 @@ class TestOutputMapping:
             env_override=env,
         )
         assert output["decision"] == "allow"
+        assert "Latest skill status is deny" in output["reason"]
+
+    def test_block_policy_returns_block_with_reason(self, mock_cli_env):
+        """SKILL_LEDGER_HOOK_POLICY=block rejects execution with the summary message."""
+        env = mock_cli_env["make_env"](
+            json.dumps(
+                {
+                    "latestStatus": "deny",
+                    "message": "Latest skill status is deny; active version is hidden.",
+                }
+            )
+        )
+        env["SKILL_LEDGER_HOOK_POLICY"] = "block"
+        output = _run_hook(
+            _make_skill_event("test-skill", mock_cli_env["cwd"]),
+            env_override=env,
+        )
+        assert output["decision"] == "block"
         assert "Latest skill status is deny" in output["reason"]
 
     def test_missing_message_field_allows(self, mock_cli_env):

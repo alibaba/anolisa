@@ -63,9 +63,9 @@
               "enabled": { "type": "boolean", "default": true },
               "policy": {
                 "type": "string",
-                "enum": ["debug", "warn", "block"],
-                "default": "debug",
-                "description": "控制已挂载 Skill Ledger hook 的用户可见行为：debug 仅调试日志，warn 告警放行，block 对强门禁状态要求确认"
+                "enum": ["ask", "debug", "warn", "block"],
+                "default": "ask",
+                "description": "控制已挂载 Skill Ledger hook 的用户可见行为：ask 优先要求确认，debug 仅调试日志，warn 告警放行，block 直接拒绝执行"
               },
               "enableBlock": {
                 "type": "boolean",
@@ -75,7 +75,7 @@
                 "type": "array",
                 "default": ["none", "drifted", "deny", "tampered"],
                 "items": { "type": "string" },
-                "description": "policy=block 时要求确认的 Skill Ledger 状态"
+                "description": "Deprecated: policy=block 现在对所有非空 Skill Ledger message 直接拒绝执行"
               }
             }
           },

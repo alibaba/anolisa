@@ -10,7 +10,6 @@ import os
 from typing import Optional
 
 import typer
-
 from agent_sec_cli.security_middleware import invoke
 from agent_sec_cli.security_middleware.result import ActionResult
 

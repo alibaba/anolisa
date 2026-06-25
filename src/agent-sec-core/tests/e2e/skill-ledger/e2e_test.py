@@ -1200,7 +1200,7 @@ def case_hook_wrong_tool_allows():
 
 
 def case_hook_unknown_skill_policy_modes():
-    """Skill not found: default debug is silent, warn policy emits reason."""
+    """Skill not found before summary resolution: fail-open regardless of policy."""
     output = _run_hook(_make_cosh_event("nonexistent-skill-xyz", "/tmp"))
     assert output == {"decision": "allow"}
 
@@ -1208,8 +1208,7 @@ def case_hook_unknown_skill_policy_modes():
         _make_cosh_event("nonexistent-skill-xyz", "/tmp"),
         env_extra=_hook_env(policy="warn"),
     )
-    assert output["decision"] == "allow"
-    assert "not found" in output.get("reason", "").lower()
+    assert output == {"decision": "allow"}
 
 
 def case_hook_pass_status_silent(ws: Workspace):
@@ -1233,7 +1232,7 @@ def case_hook_pass_status_silent(ws: Workspace):
 
 
 def case_hook_drifted_policy_modes(ws: Workspace):
-    """Hook on a drifted skill: debug allows silently, block asks."""
+    """Hook on a drifted skill: default asks, debug allows, block rejects."""
     skill = make_skill(ws.hook_skills_dir, "hook-drift", {"f.txt": "original"})
     env = ws.env()
     findings = write_findings_file(
@@ -1249,21 +1248,31 @@ def case_hook_drifted_policy_modes(ws: Workspace):
         _make_cosh_event("hook-drift", str(ws.root)),
         env_extra=env,
     )
-    assert output == {"decision": "allow"}
-
-    output = _run_hook(
-        _make_cosh_event("hook-drift", str(ws.root)),
-        env_extra=_hook_env(env, policy="block"),
-    )
     assert output["decision"] == "ask"
     assert "reason" in output, f"Expected confirmation reason for drifted: {output}"
     assert (
         "drifted" in output["reason"].lower() or "changed" in output["reason"].lower()
     )
 
+    output = _run_hook(
+        _make_cosh_event("hook-drift", str(ws.root)),
+        env_extra=_hook_env(env, policy="debug"),
+    )
+    assert output == {"decision": "allow"}
+
+    output = _run_hook(
+        _make_cosh_event("hook-drift", str(ws.root)),
+        env_extra=_hook_env(env, policy="block"),
+    )
+    assert output["decision"] == "block"
+    assert "reason" in output, f"Expected block reason for drifted: {output}"
+    assert (
+        "drifted" in output["reason"].lower() or "changed" in output["reason"].lower()
+    )
+
 
 def case_hook_path_traversal_policy_modes(ws: Workspace):
-    """Path traversal: default debug allows silently, warn emits reason."""
+    """Path traversal before summary resolution fails open without HookOutput reason."""
     output = _run_hook(
         _make_cosh_event("../../etc/passwd", "/tmp"),
         env_extra=ws.env(),
@@ -1274,9 +1283,7 @@ def case_hook_path_traversal_policy_modes(ws: Workspace):
         _make_cosh_event("../../etc/passwd", "/tmp"),
         env_extra=_hook_env(ws.env(), policy="warn"),
     )
-    assert output["decision"] == "allow"
-    assert "reason" in output
-    assert "traversal" in output["reason"].lower()
+    assert output == {"decision": "allow"}
 
 
 # ── G13: Full pipeline (vetter → ledger → hook) ─────────────────────────
@@ -1316,22 +1323,31 @@ def case_full_pipeline_vetter_to_hook(ws: Workspace):
     # Modify file → drifted
     (skill / "app.py").write_text("print(2)\n")
 
-    # default hook policy → silent allow for drifted status
+    # default hook policy → ask for drifted status
     if HOOK_SCRIPT:
         output = _run_hook(
             _make_cosh_event("pipeline-full", str(ws.root)),
             env_extra=env,
         )
+        assert output["decision"] == "ask", f"Expected default ask: {output}"
+        assert "reason" in output, f"Expected drift confirmation: {output}"
+
+    # debug hook policy → silent allow for drifted status
+    if HOOK_SCRIPT:
+        output = _run_hook(
+            _make_cosh_event("pipeline-full", str(ws.root)),
+            env_extra=_hook_env(env, policy="debug"),
+        )
         assert output == {"decision": "allow"}, f"Expected debug allow: {output}"
 
-    # block hook policy → ask with warning reason
+    # block hook policy → reject with warning reason
     if HOOK_SCRIPT:
         output = _run_hook(
             _make_cosh_event("pipeline-full", str(ws.root)),
             env_extra=_hook_env(env, policy="block"),
         )
-        assert output["decision"] == "ask"
-        assert "reason" in output, f"Expected drift confirmation: {output}"
+        assert output["decision"] == "block"
+        assert "reason" in output, f"Expected drift block: {output}"
 
 
 # ── G14: Key rotation ────────────────────────────────────────────────────
@@ -1452,7 +1468,7 @@ E2E_CASES = [
         init_default_keys=False,
     ),
     E2ECase(
-        "G12: hook unknown skill debug/warn",
+        "G12: hook unknown skill fail-open",
         _without_workspace(case_hook_unknown_skill_policy_modes),
         requires_hook=True,
         init_default_keys=False,
@@ -1463,12 +1479,12 @@ E2E_CASES = [
         requires_hook=True,
     ),
     E2ECase(
-        "G12: hook drifted debug/block",
+        "G12: hook drifted ask/debug/block",
         case_hook_drifted_policy_modes,
         requires_hook=True,
     ),
     E2ECase(
-        "G12: hook path traversal debug/warn",
+        "G12: hook path traversal fail-open",
         case_hook_path_traversal_policy_modes,
         requires_hook=True,
         init_default_keys=False,

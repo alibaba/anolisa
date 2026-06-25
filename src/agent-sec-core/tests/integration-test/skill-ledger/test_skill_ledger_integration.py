@@ -153,7 +153,9 @@ def decode_xattr_activation(value: bytes) -> dict:
     return json.loads(value.decode("utf-8"))
 
 
-def assert_pending_stub(skill_dir: Path, *, leaked_files: list[str] | None = None) -> None:
+def assert_pending_stub(
+    skill_dir: Path, *, leaked_files: list[str] | None = None
+) -> None:
     """Assert the pending decision stub exists without exposing live risk files."""
     stub_dir = skill_dir / PENDING_DECISION_TARGET
     assert stub_dir.is_dir()
@@ -2248,6 +2250,37 @@ def test_export_writes_snapshot_manifest_and_findings(ws):
     assert findings_out == [{"rule": "deny", "level": "deny", "message": "deny"}]
 
 
+def test_export_rejects_snapshot_hash_mismatch(ws):
+    skill = make_skill(ws.skills_dir, "decision-export-tampered", {"data.txt": "risk"})
+    env = ws.env()
+    findings = write_findings_file(
+        ws.fixtures,
+        "decision-export-tampered-deny.json",
+        [{"rule": "deny", "level": "deny", "message": "deny"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(findings)], env_extra=env
+    )
+    (skill / ".skill-meta" / "versions" / "v000001.snapshot" / "data.txt").write_text(
+        "tampered snapshot"
+    )
+
+    r = run_skill_ledger(
+        [
+            "export",
+            str(skill),
+            "--version",
+            "latest",
+            "--output",
+            str(ws.root / "exported-tampered-snapshot"),
+        ],
+        env_extra=env,
+    )
+
+    assert r.returncode != 0
+    assert "snapshot does not match manifest" in r.stderr
+
+
 def test_resolve_legacy_latest_scanned_policy_normalizes_and_activates_warn_snapshot(
     ws,
 ):
@@ -2328,7 +2361,9 @@ def test_resolve_pass_warn_only_activates_warn_snapshot(ws):
     assert shown["reasonCode"] == "normal"
     assert shown["message"] is None
     assert shown["warnings"] == []
-    assert shown["findings"] == [{"rule": "warn", "level": "warn", "message": "warning"}]
+    assert shown["findings"] == [
+        {"rule": "warn", "level": "warn", "message": "warning"}
+    ]
 
 
 def test_resolve_legacy_latest_scanned_policy_skips_deny_snapshot(ws):

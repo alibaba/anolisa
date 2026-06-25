@@ -25,7 +25,7 @@ _DEFAULT_MESSAGE = object()
 def _make_capability(
     root: Path,
     *,
-    policy: str = "debug",
+    policy: str = "ask",
     include_policy: bool = True,
     enable_block: bool = False,
     block_statuses: list[str] | None = None,
@@ -109,14 +109,14 @@ class _RecordingHermesContext:
         self.hooks.append(hook_name)
 
 
-def test_default_config_enables_skill_ledger_warn_policy():
-    """Default Hermes installs keep the hook mounted with visible warnings."""
+def test_default_config_enables_skill_ledger_ask_policy():
+    """Default Hermes installs request user attention without hard blocking."""
     config = tomllib.loads(
         (_HERMES_PLUGIN_DIR / "src" / "config.toml").read_text(encoding="utf-8")
     )
 
     assert config["capabilities"]["skill-ledger"]["enabled"] is True
-    assert config["capabilities"]["skill-ledger"]["policy"] == "warn"
+    assert config["capabilities"]["skill-ledger"]["policy"] == "ask"
 
 
 def test_default_config_registers_skill_ledger_hooks():
@@ -211,12 +211,31 @@ class TestSkillLedgerHooks:
         ["none", "drifted", "deny", "tampered", "error", "unknown"],
     )
     @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_non_pass_default_allows_debug_only(
+    def test_non_pass_default_ask_policy_falls_back_to_warning(
         self, mock_cli, tmp_path, status, caplog
     ):
         root = tmp_path / "skills"
         _make_skill(root, "devops/risky")
         cap = _make_capability(root)
+        mock_cli.return_value = _cli_status(status, exit_code=1)
+        caplog.set_level(logging.DEBUG, logger="agent-sec-core")
+
+        result = cap._on_pre_tool_call("skill_view", {"name": "risky"}, task_id="t1")
+        output = cap._on_transform_llm_output(
+            response_text="assistant response", task_id="t1"
+        )
+
+        assert result is None
+        assert output.startswith("[agent-sec-core skill-ledger warning]")
+        assert f"status={status}" in output
+        assert any(f"status={status}" in record.message for record in caplog.records)
+
+    @pytest.mark.parametrize("status", ["deny", "drifted"])
+    @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
+    def test_debug_policy_logs_and_allows(self, mock_cli, tmp_path, status, caplog):
+        root = tmp_path / "skills"
+        _make_skill(root, "devops/risky")
+        cap = _make_capability(root, policy="debug")
         mock_cli.return_value = _cli_status(status, exit_code=1)
         caplog.set_level(logging.DEBUG, logger="agent-sec-core")
 
@@ -351,9 +370,7 @@ class TestSkillLedgerHooks:
         assert list(cap._warnings_by_context) == ["task_id:t1"]
 
     @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_enable_block_blocks_configured_status_without_warning(
-        self, mock_cli, tmp_path
-    ):
+    def test_block_policy_blocks_message_without_warning(self, mock_cli, tmp_path):
         root = tmp_path / "skills"
         _make_skill(root, "security/blocked")
         cap = _make_capability(root, policy="block")
@@ -367,9 +384,7 @@ class TestSkillLedgerHooks:
         assert cap._on_transform_llm_output("assistant response", run_id="r1") is None
 
     @patch("src.capabilities.skill_ledger.call_agent_sec_cli")
-    def test_enable_block_allows_unconfigured_status_without_warning(
-        self, mock_cli, tmp_path
-    ):
+    def test_block_policy_allows_when_summary_has_no_message(self, mock_cli, tmp_path):
         root = tmp_path / "skills"
         _make_skill(root, "security/warn-only")
         cap = _make_capability(root, policy="block")
