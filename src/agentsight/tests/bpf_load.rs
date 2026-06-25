@@ -10,13 +10,15 @@
 //! which BPF program the verifier rejected.
 
 use agentsight::probes::{
-    FileWatch, FileWriteProbe, ProcMon, ProcTrace, Probes, SharedMaps, SslSniff, TcpSniff, UdpDns,
+    FileWatch, FileWriteProbe, Probes, ProcMon, ProcTrace, SharedMaps, SslSniff, TcpSniff, UdpDns,
 };
 
 fn make_shared_maps() -> (ProcTrace, SharedMaps) {
     let pt = ProcTrace::new().expect("proctrace open+load");
-    let shared = SharedMaps::new(pt.rb_handle().expect("rb handle"))
-        .with_traced_processes(pt.traced_processes_handle().expect("traced_processes handle"));
+    let shared = SharedMaps::new(pt.rb_handle().expect("rb handle")).with_traced_processes(
+        pt.traced_processes_handle()
+            .expect("traced_processes handle"),
+    );
     (pt, shared)
 }
 
