@@ -274,7 +274,7 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
     let session_id = call.metadata.get("session_id").map(|s| safe_cstring(s));
     let agent_name = call.agent_name.as_ref().map(|s| safe_cstring(s));
     let container_id =
-        crate::container::extract_container_id(call.pid as u32).map(|s| safe_cstring(&s));
+        crate::container::extract_container_id_cached(call.pid as u32).map(|s| safe_cstring(&s));
 
     // Construct request_url from metadata
     let server_addr = call

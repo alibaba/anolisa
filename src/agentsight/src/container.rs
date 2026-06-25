@@ -8,6 +8,68 @@
 //! Supports Docker (cgroup v1 & v2), containerd, and Kubernetes cgroup
 //! layouts.  Returns `None` for non-container processes.
 
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
+
+/// Maximum number of entries in the container-ID cache.
+const CACHE_CAPACITY: usize = 256;
+
+/// Time-to-live for a cache entry.
+const CACHE_TTL: Duration = Duration::from_secs(60);
+
+struct CacheEntry {
+    container_id: Option<String>,
+    inserted_at: Instant,
+}
+
+static CONTAINER_ID_CACHE: LazyLock<Mutex<HashMap<u32, CacheEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Cached wrapper around [`extract_container_id`].
+///
+/// Returns the cached value if present and less than 60 seconds old.
+/// On miss or expiry, calls `extract_container_id` and inserts the result.
+/// If the cache is at capacity (256 entries), the oldest entry is evicted
+/// before inserting.
+pub fn extract_container_id_cached(pid: u32) -> Option<String> {
+    let mut cache = match CONTAINER_ID_CACHE.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    // Check cache hit
+    if let Some(entry) = cache.get(&pid) {
+        if entry.inserted_at.elapsed() < CACHE_TTL {
+            return entry.container_id.clone();
+        }
+    }
+
+    // Miss or expired — compute fresh value
+    let result = extract_container_id(pid);
+
+    // Evict oldest entry if at capacity
+    if cache.len() >= CACHE_CAPACITY && !cache.contains_key(&pid) {
+        if let Some(&oldest_pid) = cache
+            .iter()
+            .min_by_key(|(_, e)| e.inserted_at)
+            .map(|(pid, _)| pid)
+        {
+            cache.remove(&oldest_pid);
+        }
+    }
+
+    cache.insert(
+        pid,
+        CacheEntry {
+            container_id: result.clone(),
+            inserted_at: Instant::now(),
+        },
+    );
+
+    result
+}
+
 /// Read `/proc/{pid}/cgroup` and extract the container ID.
 ///
 /// Returns `None` when the process is not running inside a container or
@@ -207,5 +269,23 @@ mod tests {
             id,
             "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
         );
+    }
+
+    #[test]
+    fn test_cache_returns_same_value_on_second_call() {
+        // Call twice with the same pid — both should return the same value
+        // and neither should panic.
+        let pid = std::process::id();
+        let first = extract_container_id_cached(pid);
+        let second = extract_container_id_cached(pid);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn test_cache_none_for_nonexistent_pid() {
+        // pid 999999 almost certainly does not exist; should return None
+        // without panicking.
+        let result = extract_container_id_cached(999_999);
+        assert!(result.is_none());
     }
 }
