@@ -165,8 +165,10 @@ impl CoshCore {
             .hook_system
             .fire_user_prompt_submit(&self.session_id, &cwd_str, content)
             .await;
-        self.emit_hook_notifications(writer, &prompt_result.notifications, None);
+
         if let HookDecision::Block(reason) = &prompt_result.decision {
+            // Block: no approval panel, notifications go to Governance fallback
+            self.emit_hook_notifications(writer, &prompt_result.notifications, None);
             self.emit(
                 writer,
                 &OutputMessage::assistant_text(
@@ -175,6 +177,75 @@ impl CoshCore {
                 ),
             );
             return Ok(());
+        }
+
+        if matches!(prompt_result.decision, HookDecision::Ask) {
+            let request_id = self.next_request_id();
+            let synthetic_id = format!("prompt:{request_id}");
+
+            // Extract the first hook name for the virtual HOOK: tool_name.
+            let hook_name = prompt_result
+                .notifications
+                .first()
+                .map(|n| n.hook_name.as_str())
+                .unwrap_or("unknown");
+
+            // Emit notifications (or fallback) with synthetic tool_use_id so
+            // cosh-shell stores them in pending_hook_notifications.
+            if prompt_result.notifications.is_empty() {
+                // Hook returned ask but provided no reason/systemMessage — emit fallback.
+                self.emit(
+                    writer,
+                    &OutputMessage::hook_notification(
+                        hook_name,
+                        "A hook requires your approval before this action can proceed.",
+                        Some(&synthetic_id),
+                        Some("ask"),
+                    ),
+                );
+            } else {
+                self.emit_hook_notifications(
+                    writer,
+                    &prompt_result.notifications,
+                    Some(&synthetic_id),
+                );
+            }
+
+            // Emit approval request with HOOK: prefix and empty input.
+            self.emit(
+                writer,
+                &OutputMessage::can_use_tool(
+                    &request_id,
+                    &format!("HOOK:{hook_name}"),
+                    serde_json::json!({}),
+                    &synthetic_id,
+                    true, // hook_requires_approval
+                ),
+            );
+
+            match self.wait_for_approval(&request_id, false, reader).await {
+                ApprovalResult::Allowed => { /* user confirmed, continue */ }
+                ApprovalResult::Denied(reason) => {
+                    self.emit(
+                        writer,
+                        &OutputMessage::assistant_text(
+                            &self.session_id,
+                            &format!(
+                                "Prompt rejected: {}",
+                                reason.unwrap_or_else(|| "user cancelled".to_string())
+                            ),
+                        ),
+                    );
+                    return Ok(());
+                }
+                ApprovalResult::Interrupted | _ => {
+                    return Ok(());
+                }
+            }
+        } else {
+            // allow / passthrough: notifications without tool_use_id go to
+            // deferred_events → Governance panel at end of agent run.
+            self.emit_hook_notifications(writer, &prompt_result.notifications, None);
         }
 
         self.messages.push(Message::user(content));
