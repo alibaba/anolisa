@@ -24,7 +24,7 @@ pub(crate) fn render_approval_actions<W: Write>(
 ) -> std::io::Result<()> {
     for (idx, event) in events.iter().enumerate() {
         let event_index = event_index_base + idx;
-        if let Some((id, action)) = approval_focus_from_event(event) {
+        if let Some((id, action)) = approval_focus_from_event(event, &state.approvals.requests) {
             let key = format!("approval-focus-{event_index}");
             if !state.approvals.handled_actions.insert(key) {
                 continue;

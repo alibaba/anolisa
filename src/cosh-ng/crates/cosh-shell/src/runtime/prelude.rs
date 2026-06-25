@@ -59,11 +59,12 @@ pub(crate) use crate::types::{
     Policy, QuestionSelectionMode, ShellEvent, ShellEventKind, ShellHandoffRequest,
 };
 pub(crate) use crate::ui::{
-    approval_action_at, hook_warning_icon, render_transcript, ActivityDetailsPanelModel,
-    ActivityPanelModel, ActivityRowModel, AgentStatusAnimation, ApprovalDetailsPanelModel,
-    ApprovalJournalEntryModel, ApprovalJournalPanelModel, ApprovalPanelAction, ApprovalPanelModel,
-    ApprovalReceiptPanelModel, CommandAssessmentSummaryModel, HookWarningView, MarkdownStreamBlock,
-    NoticePanelModel, QuestionAnswerPanelModel, QuestionPanelModel, RatatuiInlineRenderer,
+    approval_action_at, hook_approval_action_at, hook_warning_icon, render_transcript,
+    ActivityDetailsPanelModel, ActivityPanelModel, ActivityRowModel, AgentStatusAnimation,
+    ApprovalDetailsPanelModel, ApprovalJournalEntryModel, ApprovalJournalPanelModel,
+    ApprovalPanelAction, ApprovalPanelModel, ApprovalReceiptPanelModel,
+    CommandAssessmentSummaryModel, HookWarningView, MarkdownStreamBlock, NoticePanelModel,
+    QuestionAnswerPanelModel, QuestionPanelModel, RatatuiInlineRenderer,
     RecommendationActionPanelModel, RecommendationPanelModel,
 };
 

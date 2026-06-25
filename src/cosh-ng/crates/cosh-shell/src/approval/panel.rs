@@ -138,6 +138,7 @@ pub(crate) fn approval_is_pending(state: &InlineState, id: &str) -> bool {
 
 pub(crate) fn approval_focus_from_event(
     event: &ShellEvent,
+    requests: &[RuntimeApprovalRequest],
 ) -> Option<(String, ApprovalPanelAction)> {
     if event.kind != ShellEventKind::UserInputIntercepted
         || event.component.as_deref() != Some("card")
@@ -148,6 +149,13 @@ pub(crate) fn approval_focus_from_event(
 
     let (id, selected) = event.input.as_deref()?.split_once(':')?;
     let index = selected.trim().parse::<usize>().ok()?;
-    let action = approval_action_at(index)?;
+    let is_hook = requests
+        .iter()
+        .any(|r| r.id == id.trim() && r.subject.contains("HOOK:"));
+    let action = if is_hook {
+        hook_approval_action_at(index)?
+    } else {
+        approval_action_at(index)?
+    };
     Some((id.trim().to_string(), action))
 }

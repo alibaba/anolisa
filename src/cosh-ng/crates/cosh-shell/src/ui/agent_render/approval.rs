@@ -135,6 +135,29 @@ impl RatatuiInlineRenderer {
             return lines;
         }
 
+        if is_hook_approval_request(&model) {
+            let mut lines = vec![
+                i18n.t(crate::MessageId::ApprovalHookHeading).to_string(),
+            ];
+            for warning in &model.hook_warnings {
+                let icon = hook_warning_icon(warning.decision);
+                lines.push(format!("\u{2502} {icon} {}", warning.hook_name));
+                for msg_line in warning.message.lines() {
+                    lines.push(format!("\u{2502}   {msg_line}"));
+                }
+            }
+            if model.queue_total > 1 {
+                let position = model.queue_position.to_string();
+                let total = model.queue_total.to_string();
+                lines.push(i18n.format(
+                    crate::MessageId::ApprovalQueueCompactLine,
+                    &[("position", position.as_str()), ("total", total.as_str())],
+                ));
+            }
+            lines.push(hook_approval_action_line(model.selected_action, i18n));
+            return lines;
+        }
+
         let position = model.queue_position.to_string();
         let total = model.queue_total.to_string();
         let risk = i18n.format(
@@ -192,6 +215,11 @@ fn approval_panel_height(model: &ApprovalPanelModel<'_>, width: u16) -> u16 {
     let hook_warning_rows = model.hook_warnings.iter()
         .map(|w| 1 + w.message.lines().count())  // 1 for hookName line + N message lines
         .sum::<usize>() as u16;
+    if is_hook_approval_request(model) {
+        // heading + hook_warnings + queue(opt) + actions + keys + border(2)
+        let queue_rows = u16::from(model.queue_total > 1);
+        return 4 + hook_warning_rows + queue_rows;
+    }
     if is_command_approval_request(model) {
         let command_rows = command_preview_rows(
             model.preview,
@@ -247,6 +275,10 @@ fn render_approval_panel(
 ) {
     if is_command_approval_request(&model) {
         render_command_tool_approval_panel(model, i18n, area, buffer);
+        return;
+    }
+    if is_hook_approval_request(&model) {
+        render_hook_approval_panel(model, i18n, area, buffer);
         return;
     }
 
@@ -555,6 +587,135 @@ fn render_command_tool_approval_panel(
     }
 }
 
+// ─── Hook Approval Panel ─────────────────────────────────────────────
+
+fn render_hook_approval_panel(
+    model: ApprovalPanelModel<'_>,
+    i18n: crate::I18n,
+    area: Rect,
+    buffer: &mut Buffer,
+) {
+    let block = Block::bordered()
+        .padding(Padding::horizontal(1))
+        .title(Line::from(vec![
+            Span::styled(
+                format!(" {} ", i18n.t(crate::MessageId::ApprovalHookHeading)),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!("{} ", model.id)),
+        ]))
+        .border_set(ROUNDED)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(area);
+    block.render(area, buffer);
+
+    let hook_warning_height = model
+        .hook_warnings
+        .iter()
+        .map(|w| 1 + w.message.lines().count())
+        .sum::<usize>() as u16;
+    let queue_height = u16::from(model.queue_total > 1);
+    let constraints = vec![
+        Constraint::Length(hook_warning_height),
+        Constraint::Length(queue_height),
+        Constraint::Length(1), // actions
+        Constraint::Length(1), // keys
+    ];
+    let chunks = Layout::vertical(constraints).split(inner);
+
+    // Hook warnings (main content)
+    if !model.hook_warnings.is_empty() {
+        let mut warning_lines: Vec<Line<'_>> = Vec::new();
+        for w in &model.hook_warnings {
+            let color = hook_warning_color(w.decision);
+            let icon = hook_warning_icon(w.decision);
+            warning_lines.push(Line::from(vec![
+                Span::styled(
+                    format!("\u{2502} {icon} "),
+                    Style::default().fg(color),
+                ),
+                Span::styled(
+                    w.hook_name.to_string(),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            for msg_line in w.message.lines() {
+                warning_lines.push(Line::from(vec![
+                    Span::styled("\u{2502}   ", Style::default().fg(color)),
+                    Span::raw(msg_line.to_string()),
+                ]));
+            }
+        }
+        Paragraph::new(Text::from(warning_lines)).render(chunks[0], buffer);
+    }
+
+    // Queue position
+    if model.queue_total > 1 {
+        let position = model.queue_position.to_string();
+        let total = model.queue_total.to_string();
+        Paragraph::new(Line::from(Span::styled(
+            i18n.format(
+                crate::MessageId::ApprovalQueueCompactLine,
+                &[("position", position.as_str()), ("total", total.as_str())],
+            ),
+            Style::default().fg(Color::DarkGray),
+        )))
+        .render(chunks[1], buffer);
+    }
+
+    // Actions: Allow once / Deny / Details (no Always trust)
+    Paragraph::new(hook_approval_action_spans(model.selected_action, i18n))
+        .render(chunks[2], buffer);
+
+    // Keys
+    Paragraph::new(Line::from(vec![
+        Span::styled(
+            i18n.t(crate::MessageId::ApprovalKeysPrefix),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::raw(i18n.t(crate::MessageId::ApprovalKeysText)),
+    ]))
+    .render(chunks[3], buffer);
+}
+
+/// Render action spans excluding "Always trust" for hook approval panels.
+fn hook_approval_action_spans(selected: ApprovalPanelAction, i18n: crate::I18n) -> Line<'static> {
+    let mut spans = Vec::new();
+    let mut first = true;
+    for descriptor in APPROVAL_PANEL_ACTIONS.iter() {
+        if descriptor.action == ApprovalPanelAction::AlwaysTrust {
+            continue;
+        }
+        if !first {
+            spans.push(Span::raw("  "));
+        }
+        first = false;
+        spans.push(action_span(
+            approval_action_label(descriptor.action, i18n),
+            descriptor.action,
+            selected == descriptor.action,
+        ));
+    }
+    Line::from(spans)
+}
+
+/// Plain-text action line excluding "Always trust" for hook approval panels.
+fn hook_approval_action_line(selected: ApprovalPanelAction, i18n: crate::I18n) -> String {
+    APPROVAL_PANEL_ACTIONS
+        .iter()
+        .filter(|d| d.action != ApprovalPanelAction::AlwaysTrust)
+        .map(|descriptor| {
+            let label = approval_action_label(descriptor.action, i18n);
+            if descriptor.action == selected {
+                format!("[{label}]")
+            } else {
+                label.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("  ")
+}
+
 fn approval_action_spans(selected: ApprovalPanelAction, i18n: crate::I18n) -> Line<'static> {
     let mut spans = Vec::new();
     for (idx, descriptor) in APPROVAL_PANEL_ACTIONS.iter().enumerate() {
@@ -644,6 +805,10 @@ fn is_command_approval_request(model: &ApprovalPanelModel<'_>) -> bool {
             || model.subject.eq_ignore_ascii_case("tool shell")))
         || (model.kind == "shell command request"
             && model.subject.eq_ignore_ascii_case("shell command"))
+}
+
+fn is_hook_approval_request(model: &ApprovalPanelModel<'_>) -> bool {
+    model.subject.contains("HOOK:")
 }
 
 fn command_request_heading(subject: &str, i18n: crate::I18n) -> &'static str {

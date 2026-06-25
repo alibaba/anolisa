@@ -120,6 +120,10 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::ApprovalReceiptProviderNativeAllowedMessage => {
             "Provider-native shell tool allowed"
         }
+        MessageId::ApprovalHookHeading => "Hook review",
+        MessageId::ApprovalHookFallbackMessage => {
+            "A hook requires your approval before this action can proceed."
+        }
         _ => unreachable!("non-approval English message dispatched to approval catalog"),
     }
 }

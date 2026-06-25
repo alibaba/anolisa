@@ -2,7 +2,10 @@ use super::{RawInputCapture, RawInputEvent, CTRL_C};
 use crate::question::choices::{
     question_choice_count as shared_question_choice_count, toggle_question_option,
 };
-use crate::ui::{approval_action_at, ApprovalPanelAction, APPROVAL_PANEL_ACTIONS};
+use crate::ui::{
+    approval_action_at, hook_approval_action_at, hook_approval_action_max_index,
+    ApprovalPanelAction, APPROVAL_PANEL_ACTIONS,
+};
 
 #[derive(Debug, Default)]
 pub(super) struct CardInputState {
@@ -55,7 +58,7 @@ impl CardInputState {
                 allow_free_text: *allow_free_text,
                 multiple: *multiple,
             },
-            RawInputCapture::Approval { id } | RawInputCapture::Consultation { id } => {
+            RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
                 CardInputKind::Approval { id: id.clone() }
             }
             RawInputCapture::Mode {
@@ -131,7 +134,7 @@ impl CardInputState {
             match input[idx] {
                 CTRL_C => {
                     match capture {
-                        RawInputCapture::Approval { id } | RawInputCapture::Consultation { id } => {
+                        RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
                             events.push(RawInputEvent::CardCancel(id.clone()))
                         }
                         RawInputCapture::Mode { id, .. } => {
@@ -189,7 +192,7 @@ impl CardInputState {
                 }
                 0x1b if input.get(idx + 1) == Some(&0x1b) => {
                     match capture {
-                        RawInputCapture::Approval { id } | RawInputCapture::Consultation { id } => {
+                        RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
                             events.push(RawInputEvent::CardCancel(id.clone()))
                         }
                         RawInputCapture::Mode { id, .. } => {
@@ -215,7 +218,7 @@ impl CardInputState {
                     break;
                 }
                 0x1b => match capture {
-                    RawInputCapture::Approval { id } | RawInputCapture::Consultation { id } => {
+                    RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
                         events.push(RawInputEvent::CardCancel(id.clone()));
                         break;
                     }
@@ -247,7 +250,7 @@ impl CardInputState {
                         }
                         idx += 1;
                     }
-                    RawInputCapture::Approval { id } | RawInputCapture::Consultation { id } => {
+                    RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
                         if (byte == b'd' || byte == b'D') && self.free_text.is_empty() {
                             self.selected = 2;
                             events.push(RawInputEvent::CardDetails(id.clone()));
@@ -341,11 +344,17 @@ impl CardInputState {
                     None
                 }
             }
-            RawInputCapture::Approval { id } | RawInputCapture::Consultation { id } => {
+            RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
+                let is_hook = matches!(capture, RawInputCapture::Approval { is_hook: true, .. });
+                let max_idx = if is_hook {
+                    hook_approval_action_max_index()
+                } else {
+                    approval_action_max_index()
+                };
                 let previous = self.selected;
                 match code {
                     b'D' => self.selected = self.selected.saturating_sub(1),
-                    b'C' => self.selected = (self.selected + 1).min(approval_action_max_index()),
+                    b'C' => self.selected = (self.selected + 1).min(max_idx),
                     _ => {}
                 }
                 if self.selected != previous {
@@ -409,8 +418,13 @@ impl CardInputState {
                     None
                 }
             }
-            RawInputCapture::Approval { id } | RawInputCapture::Consultation { id } => {
-                self.selected = (self.selected + 1).min(approval_action_max_index());
+            RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
+                let max_idx = if matches!(capture, RawInputCapture::Approval { is_hook: true, .. }) {
+                    hook_approval_action_max_index()
+                } else {
+                    approval_action_max_index()
+                };
+                self.selected = (self.selected + 1).min(max_idx);
                 Some(RawInputEvent::CardFocus(id.clone(), self.selected))
             }
             RawInputCapture::Mode {
@@ -454,7 +468,7 @@ impl CardInputState {
                     None
                 }
             }
-            RawInputCapture::Approval { id } | RawInputCapture::Consultation { id } => {
+            RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
                 self.selected = self.selected.saturating_sub(1);
                 Some(RawInputEvent::CardFocus(id.clone(), self.selected))
             }
@@ -521,12 +535,16 @@ impl CardInputState {
                 }
                 None
             }
-            RawInputCapture::Approval { id } | RawInputCapture::Consultation { id } => {
+            RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
                 if !self.free_text.trim().is_empty() {
                     return None;
                 }
-                approval_action_at(self.selected)
-                    .map(|action| approval_event_for_action(id, action))
+                let action = if matches!(capture, RawInputCapture::Approval { is_hook: true, .. }) {
+                    hook_approval_action_at(self.selected)
+                } else {
+                    approval_action_at(self.selected)
+                };
+                action.map(|a| approval_event_for_action(id, a))
             }
             RawInputCapture::Mode {
                 id, option_count, ..

@@ -52,6 +52,7 @@ fn question_capture_ignores_removed_answer_slash() {
 fn approval_capture_ignores_removed_decision_slashes() {
     let capture = RawInputCapture::Approval {
         id: "req-1".to_string(),
+        is_hook: false,
     };
     let mut state = CardInputState::default();
     state.apply_capture(&capture);
@@ -225,6 +226,7 @@ fn config_language_capture_selects_language_and_cancels() {
 fn approval_capture_handles_split_escape_arrow_sequence() {
     let capture = RawInputCapture::Approval {
         id: "req-1".to_string(),
+        is_hook: false,
     };
     let mut state = CardInputState::default();
     state.apply_capture(&capture);
@@ -244,6 +246,7 @@ fn approval_capture_handles_split_escape_arrow_sequence() {
 fn approval_capture_escape_then_enter_cancels_without_submit() {
     let capture = RawInputCapture::Approval {
         id: "req-1".to_string(),
+        is_hook: false,
     };
     let mut state = CardInputState::default();
     state.apply_capture(&capture);

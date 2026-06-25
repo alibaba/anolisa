@@ -27,7 +27,8 @@ mod stream;
 mod wrap;
 
 pub use actions::{
-    approval_action_at, approval_action_index, ApprovalActionDescriptor, ApprovalPanelAction,
+    approval_action_at, approval_action_index, hook_approval_action_at,
+    hook_approval_action_max_index, ApprovalActionDescriptor, ApprovalPanelAction,
     APPROVAL_PANEL_ACTIONS,
 };
 pub use activity::{ActivityDetailsPanelModel, ActivityPanelModel, ActivityRowModel};

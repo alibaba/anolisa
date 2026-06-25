@@ -42,6 +42,7 @@ pub enum RawInputCapture {
     },
     Approval {
         id: String,
+        is_hook: bool,
     },
     Mode {
         id: String,

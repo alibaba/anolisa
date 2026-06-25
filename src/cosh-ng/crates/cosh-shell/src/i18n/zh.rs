@@ -600,6 +600,8 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::ApprovalReceiptProviderNativeAllowedMessage => {
             "已允许 provider-native shell tool 执行"
         }
+        MessageId::ApprovalHookHeading => "Hook 审查",
+        MessageId::ApprovalHookFallbackMessage => "Hook 需要您的审批才能继续执行。",
         // Registry slash commands
         MessageId::HelpGroupRegistry => "Registry",
         MessageId::HelpSummaryExtensions => "列出/管理 cosh-core 扩展",

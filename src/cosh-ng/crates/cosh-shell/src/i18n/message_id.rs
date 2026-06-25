@@ -488,6 +488,9 @@ pub enum MessageId {
     ApprovalReceiptSubjectBashProviderNative,
     ApprovalReceiptBashSentToShellMessage,
     ApprovalReceiptProviderNativeAllowedMessage,
+    // Hook approval panel
+    ApprovalHookHeading,
+    ApprovalHookFallbackMessage,
     // Registry slash commands
     HelpGroupRegistry,
     HelpSummaryExtensions,
