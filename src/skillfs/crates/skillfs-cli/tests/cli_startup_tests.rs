@@ -1771,11 +1771,78 @@ fn control_socket_created_and_accepts_ping() {
 }
 
 // ---------------------------------------------------------------------------
-// Hermes layout + security mutual exclusion
+// Hermes layout + security gates (H2)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn hermes_layout_with_security_fails_startup() {
+fn hermes_security_activation_file_passes_gate() {
+    let source = empty_source();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let mut child = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--skill-layout",
+            "hermes",
+            "--security",
+            "--activation-mode",
+            "file",
+            "--foreground",
+        ])
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn skillfs");
+
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let _ = child.kill();
+    let output = child.wait_with_output().expect("wait");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        !combined.contains("incompatible"),
+        "hermes + security + activation-mode file must pass gate: {combined}"
+    );
+}
+
+#[test]
+fn hermes_decision_command_rejected() {
+    let source = empty_source();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--skill-layout",
+            "hermes",
+            "--security",
+            "--decision-command",
+            "echo",
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(
+        !out.status.success(),
+        "hermes + decision-command must fail startup"
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("incompatible"),
+        "error must mention incompatibility: {combined}"
+    );
+}
+
+#[test]
+fn hermes_control_socket_rejected() {
     let source = empty_source();
     let mount = tempfile::tempdir().expect("mount tempdir");
     let out = Command::new(bin_path())
@@ -1788,41 +1855,25 @@ fn hermes_layout_with_security_fails_startup() {
             "--security",
             "--activation-mode",
             "file",
-        ])
-        .output()
-        .expect("invoke skillfs");
-    assert!(!out.status.success(), "hermes + security must fail startup");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("incompatible"),
-        "error must mention incompatibility: {stderr}"
-    );
-}
-
-#[test]
-fn hermes_layout_with_notify_socket_fails_startup() {
-    let source = empty_source();
-    let mount = tempfile::tempdir().expect("mount tempdir");
-    let out = Command::new(bin_path())
-        .args([
-            "mount",
-            source.path().to_str().unwrap(),
-            mount.path().to_str().unwrap(),
-            "--skill-layout",
-            "hermes",
-            "--notify-socket",
-            "/tmp/nonexistent.sock",
+            "--control-socket",
+            "/tmp/test-hermes.sock",
+            "--trusted-peer-exe",
+            bin_path(),
         ])
         .output()
         .expect("invoke skillfs");
     assert!(
         !out.status.success(),
-        "hermes + notify-socket must fail startup"
+        "hermes + control-socket must fail startup"
     );
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
     assert!(
-        stderr.contains("incompatible"),
-        "error must mention incompatibility: {stderr}"
+        combined.contains("incompatible"),
+        "error must mention incompatibility: {combined}"
     );
 }
 
@@ -1843,9 +1894,6 @@ fn hermes_layout_without_security_passes_gate() {
         .spawn()
         .expect("spawn skillfs");
 
-    // Wait briefly — if the incompatibility gate fires it exits
-    // immediately; if it passes the gate it either starts FUSE or
-    // fails later on FUSE availability.
     std::thread::sleep(std::time::Duration::from_secs(2));
     let _ = child.kill();
     let output = child.wait_with_output().expect("wait");
