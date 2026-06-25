@@ -77,6 +77,39 @@ pub fn builtin_auth_providers() -> Vec<AuthProvider> {
             builtin_provider_type: "openai".to_string(),
             builtin_default_model: None,
         },
+        AuthProvider {
+            id: "aliyun".to_string(),
+            label: "Aliyun Authentication".to_string(),
+            fields: vec![
+                AuthField {
+                    name: "access_key_id".to_string(),
+                    label: "Access Key ID".to_string(),
+                    hint: Some("获取地址: https://ram.console.aliyun.com/manage/ak".to_string()),
+                    secret: true,
+                    required: true,
+                    placeholder: None,
+                },
+                AuthField {
+                    name: "access_key_secret".to_string(),
+                    label: "Access Key Secret".to_string(),
+                    hint: None,
+                    secret: true,
+                    required: true,
+                    placeholder: None,
+                },
+                AuthField {
+                    name: "model".to_string(),
+                    label: "Model".to_string(),
+                    hint: Some("默认: qwen3.7-plus".to_string()),
+                    secret: false,
+                    required: false,
+                    placeholder: Some("qwen3.7-plus".to_string()),
+                },
+            ],
+            builtin_base_url: None,
+            builtin_provider_type: "aliyun".to_string(),
+            builtin_default_model: Some("qwen3.7-plus".to_string()),
+        },
     ]
 }
 
@@ -124,6 +157,11 @@ pub fn apply_auth_credentials(config: &mut CoreConfig, response: &AuthResponse) 
         .cloned()
         .unwrap_or_default();
 
+    // Aliyun provider uses AK/SK instead of API key
+    let access_key_id = response.values.get("access_key_id").cloned();
+    let access_key_secret = response.values.get("access_key_secret").cloned();
+    let security_token = response.values.get("security_token").cloned();
+
     config.ai.active_provider = Some(response.provider_id.clone());
     config.ai.providers.insert(
         response.provider_id.clone(),
@@ -133,6 +171,9 @@ pub fn apply_auth_credentials(config: &mut CoreConfig, response: &AuthResponse) 
             api_key: Some(api_key),
             model: final_model,
             extra_params: None,
+            access_key_id,
+            access_key_secret,
+            security_token,
         },
     );
 }
@@ -230,9 +271,10 @@ mod tests {
     #[test]
     fn builtin_providers_have_correct_ids() {
         let providers = builtin_auth_providers();
-        assert_eq!(providers.len(), 2);
+        assert_eq!(providers.len(), 3);
         assert_eq!(providers[0].id, "dashscope");
         assert_eq!(providers[1].id, "openai_compat");
+        assert_eq!(providers[2].id, "aliyun");
     }
 
     #[test]

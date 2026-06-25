@@ -29,6 +29,20 @@ use provider::profile;
 
 fn create_provider(config: &CoreConfig) -> Box<dyn provider::ContentGenerator> {
     let resolved = config.resolve_provider();
+    // Aliyun provider uses AK/SK, not API key
+    if resolved.provider_type == "aliyun" {
+        if resolved.access_key_id.is_empty() || resolved.access_key_secret.is_empty() {
+            eprintln!("[cosh-core] Warning: no AK/SK configured for aliyun, using mock provider");
+            return Box::new(provider::mock::MockProvider::text_only(
+                "No AK/SK configured. Please set ALIBABA_CLOUD_ACCESS_KEY_ID/SECRET or use /auth.",
+            ));
+        }
+        return Box::new(provider::sysom::SysomProvider::new(
+            &resolved.access_key_id,
+            &resolved.access_key_secret,
+            resolved.security_token.as_deref(),
+        ));
+    }
     if resolved.api_key.is_empty() {
         eprintln!("[cosh-core] Warning: no API key configured, using mock provider");
         return Box::new(provider::mock::MockProvider::text_only(
@@ -49,9 +63,13 @@ fn create_provider_from_resolved(
     ))
 }
 
-/// Check if auth is needed (no API key configured).
+/// Check if auth is needed (no API key or AK/SK configured).
 fn needs_auth(config: &CoreConfig) -> bool {
-    config.resolve_provider().api_key.is_empty()
+    let resolved = config.resolve_provider();
+    if resolved.provider_type == "aliyun" {
+        return resolved.access_key_id.is_empty() || resolved.access_key_secret.is_empty();
+    }
+    resolved.api_key.is_empty()
 }
 
 #[tokio::main]

@@ -40,6 +40,12 @@ pub struct ProviderConfig {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra_params: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_key_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_key_secret: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -259,12 +265,32 @@ impl CoreConfig {
 
         let extra_params = provider_cfg.and_then(|p| p.extra_params.clone());
 
+        let access_key_id = provider_cfg
+            .and_then(|p| p.access_key_id.as_deref())
+            .map(expand_env_vars)
+            .or_else(|| std::env::var("ALIBABA_CLOUD_ACCESS_KEY_ID").ok())
+            .unwrap_or_default();
+
+        let access_key_secret = provider_cfg
+            .and_then(|p| p.access_key_secret.as_deref())
+            .map(expand_env_vars)
+            .or_else(|| std::env::var("ALIBABA_CLOUD_ACCESS_KEY_SECRET").ok())
+            .unwrap_or_default();
+
+        let security_token = provider_cfg
+            .and_then(|p| p.security_token.as_deref())
+            .map(expand_env_vars)
+            .or_else(|| std::env::var("ALIBABA_CLOUD_SECURITY_TOKEN").ok());
+
         ResolvedProvider {
             base_url,
             api_key,
             model,
             provider_type,
             extra_params,
+            access_key_id,
+            access_key_secret,
+            security_token,
         }
     }
 }
@@ -276,6 +302,9 @@ pub struct ResolvedProvider {
     pub model: String,
     pub provider_type: String,
     pub extra_params: Option<Value>,
+    pub access_key_id: String,
+    pub access_key_secret: String,
+    pub security_token: Option<String>,
 }
 
 /// Persist the current provider config to `~/.copilot-shell/config.toml`.
@@ -333,6 +362,15 @@ pub fn persist_config(config: &CoreConfig) -> Result<(), String> {
         }
         if let Some(ref m) = provider.model {
             preserved.push_str(&format!("model = \"{}\"\n", escape_toml_value(m)));
+        }
+        if let Some(ref ak) = provider.access_key_id {
+            preserved.push_str(&format!("access_key_id = \"{}\"\n", escape_toml_value(ak)));
+        }
+        if let Some(ref sk) = provider.access_key_secret {
+            preserved.push_str(&format!("access_key_secret = \"{}\"\n", escape_toml_value(sk)));
+        }
+        if let Some(ref st) = provider.security_token {
+            preserved.push_str(&format!("security_token = \"{}\"\n", escape_toml_value(st)));
         }
         preserved.push('\n');
     }

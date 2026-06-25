@@ -1,10 +1,17 @@
 use std::path::Path;
 
-use aes_gcm::aead::{Aead, KeyInit};
-use aes_gcm::{Aes256Gcm, Nonce};
+use aes_gcm::aead::generic_array::typenum::U16;
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    AesGcm,
+    aes::Aes256,
+};
 use scrypt::{scrypt, Params};
 
 use crate::config::config_dir;
+
+/// AES-256-GCM with 16-byte nonce (matching Node.js crypto.createCipheriv behavior).
+type Aes256Gcm16 = AesGcm<Aes256, U16>;
 
 const ENCRYPTED_PREFIX: &str = "enc:";
 const CREDENTIAL_PASSWORD: &[u8] = b"copilot-credential-encrypt";
@@ -15,6 +22,8 @@ pub fn try_migrate() {
     let config_path = dir.join("config.toml");
 
     if !settings_path.exists() || config_path.exists() {
+        // Even if settings.json migration is skipped, try aliyun creds migration
+        try_migrate_aliyun_credentials(&dir, &config_path);
         return;
     }
 
@@ -24,6 +33,85 @@ pub fn try_migrate() {
         Ok(()) => eprintln!("[cosh-core] Migration complete: {}", config_path.display()),
         Err(e) => eprintln!("[cosh-core] Migration warning: {e} (continuing with defaults)"),
     }
+
+    try_migrate_aliyun_credentials(&dir, &config_path);
+}
+
+/// Migrate Aliyun credentials from copilot-shell's encrypted aliyun_creds.json
+/// into cosh-ng's config.toml. Only runs once (when config.toml has no aliyun provider).
+fn try_migrate_aliyun_credentials(cfg_dir: &Path, config_path: &Path) {
+    let creds_path = cfg_dir.join("aliyun_creds.json");
+    if !creds_path.exists() {
+        return;
+    }
+
+    // Check if config.toml already has an aliyun provider
+    if config_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(config_path) {
+            if content.contains("[ai.providers.aliyun]") {
+                return;
+            }
+        }
+    }
+
+    let encrypted = match std::fs::read_to_string(&creds_path) {
+        Ok(c) => c.trim().to_string(),
+        Err(_) => return,
+    };
+
+    let salt_path = cfg_dir.join(".encryption-salt");
+    let decrypted = match decrypt_credential(&encrypted, &salt_path) {
+        Some(d) => d,
+        None => return,
+    };
+
+    let creds: serde_json::Value = match serde_json::from_str(&decrypted) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    let ak = creds["accessKeyId"].as_str().unwrap_or_default();
+    let sk = creds["accessKeySecret"].as_str().unwrap_or_default();
+    if ak.is_empty() || sk.is_empty() {
+        return;
+    }
+    let st = creds["securityToken"].as_str();
+
+    let mut existing = if config_path.exists() {
+        std::fs::read_to_string(config_path).unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    existing.push_str("\n[ai.providers.aliyun]\n");
+    existing.push_str("type = \"aliyun\"\n");
+    existing.push_str(&format!("access_key_id = \"{}\"\n", escape_toml_migrate(ak)));
+    existing.push_str(&format!("access_key_secret = \"{}\"\n", escape_toml_migrate(sk)));
+    if let Some(token) = st {
+        existing.push_str(&format!("security_token = \"{}\"\n", escape_toml_migrate(token)));
+    }
+    existing.push_str("model = \"qwen3.7-plus\"\n");
+
+    let pid = std::process::id();
+    let tmp_path = cfg_dir.join(format!("config.toml.tmp.{pid}"));
+    if std::fs::write(&tmp_path, &existing).is_err() {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600));
+    }
+    if std::fs::rename(&tmp_path, config_path).is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+        return;
+    }
+
+    eprintln!("[cosh-core] Migrated Aliyun credentials from aliyun_creds.json");
+}
+
+fn escape_toml_migrate(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
 }
 
 fn migrate_settings(
@@ -117,7 +205,8 @@ fn decrypt_credential(encrypted: &str, salt_path: &Path) -> Option<String> {
     let tag_bytes = hex_decode(parts[1])?;
     let ct_bytes = hex_decode(parts[2])?;
 
-    if iv_bytes.len() != 12 || tag_bytes.len() != 16 {
+    // copilot-shell uses 16-byte IV (Node.js crypto.createCipheriv)
+    if iv_bytes.len() != 16 || tag_bytes.len() != 16 {
         return None;
     }
 
@@ -130,9 +219,9 @@ fn decrypt_credential(encrypted: &str, salt_path: &Path) -> Option<String> {
     let params = Params::new(14, 8, 1, 32).ok()?;
     scrypt(CREDENTIAL_PASSWORD, &salt, &params, &mut key).ok()?;
 
-    let cipher = Aes256Gcm::new_from_slice(&key).ok()?;
+    let cipher = Aes256Gcm16::new_from_slice(&key).ok()?;
 
-    let nonce = Nonce::from_slice(&iv_bytes);
+    let nonce = aes_gcm::aead::generic_array::GenericArray::from_slice(&iv_bytes);
     let mut ciphertext_with_tag = ct_bytes;
     ciphertext_with_tag.extend_from_slice(&tag_bytes);
 
@@ -254,9 +343,9 @@ mod tests {
         let params = Params::new(14, 8, 1, 32).unwrap();
         scrypt(CREDENTIAL_PASSWORD, &salt, &params, &mut key).unwrap();
 
-        let cipher = Aes256Gcm::new_from_slice(&key).unwrap();
-        let iv = [0xABu8; 12];
-        let nonce = Nonce::from_slice(&iv);
+        let cipher = Aes256Gcm16::new_from_slice(&key).unwrap();
+        let iv = [0xABu8; 16];
+        let nonce = aes_gcm::aead::generic_array::GenericArray::from_slice(&iv);
         let plaintext = b"sk-test-secret-key";
 
         let ciphertext_with_tag = cipher.encrypt(nonce, plaintext.as_ref()).unwrap();
