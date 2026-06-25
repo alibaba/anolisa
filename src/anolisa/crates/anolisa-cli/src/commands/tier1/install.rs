@@ -3285,12 +3285,16 @@ fn snapshot_datadir_contract(layout: &FsLayout, component: &str, command: &str) 
     }
 
     let mut content: Option<String> = None;
+    let mut found_source: Option<PathBuf> = None;
+    let mut found_root: Option<PathBuf> = None;
     let mut searched: Vec<PathBuf> = Vec::new();
     for root in &roots {
         let source = FsLayout::component_contract_path(root, component);
         match std::fs::read_to_string(&source) {
             Ok(c) => {
                 content = Some(c);
+                found_source = Some(source);
+                found_root = Some(root.clone());
                 break;
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -3332,6 +3336,27 @@ fn snapshot_datadir_contract(layout: &FsLayout, component: &str, command: &str) 
         );
         eprintln!("warning: {msg}");
         warnings.push(msg);
+        return warnings;
+    }
+
+    // Best-effort provenance sidecar so adapter operations can resolve
+    // {datadir} without content-matching against scoped datadir roots.
+    if let (Some(source_path), Some(datadir_root)) = (found_source, found_root) {
+        use anolisa_core::adapter::contract::{
+            ContractProvenance, ContractSourceKind, write_snapshot_provenance,
+        };
+        let provenance = ContractProvenance {
+            schema_version: 1,
+            source_kind: ContractSourceKind::Datadir,
+            source_path,
+            datadir_root,
+        };
+        if let Err(err) = write_snapshot_provenance(&dest, &provenance) {
+            let msg =
+                format!("failed to write contract provenance for component '{component}': {err}");
+            eprintln!("warning: {msg}");
+            warnings.push(msg);
+        }
     }
 
     warnings
@@ -6550,6 +6575,47 @@ scope = "@anolisa"
         assert_eq!(
             content, contract,
             "snapshot must be a verbatim copy of the FHS package contract"
+        );
+    }
+
+    /// Scenario A: snapshot_datadir_contract writes provenance sidecar.
+    #[test]
+    fn snapshot_datadir_contract_writes_provenance() {
+        let _env_guard = crate::packaged::DataDirEnvGuard::clear();
+        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        let layout = common::resolve_layout(&ctx);
+        let contract = component_manifest_toml("sec-core", "1.0.0", &["system"]);
+        seed_datadir_contract(&layout, "sec-core", &contract);
+
+        let warnings = snapshot_datadir_contract(&layout, "sec-core", COMMAND);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+
+        let snapshot = common::installed_component_manifest_path(&layout, "sec-core", COMMAND)
+            .expect("snapshot path");
+        assert!(snapshot.exists(), "component.toml snapshot must exist");
+
+        let prov_path =
+            anolisa_platform::fs_layout::FsLayout::provenance_path_for_snapshot(&snapshot);
+        assert!(
+            prov_path.exists(),
+            "provenance.toml must exist alongside snapshot"
+        );
+
+        let prov: anolisa_core::adapter::contract::ContractProvenance =
+            toml::from_str(&std::fs::read_to_string(&prov_path).expect("read prov"))
+                .expect("parse prov");
+        assert_eq!(prov.schema_version, 1);
+        assert_eq!(
+            prov.source_kind,
+            anolisa_core::adapter::contract::ContractSourceKind::Datadir,
+        );
+        assert_eq!(prov.datadir_root, layout.datadir);
+        assert_eq!(
+            prov.source_path,
+            anolisa_platform::fs_layout::FsLayout::component_contract_path(
+                &layout.datadir,
+                "sec-core"
+            ),
         );
     }
 }

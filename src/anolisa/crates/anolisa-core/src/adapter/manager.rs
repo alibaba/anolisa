@@ -1690,32 +1690,16 @@ fn is_adapter_visible_status(status: ObjectStatus) -> bool {
 
 /// Return the datadir root that supplied a resolved component contract.
 ///
-/// Direct datadir hits are identified by path. State snapshots do not yet
-/// persist explicit source metadata, so for snapshot hits we match the
-/// snapshot content against scoped datadir contracts. This preserves the
-/// normal install/adopt behavior where the snapshot is a verbatim copy of
-/// a datadir contract, without adding state-schema surface.
+/// Delegates to [`super::contract::infer_contract_datadir_root`] which
+/// checks provenance first (written during install/adopt), then falls
+/// back to content matching for snapshots created before provenance was
+/// introduced.
 fn contract_datadir_root_from_source(
     component: &str,
     contract_path: &Path,
     scoped_datadir_roots: &[PathBuf],
 ) -> Option<PathBuf> {
-    if let Some(root) = scoped_datadir_roots
-        .iter()
-        .find(|root| FsLayout::component_contract_path(root, component) == contract_path)
-        .cloned()
-    {
-        return Some(root);
-    }
-
-    let snapshot_content = std::fs::read(contract_path).ok()?;
-    scoped_datadir_roots
-        .iter()
-        .find(|root| {
-            let candidate = FsLayout::component_contract_path(root, component);
-            std::fs::read(candidate).is_ok_and(|content| content == snapshot_content)
-        })
-        .cloned()
+    super::contract::infer_contract_datadir_root(component, contract_path, scoped_datadir_roots)
 }
 
 fn declared_plugin_id(manifest: &ComponentManifest, framework: &str) -> Option<String> {
@@ -3597,5 +3581,159 @@ source = "{{datadir}}/skills/code-scanner/"
         )
         .expect("resolve skills");
         assert_eq!(skills[0].source.as_ref(), Some(&skill_source));
+    }
+
+    // -- provenance-guided contract datadir root ----------------------------
+
+    /// Provenance selects the correct datadir root when two roots have
+    /// identical contracts (Scenario B). Without provenance, the first
+    /// content match wins (local_datadir) which would be wrong.
+    #[test]
+    fn provenance_selects_correct_datadir_for_absolute_dest_skill_sources() {
+        use crate::adapter::contract::{
+            ContractProvenance, ContractSourceKind, write_snapshot_provenance,
+        };
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("var/lib/anolisa");
+        let local_datadir = tmp.path().join("usr/local/share/anolisa");
+        let pkg_datadir = tmp.path().join("usr/share/anolisa");
+        let abs_dest = tmp.path().join("opt/agent-sec/openclaw-plugin");
+
+        seed_installed_state(&state_dir, "sec-core", ObjectStatus::Adopted);
+
+        let contract = format!(
+            r#"
+[component]
+name = "sec-core"
+version = "0.1.0"
+layer = "runtime"
+
+[[adapters]]
+framework = "openclaw"
+adapter_type = "plugin"
+plugin_id = "sec-core"
+dest = "{}"
+
+[[adapters.openclaw.skills]]
+name = "code-scanner"
+source = "{{datadir}}/skills/code-scanner/"
+"#,
+            abs_dest.display()
+        );
+
+        // Both datadirs have identical contracts — content match alone
+        // would pick local_datadir (first in list), but provenance
+        // points to pkg_datadir.
+        write_contract_with_content(&local_datadir, "sec-core", &contract);
+        write_contract_with_content(&pkg_datadir, "sec-core", &contract);
+
+        let snapshot = FsLayout::component_manifest_snapshot_path(&state_dir, "sec-core");
+        std::fs::create_dir_all(snapshot.parent().expect("snapshot parent")).expect("mkdir");
+        std::fs::write(&snapshot, &contract).expect("write snapshot");
+
+        let prov = ContractProvenance {
+            schema_version: 1,
+            source_kind: ContractSourceKind::Datadir,
+            source_path: FsLayout::component_contract_path(&pkg_datadir, "sec-core"),
+            datadir_root: pkg_datadir.clone(),
+        };
+        write_snapshot_provenance(&snapshot, &prov).expect("write prov");
+
+        std::fs::create_dir_all(&abs_dest).expect("mkdir abs_dest");
+        std::fs::write(abs_dest.join("openclaw.plugin.json"), b"{}").expect("write plugin");
+
+        let skill_source = pkg_datadir.join("skills").join("code-scanner");
+        std::fs::create_dir_all(&skill_source).expect("mkdir skill source");
+        std::fs::write(skill_source.join("manifest.json"), b"{}").expect("write skill");
+
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let mut manager = AdapterManager::new(
+            layout.clone(),
+            Some(tmp.path().to_path_buf()),
+            "test".into(),
+        );
+        manager.state_path = state_dir.join("installed.toml");
+        manager.visible_roots = vec![VisibleRoot {
+            state_dir: state_dir.clone(),
+            contract_datadir_roots: vec![local_datadir.clone(), pkg_datadir.clone()],
+        }];
+        manager.all_datadir_roots = vec![local_datadir.clone(), pkg_datadir.clone()];
+
+        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let (manifest, scoped_roots, contract_datadir_root) = manager
+            .load_visible_component_manifest("sec-core", &state)
+            .expect("load manifest");
+        assert_eq!(
+            contract_datadir_root.as_ref(),
+            Some(&pkg_datadir),
+            "provenance must select pkg_datadir, not local_datadir"
+        );
+
+        let (resource_root, effective_datadir) = manager
+            .resolve_resource_root(
+                "sec-core",
+                "openclaw",
+                &manifest,
+                &scoped_roots,
+                contract_datadir_root.as_deref(),
+            )
+            .expect("resolve resource root");
+        assert_eq!(resource_root, abs_dest);
+        assert_eq!(effective_datadir, pkg_datadir);
+
+        let skill_specs = declared_skills(&manifest, "openclaw");
+        let skills = resolve_skill_sources(
+            skill_specs,
+            &layout,
+            &effective_datadir,
+            "sec-core",
+            "openclaw",
+            &resource_root,
+        )
+        .expect("resolve skills");
+        assert_eq!(
+            skills[0].source.as_ref(),
+            Some(&skill_source),
+            "skill source must resolve to pkg_datadir, not local_datadir"
+        );
+    }
+
+    /// Without provenance, snapshot content match still works (Scenario C).
+    #[test]
+    fn snapshot_without_provenance_falls_back_to_content_match() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        let pkg_datadir = tmp.path().join("pkg_data");
+
+        seed_installed_state(&state_dir, "sec-core", ObjectStatus::Adopted);
+
+        let contract = valid_contract_toml("sec-core");
+        write_contract(&pkg_datadir, "sec-core");
+
+        let snapshot = FsLayout::component_manifest_snapshot_path(&state_dir, "sec-core");
+        std::fs::create_dir_all(snapshot.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&snapshot, contract).expect("write snapshot");
+        // Deliberately no provenance.toml.
+
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let mut manager =
+            AdapterManager::new(layout, Some(tmp.path().to_path_buf()), "test".into());
+        manager.state_path = state_dir.join("installed.toml");
+        manager.visible_roots = vec![VisibleRoot {
+            state_dir: state_dir.clone(),
+            contract_datadir_roots: vec![pkg_datadir.clone()],
+        }];
+        manager.all_datadir_roots = vec![pkg_datadir.clone()];
+
+        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let (_manifest, _scoped_roots, contract_datadir_root) = manager
+            .load_visible_component_manifest("sec-core", &state)
+            .expect("load manifest");
+        assert_eq!(
+            contract_datadir_root.as_ref(),
+            Some(&pkg_datadir),
+            "content matching must find pkg_datadir"
+        );
     }
 }

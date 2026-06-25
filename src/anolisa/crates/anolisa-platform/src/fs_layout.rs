@@ -30,6 +30,8 @@ const COMPONENT_MANIFESTS_SUBDIR: &str = "component-manifests";
 /// Filename used for both the package-owned component contract and the
 /// runtime state snapshot.
 const COMPONENT_MANIFEST_FILE: &str = "component.toml";
+/// Sidecar provenance file written alongside a contract snapshot.
+const PROVENANCE_FILE: &str = "provenance.toml";
 /// Audit-log file name written under `log_dir`.
 const CENTRAL_LOG_NAME: &str = "central.jsonl";
 /// Lock file name written under `state_dir`.
@@ -369,6 +371,21 @@ impl FsLayout {
             .join(COMPONENT_MANIFESTS_SUBDIR)
             .join(component)
             .join(COMPONENT_MANIFEST_FILE)
+    }
+
+    /// Provenance sidecar path for a state snapshot under an arbitrary
+    /// state root. Lives alongside the snapshot `component.toml`.
+    pub fn component_manifest_provenance_path(state_root: &Path, component: &str) -> PathBuf {
+        state_root
+            .join(COMPONENT_MANIFESTS_SUBDIR)
+            .join(component)
+            .join(PROVENANCE_FILE)
+    }
+
+    /// Provenance sidecar path derived from an existing snapshot path.
+    /// Replaces the filename with `provenance.toml`.
+    pub fn provenance_path_for_snapshot(snapshot_path: &Path) -> PathBuf {
+        snapshot_path.with_file_name(PROVENANCE_FILE)
     }
 }
 

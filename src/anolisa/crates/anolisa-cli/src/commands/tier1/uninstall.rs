@@ -620,6 +620,7 @@ fn uninstall_rpm_component(
                 "component '{component}' disappeared from state during uninstall; nothing removed"
             ),
         })?;
+    remove_component_manifest_snapshot(&layout, component, command)?;
 
     let now = now_iso8601();
     let lock_ts = Utc::now();
@@ -699,6 +700,25 @@ fn uninstall_rpm_component(
     };
     render_uninstall_rpm(ctx, &payload);
     Ok(())
+}
+
+fn remove_component_manifest_snapshot(
+    layout: &anolisa_platform::fs_layout::FsLayout,
+    component: &str,
+    command: &str,
+) -> Result<(), CliError> {
+    let dir = common::installed_component_manifest_dir(layout, component, command)?;
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "failed to remove component manifest snapshot at {}: {err}",
+                dir.display()
+            ),
+        }),
+    }
 }
 
 /// Build the actionable "rpm/dnf tooling missing" error for the RPM uninstall
@@ -1675,6 +1695,19 @@ mod tests {
         InstalledState::load(&layout.state_dir.join("installed.toml")).expect("load state")
     }
 
+    fn seed_manifest_snapshot(ctx: &CliContext, component: &str) -> PathBuf {
+        let layout = common::resolve_layout(ctx);
+        let snapshot = common::installed_component_manifest_path(&layout, component, COMMAND)
+            .expect("snapshot path");
+        let dir = snapshot.parent().expect("snapshot dir").to_path_buf();
+        std::fs::create_dir_all(&dir).expect("mkdir snapshot dir");
+        std::fs::write(&snapshot, "component snapshot").expect("write snapshot");
+        let provenance =
+            anolisa_platform::fs_layout::FsLayout::provenance_path_for_snapshot(&snapshot);
+        std::fs::write(provenance, "schema_version = 1\n").expect("write provenance");
+        dir
+    }
+
     fn args_rm(component: &str) -> UninstallArgs {
         UninstallArgs {
             component: component.to_string(),
@@ -1727,6 +1760,7 @@ mod tests {
             )],
             Vec::new(),
         );
+        let snapshot_dir = seed_manifest_snapshot(&c, "copilot-shell");
         let rpm = FakeRpm::present("anolisa-copilot-shell");
         run(args("copilot-shell", false), &c, &rpm, true).expect("uninstall ok");
 
@@ -1748,6 +1782,10 @@ mod tests {
                 .iter()
                 .any(|o| o.command == "uninstall copilot-shell"),
             "an operation record must be appended",
+        );
+        assert!(
+            !snapshot_dir.exists(),
+            "component manifest snapshot dir must be removed",
         );
     }
 
@@ -1934,6 +1972,7 @@ mod tests {
             )],
             Vec::new(),
         );
+        let snapshot_dir = seed_manifest_snapshot(&c, "copilot-shell");
         let rpm = FakeRpm::present("anolisa-copilot-shell");
         run(args_rm("copilot-shell"), &c, &rpm, true).expect("dry-run ok");
 
@@ -1943,6 +1982,10 @@ mod tests {
                 .find_object(ObjectKind::Component, "copilot-shell")
                 .is_some(),
             "dry-run must not drop the state record",
+        );
+        assert!(
+            snapshot_dir.exists(),
+            "dry-run must not remove the manifest snapshot dir",
         );
     }
 

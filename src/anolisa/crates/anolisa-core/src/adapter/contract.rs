@@ -14,9 +14,108 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use anolisa_platform::fs_layout::FsLayout;
 
 use crate::manifest::{ComponentManifest, ManifestError};
+
+// ---------------------------------------------------------------------------
+// Provenance
+// ---------------------------------------------------------------------------
+
+/// How a contract snapshot was originally sourced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContractSourceKind {
+    /// Sourced from a `{datadir}/components/<component>/component.toml`.
+    Datadir,
+}
+
+/// Provenance sidecar for a state-snapshotted component contract.
+///
+/// Written alongside `component.toml` during install/adopt so that later
+/// adapter operations can resolve `{datadir}` without content-matching.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractProvenance {
+    /// Sidecar schema version (currently `1`).
+    pub schema_version: u32,
+    /// How the contract was obtained.
+    pub source_kind: ContractSourceKind,
+    /// Absolute path of the original contract file.
+    pub source_path: PathBuf,
+    /// The datadir root that `source_path` lives under.
+    pub datadir_root: PathBuf,
+}
+
+/// Read the provenance sidecar for a snapshot at `snapshot_path`.
+///
+/// Returns `None` when the file is absent or unparseable — callers
+/// must fall back to content matching.
+pub fn read_snapshot_provenance(snapshot_path: &Path) -> Option<ContractProvenance> {
+    let provenance_path = FsLayout::provenance_path_for_snapshot(snapshot_path);
+    let content = std::fs::read_to_string(&provenance_path).ok()?;
+    toml::from_str(&content).ok()
+}
+
+/// Write a provenance sidecar alongside the snapshot at `snapshot_path`.
+pub fn write_snapshot_provenance(
+    snapshot_path: &Path,
+    provenance: &ContractProvenance,
+) -> Result<(), std::io::Error> {
+    let provenance_path = FsLayout::provenance_path_for_snapshot(snapshot_path);
+    let content = toml::to_string_pretty(provenance).map_err(std::io::Error::other)?;
+    std::fs::write(provenance_path, content)
+}
+
+/// Determine the effective datadir root for a resolved contract.
+///
+/// - If `contract_path` is a direct datadir hit (lives under one of
+///   `scoped_datadir_roots`), returns that root directly.
+/// - If `contract_path` is a state snapshot, tries provenance first: reads
+///   `provenance.toml` and uses its `datadir_root` if the source path is
+///   consistent and the root is in `scoped_datadir_roots`.
+/// - Falls back to content matching: compares the snapshot content against
+///   each scoped datadir contract and returns the first match.
+/// - Returns `None` when no root can be determined.
+pub fn infer_contract_datadir_root(
+    component: &str,
+    contract_path: &Path,
+    scoped_datadir_roots: &[PathBuf],
+) -> Option<PathBuf> {
+    // Direct datadir hit.
+    if let Some(root) = scoped_datadir_roots
+        .iter()
+        .find(|root| FsLayout::component_contract_path(root, component) == contract_path)
+        .cloned()
+    {
+        return Some(root);
+    }
+
+    // Snapshot hit — try provenance sidecar.
+    if let Some(prov) = read_snapshot_provenance(contract_path) {
+        if prov.source_kind == ContractSourceKind::Datadir
+            && scoped_datadir_roots.contains(&prov.datadir_root)
+            && FsLayout::component_contract_path(&prov.datadir_root, component) == prov.source_path
+        {
+            return Some(prov.datadir_root);
+        }
+    }
+
+    // Fallback: content match against scoped datadir contracts.
+    let snapshot_content = std::fs::read(contract_path).ok()?;
+    scoped_datadir_roots
+        .iter()
+        .find(|root| {
+            let candidate = FsLayout::component_contract_path(root, component);
+            std::fs::read(candidate).is_ok_and(|content| content == snapshot_content)
+        })
+        .cloned()
+}
+
+// ---------------------------------------------------------------------------
+// Resolved contract with source
+// ---------------------------------------------------------------------------
 
 /// A resolved component contract plus the concrete file that supplied it.
 #[derive(Debug, Clone)]
@@ -319,5 +418,200 @@ layer = "runtime"
         let manifest = resolve_component_contract("mycomp", &[state], &[data1, data2])
             .expect("should resolve from data2");
         assert_eq!(manifest.component.name, "mycomp");
+    }
+
+    // -- provenance read/write ----------------------------------------------
+
+    #[test]
+    fn write_then_read_provenance_roundtrip() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = tmp.path().join("state");
+        write_snapshot(&state, "mycomp", &valid_toml("mycomp"));
+        let snapshot_path = FsLayout::component_manifest_snapshot_path(&state, "mycomp");
+
+        let prov = ContractProvenance {
+            schema_version: 1,
+            source_kind: ContractSourceKind::Datadir,
+            source_path: PathBuf::from("/usr/share/anolisa/components/mycomp/component.toml"),
+            datadir_root: PathBuf::from("/usr/share/anolisa"),
+        };
+        write_snapshot_provenance(&snapshot_path, &prov).expect("write provenance");
+
+        let read_back = read_snapshot_provenance(&snapshot_path).expect("read provenance");
+        assert_eq!(read_back.schema_version, 1);
+        assert_eq!(read_back.source_kind, ContractSourceKind::Datadir);
+        assert_eq!(read_back.datadir_root, PathBuf::from("/usr/share/anolisa"));
+    }
+
+    #[test]
+    fn read_provenance_returns_none_when_absent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = tmp.path().join("state");
+        write_snapshot(&state, "mycomp", &valid_toml("mycomp"));
+        let snapshot_path = FsLayout::component_manifest_snapshot_path(&state, "mycomp");
+
+        assert!(read_snapshot_provenance(&snapshot_path).is_none());
+    }
+
+    #[test]
+    fn read_provenance_returns_none_on_invalid_toml() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = tmp.path().join("state");
+        write_snapshot(&state, "mycomp", &valid_toml("mycomp"));
+        let snapshot_path = FsLayout::component_manifest_snapshot_path(&state, "mycomp");
+
+        let bad_path = FsLayout::provenance_path_for_snapshot(&snapshot_path);
+        fs::write(&bad_path, "not valid {{{toml").expect("write bad");
+        assert!(read_snapshot_provenance(&snapshot_path).is_none());
+    }
+
+    // -- infer_contract_datadir_root ----------------------------------------
+
+    /// Scenario B: provenance guides resolution when two datadir roots have
+    /// identical contracts.
+    #[test]
+    fn provenance_selects_correct_datadir_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = tmp.path().join("state");
+        let local_data = tmp.path().join("local_data");
+        let pkg_data = tmp.path().join("pkg_data");
+
+        let contract = valid_toml("sec-core");
+        write_snapshot(&state, "sec-core", &contract);
+        write_datadir(&local_data, "sec-core", &contract);
+        write_datadir(&pkg_data, "sec-core", &contract);
+
+        let snapshot_path = FsLayout::component_manifest_snapshot_path(&state, "sec-core");
+        let prov = ContractProvenance {
+            schema_version: 1,
+            source_kind: ContractSourceKind::Datadir,
+            source_path: FsLayout::component_contract_path(&pkg_data, "sec-core"),
+            datadir_root: pkg_data.clone(),
+        };
+        write_snapshot_provenance(&snapshot_path, &prov).expect("write prov");
+
+        let root = infer_contract_datadir_root(
+            "sec-core",
+            &snapshot_path,
+            &[local_data.clone(), pkg_data.clone()],
+        );
+        assert_eq!(
+            root.as_ref(),
+            Some(&pkg_data),
+            "provenance must select pkg_data, not local_data"
+        );
+    }
+
+    /// Scenario C: no provenance falls back to content matching.
+    #[test]
+    fn backward_compat_content_match_without_provenance() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = tmp.path().join("state");
+        let data = tmp.path().join("data");
+
+        let contract = valid_toml("sec-core");
+        write_snapshot(&state, "sec-core", &contract);
+        write_datadir(&data, "sec-core", &contract);
+
+        let snapshot_path = FsLayout::component_manifest_snapshot_path(&state, "sec-core");
+
+        let root = infer_contract_datadir_root("sec-core", &snapshot_path, &[data.clone()]);
+        assert_eq!(
+            root.as_ref(),
+            Some(&data),
+            "content matching fallback must find the datadir root"
+        );
+    }
+
+    /// Scenario D: provenance datadir_root not in scoped roots.
+    #[test]
+    fn invalid_provenance_falls_back_to_content_match() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = tmp.path().join("state");
+        let data = tmp.path().join("data");
+
+        let contract = valid_toml("sec-core");
+        write_snapshot(&state, "sec-core", &contract);
+        write_datadir(&data, "sec-core", &contract);
+
+        let snapshot_path = FsLayout::component_manifest_snapshot_path(&state, "sec-core");
+        let prov = ContractProvenance {
+            schema_version: 1,
+            source_kind: ContractSourceKind::Datadir,
+            source_path: PathBuf::from("/gone/components/sec-core/component.toml"),
+            datadir_root: PathBuf::from("/gone"),
+        };
+        write_snapshot_provenance(&snapshot_path, &prov).expect("write prov");
+
+        let root = infer_contract_datadir_root("sec-core", &snapshot_path, &[data.clone()]);
+        assert_eq!(
+            root.as_ref(),
+            Some(&data),
+            "invalid provenance must fall back to content match"
+        );
+    }
+
+    /// Scenario D variant: malformed provenance TOML.
+    #[test]
+    fn malformed_provenance_toml_falls_back_to_content_match() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = tmp.path().join("state");
+        let data = tmp.path().join("data");
+
+        let contract = valid_toml("sec-core");
+        write_snapshot(&state, "sec-core", &contract);
+        write_datadir(&data, "sec-core", &contract);
+
+        let snapshot_path = FsLayout::component_manifest_snapshot_path(&state, "sec-core");
+        let bad = FsLayout::provenance_path_for_snapshot(&snapshot_path);
+        fs::write(&bad, "this is not valid toml [[[").expect("write bad");
+
+        let root = infer_contract_datadir_root("sec-core", &snapshot_path, &[data.clone()]);
+        assert_eq!(
+            root.as_ref(),
+            Some(&data),
+            "malformed provenance must fall back to content match"
+        );
+    }
+
+    /// Scenario D variant: provenance source_path inconsistent with root.
+    #[test]
+    fn inconsistent_provenance_source_path_falls_back() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = tmp.path().join("state");
+        let data = tmp.path().join("data");
+
+        let contract = valid_toml("sec-core");
+        write_snapshot(&state, "sec-core", &contract);
+        write_datadir(&data, "sec-core", &contract);
+
+        let snapshot_path = FsLayout::component_manifest_snapshot_path(&state, "sec-core");
+        let prov = ContractProvenance {
+            schema_version: 1,
+            source_kind: ContractSourceKind::Datadir,
+            source_path: PathBuf::from("/some/other/component.toml"),
+            datadir_root: data.clone(),
+        };
+        write_snapshot_provenance(&snapshot_path, &prov).expect("write prov");
+
+        let root = infer_contract_datadir_root("sec-core", &snapshot_path, &[data.clone()]);
+        assert_eq!(
+            root.as_ref(),
+            Some(&data),
+            "inconsistent source_path must fall back to content match"
+        );
+    }
+
+    /// Direct datadir hit returns that root without provenance.
+    #[test]
+    fn direct_datadir_hit_returns_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data = tmp.path().join("data");
+
+        write_datadir(&data, "mycomp", &valid_toml("mycomp"));
+        let datadir_path = FsLayout::component_contract_path(&data, "mycomp");
+
+        let root = infer_contract_datadir_root("mycomp", &datadir_path, &[data.clone()]);
+        assert_eq!(root.as_ref(), Some(&data));
     }
 }

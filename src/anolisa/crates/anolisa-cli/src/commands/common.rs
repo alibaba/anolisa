@@ -59,12 +59,24 @@ pub fn installed_component_manifest_path(
     component: &str,
     command: &str,
 ) -> Result<PathBuf, CliError> {
+    Ok(
+        installed_component_manifest_dir(layout, component, command)?
+            .join(INSTALLED_COMPONENT_MANIFEST_FILE),
+    )
+}
+
+/// Directory for the component manifest saved as part of an installed
+/// component's local state.
+pub fn installed_component_manifest_dir(
+    layout: &FsLayout,
+    component: &str,
+    command: &str,
+) -> Result<PathBuf, CliError> {
     validate_component_path_segment(component, command)?;
     Ok(layout
         .state_dir
         .join(INSTALLED_COMPONENT_MANIFESTS_SUBDIR)
-        .join(component)
-        .join(INSTALLED_COMPONENT_MANIFEST_FILE))
+        .join(component))
 }
 
 fn validate_component_path_segment(component: &str, command: &str) -> Result<(), CliError> {

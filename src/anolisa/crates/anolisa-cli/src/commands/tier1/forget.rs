@@ -5,9 +5,10 @@
 //! `missing` case from `anolisa status`), or whenever the operator wants ANOLISA
 //! to stop tracking a component, `forget` removes the `installed.toml` object
 //! and records the operation. It performs **no** package operation — no
-//! `dnf remove`, no `rpm -e` — and deletes no files. An observed/managed RPM
-//! stays installed in rpmdb; a raw component's owned files stay on disk (use
-//! `anolisa uninstall` to remove those).
+//! `dnf remove`, no `rpm -e` — and leaves package/component files on disk. It
+//! only removes ANOLISA-owned state metadata for the forgotten component. An
+//! observed/managed RPM stays installed in rpmdb; a raw component's owned files
+//! stay on disk (use `anolisa uninstall` to remove those).
 
 use chrono::{SecondsFormat, Utc};
 use clap::Parser;
@@ -118,9 +119,9 @@ pub fn handle(args: ForgetArgs, ctx: &CliContext) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Remove the component's state object under the install lock and append an
-/// audit record. No package operation, no file deletion. Returns the operation
-/// id.
+/// Remove the component's state object and local manifest snapshot under the
+/// install lock, then append an audit record. No package/component files are
+/// removed. Returns the operation id.
 fn persist_forget(
     ctx: &CliContext,
     component: &str,
@@ -165,6 +166,7 @@ fn persist_forget(
             ),
         })?;
     let ownership_label = removed.effective_ownership().label();
+    remove_component_manifest_snapshot(&layout, component, command)?;
 
     let now = now_iso8601();
     let lock_ts = Utc::now();
@@ -215,6 +217,25 @@ fn persist_forget(
     }
 
     Ok((operation_id, ownership_label))
+}
+
+fn remove_component_manifest_snapshot(
+    layout: &anolisa_platform::fs_layout::FsLayout,
+    component: &str,
+    command: &str,
+) -> Result<(), CliError> {
+    let dir = common::installed_component_manifest_dir(layout, component, command)?;
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "failed to remove component manifest snapshot at {}: {err}",
+                dir.display()
+            ),
+        }),
+    }
 }
 
 /// Human/JSON renderer for a forget result.
@@ -378,6 +399,19 @@ mod tests {
         InstalledState::load(&layout.state_dir.join("installed.toml")).expect("load state")
     }
 
+    fn seed_manifest_snapshot(ctx: &CliContext, component: &str) -> PathBuf {
+        let layout = common::resolve_layout(ctx);
+        let snapshot = common::installed_component_manifest_path(&layout, component, COMMAND)
+            .expect("snapshot path");
+        let dir = snapshot.parent().expect("snapshot dir").to_path_buf();
+        std::fs::create_dir_all(&dir).expect("mkdir snapshot dir");
+        std::fs::write(&snapshot, "component snapshot").expect("write snapshot");
+        let provenance =
+            anolisa_platform::fs_layout::FsLayout::provenance_path_for_snapshot(&snapshot);
+        std::fs::write(provenance, "schema_version = 1\n").expect("write provenance");
+        dir
+    }
+
     /// forget drops the state object and records the operation; no package
     /// operation is involved (there is no package query/transaction at all).
     #[test]
@@ -393,6 +427,7 @@ mod tests {
             )],
             Vec::new(),
         );
+        let snapshot_dir = seed_manifest_snapshot(&c, "copilot-shell");
 
         handle(
             ForgetArgs {
@@ -415,6 +450,10 @@ mod tests {
                 .iter()
                 .any(|o| o.command == "forget copilot-shell"),
             "an operation record must be appended",
+        );
+        assert!(
+            !snapshot_dir.exists(),
+            "component manifest snapshot dir must be removed",
         );
     }
 
@@ -520,6 +559,7 @@ mod tests {
             )],
             Vec::new(),
         );
+        let snapshot_dir = seed_manifest_snapshot(&c, "copilot-shell");
         handle(
             ForgetArgs {
                 component: "copilot-shell".to_string(),
@@ -532,6 +572,10 @@ mod tests {
                 .find_object(ObjectKind::Component, "copilot-shell")
                 .is_some(),
             "dry-run must not remove the state object",
+        );
+        assert!(
+            snapshot_dir.exists(),
+            "dry-run must not remove the manifest snapshot dir",
         );
     }
 
