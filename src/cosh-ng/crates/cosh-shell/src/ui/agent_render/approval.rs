@@ -808,7 +808,7 @@ fn is_command_approval_request(model: &ApprovalPanelModel<'_>) -> bool {
 }
 
 fn is_hook_approval_request(model: &ApprovalPanelModel<'_>) -> bool {
-    model.subject.contains("HOOK:")
+    model.subject.starts_with("HOOK:")
 }
 
 fn command_request_heading(subject: &str, i18n: crate::I18n) -> &'static str {

@@ -238,7 +238,7 @@ impl CoshCore {
                     );
                     return Ok(());
                 }
-                ApprovalResult::Interrupted | _ => {
+                ApprovalResult::Interrupted | ApprovalResult::HostExecutedShell { .. } => {
                     return Ok(());
                 }
             }

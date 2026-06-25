@@ -306,6 +306,15 @@ async fn handle_skills(
                     error: Some("missing 'name' parameter".to_string()),
                 };
             }
+            // Validate skill exists
+            if skill_manager.load(name).await.is_none() {
+                return OutputMessage::RegistryResponse {
+                    request_id: request_id.to_string(),
+                    success: false,
+                    data: None,
+                    error: Some(format!("skill not found: {name}")),
+                };
+            }
             if let Err(e) = crate::state::remove_disabled(crate::state::SKILLS_STATE, name) {
                 return OutputMessage::RegistryResponse {
                     request_id: request_id.to_string(),
@@ -332,6 +341,15 @@ async fn handle_skills(
                     success: false,
                     data: None,
                     error: Some("missing 'name' parameter".to_string()),
+                };
+            }
+            // Validate skill exists
+            if skill_manager.load(name).await.is_none() {
+                return OutputMessage::RegistryResponse {
+                    request_id: request_id.to_string(),
+                    success: false,
+                    data: None,
+                    error: Some(format!("skill not found: {name}")),
                 };
             }
             if let Err(e) = crate::state::add_disabled(crate::state::SKILLS_STATE, name) {
