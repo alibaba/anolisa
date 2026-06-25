@@ -322,6 +322,5 @@ where
     }
 
     // Create provider from new config
-    let resolved = config.resolve_provider();
-    Some(crate::create_provider_from_resolved(&resolved))
+    Some(crate::create_provider(config))
 }

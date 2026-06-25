@@ -1152,12 +1152,25 @@ impl CoshCore {
 
         // Rebuild provider
         let resolved = self.config.resolve_provider();
-        let profile = crate::provider::profile::profile_from_name(&resolved.provider_type);
-        self.provider = Box::new(crate::provider::openai_compat::OpenAICompatProvider::new(
-            &resolved.base_url,
-            &resolved.api_key,
-            profile,
-        ));
+        if resolved.provider_type == "aliyun" {
+            if !resolved.access_key_id.is_empty() && !resolved.access_key_secret.is_empty() {
+                self.provider = Box::new(crate::provider::sysom::SysomProvider::new(
+                    &resolved.access_key_id,
+                    &resolved.access_key_secret,
+                    resolved.security_token.as_deref(),
+                ));
+            } else {
+                tracing::warn!("Aliyun auth response missing AK/SK");
+                return false;
+            }
+        } else {
+            let profile = crate::provider::profile::profile_from_name(&resolved.provider_type);
+            self.provider = Box::new(crate::provider::openai_compat::OpenAICompatProvider::new(
+                &resolved.base_url,
+                &resolved.api_key,
+                profile,
+            ));
+        }
 
         self.emit(writer, &OutputMessage::system_status("auth_ok"));
         true
