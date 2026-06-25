@@ -222,6 +222,7 @@ mod tests {
                 args: Some(args.into()),
                 exit_code: None,
             },
+            session_id: None,
         }
     }
 

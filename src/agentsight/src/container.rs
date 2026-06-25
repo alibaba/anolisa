@@ -8,7 +8,8 @@
 //! Supports Docker (cgroup v1 & v2), containerd, and Kubernetes cgroup
 //! layouts.  Returns `None` for non-container processes.
 
-use std::collections::HashMap;
+use lru::LruCache;
+use std::num::NonZeroUsize;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -23,43 +24,33 @@ struct CacheEntry {
     inserted_at: Instant,
 }
 
-static CONTAINER_ID_CACHE: LazyLock<Mutex<HashMap<u32, CacheEntry>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static CONTAINER_ID_CACHE: LazyLock<Mutex<LruCache<u32, CacheEntry>>> = LazyLock::new(|| {
+    Mutex::new(LruCache::new(
+        NonZeroUsize::new(CACHE_CAPACITY).expect("CACHE_CAPACITY > 0"),
+    ))
+});
 
 /// Cached wrapper around [`extract_container_id`].
 ///
 /// Returns the cached value if present and less than 60 seconds old.
 /// On miss or expiry, calls `extract_container_id` and inserts the result.
-/// If the cache is at capacity (256 entries), the oldest entry is evicted
-/// before inserting.
+/// Uses `lru::LruCache` for O(1) eviction, consistent with other agentsight
+/// caches (HTTP aggregator, response map, id resolver).
 pub fn extract_container_id_cached(pid: u32) -> Option<String> {
     let mut cache = match CONTAINER_ID_CACHE.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
 
-    // Check cache hit
     if let Some(entry) = cache.get(&pid) {
         if entry.inserted_at.elapsed() < CACHE_TTL {
             return entry.container_id.clone();
         }
     }
 
-    // Miss or expired — compute fresh value
     let result = extract_container_id(pid);
 
-    // Evict oldest entry if at capacity
-    if cache.len() >= CACHE_CAPACITY && !cache.contains_key(&pid) {
-        if let Some(&oldest_pid) = cache
-            .iter()
-            .min_by_key(|(_, e)| e.inserted_at)
-            .map(|(pid, _)| pid)
-        {
-            cache.remove(&oldest_pid);
-        }
-    }
-
-    cache.insert(
+    cache.put(
         pid,
         CacheEntry {
             container_id: result.clone(),
