@@ -62,6 +62,52 @@ impl<R: CommandRunner> RpmPackageQuery<R> {
     pub fn with_runner(runner: R) -> Self {
         Self { runner }
     }
+
+    /// List the absolute file paths an installed package owns (`rpm -q --list`).
+    ///
+    /// Used to discover the systemd unit files an RPM placed, so `anolisa
+    /// restart` can drive the services a package owns even though the RPM
+    /// install path records no `services` in state. Paths are returned verbatim
+    /// (one per `rpm` output line, blank lines dropped); the caller classifies
+    /// which are units and in which scope — this layer keeps no systemd
+    /// knowledge. Not on [`PackageQuery`]: keeping it inherent avoids touching
+    /// the trait's many fake implementations.
+    ///
+    /// # Errors
+    /// - [`PackageQueryError::CommandMissing`] when `rpm` is absent.
+    /// - [`PackageQueryError::QueryFailed`] on a non-zero exit. This includes
+    ///   "package is not installed", which for a state-tracked component is
+    ///   drift the caller should surface rather than silently treat as
+    ///   "no units".
+    pub fn list_files(&self, package: &str) -> Result<Vec<String>, PackageQueryError> {
+        let out = self
+            .runner
+            .run(RPM, &["-q", "--list", package])
+            .map_err(|e| map_spawn_error(e, RPM))?;
+
+        if out.code != Some(0) {
+            // rpm writes "is not installed" to stdout and hard errors to stderr;
+            // surface whichever is non-empty so the caller sees the real cause.
+            let detail = if out.stderr.trim().is_empty() {
+                out.stdout.clone()
+            } else {
+                out.stderr.clone()
+            };
+            return Err(PackageQueryError::QueryFailed {
+                command: RPM.to_string(),
+                code: out.code,
+                stderr: detail,
+            });
+        }
+
+        Ok(out
+            .stdout
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
 }
 
 impl<R: CommandRunner> PackageQuery for RpmPackageQuery<R> {
@@ -359,6 +405,19 @@ mod tests {
                 assert_eq!(
                     args[4], expected_package,
                     "rpm capability argument must be last: {args:?}"
+                );
+            }
+            // `rpm -q --list <pkg>` (list_files)
+            RPM if args.get(1) == Some(&"--list") => {
+                assert_eq!(
+                    args.len(),
+                    3,
+                    "rpm list needs [-q, --list, <pkg>]: {args:?}"
+                );
+                assert_eq!(args[0], "-q");
+                assert_eq!(
+                    args[2], expected_package,
+                    "rpm package argument must be last: {args:?}"
                 );
             }
             // `rpm -q --qf <fmt> <pkg>` (query_installed)
@@ -731,6 +790,59 @@ mod tests {
         assert!(matches!(
             err,
             PackageQueryError::QueryFailed { command, .. } if command == RPM
+        ));
+    }
+
+    #[test]
+    fn list_files_returns_paths() {
+        // Mixed manifest: a binary, a system unit, and a blank line. The blank
+        // line is dropped; every real path is returned verbatim (the caller,
+        // not this layer, decides which are units).
+        let manifest = "/usr/local/bin/agentsight\n\
+                        /usr/lib/systemd/system/agentsight.service\n\
+                        \n";
+        let q = query_with_rpm("agentsight", ok_out(Some(0), manifest, ""));
+        let files = q.list_files("agentsight").unwrap();
+        assert_eq!(
+            files,
+            vec![
+                "/usr/local/bin/agentsight".to_string(),
+                "/usr/lib/systemd/system/agentsight.service".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn list_files_not_installed_maps_to_error() {
+        // `rpm -ql` on an absent package exits non-zero with the notice on
+        // stdout; for a tracked component that is drift, so it must surface as
+        // an error (carrying the stdout detail), not an empty file list.
+        let q = query_with_rpm(
+            "ghost",
+            ok_out(Some(1), "package ghost is not installed", ""),
+        );
+        let err = q.list_files("ghost").unwrap_err();
+        match err {
+            PackageQueryError::QueryFailed {
+                command, stderr, ..
+            } => {
+                assert_eq!(command, RPM);
+                assert!(
+                    stderr.contains("not installed"),
+                    "detail should carry the rpm notice: {stderr}"
+                );
+            }
+            other => panic!("expected QueryFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_files_command_missing_maps_to_error() {
+        let q = query_with_rpm("x", FakeOutcome::Err(io::ErrorKind::NotFound));
+        let err = q.list_files("x").unwrap_err();
+        assert!(matches!(
+            err,
+            PackageQueryError::CommandMissing { command } if command == RPM
         ));
     }
 }
