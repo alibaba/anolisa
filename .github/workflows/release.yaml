@@ -133,7 +133,7 @@ jobs:
 
       - name: Create GitHub Release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           COMPONENT="${{ needs.package.outputs.component }}"
           VERSION="${{ needs.package.outputs.version }}"
