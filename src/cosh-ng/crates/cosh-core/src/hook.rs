@@ -90,8 +90,7 @@ pub struct PreToolUseResult {
 
 #[derive(Debug, Clone)]
 pub struct PostToolUseResult {
-    pub deny: bool,
-    pub deny_reason: Option<String>,
+    pub decision: HookDecision,
     pub additional_context: Option<String>,
     pub notifications: Vec<HookNotification>,
 }
@@ -111,8 +110,7 @@ pub struct SessionStartResult {
 
 #[derive(Debug, Clone)]
 pub struct StopResult {
-    pub reject: bool,
-    pub reject_reason: Option<String>,
+    pub decision: HookDecision,
     pub notifications: Vec<HookNotification>,
 }
 
@@ -394,8 +392,7 @@ impl HookSystem {
     ) -> PostToolUseResult {
         if !self.enabled {
             return PostToolUseResult {
-                deny: false,
-                deny_reason: None,
+                decision: HookDecision::Passthrough,
                 additional_context: None,
                 notifications: vec![],
             };
@@ -409,8 +406,7 @@ impl HookSystem {
 
         if defs.is_empty() {
             return PostToolUseResult {
-                deny: false,
-                deny_reason: None,
+                decision: HookDecision::Passthrough,
                 additional_context: None,
                 notifications: vec![],
             };
@@ -496,8 +492,7 @@ impl HookSystem {
     ) -> StopResult {
         if !self.enabled {
             return StopResult {
-                reject: false,
-                reject_reason: None,
+                decision: HookDecision::Passthrough,
                 notifications: vec![],
             };
         }
@@ -505,8 +500,7 @@ impl HookSystem {
         let defs = self.active_hooks(HookEventName::Stop);
         if defs.is_empty() {
             return StopResult {
-                reject: false,
-                reject_reason: None,
+                decision: HookDecision::Passthrough,
                 notifications: vec![],
             };
         }
@@ -767,23 +761,7 @@ impl HookSystem {
             let name = Self::hook_name(defs[i], i);
             self.collect_notifications(&out, &name, &mut notifications);
 
-            match out.decision.as_deref() {
-                Some("block") | Some("deny") => {
-                    let reason = out.reason.unwrap_or_else(|| "Blocked by hook".to_string());
-                    decision = HookDecision::Block(reason);
-                }
-                Some("ask") => {
-                    if decision == HookDecision::Passthrough || decision == HookDecision::Allow {
-                        decision = HookDecision::Ask;
-                    }
-                }
-                Some("approve") | Some("allow") => {
-                    if decision == HookDecision::Passthrough {
-                        decision = HookDecision::Allow;
-                    }
-                }
-                _ => {}
-            }
+            decision = fold_decision(decision, out.decision.as_deref(), out.reason.clone());
 
             if let Some(ref specific) = out.hook_specific_output {
                 if let Some(patch) = specific.get("tool_input") {
@@ -807,8 +785,7 @@ impl HookSystem {
         outputs: Vec<(usize, HookOutput)>,
         defs: &[&HookDefinition],
     ) -> PostToolUseResult {
-        let mut deny = false;
-        let mut deny_reason = None;
+        let mut decision = HookDecision::Passthrough;
         let mut additional_context: Option<String> = None;
         let mut notifications = Vec::new();
 
@@ -816,24 +793,12 @@ impl HookSystem {
             let name = Self::hook_name(defs[i], i);
             self.collect_notifications(&out, &name, &mut notifications);
 
-            if matches!(out.decision.as_deref(), Some("deny") | Some("block")) {
-                deny = true;
-                deny_reason = out.reason.or(deny_reason);
-            }
-
-            if let Some(ref specific) = out.hook_specific_output {
-                if let Some(ctx) = Self::pick_additional_context(specific) {
-                    additional_context = Some(match additional_context {
-                        Some(existing) => format!("{existing}\n{ctx}"),
-                        None => ctx.to_string(),
-                    });
-                }
-            }
+            decision = fold_decision(decision, out.decision.as_deref(), out.reason.clone());
+            fold_additional_context(&mut additional_context, &out.hook_specific_output);
         }
 
         PostToolUseResult {
-            deny,
-            deny_reason,
+            decision,
             additional_context,
             notifications,
         }
@@ -852,22 +817,8 @@ impl HookSystem {
             let name = Self::hook_name(defs[i], i);
             self.collect_notifications(&out, &name, &mut notifications);
 
-            match out.decision.as_deref() {
-                Some("block") | Some("deny") => {
-                    let reason = out.reason.unwrap_or_else(|| "Blocked by hook".to_string());
-                    decision = HookDecision::Block(reason);
-                }
-                _ => {}
-            }
-
-            if let Some(ref specific) = out.hook_specific_output {
-                if let Some(ctx) = Self::pick_additional_context(specific) {
-                    additional_context = Some(match additional_context {
-                        Some(existing) => format!("{existing}\n{ctx}"),
-                        None => ctx.to_string(),
-                    });
-                }
-            }
+            decision = fold_decision(decision, out.decision.as_deref(), out.reason.clone());
+            fold_additional_context(&mut additional_context, &out.hook_specific_output);
         }
 
         UserPromptResult {
@@ -889,14 +840,7 @@ impl HookSystem {
             let name = Self::hook_name(defs[i], i);
             self.collect_notifications(&out, &name, &mut notifications);
 
-            if let Some(ref specific) = out.hook_specific_output {
-                if let Some(ctx) = Self::pick_additional_context(specific) {
-                    additional_context = Some(match additional_context {
-                        Some(existing) => format!("{existing}\n{ctx}"),
-                        None => ctx.to_string(),
-                    });
-                }
-            }
+            fold_additional_context(&mut additional_context, &out.hook_specific_output);
         }
 
         SessionStartResult {
@@ -910,23 +854,18 @@ impl HookSystem {
         outputs: Vec<(usize, HookOutput)>,
         defs: &[&HookDefinition],
     ) -> StopResult {
-        let mut reject = false;
-        let mut reject_reason = None;
+        let mut decision = HookDecision::Passthrough;
         let mut notifications = Vec::new();
 
         for (i, out) in outputs {
             let name = Self::hook_name(defs[i], i);
             self.collect_notifications(&out, &name, &mut notifications);
 
-            if matches!(out.decision.as_deref(), Some("deny") | Some("block") | Some("reject")) {
-                reject = true;
-                reject_reason = out.reason.or(reject_reason);
-            }
+            decision = fold_decision(decision, out.decision.as_deref(), out.reason.clone());
         }
 
         StopResult {
-            reject,
-            reject_reason,
+            decision,
             notifications,
         }
     }
@@ -971,6 +910,49 @@ fn merge_json(a: Value, b: Value) -> Value {
 /// Public re-export of merge_json for use in core.rs.
 pub fn merge_json_pub(a: Value, b: Value) -> Value {
     merge_json(a, b)
+}
+
+// ─── Decision Aggregation Primitives ─────────────────────────────────
+
+/// Fold a raw hook output decision string into the running `HookDecision`.
+///
+/// Priority (highest wins): Block > Ask > Allow > Passthrough.
+/// "reject" is treated as equivalent to "block"/"deny" (used by Stop hooks).
+fn fold_decision(current: HookDecision, raw: Option<&str>, reason: Option<String>) -> HookDecision {
+    match raw {
+        Some("block") | Some("deny") | Some("reject") => {
+            // Preserve the first non-empty block reason; don't let a later
+            // hook without a reason overwrite an existing detailed message.
+            match (&current, &reason) {
+                (HookDecision::Block(_), None) => current,
+                _ => HookDecision::Block(
+                    reason.unwrap_or_else(|| "Blocked by hook".to_string()),
+                ),
+            }
+        }
+        Some("ask") => match current {
+            HookDecision::Block(_) => current,
+            _ => HookDecision::Ask,
+        },
+        Some("approve") | Some("allow") => match current {
+            HookDecision::Passthrough => HookDecision::Allow,
+            _ => current,
+        },
+        _ => current,
+    }
+}
+
+/// Extract `additionalContext` from `hook_specific_output` and append-merge
+/// into the running accumulator.
+fn fold_additional_context(current: &mut Option<String>, specific: &Option<Value>) {
+    if let Some(ref specific) = specific {
+        if let Some(ctx) = HookSystem::pick_additional_context(specific) {
+            *current = Some(match current.take() {
+                Some(existing) => format!("{existing}\n{ctx}"),
+                None => ctx.to_string(),
+            });
+        }
+    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────

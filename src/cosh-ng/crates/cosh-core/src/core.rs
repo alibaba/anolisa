@@ -392,10 +392,7 @@ impl CoshCore {
                     .fire_stop(&self.session_id, &cwd_str, &text_buf)
                     .await;
                 self.emit_hook_notifications(writer, &stop_result.notifications, None);
-                if stop_result.reject {
-                    let reason = stop_result
-                        .reject_reason
-                        .unwrap_or_else(|| "rejected by hook".to_string());
+                if let HookDecision::Block(reason) = &stop_result.decision {
                     self.messages.push(Message::assistant(&text_buf));
                     self.messages.push(Message::user(&format!(
                         "[Hook rejected response] {reason}. Please revise your answer."
@@ -608,10 +605,7 @@ impl CoshCore {
                     .await;
                 self.emit_hook_notifications(writer, &post_hook.notifications, Some(&tc.id));
 
-                let result = if post_hook.deny {
-                    let reason = post_hook
-                        .deny_reason
-                        .unwrap_or_else(|| "denied by hook".to_string());
+                let result = if let HookDecision::Block(reason) = &post_hook.decision {
                     ToolResult::error(format!("Post-tool hook denied: {reason}"))
                 } else if let Some(ref extra) = post_hook.additional_context {
                     ToolResult {
