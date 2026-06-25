@@ -67,6 +67,11 @@ pub(crate) fn render_question_answer_actions<W: Write>(
             continue;
         }
 
+        // Skip if auth panel is active — let render_auth_card_actions handle it
+        if state.auth.state.is_some() {
+            continue;
+        }
+
         let Some(answer_run) =
             agent_request_from_pending_question_answer(event, event_index, state)
         else {

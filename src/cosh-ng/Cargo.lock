@@ -421,7 +421,7 @@ name = "cosh-shell"
 version = "0.10.0"
 dependencies = [
  "nix",
- "qr2term",
+ "qrcode",
  "ratatui",
  "serde",
  "serde_json",
@@ -1623,16 +1623,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "qr2term"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6867c60b38e9747a079a19614dbb5981a53f21b9a56c265f3bfdf6011a50a957"
-dependencies = [
- "crossterm",
- "qrcode",
 ]
 
 [[package]]
