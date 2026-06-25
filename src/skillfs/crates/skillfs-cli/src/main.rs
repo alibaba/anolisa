@@ -664,30 +664,6 @@ async fn cmd_mount(
             }),
     };
 
-    // Hermes layout compatibility gates.
-    //
-    // H2 allows hermes + --security + --activation-mode file so nested
-    // skill leaves can participate in activation-file mode and notify.
-    // --decision-command and --control-socket remain incompatible because
-    // the external protocols do not accept slash-containing skill ids.
-    if skill_layout == Some(skillfs_fuse::SkillLayout::Hermes) {
-        if let Some(ref cmd) = decision_command {
-            return Err(format!(
-                "--skill-layout hermes is incompatible with \
-                 --decision-command '{}' (the external decision protocol \
-                 does not accept slash-containing skill ids)",
-                cmd
-            )
-            .into());
-        }
-        if control_socket.is_some() {
-            return Err("--skill-layout hermes is incompatible with \
-                 --control-socket (control socket skill-name validation \
-                 does not accept nested ids)"
-                .into());
-        }
-    }
-
     // Parse reload mode: CLI flag (if present) overrides config file.
     let reload_mode = match activation_reload_mode_raw.as_deref() {
         Some(raw) => ReloadMode::parse(raw).ok_or_else(|| {
@@ -749,6 +725,19 @@ async fn cmd_mount(
         }
         None => None,
     };
+
+    // Hermes + decision-command gate (post config merge).
+    //
+    // The external decision protocol does not accept slash-containing
+    // skill ids, so hermes nested skills cannot use --decision-command.
+    // This gate runs after both CLI and config-file values are merged.
+    if skill_layout == Some(skillfs_fuse::SkillLayout::Hermes) && parsed_decision_command.is_some()
+    {
+        return Err("--skill-layout hermes is incompatible with \
+                 --decision-command (the external decision protocol \
+                 does not accept slash-containing skill ids)"
+            .into());
+    }
 
     // Activation source validation:
     //   --security + --decision-command           => scan -> resolve path
@@ -1687,6 +1676,17 @@ async fn cmd_mount(
             .into());
         }
         _ => {}
+    }
+
+    // Hermes + control-socket gate (post config merge).
+    //
+    // Control socket skill-name validation does not accept nested ids.
+    // This gate runs after both CLI and config-file values are merged.
+    if skill_layout == Some(skillfs_fuse::SkillLayout::Hermes) && control_socket.is_some() {
+        return Err("--skill-layout hermes is incompatible with \
+                 --control-socket (control socket skill-name validation \
+                 does not accept nested ids)"
+            .into());
     }
 
     // Build ControlSocketConfig when both are set.
