@@ -188,7 +188,7 @@ fn gather_sessions(path: &Path, start_ns: i64, end_ns: i64) -> SessionStats {
             return SessionStats::default();
         }
     };
-    let sessions = match store.list_sessions(start_ns, end_ns) {
+    let sessions = match store.list_sessions(start_ns, end_ns, true) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("warning: cannot query sessions: {e}");

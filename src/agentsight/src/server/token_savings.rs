@@ -171,22 +171,18 @@ fn generate_optimization_reason(operation: &str, before_tokens: i64, after_token
     };
     match operation {
         "compress-response" => format!(
-            "MCP 服务器返回的响应内容经过压缩处理，移除冗余字段和重复信息，节省 {}%（{} tokens）",
-            pct, saved
+            "MCP 服务器返回的响应内容经过压缩处理，移除冗余字段和重复信息，节省 {pct}%（{saved} tokens）"
         ),
         "rewrite-command" => format!(
-            "工具调用的输出内容经过精简重写，保留关键语义同时降低 token 开销，节省 {}%（{} tokens）",
-            pct, saved
+            "工具调用的输出内容经过精简重写，保留关键语义同时降低 token 开销，节省 {pct}%（{saved} tokens）"
         ),
         "compress-schema" => format!(
-            "工具的 JSON Schema 定义经过压缩，移除描述性文本和可选字段，节省 {}%（{} tokens）",
-            pct, saved
+            "工具的 JSON Schema 定义经过压缩，移除描述性文本和可选字段，节省 {pct}%（{saved} tokens）"
         ),
         "compress-toon" => format!(
-            "使用 TOON 结构化编码替代原始 JSON，大幅缩减 token 占用，节省 {}%（{} tokens）",
-            pct, saved
+            "使用 TOON 结构化编码替代原始 JSON，大幅缩减 token 占用，节省 {pct}%（{saved} tokens）"
         ),
-        _ => format!("内容经过优化处理，节省 {}%（{} tokens）", pct, saved),
+        _ => format!("内容经过优化处理，节省 {pct}%（{saved} tokens）"),
     }
 }
 
@@ -1139,11 +1135,11 @@ mod tests {
     #[test]
     fn test_diff_large_input_fallback() {
         let big_before = (0..1200)
-            .map(|i| format!("line{}", i))
+            .map(|i| format!("line{i}"))
             .collect::<Vec<_>>()
             .join("\n");
         let big_after = (0..1000)
-            .map(|i| format!("new{}", i))
+            .map(|i| format!("new{i}"))
             .collect::<Vec<_>>()
             .join("\n");
         let result = compute_diff_lines(Some(&big_before), Some(&big_after));
@@ -1163,11 +1159,11 @@ mod tests {
     fn test_diff_max_lines_cap() {
         // Create input that would generate many diff lines
         let before = (0..150)
-            .map(|i| format!("old_{}", i))
+            .map(|i| format!("old_{i}"))
             .collect::<Vec<_>>()
             .join("\n");
         let after = (0..150)
-            .map(|i| format!("new_{}", i))
+            .map(|i| format!("new_{i}"))
             .collect::<Vec<_>>()
             .join("\n");
         let result = compute_diff_lines(Some(&before), Some(&after));

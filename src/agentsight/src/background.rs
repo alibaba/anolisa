@@ -54,17 +54,18 @@ pub(crate) fn path_matches_target(paths: &[PathBuf], target: &Option<OsString>) 
 /// Decision produced by [`decide_sls_config_change`]: what the config watcher
 /// should do in response to a parsed `runtime.sls_logtail_path` value.
 ///
-/// Side effects (process exit, exporter construction, mailbox write, dynamic
-/// logtail-path update) are carried out by the thread shell so the decision
-/// logic stays pure and testable.
+/// Side effects (exporter construction, mailbox write, dynamic logtail-path
+/// update) are carried out by the thread shell so the decision logic stays
+/// pure and testable.
 #[derive(Debug, PartialEq)]
 pub(crate) enum SlsConfigAction {
     /// Field missing / parse error, or empty path while already inactive: no-op.
     NoChange,
     /// Empty path while active: SLS was just deactivated (dynamic path cleared).
     Deactivated,
-    /// Non-empty path but uid fetch failed: the shell must abort the process.
-    AbortUidMissing,
+    /// Non-empty path but uid fetch failed: SLS activation deferred until
+    /// the next config event (when the metadata endpoint may be reachable).
+    UidUnavailable,
     /// Non-empty path, first activation: shell should build a LogtailExporter for
     /// `path` and deposit it into the mailbox.
     Activate { path: String },
@@ -97,7 +98,7 @@ pub(crate) fn decide_sls_config_change(
         }
         Some(Some(new_path)) => {
             if uid.is_empty() {
-                return SlsConfigAction::AbortUidMissing;
+                return SlsConfigAction::UidUnavailable;
             }
             if !sls_activated.swap(true, Ordering::SeqCst) {
                 SlsConfigAction::Activate { path: new_path }
@@ -113,10 +114,9 @@ pub(crate) fn decide_sls_config_change(
 /// process-global dynamic logtail path, and on first activation build a
 /// LogtailExporter and deposit it into the mailbox).
 ///
-/// Returns the [`SlsConfigAction`] so the thread shell can perform the only
-/// non-testable action (`process::exit` on uid failure). `fetch_uid` is injected
+/// Returns the [`SlsConfigAction`] for logging/tracing. `fetch_uid` is injected
 /// so tests can supply a uid without invoking `get_owner_account_id`, which
-/// blocks on ECS metadata and would `process::exit` the test harness.
+/// blocks on ECS metadata.
 pub(crate) fn handle_config_event(
     content: &str,
     sls_activated: &AtomicBool,
@@ -140,10 +140,10 @@ pub(crate) fn handle_config_event(
                  (runtime.sls_logtail_path cleared)"
             );
         }
-        SlsConfigAction::AbortUidMissing => {
-            log::error!(
-                "Config watcher: SLS activation requested but uid fetch failed. \
-                 Terminating process."
+        SlsConfigAction::UidUnavailable => {
+            log::warn!(
+                "Config watcher: SLS activation deferred — uid fetch failed \
+                 (metadata endpoint unreachable). Will retry on next config event."
             );
         }
         SlsConfigAction::Activate { path } => {
@@ -234,9 +234,9 @@ pub(crate) fn start_config_watcher(
                     trace_enabled,
                     &pending_logtail,
                 );
-                if action == SlsConfigAction::AbortUidMissing {
-                    std::process::exit(1);
-                }
+                // UidUnavailable is logged inside handle_config_event;
+                // the process continues and retries on the next config event.
+                let _ = action;
             }
 
             log::info!("Config watcher exiting");
@@ -757,11 +757,11 @@ mod tests {
     }
 
     #[test]
-    fn test_decide_sls_path_but_no_uid_aborts() {
+    fn test_decide_sls_path_but_no_uid_defers() {
         let flag = AtomicBool::new(false);
         assert_eq!(
             decide_sls_config_change(Some(Some("/p.log".into())), &flag, ""),
-            SlsConfigAction::AbortUidMissing
+            SlsConfigAction::UidUnavailable
         );
         // Flag must NOT be set when uid is missing.
         assert!(!flag.load(Ordering::SeqCst));
@@ -1119,10 +1119,10 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_event_abort_when_uid_missing() {
+    fn test_handle_event_defers_when_uid_missing() {
         let flag = AtomicBool::new(false);
         let mailbox = empty_mailbox();
-        // Non-empty path but uid fetch returns empty -> AbortUidMissing.
+        // Non-empty path but uid fetch returns empty -> UidUnavailable.
         let action = handle_config_event(
             r#"{"runtime":{"sls_logtail_path":"/p.log"}}"#,
             &flag,
@@ -1131,7 +1131,7 @@ mod tests {
             false,
             &mailbox,
         );
-        assert_eq!(action, SlsConfigAction::AbortUidMissing);
+        assert_eq!(action, SlsConfigAction::UidUnavailable);
         // No exporter built, flag not set.
         assert!(mailbox.lock().unwrap().is_none());
         assert!(!flag.load(Ordering::SeqCst));
