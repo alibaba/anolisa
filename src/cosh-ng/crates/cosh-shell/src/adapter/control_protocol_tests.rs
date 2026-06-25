@@ -124,6 +124,7 @@ fn parse_shell_evidence_read_output() {
                     output_id,
                     direction,
                     lines,
+                    bypass_recent_filter,
                 },
         } => {
             assert_eq!(request_id, "evidence-2");
@@ -131,6 +132,7 @@ fn parse_shell_evidence_read_output() {
             assert_eq!(output_id, "terminal-output://raw-session-a1b2/cmd-1");
             assert_eq!(direction, ShellOutputDirection::Head);
             assert_eq!(lines, 12);
+            assert!(!bypass_recent_filter);
         }
         _ => panic!("expected ShellEvidence read_output"),
     }
@@ -144,14 +146,51 @@ fn parse_shell_evidence_read_output_defaults_optional_fields() {
         ControlRequest::ShellEvidence {
             action:
                 ShellEvidenceAction::ReadOutput {
-                    direction, lines, ..
+                    direction,
+                    lines,
+                    bypass_recent_filter,
+                    ..
                 },
             ..
         } => {
             assert_eq!(direction, ShellOutputDirection::Tail);
             assert_eq!(lines, 120);
+            assert!(!bypass_recent_filter);
         }
         _ => panic!("expected ShellEvidence read_output"),
+    }
+}
+
+#[test]
+fn parse_shell_evidence_read_output_bypass_recent_filter() {
+    let line = r#"{"type":"control_request","request_id":"evidence-2","request":{"subtype":"shell_evidence","tool_use_id":"toolu_def","action":"read_output","output_id":"terminal-output://raw-session-a1b2/cmd-1","bypass_recent_filter":true}}"#;
+    let req = parse_control_request(line).expect("should parse");
+    match req {
+        ControlRequest::ShellEvidence {
+            action:
+                ShellEvidenceAction::ReadOutput {
+                    bypass_recent_filter,
+                    ..
+                },
+            ..
+        } => assert!(bypass_recent_filter),
+        _ => panic!("expected ShellEvidence read_output"),
+    }
+}
+
+#[test]
+fn parse_shell_evidence_list_commands_ignores_direction_hint() {
+    let line = r#"{"type":"control_request","request_id":"evidence-1","request":{"subtype":"shell_evidence","tool_use_id":"toolu_abc","action":"list_commands","direction":"tail","limit":10}}"#;
+    let req = parse_control_request(line).expect("should parse");
+    match req {
+        ControlRequest::ShellEvidence {
+            action: ShellEvidenceAction::ListCommands { limit, cursor },
+            ..
+        } => {
+            assert_eq!(limit, 10);
+            assert_eq!(cursor, None);
+        }
+        _ => panic!("expected ShellEvidence list_commands"),
     }
 }
 
@@ -182,11 +221,11 @@ fn parse_shell_evidence_rejects_invalid_action_family() {
     )
     .is_none());
     assert!(parse_control_request(
-        r#"{"type":"control_request","request_id":"evidence-1","request":{"subtype":"shell_evidence","tool_use_id":"toolu_abc","action":"list_commands","direction":"tail"}}"#
+        r#"{"type":"control_request","request_id":"evidence-1","request":{"subtype":"shell_evidence","tool_use_id":"toolu_abc","action":"list_commands","lines":120}}"#
     )
     .is_none());
     assert!(parse_control_request(
-        r#"{"type":"control_request","request_id":"evidence-1","request":{"subtype":"shell_evidence","tool_use_id":"toolu_abc","action":"list_commands","lines":120}}"#
+        r#"{"type":"control_request","request_id":"evidence-1","request":{"subtype":"shell_evidence","tool_use_id":"toolu_abc","action":"list_commands","bypass_recent_filter":true}}"#
     )
     .is_none());
     assert!(parse_control_request(
@@ -207,6 +246,10 @@ fn parse_shell_evidence_rejects_invalid_action_family() {
     .is_none());
     assert!(parse_control_request(
         r#"{"type":"control_request","request_id":"evidence-1","request":{"subtype":"shell_evidence","tool_use_id":"toolu_abc","action":"read_output","output_id":"terminal-output://raw-session/cmd-1","lines":"many"}}"#
+    )
+    .is_none());
+    assert!(parse_control_request(
+        r#"{"type":"control_request","request_id":"evidence-1","request":{"subtype":"shell_evidence","tool_use_id":"toolu_abc","action":"read_output","output_id":"terminal-output://raw-session/cmd-1","bypass_recent_filter":"yes"}}"#
     )
     .is_none());
 }

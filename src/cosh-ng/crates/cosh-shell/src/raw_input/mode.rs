@@ -10,6 +10,7 @@ pub enum RawObserverAction {
     DelayShellOutput,
     CaptureInput(RawInputCapture),
     EmitToPty(ShellHandoffRequest),
+    EmitToPtyWithPromptRestore(ShellHandoffRequest),
     InterruptForeground,
     RestorePrompt { ghost_text: Option<String> },
 }
@@ -89,6 +90,7 @@ pub(crate) fn update_input_mode(input_mode: &Arc<Mutex<RawInputMode>>, action: &
         } => RawInputMode::PromptGhost(text.clone()),
         RawObserverAction::Continue
         | RawObserverAction::EmitToPty(_)
+        | RawObserverAction::EmitToPtyWithPromptRestore(_)
         | RawObserverAction::InterruptForeground
         | RawObserverAction::RestorePrompt { ghost_text: None } => RawInputMode::Passthrough,
     };

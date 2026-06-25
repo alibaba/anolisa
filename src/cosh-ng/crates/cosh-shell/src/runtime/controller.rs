@@ -37,6 +37,11 @@ fn render_raw_inline_events<W: Write>(
         .shell_handoff_mut()
         .emit_next_approved()
     {
+        if inline_state.trigger_pty_prompt {
+            inline_state.trigger_pty_prompt = false;
+            inline_state.pending_input_ghost = None;
+            return Ok(RawObserverAction::EmitToPtyWithPromptRestore(request));
+        }
         return Ok(RawObserverAction::EmitToPty(request));
     }
     if let Some(capture) = pending_card_capture(inline_state) {
@@ -328,6 +333,36 @@ mod tests {
                 .expect("keep handoff foreground protected");
 
         assert_eq!(second_action, RawObserverAction::RawPassthrough);
+    }
+
+    #[test]
+    fn pending_shell_handoff_restores_prompt_with_first_emit() {
+        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+        let mut state = InlineState::default();
+        state.trigger_pty_prompt = true;
+        let request = ShellHandoffRequest::new(
+            "echo approved",
+            "$ echo approved",
+            "approved_provider_shell_tool",
+            "user",
+            "req-approved",
+            "run-approved",
+            1,
+        )
+        .expect("handoff request");
+        state
+            .control
+            .shell_handoff_mut()
+            .enqueue_approved_request(request.clone());
+        let mut output = Vec::new();
+
+        let action = render_raw_inline_events(&[], &mut output, &adapter, "zsh", &mut state)
+            .expect("emit handoff with prompt restore");
+
+        assert_eq!(
+            action,
+            RawObserverAction::EmitToPtyWithPromptRestore(request)
+        );
     }
 
     #[test]

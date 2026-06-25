@@ -151,6 +151,7 @@ impl StartupHealthState {
 #[derive(Default)]
 pub(crate) struct ShellEvidenceState {
     pub(crate) last_action: Option<ShellEvidenceActionRecord>,
+    recent_shell_tool_outputs: VecDeque<RecentShellToolOutput>,
 }
 
 #[derive(Debug, Clone)]
@@ -162,6 +163,212 @@ pub(crate) struct ShellEvidenceActionRecord {
     pub(crate) output_id: Option<String>,
     pub(crate) status: String,
     pub(crate) failure_reason: Option<String>,
+}
+
+pub(crate) const RECENT_SHELL_TOOL_OUTPUT_WINDOW: usize = 5;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecentShellToolOutput {
+    pub(crate) output_id: String,
+    pub(crate) run_id: Option<String>,
+    pub(crate) coverage: EvidenceCoverage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EvidenceCoverage {
+    Summary,
+    Excerpt { direction: String, lines: u16 },
+}
+
+impl ShellEvidenceState {
+    pub(crate) fn clear_recent_shell_tool_outputs(&mut self) {
+        self.recent_shell_tool_outputs.clear();
+    }
+
+    pub(crate) fn record_host_executed_shell_output(
+        &mut self,
+        output_id: String,
+        run_id: Option<String>,
+    ) {
+        self.push_recent_shell_tool_output(output_id, run_id, EvidenceCoverage::Summary);
+    }
+
+    pub(crate) fn record_shell_evidence_read_output(
+        &mut self,
+        output_id: String,
+        run_id: Option<String>,
+        direction: String,
+        lines: u16,
+    ) {
+        self.push_recent_shell_tool_output(
+            output_id,
+            run_id,
+            EvidenceCoverage::Excerpt { direction, lines },
+        );
+    }
+
+    pub(crate) fn read_output_recently_delivered(
+        &self,
+        output_id: &str,
+        run_id: Option<&str>,
+        direction: &str,
+        lines: u16,
+    ) -> bool {
+        self.recent_shell_tool_outputs.iter().rev().any(|record| {
+            record.output_id == output_id
+                && record
+                    .run_id
+                    .as_deref()
+                    .map_or(true, |record_run_id| Some(record_run_id) == run_id)
+                && record.coverage.covers(direction, lines)
+        })
+    }
+
+    fn push_recent_shell_tool_output(
+        &mut self,
+        output_id: String,
+        run_id: Option<String>,
+        coverage: EvidenceCoverage,
+    ) {
+        self.recent_shell_tool_outputs
+            .push_back(RecentShellToolOutput {
+                output_id,
+                run_id,
+                coverage,
+            });
+        while self.recent_shell_tool_outputs.len() > RECENT_SHELL_TOOL_OUTPUT_WINDOW {
+            self.recent_shell_tool_outputs.pop_front();
+        }
+    }
+}
+
+impl EvidenceCoverage {
+    fn covers(&self, direction: &str, lines: u16) -> bool {
+        match self {
+            Self::Summary => true,
+            Self::Excerpt {
+                direction: delivered_direction,
+                lines: delivered_lines,
+            } => delivered_direction == direction && *delivered_lines >= lines,
+        }
+    }
+}
+
+#[cfg(test)]
+mod shell_evidence_recent_tests {
+    use super::*;
+
+    #[test]
+    fn recent_shell_evidence_summary_suppresses_same_tail_read() {
+        let mut state = ShellEvidenceState::default();
+        state.record_host_executed_shell_output(
+            "terminal-output://session-1/cmd-1".to_string(),
+            Some("run-1".to_string()),
+        );
+
+        assert!(state.read_output_recently_delivered(
+            "terminal-output://session-1/cmd-1",
+            Some("run-1"),
+            "tail",
+            120,
+        ));
+    }
+
+    #[test]
+    fn recent_shell_evidence_allows_expansion_and_run_miss() {
+        let mut state = ShellEvidenceState::default();
+        state.record_shell_evidence_read_output(
+            "terminal-output://session-1/cmd-1".to_string(),
+            Some("run-1".to_string()),
+            "tail".to_string(),
+            80,
+        );
+
+        assert!(!state.read_output_recently_delivered(
+            "terminal-output://session-1/cmd-1",
+            Some("run-1"),
+            "tail",
+            120,
+        ));
+        assert!(!state.read_output_recently_delivered(
+            "terminal-output://session-1/cmd-1",
+            Some("run-2"),
+            "tail",
+            120,
+        ));
+    }
+
+    #[test]
+    fn recent_shell_evidence_summary_suppresses_default_read_even_when_incomplete() {
+        let mut state = ShellEvidenceState::default();
+        state.record_host_executed_shell_output(
+            "terminal-output://session-1/cmd-1".to_string(),
+            Some("run-1".to_string()),
+        );
+
+        assert!(state.read_output_recently_delivered(
+            "terminal-output://session-1/cmd-1",
+            Some("run-1"),
+            "tail",
+            120,
+        ));
+    }
+
+    #[test]
+    fn recent_shell_evidence_excerpt_coverage_controls_suppression() {
+        let mut state = ShellEvidenceState::default();
+        state.record_shell_evidence_read_output(
+            "terminal-output://session-1/cmd-1".to_string(),
+            Some("run-1".to_string()),
+            "tail".to_string(),
+            80,
+        );
+
+        assert!(state.read_output_recently_delivered(
+            "terminal-output://session-1/cmd-1",
+            Some("run-1"),
+            "tail",
+            40,
+        ));
+        assert!(!state.read_output_recently_delivered(
+            "terminal-output://session-1/cmd-1",
+            Some("run-1"),
+            "tail",
+            120,
+        ));
+    }
+
+    #[test]
+    fn recent_shell_evidence_window_evicts_oldest_and_clear_resets() {
+        let mut state = ShellEvidenceState::default();
+        for index in 1..=RECENT_SHELL_TOOL_OUTPUT_WINDOW + 1 {
+            state.record_host_executed_shell_output(
+                format!("terminal-output://session-1/cmd-{index}"),
+                Some("run-1".to_string()),
+            );
+        }
+
+        assert!(!state.read_output_recently_delivered(
+            "terminal-output://session-1/cmd-1",
+            Some("run-1"),
+            "tail",
+            120,
+        ));
+        assert!(state.read_output_recently_delivered(
+            "terminal-output://session-1/cmd-6",
+            Some("run-1"),
+            "tail",
+            120,
+        ));
+
+        state.clear_recent_shell_tool_outputs();
+        assert!(!state.read_output_recently_delivered(
+            "terminal-output://session-1/cmd-6",
+            Some("run-1"),
+            "tail",
+            120,
+        ));
+    }
 }
 
 #[derive(Default)]

@@ -59,6 +59,7 @@ pub enum ShellEvidenceAction {
         output_id: String,
         direction: ShellOutputDirection,
         lines: u16,
+        bypass_recent_filter: bool,
     },
 }
 
@@ -377,8 +378,8 @@ pub fn parse_control_request(line: &str) -> Option<ControlRequest> {
             let action = match request.get("action")?.as_str()? {
                 "list_commands" => {
                     if request.get("output_id").is_some()
-                        || request.get("direction").is_some()
                         || request.get("lines").is_some()
+                        || request.get("bypass_recent_filter").is_some()
                     {
                         return None;
                     }
@@ -394,10 +395,12 @@ pub fn parse_control_request(line: &str) -> Option<ControlRequest> {
                     }
                     let direction = parse_shell_output_direction(request)?;
                     let lines = parse_shell_output_lines(request)?;
+                    let bypass_recent_filter = parse_bypass_recent_filter(request)?;
                     ShellEvidenceAction::ReadOutput {
                         output_id,
                         direction,
                         lines,
+                        bypass_recent_filter,
                     }
                 }
                 _ => return None,
@@ -433,6 +436,13 @@ fn parse_shell_output_lines(request: &Value) -> Option<u16> {
         return None;
     }
     Some(lines.min(300) as u16)
+}
+
+fn parse_bypass_recent_filter(request: &Value) -> Option<bool> {
+    match request.get("bypass_recent_filter") {
+        Some(value) => value.as_bool(),
+        None => Some(false),
+    }
 }
 
 fn parse_shell_evidence_list_limit(request: &Value) -> Option<u16> {

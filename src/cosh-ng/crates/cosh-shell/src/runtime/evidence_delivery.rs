@@ -18,6 +18,20 @@ pub(crate) fn record_shell_handoff_completion(
     if delivery.delivered {
         state.agent_run.native_prompt_after_run = true;
         state.agent_run.host_executed_shell_result_delivered = true;
+        if evidence.terminal_output_ref.is_some() {
+            let output_id = crate::evidence::output_policy::terminal_output_id(
+                &evidence.shell_session_id,
+                &evidence.command_block_id,
+            );
+            let run_id = state
+                .agent_run
+                .active
+                .as_ref()
+                .map(|run| run.request.id.clone());
+            state
+                .shell_evidence
+                .record_host_executed_shell_output(output_id, run_id);
+        }
     }
     evidence.apply_provider_result_delivery(delivery);
     state

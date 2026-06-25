@@ -55,7 +55,8 @@ fn trigger_evidence_prompt(
                 "Continue the same Shell-first Agent session using this tool result.\n\
                  The native shell transcript has already printed the command and stdout/stderr. \
                  The tool_result payload is a bounded model view: use preview/ref fields, do not \
-                 assume it contains the full output. \
+                 assume it contains the full output. Use this tool_result first; call cosh_shell_evidence \
+                 only if this bounded view is missing output needed for the answer. \
                  Any earlier pre-approval prose in this same session is obsolete. \
                  Analyze only the result below. Do not repeat that approval was needed, do not list \
                  commands for the user to run manually, do not describe pre-approval steps, and \
@@ -81,8 +82,9 @@ fn trigger_evidence_prompt(
             )
         } else if input.starts_with("ShellEvidenceExcerpt\n") {
             format!(
-                "Continue the same Shell-first Agent session using this user-requested shell evidence excerpt.\n\
+                 "Continue the same Shell-first Agent session using this user-requested shell evidence excerpt.\n\
                  The excerpt is bounded and may not contain the full command output. \
+                 Use this excerpt first; call cosh_shell_evidence only for an older output or a different/larger missing slice. \
                  terminal-output:// refs are cosh-shell evidence ids, not files; do not use provider file tools to read them. {output_access} \
                  Do not execute follow-up commands automatically unless the user asks for further live inspection.\n\
                  Do not mention Claude Code, plan mode, implementation status, or internal workflow.\n\n\
@@ -123,7 +125,7 @@ fn trigger_evidence_prompt(
         let command_facts = provider_safe_command_facts(&request.command_block);
         format!(
             "Analyze this failed shell command for a Shell-first assistant.\n\
-             Use the included bounded shell context and output id; terminal-output:// refs are \
+             Use the included bounded shell context and output id as an evidence bookmark; terminal-output:// refs are \
              not files and must not be read with provider file tools. {output_access} Then explain the failure and suggest fixes. \
              cosh-shell has an approval system that reviews every tool request.\n\
              Do not mention Claude Code, plan mode, implementation status, or internal workflow.\n\n\
@@ -228,7 +230,7 @@ fn output_access_instruction(
     }
     match access {
         ShellEvidenceAccess::ControlProtocolTool => {
-            "To list recorded shell commands or inspect captured output, call cosh_shell_evidence with action=list_commands or action=read_output. For diagnostics, failures, output analysis, or status checks, read relevant outputs before making result claims, up to 3 outputs per answer; do not call read_output for commands whose facts show no output_id, output_available=false, or output_bytes=0. For activity recaps or command lists, use command facts only."
+            "Use current tool results first. Use cosh_shell_evidence only for older shell ledger output or missing output coverage: action=list_commands lists command facts, action=read_output returns a bounded excerpt. Do not call read_output for commands whose facts show no output_id, output_available=false, or output_bytes=0. For activity recaps or command lists, use command facts only."
         }
         ShellEvidenceAccess::FencedRequestFallback => {
             "For more captured output, emit exactly one fenced cosh-request block: ```cosh-request\noutput <output_id> tail\nlines <n>\n```."
@@ -255,7 +257,7 @@ fn history_access_instruction(
     }
     match access {
         ShellEvidenceAccess::ControlProtocolTool => {
-            "Recent shell history is not included by default. If prior commands are needed, call cosh_shell_evidence with action=list_commands. For diagnostics, failures, output analysis, or status checks, read relevant outputs before making result claims, up to 3 outputs per answer; do not call read_output for commands whose facts show no output_id, output_available=false, or output_bytes=0. For activity recaps or command lists, use command facts only."
+            "Use current tool results first. Recent shell history is not included by default. If prior commands are needed, call cosh_shell_evidence with action=list_commands. Use read_output only for older shell ledger output or missing output coverage; do not call it again for current tool results. Do not call read_output for commands whose facts show no output_id, output_available=false, or output_bytes=0. For activity recaps or command lists, use command facts only."
         }
         ShellEvidenceAccess::FencedRequestFallback => {
             "Recent shell history is not included by default. If prior commands are needed, emit exactly one fenced cosh-request block: ```cosh-request\nhistory\n```."

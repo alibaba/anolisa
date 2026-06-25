@@ -97,6 +97,158 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
 }
 
 #[test]
+fn raw_cli_cosh_core_duplicate_read_after_host_executed_is_already_delivered() {
+    let home = temp_shell_home("cosh-core-shell-evidence-duplicate-read");
+    let bin_dir = home.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let cosh_core_path = bin_dir.join("cosh-core");
+    write_executable(
+        &cosh_core_path,
+        r#"#!/bin/sh
+read -r init
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true,"can_handle_shell_evidence_tool":true}}}}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-duplicate-read","model":"cosh-core-test"}'
+read -r user_message
+printf '%s\n' '{"type":"control_request","request_id":"ctrl-duplicate-read","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"i=1; while [ $i -le 120 ]; do printf \"duplicate-read-line-%03d xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n\" \"$i\"; i=$((i+1)); done"},"tool_use_id":"toolu-duplicate-read"}}'
+IFS= read -r response1 || exit 2
+case "$response1" in
+  *'"behavior":"host_executed_shell"'*'ShellCommandCompleted evidence'*'output_id: terminal-output://raw-session-'*) ;;
+  *) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-duplicate-read","is_error":true,"result":"missing host-executed output id"}'; exit 1 ;;
+esac
+output_tail=${response1#*output_id: }
+output_id=${output_tail%%\\n*}
+printf '%s\n' "{\"type\":\"control_request\",\"request_id\":\"evidence-duplicate-read\",\"request\":{\"subtype\":\"shell_evidence\",\"tool_use_id\":\"toolu-evidence-duplicate-read\",\"action\":\"read_output\",\"output_id\":\"$output_id\",\"direction\":\"tail\",\"lines\":120}}"
+IFS= read -r response2 || exit 2
+case "$response2" in
+  *'"behavior":"shell_evidence"'*'excerpt_status: already_delivered'*'already_delivered_recent_shell_tool_output'*)
+    case "$response2" in
+      *'bounded_output_excerpt:'*|*'duplicate-read-line-120'*) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-duplicate-read","is_error":true,"result":"duplicate read returned output body"}'; exit 1 ;;
+    esac
+    ;;
+  *) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-duplicate-read","is_error":true,"result":"duplicate read was not suppressed"}'; exit 1 ;;
+esac
+printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-duplicate-read","message":{"content":[{"type":"text","text":"DUPLICATE READ ALREADY DELIVERED FINAL"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-duplicate-read","is_error":false,"result":"done"}'
+exit 0
+"#,
+    );
+    let home_str = home.to_string_lossy().to_string();
+    let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "cosh-core",
+        &[],
+        &[("HOME", &home_str), ("COSH_CORE_PATH", &cosh_core_path_str)],
+        vec![
+            (b"/mode approval trust confirm\n".to_vec(), Duration::ZERO),
+            (
+                b"?? cosh-core-evidence-duplicate-read\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            (
+                b"/details evidence-1\n".to_vec(),
+                Duration::from_millis(6_000),
+            ),
+            (b"exit 0\n".to_vec(), Duration::from_millis(500)),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    assert!(
+        output.contains("DUPLICATE READ ALREADY DELIVERED FINAL"),
+        "{output}"
+    );
+    assert!(output.contains("Activity details evidence-1"), "{output}");
+    assert!(output.contains("status: already_delivered"), "{output}");
+    assert!(
+        output.contains("already_delivered_recent_shell_tool_output"),
+        "{output}"
+    );
+    assert!(
+        !output.contains("duplicate read was not suppressed"),
+        "{output}"
+    );
+    assert!(
+        !output.contains("duplicate read returned output body"),
+        "{output}"
+    );
+    assert!(
+        !output.contains("missing host-executed output id"),
+        "{output}"
+    );
+}
+
+#[test]
+fn raw_cli_cosh_core_bypass_recent_filter_reads_after_host_executed() {
+    let home = temp_shell_home("cosh-core-shell-evidence-bypass-read");
+    let bin_dir = home.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let cosh_core_path = bin_dir.join("cosh-core");
+    write_executable(
+        &cosh_core_path,
+        r#"#!/bin/sh
+read -r init
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true,"can_handle_shell_evidence_tool":true}}}}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-bypass-read","model":"cosh-core-test"}'
+read -r user_message
+printf '%s\n' '{"type":"control_request","request_id":"ctrl-bypass-read","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"printf '\''bypass-one\\nbypass-two\\nbypass-three\\n'\''"},"tool_use_id":"toolu-bypass-read"}}'
+IFS= read -r response1 || exit 2
+case "$response1" in
+  *'"behavior":"host_executed_shell"'*'ShellCommandCompleted evidence'*'output_id: terminal-output://raw-session-'*) ;;
+  *) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-bypass-read","is_error":true,"result":"missing bypass host-executed output id"}'; exit 1 ;;
+esac
+output_tail=${response1#*output_id: }
+output_id=${output_tail%%\\n*}
+printf '%s\n' "{\"type\":\"control_request\",\"request_id\":\"evidence-bypass-read\",\"request\":{\"subtype\":\"shell_evidence\",\"tool_use_id\":\"toolu-evidence-bypass-read\",\"action\":\"read_output\",\"output_id\":\"$output_id\",\"direction\":\"tail\",\"lines\":2,\"bypass_recent_filter\":true}}"
+IFS= read -r response2 || exit 2
+case "$response2" in
+  *'"behavior":"shell_evidence"'*'ShellEvidenceExcerpt'*'excerpt_status: available'*'bounded_output_excerpt:'*'bypass-two'*'bypass-three'*) ;;
+  *) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-bypass-read","is_error":true,"result":"bypass read did not return bounded excerpt"}'; exit 1 ;;
+esac
+printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-bypass-read","message":{"content":[{"type":"text","text":"BYPASS READ RETURNED EXCERPT FINAL"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-bypass-read","is_error":false,"result":"done"}'
+exit 0
+"#,
+    );
+    let home_str = home.to_string_lossy().to_string();
+    let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "cosh-core",
+        &[],
+        &[("HOME", &home_str), ("COSH_CORE_PATH", &cosh_core_path_str)],
+        vec![
+            (b"/mode approval trust confirm\n".to_vec(), Duration::ZERO),
+            (
+                b"?? cosh-core-evidence-bypass-read\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            (
+                b"/details evidence-1\n".to_vec(),
+                Duration::from_millis(6_000),
+            ),
+            (b"exit 0\n".to_vec(), Duration::from_millis(500)),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    assert!(
+        output.contains("BYPASS READ RETURNED EXCERPT FINAL"),
+        "{output}"
+    );
+    assert!(output.contains("Activity details evidence-1"), "{output}");
+    assert!(output.contains("status: available"), "{output}");
+    assert!(output.contains("bypass-two"), "{output}");
+    assert!(output.contains("bypass-three"), "{output}");
+    assert!(
+        !output.contains("bypass read did not return bounded excerpt"),
+        "{output}"
+    );
+    assert!(
+        !output.contains("missing bypass host-executed output id"),
+        "{output}"
+    );
+}
+
+#[test]
 fn raw_cli_cosh_core_terminal_output_read_misroute_recommends_shell_evidence_tool() {
     let home = temp_shell_home("cosh-core-shell-evidence-misroute");
     let bin_dir = home.join("bin");
@@ -275,10 +427,6 @@ printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-sh
 read -r user_message
 case "$user_message" in
   *evidence-failed-diagnostic*)
-    case "$user_message" in
-      *'read relevant outputs before making result claims'*'do not call read_output for commands whose facts show no output_id'*) ;;
-      *) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-shell-evidence-failed-diagnostic","is_error":true,"result":"missing diagnostic evidence prompt policy"}'; exit 1 ;;
-    esac
     printf '%s\n' '{"type":"control_request","request_id":"failed-list-1","request":{"subtype":"shell_evidence","tool_use_id":"toolu-failed-list","action":"list_commands","limit":5}}'
     IFS= read -r response1 || exit 2
     case "$response1" in
@@ -363,10 +511,6 @@ printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-sh
 read -r user_message
 case "$user_message" in
   *evidence-list-only*)
-    case "$user_message" in
-      *'activity recaps or command lists, use command facts only'*) ;;
-      *) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-shell-evidence-list-only","is_error":true,"result":"missing list-only evidence prompt policy"}'; exit 1 ;;
-    esac
     printf '%s\n' '{"type":"control_request","request_id":"list-only-1","request":{"subtype":"shell_evidence","tool_use_id":"toolu-list-only","action":"list_commands","limit":5}}'
     IFS= read -r response1 || exit 2
     case "$response1" in
@@ -426,10 +570,6 @@ printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-sh
 read -r user_message
 case "$user_message" in
   *evidence-activity-recap*)
-    case "$user_message" in
-      *'activity recaps or command lists, use command facts only'*) ;;
-      *) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-shell-evidence-activity-recap","is_error":true,"result":"missing activity recap evidence prompt policy"}'; exit 1 ;;
-    esac
     printf '%s\n' '{"type":"control_request","request_id":"activity-recap-list-1","request":{"subtype":"shell_evidence","tool_use_id":"toolu-activity-recap-list","action":"list_commands","limit":5}}'
     IFS= read -r response1 || exit 2
     case "$response1" in

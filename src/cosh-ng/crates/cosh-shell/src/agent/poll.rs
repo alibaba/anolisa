@@ -187,13 +187,40 @@ fn poll_active_agent_run_with_policy<W: Write>(
                     output_id,
                     direction,
                     lines,
-                } => crate::runtime::shell_evidence::read_shell_evidence_output(
-                    &state.session_blocks,
-                    state.approval_mode,
-                    output_id,
-                    direction.as_str(),
-                    *lines,
-                ),
+                    bypass_recent_filter,
+                } => {
+                    if !*bypass_recent_filter
+                        && state.shell_evidence.read_output_recently_delivered(
+                            output_id,
+                            Some(run_id.as_str()),
+                            direction.as_str(),
+                            *lines,
+                        )
+                    {
+                        crate::runtime::shell_evidence::shell_evidence_read_unavailable_guard(
+                            &state.session_blocks,
+                            state.approval_mode,
+                            output_id,
+                            direction.as_str(),
+                            *lines,
+                        )
+                        .unwrap_or_else(|| {
+                            crate::runtime::shell_evidence::already_delivered_shell_evidence_result(
+                                output_id,
+                                direction.as_str(),
+                                *lines,
+                            )
+                        })
+                    } else {
+                        crate::runtime::shell_evidence::read_shell_evidence_output(
+                            &state.session_blocks,
+                            state.approval_mode,
+                            output_id,
+                            direction.as_str(),
+                            *lines,
+                        )
+                    }
+                }
             };
             let status =
                 if result.metadata.reason.as_deref() == Some("redacted_confirmation_required") {
@@ -221,8 +248,17 @@ fn poll_active_agent_run_with_policy<W: Write>(
                 output_id,
                 direction,
                 lines,
+                ..
             } = action
             {
+                if result.metadata.excerpt_status == "available" && !result.metadata.is_error {
+                    state.shell_evidence.record_shell_evidence_read_output(
+                        output_id.clone(),
+                        Some(run_id.clone()),
+                        direction.as_str().to_string(),
+                        *lines,
+                    );
+                }
                 crate::activity::runtime::record_shell_evidence_action(
                     state.language,
                     &mut state.activity.rows,

@@ -15,8 +15,7 @@ use crate::raw_input::{
     set_pty_winsize, signal_foreground_process_group, signal_process_group, update_input_mode,
     write_all_pty, RawInputEvent, RawInputMode, RawObserverAction,
 };
-use crate::types::ShellEvent;
-use crate::types::ShellEventKind;
+use crate::types::{ShellEvent, ShellEventKind, ShellHandoffRequest};
 
 use super::model::current_terminal_winsize;
 use super::osc::OscParser;
@@ -502,20 +501,33 @@ fn resolve_pty_emit<W: Write>(
 ) -> io::Result<RawObserverAction> {
     match action {
         RawObserverAction::EmitToPty(request) => {
-            output.flush()?;
-            let bytes = request.pty_bytes().map_err(|message| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("blocked shell handoff: {message}"),
-                )
-            })?;
-            pending_terminal_restore.record_intervention_start(terminal_fd);
-            parser.register_pending_handoff_origin(&request);
-            write_handoff_request(handoff_request_file, &request.command)?;
-            if let Err(err) = write_all_pty(master, &bytes) {
-                let _ = std::fs::remove_file(handoff_request_file);
-                return Err(err);
-            }
+            emit_to_pty(
+                master,
+                terminal_fd,
+                parser,
+                output,
+                request,
+                display_start,
+                replayed_prompt_prefix,
+                pending_terminal_restore,
+                handoff_request_file,
+                false,
+            )?;
+            Ok(RawObserverAction::Continue)
+        }
+        RawObserverAction::EmitToPtyWithPromptRestore(request) => {
+            emit_to_pty(
+                master,
+                terminal_fd,
+                parser,
+                output,
+                request,
+                display_start,
+                replayed_prompt_prefix,
+                pending_terminal_restore,
+                handoff_request_file,
+                true,
+            )?;
             Ok(RawObserverAction::Continue)
         }
         RawObserverAction::InterruptForeground => {
@@ -560,6 +572,68 @@ fn resolve_pty_emit<W: Write>(
         }
         other => Ok(other),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_to_pty<W: Write>(
+    master: &mut File,
+    terminal_fd: i32,
+    parser: &mut OscParser,
+    output: &mut W,
+    request: ShellHandoffRequest,
+    display_start: &mut usize,
+    replayed_prompt_prefix: &mut Option<Vec<u8>>,
+    pending_terminal_restore: &mut PendingTerminalRecovery,
+    handoff_request_file: &Path,
+    restore_prompt: bool,
+) -> io::Result<()> {
+    output.flush()?;
+    if restore_prompt {
+        restore_prompt_display_before_handoff(
+            parser,
+            output,
+            display_start,
+            replayed_prompt_prefix,
+        )?;
+    }
+    let bytes = request.pty_bytes().map_err(|message| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("blocked shell handoff: {message}"),
+        )
+    })?;
+    pending_terminal_restore.record_intervention_start(terminal_fd);
+    parser.register_pending_handoff_origin(&request);
+    write_handoff_request(handoff_request_file, &request.command)?;
+    if let Err(err) = write_all_pty(master, &bytes) {
+        let _ = std::fs::remove_file(handoff_request_file);
+        return Err(err);
+    }
+    Ok(())
+}
+
+fn restore_prompt_display_before_handoff<W: Write>(
+    parser: &OscParser,
+    output: &mut W,
+    display_start: &mut usize,
+    replayed_prompt_prefix: &mut Option<Vec<u8>>,
+) -> io::Result<()> {
+    if parser.display.len() > *display_start {
+        write_pending_display(parser, output, display_start, replayed_prompt_prefix)?;
+        output.flush()?;
+        return Ok(());
+    }
+
+    let raw_prompt = parser.last_prompt_display();
+    let prompt = prompt_replay_bytes(raw_prompt);
+    if prompt.is_empty() {
+        return Ok(());
+    }
+    output.write_all(prompt)?;
+    output.flush()?;
+    mark_pending_prompt_replayed(parser, raw_prompt, display_start);
+    *replayed_prompt_prefix = Some(raw_prompt.to_vec());
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -687,4 +761,61 @@ fn same_winsize(left: &Winsize, right: &Winsize) -> bool {
         && left.ws_col == right.ws_col
         && left.ws_xpixel == right.ws_xpixel
         && left.ws_ypixel == right.ws_ypixel
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_MARKER_TOKEN: &str = "test-marker-token";
+
+    fn parser_for_test(name: &str) -> OscParser {
+        let dir = std::env::temp_dir().join(format!("cosh-raw-relay-{name}"));
+        OscParser::new(name.to_string(), dir, TEST_MARKER_TOKEN.to_string())
+    }
+
+    fn feed_shell_ready(parser: &mut OscParser) {
+        let mut marker = Vec::new();
+        marker.extend_from_slice(b"\x1b]1337;COSH;");
+        marker.extend_from_slice(
+            br#"{"event":"precmd","token":"test-marker-token","status":0,"cwd":"/tmp"}"#,
+        );
+        marker.push(b'\x07');
+        parser.feed(&marker).expect("feed precmd");
+    }
+
+    #[test]
+    fn handoff_prompt_restore_strips_duplicate_prompt_echo() {
+        let mut parser = parser_for_test("handoff-prompt-restore");
+        feed_shell_ready(&mut parser);
+        parser.feed(b"bash-4.4$ ").expect("feed prompt");
+        let mut display_start = parser.display.len();
+        let mut replayed_prompt_prefix = None;
+        let mut output = Vec::new();
+
+        restore_prompt_display_before_handoff(
+            &parser,
+            &mut output,
+            &mut display_start,
+            &mut replayed_prompt_prefix,
+        )
+        .expect("restore prompt");
+
+        assert_eq!(String::from_utf8_lossy(&output), "bash-4.4$ ");
+        assert_eq!(replayed_prompt_prefix.as_deref(), Some(&b"bash-4.4$ "[..]));
+
+        parser
+            .feed(b"bash-4.4$ echo ok\r\n")
+            .expect("feed echoed handoff");
+        write_pending_display(
+            &parser,
+            &mut output,
+            &mut display_start,
+            &mut replayed_prompt_prefix,
+        )
+        .expect("write echoed handoff");
+
+        assert_eq!(String::from_utf8_lossy(&output), "bash-4.4$ echo ok\r\n");
+        assert!(replayed_prompt_prefix.is_none());
+    }
 }

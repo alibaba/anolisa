@@ -103,6 +103,7 @@ fn start_agent_run_with_queue_policy<W: Write>(
     let now = Instant::now();
     let i18n = state.i18n();
     state.agent_run.host_executed_shell_result_delivered = false;
+    state.shell_evidence.clear_recent_shell_tool_outputs();
     state.agent_run.active = Some(ActiveAgentRun {
         request,
         handle,

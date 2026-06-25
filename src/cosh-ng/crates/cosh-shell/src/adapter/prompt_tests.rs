@@ -1,6 +1,8 @@
 use super::prompt::{
-    prompt_from_request, provider_prompt_contract, provider_prompt_contract_for_language,
+    prompt_from_request, prompt_from_request_with_evidence_access, provider_prompt_contract,
+    provider_prompt_contract_for_language, provider_prompt_contract_with_evidence_access,
 };
+use crate::evidence::ShellEvidenceAccess;
 use crate::types::{
     AgentMode, AgentRequest, CommandBlock, CommandStatus, CoshApprovalMode, FindingSeverity,
     HookFinding, OutputRefs,
@@ -318,6 +320,7 @@ fn shell_evidence_excerpt_prompt_uses_explicit_follow_up_boundary() {
         prompt.contains("terminal-output:// refs are cosh-shell evidence ids, not files"),
         "{prompt}"
     );
+    assert!(prompt.contains("Use this excerpt first"), "{prompt}");
     assert!(
         !prompt.contains("Handle this natural-language shell prompt request"),
         "{prompt}"
@@ -561,6 +564,7 @@ fn tool_result_prompt_declares_preview_ref_boundary() {
         prompt.contains("bounded model view: use preview/ref fields"),
         "{prompt}"
     );
+    assert!(prompt.contains("Use this tool_result first"), "{prompt}");
     assert!(
         prompt.contains("Stdout ref: /tmp/cosh/out-1.txt"),
         "{prompt}"
@@ -569,6 +573,55 @@ fn tool_result_prompt_declares_preview_ref_boundary() {
         prompt.contains("Full output was shown to the user transcript"),
         "{prompt}"
     );
+}
+
+#[test]
+fn control_protocol_prompt_avoids_proactive_duplicate_read_instruction() {
+    let request = AgentRequest {
+        id: "agent-request-input-1".to_string(),
+        session_id: "session-1".to_string(),
+        command_block: command_block("input-1", "explain history", 0, None),
+        context_blocks: Vec::new(),
+        context_hints: Vec::new(),
+        user_input: Some("explain history".to_string()),
+        findings: Vec::new(),
+        mode: AgentMode::RecommendOnly,
+        user_confirmed: true,
+        hook_finding: None,
+        recommended_skill: None,
+    };
+
+    let prompt = prompt_from_request_with_evidence_access(
+        &request,
+        ShellEvidenceAccess::ControlProtocolTool,
+    );
+
+    assert!(!prompt.contains("read relevant outputs before making result claims"));
+    assert!(
+        prompt.contains("Use current tool results first"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("older shell ledger output or missing output coverage"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("bypass_recent_filter"), "{prompt}");
+}
+
+#[test]
+fn control_protocol_contract_does_not_advertise_bypass_recent_filter() {
+    let prompt = provider_prompt_contract_with_evidence_access(
+        CoshApprovalMode::Auto,
+        "run_shell_command",
+        ShellEvidenceAccess::ControlProtocolTool,
+    );
+
+    assert!(!prompt.contains("read relevant outputs before making result claims"));
+    assert!(
+        prompt.contains("Use current tool results first"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("bypass_recent_filter"), "{prompt}");
 }
 
 #[test]

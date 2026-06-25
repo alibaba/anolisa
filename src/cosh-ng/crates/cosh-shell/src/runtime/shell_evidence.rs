@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crate::adapter::{ShellEvidenceMetadata, ShellEvidenceResult};
 use crate::evidence::model::OutputExcerptDirection;
 use crate::evidence::output_policy::{
@@ -11,6 +13,8 @@ use crate::types::CommandStatus;
 const MAX_OUTPUT_LINES: usize = 300;
 const MAX_OUTPUT_BYTES: usize = 12 * 1024;
 const LIST_CURSOR_PREFIX: &str = "offset:";
+pub(crate) const ALREADY_DELIVERED_RECENT_REASON: &str =
+    "already_delivered_recent_shell_tool_output";
 
 pub(crate) fn list_shell_evidence_commands(
     blocks: &[CommandBlock],
@@ -247,6 +251,120 @@ pub(crate) fn read_shell_evidence_output(
     }
 }
 
+pub(crate) fn shell_evidence_read_unavailable_guard(
+    blocks: &[CommandBlock],
+    approval_mode: CoshApprovalMode,
+    output_id: &str,
+    direction: &str,
+    lines: u16,
+) -> Option<ShellEvidenceResult> {
+    let Some(parsed) = parse_terminal_output_id(output_id) else {
+        return Some(unavailable(
+            "read_output",
+            output_id,
+            direction,
+            lines,
+            "invalid_output_id",
+        ));
+    };
+
+    let session_seen = blocks
+        .iter()
+        .any(|block| block.session_id == parsed.shell_session_id);
+    if !session_seen {
+        return Some(unavailable(
+            "read_output",
+            output_id,
+            direction,
+            lines,
+            "stale_session",
+        ));
+    }
+
+    let Some(block) = blocks
+        .iter()
+        .find(|block| block.session_id == parsed.shell_session_id && block.id == parsed.command_id)
+    else {
+        return Some(unavailable(
+            "read_output",
+            output_id,
+            direction,
+            lines,
+            "not_in_current_ledger",
+        ));
+    };
+
+    let Some(output_ref) = block.output.terminal_output_ref.as_deref() else {
+        return Some(unavailable(
+            "read_output",
+            output_id,
+            direction,
+            lines,
+            "unavailable",
+        ));
+    };
+
+    if !Path::new(output_ref).is_file() {
+        return Some(unavailable(
+            "read_output",
+            output_id,
+            direction,
+            lines,
+            "expired",
+        ));
+    }
+
+    if approval_mode == CoshApprovalMode::Recommend {
+        return Some(unavailable(
+            "read_output",
+            output_id,
+            direction,
+            lines,
+            "redacted_confirmation_required",
+        ));
+    }
+
+    None
+}
+
+pub(crate) fn already_delivered_shell_evidence_result(
+    output_id: &str,
+    direction: &str,
+    lines: u16,
+) -> ShellEvidenceResult {
+    ShellEvidenceResult {
+        llm_content: format!(
+            "ShellEvidenceExcerpt\n\
+             action: read_output\n\
+             output_id: {output_id}\n\
+             direction: {direction}\n\
+             lines_requested: {lines}\n\
+             excerpt_status: already_delivered\n\
+             reason: {ALREADY_DELIVERED_RECENT_REASON}"
+        ),
+        return_display: Some(ALREADY_DELIVERED_RECENT_REASON.to_string()),
+        metadata: ShellEvidenceMetadata {
+            action: "read_output".to_string(),
+            scope: None,
+            limit: None,
+            next_cursor: None,
+            output_id: output_id.to_string(),
+            status: "already_delivered".to_string(),
+            excerpt_status: "already_delivered".to_string(),
+            reason: Some(ALREADY_DELIVERED_RECENT_REASON.to_string()),
+            direction: direction.to_string(),
+            lines,
+            command_count: None,
+            provider_visible_byte_cap: MAX_OUTPUT_BYTES,
+            truncated: false,
+            truncated_by_lines: false,
+            truncated_by_bytes: false,
+            truncation_reason: "none".to_string(),
+            is_error: false,
+        },
+    }
+}
+
 fn unavailable(
     action: &str,
     output_id: &str,
@@ -370,6 +488,66 @@ mod tests {
         assert!(result.metadata.truncated);
         assert!(result.llm_content.contains("line3"));
         assert!(!result.llm_content.contains("line1"));
+    }
+
+    #[test]
+    fn already_delivered_shell_evidence_result_is_not_error_and_has_no_body() {
+        let result = already_delivered_shell_evidence_result(
+            "terminal-output://raw-session-a/cmd-1",
+            "tail",
+            120,
+        );
+
+        assert!(!result.metadata.is_error);
+        assert_eq!(result.metadata.excerpt_status, "already_delivered");
+        assert_eq!(
+            result.metadata.reason.as_deref(),
+            Some(ALREADY_DELIVERED_RECENT_REASON)
+        );
+        assert!(!result.llm_content.contains("bounded_output_excerpt:"));
+    }
+
+    #[test]
+    fn read_unavailable_guard_rejects_expired_ref_before_recent_suppress() {
+        let missing = std::env::temp_dir().join(format!(
+            "cosh-shell-expired-guard-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let block = command_block("raw-session-a", "cmd-1", Some(&missing));
+
+        let result = shell_evidence_read_unavailable_guard(
+            &[block],
+            CoshApprovalMode::Trust,
+            "terminal-output://raw-session-a/cmd-1",
+            "tail",
+            120,
+        )
+        .expect("expired guard");
+
+        assert!(result.metadata.is_error);
+        assert_eq!(result.metadata.reason.as_deref(), Some("expired"));
+    }
+
+    #[test]
+    fn read_unavailable_guard_rejects_recommend_mode_before_recent_suppress() {
+        let file = output_file("safe output\n");
+        let block = command_block("raw-session-a", "cmd-1", Some(file.path()));
+
+        let result = shell_evidence_read_unavailable_guard(
+            &[block],
+            CoshApprovalMode::Recommend,
+            "terminal-output://raw-session-a/cmd-1",
+            "tail",
+            120,
+        )
+        .expect("recommend guard");
+
+        assert!(result.metadata.is_error);
+        assert_eq!(
+            result.metadata.reason.as_deref(),
+            Some("redacted_confirmation_required")
+        );
     }
 
     #[test]
