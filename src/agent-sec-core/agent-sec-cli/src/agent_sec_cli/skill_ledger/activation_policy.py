@@ -5,18 +5,25 @@ from typing import Any
 ACTIVATION_POLICY_PASS_ONLY = "pass_only"
 ACTIVATION_POLICY_PASS_WARN_ONLY = "pass_warn_only"
 ACTIVATION_POLICY_LATEST_SCANNED = "latest_scanned"
-DEFAULT_ACTIVATION_POLICY = ACTIVATION_POLICY_LATEST_SCANNED
+DEFAULT_ACTIVATION_POLICY = ACTIVATION_POLICY_PASS_WARN_ONLY
 
 ACTIVATION_POLICY_ALLOWED_SCAN_STATUSES: dict[str, frozenset[str]] = {
-    ACTIVATION_POLICY_PASS_ONLY: frozenset({"pass"}),
     ACTIVATION_POLICY_PASS_WARN_ONLY: frozenset({"pass", "warn"}),
-    ACTIVATION_POLICY_LATEST_SCANNED: frozenset({"pass", "warn", "deny"}),
 }
 ACTIVATION_POLICIES = frozenset(ACTIVATION_POLICY_ALLOWED_SCAN_STATUSES)
+LEGACY_ACTIVATION_POLICIES = frozenset(
+    {ACTIVATION_POLICY_PASS_ONLY, ACTIVATION_POLICY_LATEST_SCANNED}
+)
 
 
 def validate_activation_policy(policy: Any) -> str:
-    """Return a valid activation policy or raise ``ValueError``."""
+    """Return the canonical activation policy or raise ``ValueError``.
+
+    Historical config values are accepted but normalized so runtime exposure has
+    exactly one branch: ``pass_warn_only``.
+    """
+    if isinstance(policy, str) and policy in LEGACY_ACTIVATION_POLICIES:
+        return ACTIVATION_POLICY_PASS_WARN_ONLY
     if not isinstance(policy, str) or policy not in ACTIVATION_POLICIES:
         allowed = ", ".join(sorted(ACTIVATION_POLICIES))
         raise ValueError(

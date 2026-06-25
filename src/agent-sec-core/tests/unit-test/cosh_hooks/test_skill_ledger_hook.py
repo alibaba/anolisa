@@ -8,9 +8,9 @@ Tests are grouped into three categories:
 1. **Fail-open paths** — invalid input, wrong tool, missing skill dir.
    These never invoke the CLI and verify the hook always returns allow.
 2. **Skill directory resolution** — project-level lookup, missing SKILL.md.
-3. **Output mapping** — status → warning message formatting.
-   Uses a mock CLI script to return canned check results, verifying the
-   hook's decision/reason output for every known status.
+3. **Output mapping** — exposure summary message → prompt formatting.
+   Uses a mock CLI script to return canned show results, verifying that only
+   ``message`` controls user prompts.
 """
 
 import io
@@ -112,7 +112,7 @@ def test_cosh_manifest_registers_skill_ledger_by_default():
     assert "skill-ledger" in registered_hook_names
 
 
-def test_injects_trace_context_into_skill_ledger_check_command(monkeypatch, capsys):
+def test_injects_trace_context_into_skill_ledger_show_command(monkeypatch, capsys):
     captured = {}
 
     def fake_run(args, **kwargs):
@@ -121,7 +121,7 @@ def test_injects_trace_context_into_skill_ledger_check_command(monkeypatch, caps
         return subprocess.CompletedProcess(
             args=args,
             returncode=0,
-            stdout=json.dumps({"status": "pass"}),
+            stdout=json.dumps({"latestStatus": "pass", "message": None}),
             stderr="",
         )
 
@@ -171,7 +171,7 @@ def test_injects_trace_context_into_skill_ledger_check_command(monkeypatch, caps
         "--trace-context",
         expected_context,
         "skill-ledger",
-        "check",
+        "show",
         "/project/.copilot-shell/skills/test-skill",
     ]
     assert captured["kwargs"]["check"] is False
@@ -292,18 +292,19 @@ class TestSkillDirResolution:
     def test_project_level_skill_found(self, mock_cli_env):
         """Skill in <cwd>/.copilot-shell/skills/<name>/ should be found.
 
-        We verify by feeding a mock CLI that returns ``{"status": "warn"}``.
+        We verify by feeding a mock CLI that returns a non-empty ``message``.
         If the skill dir is found the hook calls the CLI and produces a
         ``reason`` field; if the skill dir were *not* found, the hook would
         return plain allow with no ``reason`` at all.
         """
-        env = mock_cli_env["make_env"](json.dumps({"status": "warn"}))
-        env["SKILL_LEDGER_HOOK_POLICY"] = "warn"
+        env = mock_cli_env["make_env"](
+            json.dumps({"latestStatus": "drifted", "message": "drifted latest"})
+        )
         output = _run_hook(
             _make_skill_event("test-skill", mock_cli_env["cwd"]),
             env_override=env,
         )
-        assert output["decision"] == "allow"
+        assert output["decision"] == "ask"
         assert "reason" in output, "Skill dir not found — CLI was never called"
 
     def test_skill_context_resolves_name_directory_mismatch(self, mock_cli_env):
@@ -317,8 +318,9 @@ class TestSkillDirResolution:
             name="directory-name",
             manifest_name="frontmatter-name",
         )
-        env = mock_cli_env["make_env"](json.dumps({"status": "warn"}))
-        env["SKILL_LEDGER_HOOK_POLICY"] = "warn"
+        env = mock_cli_env["make_env"](
+            json.dumps({"latestStatus": "drifted", "message": "drifted latest"})
+        )
         output = _run_hook(
             _make_skill_event(
                 "frontmatter-name",
@@ -327,8 +329,8 @@ class TestSkillDirResolution:
             ),
             env_override=env,
         )
-        assert output["decision"] == "allow"
-        assert "low-risk" in output["reason"]
+        assert output["decision"] == "ask"
+        assert "drifted latest" in output["reason"]
 
     def test_skill_context_skips_only_unresolvable_supported_base(self, mock_cli_env):
         """A bad project base should not discard user/system base checks."""
@@ -340,16 +342,17 @@ class TestSkillDirResolution:
             "---\nname: user-skill\ndescription: A user skill\n---\nHello\n"
         )
 
-        env = mock_cli_env["make_env"](json.dumps({"status": "warn"}))
+        env = mock_cli_env["make_env"](
+            json.dumps({"latestStatus": "drifted", "message": "drifted latest"})
+        )
         env["HOME"] = str(home)
-        env["SKILL_LEDGER_HOOK_POLICY"] = "warn"
         output = _run_hook(
             _make_skill_event("user-skill", "\0bad-project", skill_file),
             env_override=env,
         )
 
-        assert output["decision"] == "allow"
-        assert "low-risk" in output["reason"]
+        assert output["decision"] == "ask"
+        assert "drifted latest" in output["reason"]
 
     @pytest.mark.parametrize("scope_name", ["custom", "extension", "remote"])
     def test_skill_context_outside_supported_scope_debug_skips(
@@ -417,7 +420,7 @@ _MOCK_CLI_SCRIPT = f"#!{sys.executable}\n" + textwrap.dedent("""\
     # init --no-baseline → silent success
     if len(sys.argv) >= 4 and sys.argv[2] == "init" and sys.argv[3] == "--no-baseline":
         sys.exit(0)
-    # check → return canned output from env
+    # show → return canned output from env
     output = os.environ.get("_MOCK_CHECK_OUTPUT", "")
     rc = int(os.environ.get("_MOCK_CHECK_RC", "0"))
     if output:
@@ -431,8 +434,8 @@ def mock_cli_env(tmp_path):
     """Create a fake ``agent-sec-cli`` and a skill dir in a temp project.
 
     Returns a dict with ``cwd``, ``skill_dir``, and a function
-    ``env(status, rc=0)`` that builds the env dict for a given canned
-    check response.
+    ``env(summary, rc=0)`` that builds the env dict for a given canned
+    show response.
     """
     # Write the mock CLI script
     bin_dir = tmp_path / "bin"
@@ -468,105 +471,88 @@ def mock_cli_env(tmp_path):
 
 
 class TestOutputMapping:
-    """Verify status → decision/reason mapping for every known status."""
+    """Verify exposure summary message → decision/reason mapping."""
 
-    def test_pass_returns_silent_allow(self, mock_cli_env):
-        """status=pass → allow with NO reason field."""
-        env = mock_cli_env["make_env"](json.dumps({"status": "pass"}))
+    def test_warn_null_message_returns_silent_allow(self, mock_cli_env):
+        """latestStatus=warn with message=null → allow with NO reason field."""
+        env = mock_cli_env["make_env"](
+            json.dumps(
+                {
+                    "latestStatus": "warn",
+                    "message": None,
+                }
+            )
+        )
         output = _run_hook(
             _make_skill_event("test-skill", mock_cli_env["cwd"]),
             env_override=env,
         )
         assert output == {"decision": "allow"}
 
-    def test_none_requires_confirmation(self, mock_cli_env):
-        """Default policy: status=none → silent allow with debug stderr."""
-        env = mock_cli_env["make_env"](json.dumps({"status": "none"}))
+    def test_nonempty_message_requires_confirmation(self, mock_cli_env):
+        """message text → ask with the shared Skill Ledger message."""
+        env = mock_cli_env["make_env"](
+            json.dumps(
+                {
+                    "latestStatus": "deny",
+                    "reasonCode": "latest_risk_fallback_to_previous",
+                    "message": "Latest skill status is deny; active version is v000001.",
+                }
+            )
+        )
+        output = _run_hook(
+            _make_skill_event("test-skill", mock_cli_env["cwd"]),
+            env_override=env,
+        )
+        assert output["decision"] == "ask"
+        assert "Latest skill status is deny" in output["reason"]
+        assert "test-skill" in output["reason"]
+
+    def test_debug_policy_logs_message_without_prompt(self, mock_cli_env):
+        """SKILL_LEDGER_HOOK_POLICY=debug keeps message-based prompts silent."""
+        env = mock_cli_env["make_env"](
+            json.dumps(
+                {
+                    "latestStatus": "deny",
+                    "message": "Latest skill status is deny; active version is hidden.",
+                }
+            )
+        )
+        env["SKILL_LEDGER_HOOK_POLICY"] = "debug"
         output, stderr = _run_hook(
             _make_skill_event("test-skill", mock_cli_env["cwd"]),
             env_override=env,
             return_stderr=True,
         )
         assert output == {"decision": "allow"}
-        assert "status=none" in stderr
-        assert "test-skill" in stderr
+        assert "Latest skill status is deny" in stderr
 
-    def test_warn_returns_warning(self, mock_cli_env):
-        """Default policy: status=warn → silent allow with debug stderr."""
-        env = mock_cli_env["make_env"](json.dumps({"status": "warn"}))
-        output, stderr = _run_hook(
-            _make_skill_event("test-skill", mock_cli_env["cwd"]),
-            env_override=env,
-            return_stderr=True,
+    def test_warn_policy_returns_allow_with_reason(self, mock_cli_env):
+        """SKILL_LEDGER_HOOK_POLICY=warn turns message into allow + reason."""
+        env = mock_cli_env["make_env"](
+            json.dumps(
+                {
+                    "latestStatus": "deny",
+                    "message": "Latest skill status is deny; active version is hidden.",
+                }
+            )
         )
-        assert output == {"decision": "allow"}
-        assert "status=warn" in stderr
-
-    def test_warn_policy_returns_warning(self, mock_cli_env):
-        """SKILL_LEDGER_HOOK_POLICY=warn restores allow + reason."""
-        env = mock_cli_env["make_env"](json.dumps({"status": "warn"}))
         env["SKILL_LEDGER_HOOK_POLICY"] = "warn"
         output = _run_hook(
             _make_skill_event("test-skill", mock_cli_env["cwd"]),
             env_override=env,
         )
         assert output["decision"] == "allow"
-        assert "low-risk" in output["reason"]
+        assert "Latest skill status is deny" in output["reason"]
 
-    def test_block_policy_requires_confirmation(self, mock_cli_env):
-        """SKILL_LEDGER_HOOK_POLICY=block restores ask for strong statuses."""
-        env = mock_cli_env["make_env"](json.dumps({"status": "none"}))
-        env["SKILL_LEDGER_HOOK_POLICY"] = "block"
+    def test_missing_message_field_allows(self, mock_cli_env):
+        """CLI returns JSON without message → fail-open silent allow."""
+        env = mock_cli_env["make_env"](json.dumps({"latestStatus": "deny"}))
         output = _run_hook(
             _make_skill_event("test-skill", mock_cli_env["cwd"]),
             env_override=env,
-        )
-        assert output["decision"] == "ask"
-        assert "not been security-scanned" in output["reason"]
-
-    def test_deny_requires_confirmation(self, mock_cli_env):
-        """SKILL_LEDGER_HOOK_POLICY=block: status=deny → ask."""
-        env = mock_cli_env["make_env"](json.dumps({"status": "deny"}), rc=1)
-        env["SKILL_LEDGER_HOOK_POLICY"] = "block"
-        output = _run_hook(
-            _make_skill_event("test-skill", mock_cli_env["cwd"]),
-            env_override=env,
-        )
-        assert output["decision"] == "ask"
-        assert "high-risk" in output["reason"]
-
-    def test_drifted_requires_confirmation(self, mock_cli_env):
-        """SKILL_LEDGER_HOOK_POLICY=block: status=drifted → ask."""
-        env = mock_cli_env["make_env"](json.dumps({"status": "drifted"}), rc=1)
-        env["SKILL_LEDGER_HOOK_POLICY"] = "block"
-        output = _run_hook(
-            _make_skill_event("test-skill", mock_cli_env["cwd"]),
-            env_override=env,
-        )
-        assert output["decision"] == "ask"
-        assert "changed" in output["reason"]
-
-    def test_tampered_requires_confirmation(self, mock_cli_env):
-        """SKILL_LEDGER_HOOK_POLICY=block: status=tampered → ask."""
-        env = mock_cli_env["make_env"](json.dumps({"status": "tampered"}), rc=1)
-        env["SKILL_LEDGER_HOOK_POLICY"] = "block"
-        output = _run_hook(
-            _make_skill_event("test-skill", mock_cli_env["cwd"]),
-            env_override=env,
-        )
-        assert output["decision"] == "ask"
-        assert "signature verification failed" in output["reason"]
-
-    def test_unknown_status_returns_warning(self, mock_cli_env):
-        """Default policy: unrecognized status → silent allow with debug stderr."""
-        env = mock_cli_env["make_env"](json.dumps({"status": "banana"}))
-        output, stderr = _run_hook(
-            _make_skill_event("test-skill", mock_cli_env["cwd"]),
-            env_override=env,
-            return_stderr=True,
         )
         assert output == {"decision": "allow"}
-        assert "status=banana" in stderr
 
     def test_cli_invalid_json_stdout_allows(self, mock_cli_env):
         """CLI returns non-JSON stdout → fail-open."""
@@ -586,13 +572,11 @@ class TestOutputMapping:
         )
         assert output == {"decision": "allow"}
 
-    def test_cli_missing_status_field_returns_unknown(self, mock_cli_env):
-        """CLI returns JSON without 'status' → default debug-only unknown."""
-        env = mock_cli_env["make_env"](json.dumps({"result": "ok"}))
-        output, stderr = _run_hook(
+    def test_empty_message_field_allows(self, mock_cli_env):
+        """CLI returns empty message → silent allow."""
+        env = mock_cli_env["make_env"](json.dumps({"message": ""}))
+        output = _run_hook(
             _make_skill_event("test-skill", mock_cli_env["cwd"]),
             env_override=env,
-            return_stderr=True,
         )
         assert output == {"decision": "allow"}
-        assert "status=unknown" in stderr

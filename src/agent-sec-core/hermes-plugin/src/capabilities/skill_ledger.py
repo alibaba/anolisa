@@ -21,20 +21,11 @@ _DEFAULT_BLOCK_STATUSES = ["none", "drifted", "deny", "tampered"]
 _POLICY_DEBUG = "debug"
 _POLICY_WARN = "warn"
 _POLICY_BLOCK = "block"
-_DEFAULT_POLICY = _POLICY_DEBUG
+_DEFAULT_POLICY = _POLICY_WARN
 _VALID_POLICIES = frozenset({_POLICY_DEBUG, _POLICY_WARN, _POLICY_BLOCK})
 _SKIP_DIRS = frozenset({".git", ".github", ".hub", ".archive", ".skill-meta"})
 _CONTEXT_KEY_FIELDS = ("session_id", "task_id", "run_id")
 _HERMES_SESSION_ENV = "HERMES_SESSION_ID"
-
-_STATUS_MESSAGES = {
-    "none": "Skill has not been security-scanned yet.",
-    "warn": "Skill has low-risk findings; review is recommended.",
-    "drifted": "Skill content changed since the last scan.",
-    "deny": "Skill has high-risk findings.",
-    "tampered": "Skill metadata signature verification failed.",
-    "error": "Skill check failed.",
-}
 
 
 @dataclass
@@ -81,7 +72,7 @@ class SkillLedgerCapability(AgentSecCoreCapability):
         }
 
     def _on_pre_tool_call(self, tool_name, args, **kwargs):
-        """Run skill-ledger check before Hermes reads a skill."""
+        """Run skill-ledger exposure summary before Hermes reads a skill."""
         if tool_name != _TOOL_NAME:
             return None
         if not isinstance(args, dict):
@@ -97,7 +88,7 @@ class SkillLedgerCapability(AgentSecCoreCapability):
         skill_dir = skill_dir.resolve()
 
         result = call_agent_sec_cli(
-            ["skill-ledger", "check", str(skill_dir)],
+            ["skill-ledger", "show", str(skill_dir)],
             timeout=self._timeout,
             trace_context=trace_context(kwargs),
         )
@@ -110,7 +101,7 @@ class SkillLedgerCapability(AgentSecCoreCapability):
             return None
 
         try:
-            check_result = json.loads(result.stdout)
+            summary = json.loads(result.stdout)
         except (json.JSONDecodeError, ValueError):
             self._diagnostic(
                 "[agent-sec-core] skill-ledger invalid CLI JSON, fail-open skill_dir=%s exit_code=%s",
@@ -119,20 +110,20 @@ class SkillLedgerCapability(AgentSecCoreCapability):
             )
             return None
 
-        if not isinstance(check_result, dict):
+        if not isinstance(summary, dict):
             self._diagnostic(
                 "[agent-sec-core] skill-ledger CLI JSON is not an object, fail-open skill_dir=%s",
                 skill_dir,
             )
             return None
 
-        status = str(check_result.get("status", "unknown"))
-        if status == "pass":
+        message = summary.get("message")
+        if not isinstance(message, str) or not message.strip():
             return None
 
-        skill_name = str(check_result.get("skillName") or skill_dir.name)
-        message = self._format_message(status, skill_name, skill_dir)
-
+        status = str(summary.get("latestStatus", "unknown"))
+        skill_name = str(summary.get("skillName") or skill_dir.name)
+        message = f"Skill '{skill_name}': {message}"
         if self._policy == _POLICY_DEBUG:
             logger.debug("[agent-sec-core] skill-ledger %s", message)
             return None
@@ -403,8 +394,3 @@ class SkillLedgerCapability(AgentSecCoreCapability):
             )
             return minimum
         return value
-
-    @staticmethod
-    def _format_message(status: str, skill_name: str, skill_dir: Path) -> str:
-        detail = _STATUS_MESSAGES.get(status, f"Skill has unknown status '{status}'.")
-        return f"Skill '{skill_name}' ({skill_dir}) status={status}. {detail}"

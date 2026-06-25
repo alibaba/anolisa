@@ -12,6 +12,7 @@ from agent_sec_cli.skill_ledger.models.finding import NormalizedFinding
 from agent_sec_cli.skill_ledger.models.manifest import (
     ManifestSignature,
     SignedManifest,
+    UserDecision,
 )
 from agent_sec_cli.skill_ledger.models.scan import (
     ScanEntry,
@@ -128,6 +129,55 @@ class TestManifestSerializationRoundtrip(unittest.TestCase):
         self.assertEqual(original.signature.value, restored.signature.value)
         self.assertEqual(len(original.scans), len(restored.scans))
         self.assertEqual(original.scans[0].scanner, restored.scans[0].scanner)
+
+    def test_user_decision_roundtrip_preserves_minimal_decision(self):
+        original = SignedManifest(
+            versionId="v000004",
+            skillName="my-skill",
+            fileHashes={"SKILL.md": "sha256:aaa"},
+            scanStatus="deny",
+            userDecision=UserDecision(
+                action="rollback",
+                targetVersionId="v000001",
+                reason="reviewed and restored previous pass version",
+            ),
+            createdAt="2026-01-01T00:00:00+00:00",
+            updatedAt="2026-01-01T00:05:00+00:00",
+        )
+
+        restored = SignedManifest.from_json(original.to_json())
+
+        self.assertEqual(restored.userDecision.action, "rollback")
+        self.assertEqual(restored.userDecision.targetVersionId, "v000001")
+        self.assertEqual(
+            restored.userDecision.reason,
+            "reviewed and restored previous pass version",
+        )
+
+    def test_user_decision_changes_manifest_hash(self):
+        m1 = SignedManifest(
+            versionId="v000001",
+            skillName="my-skill",
+            fileHashes={"SKILL.md": "sha256:aaa"},
+            scanStatus="deny",
+            createdAt="2026-01-01T00:00:00+00:00",
+            updatedAt="2026-01-01T00:00:00+00:00",
+        )
+        m2 = SignedManifest(
+            versionId="v000001",
+            skillName="my-skill",
+            fileHashes={"SKILL.md": "sha256:aaa"},
+            scanStatus="deny",
+            userDecision=UserDecision(action="allow"),
+            createdAt="2026-01-01T00:00:00+00:00",
+            updatedAt="2026-01-01T00:00:00+00:00",
+        )
+
+        self.assertNotEqual(m1.compute_manifest_hash(), m2.compute_manifest_hash())
+
+    def test_rollback_decision_requires_target_version(self):
+        with self.assertRaises(ValueError):
+            UserDecision(action="rollback")
 
 
 class TestScanStatusAggregation(unittest.TestCase):

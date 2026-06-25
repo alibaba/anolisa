@@ -2,7 +2,7 @@
 """Cosh hook script for skill-ledger.
 
 Reads a cosh PreToolUse JSON from stdin, resolves the skill directory
-from the skill context or skill name, invokes ``agent-sec-cli skill-ledger check`` via
+from the skill context or skill name, invokes ``agent-sec-cli skill-ledger show`` via
 subprocess, and writes a cosh HookOutput JSON to stdout.
 
 Hook point: **PreToolUse** — matcher: ``skill``
@@ -19,9 +19,10 @@ Input schema::
 
 Output mapping:
 
-    policy "debug" (default) → always allow; non-pass states only write debug stderr
-    policy "warn"            → non-pass states allow with a visible reason
-    policy "block"           → none/drifted/deny/tampered ask; other non-pass states warn
+    summary.message is null → { "decision": "allow" }
+    policy "debug"           → summary.message only writes debug stderr
+    policy "warn"            → summary.message allows with visible reason
+    policy "block" (default) → summary.message asks for confirmation
 
 Optional copilot-shell settings.json configuration::
 
@@ -56,34 +57,11 @@ from trace_context import with_trace_context
 # -- constants ---------------------------------------------------------------
 
 _TOOL_NAME = "skill"
-_CHECK_TIMEOUT = 5  # seconds for the CLI check call
+_CHECK_TIMEOUT = 5  # seconds for the CLI show call
 _INIT_TIMEOUT = 3  # seconds for key initialization
 
-_DEFAULT_POLICY = "debug"
+_DEFAULT_POLICY = "block"
 _VALID_POLICIES = frozenset({"debug", "warn", "block"})
-_ASK_STATUSES = frozenset({"none", "drifted", "deny", "tampered"})
-
-_STATUS_MESSAGES = {
-    "warn": "\u26a0\ufe0f Skill '{name}' has low-risk findings \u2014 review recommended",
-    "drifted": (
-        "\u26a0\ufe0f Skill '{name}' content has changed since last scan"
-        " \u2014 confirm before using and run a fresh scan when possible"
-    ),
-    "none": (
-        "\u26a0\ufe0f Skill '{name}' has not been security-scanned yet"
-        " \u2014 confirm before using"
-    ),
-    "error": "\u26a0\ufe0f Skill '{name}' check failed \u2014 invalid path or missing SKILL.md",
-    "deny": (
-        "\U0001f6a8 Skill '{name}' has high-risk findings"
-        " \u2014 confirm only if you trust the skill and intend to review it"
-    ),
-    "tampered": (
-        "\U0001f6a8 Skill '{name}' metadata signature verification failed"
-        " \u2014 confirm only if you trust the skill source"
-    ),
-}
-
 
 # -- helpers -----------------------------------------------------------------
 
@@ -108,12 +86,10 @@ def _debug(message: str) -> None:
     print(f"[skill-ledger debug] {message}", file=sys.stderr)
 
 
-def _allow_or_warn(reason: str, policy: str) -> str:
-    """Allow silently in debug policy; otherwise allow with a visible reason."""
-    if policy == "debug":
-        _debug(reason)
-        return _allow()
-    return _allow_with_reason(reason)
+def _allow_or_warn(reason: str, _policy: str) -> str:
+    """Fail open for pre-summary diagnostics without prompting the user."""
+    _debug(reason)
+    return _allow()
 
 
 def _read_policy() -> str:
@@ -278,42 +254,26 @@ def _ensure_keys(input_data: dict[str, Any]) -> None:
         _debug("key init failed: {}".format(exc))
 
 
-def _format_cosh(check_result: dict, skill_name: str, policy: str) -> str:
-    """Convert a check-result dict into a cosh HookOutput JSON string.
-
-    Mapping:
-        policy == "debug"                        → decision "allow" (silent)
-        policy == "block" and status is strong   → decision "ask" + reason
-        policy == "warn" or non-strong block     → decision "allow" + reason
-    """
-    status = check_result.get("status", "unknown")
-
-    if status == "pass":
+def _format_cosh(summary: dict, skill_name: str, policy: str) -> str:
+    """Convert an exposure summary into a cosh HookOutput JSON string."""
+    message = summary.get("message")
+    if not isinstance(message, str) or not message.strip():
         return _allow()
 
-    template = _STATUS_MESSAGES.get(status)
-    if template:
-        reason = template.format(name=skill_name)
-    else:
-        reason = "\u26a0\ufe0f Skill '{}' has unknown status '{}'".format(
-            skill_name, status
-        )
-
+    reason = f"\u26a0\ufe0f Skill '{skill_name}': {message}"
     if policy == "debug":
-        _debug("skill='{}' status={}: {}".format(skill_name, status, reason))
+        _debug(reason)
         return _allow()
-
-    if policy == "block" and status in _ASK_STATUSES:
-        return _ask_with_reason(reason)
-
-    return _allow_with_reason(reason)
+    if policy == "warn":
+        return _allow_with_reason(reason)
+    return _ask_with_reason(reason)
 
 
 # -- main --------------------------------------------------------------------
 
 
 def main() -> None:
-    """Entry point — read stdin, check skill, write stdout."""
+    """Entry point — read stdin, summarize skill exposure, write stdout."""
     # 1. Read stdin JSON (PreToolUse event)
     try:
         input_data = json.load(sys.stdin)
@@ -383,10 +343,10 @@ def main() -> None:
     # 4. Ensure signing keys exist (auto-init if missing)
     _ensure_keys(input_data)
 
-    # 5. Call agent-sec-cli skill-ledger check <skill_dir>
+    # 5. Call agent-sec-cli skill-ledger show <skill_dir>
     try:
         cmd = with_trace_context(
-            ["agent-sec-cli", "skill-ledger", "check", skill_dir],
+            ["agent-sec-cli", "skill-ledger", "show", skill_dir],
             input_data,
         )
         proc = subprocess.run(
@@ -402,9 +362,9 @@ def main() -> None:
         print(_allow())
         return
 
-    # 6. Parse check result and format output
+    # 6. Parse exposure summary and format output
     try:
-        check_result = json.loads(proc.stdout)
+        exposure_summary = json.loads(proc.stdout)
     except (json.JSONDecodeError, ValueError):
         _debug(
             "skill='{}' invalid CLI JSON, exit_code={}, stderr={!r}".format(
@@ -414,7 +374,7 @@ def main() -> None:
         print(_allow())
         return
 
-    print(_format_cosh(check_result, skill_name, policy))
+    print(_format_cosh(exposure_summary, skill_name, policy))
 
 
 if __name__ == "__main__":

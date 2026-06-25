@@ -11,6 +11,8 @@ from agent_sec_cli.daemon.skill_ledger_activation import (
     METHOD_SKILLFS_NOTIFY_CHANGE,
 )
 
+PENDING_DECISION_TARGET = ".skill-meta/versions/__pending_decision__.snapshot"
+
 
 def make_skill(parent: Path, name: str, files: dict[str, str] | None = None) -> Path:
     """Create a minimal skill directory."""
@@ -415,7 +417,7 @@ def test_daemon_notify_updates_activation_after_safe_drift(
     assert activation_v2["target"] == ".skill-meta/versions/v000002.snapshot"
 
 
-def test_daemon_default_latest_scanned_policy_activates_risky_snapshot(
+def test_daemon_default_pass_warn_policy_handles_risky_snapshot(
     monkeypatch,
     tmp_path: Path,
 ):
@@ -464,7 +466,10 @@ def test_daemon_default_latest_scanned_policy_activates_risky_snapshot(
                     read_activation(skill_dir)
                     if read_latest(skill_dir).get("versionId") == "v000002"
                     and read_activation(skill_dir).get("target")
-                    == ".skill-meta/versions/v000002.snapshot"
+                    in {
+                        ".skill-meta/versions/v000001.snapshot",
+                        ".skill-meta/versions/v000002.snapshot",
+                    }
                     else None
                 )
             )
@@ -478,10 +483,15 @@ def test_daemon_default_latest_scanned_policy_activates_risky_snapshot(
     assert activation_v1["target"] == ".skill-meta/versions/v000001.snapshot"
     assert latest["versionId"] == "v000002"
     assert latest["scanStatus"] in {"warn", "deny"}
-    assert activation_after_risk["target"] == ".skill-meta/versions/v000002.snapshot"
+    expected_target = (
+        ".skill-meta/versions/v000002.snapshot"
+        if latest["scanStatus"] == "warn"
+        else ".skill-meta/versions/v000001.snapshot"
+    )
+    assert activation_after_risk["target"] == expected_target
 
 
-def test_daemon_latest_scanned_policy_activates_risky_snapshot(
+def test_daemon_legacy_latest_scanned_policy_is_pass_warn_only(
     monkeypatch,
     tmp_path: Path,
 ):
@@ -502,7 +512,7 @@ def test_daemon_latest_scanned_policy_activates_risky_snapshot(
                 notify_payload(skill_dir),
                 trace_context={},
             )
-            await wait_for(
+            initial_activation = await wait_for(
                 lambda: (
                     read_activation(skill_dir)
                     if (skill_dir / ".skill-meta" / "activation.json").is_file()
@@ -530,20 +540,30 @@ def test_daemon_latest_scanned_policy_activates_risky_snapshot(
                     read_activation(skill_dir)
                     if read_latest(skill_dir).get("versionId") == "v000002"
                     and read_activation(skill_dir).get("target")
-                    == ".skill-meta/versions/v000002.snapshot"
+                    in {
+                        ".skill-meta/versions/v000001.snapshot",
+                        ".skill-meta/versions/v000002.snapshot",
+                        PENDING_DECISION_TARGET,
+                    }
                     else None
                 )
             )
             latest = read_latest(skill_dir)
         finally:
             await server.stop()
-        return activation_after_risk, latest
+        return initial_activation, activation_after_risk, latest
 
-    activation_after_risk, latest = asyncio.run(scenario())
+    initial_activation, activation_after_risk, latest = asyncio.run(scenario())
 
     assert latest["versionId"] == "v000002"
     assert latest["scanStatus"] in {"warn", "deny"}
-    assert activation_after_risk["target"] == ".skill-meta/versions/v000002.snapshot"
+    if latest["scanStatus"] == "warn":
+        expected_target = ".skill-meta/versions/v000002.snapshot"
+    elif initial_activation["target"] == ".skill-meta/versions/v000001.snapshot":
+        expected_target = ".skill-meta/versions/v000001.snapshot"
+    else:
+        expected_target = PENDING_DECISION_TARGET
+    assert activation_after_risk["target"] == expected_target
 
 
 def test_daemon_pass_warn_only_policy_hides_deny_snapshot(

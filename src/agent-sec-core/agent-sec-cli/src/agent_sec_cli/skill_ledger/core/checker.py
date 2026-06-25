@@ -48,6 +48,11 @@ def _manifest_metadata(manifest: SignedManifest, skill_dir: str) -> dict[str, An
         "updatedAt": manifest.updatedAt,
         "fileCount": len(manifest.fileHashes),
         "manifestHash": manifest.manifestHash,
+        "userDecision": (
+            manifest.userDecision.model_dump(exclude_none=True)
+            if manifest.userDecision is not None
+            else None
+        ),
     }
 
 

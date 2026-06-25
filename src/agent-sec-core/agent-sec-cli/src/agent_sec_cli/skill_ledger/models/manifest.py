@@ -7,9 +7,10 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel, Field, model_validator
+
 from agent_sec_cli.skill_ledger.models.scan import ScanEntry
 from agent_sec_cli.skill_ledger.utils import utc_now_iso
-from pydantic import BaseModel, Field
 
 
 class ManifestSignature(BaseModel):
@@ -18,6 +19,29 @@ class ManifestSignature(BaseModel):
     algorithm: str = "ed25519"
     value: str = ""  # base64-encoded signature
     keyFingerprint: str = ""  # "sha256:<hex>"
+
+
+class UserDecision(BaseModel):
+    """User decision bound to this specific signed manifest version."""
+
+    action: str
+    targetVersionId: str | None = None
+    reason: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_action(self) -> "UserDecision":
+        allowed = {"allow", "always_allow", "block", "rollback"}
+        if self.action not in allowed:
+            raise ValueError(
+                f"userDecision.action must be one of {sorted(allowed)}, got {self.action!r}"
+            )
+        if self.action == "rollback" and not self.targetVersionId:
+            raise ValueError("userDecision.targetVersionId is required for rollback")
+        if self.action != "rollback" and self.targetVersionId is not None:
+            raise ValueError(
+                "userDecision.targetVersionId is only allowed for rollback"
+            )
+        return self
 
 
 class SignedManifest(BaseModel):
@@ -36,6 +60,8 @@ class SignedManifest(BaseModel):
 
     scans: list[ScanEntry] = Field(default_factory=list)
     scanStatus: str = "none"  # none | pass | warn | deny
+
+    userDecision: UserDecision | None = None
 
     policy: str = "warning"  # warning | allow | block
 

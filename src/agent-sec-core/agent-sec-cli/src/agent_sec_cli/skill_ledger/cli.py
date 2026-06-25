@@ -10,6 +10,7 @@ import os
 from typing import Optional
 
 import typer
+
 from agent_sec_cli.security_middleware import invoke
 from agent_sec_cli.security_middleware.result import ActionResult
 
@@ -386,6 +387,111 @@ def cmd_list_scanners() -> None:
     Use this to discover valid values for scan --scanners and certify --scanner.
     """
     result = invoke("skill_ledger", command="list-scanners")
+    _forward(result)
+
+
+# ---------------------------------------------------------------------------
+# decide
+# ---------------------------------------------------------------------------
+
+
+@app.command("decide")
+def cmd_decide(
+    skill_dir: str = typer.Argument(..., help="Path to the skill directory"),
+    action: Optional[str] = typer.Option(
+        None,
+        "--action",
+        help="User decision to apply: allow | always_allow | block | rollback",
+    ),
+    version: Optional[str] = typer.Option(
+        None,
+        "--version",
+        help="Target version for rollback decisions.",
+    ),
+    reason: Optional[str] = typer.Option(
+        None,
+        "--reason",
+        help="Optional human-readable decision reason.",
+    ),
+    clear: bool = typer.Option(
+        False,
+        "--clear",
+        help="Clear the latest version's user decision.",
+    ),
+) -> None:
+    """Apply or clear a user decision for a skill version."""
+    if clear and action is not None:
+        typer.echo("Error: --clear and --action are mutually exclusive.", err=True)
+        raise typer.Exit(code=1)
+    result = invoke(
+        "skill_ledger",
+        command="decide",
+        skill_dir=skill_dir,
+        decision_action=action,
+        target_version_id=version,
+        reason=reason,
+        clear=clear,
+    )
+    _forward(result)
+
+
+# ---------------------------------------------------------------------------
+# show
+# ---------------------------------------------------------------------------
+
+
+@app.command("show")
+def cmd_show(
+    skill_dir: str = typer.Argument(..., help="Path to the skill directory"),
+    policy: Optional[str] = typer.Option(
+        None,
+        "--policy",
+        help="Activation policy to use when computing the active version.",
+    ),
+) -> None:
+    """Show latest, active, decision, findings, and consistency details."""
+    result = invoke(
+        "skill_ledger",
+        command="show",
+        skill_dir=skill_dir,
+        policy=policy,
+    )
+    _forward(result)
+
+
+# ---------------------------------------------------------------------------
+# export
+# ---------------------------------------------------------------------------
+
+
+@app.command("export")
+def cmd_export(
+    skill_dir: str = typer.Argument(..., help="Path to the skill directory"),
+    version: str = typer.Option(
+        "latest",
+        "--version",
+        help="Version to export: latest | active | v000001",
+    ),
+    output: str = typer.Option(
+        ...,
+        "--output",
+        help="Directory that will receive snapshot/, manifest.json, and findings.json.",
+    ),
+    policy: Optional[str] = typer.Option(
+        None,
+        "--policy",
+        help="Activation policy to use when --version active is requested.",
+    ),
+) -> None:
+    """Export an otherwise hidden signed snapshot for user review."""
+    result = invoke(
+        "skill_ledger",
+        command="export",
+        skill_dir=skill_dir,
+        version=version,
+        output=output,
+        policy=policy,
+    )
     _forward(result)
 
 

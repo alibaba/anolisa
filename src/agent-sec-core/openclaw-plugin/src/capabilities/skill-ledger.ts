@@ -8,14 +8,10 @@ import { buildTraceContext, callAgentSecCli, type TraceContext } from "../utils.
 // Types
 // ---------------------------------------------------------------------------
 
-type CheckResult = {
-  status: string;
+type ExposureSummary = {
+  latestStatus: string;
+  message: string | null;
   skillName?: string;
-  versionId?: string;
-  createdAt?: string;
-  updatedAt?: string;
-  fileCount?: number;
-  manifestHash?: string;
   [key: string]: unknown;
 };
 
@@ -33,24 +29,16 @@ type SkillLedgerConfig = {
 const READ_TOOL_NAMES = ["read"];
 const PATH_PARAM_NAMES = ["file_path", "path"];
 const DEFAULT_TIMEOUT_MS = 5_000;
-const DEFAULT_POLICY: SkillLedgerPolicy = "debug";
+const DEFAULT_POLICY: SkillLedgerPolicy = "block";
 const VALID_POLICIES = new Set<SkillLedgerPolicy>(["debug", "warn", "block"]);
 const DEFAULT_BLOCK_STATUSES = ["none", "drifted", "deny", "tampered"];
 
 // ---------------------------------------------------------------------------
-// Status messages and confirmation policy
+// Confirmation policy
 // ---------------------------------------------------------------------------
 
-const WARNING_MESSAGES: Record<string, (name: string) => string> = {
-  warn: (n) => `⚠️ Skill '${n}' has low-risk findings — review recommended`,
-  drifted: (n) => `⚠️ Skill '${n}' content has changed since last scan — confirm before using and run a fresh scan when possible`,
-  none: (n) => `⚠️ Skill '${n}' has not been security-scanned yet — confirm before using`,
-  error: (n) => `⚠️ Skill '${n}' check failed — invalid path or missing SKILL.md`,
-  deny: (n) => `🚨 Skill '${n}' has high-risk findings — confirm only if you trust the skill and intend to review it`,
-  tampered: (n) => `🚨 Skill '${n}' metadata signature verification failed — confirm only if you trust the skill source`,
-};
-
 const CONFIRMATION_SEVERITY: Record<string, "warning" | "critical"> = {
+  warn: "warning",
   none: "warning",
   drifted: "warning",
   deny: "critical",
@@ -117,12 +105,6 @@ function extractSkillPath(
 /** Resolve skill_dir from the matched SKILL.md path. */
 function resolveSkillDir(skillMdPath: string): string {
   return resolve(dirname(skillMdPath));
-}
-
-function formatSkillLedgerMessage(status: string, skillName: string): string {
-  const warnFn = WARNING_MESSAGES[status];
-  if (warnFn) return warnFn(skillName);
-  return `⚠️ Skill '${skillName}' has unknown status '${status}'`;
 }
 
 function confirmationSeverity(status: string): "warning" | "critical" | undefined {
@@ -261,16 +243,15 @@ export const skillLedger: SecurityCapability = {
 
           // Invoke CLI
           const result = await callAgentSecCli(
-            ["skill-ledger", "check", skillDir],
+            ["skill-ledger", "show", skillDir],
             { timeout: DEFAULT_TIMEOUT_MS, traceContext },
           );
 
-          // Parse JSON output. CLI may return exit code 1 for risky states,
-          // but stdout still contains valid check result with status field.
-          // We should parse stdout even if exit code is non-zero.
-          let checkResult: CheckResult;
+          // Parse JSON output. CLI may return exit code 1 for errors, but show
+          // normally returns a JSON summary with message/null semantics.
+          let summary: ExposureSummary;
           try {
-            checkResult = JSON.parse(result.stdout) as CheckResult;
+            summary = JSON.parse(result.stdout) as ExposureSummary;
           } catch {
             if (result.exitCode !== 0) {
               logDiagnostic(
@@ -288,13 +269,12 @@ export const skillLedger: SecurityCapability = {
             return undefined;
           }
 
-          const status = checkResult.status ?? "unknown";
-
-          if (status === "pass") {
+          if (typeof summary.message !== "string" || !summary.message.trim()) {
             return undefined;
           }
 
-          const message = formatSkillLedgerMessage(status, skillName);
+          const status = summary.latestStatus ?? "unknown";
+          const message = `⚠️ Skill '${skillName}': ${summary.message}`;
           if (cfg.policy === "debug") {
             logDebug(api, `skill='${skillName}' status=${status}: ${message}`);
             return undefined;

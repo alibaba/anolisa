@@ -81,7 +81,7 @@ function mockSkillLedgerCheck(result: CliResult): void {
       };
     }
 
-    if (args[offset] === "skill-ledger" && args[offset + 1] === "check") {
+    if (args[offset] === "skill-ledger" && args[offset + 1] === "show") {
       checkCallCount++;
       lastCheckArgs = args;
       return result;
@@ -107,10 +107,10 @@ function mockSkillLedgerInitFailure(stderr: string): void {
       };
     }
 
-    if (args[offset] === "skill-ledger" && args[offset + 1] === "check") {
+    if (args[offset] === "skill-ledger" && args[offset + 1] === "show") {
       return {
         exitCode: 0,
-        stdout: JSON.stringify({ status: "pass" }),
+        stdout: JSON.stringify({ latestStatus: "pass", message: null }),
         stderr: "",
       };
     }
@@ -122,7 +122,10 @@ function mockSkillLedgerInitFailure(stderr: string): void {
 function mockSkillLedgerStatus(status: string, exitCode = 0): void {
   mockSkillLedgerCheck({
     exitCode,
-    stdout: JSON.stringify({ status }),
+    stdout: JSON.stringify({
+      latestStatus: status,
+      message: status === "pass" ? null : `summary message for ${status}`,
+    }),
     stderr: "",
   });
 }
@@ -221,10 +224,14 @@ describe("skill-ledger", () => {
             };
       }
 
-      if (args[offset] === "skill-ledger" && args[offset + 1] === "check") {
+      if (args[offset] === "skill-ledger" && args[offset + 1] === "show") {
         checkCallCount++;
         lastCheckArgs = args;
-        return { exitCode: 0, stdout: JSON.stringify({ status: "pass" }), stderr: "" };
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({ latestStatus: "pass", message: null }),
+          stderr: "",
+        };
       }
 
       return { exitCode: 0, stdout: "", stderr: "" };
@@ -286,7 +293,7 @@ describe("skill-ledger", () => {
     assert.ok(lastCheckArgs?.includes("/skills/alpha"));
   });
 
-  it("expands leading ~/ before invoking skill-ledger check", async () => {
+  it("expands leading ~/ before invoking skill-ledger show", async () => {
     mockSkillLedgerStatus("pass");
     const { beforeToolCall } = registerHandlers();
 
@@ -316,7 +323,7 @@ describe("skill-ledger", () => {
     assert.ok(!lastCheckArgs?.includes("/openclaw/skills/session-logs"));
   });
 
-  it("passes hook trace context to skill-ledger check", async () => {
+  it("passes hook trace context to skill-ledger show", async () => {
     mockSkillLedgerStatus("pass");
     const { beforeToolCall } = registerHandlers();
 
@@ -369,8 +376,7 @@ describe("skill-ledger", () => {
     assert.equal(await beforeToolCall.handler(null, {}), undefined);
     assert.equal(await beforeToolCall.handler({ toolName: "read" }, {}), undefined);
 
-    assert.ok(logs.some((log) => log.includes("[DEBUG] [skill-ledger]")));
-    assert.ok(!logs.some((log) => log.includes("[WARN] [skill-ledger]")));
+    assert.ok(logs.some((log) => log.includes("[WARN] [skill-ledger]")));
   });
 
   it("pass allows silently", async () => {
@@ -380,26 +386,39 @@ describe("skill-ledger", () => {
     assert.equal(await beforeToolCall.handler(readSkillEvent(), { runId: "run-1" }), undefined);
   });
 
-  for (const status of ["none", "drifted", "deny", "tampered"]) {
-    it(`${status} logs debug and allows by default`, async () => {
-      mockSkillLedgerStatus(status, status === "none" ? 0 : 1);
-      const { beforeToolCall, logs } = registerHandlers();
-
-      const result = await beforeToolCall.handler(
-        readSkillEvent(`/skills/${status}/SKILL.md`, "run-1"),
-        { runId: "run-1" },
-      );
-
-      assert.equal(result, undefined);
-      assert.ok(logs.some((log) => log.includes("[DEBUG] [skill-ledger]")));
-      assert.ok(!logs.some((log) => log.includes("[WARN] [skill-ledger]")));
+  it("warn with null message allows silently", async () => {
+    mockSkillLedgerCheck({
+      exitCode: 0,
+      stdout: JSON.stringify({
+        latestStatus: "warn",
+        message: null,
+      }),
+      stderr: "",
     });
-  }
+    const { beforeToolCall } = registerHandlers();
+
+    assert.equal(await beforeToolCall.handler(readSkillEvent(), { runId: "run-1" }), undefined);
+  });
+
+  it("user decision summary with null message allows silently", async () => {
+    mockSkillLedgerCheck({
+      exitCode: 0,
+      stdout: JSON.stringify({
+        latestStatus: "deny",
+        userDecision: { action: "allow" },
+        message: null,
+      }),
+      stderr: "",
+    });
+    const { beforeToolCall } = registerHandlers();
+
+    assert.equal(await beforeToolCall.handler(readSkillEvent(), { runId: "run-1" }), undefined);
+  });
 
   for (const status of ["none", "drifted", "deny", "tampered"]) {
-    it(`${status} asks for approval with block policy`, async () => {
+    it(`${status} asks for approval by default`, async () => {
       mockSkillLedgerStatus(status, status === "none" ? 0 : 1);
-      const { beforeToolCall } = registerHandlers(policyConfig("block"));
+      const { beforeToolCall } = registerHandlers();
 
       const result = await beforeToolCall.handler(
         readSkillEvent(`/skills/${status}/SKILL.md`, "run-1"),
@@ -415,7 +434,23 @@ describe("skill-ledger", () => {
     });
   }
 
-  it("invalid explicit policy falls back to debug and logs a config warning", async () => {
+  for (const status of ["none", "drifted", "deny", "tampered"]) {
+    it(`${status} logs debug and allows with debug policy`, async () => {
+      mockSkillLedgerStatus(status, status === "none" ? 0 : 1);
+      const { beforeToolCall, logs } = registerHandlers(policyConfig("debug"));
+
+      const result = await beforeToolCall.handler(
+        readSkillEvent(`/skills/${status}/SKILL.md`, "run-1"),
+        { runId: "run-1" },
+      );
+
+      assert.equal(result, undefined);
+      assert.ok(logs.some((log) => log.includes("[DEBUG] [skill-ledger]")));
+      assert.ok(!logs.some((log) => log.includes("[WARN] [skill-ledger]")));
+    });
+  }
+
+  it("invalid explicit policy falls back to default block policy", async () => {
     mockSkillLedgerStatus("deny", 1);
     const { beforeToolCall, logs } = registerHandlers({
       capabilities: {
@@ -428,19 +463,18 @@ describe("skill-ledger", () => {
       {},
     );
 
-    assert.equal(result, undefined);
+    assert.ok(result?.requireApproval);
     assert.ok(
       logs.some((log) =>
-        log.includes("[WARN] [skill-ledger] invalid policy=\"blcok\"; using debug"),
+        log.includes("[WARN] [skill-ledger] invalid policy=\"blcok\"; using block"),
       ),
     );
-    assert.ok(logs.some((log) => log.includes("[DEBUG] [skill-ledger]")));
   });
 
   for (const status of ["warn", "error", "mystery"]) {
-    it(`${status} logs debug only by default`, async () => {
+    it(`${status} logs warning without approval with warn policy`, async () => {
       mockSkillLedgerStatus(status, status === "error" ? 1 : 0);
-      const { beforeToolCall, logs } = registerHandlers();
+      const { beforeToolCall, logs } = registerHandlers(policyConfig("warn"));
 
       const result = await beforeToolCall.handler(
         readSkillEvent(`/skills/${status}/SKILL.md`, "run-1"),
@@ -448,12 +482,13 @@ describe("skill-ledger", () => {
       );
 
       assert.equal(result, undefined);
-      assert.ok(logs.some((log) => log.includes("[DEBUG] [skill-ledger]")));
-      assert.ok(!logs.some((log) => log.includes("[WARN] [skill-ledger]")));
+      assert.ok(logs.some((log) => log.includes("[WARN] [skill-ledger]")));
     });
+  }
 
-    it(`${status} logs warning with warn policy`, async () => {
-      for (const pluginConfig of [policyConfig("warn"), legacyEnableBlockConfig(false)]) {
+  for (const status of ["error", "mystery"]) {
+    it(`${status} logs warning without approval in legacy enableBlock=false mode`, async () => {
+      for (const pluginConfig of [legacyEnableBlockConfig(false)]) {
         mockSkillLedgerStatus(status, status === "error" ? 1 : 0);
         const { beforeToolCall, logs } = registerHandlers(pluginConfig);
 

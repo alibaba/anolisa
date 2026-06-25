@@ -318,12 +318,20 @@ def _new_manifest(
 ) -> SignedManifest:
     """Create a new unsigned manifest object for the current skill contents."""
     skill_name = Path(skill_dir).name
+    inherited_decision = None
+    if (
+        previous_manifest is not None
+        and previous_manifest.userDecision is not None
+        and previous_manifest.userDecision.action == "always_allow"
+    ):
+        inherited_decision = previous_manifest.userDecision
     return SignedManifest(
         versionId=next_version_id(skill_dir),
         previousVersionId=_previous_version_id(skill_dir, previous_manifest),
         skillName=skill_name,
         fileHashes=current_hashes,
         scanStatus="none",
+        userDecision=inherited_decision,
         previousManifestSignature=_previous_signature(skill_dir, previous_manifest),
     )
 

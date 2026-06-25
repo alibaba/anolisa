@@ -19,8 +19,8 @@ def test_activation_policies_are_derived_from_status_mapping():
     assert ACTIVATION_POLICIES == frozenset(ACTIVATION_POLICY_ALLOWED_SCAN_STATUSES)
 
 
-def test_default_activation_policy_is_latest_scanned():
-    assert DEFAULT_ACTIVATION_POLICY == ACTIVATION_POLICY_LATEST_SCANNED
+def test_default_activation_policy_is_pass_warn_only():
+    assert DEFAULT_ACTIVATION_POLICY == ACTIVATION_POLICY_PASS_WARN_ONLY
 
 
 def test_pass_warn_only_constant_is_exported():
@@ -38,8 +38,8 @@ def test_pass_warn_only_constant_is_exported():
         ACTIVATION_POLICY_LATEST_SCANNED,
     ],
 )
-def test_validate_activation_policy_accepts_supported_policies(policy):
-    assert validate_activation_policy(policy) == policy
+def test_validate_activation_policy_accepts_and_normalizes_supported_policies(policy):
+    assert validate_activation_policy(policy) == ACTIVATION_POLICY_PASS_WARN_ONLY
 
 
 @pytest.mark.parametrize("policy", ["unknown", ["pass_only"]])
@@ -49,12 +49,9 @@ def test_validate_activation_policy_rejects_invalid_policies(policy):
 
 
 def test_allowed_scan_statuses_for_policy():
-    assert allowed_scan_statuses_for_policy(ACTIVATION_POLICY_PASS_ONLY) == frozenset(
-        {"pass"}
-    )
-    assert allowed_scan_statuses_for_policy(
-        ACTIVATION_POLICY_PASS_WARN_ONLY
-    ) == frozenset({"pass", "warn"})
-    assert allowed_scan_statuses_for_policy(
-        ACTIVATION_POLICY_LATEST_SCANNED
-    ) == frozenset({"pass", "warn", "deny"})
+    for policy in (
+        ACTIVATION_POLICY_PASS_ONLY,
+        ACTIVATION_POLICY_PASS_WARN_ONLY,
+        ACTIVATION_POLICY_LATEST_SCANNED,
+    ):
+        assert allowed_scan_statuses_for_policy(policy) == frozenset({"pass", "warn"})

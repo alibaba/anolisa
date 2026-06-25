@@ -6,11 +6,13 @@ minimal activation contract:
     {"schemaVersion": 1, "target": ".skill-meta/versions/v000001.snapshot"}
 
 The daemon stage will reuse this internal helper when publishing the current
-runtime target. A null target means no trusted snapshot is currently available.
+runtime target. A null target means the user explicitly blocked the skill or
+SkillFS should fail safe to hidden.
 """
 
 import json
 import os
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -18,26 +20,18 @@ from typing import Any
 from agent_sec_cli.skill_ledger.activation_policy import (
     ACTIVATION_POLICY_PASS_ONLY,
     DEFAULT_ACTIVATION_POLICY,
-    allowed_scan_statuses_for_policy,
     validate_activation_policy,
 )
-from agent_sec_cli.skill_ledger.core.checker import check
-from agent_sec_cli.skill_ledger.core.file_hasher import (
-    compute_snapshot_file_hashes,
-    diff_file_hashes,
-)
-from agent_sec_cli.skill_ledger.core.manifest_integrity import (
-    verify_manifest_integrity,
+from agent_sec_cli.skill_ledger.core.exposure import (
+    build_exposure_summary,
+    exposure_target,
+    is_pending_decision_target,
+    pending_decision_target,
 )
 from agent_sec_cli.skill_ledger.core.version_chain import (
     SKILL_META_DIR,
-    VERSIONS_DIR,
     ensure_skill_meta,
-    list_version_ids,
-    load_version_manifest,
-    snapshot_dir_path,
 )
-from agent_sec_cli.skill_ledger.models.manifest import SignedManifest
 from agent_sec_cli.skill_ledger.signing.base import SigningBackend
 from agent_sec_cli.skill_ledger.utils import validate_skill_dir
 
@@ -58,7 +52,48 @@ def activation_xattr_name() -> str:
 
 def snapshot_target(version_id: str) -> str:
     """Return the SkillFS target path for a version snapshot."""
-    return f"{SKILL_META_DIR}/{VERSIONS_DIR}/{version_id}.snapshot"
+    return exposure_target(version_id)
+
+
+def pending_snapshot_target() -> str:
+    """Return the SkillFS target path for the pending decision stub."""
+    return pending_decision_target()
+
+
+def ensure_pending_decision_stub(skill_dir: str | Path) -> Path:
+    """Create the safe pending decision stub snapshot and return its path."""
+    skill_path = Path(skill_dir)
+    stub_dir = skill_path / pending_decision_target()
+    if stub_dir.exists():
+        shutil.rmtree(stub_dir)
+    stub_dir.mkdir(parents=True, exist_ok=True)
+    skill_name = skill_path.name
+    (stub_dir / "SKILL.md").write_text(
+        (
+            "---\n"
+            f"name: {skill_name}\n"
+            "description: Skill requires manual review before use\n"
+            "---\n"
+            "# Pending Skill Ledger Review\n\n"
+            "This is a safe placeholder. The real skill version is not exposed "
+            "because Skill Ledger found a risk and no trusted fallback version "
+            "is available.\n\n"
+            "Run `agent-sec-cli skill-ledger show <skill_dir>` to inspect the "
+            "status, `agent-sec-cli skill-ledger export <skill_dir> --version "
+            "latest --output <path>` to review the hidden version, then run "
+            "`agent-sec-cli skill-ledger decide <skill_dir> --action allow`, "
+            "`rollback`, or `block` before retrying.\n"
+        ),
+        encoding="utf-8",
+    )
+    return stub_dir
+
+
+def cleanup_pending_decision_stub(skill_dir: str | Path) -> None:
+    """Remove a stale pending decision stub after real activation changes."""
+    stub_dir = Path(skill_dir) / pending_decision_target()
+    if stub_dir.exists():
+        shutil.rmtree(stub_dir)
 
 
 def resolve_activation(
@@ -70,26 +105,17 @@ def resolve_activation(
 ) -> dict[str, Any]:
     """Resolve and optionally persist the runtime activation target.
 
-    ``pass_only`` activates only signed ``scanStatus=pass`` versions.
-    ``pass_warn_only`` activates signed ``scanStatus=pass`` or ``warn`` versions,
-    but skips ``deny`` snapshots. ``latest_scanned`` activates the latest signed
-    scanned snapshot, including ``pass``, ``warn``, or ``deny``. Current source
-    workspace changes never become runtime-readable until scan/certify creates a
-    snapshot.
+    Runtime exposure has one behavior branch: activate a trusted ``pass`` or
+    ``warn`` snapshot unless a user decision explicitly allows or blocks a
+    version. Legacy policy strings are normalized before they are reported.
     """
     policy = validate_activation_policy(policy)
 
     validate_skill_dir(skill_dir)
     skill_name = Path(skill_dir).name
-    status_result = check(skill_dir, backend)
-    status = status_result.get("status", "unknown")
-
-    candidate = find_latest_activation_snapshot(skill_dir, backend, policy=policy)
-    if candidate is None:
-        target = None
-        active_version = None
-    else:
-        active_version, target = candidate
+    summary = build_exposure_summary(skill_dir, backend)
+    target = summary["target"]
+    active_version = summary["activeVersionId"]
 
     activation = {"schemaVersion": SCHEMA_VERSION, "target": target}
     activation_xattr = _activation_xattr_status(
@@ -98,15 +124,25 @@ def resolve_activation(
         skipped=True,
     )
     if write_activation:
-        activation_xattr = write_activation_contract(skill_dir, activation)
+        if is_pending_decision_target(target):
+            ensure_pending_decision_stub(skill_dir)
+            activation_xattr = write_activation_contract(skill_dir, activation)
+        else:
+            activation_xattr = write_activation_contract(skill_dir, activation)
+            cleanup_pending_decision_stub(skill_dir)
 
     return {
         "schemaVersion": SCHEMA_VERSION,
         "skillName": skill_name,
         "target": target,
         "activeVersionId": active_version,
-        "status": status,
+        "status": summary["latestStatus"],
+        "latestStatus": summary["latestStatus"],
+        "latestVersionId": summary["latestVersionId"],
         "policy": policy,
+        "userDecision": summary["userDecision"],
+        "reasonCode": summary["reasonCode"],
+        "message": summary["message"],
         "activationPath": str(activation_json_path(skill_dir)),
         "activationXattr": activation_xattr,
     }
@@ -130,27 +166,14 @@ def find_latest_activation_snapshot(
     *,
     policy: str,
 ) -> tuple[str, str] | None:
-    """Return ``(version_id, target)`` for the newest snapshot allowed by policy."""
-    allowed_statuses = allowed_scan_statuses_for_policy(policy)
-    for version_id in reversed(list_version_ids(skill_dir)):
-        try:
-            manifest = load_version_manifest(skill_dir, version_id)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if manifest is None:
-            continue
-        if manifest.versionId != version_id:
-            continue
-        if not _is_signed_manifest_with_allowed_status(
-            manifest,
-            backend,
-            allowed_statuses,
-        ):
-            continue
-        if not _snapshot_matches_manifest(skill_dir, version_id, manifest):
-            continue
-        return version_id, snapshot_target(version_id)
-    return None
+    """Return ``(version_id, target)`` for the current exposure summary."""
+    validate_activation_policy(policy)
+    summary = build_exposure_summary(str(skill_dir), backend)
+    version_id = summary["activeVersionId"]
+    target = summary["target"]
+    if version_id is None or target is None:
+        return None
+    return str(version_id), str(target)
 
 
 def write_activation_contract(
@@ -187,32 +210,6 @@ def write_activation_xattr(
             error=f"{type(exc).__name__}: {exc}",
         )
     return _activation_xattr_status(written=True, available=True)
-
-
-def _is_signed_manifest_with_allowed_status(
-    manifest: SignedManifest,
-    backend: SigningBackend,
-    allowed_statuses: frozenset[str],
-) -> bool:
-    if manifest.scanStatus not in allowed_statuses:
-        return False
-    valid, _ = verify_manifest_integrity(manifest, backend)
-    return valid
-
-
-def _snapshot_matches_manifest(
-    skill_dir: str | Path,
-    version_id: str,
-    manifest: SignedManifest,
-) -> bool:
-    snapshot_path = snapshot_dir_path(skill_dir, version_id)
-    if not snapshot_path.is_dir():
-        return False
-    try:
-        current_hashes = compute_snapshot_file_hashes(snapshot_path)
-    except ValueError:
-        return False
-    return bool(diff_file_hashes(manifest.fileHashes, current_hashes)["match"])
 
 
 def _minimal_activation_contract(activation: dict[str, Any]) -> dict[str, Any]:

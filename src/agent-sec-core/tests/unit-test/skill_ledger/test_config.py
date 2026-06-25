@@ -19,6 +19,7 @@ from agent_sec_cli.skill_ledger import config as config_module
 from agent_sec_cli.skill_ledger.config import (
     _DEFAULT_CONFIG,
     ACTIVATION_POLICY_LATEST_SCANNED,
+    ACTIVATION_POLICY_PASS_ONLY,
     DEFAULT_SKILL_DIRS,
     _compact_skill_dirs,
     _deep_merge_config,
@@ -52,10 +53,10 @@ class TestDefaultConfig(unittest.TestCase):
 
     def test_default_activation_policy(self):
         self.assertEqual(
-            _DEFAULT_CONFIG["activationPolicy"], ACTIVATION_POLICY_LATEST_SCANNED
+            _DEFAULT_CONFIG["activationPolicy"], ACTIVATION_POLICY_PASS_WARN_ONLY
         )
         self.assertEqual(
-            resolve_activation_policy(_DEFAULT_CONFIG), ACTIVATION_POLICY_LATEST_SCANNED
+            resolve_activation_policy(_DEFAULT_CONFIG), ACTIVATION_POLICY_PASS_WARN_ONLY
         )
 
     def test_pass_warn_only_constant_is_exported(self):
@@ -168,13 +169,12 @@ class TestConfigMerge(unittest.TestCase):
         merged = _deep_merge_config(defaults, user)
         self.assertEqual(merged["otherList"], [3])
 
-    def test_resolve_activation_policy_accepts_latest_scanned(self):
-        self.assertEqual(
-            resolve_activation_policy(
-                {"activationPolicy": ACTIVATION_POLICY_LATEST_SCANNED}
-            ),
-            ACTIVATION_POLICY_LATEST_SCANNED,
-        )
+    def test_resolve_activation_policy_normalizes_legacy_policies(self):
+        for policy in (ACTIVATION_POLICY_PASS_ONLY, ACTIVATION_POLICY_LATEST_SCANNED):
+            self.assertEqual(
+                resolve_activation_policy({"activationPolicy": policy}),
+                ACTIVATION_POLICY_PASS_WARN_ONLY,
+            )
 
     def test_resolve_activation_policy_accepts_pass_warn_only(self):
         self.assertEqual(
@@ -192,7 +192,7 @@ class TestConfigMerge(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "activationPolicy"):
             resolve_activation_policy({"activationPolicy": ["pass_only"]})
 
-    def test_load_config_preserves_activation_policy(self):
+    def test_load_config_normalizes_legacy_activation_policy(self):
         cfg_dir = Path(tempfile.mkdtemp())
         try:
             cfg_path = cfg_dir / "config.json"
@@ -207,7 +207,7 @@ class TestConfigMerge(unittest.TestCase):
                 cfg = load_config()
             self.assertEqual(
                 resolve_activation_policy(cfg),
-                ACTIVATION_POLICY_LATEST_SCANNED,
+                ACTIVATION_POLICY_PASS_WARN_ONLY,
             )
         finally:
             shutil.rmtree(cfg_dir)

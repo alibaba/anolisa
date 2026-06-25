@@ -20,6 +20,12 @@ from agent_sec_cli.skill_ledger.core.certifier import (
     scan_skill,
 )
 from agent_sec_cli.skill_ledger.core.checker import check, check_batch
+from agent_sec_cli.skill_ledger.core.decision import (
+    clear_decision,
+    decide_skill,
+    export_skill,
+    show_skill,
+)
 from agent_sec_cli.skill_ledger.core.status import ledger_status
 from agent_sec_cli.skill_ledger.scanner.registry import ScannerRegistry
 from agent_sec_cli.skill_ledger.signing.ed25519 import NativeEd25519Backend
@@ -479,3 +485,95 @@ class SkillLedgerBackend(BaseBackend):
             stdout=json.dumps(data, ensure_ascii=False) + "\n",
             data=data,
         )
+
+    def _do_decide(
+        self,
+        ctx: RequestContext,
+        *,
+        skill_dir: str,
+        decision_action: str | None = None,
+        target_version_id: str | None = None,
+        reason: str | None = None,
+        clear: bool = False,
+        **kw: Any,
+    ) -> ActionResult:
+        try:
+            key_created, key_result, warnings = self._ensure_keys()
+            backend = NativeEd25519Backend()
+            if clear:
+                result = clear_decision(skill_dir, backend)
+            else:
+                if decision_action is None:
+                    return ActionResult(
+                        success=False,
+                        error="--action is required unless --clear is set",
+                        exit_code=1,
+                    )
+                result = decide_skill(
+                    skill_dir,
+                    backend,
+                    action=decision_action,
+                    target_version_id=target_version_id,
+                    reason=reason,
+                )
+            result["keyCreated"] = key_created
+            if key_result is not None:
+                result["key"] = key_result
+            if warnings:
+                result["warnings"] = warnings
+            data = {"command": "decide", **result}
+            return ActionResult(
+                success=True,
+                stdout=json.dumps(data, ensure_ascii=False) + "\n",
+                data=data,
+            )
+        except Exception as exc:
+            return ActionResult(success=False, error=str(exc), exit_code=1)
+
+    def _do_show(
+        self,
+        ctx: RequestContext,
+        *,
+        skill_dir: str,
+        policy: str | None = None,
+        **kw: Any,
+    ) -> ActionResult:
+        backend = NativeEd25519Backend()
+        try:
+            result = show_skill(skill_dir, backend, policy=policy)
+            data = {"command": "show", **result}
+            return ActionResult(
+                success=True,
+                stdout=json.dumps(data, ensure_ascii=False) + "\n",
+                data=data,
+            )
+        except Exception as exc:
+            return ActionResult(success=False, error=str(exc), exit_code=1)
+
+    def _do_export(
+        self,
+        ctx: RequestContext,
+        *,
+        skill_dir: str,
+        version: str,
+        output: str,
+        policy: str | None = None,
+        **kw: Any,
+    ) -> ActionResult:
+        backend = NativeEd25519Backend()
+        try:
+            result = export_skill(
+                skill_dir,
+                backend,
+                version=version,
+                output=output,
+                policy=policy,
+            )
+            data = {"command": "export", **result}
+            return ActionResult(
+                success=True,
+                stdout=json.dumps(data, ensure_ascii=False) + "\n",
+                data=data,
+            )
+        except Exception as exc:
+            return ActionResult(success=False, error=str(exc), exit_code=1)

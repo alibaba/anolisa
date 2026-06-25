@@ -40,6 +40,7 @@ from typer.testing import CliRunner
 
 _runner = CliRunner()
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+PENDING_DECISION_TARGET = ".skill-meta/versions/__pending_decision__.snapshot"
 
 
 def strip_ansi(text: str) -> str:
@@ -140,16 +141,37 @@ def read_activation(skill_dir: Path) -> dict:
     return json.loads(activation.read_text())
 
 
+def write_skill_ledger_config(root: Path, config: dict) -> None:
+    """Write isolated skill-ledger config for integration tests."""
+    config_dir = root / "xdg_config" / "agent-sec" / "skill-ledger"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.json").write_text(json.dumps(config))
+
+
 def decode_xattr_activation(value: bytes) -> dict:
     """Decode an activation xattr payload."""
     return json.loads(value.decode("utf-8"))
+
+
+def assert_pending_stub(skill_dir: Path, *, leaked_files: list[str] | None = None) -> None:
+    """Assert the pending decision stub exists without exposing live risk files."""
+    stub_dir = skill_dir / PENDING_DECISION_TARGET
+    assert stub_dir.is_dir()
+    skill_md = stub_dir / "SKILL.md"
+    assert skill_md.is_file()
+    content = skill_md.read_text()
+    assert f"name: {skill_dir.name}" in content
+    assert "requires manual review" in content
+    assert "skill-ledger decide" in content
+    for rel in leaked_files or []:
+        assert not (stub_dir / rel).exists()
 
 
 def resolve_skill_activation(
     skill_dir: Path,
     env_extra: dict,
     *,
-    policy: str = "pass_only",
+    policy: str = "pass_warn_only",
 ) -> dict:
     """Resolve activation using the same isolated env as CLI integration tests."""
     return resolve_skill_activation_with_backend(
@@ -165,7 +187,7 @@ def resolve_skill_activation_with_backend(
     env_extra: dict,
     backend: SigningBackend,
     *,
-    policy: str = "pass_only",
+    policy: str = "pass_warn_only",
 ) -> dict:
     """Resolve activation with a caller-provided signing backend."""
     previous = {key: os.environ.get(key) for key in env_extra}
@@ -1532,8 +1554,8 @@ def test_audit_verify_snapshots_rejects_symlink(ws):
 # ── Group 6b: runtime activation resolver ─────────────────────────────────
 
 
-def test_resolve_no_manifest_writes_null_activation(ws, monkeypatch):
-    """resolve on a new skill exposes no runtime target and creates no version."""
+def test_resolve_no_manifest_writes_pending_stub_activation(ws, monkeypatch):
+    """resolve on a new skill exposes a safe review stub and creates no version."""
     skill = make_skill(ws.skills_dir, "resolve-new", {"f.txt": "new"})
     env = ws.env()
     xattr_calls = []
@@ -1546,9 +1568,16 @@ def test_resolve_no_manifest_writes_null_activation(ws, monkeypatch):
     out = resolve_skill_activation(skill, env)
 
     assert out["status"] == "none"
-    assert out["target"] is None
+    assert out["activeVersionId"] is None
+    assert out["target"] == PENDING_DECISION_TARGET
     assert "reason" not in out
-    assert read_activation(skill) == {"schemaVersion": 1, "target": None}
+    assert out["reasonCode"] == "latest_risk_pending_decision"
+    assert out["message"] is not None
+    assert read_activation(skill) == {
+        "schemaVersion": 1,
+        "target": PENDING_DECISION_TARGET,
+    }
+    assert_pending_stub(skill, leaked_files=["f.txt"])
     assert out["activationXattr"] == {
         "name": resolver_core.activation_xattr_name(),
         "written": True,
@@ -1560,7 +1589,7 @@ def test_resolve_no_manifest_writes_null_activation(ws, monkeypatch):
     assert xattr_calls[0][2] == (skill / ".skill-meta" / "activation.json").read_bytes()
     assert decode_xattr_activation(xattr_calls[0][2]) == {
         "schemaVersion": 1,
-        "target": None,
+        "target": PENDING_DECISION_TARGET,
     }
     assert not (skill / ".skill-meta" / "versions" / "v000001.json").exists()
     assert not (skill / ".skill-meta" / "versions" / "v000001.snapshot").exists()
@@ -1624,8 +1653,14 @@ def test_resolve_skips_pass_version_when_verify_returns_false(ws):
 
     assert out["status"] == "tampered"
     assert out["activeVersionId"] is None
-    assert out["target"] is None
-    assert read_activation(skill) == {"schemaVersion": 1, "target": None}
+    assert out["target"] == PENDING_DECISION_TARGET
+    assert out["reasonCode"] == "tampered"
+    assert out["message"] is not None
+    assert read_activation(skill) == {
+        "schemaVersion": 1,
+        "target": PENDING_DECISION_TARGET,
+    }
+    assert_pending_stub(skill, leaked_files=["tool.sh"])
 
 
 def test_resolve_skips_pass_version_when_public_key_is_missing(ws):
@@ -1645,8 +1680,14 @@ def test_resolve_skips_pass_version_when_public_key_is_missing(ws):
 
     assert out["status"] == "tampered"
     assert out["activeVersionId"] is None
-    assert out["target"] is None
-    assert read_activation(skill) == {"schemaVersion": 1, "target": None}
+    assert out["target"] == PENDING_DECISION_TARGET
+    assert out["reasonCode"] == "tampered"
+    assert out["message"] is not None
+    assert read_activation(skill) == {
+        "schemaVersion": 1,
+        "target": PENDING_DECISION_TARGET,
+    }
+    assert_pending_stub(skill, leaked_files=["tool.sh"])
 
 
 def test_resolve_drifted_source_keeps_previous_pass_snapshot(ws):
@@ -1667,7 +1708,8 @@ def test_resolve_drifted_source_keeps_previous_pass_snapshot(ws):
 
     assert out["status"] == "drifted"
     assert out["target"] == ".skill-meta/versions/v000001.snapshot"
-    assert "reason" not in out
+    assert out["reasonCode"] == "root_drift"
+    assert out["message"] is not None
 
 
 def test_resolve_xattr_failure_keeps_activation_file(ws, monkeypatch):
@@ -1682,8 +1724,12 @@ def test_resolve_xattr_failure_keeps_activation_file(ws, monkeypatch):
 
     out = resolve_skill_activation(skill, env)
 
-    assert out["target"] is None
-    assert read_activation(skill) == {"schemaVersion": 1, "target": None}
+    assert out["target"] == PENDING_DECISION_TARGET
+    assert read_activation(skill) == {
+        "schemaVersion": 1,
+        "target": PENDING_DECISION_TARGET,
+    }
+    assert_pending_stub(skill, leaked_files=["data.txt"])
     assert out["activationXattr"]["name"] == resolver_core.activation_xattr_name()
     assert out["activationXattr"]["written"] is False
     assert out["activationXattr"]["available"] is True
@@ -1698,8 +1744,12 @@ def test_resolve_missing_xattr_support_keeps_activation_file(ws, monkeypatch):
 
     out = resolve_skill_activation(skill, env)
 
-    assert out["target"] is None
-    assert read_activation(skill) == {"schemaVersion": 1, "target": None}
+    assert out["target"] == PENDING_DECISION_TARGET
+    assert read_activation(skill) == {
+        "schemaVersion": 1,
+        "target": PENDING_DECISION_TARGET,
+    }
+    assert_pending_stub(skill, leaked_files=["data.txt"])
     assert out["activationXattr"] == {
         "name": resolver_core.activation_xattr_name(),
         "written": False,
@@ -1736,8 +1786,8 @@ def test_resolve_without_writing_reports_stable_xattr_status(ws):
     assert not (skill / ".skill-meta" / "activation.json").exists()
 
 
-def test_resolve_warn_latest_falls_back_to_previous_pass_snapshot(ws):
-    """Explicit pass_only policy does not activate warn snapshots."""
+def test_resolve_legacy_pass_only_policy_normalizes_and_activates_warn_snapshot(ws):
+    """Legacy pass_only config behaves as silent pass_warn_only."""
     skill = make_skill(ws.skills_dir, "resolve-warn", {"data.txt": "v1"})
     env = ws.env()
     pass_findings = write_findings_file(
@@ -1761,12 +1811,447 @@ def test_resolve_warn_latest_falls_back_to_previous_pass_snapshot(ws):
     out = resolve_skill_activation(skill, env, policy="pass_only")
 
     assert out["status"] == "warn"
+    assert out["policy"] == "pass_warn_only"
+    assert out["activeVersionId"] == "v000002"
+    assert out["target"] == ".skill-meta/versions/v000002.snapshot"
+    assert out["reasonCode"] == "normal"
+    assert out["message"] is None
+
+
+def test_decide_allow_activates_latest_deny_snapshot_under_pass_only(ws):
+    """A user allow decision overrides scanStatus for the latest signed version."""
+    skill = make_skill(ws.skills_dir, "decision-allow", {"data.txt": "v1"})
+    env = ws.env()
+    pass_findings = write_findings_file(
+        ws.fixtures,
+        "decision-allow-pass.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    deny_findings = write_findings_file(
+        ws.fixtures,
+        "decision-allow-deny.json",
+        [{"rule": "deny", "level": "deny", "message": "deny"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(pass_findings)], env_extra=env
+    )
+    (skill / "data.txt").write_text("v2 risky")
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(deny_findings)], env_extra=env
+    )
+
+    before = resolve_skill_activation(skill, env, policy="pass_only")
+    assert before["activeVersionId"] == "v000001"
+
+    r = run_skill_ledger(
+        ["decide", str(skill), "--action", "allow", "--reason", "reviewed"],
+        env_extra=env,
+    )
+    assert r.returncode == 0, f"decide exit {r.returncode}: {r.stderr}"
+    decision = parse_json_output(r.stdout)
+    assert decision["userDecision"]["action"] == "allow"
+    assert decision["versionId"] == "v000002"
+    assert sorted(
+        p.name for p in (skill / ".skill-meta" / "versions").glob("*.json")
+    ) == [
+        "v000001.json",
+        "v000002.json",
+    ]
+
+    after = resolve_skill_activation(skill, env, policy="pass_only")
+    assert after["activeVersionId"] == "v000002"
+    assert after["target"] == ".skill-meta/versions/v000002.snapshot"
+    assert after["reasonCode"] == "user_allow"
+    assert after["message"] is None
+
+    r = run_skill_ledger(["show", str(skill)], env_extra=env)
+    assert r.returncode == 0, f"show exit {r.returncode}: {r.stderr}"
+    shown = parse_json_output(r.stdout)
+    assert shown["latestStatus"] == "deny"
+    assert shown["activeVersionId"] == "v000002"
+    assert shown["userDecision"]["action"] == "allow"
+    assert shown["reasonCode"] == "user_allow"
+    assert shown["message"] is None
+    assert shown["warnings"] == []
+
+
+def test_decide_allow_cleans_pending_stub_for_deny_only_skill(ws):
+    """Allowing a hidden deny-only skill removes the temporary review stub."""
+    skill = make_skill(ws.skills_dir, "decision-allow-pending", {"data.txt": "v1"})
+    env = ws.env()
+    deny_findings = write_findings_file(
+        ws.fixtures,
+        "decision-allow-pending-deny.json",
+        [{"rule": "deny", "level": "deny", "message": "deny"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(deny_findings)], env_extra=env
+    )
+
+    before = resolve_skill_activation(skill, env, policy="pass_warn_only")
+    assert before["target"] == PENDING_DECISION_TARGET
+    assert before["activeVersionId"] is None
+    assert_pending_stub(skill, leaked_files=["data.txt"])
+
+    r = run_skill_ledger(
+        ["decide", str(skill), "--action", "allow", "--reason", "reviewed"],
+        env_extra=env,
+    )
+    assert r.returncode == 0, f"decide exit {r.returncode}: {r.stderr}"
+
+    assert not (skill / PENDING_DECISION_TARGET).exists()
+    assert read_activation(skill) == {
+        "schemaVersion": 1,
+        "target": ".skill-meta/versions/v000001.snapshot",
+    }
+
+
+def test_decide_block_hides_skill_even_when_pass_snapshot_exists(ws):
+    """A block decision hides the whole skill instead of falling back."""
+    skill = make_skill(ws.skills_dir, "decision-block", {"data.txt": "v1"})
+    env = ws.env()
+    findings = write_findings_file(
+        ws.fixtures,
+        "decision-block-pass.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    deny_findings = write_findings_file(
+        ws.fixtures,
+        "decision-block-deny.json",
+        [{"rule": "deny", "level": "deny", "message": "deny"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(findings)], env_extra=env
+    )
+    (skill / "data.txt").write_text("v2 risky")
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(deny_findings)], env_extra=env
+    )
+    r = run_skill_ledger(
+        ["decide", str(skill), "--action", "block", "--reason", "do not use"],
+        env_extra=env,
+    )
+    assert r.returncode == 0, f"decide exit {r.returncode}: {r.stderr}"
+
+    out = resolve_skill_activation(skill, env, policy="latest_scanned")
+    assert out["activeVersionId"] is None
+    assert out["target"] is None
+    assert read_activation(skill) == {"schemaVersion": 1, "target": None}
+
+    r = run_skill_ledger(["show", str(skill)], env_extra=env)
+    assert r.returncode == 0, f"show exit {r.returncode}: {r.stderr}"
+    shown = parse_json_output(r.stdout)
+    assert shown["active"] is None
+    assert shown["target"] is None
+    assert shown["reasonCode"] == "user_block"
+    assert shown["message"] is None
+    assert shown["userDecision"]["action"] == "block"
+    assert shown["warnings"] == []
+    assert shown["consistencyReason"] == "user decision block hides this skill"
+
+
+def test_decide_block_cleans_pending_stub_for_deny_only_skill(ws):
+    """Blocking a hidden deny-only skill removes the temporary review stub."""
+    skill = make_skill(ws.skills_dir, "decision-block-pending", {"data.txt": "v1"})
+    env = ws.env()
+    deny_findings = write_findings_file(
+        ws.fixtures,
+        "decision-block-pending-deny.json",
+        [{"rule": "deny", "level": "deny", "message": "deny"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(deny_findings)], env_extra=env
+    )
+
+    before = resolve_skill_activation(skill, env, policy="pass_warn_only")
+    assert before["target"] == PENDING_DECISION_TARGET
+    assert before["activeVersionId"] is None
+    assert_pending_stub(skill, leaked_files=["data.txt"])
+
+    r = run_skill_ledger(
+        ["decide", str(skill), "--action", "block", "--reason", "do not use"],
+        env_extra=env,
+    )
+    assert r.returncode == 0, f"decide exit {r.returncode}: {r.stderr}"
+
+    assert not (skill / PENDING_DECISION_TARGET).exists()
+    assert read_activation(skill) == {"schemaVersion": 1, "target": None}
+
+
+def test_decide_always_allow_inherits_to_future_versions(ws):
+    """always_allow is copied to future versions and keeps latest active."""
+    skill = make_skill(ws.skills_dir, "decision-always-allow", {"data.txt": "v1"})
+    env = ws.env()
+    pass_findings = write_findings_file(
+        ws.fixtures,
+        "decision-always-allow-pass.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    deny_findings = write_findings_file(
+        ws.fixtures,
+        "decision-always-allow-deny.json",
+        [{"rule": "deny", "level": "deny", "message": "deny"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(pass_findings)], env_extra=env
+    )
+    r = run_skill_ledger(
+        ["decide", str(skill), "--action", "always_allow"],
+        env_extra=env,
+    )
+    assert r.returncode == 0, f"decide exit {r.returncode}: {r.stderr}"
+
+    (skill / "data.txt").write_text("v2 risky")
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(deny_findings)], env_extra=env
+    )
+
+    latest = read_latest_manifest(skill)
+    assert latest["versionId"] == "v000002"
+    assert latest["userDecision"]["action"] == "always_allow"
+    out = resolve_skill_activation(skill, env, policy="pass_only")
+    assert out["activeVersionId"] == "v000002"
+
+
+def test_decide_block_does_not_inherit_to_future_versions(ws):
+    """block hides only its own version; future versions fall back to policy."""
+    skill = make_skill(ws.skills_dir, "decision-block-inherit", {"data.txt": "v1"})
+    env = ws.env()
+    findings = write_findings_file(
+        ws.fixtures,
+        "decision-block-inherit-pass.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(findings)], env_extra=env
+    )
+    run_skill_ledger(
+        ["decide", str(skill), "--action", "block"],
+        env_extra=env,
+    )
+
+    (skill / "data.txt").write_text("v2 safe")
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(findings)], env_extra=env
+    )
+
+    latest = read_latest_manifest(skill)
+    assert latest["versionId"] == "v000002"
+    assert latest.get("userDecision") is None
+    out = resolve_skill_activation(skill, env, policy="latest_scanned")
+    assert out["activeVersionId"] == "v000002"
+    assert out["target"] == ".skill-meta/versions/v000002.snapshot"
+
+
+def test_decide_clear_returns_to_activation_policy(ws):
+    """Clearing a decision makes resolver fall back to activationPolicy."""
+    skill = make_skill(ws.skills_dir, "decision-clear", {"data.txt": "v1"})
+    env = ws.env()
+    pass_findings = write_findings_file(
+        ws.fixtures,
+        "decision-clear-pass.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    deny_findings = write_findings_file(
+        ws.fixtures,
+        "decision-clear-deny.json",
+        [{"rule": "deny", "level": "deny", "message": "deny"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(pass_findings)], env_extra=env
+    )
+    (skill / "data.txt").write_text("v2 risky")
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(deny_findings)], env_extra=env
+    )
+    run_skill_ledger(
+        ["decide", str(skill), "--action", "allow"],
+        env_extra=env,
+    )
+    assert (
+        resolve_skill_activation(skill, env, policy="pass_only")["activeVersionId"]
+        == "v000002"
+    )
+
+    r = run_skill_ledger(["decide", str(skill), "--clear"], env_extra=env)
+    assert r.returncode == 0, f"clear exit {r.returncode}: {r.stderr}"
+
+    latest = read_latest_manifest(skill)
+    assert latest.get("userDecision") is None
+    out = resolve_skill_activation(skill, env, policy="pass_only")
     assert out["activeVersionId"] == "v000001"
-    assert out["target"] == ".skill-meta/versions/v000001.snapshot"
 
 
-def test_resolve_latest_scanned_activates_warn_snapshot(ws):
-    """latest_scanned policy may activate the newest valid warn snapshot."""
+def test_decide_rollback_restores_pass_snapshot_and_records_new_version(ws):
+    """Rollback is a decide action that creates a new version from a pass snapshot."""
+    skill = make_skill(ws.skills_dir, "decision-rollback", {"data.txt": "safe"})
+    env = ws.env()
+    pass_findings = write_findings_file(
+        ws.fixtures,
+        "decision-rollback-pass.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    deny_findings = write_findings_file(
+        ws.fixtures,
+        "decision-rollback-deny.json",
+        [{"rule": "deny", "level": "deny", "message": "deny"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(pass_findings)], env_extra=env
+    )
+    (skill / "data.txt").write_text("risky")
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(deny_findings)], env_extra=env
+    )
+
+    r = run_skill_ledger(
+        ["decide", str(skill), "--action", "rollback", "--version", "v000001"],
+        env_extra=env,
+    )
+    assert r.returncode == 0, f"rollback exit {r.returncode}: {r.stderr}"
+    out = parse_json_output(r.stdout)
+
+    assert out["versionId"] == "v000003"
+    assert out["userDecision"]["action"] == "rollback"
+    assert out["userDecision"]["targetVersionId"] == "v000001"
+    assert (skill / "data.txt").read_text() == "safe"
+
+    activation = resolve_skill_activation(skill, env, policy="pass_only")
+    assert activation["activeVersionId"] == "v000003"
+    assert activation["target"] == ".skill-meta/versions/v000003.snapshot"
+
+
+def test_decide_rollback_defaults_to_active_version(ws):
+    """Rollback without --version restores the currently active snapshot."""
+    write_skill_ledger_config(ws.root, {"activationPolicy": "pass_only"})
+    skill = make_skill(ws.skills_dir, "decision-rollback-default", {"data.txt": "safe"})
+    env = ws.env()
+    pass_findings = write_findings_file(
+        ws.fixtures,
+        "decision-rollback-default-pass.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    deny_findings = write_findings_file(
+        ws.fixtures,
+        "decision-rollback-default-deny.json",
+        [{"rule": "deny", "level": "deny", "message": "deny"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(pass_findings)], env_extra=env
+    )
+    (skill / "data.txt").write_text("risky")
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(deny_findings)], env_extra=env
+    )
+
+    r = run_skill_ledger(
+        ["decide", str(skill), "--action", "rollback"],
+        env_extra=env,
+    )
+    assert r.returncode == 0, f"rollback exit {r.returncode}: {r.stderr}"
+    out = parse_json_output(r.stdout)
+
+    assert out["versionId"] == "v000003"
+    assert out["userDecision"]["action"] == "rollback"
+    assert out["userDecision"]["targetVersionId"] == "v000001"
+    assert (skill / "data.txt").read_text() == "safe"
+
+
+def test_decide_rollback_without_version_errors_when_active_is_empty(ws):
+    """Rollback without --version fails when no snapshot is currently active."""
+    write_skill_ledger_config(ws.root, {"activationPolicy": "pass_only"})
+    skill = make_skill(
+        ws.skills_dir, "decision-rollback-no-active", {"data.txt": "risk"}
+    )
+    env = ws.env()
+    deny_findings = write_findings_file(
+        ws.fixtures,
+        "decision-rollback-no-active-deny.json",
+        [{"rule": "deny", "level": "deny", "message": "deny"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(deny_findings)], env_extra=env
+    )
+
+    r = run_skill_ledger(
+        ["decide", str(skill), "--action", "rollback"],
+        env_extra=env,
+    )
+    assert r.returncode == 1
+    assert "no active version" in r.stderr
+
+
+def test_show_reports_active_latest_decision_and_root_match(ws):
+    skill = make_skill(ws.skills_dir, "decision-show", {"data.txt": "v1"})
+    env = ws.env()
+    pass_findings = write_findings_file(
+        ws.fixtures,
+        "decision-show-pass.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    deny_findings = write_findings_file(
+        ws.fixtures,
+        "decision-show-deny.json",
+        [{"rule": "deny", "level": "deny", "message": "deny"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(pass_findings)], env_extra=env
+    )
+    (skill / "data.txt").write_text("v2 risky")
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(deny_findings)], env_extra=env
+    )
+
+    r = run_skill_ledger(["show", str(skill), "--policy", "pass_only"], env_extra=env)
+    assert r.returncode == 0, f"show exit {r.returncode}: {r.stderr}"
+    out = parse_json_output(r.stdout)
+
+    assert out["latestStatus"] == "deny"
+    assert out["latestVersionId"] == "v000002"
+    assert out["activeVersionId"] == "v000001"
+    assert out["reasonCode"] == "latest_risk_fallback_to_previous"
+    assert out["message"] is not None
+    assert out["userDecision"] is None
+    assert out["latest"]["versionId"] == "v000002"
+    assert out["latest"]["status"] == "deny"
+    assert out["active"]["versionId"] == "v000001"
+    assert out["rootMatchesActive"] is False
+    assert out["activationPolicy"] == "pass_warn_only"
+    assert "active version is v000001" in out["consistencyReason"]
+    assert out["warnings"]
+
+
+def test_export_writes_snapshot_manifest_and_findings(ws):
+    skill = make_skill(ws.skills_dir, "decision-export", {"data.txt": "risk"})
+    env = ws.env()
+    findings = write_findings_file(
+        ws.fixtures,
+        "decision-export-deny.json",
+        [{"rule": "deny", "level": "deny", "message": "deny"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(findings)], env_extra=env
+    )
+    out_dir = ws.root / "exported-risk-skill"
+
+    r = run_skill_ledger(
+        ["export", str(skill), "--version", "latest", "--output", str(out_dir)],
+        env_extra=env,
+    )
+    assert r.returncode == 0, f"export exit {r.returncode}: {r.stderr}"
+    out = parse_json_output(r.stdout)
+
+    assert out["versionId"] == "v000001"
+    assert (out_dir / "snapshot" / "data.txt").read_text() == "risk"
+    assert json.loads((out_dir / "manifest.json").read_text())["scanStatus"] == "deny"
+    findings_out = json.loads((out_dir / "findings.json").read_text())
+    assert findings_out == [{"rule": "deny", "level": "deny", "message": "deny"}]
+
+
+def test_resolve_legacy_latest_scanned_policy_normalizes_and_activates_warn_snapshot(
+    ws,
+):
+    """Legacy latest_scanned config behaves as silent pass_warn_only."""
     skill = make_skill(ws.skills_dir, "resolve-latest-warn", {"data.txt": "v1"})
     env = ws.env()
     pass_findings = write_findings_file(
@@ -1790,8 +2275,11 @@ def test_resolve_latest_scanned_activates_warn_snapshot(ws):
     out = resolve_skill_activation(skill, env, policy="latest_scanned")
 
     assert out["status"] == "warn"
+    assert out["policy"] == "pass_warn_only"
     assert out["activeVersionId"] == "v000002"
     assert out["target"] == ".skill-meta/versions/v000002.snapshot"
+    assert out["reasonCode"] == "normal"
+    assert out["message"] is None
     assert read_activation(skill) == {
         "schemaVersion": 1,
         "target": ".skill-meta/versions/v000002.snapshot",
@@ -1799,7 +2287,7 @@ def test_resolve_latest_scanned_activates_warn_snapshot(ws):
 
 
 def test_resolve_pass_warn_only_activates_warn_snapshot(ws):
-    """pass_warn_only policy may activate the newest valid warn snapshot."""
+    """pass_warn_only activates valid warn snapshots without warning."""
     skill = make_skill(ws.skills_dir, "resolve-pass-warn-warn", {"data.txt": "v1"})
     env = ws.env()
     pass_findings = write_findings_file(
@@ -1825,14 +2313,26 @@ def test_resolve_pass_warn_only_activates_warn_snapshot(ws):
     assert out["status"] == "warn"
     assert out["activeVersionId"] == "v000002"
     assert out["target"] == ".skill-meta/versions/v000002.snapshot"
+    assert out["reasonCode"] == "normal"
+    assert out["message"] is None
     assert read_activation(skill) == {
         "schemaVersion": 1,
         "target": ".skill-meta/versions/v000002.snapshot",
     }
 
+    r = run_skill_ledger(["show", str(skill)], env_extra=env)
+    assert r.returncode == 0, f"show exit {r.returncode}: {r.stderr}"
+    shown = parse_json_output(r.stdout)
+    assert shown["latestStatus"] == "warn"
+    assert shown["activeVersionId"] == "v000002"
+    assert shown["reasonCode"] == "normal"
+    assert shown["message"] is None
+    assert shown["warnings"] == []
+    assert shown["findings"] == [{"rule": "warn", "level": "warn", "message": "warning"}]
 
-def test_resolve_latest_scanned_activates_deny_snapshot(ws):
-    """latest_scanned policy may activate the newest valid deny snapshot."""
+
+def test_resolve_legacy_latest_scanned_policy_skips_deny_snapshot(ws):
+    """Legacy latest_scanned no longer activates deny snapshots."""
     skill = make_skill(ws.skills_dir, "resolve-latest-deny", {"data.txt": "v1"})
     env = ws.env()
     pass_findings = write_findings_file(
@@ -1856,8 +2356,9 @@ def test_resolve_latest_scanned_activates_deny_snapshot(ws):
     out = resolve_skill_activation(skill, env, policy="latest_scanned")
 
     assert out["status"] == "deny"
-    assert out["activeVersionId"] == "v000002"
-    assert out["target"] == ".skill-meta/versions/v000002.snapshot"
+    assert out["policy"] == "pass_warn_only"
+    assert out["activeVersionId"] == "v000001"
+    assert out["target"] == ".skill-meta/versions/v000001.snapshot"
 
 
 def test_resolve_pass_warn_only_skips_deny_snapshot(ws):
@@ -1893,8 +2394,8 @@ def test_resolve_pass_warn_only_skips_deny_snapshot(ws):
     }
 
 
-def test_resolve_pass_warn_only_returns_null_without_pass_or_warn_snapshot(ws):
-    """pass_warn_only writes target null when only deny history exists."""
+def test_resolve_pass_warn_only_uses_pending_stub_without_pass_or_warn_snapshot(ws):
+    """pass_warn_only exposes a safe review stub when only deny history exists."""
     skill = make_skill(ws.skills_dir, "resolve-pass-warn-only-deny", {"data.txt": "v1"})
     env = ws.env()
     deny_findings = write_findings_file(
@@ -1910,12 +2411,28 @@ def test_resolve_pass_warn_only_returns_null_without_pass_or_warn_snapshot(ws):
 
     assert out["status"] == "deny"
     assert out["activeVersionId"] is None
-    assert out["target"] is None
-    assert read_activation(skill) == {"schemaVersion": 1, "target": None}
+    assert out["target"] == PENDING_DECISION_TARGET
+    assert out["reasonCode"] == "latest_risk_pending_decision"
+    assert out["message"] is not None
+    assert read_activation(skill) == {
+        "schemaVersion": 1,
+        "target": PENDING_DECISION_TARGET,
+    }
+    assert_pending_stub(skill, leaked_files=["data.txt"])
+
+    r = run_skill_ledger(["show", str(skill)], env_extra=env)
+    assert r.returncode == 0, f"show exit {r.returncode}: {r.stderr}"
+    shown = parse_json_output(r.stdout)
+    assert shown["latestStatus"] == "deny"
+    assert shown["activeVersionId"] is None
+    assert shown["target"] == PENDING_DECISION_TARGET
+    assert shown["userDecision"] is None
+    assert shown["reasonCode"] == "latest_risk_pending_decision"
+    assert shown["message"] is not None
 
 
-def test_resolve_latest_scanned_excludes_none_snapshot(ws):
-    """latest_scanned still requires a scanned pass/warn/deny snapshot."""
+def test_resolve_legacy_latest_scanned_excludes_none_snapshot(ws):
+    """Legacy latest_scanned still requires a pass/warn snapshot."""
     from agent_sec_cli.skill_ledger.core.certifier import (  # noqa: PLC0415
         _persist_manifest_update,
         _prepare_manifest_for_update,
@@ -1953,8 +2470,14 @@ def test_resolve_latest_scanned_excludes_none_snapshot(ws):
 
     assert out["status"] == "none"
     assert out["activeVersionId"] is None
-    assert out["target"] is None
-    assert read_activation(skill) == {"schemaVersion": 1, "target": None}
+    assert out["target"] == PENDING_DECISION_TARGET
+    assert out["reasonCode"] == "latest_risk_pending_decision"
+    assert out["message"] is not None
+    assert read_activation(skill) == {
+        "schemaVersion": 1,
+        "target": PENDING_DECISION_TARGET,
+    }
+    assert_pending_stub(skill, leaked_files=["data.txt"])
 
 
 def test_resolve_rejects_unknown_activation_policy(ws):
@@ -1987,6 +2510,8 @@ def test_resolve_tampered_latest_uses_previous_trusted_version_file(ws):
 
     assert out["status"] == "tampered"
     assert out["target"] == ".skill-meta/versions/v000001.snapshot"
+    assert out["reasonCode"] == "tampered"
+    assert out["message"] is not None
 
 
 def test_resolve_skips_pass_version_when_snapshot_hash_mismatches(ws):
@@ -2008,8 +2533,15 @@ def test_resolve_skips_pass_version_when_snapshot_hash_mismatches(ws):
     out = resolve_skill_activation(skill, env)
 
     assert out["status"] == "pass"
-    assert out["target"] is None
-    assert read_activation(skill) == {"schemaVersion": 1, "target": None}
+    assert out["activeVersionId"] is None
+    assert out["target"] == PENDING_DECISION_TARGET
+    assert out["reasonCode"] == "tampered"
+    assert out["message"] is not None
+    assert read_activation(skill) == {
+        "schemaVersion": 1,
+        "target": PENDING_DECISION_TARGET,
+    }
+    assert_pending_stub(skill, leaked_files=["data.txt"])
 
 
 def test_resolve_skips_version_file_with_mismatched_manifest_id(ws):
@@ -2060,8 +2592,15 @@ def test_resolve_rejects_snapshot_with_symlink(ws):
     out = resolve_skill_activation(skill, env)
 
     assert out["status"] == "pass"
-    assert out["target"] is None
-    assert read_activation(skill) == {"schemaVersion": 1, "target": None}
+    assert out["activeVersionId"] is None
+    assert out["target"] == PENDING_DECISION_TARGET
+    assert out["reasonCode"] == "tampered"
+    assert out["message"] is not None
+    assert read_activation(skill) == {
+        "schemaVersion": 1,
+        "target": PENDING_DECISION_TARGET,
+    }
+    assert_pending_stub(skill, leaked_files=["data.txt"])
 
 
 # ── Group 7: status command ───────────────────────────────────────────────
