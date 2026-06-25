@@ -119,52 +119,70 @@ fn mime_for_path(path: &str) -> &'static str {
 
 fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg
-        // API routes (registered before the catch-all static handler)
+        // Top-level health & metrics (not under /api)
         .service(handlers::health)
         .service(handlers::metrics)
-        .service(handlers::list_sessions)
-        .service(handlers::list_traces_by_session)
-        .service(handlers::get_trace_detail)
-        .service(handlers::get_conversation_events)
-        .service(handlers::list_agent_names)
-        .service(handlers::get_timeseries)
-        .service(handlers::export_atif_trace)
-        .service(handlers::export_atif_session)
-        .service(handlers::export_atif_conversation)
-        .service(handlers::get_agent_health)
-        .service(handlers::delete_agent_health)
-        .service(handlers::restart_agent_health)
-        // Interruption API routes
-        .service(handlers::list_interruptions)
-        .service(handlers::interruption_count)
-        .service(handlers::interruption_stats)
-        .service(handlers::interruption_session_counts)
-        .service(handlers::interruption_conversation_counts)
-        .service(handlers::list_session_interruptions)
-        .service(handlers::list_conversation_interruptions)
-        .service(handlers::resolve_interruption)
-        .service(handlers::get_interruption)
-        .service(token_savings::get_token_savings)
-        .service(token_savings::get_session_savings)
-        // agent-sec Security Observability API routes
-        .service(handlers::security_status)
-        .service(handlers::security_summary)
-        .service(handlers::security_events_count_by)
-        .service(handlers::security_events_list)
-        .service(handlers::security_event_detail)
-        .service(handlers::security_observability_sessions)
-        .service(handlers::security_observability_runs)
-        .service(handlers::security_observability_timeline)
-        // Skill Metrics API routes
-        .service(handlers::skill_metrics_all)
-        .service(handlers::skill_metrics_downloads)
-        .service(handlers::skill_metrics_loads)
-        .service(handlers::skill_metrics_usage_ratio)
-        .service(handlers::skill_metrics_distribution)
-        .service(handlers::skill_metrics_hotness)
+        // All API routes under /api scope
+        .service(
+            web::scope("/api")
+                .service(handlers::list_sessions)
+                .service(handlers::list_traces_by_session)
+                .service(handlers::get_trace_detail)
+                .service(handlers::get_conversation_events)
+                .service(handlers::list_agent_names)
+                .service(handlers::get_timeseries)
+                .service(handlers::export_atif_trace)
+                .service(handlers::export_atif_session)
+                .service(handlers::export_atif_conversation)
+                .service(handlers::get_agent_health)
+                .service(
+                    web::resource("/agent-health/{pid}")
+                        .route(web::delete().to(handlers::delete_agent_health)),
+                )
+                .service(handlers::restart_agent_health)
+                // Interruption API routes
+                .service(handlers::list_interruptions)
+                .service(handlers::interruption_count)
+                .service(handlers::interruption_stats)
+                .service(handlers::interruption_session_counts)
+                .service(handlers::interruption_conversation_counts)
+                .service(handlers::list_session_interruptions)
+                .service(handlers::list_conversation_interruptions)
+                .service(
+                    web::resource("/interruptions/{interruption_id}/resolve")
+                        .route(web::post().to(handlers::resolve_interruption)),
+                )
+                .service(handlers::get_interruption)
+                .service(token_savings::get_token_savings)
+                .service(token_savings::get_session_savings)
+                // agent-sec Security Observability API routes
+                .service(handlers::security_status)
+                .service(handlers::security_summary)
+                .service(handlers::security_events_count_by)
+                .service(handlers::security_events_list)
+                .service(handlers::security_event_detail)
+                .service(handlers::security_observability_sessions)
+                .service(handlers::security_observability_runs)
+                .service(handlers::security_observability_timeline)
+                // Skill Metrics API routes
+                .service(handlers::skill_metrics_all)
+                .service(handlers::skill_metrics_downloads)
+                .service(handlers::skill_metrics_loads)
+                .service(handlers::skill_metrics_usage_ratio)
+                .service(handlers::skill_metrics_distribution)
+                .service(handlers::skill_metrics_hotness)
+                .default_service(web::route().to(api_not_found)),
+        )
+        // Health scope with not-found fallback
+        .service(web::scope("/health").default_service(web::route().to(api_not_found)))
         // Frontend static files (catch-all, must be last)
         .service(serve_frontend_root)
         .service(serve_frontend);
+}
+
+async fn api_not_found() -> impl Responder {
+    HttpResponse::NotFound()
+        .json(serde_json::json!({"error": "not_found", "message": "No matching API endpoint"}))
 }
 
 // ─── Server entry point ───────────────────────────────────────────────────────

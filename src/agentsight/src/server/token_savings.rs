@@ -175,7 +175,7 @@ fn now_ns() -> u64 {
 ///
 /// Returns token savings data by cross-referencing genai_events.db
 /// with the external ~/.tokenless/stats.db.
-#[get("/api/token-savings")]
+#[get("/token-savings")]
 pub async fn get_token_savings(
     data: web::Data<AppState>,
     query: web::Query<TokenSavingsQuery>,
@@ -418,7 +418,7 @@ pub async fn get_token_savings(
 /// GET /api/token-savings/session/{session_id}
 ///
 /// Returns token savings detail for a single session.
-#[get("/api/token-savings/session/{session_id}")]
+#[get("/token-savings/session/{session_id}")]
 pub async fn get_session_savings(
     data: web::Data<AppState>,
     path: web::Path<String>,
@@ -689,7 +689,7 @@ mod tests {
         .await;
 
         let req = actix_test::TestRequest::get()
-            .uri("/api/token-savings?start_ns=0&end_ns=9999999999999999")
+            .uri("/token-savings?start_ns=0&end_ns=9999999999999999")
             .to_request();
         let resp = actix_test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);
@@ -729,7 +729,7 @@ mod tests {
         .await;
 
         let req = actix_test::TestRequest::get()
-            .uri("/api/token-savings?start_ns=0&end_ns=9999999999999999")
+            .uri("/token-savings?start_ns=0&end_ns=9999999999999999")
             .to_request();
         let resp = actix_test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);
@@ -773,7 +773,7 @@ mod tests {
         .await;
 
         let req = actix_test::TestRequest::get()
-            .uri("/api/token-savings/session/nonexistent")
+            .uri("/token-savings/session/nonexistent")
             .to_request();
         let resp = actix_test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);
@@ -812,7 +812,7 @@ mod tests {
         .await;
 
         let req = actix_test::TestRequest::get()
-            .uri("/api/token-savings/session/sess-1")
+            .uri("/token-savings/session/sess-1")
             .to_request();
         let resp = actix_test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);

@@ -49,7 +49,7 @@ pub struct SessionQuery {
 /// GET /api/sessions?start_ns=<i64>&end_ns=<i64>
 ///
 /// Returns a list of gen_ai.session_id values with aggregated stats.
-#[get("/api/sessions")]
+#[get("/sessions")]
 pub async fn list_sessions(
     data: web::Data<AppState>,
     query: web::Query<SessionQuery>,
@@ -79,7 +79,7 @@ pub async fn list_sessions(
 ///
 /// Returns conversations belonging to a session with token stats.
 /// Optional `start_ns`/`end_ns` query parameters filter conversations by time.
-#[get("/api/sessions/{session_id}/traces")]
+#[get("/sessions/{session_id}/traces")]
 pub async fn list_traces_by_session(
     data: web::Data<AppState>,
     path: web::Path<String>,
@@ -111,7 +111,7 @@ pub async fn list_traces_by_session(
 /// GET /api/traces/{trace_id}
 ///
 /// Returns detailed LLM call events for a trace.
-#[get("/api/traces/{trace_id}")]
+#[get("/traces/{trace_id}")]
 pub async fn get_trace_detail(
     data: web::Data<AppState>,
     path: web::Path<String>,
@@ -134,7 +134,7 @@ pub async fn get_trace_detail(
 /// GET /api/conversations/{conversation_id}
 ///
 /// Returns detailed LLM call events for a conversation (user query).
-#[get("/api/conversations/{conversation_id}")]
+#[get("/conversations/{conversation_id}")]
 pub async fn get_conversation_events(
     data: web::Data<AppState>,
     path: web::Path<String>,
@@ -179,7 +179,7 @@ pub struct TimeseriesQuery {
 /// GET /api/agent-names?start_ns=<i64>&end_ns=<i64>
 ///
 /// Returns a sorted list of distinct agent_name values.
-#[get("/api/agent-names")]
+#[get("/agent-names")]
 pub async fn list_agent_names(
     data: web::Data<AppState>,
     query: web::Query<TimeRangeQuery>,
@@ -213,7 +213,7 @@ pub struct TimeseriesResponse {
 ///
 /// Returns time-bucketed token stats (input/output/total) and per-model total-token
 /// breakdowns, both within the requested time range.
-#[get("/api/timeseries")]
+#[get("/timeseries")]
 pub async fn get_timeseries(
     data: web::Data<AppState>,
     query: web::Query<TimeseriesQuery>,
@@ -272,7 +272,7 @@ fn now_ns() -> u64 {
 ///
 /// Reports only whether the agent-sec daemon is reachable. Data-plane failures
 /// are surfaced by the individual security query endpoints.
-#[get("/api/security/status")]
+#[get("/security/status")]
 pub async fn security_status(data: web::Data<AppState>) -> impl Responder {
     let client = match agent_sec_client(&data) {
         Ok(client) => client,
@@ -311,7 +311,7 @@ pub async fn security_status(data: web::Data<AppState>) -> impl Responder {
 }
 
 /// GET /api/security/summary
-#[get("/api/security/summary")]
+#[get("/security/summary")]
 pub async fn security_summary(
     data: web::Data<AppState>,
     query: web::Query<HashMap<String, String>>,
@@ -320,7 +320,7 @@ pub async fn security_summary(
 }
 
 /// GET /api/security/events/count-by
-#[get("/api/security/events/count-by")]
+#[get("/security/events/count-by")]
 pub async fn security_events_count_by(
     data: web::Data<AppState>,
     query: web::Query<HashMap<String, String>>,
@@ -329,7 +329,7 @@ pub async fn security_events_count_by(
 }
 
 /// GET /api/security/events
-#[get("/api/security/events")]
+#[get("/security/events")]
 pub async fn security_events_list(
     data: web::Data<AppState>,
     query: web::Query<HashMap<String, String>>,
@@ -338,7 +338,7 @@ pub async fn security_events_list(
 }
 
 /// GET /api/security/events/{event_id}
-#[get("/api/security/events/{event_id}")]
+#[get("/security/events/{event_id}")]
 pub async fn security_event_detail(
     data: web::Data<AppState>,
     path: web::Path<String>,
@@ -352,7 +352,7 @@ pub async fn security_event_detail(
 }
 
 /// GET /api/security/observability/sessions
-#[get("/api/security/observability/sessions")]
+#[get("/security/observability/sessions")]
 pub async fn security_observability_sessions(
     data: web::Data<AppState>,
     query: web::Query<HashMap<String, String>>,
@@ -361,7 +361,7 @@ pub async fn security_observability_sessions(
 }
 
 /// GET /api/security/observability/sessions/{session_id}/runs
-#[get("/api/security/observability/sessions/{session_id}/runs")]
+#[get("/security/observability/sessions/{session_id}/runs")]
 pub async fn security_observability_runs(
     data: web::Data<AppState>,
     path: web::Path<String>,
@@ -375,7 +375,7 @@ pub async fn security_observability_runs(
 }
 
 /// GET /api/security/observability/timeline
-#[get("/api/security/observability/timeline")]
+#[get("/security/observability/timeline")]
 pub async fn security_observability_timeline(
     data: web::Data<AppState>,
     query: web::Query<HashMap<String, String>>,
@@ -794,24 +794,24 @@ mod tests {
         .await;
 
         for (uri, status) in [
-            ("/api/security/status", StatusCode::SERVICE_UNAVAILABLE),
-            ("/api/security/summary?limit=1", StatusCode::BAD_GATEWAY),
+            ("/security/status", StatusCode::SERVICE_UNAVAILABLE),
+            ("/security/summary?limit=1", StatusCode::BAD_GATEWAY),
             (
-                "/api/security/events/count-by?include_security=true",
+                "/security/events/count-by?include_security=true",
                 StatusCode::BAD_GATEWAY,
             ),
-            ("/api/security/events?offset=1", StatusCode::BAD_GATEWAY),
-            ("/api/security/events/event-1", StatusCode::BAD_GATEWAY),
+            ("/security/events?offset=1", StatusCode::BAD_GATEWAY),
+            ("/security/events/event-1", StatusCode::BAD_GATEWAY),
             (
-                "/api/security/observability/sessions?latest_limit=1",
-                StatusCode::BAD_GATEWAY,
-            ),
-            (
-                "/api/security/observability/sessions/session-1/runs",
+                "/security/observability/sessions?latest_limit=1",
                 StatusCode::BAD_GATEWAY,
             ),
             (
-                "/api/security/observability/timeline?end_ns=2",
+                "/security/observability/sessions/session-1/runs",
+                StatusCode::BAD_GATEWAY,
+            ),
+            (
+                "/security/observability/timeline?end_ns=2",
                 StatusCode::BAD_GATEWAY,
             ),
         ] {
@@ -852,6 +852,72 @@ mod tests {
             interruption_store: None,
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms },
         })
+    }
+
+    #[actix_web::test]
+    async fn api_unmatched_returns_404_json() {
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state(0))
+                .configure(super::super::configure_routes),
+        )
+        .await;
+
+        let req = awtest::TestRequest::get()
+            .uri("/api/definitely-not-a-route")
+            .to_request();
+        let resp = awtest::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body: Value =
+            serde_json::from_slice(&actix_web::body::to_bytes(resp.into_body()).await.unwrap())
+                .unwrap();
+        assert_eq!(body["error"], "not_found");
+    }
+
+    #[actix_web::test]
+    async fn health_unmatched_returns_404_json() {
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state(0))
+                .configure(super::super::configure_routes),
+        )
+        .await;
+
+        let req = awtest::TestRequest::get().uri("/health/nope").to_request();
+        let resp = awtest::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body: Value =
+            serde_json::from_slice(&actix_web::body::to_bytes(resp.into_body()).await.unwrap())
+                .unwrap();
+        assert_eq!(body["error"], "not_found");
+    }
+
+    #[actix_web::test]
+    async fn non_api_path_uses_spa_fallback_not_api_404() {
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state(0))
+                .configure(super::super::configure_routes),
+        )
+        .await;
+
+        let req = awtest::TestRequest::get().uri("/dashboard").to_request();
+        let resp = awtest::call_service(&app, req).await;
+
+        // Should NOT be 404 JSON — it should go to SPA fallback (200 or 404 plain)
+        // Definitely should not be a JSON 404 with error.code = "not_found"
+        let status = resp.status();
+        let body_bytes = actix_web::body::to_bytes(resp.into_body()).await.unwrap();
+        let is_api_404 = serde_json::from_slice::<Value>(&body_bytes)
+            .ok()
+            .and_then(|v| v.get("error")?.get("code")?.as_str().map(String::from))
+            == Some("not_found".to_string());
+        assert!(
+            !is_api_404,
+            "SPA path /dashboard must not get API 404, got status={status}"
+        );
     }
 }
 
@@ -977,7 +1043,7 @@ pub struct AgentHealthResponse {
 /// Cosh is excluded from the response: it has no HTTP port and no daemon process,
 /// so there is nothing meaningful to display in the UI. Agent-crash interruption
 /// detection for Cosh still works via the health checker background scan.
-#[get("/api/agent-health")]
+#[get("/agent-health")]
 pub async fn get_agent_health(
     data: web::Data<AppState>,
     req: actix_web::HttpRequest,
@@ -1003,7 +1069,6 @@ pub async fn get_agent_health(
 /// DELETE /api/agent-health/{pid}
 ///
 /// User-acknowledges an offline agent and removes it from the store.
-#[actix_web::delete("/api/agent-health/{pid}")]
 pub async fn delete_agent_health(
     data: web::Data<AppState>,
     path: web::Path<u32>,
@@ -1020,7 +1085,7 @@ pub async fn delete_agent_health(
 /// POST /api/agent-health/{pid}/restart
 ///
 /// Kill the hung process and re-launch it with its original command line.
-#[actix_web::post("/api/agent-health/{pid}/restart")]
+#[post("/agent-health/{pid}/restart")]
 pub async fn restart_agent_health(
     data: web::Data<AppState>,
     path: web::Path<u32>,
@@ -1080,7 +1145,7 @@ pub async fn restart_agent_health(
 /// GET /api/export/atif/trace/{trace_id}
 ///
 /// Exports a single trace as an ATIF v1.6 trajectory document.
-#[get("/api/export/atif/trace/{trace_id}")]
+#[get("/export/atif/trace/{trace_id}")]
 pub async fn export_atif_trace(
     data: web::Data<AppState>,
     path: web::Path<String>,
@@ -1119,7 +1184,7 @@ pub async fn export_atif_trace(
 /// GET /api/export/atif/session/{session_id}
 ///
 /// Exports a full session (all traces) as an ATIF v1.6 trajectory document.
-#[get("/api/export/atif/session/{session_id}")]
+#[get("/export/atif/session/{session_id}")]
 pub async fn export_atif_session(
     data: web::Data<AppState>,
     path: web::Path<String>,
@@ -1158,7 +1223,7 @@ pub async fn export_atif_session(
 /// GET /api/export/atif/conversation/{conversation_id}
 ///
 /// Exports all LLM calls for a conversation as an ATIF v1.6 trajectory document.
-#[get("/api/export/atif/conversation/{conversation_id}")]
+#[get("/export/atif/conversation/{conversation_id}")]
 pub async fn export_atif_conversation(
     data: web::Data<AppState>,
     path: web::Path<String>,
@@ -1213,7 +1278,7 @@ pub struct InterruptionQuery {
 /// GET /api/interruptions
 ///
 /// Returns a list of interruption events matching the query.
-#[get("/api/interruptions")]
+#[get("/interruptions")]
 pub async fn list_interruptions(
     data: web::Data<AppState>,
     query: web::Query<InterruptionQuery>,
@@ -1249,7 +1314,7 @@ pub async fn list_interruptions(
 ///
 /// Returns total interruption count + breakdown by severity within a time range.
 /// Response: { total, by_severity: { critical, high, medium, low } }
-#[get("/api/interruptions/count")]
+#[get("/interruptions/count")]
 pub async fn interruption_count(
     data: web::Data<AppState>,
     query: web::Query<InterruptionQuery>,
@@ -1299,7 +1364,7 @@ pub async fn interruption_count(
 /// GET /api/interruptions/stats
 ///
 /// Returns per-type count statistics within a time range.
-#[get("/api/interruptions/stats")]
+#[get("/interruptions/stats")]
 pub async fn interruption_stats(
     data: web::Data<AppState>,
     query: web::Query<InterruptionQuery>,
@@ -1325,7 +1390,7 @@ pub async fn interruption_stats(
 /// GET /api/interruptions/session-counts?start_ns=<i64>&end_ns=<i64>
 ///
 /// Returns unresolved interruption breakdown per session_id, grouped by severity and type.
-#[get("/api/interruptions/session-counts")]
+#[get("/interruptions/session-counts")]
 pub async fn interruption_session_counts(
     data: web::Data<AppState>,
     query: web::Query<InterruptionQuery>,
@@ -1389,7 +1454,7 @@ pub async fn interruption_session_counts(
 /// GET /api/interruptions/conversation-counts?start_ns=<i64>&end_ns=<i64>
 ///
 /// Returns unresolved interruption breakdown per conversation_id, grouped by severity and type.
-#[get("/api/interruptions/conversation-counts")]
+#[get("/interruptions/conversation-counts")]
 pub async fn interruption_conversation_counts(
     data: web::Data<AppState>,
     query: web::Query<InterruptionQuery>,
@@ -1453,7 +1518,7 @@ pub async fn interruption_conversation_counts(
 /// GET /api/sessions/{session_id}/interruptions
 ///
 /// Returns all interruption events for a specific session.
-#[get("/api/sessions/{session_id}/interruptions")]
+#[get("/sessions/{session_id}/interruptions")]
 pub async fn list_session_interruptions(
     data: web::Data<AppState>,
     path: web::Path<String>,
@@ -1475,7 +1540,7 @@ pub async fn list_session_interruptions(
 /// GET /api/conversations/{conversation_id}/interruptions
 ///
 /// Returns all interruption events for a specific conversation.
-#[get("/api/conversations/{conversation_id}/interruptions")]
+#[get("/conversations/{conversation_id}/interruptions")]
 pub async fn list_conversation_interruptions(
     data: web::Data<AppState>,
     path: web::Path<String>,
@@ -1497,7 +1562,6 @@ pub async fn list_conversation_interruptions(
 /// POST /api/interruptions/{interruption_id}/resolve
 ///
 /// Mark a specific interruption event as resolved.
-#[post("/api/interruptions/{interruption_id}/resolve")]
 pub async fn resolve_interruption(
     data: web::Data<AppState>,
     path: web::Path<String>,
@@ -1522,7 +1586,7 @@ pub async fn resolve_interruption(
 /// GET /api/interruptions/{interruption_id}
 ///
 /// Get a single interruption event by ID.
-#[get("/api/interruptions/{interruption_id}")]
+#[get("/interruptions/{interruption_id}")]
 pub async fn get_interruption(
     data: web::Data<AppState>,
     path: web::Path<String>,
@@ -1557,7 +1621,7 @@ pub struct SkillMetricsQuery {
 }
 
 /// GET /api/skill-metrics — full skill metrics report
-#[get("/api/skill-metrics")]
+#[get("/skill-metrics")]
 pub async fn skill_metrics_all(
     data: web::Data<AppState>,
     query: web::Query<SkillMetricsQuery>,
@@ -1570,7 +1634,7 @@ pub async fn skill_metrics_all(
 }
 
 /// GET /api/skill-metrics/downloads
-#[get("/api/skill-metrics/downloads")]
+#[get("/skill-metrics/downloads")]
 pub async fn skill_metrics_downloads(
     data: web::Data<AppState>,
     query: web::Query<SkillMetricsQuery>,
@@ -1586,7 +1650,7 @@ pub async fn skill_metrics_downloads(
 }
 
 /// GET /api/skill-metrics/loads
-#[get("/api/skill-metrics/loads")]
+#[get("/skill-metrics/loads")]
 pub async fn skill_metrics_loads(
     data: web::Data<AppState>,
     query: web::Query<SkillMetricsQuery>,
@@ -1602,7 +1666,7 @@ pub async fn skill_metrics_loads(
 }
 
 /// GET /api/skill-metrics/usage-ratio
-#[get("/api/skill-metrics/usage-ratio")]
+#[get("/skill-metrics/usage-ratio")]
 pub async fn skill_metrics_usage_ratio(
     data: web::Data<AppState>,
     query: web::Query<SkillMetricsQuery>,
@@ -1618,7 +1682,7 @@ pub async fn skill_metrics_usage_ratio(
 }
 
 /// GET /api/skill-metrics/distribution
-#[get("/api/skill-metrics/distribution")]
+#[get("/skill-metrics/distribution")]
 pub async fn skill_metrics_distribution(
     data: web::Data<AppState>,
     query: web::Query<SkillMetricsQuery>,
@@ -1634,7 +1698,7 @@ pub async fn skill_metrics_distribution(
 }
 
 /// GET /api/skill-metrics/hotness
-#[get("/api/skill-metrics/hotness")]
+#[get("/skill-metrics/hotness")]
 pub async fn skill_metrics_hotness(
     data: web::Data<AppState>,
     query: web::Query<SkillMetricsQuery>,
