@@ -124,10 +124,15 @@ jobs:
               }
             }
             
-            // 3. Title keyword fallback (from labelMap keys + common aliases)
+            // 3. Title keyword fallback.
+            //
+            // Match longer component keys first so a specific scope like
+            // "skillfs" is not captured by the shorter "skill" scope.
             if (!componentLabel) {
               const t = title.toLowerCase();
-              for (const [short, label] of Object.entries(labelMap)) {
+              const titleMatches = Object.entries(labelMap)
+                .sort(([a], [b]) => b.length - a.length);
+              for (const [short, label] of titleMatches) {
                 if (t.includes(short)) { componentLabel = label; labelSource = `title keyword: "${short}"`; break; }
               }
               if (componentLabel) {
