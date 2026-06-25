@@ -236,10 +236,9 @@ impl Drop for TrustedWriterFixture {
     }
 }
 
-/// Default-disabled config: `.skill-meta` mutation through the FUSE
-/// mount must still return `EACCES`. Pre-existing behavior, pinned
-/// here so a future refactor of the gate cannot accidentally relax
-/// the deny.
+/// Default-disabled config: `.skill-meta` access through the FUSE
+/// mount is hidden (ENOENT). Pre-existing deny is preserved; the
+/// view gate now hides `.skill-meta` entirely for untrusted callers.
 #[test]
 fn default_disabled_config_keeps_skill_meta_denied() {
     if !common::fuse_available() {
@@ -253,8 +252,8 @@ fn default_disabled_config_keeps_skill_meta_denied() {
         std::fs::write(&target, b"{}\n").expect_err("write must fail with default-disabled gate");
     assert_eq!(
         err.raw_os_error(),
-        Some(libc::EACCES),
-        "default-disabled gate must surface EACCES, got {err:?}"
+        Some(libc::ENOENT),
+        "default-disabled gate must surface ENOENT, got {err:?}"
     );
     // The on-disk source must remain untouched.
     assert!(
@@ -264,10 +263,8 @@ fn default_disabled_config_keeps_skill_meta_denied() {
 }
 
 /// Configured trusted-writer name that does NOT match the test
-/// process's comm: `.skill-meta` mutation through the mount must still
-/// return `EACCES`. The deny path on a configured-but-mismatched
-/// gate is the same errno as the default-disabled path; the
-/// difference shows up only in the audit `detail`.
+/// process's comm: `.skill-meta` access through the mount returns
+/// `ENOENT` (hidden from untrusted callers).
 #[cfg(target_os = "linux")]
 #[test]
 fn mismatched_trusted_writer_name_still_denies_skill_meta() {
@@ -278,10 +275,6 @@ fn mismatched_trusted_writer_name_still_denies_skill_meta() {
         return;
     }
     let skill = "alpha";
-    // Use a name that cannot collide with any reasonable cargo test
-    // executable comm, then verify it does not collide with this
-    // run's actual comm just in case (Linux comm is capped at 15
-    // bytes, so an exact match is extremely unlikely).
     let mismatched = "skillfs-non-match";
     assert_ne!(
         mismatched,
@@ -294,7 +287,7 @@ fn mismatched_trusted_writer_name_still_denies_skill_meta() {
     let err = std::fs::write(&target, b"{}\n").expect_err(
         "write must fail when the configured trusted writer does not match the test process",
     );
-    assert_eq!(err.raw_os_error(), Some(libc::EACCES));
+    assert_eq!(err.raw_os_error(), Some(libc::ENOENT));
     assert!(
         !fx.source_skill_meta(skill).join("manifest.json").exists(),
         "mismatched-gate write must not have hit disk"
@@ -538,7 +531,7 @@ fn mismatched_exe_identity_denies_skill_meta_write() {
     let target = fx.skill_meta(skill).join("manifest.json");
     let err = std::fs::write(&target, b"{}\n")
         .expect_err("write must fail when exe identity does not match");
-    assert_eq!(err.raw_os_error(), Some(libc::EACCES));
+    assert_eq!(err.raw_os_error(), Some(libc::ENOENT));
 }
 
 #[cfg(target_os = "linux")]

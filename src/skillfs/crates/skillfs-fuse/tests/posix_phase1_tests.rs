@@ -905,40 +905,23 @@ fn test_skill_meta_read_stat_readdir_still_work() {
     skip_if_no_fuse!();
 
     let fx = fixture_with_skill_meta("alpha");
-    let manifest = fx.passthrough_path("alpha", ".skill-meta/manifest.json");
 
-    // 1. Stat the directory and the manifest through the mount.
-    let dir_meta = std::fs::metadata(fx.passthrough_path("alpha", ".skill-meta"))
-        .expect(".skill-meta dir stat");
-    assert!(dir_meta.is_dir(), ".skill-meta must be a directory");
-
-    let file_meta = std::fs::metadata(&manifest).expect(".skill-meta/manifest.json stat");
-    assert!(file_meta.is_file(), "manifest.json must be a regular file");
-
-    // 2. Read the manifest content back unchanged.
-    let body = std::fs::read(&manifest).expect("read manifest");
-    assert_eq!(body, b"{\"v\":1}");
-
-    // 3. readdir lists `.skill-meta` and its child entries.
+    // Untrusted callers cannot see .skill-meta in readdir.
     let skill_listing = list_dir_names(&fx.skill_path("alpha"));
     assert!(
-        skill_listing.contains(&".skill-meta".to_string()),
-        "skill listing must include .skill-meta, got {skill_listing:?}"
+        !skill_listing.contains(&".skill-meta".to_string()),
+        "skill listing must NOT include .skill-meta for untrusted, got {skill_listing:?}"
     );
-    let meta_listing = list_dir_names(&fx.passthrough_path("alpha", ".skill-meta"));
-    assert!(
-        meta_listing.contains(&"manifest.json".to_string()),
-        ".skill-meta listing must include manifest.json, got {meta_listing:?}"
-    );
-    assert!(
-        meta_listing.contains(&"signatures".to_string()),
-        ".skill-meta listing must include signatures dir, got {meta_listing:?}"
-    );
-    let nested = list_dir_names(&fx.passthrough_path("alpha", ".skill-meta/signatures"));
-    assert!(
-        nested.contains(&"root.json".to_string()),
-        "signatures listing must include root.json, got {nested:?}"
-    );
+
+    // Untrusted callers cannot stat .skill-meta.
+    let err = std::fs::metadata(fx.passthrough_path("alpha", ".skill-meta"))
+        .expect_err(".skill-meta stat must fail for untrusted");
+    assert_eq!(err.raw_os_error(), Some(libc::ENOENT));
+
+    // Untrusted callers cannot read .skill-meta files.
+    let manifest = fx.passthrough_path("alpha", ".skill-meta/manifest.json");
+    let err = std::fs::read(&manifest).expect_err("manifest read must fail for untrusted");
+    assert_eq!(err.raw_os_error(), Some(libc::ENOENT));
 }
 
 #[test]
@@ -956,13 +939,13 @@ fn test_skill_meta_create_returns_eacces() {
         .expect_err("create under .skill-meta must fail");
     assert_eq!(
         err.raw_os_error().unwrap_or(0),
-        libc::EACCES,
-        "create under .skill-meta must surface EACCES, got {err}"
+        libc::ENOENT,
+        "create under .skill-meta must surface ENOENT, got {err}"
     );
     // No partial file left on the source side.
     assert!(
         !fx.source().join("alpha/.skill-meta/new.json").exists(),
-        "EACCES'd create must not have written to the source"
+        "denied create must not have written to the source"
     );
 }
 
@@ -979,8 +962,8 @@ fn test_skill_meta_open_for_write_returns_eacces() {
         .expect_err("write open of .skill-meta file must fail");
     assert_eq!(
         err.raw_os_error().unwrap_or(0),
-        libc::EACCES,
-        "write open must surface EACCES, got {err}"
+        libc::ENOENT,
+        "write open must surface ENOENT, got {err}"
     );
 
     let original = std::fs::read(fx.source().join("alpha/.skill-meta/manifest.json"))
@@ -1005,8 +988,8 @@ fn test_skill_meta_open_with_trunc_returns_eacces() {
         .expect_err("write|trunc open of .skill-meta must fail");
     assert_eq!(
         err.raw_os_error().unwrap_or(0),
-        libc::EACCES,
-        "write|trunc open must surface EACCES, got {err}"
+        libc::ENOENT,
+        "write|trunc open must surface ENOENT, got {err}"
     );
 
     let original = std::fs::read(fx.source().join("alpha/.skill-meta/manifest.json"))
@@ -1032,8 +1015,8 @@ fn test_skill_meta_rdonly_trunc_returns_eacces() {
     assert_eq!(fd, -1, "O_RDONLY|O_TRUNC must fail for .skill-meta");
     assert_eq!(
         err,
-        libc::EACCES,
-        "O_RDONLY|O_TRUNC must surface EACCES, got {err}"
+        libc::ENOENT,
+        "O_RDONLY|O_TRUNC must surface ENOENT, got {err}"
     );
 
     let original = std::fs::read(fx.source().join("alpha/.skill-meta/manifest.json"))
@@ -1054,12 +1037,12 @@ fn test_skill_meta_unlink_returns_eacces() {
     let err = std::fs::remove_file(&manifest).expect_err("unlink under .skill-meta must fail");
     assert_eq!(
         err.raw_os_error().unwrap_or(0),
-        libc::EACCES,
-        "unlink must surface EACCES, got {err}"
+        libc::ENOENT,
+        "unlink must surface ENOENT, got {err}"
     );
     assert!(
         fx.source().join("alpha/.skill-meta/manifest.json").exists(),
-        ".skill-meta file must remain after EACCES'd unlink"
+        ".skill-meta file must remain after denied unlink"
     );
 }
 
@@ -1077,8 +1060,8 @@ fn test_skill_meta_rmdir_returns_eacces() {
         .expect_err("rmdir under .skill-meta must fail");
     assert_eq!(
         err.raw_os_error().unwrap_or(0),
-        libc::EACCES,
-        "rmdir must surface EACCES, got {err}"
+        libc::ENOENT,
+        "rmdir must surface ENOENT, got {err}"
     );
     assert!(empty.exists(), "rmdir target must remain on source");
 }
@@ -1093,12 +1076,12 @@ fn test_skill_meta_mkdir_returns_eacces() {
     let err = std::fs::create_dir(&new_dir).expect_err("mkdir under .skill-meta must fail");
     assert_eq!(
         err.raw_os_error().unwrap_or(0),
-        libc::EACCES,
-        "mkdir must surface EACCES, got {err}"
+        libc::ENOENT,
+        "mkdir must surface ENOENT, got {err}"
     );
     assert!(
         !fx.source().join("alpha/.skill-meta/newsub").exists(),
-        "mkdir EACCES must not have created anything on source"
+        "mkdir denied must not have created anything on source"
     );
 }
 
@@ -1114,8 +1097,8 @@ fn test_skill_meta_rename_from_returns_eacces() {
     let err = std::fs::rename(&from, &to).expect_err("rename out of .skill-meta must fail");
     assert_eq!(
         err.raw_os_error().unwrap_or(0),
-        libc::EACCES,
-        "rename from must surface EACCES, got {err}"
+        libc::ENOENT,
+        "rename from must surface ENOENT, got {err}"
     );
     assert!(
         fx.source().join("alpha/.skill-meta/manifest.json").exists(),
@@ -1142,8 +1125,8 @@ fn test_skill_meta_rename_to_returns_eacces() {
     let err = std::fs::rename(&from, &to).expect_err("rename into .skill-meta must fail");
     assert_eq!(
         err.raw_os_error().unwrap_or(0),
-        libc::EACCES,
-        "rename into must surface EACCES, got {err}"
+        libc::ENOENT,
+        "rename into must surface ENOENT, got {err}"
     );
     assert!(
         fx.source().join("alpha/normal.txt").exists(),
@@ -1176,8 +1159,8 @@ fn test_skill_meta_truncate_path_returns_eacces() {
     assert_eq!(ret, -1, "truncate on .skill-meta must fail");
     assert_eq!(
         err,
-        libc::EACCES,
-        "truncate on .skill-meta must surface EACCES, got {err}"
+        libc::ENOENT,
+        "truncate on .skill-meta must surface ENOENT, got {err}"
     );
 
     let after = std::fs::read(fx.source().join("alpha/.skill-meta/manifest.json"))
@@ -1185,11 +1168,11 @@ fn test_skill_meta_truncate_path_returns_eacces() {
     assert_eq!(
         after.len(),
         original_len,
-        "truncate EACCES must leave length unchanged"
+        "truncate denied must leave length unchanged"
     );
     assert_eq!(
         after, original,
-        "truncate EACCES must leave bytes unchanged"
+        "truncate denied must leave bytes unchanged"
     );
 }
 
@@ -1209,8 +1192,8 @@ fn test_skill_meta_chmod_returns_eacces() {
         .expect_err("chmod under .skill-meta must fail");
     assert_eq!(
         err.raw_os_error().unwrap_or(0),
-        libc::EACCES,
-        "chmod must surface EACCES, got {err}"
+        libc::ENOENT,
+        "chmod must surface ENOENT, got {err}"
     );
 
     let after = std::fs::metadata(fx.source().join("alpha/.skill-meta/manifest.json"))
@@ -1219,7 +1202,7 @@ fn test_skill_meta_chmod_returns_eacces() {
         & 0o7777;
     assert_eq!(
         after, original_mode,
-        "chmod EACCES must not have altered source mode"
+        "chmod denied must not have altered source mode"
     );
 }
 
@@ -1246,14 +1229,14 @@ fn test_skill_meta_utimens_returns_eacces() {
     let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
 
     assert_eq!(ret, -1, "utimens under .skill-meta must fail");
-    assert_eq!(err, libc::EACCES, "utimens must surface EACCES, got {err}");
+    assert_eq!(err, libc::ENOENT, "utimens must surface ENOENT, got {err}");
 
     let after_mtime = std::fs::metadata(fx.source().join("alpha/.skill-meta/manifest.json"))
         .expect("metadata after")
         .mtime();
     assert_eq!(
         after_mtime, original_mtime,
-        "utimens EACCES must not have changed mtime"
+        "utimens denied must not have changed mtime"
     );
 }
 
@@ -1271,15 +1254,15 @@ fn test_skill_meta_access_w_ok_returns_eacces() {
     assert_eq!(ret, -1, "access W_OK must fail");
     assert_eq!(
         err,
-        libc::EACCES,
-        "access W_OK must surface EACCES, got {err}"
+        libc::ENOENT,
+        "access W_OK must surface ENOENT, got {err}"
     );
 
-    // F_OK / R_OK still succeed (defer to physical permissions).
+    // F_OK / R_OK also fail — untrusted callers cannot even see .skill-meta.
     let ret_f = unsafe { libc::access(c_path.as_ptr(), libc::F_OK) };
-    assert_eq!(ret_f, 0, "F_OK must succeed for readable .skill-meta entry");
+    assert_eq!(ret_f, -1, "F_OK must fail for untrusted .skill-meta entry");
     let ret_r = unsafe { libc::access(c_path.as_ptr(), libc::R_OK) };
-    assert_eq!(ret_r, 0, "R_OK must succeed for readable .skill-meta entry");
+    assert_eq!(ret_r, -1, "R_OK must fail for untrusted .skill-meta entry");
 }
 
 #[test]
@@ -1342,11 +1325,9 @@ fn test_neighbour_named_skill_meta2_is_not_protected() {
 fn test_skill_meta_protection_holds_for_symlink_creation() {
     skip_if_no_fuse!();
 
-    // Package T2 enables same-skill symlink creation. S1's `.skill-meta`
-    // mutation gate must still refuse new symlinks whose **link path**
-    // lands under `.skill-meta/**`, even though ordinary same-skill
-    // symlinks now succeed. The errno on the rejected path is the
-    // policy's `EACCES`, not the old global `EROFS`.
+    // Package T2 enables same-skill symlink creation. The `.skill-meta`
+    // view gate hides the namespace from untrusted callers, so symlink
+    // creation fails at path resolution (ENOENT).
     let fx = fixture_with_skill_meta("alpha");
 
     let inside_meta = fx.passthrough_path("alpha", ".skill-meta/planted-link");
@@ -1354,7 +1335,7 @@ fn test_skill_meta_protection_holds_for_symlink_creation() {
         .expect_err("symlink under .skill-meta must remain rejected");
     assert_eq!(
         err.raw_os_error().unwrap_or(0),
-        libc::EACCES,
-        ".skill-meta symlink creation must surface EACCES, got {err}"
+        libc::ENOENT,
+        ".skill-meta symlink creation must surface ENOENT, got {err}"
     );
 }

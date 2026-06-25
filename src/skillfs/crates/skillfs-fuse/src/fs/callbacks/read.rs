@@ -252,11 +252,50 @@ impl SkillFs {
             }
         }
 
+        // Trusted `.skill-meta` read-path gate. Untrusted callers are
+        // denied; trusted read-only opens route to the live source
+        // directory. Mutating opens fall through to enforce_skill_meta
+        // so the existing audit/policy path is preserved.
+        let is_mutating_open = is_write || (flags & libc::O_TRUNC) != 0;
+        match self.is_trusted_skill_meta_access(&path_type, req) {
+            Some(false) => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+            Some(true) if !is_mutating_open => {
+                let physical = match path_type {
+                    PathType::Passthrough {
+                        ref skill_name,
+                        ref relative_path,
+                    } => Some(self.skill_physical_dir(skill_name).join(relative_path)),
+                    PathType::InboxPassthrough {
+                        ref skill_name,
+                        ref relative_path,
+                    } => Some(self.inbox_skill_dir(skill_name).join(relative_path)),
+                    _ => None,
+                };
+                if let Some(physical) = physical {
+                    match open_options_from_flags(flags).open(&physical) {
+                        Ok(file) => {
+                            let fh = self.handles.allocate(ino, flags, Some(file), None);
+                            reply.opened(fh, 0);
+                        }
+                        Err(e) => reply.error(errno(&e)),
+                    }
+                    return;
+                }
+            }
+            Some(true) => {
+                // Mutating open on trusted .skill-meta — fall through
+                // to enforce_skill_meta for audit/policy.
+            }
+            None => {}
+        }
+
         // S1: deny mutating opens (write modes, O_APPEND with write, or
         // O_TRUNC even with O_RDONLY) on `.skill-meta/**` before any I/O.
         // O_RDONLY without O_TRUNC stays allowed so directory traversal
         // and read-only manifest inspection still work.
-        let is_mutating_open = is_write || (flags & libc::O_TRUNC) != 0;
         if is_mutating_open {
             // S3: deny mutating opens on a reserved lifecycle namespace.
             // Read-only opens are blocked earlier by `lookup` returning

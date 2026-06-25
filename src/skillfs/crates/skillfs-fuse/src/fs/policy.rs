@@ -21,7 +21,7 @@ use super::SkillFs;
 use crate::path::PathType;
 use crate::security::{
     self, PathPolicy, PolicyDecision, SkillEvent, SkillEventAction, SkillEventKind,
-    TrustedWriterDecision, evaluate_trusted_writer,
+    TrustedWriterDecision, evaluate_trusted_writer, is_skill_meta_path,
     lifecycle::{LifecycleNameClass, classify_skill_name as classify_lifecycle_name},
 };
 use crate::sys::errno;
@@ -359,5 +359,42 @@ impl SkillFs {
             return libc::EACCES;
         }
         0
+    }
+
+    /// Trusted `.skill-meta` read-path gate.
+    ///
+    /// Returns:
+    /// * `None` — path is not `.skill-meta/**`; caller proceeds normally.
+    /// * `Some(true)` — path is `.skill-meta/**` and caller is trusted;
+    ///   caller should route to **live source** via `skill_physical_dir`.
+    /// * `Some(false)` — path is `.skill-meta/**` and caller is
+    ///   untrusted; caller should deny/hide (ENOENT).
+    pub(super) fn is_trusted_skill_meta_access(
+        &self,
+        path_type: &PathType,
+        req: &Request,
+    ) -> Option<bool> {
+        let relative_path = match path_type {
+            PathType::Passthrough { relative_path, .. }
+            | PathType::InboxPassthrough { relative_path, .. } => relative_path.as_path(),
+            _ => return None,
+        };
+        if !is_skill_meta_path(relative_path) {
+            return None;
+        }
+        Some(self.evaluate_trusted_writer(req).is_allowed())
+    }
+
+    /// Whether `.skill-meta` should appear in a `SkillDir` listing.
+    pub(super) fn should_show_skill_meta_in_listing(
+        &self,
+        skill_name: &str,
+        req: &Request,
+    ) -> bool {
+        let probe = PathType::Passthrough {
+            skill_name: skill_name.to_string(),
+            relative_path: std::path::PathBuf::from(crate::security::SKILL_META_DIR),
+        };
+        self.is_trusted_skill_meta_access(&probe, req) == Some(true)
     }
 }

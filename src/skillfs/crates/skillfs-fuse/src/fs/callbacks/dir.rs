@@ -9,12 +9,15 @@ use super::super::SkillFs;
 use super::super::read_resolution::ReadResolution;
 use crate::attr::dir_entry_file_type;
 use crate::path::{PathType, is_skill_discover_path, parse_path};
-use crate::security::{inbox::INBOX_DIR_NAME, lifecycle::is_reserved_lifecycle_name};
+use crate::security::{
+    SKILL_META_DIR, inbox::INBOX_DIR_NAME, lifecycle::is_reserved_lifecycle_name,
+};
 use crate::sys::errno;
 
 impl SkillFs {
     pub(in crate::fs) fn readdir_dynamic(
         &mut self,
+        req: &Request,
         ino: u64,
         offset: i64,
         mut reply: ReplyDirectory,
@@ -130,6 +133,7 @@ impl SkillFs {
                     if self.is_staging_skill_root(&skill_name)
                         || self.is_pending_install(&skill_name)
                     {
+                        let show_meta = self.should_show_skill_meta_in_listing(&skill_name, req);
                         let parent_ino = self.skills_dir_ino();
                         let mut entries: Vec<(u64, FileType, String)> = vec![
                             (ino, FileType::Directory, ".".to_string()),
@@ -139,6 +143,9 @@ impl SkillFs {
                         if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
                             for entry in dir_iter.flatten() {
                                 let name = entry.file_name().to_string_lossy().to_string();
+                                if name == SKILL_META_DIR && !show_meta {
+                                    continue;
+                                }
                                 let kind = dir_entry_file_type(&entry);
                                 let entry_path = format!("{}/{}", path, name);
                                 let entry_ino = self.inodes.readdir_ino(&entry_path);
@@ -167,6 +174,8 @@ impl SkillFs {
                         entries.push((md_ino, FileType::RegularFile, "SKILL.md".to_string()));
 
                         if skill_name != "skill-discover" {
+                            let show_meta =
+                                self.should_show_skill_meta_in_listing(&skill_name, req);
                             // D1.1: fallback skills enumerate from the
                             // snapshot tree; current and no-resolver skills
                             // enumerate from the live source.
@@ -177,6 +186,9 @@ impl SkillFs {
                                 for entry in dir_iter.flatten() {
                                     let name = entry.file_name().to_string_lossy().to_string();
                                     if name == "SKILL.md" {
+                                        continue;
+                                    }
+                                    if name == SKILL_META_DIR && !show_meta {
                                         continue;
                                     }
                                     let kind = dir_entry_file_type(&entry);
@@ -194,44 +206,81 @@ impl SkillFs {
                     skill_name,
                     relative_path,
                 } => {
-                    // I2: staging roots use the physical source dir
-                    // directly, bypassing the active resolver.
-                    // Pending installs use the same bypass.
-                    let skill_dir = if self.is_staging_skill_root(&skill_name)
-                        || self.is_pending_install(&skill_name)
-                    {
-                        self.source_base().join(&skill_name)
-                    } else {
-                        match self.skill_read_dir(&skill_name) {
-                            Some(d) => d,
-                            None => {
-                                reply.error(libc::ENOENT);
-                                return;
-                            }
+                    let pt = PathType::Passthrough {
+                        skill_name: skill_name.clone(),
+                        relative_path: relative_path.clone(),
+                    };
+                    match self.is_trusted_skill_meta_access(&pt, req) {
+                        Some(false) => {
+                            reply.error(libc::ENOENT);
+                            return;
                         }
-                    };
-                    let parent_ino = {
-                        let parent_path = Path::new(&path)
-                            .parent()
-                            .map(|p| p.to_string_lossy().to_string())
-                            .unwrap_or_default();
-                        self.inodes.lookup_by_path(&parent_path).unwrap_or(ino)
-                    };
-                    let phys_dir = skill_dir.join(&relative_path);
-                    let mut entries: Vec<(u64, FileType, String)> = vec![
-                        (ino, FileType::Directory, ".".to_string()),
-                        (parent_ino, FileType::Directory, "..".to_string()),
-                    ];
-                    if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
-                        for entry in dir_iter.flatten() {
-                            let name = entry.file_name().to_string_lossy().to_string();
-                            let kind = dir_entry_file_type(&entry);
-                            let entry_path = format!("{}/{}", path, name);
-                            let entry_ino = self.inodes.readdir_ino(&entry_path);
-                            entries.push((entry_ino, kind, name));
+                        Some(true) => {
+                            let phys_dir =
+                                self.skill_physical_dir(&skill_name).join(&relative_path);
+                            let parent_ino = {
+                                let parent_path = Path::new(&path)
+                                    .parent()
+                                    .map(|p| p.to_string_lossy().to_string())
+                                    .unwrap_or_default();
+                                self.inodes.lookup_by_path(&parent_path).unwrap_or(ino)
+                            };
+                            let mut entries: Vec<(u64, FileType, String)> = vec![
+                                (ino, FileType::Directory, ".".to_string()),
+                                (parent_ino, FileType::Directory, "..".to_string()),
+                            ];
+                            if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
+                                for entry in dir_iter.flatten() {
+                                    let name = entry.file_name().to_string_lossy().to_string();
+                                    let kind = dir_entry_file_type(&entry);
+                                    let entry_path = format!("{}/{}", path, name);
+                                    let entry_ino = self.inodes.readdir_ino(&entry_path);
+                                    entries.push((entry_ino, kind, name));
+                                }
+                            }
+                            entries
+                        }
+                        None => {
+                            // I2: staging roots use the physical source dir
+                            // directly, bypassing the active resolver.
+                            // Pending installs use the same bypass.
+                            let skill_dir = if self.is_staging_skill_root(&skill_name)
+                                || self.is_pending_install(&skill_name)
+                            {
+                                self.source_base().join(&skill_name)
+                            } else {
+                                match self.skill_read_dir(&skill_name) {
+                                    Some(d) => d,
+                                    None => {
+                                        reply.error(libc::ENOENT);
+                                        return;
+                                    }
+                                }
+                            };
+                            let parent_ino = {
+                                let parent_path = Path::new(&path)
+                                    .parent()
+                                    .map(|p| p.to_string_lossy().to_string())
+                                    .unwrap_or_default();
+                                self.inodes.lookup_by_path(&parent_path).unwrap_or(ino)
+                            };
+                            let phys_dir = skill_dir.join(&relative_path);
+                            let mut entries: Vec<(u64, FileType, String)> = vec![
+                                (ino, FileType::Directory, ".".to_string()),
+                                (parent_ino, FileType::Directory, "..".to_string()),
+                            ];
+                            if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
+                                for entry in dir_iter.flatten() {
+                                    let name = entry.file_name().to_string_lossy().to_string();
+                                    let kind = dir_entry_file_type(&entry);
+                                    let entry_path = format!("{}/{}", path, name);
+                                    let entry_ino = self.inodes.readdir_ino(&entry_path);
+                                    entries.push((entry_ino, kind, name));
+                                }
+                            }
+                            entries
                         }
                     }
-                    entries
                 }
                 PathType::InboxDir => {
                     let parent_ino = FUSE_ROOT_ID;
@@ -462,6 +511,7 @@ impl SkillFs {
                 // enumerate physical entries directly.
                 // Pending installs use the same bypass.
                 if self.is_staging_skill_root(skill_name) || self.is_pending_install(skill_name) {
+                    let show_meta = self.should_show_skill_meta_in_listing(skill_name, _req);
                     let skills_dir_ino = self.skills_dir_ino();
                     let mut entries = vec![
                         (ino, FileType::Directory, ".".to_string()),
@@ -473,6 +523,9 @@ impl SkillFs {
                         phys_entries.sort_by_key(|e| e.file_name());
                         for entry in phys_entries {
                             let name = entry.file_name().to_string_lossy().to_string();
+                            if name == SKILL_META_DIR && !show_meta {
+                                continue;
+                            }
                             let kind = dir_entry_file_type(&entry);
                             let entry_path = format!("{}/{}", path, name);
                             let entry_ino = self.inodes.readdir_ino(&entry_path);
@@ -507,6 +560,7 @@ impl SkillFs {
                     // promise is that `/skills/<skill>` is read-served from
                     // the trusted snapshot tree, files and all.
                     let dir_file = if !is_skill_discover_path(skill_name) {
+                        let show_meta = self.should_show_skill_meta_in_listing(skill_name, _req);
                         // `skill_read_dir` returns the snapshot dir for
                         // fallback and the live dir otherwise. Hidden is
                         // handled by the early-return above so the
@@ -521,6 +575,9 @@ impl SkillFs {
                             for entry in phys_entries {
                                 let name = entry.file_name().to_string_lossy().to_string();
                                 if name == "SKILL.md" {
+                                    continue;
+                                }
+                                if name == SKILL_META_DIR && !show_meta {
                                     continue;
                                 }
                                 let kind = dir_entry_file_type(&entry);
@@ -541,52 +598,88 @@ impl SkillFs {
                 ref skill_name,
                 ref relative_path,
             } => {
-                // I2: staging roots use the physical source dir
-                // directly, bypassing the active resolver.
-                // Pending installs use the same bypass.
-                // D1.1: hidden / snapshot resolution. Hidden surfaces
-                // ENOENT; snapshot drives the listing from the trusted
-                // snapshot tree so subdirectory enumerations stay
-                // consistent with what lookup/getattr/read reports.
-                let skill_dir = if self.is_staging_skill_root(skill_name)
-                    || self.is_pending_install(skill_name)
-                {
-                    self.source_base().join(skill_name)
-                } else {
-                    match self.skill_read_dir(skill_name) {
-                        Some(d) => d,
-                        None => return reply.error(libc::ENOENT),
+                let pt = PathType::Passthrough {
+                    skill_name: skill_name.clone(),
+                    relative_path: relative_path.clone(),
+                };
+                match self.is_trusted_skill_meta_access(&pt, _req) {
+                    Some(false) => return reply.error(libc::ENOENT),
+                    Some(true) => {
+                        let phys_dir = self.skill_physical_dir(skill_name).join(relative_path);
+                        let parent_ino = {
+                            let parent_path = Path::new(&path)
+                                .parent()
+                                .map(|p| p.to_string_lossy().to_string())
+                                .unwrap_or_default();
+                            self.inodes.lookup_by_path(&parent_path).unwrap_or(ino)
+                        };
+                        let mut entries = vec![
+                            (ino, FileType::Directory, ".".to_string()),
+                            (parent_ino, FileType::Directory, "..".to_string()),
+                        ];
+                        if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
+                            let mut phys_entries: Vec<_> = dir_iter.flatten().collect();
+                            phys_entries.sort_by_key(|e| e.file_name());
+                            for entry in phys_entries {
+                                let name = entry.file_name().to_string_lossy().to_string();
+                                let kind = dir_entry_file_type(&entry);
+                                let entry_path = format!("{}/{}", path, name);
+                                let entry_ino = self.inodes.readdir_ino(&entry_path);
+                                entries.push((entry_ino, kind, name));
+                            }
+                        }
+                        let dir_file = std::fs::File::open(&phys_dir).ok();
+                        (entries, dir_file)
                     }
-                };
-                let parent_ino = {
-                    let parent_path = Path::new(&path)
-                        .parent()
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    self.inodes.lookup_by_path(&parent_path).unwrap_or(ino)
-                };
+                    None => {
+                        // I2: staging roots use the physical source dir
+                        // directly, bypassing the active resolver.
+                        // Pending installs use the same bypass.
+                        // D1.1: hidden / snapshot resolution. Hidden surfaces
+                        // ENOENT; snapshot drives the listing from the trusted
+                        // snapshot tree so subdirectory enumerations stay
+                        // consistent with what lookup/getattr/read reports.
+                        let skill_dir = if self.is_staging_skill_root(skill_name)
+                            || self.is_pending_install(skill_name)
+                        {
+                            self.source_base().join(skill_name)
+                        } else {
+                            match self.skill_read_dir(skill_name) {
+                                Some(d) => d,
+                                None => return reply.error(libc::ENOENT),
+                            }
+                        };
+                        let parent_ino = {
+                            let parent_path = Path::new(&path)
+                                .parent()
+                                .map(|p| p.to_string_lossy().to_string())
+                                .unwrap_or_default();
+                            self.inodes.lookup_by_path(&parent_path).unwrap_or(ino)
+                        };
 
-                let mut entries = vec![
-                    (ino, FileType::Directory, ".".to_string()),
-                    (parent_ino, FileType::Directory, "..".to_string()),
-                ];
+                        let mut entries = vec![
+                            (ino, FileType::Directory, ".".to_string()),
+                            (parent_ino, FileType::Directory, "..".to_string()),
+                        ];
 
-                let phys_dir = skill_dir.join(relative_path);
-                if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
-                    let mut phys_entries: Vec<_> = dir_iter.flatten().collect();
-                    phys_entries.sort_by_key(|e| e.file_name());
+                        let phys_dir = skill_dir.join(relative_path);
+                        if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
+                            let mut phys_entries: Vec<_> = dir_iter.flatten().collect();
+                            phys_entries.sort_by_key(|e| e.file_name());
 
-                    for entry in phys_entries {
-                        let name = entry.file_name().to_string_lossy().to_string();
-                        let kind = dir_entry_file_type(&entry);
-                        let entry_path = format!("{}/{}", path, name);
-                        let entry_ino = self.inodes.readdir_ino(&entry_path);
-                        entries.push((entry_ino, kind, name));
+                            for entry in phys_entries {
+                                let name = entry.file_name().to_string_lossy().to_string();
+                                let kind = dir_entry_file_type(&entry);
+                                let entry_path = format!("{}/{}", path, name);
+                                let entry_ino = self.inodes.readdir_ino(&entry_path);
+                                entries.push((entry_ino, kind, name));
+                            }
+                        }
+                        let dir_file = std::fs::File::open(&phys_dir).ok();
+
+                        (entries, dir_file)
                     }
                 }
-                let dir_file = std::fs::File::open(&phys_dir).ok();
-
-                (entries, dir_file)
             }
             PathType::InboxDir => {
                 let mut entries = vec![
@@ -716,7 +809,7 @@ impl SkillFs {
             ino,
             fh, "readdir: no directory handle found, falling back to dynamic listing"
         );
-        self.readdir_dynamic(ino, offset, reply);
+        self.readdir_dynamic(_req, ino, offset, reply);
     }
     pub(in crate::fs) fn releasedir_impl(
         &mut self,

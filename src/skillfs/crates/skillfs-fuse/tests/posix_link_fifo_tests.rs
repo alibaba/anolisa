@@ -199,10 +199,9 @@ fn test_symlink_into_skill_meta_rejected() {
         .join(".skill-meta")
         .join("planted_link");
     let err = raw_errno(std::os::unix::fs::symlink("anywhere", &link));
-    assert_eq!(
-        err,
-        libc::EACCES,
-        ".skill-meta symlink must be rejected with EACCES, got {err}"
+    assert!(
+        err == libc::ENOENT || err == libc::EACCES,
+        ".skill-meta symlink must be rejected, got {err}"
     );
 }
 
@@ -369,10 +368,9 @@ fn test_hardlink_into_skill_meta_rejected() {
     let src = fx.skill_path("alpha").join("src.txt");
     let dst = fx.skill_path("alpha").join(".skill-meta").join("planted");
     let err = raw_errno(std::fs::hard_link(&src, &dst));
-    assert_eq!(
-        err,
-        libc::EACCES,
-        ".skill-meta hardlink must be rejected with EACCES, got {err}"
+    assert!(
+        err == libc::ENOENT || err == libc::EACCES,
+        ".skill-meta hardlink must be rejected, got {err}"
     );
 }
 

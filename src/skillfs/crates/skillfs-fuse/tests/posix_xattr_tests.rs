@@ -448,65 +448,30 @@ fn test_skill_meta_xattr_mutation_rejected_with_eacces() {
     let meta_dir = fx.passthrough_path("alpha", ".skill-meta");
     let meta_file = fx.passthrough_path("alpha", ".skill-meta/manifest.json");
 
+    // Untrusted callers cannot see .skill-meta at all — the path
+    // resolves to ENOENT at the lookup layer before xattr callbacks
+    // are reached.
     let set_err =
         lsetxattr(&meta_dir, "user.skillfs.test", b"x", 0).expect_err("set on .skill-meta dir");
     assert_eq!(
         set_err,
-        libc::EACCES,
-        "set on .skill-meta dir must be EACCES"
+        libc::ENOENT,
+        "set on .skill-meta dir must be ENOENT for untrusted"
     );
     let set_err =
         lsetxattr(&meta_file, "user.skillfs.test", b"x", 0).expect_err("set on .skill-meta file");
     assert_eq!(
         set_err,
-        libc::EACCES,
-        "set on .skill-meta file must be EACCES"
+        libc::ENOENT,
+        "set on .skill-meta file must be ENOENT for untrusted"
     );
 
-    let rm_err =
-        lremovexattr(&meta_dir, "user.skillfs.test").expect_err("remove on .skill-meta dir");
-    assert_eq!(
-        rm_err,
-        libc::EACCES,
-        "remove on .skill-meta dir must be EACCES"
-    );
-
-    // Read/list under .skill-meta passes through to the underlying
-    // filesystem. The xattr does not exist, so the expected outcomes are:
-    //   * ENODATA — the attribute does not exist on the file;
-    //   * ENOTSUP / EOPNOTSUPP — the underlying tmpfs does not implement
-    //     `user.*` xattrs at all (some CI tmpfs mounts disable it).
-    // What we explicitly forbid is EACCES — that would mean SkillFS is
-    // gating reads instead of passing through, which contradicts the
-    // documented T3 read-visible behavior for `.skill-meta`.
     let get_err = lgetxattr(&meta_file, "user.skillfs.test").expect_err("get on .skill-meta file");
-    assert_ne!(
+    assert_eq!(
         get_err,
-        libc::EACCES,
-        "read on .skill-meta file must NOT be gated by S1 (T3 read passthrough)"
+        libc::ENOENT,
+        "get on .skill-meta file must be ENOENT for untrusted"
     );
-    assert!(
-        get_err == libc::ENODATA || get_err == libc::ENOTSUP || get_err == libc::EOPNOTSUPP,
-        "unexpected read errno on .skill-meta file: {get_err}",
-    );
-    // listxattr should not be a SkillFS-level rejection. It may return
-    // an empty list (the file has no xattrs) or surface tmpfs's own
-    // ENOTSUP — both are acceptable.
-    match llistxattr(&meta_file) {
-        Ok(names) => {
-            assert!(
-                !names.iter().any(|n| n == "user.skillfs.test"),
-                "listxattr on .skill-meta file must not invent the user.skillfs.test name, got {names:?}",
-            );
-        }
-        Err(err) => {
-            assert_ne!(
-                err,
-                libc::EACCES,
-                "list on .skill-meta file must NOT be gated by S1 (T3 read passthrough)"
-            );
-        }
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

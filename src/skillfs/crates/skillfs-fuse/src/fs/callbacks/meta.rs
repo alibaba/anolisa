@@ -105,8 +105,11 @@ impl SkillFs {
                 // I4: post-publish grace bypasses the hidden gate so
                 // installers can traverse the skill directory to reach
                 // whitelisted files within the grace window.
+                // Trusted writers can traverse hidden skill dirs so
+                // exact-path `.skill-meta` access works.
                 if matches!(self.resolve_skill_read(&skill_name), ReadResolution::Hidden)
                     && !self.is_post_publish_grace_allowed(&skill_name, None)
+                    && !self.evaluate_trusted_writer(_req).is_allowed()
                 {
                     reply.error(libc::ENOENT);
                     return;
@@ -205,6 +208,32 @@ impl SkillFs {
                 if is_reserved_lifecycle_name(&skill_name) {
                     reply.error(libc::ENOENT);
                     return;
+                }
+                let pt = PathType::Passthrough {
+                    skill_name: skill_name.clone(),
+                    relative_path: relative_path.clone(),
+                };
+                match self.is_trusted_skill_meta_access(&pt, _req) {
+                    Some(false) => {
+                        reply.error(libc::ENOENT);
+                        return;
+                    }
+                    Some(true) => {
+                        let physical_path =
+                            self.skill_physical_dir(&skill_name).join(&relative_path);
+                        match std::fs::symlink_metadata(&physical_path) {
+                            Ok(meta) => {
+                                let mut attr = file_attr_from_metadata(&meta);
+                                let ino = self.inodes.allocate(&path_str, attr.kind, parent);
+                                self.inodes.remember(ino);
+                                attr.ino = ino;
+                                reply.entry(&Duration::from_secs(1), &attr, 0);
+                            }
+                            Err(e) => reply.error(errno(&e)),
+                        }
+                        return;
+                    }
+                    None => {}
                 }
                 // I2: staging roots use the physical source dir
                 // directly, bypassing the active resolver.
@@ -400,8 +429,11 @@ impl SkillFs {
                     return;
                 }
                 // I4: grace bypass for getattr on skill dir.
+                // Trusted writers can stat hidden skill dirs for
+                // `.skill-meta` exact-path traversal.
                 if matches!(self.resolve_skill_read(&skill_name), ReadResolution::Hidden)
                     && !self.is_post_publish_grace_allowed(&skill_name, None)
+                    && !self.evaluate_trusted_writer(_req).is_allowed()
                 {
                     reply.error(libc::ENOENT);
                     return;
@@ -460,6 +492,30 @@ impl SkillFs {
                 skill_name,
                 relative_path,
             } => {
+                let pt = PathType::Passthrough {
+                    skill_name: skill_name.clone(),
+                    relative_path: relative_path.clone(),
+                };
+                match self.is_trusted_skill_meta_access(&pt, _req) {
+                    Some(false) => {
+                        reply.error(libc::ENOENT);
+                        return;
+                    }
+                    Some(true) => {
+                        let physical_path =
+                            self.skill_physical_dir(&skill_name).join(&relative_path);
+                        match std::fs::symlink_metadata(&physical_path) {
+                            Ok(meta) => {
+                                let mut attr = file_attr_from_metadata(&meta);
+                                attr.ino = ino;
+                                reply.attr(&Duration::from_secs(1), &attr);
+                            }
+                            Err(e) => reply.error(errno(&e)),
+                        }
+                        return;
+                    }
+                    None => {}
+                }
                 // I2: staging roots use the physical source dir
                 // directly, bypassing the active resolver.
                 // Pending installs use the same bypass.
@@ -643,13 +699,30 @@ impl SkillFs {
                     reply.error(libc::ENOENT);
                     return;
                 }
+                let ipt = PathType::InboxPassthrough {
+                    skill_name: skill_name.clone(),
+                    relative_path: relative_path.clone(),
+                };
+                match self.is_trusted_skill_meta_access(&ipt, req) {
+                    Some(false) => {
+                        reply.error(libc::ENOENT);
+                        return;
+                    }
+                    Some(true) => {
+                        let file_path = self.inbox_skill_dir(skill_name).join(relative_path);
+                        let result = self.check_physical_access_result(&file_path, mask, req);
+                        if result == 0 {
+                            reply.ok();
+                        } else {
+                            reply.error(result);
+                        }
+                        return;
+                    }
+                    None => {}
+                }
                 if (mask & libc::W_OK) != 0 {
-                    let pt = PathType::InboxPassthrough {
-                        skill_name: skill_name.clone(),
-                        relative_path: relative_path.clone(),
-                    };
                     if let Some(errno) = self.enforce_skill_meta(
-                        &pt,
+                        &ipt,
                         SkillEventKind::Metadata,
                         req,
                         Some(format!("access mask=0x{:x}", mask)),
@@ -694,13 +767,30 @@ impl SkillFs {
                         reply.ok();
                     }
                 } else {
+                    let pt = PathType::Passthrough {
+                        skill_name: skill_name.clone(),
+                        relative_path: relative_path.clone(),
+                    };
+                    match self.is_trusted_skill_meta_access(&pt, req) {
+                        Some(false) => {
+                            reply.error(libc::ENOENT);
+                            return;
+                        }
+                        Some(true) => {
+                            let file_path = self.skill_physical_dir(skill_name).join(relative_path);
+                            let result = self.check_physical_access_result(&file_path, mask, req);
+                            if result == 0 {
+                                reply.ok();
+                            } else {
+                                reply.error(result);
+                            }
+                            return;
+                        }
+                        None => {}
+                    }
                     // S1: deny W_OK on `.skill-meta/**`. R_OK/X_OK/F_OK
                     // still defer to the underlying physical permissions.
                     if (mask & libc::W_OK) != 0 {
-                        let pt = PathType::Passthrough {
-                            skill_name: skill_name.clone(),
-                            relative_path: relative_path.clone(),
-                        };
                         if let Some(errno) = self.enforce_skill_meta(
                             &pt,
                             SkillEventKind::Metadata,
