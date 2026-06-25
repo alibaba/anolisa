@@ -332,6 +332,26 @@ def is_skill_file(text: str) -> bool:
     return False
 
 
+def resolve_tool_call_id(agent_id: str, input_data: dict) -> str:
+    """Resolve the tool call identifier to record for a hook invocation.
+
+    Qwen Code's serialized hook input carries two identifiers: the internal
+    ``tool_use_id`` (``toolu_<ts>_<rand>``, always present) and
+    ``tool_call_id`` (the LLM provider's original call ID, e.g. ``call_xxx``,
+    snake_case — Qwen Code's TS uses camelCase ``toolCallId`` internally but
+    normalizes to ``tool_call_id`` on the wire). For the qwencode agent,
+    prefer the provider call ID and fall back to the internal one; for other
+    agents, keep the existing priority (``tool_use_id`` first).
+    """
+    if agent_id == "qwencode":
+        return (
+            input_data.get("tool_call_id")
+            or input_data.get("toolCallId")
+            or input_data.get("tool_use_id", "")
+        )
+    return input_data.get("tool_use_id") or input_data.get("toolCallId", "")
+
+
 def write_context(agent_id: str, session_id: str, tool_use_id: str) -> None:
     """Write context file for rtk rewrite session tracking."""
     os.makedirs(_CONTEXT_DIR, mode=0o700, exist_ok=True)

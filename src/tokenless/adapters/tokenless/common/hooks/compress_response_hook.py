@@ -39,6 +39,7 @@ from hook_utils import (
     get_thresholds,
     is_skill_file,
     resolve_binary,
+    resolve_tool_call_id,
     skip,
     try_parse_json,
     unwrap_string_json,
@@ -124,7 +125,7 @@ def main() -> None:
 
     # 8. Extract caller context
     session_id = input_data.get("session_id", "")
-    tool_use_id = input_data.get("tool_use_id") or input_data.get("toolCallId", "")
+    tool_use_id = resolve_tool_call_id(_AGENT_ID, input_data)
 
     # 9. Environment attribution analysis
     env_attribution = ""

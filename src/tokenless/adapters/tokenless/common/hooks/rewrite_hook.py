@@ -29,6 +29,7 @@ from hook_utils import (
     forward_stderr,
     parse_version,
     resolve_binary,
+    resolve_tool_call_id,
     skip,
     warn,
     write_context,
@@ -93,9 +94,7 @@ def main() -> None:
     env = os.environ.copy()
     env["TOKENLESS_AGENT_ID"] = _AGENT_ID
     session_id = input_data.get("session_id", "")
-    tool_use_id = input_data.get("tool_use_id") or input_data.get(
-        "toolCallId", ""
-    )
+    tool_use_id = resolve_tool_call_id(_AGENT_ID, input_data)
     if session_id:
         env["TOKENLESS_SESSION_ID"] = session_id
     if tool_use_id:

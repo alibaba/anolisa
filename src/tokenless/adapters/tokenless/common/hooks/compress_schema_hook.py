@@ -23,6 +23,7 @@ from hook_utils import (
     _TOKENLESS_LOCAL_LIB,
     _TOKENLESS_LOCAL_SHARE,
     resolve_binary,
+    resolve_tool_call_id,
     skip,
     warn,
 )
@@ -77,9 +78,7 @@ def main() -> None:
 
     # 4. Extract caller context
     session_id = input_data.get("session_id", "")
-    tool_use_id = input_data.get("tool_use_id") or input_data.get(
-        "toolCallId", ""
-    )
+    tool_use_id = resolve_tool_call_id(_AGENT_ID, input_data)
 
     # 5. Compress schemas via tokenless compress-schema --batch
     cmd = [tokenless_bin, "compress-schema", "--batch", "--agent-id", _AGENT_ID]
