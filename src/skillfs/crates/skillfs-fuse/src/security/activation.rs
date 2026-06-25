@@ -1002,6 +1002,95 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────
+    // enumerate_hermes_skill_leaves + bootstrap_activation with nested ids
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn enumerate_hermes_skill_leaves_finds_nested_skills() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // Management paths — should be skipped.
+        std::fs::create_dir_all(root.join(".hub")).unwrap();
+        std::fs::write(root.join(".bundled_manifest"), "").unwrap();
+
+        // Category with two skill leaves.
+        let notes = root.join("apple/apple-notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        std::fs::write(notes.join("SKILL.md"), "---\nname: n\n---\n").unwrap();
+
+        let music = root.join("apple/apple-music");
+        std::fs::create_dir_all(&music).unwrap();
+        std::fs::write(music.join("SKILL.md"), "---\nname: m\n---\n").unwrap();
+
+        // Non-skill subdir (no SKILL.md) — should be skipped.
+        std::fs::create_dir_all(root.join("apple/docs")).unwrap();
+
+        // Dot-prefixed dir — should be skipped.
+        std::fs::create_dir_all(root.join(".git/objects")).unwrap();
+
+        let mut leaves = enumerate_hermes_skill_leaves(root);
+        leaves.sort();
+        assert_eq!(
+            leaves,
+            vec!["apple/apple-music", "apple/apple-notes"],
+            "must enumerate only dirs with SKILL.md, got: {:?}",
+            leaves
+        );
+    }
+
+    #[test]
+    fn bootstrap_activation_with_hermes_nested_id() {
+        use super::super::active::ActiveSkillResolver;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // Create a nested skill with a valid activation file.
+        let skill = root.join("apple/apple-notes");
+        std::fs::create_dir_all(skill.join(".skill-meta/versions/v000001.snapshot")).unwrap();
+        std::fs::write(
+            skill.join(".skill-meta/activation.json"),
+            r#"{"schemaVersion": 1, "target": ".skill-meta/versions/v000001.snapshot"}"#,
+        )
+        .unwrap();
+
+        // Create another nested skill with hidden activation.
+        let hidden = root.join("apple/apple-music");
+        std::fs::create_dir_all(hidden.join(".skill-meta")).unwrap();
+        std::fs::write(
+            hidden.join(".skill-meta/activation.json"),
+            r#"{"schemaVersion": 1, "target": null}"#,
+        )
+        .unwrap();
+
+        let resolver = ActiveSkillResolver::new(root);
+        let names = vec![
+            "apple/apple-notes".to_string(),
+            "apple/apple-music".to_string(),
+        ];
+        let results = bootstrap_activation(root, &names, &resolver);
+
+        assert!(results[0].1.is_ok(), "apple/apple-notes must load");
+        assert!(results[1].1.is_ok(), "apple/apple-music must load");
+
+        assert!(
+            matches!(
+                resolver.get("apple/apple-notes"),
+                Some(ActiveTarget::Snapshot { .. })
+            ),
+            "apple/apple-notes must be snapshot"
+        );
+        assert!(
+            matches!(
+                resolver.get("apple/apple-music"),
+                Some(ActiveTarget::Hidden { .. })
+            ),
+            "apple/apple-music must be hidden"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
     // A2: load_activation_prefer_xattr
     // ─────────────────────────────────────────────────────────────────────
 

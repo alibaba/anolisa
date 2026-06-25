@@ -1903,3 +1903,98 @@ fn hermes_layout_without_security_passes_gate() {
         "hermes without security must not trigger incompatibility gate: {stderr}"
     );
 }
+
+#[test]
+fn hermes_config_decision_command_rejected() {
+    let source = empty_source();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let config_dir = tempfile::tempdir().expect("config dir");
+    let config_path = config_dir.path().join("security.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+[skills]
+layout = "hermes"
+
+[decision]
+command = "agent-sec-cli skill-ledger"
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--config",
+            config_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(
+        !out.status.success(),
+        "hermes (config) + decision-command (config) must fail"
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("incompatible"),
+        "config-sourced hermes + decision-command must be rejected: {combined}"
+    );
+}
+
+#[test]
+fn hermes_config_control_socket_rejected() {
+    let source = empty_source();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let config_dir = tempfile::tempdir().expect("config dir");
+    let config_path = config_dir.path().join("security.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+[skills]
+layout = "hermes"
+
+[activation]
+mode = "file"
+
+[control_socket]
+path = "/tmp/test-hermes-config.sock"
+trusted_peer_exe = "{}"
+"#,
+            bin_path()
+        ),
+    )
+    .unwrap();
+
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--config",
+            config_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(
+        !out.status.success(),
+        "hermes (config) + control-socket (config) must fail"
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("incompatible"),
+        "config-sourced hermes + control-socket must be rejected: {combined}"
+    );
+}
