@@ -302,6 +302,14 @@ impl SkillFs {
                         ref skill_name,
                         ref relative_path,
                     } => Some(self.inbox_skill_dir(skill_name).join(relative_path)),
+                    PathType::NestedPassthrough {
+                        ref category,
+                        ref skill_name,
+                        ref relative_path,
+                    } => Some(
+                        self.hermes_skill_physical_dir(category, skill_name)
+                            .join(relative_path),
+                    ),
                     _ => None,
                 };
                 if let Some(physical) = physical {

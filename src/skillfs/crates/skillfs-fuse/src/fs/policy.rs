@@ -58,6 +58,7 @@ impl SkillFs {
         req: &Request,
         detail: Option<String>,
     ) -> Option<i32> {
+        let nested_id;
         let (skill_name, relative_path) = match path_type {
             PathType::Passthrough {
                 skill_name,
@@ -67,10 +68,14 @@ impl SkillFs {
                 skill_name,
                 relative_path,
             } => (skill_name.as_str(), relative_path.as_path()),
-            // Only Passthrough / InboxPassthrough paths can land inside
-            // `.skill-meta`. Other path classes (Root, SkillsDir,
-            // SkillDir, SkillMd, InboxDir, InboxSkillDir, Invalid) are
-            // excluded by construction.
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } => {
+                nested_id = Self::hermes_skill_id(category, skill_name);
+                (nested_id.as_str(), relative_path.as_path())
+            }
             _ => return None,
         };
 
@@ -379,7 +384,8 @@ impl SkillFs {
     ) -> Option<bool> {
         let relative_path = match path_type {
             PathType::Passthrough { relative_path, .. }
-            | PathType::InboxPassthrough { relative_path, .. } => relative_path.as_path(),
+            | PathType::InboxPassthrough { relative_path, .. }
+            | PathType::NestedPassthrough { relative_path, .. } => relative_path.as_path(),
             _ => return None,
         };
         if !is_skill_meta_path(relative_path) {
@@ -395,6 +401,21 @@ impl SkillFs {
         req: &Request,
     ) -> bool {
         let probe = PathType::Passthrough {
+            skill_name: skill_name.to_string(),
+            relative_path: std::path::PathBuf::from(crate::security::SKILL_META_DIR),
+        };
+        self.is_trusted_skill_meta_access(&probe, req) == Some(true)
+    }
+
+    /// Whether `.skill-meta` should appear in a `NestedSkillDir` listing.
+    pub(super) fn should_show_skill_meta_in_nested_listing(
+        &self,
+        category: &str,
+        skill_name: &str,
+        req: &Request,
+    ) -> bool {
+        let probe = PathType::NestedPassthrough {
+            category: category.to_string(),
             skill_name: skill_name.to_string(),
             relative_path: std::path::PathBuf::from(crate::security::SKILL_META_DIR),
         };

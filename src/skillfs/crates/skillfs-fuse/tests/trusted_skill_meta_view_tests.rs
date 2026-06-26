@@ -19,8 +19,12 @@ use std::time::Duration;
 
 use parking_lot::RwLock;
 use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
-use skillfs_fuse::security::{ActiveSkillResolver, LedgerResolveResult, TrustedWriterConfig};
-use skillfs_fuse::{MountConfig, MountHandle, MountOptions, mount_background_configured};
+use skillfs_fuse::security::{
+    ActiveSkillResolver, ActiveTarget, LedgerResolveResult, TrustedWriterConfig,
+};
+use skillfs_fuse::{
+    MountConfig, MountHandle, MountOptions, SkillLayout, mount_background_configured,
+};
 
 #[path = "common/mod.rs"]
 mod common;
@@ -640,5 +644,359 @@ fn untrusted_parent_listing_still_hides_skill_meta() {
     assert!(
         !listing.contains(&".skill-meta".to_string()),
         "untrusted caller must NOT see .skill-meta, got {listing:?}"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Hermes nested .skill-meta tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn seed_hermes_with_meta(source: &Path, category: &str, skill: &str) {
+    let skill_dir = source.join(category).join(skill);
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        format!("---\nname: {skill}\ndescription: test\n---\n{skill} body.\n"),
+    )
+    .unwrap();
+    let meta = skill_dir.join(".skill-meta");
+    std::fs::create_dir_all(&meta).unwrap();
+    std::fs::write(
+        meta.join("manifest.json"),
+        format!("{{\"skill\":\"{category}/{skill}\",\"live\":true}}\n"),
+    )
+    .unwrap();
+}
+
+#[allow(dead_code)]
+struct HermesMetaViewFixture {
+    source: tempfile::TempDir,
+    mountpoint: tempfile::TempDir,
+    handle: Option<MountHandle>,
+}
+
+impl HermesMetaViewFixture {
+    fn new<S, R>(seed: S, trusted_writer: Option<TrustedWriterConfig>, resolver_builder: R) -> Self
+    where
+        S: FnOnce(&Path),
+        R: FnOnce(&Path) -> Option<Arc<ActiveSkillResolver>>,
+    {
+        let source = tempfile::tempdir().expect("source tempdir");
+        seed(source.path());
+        let resolver = resolver_builder(source.path());
+        let mountpoint = tempfile::tempdir().expect("mount tempdir");
+
+        let store = fixture_store(source.path());
+        let handle = mount_background_configured(
+            mountpoint.path(),
+            source.path(),
+            store,
+            MountOptions::default(),
+            true,
+            MountConfig {
+                trusted_writer,
+                active_resolver: resolver,
+                skill_layout: Some(SkillLayout::Hermes),
+                ..MountConfig::default()
+            },
+        )
+        .expect("mount_background_configured");
+        std::thread::sleep(Duration::from_millis(300));
+
+        Self {
+            source,
+            mountpoint,
+            handle: Some(handle),
+        }
+    }
+
+    fn nested_skill_dir(&self, category: &str, skill: &str) -> PathBuf {
+        self.mountpoint.path().join(category).join(skill)
+    }
+
+    fn nested_skill_meta(&self, category: &str, skill: &str) -> PathBuf {
+        self.nested_skill_dir(category, skill).join(".skill-meta")
+    }
+}
+
+impl Drop for HermesMetaViewFixture {
+    fn drop(&mut self) {
+        if let Some(h) = self.handle.take() {
+            drop(h);
+        }
+        let mp = self.mountpoint.path().to_path_buf();
+        std::thread::sleep(Duration::from_millis(150));
+        let _ = std::process::Command::new("fusermount3")
+            .args(["-u", &mp.to_string_lossy()])
+            .output();
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// H1. Untrusted readdir of category/skill hides .skill-meta
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn hermes_untrusted_readdir_hides_skill_meta() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+    let fx = HermesMetaViewFixture::new(
+        |src| seed_hermes_with_meta(src, "apple", "apple-notes"),
+        None,
+        |_| None,
+    );
+    let listing = sorted_dir(&fx.nested_skill_dir("apple", "apple-notes"));
+    assert!(
+        listing.contains(&"SKILL.md".to_string()),
+        "SKILL.md must be visible, got {listing:?}"
+    );
+    assert!(
+        !listing.contains(&".skill-meta".to_string()),
+        ".skill-meta must be hidden from untrusted readdir, got {listing:?}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// H2. Untrusted exact path metadata/read for category/skill/.skill-meta/...
+//     returns ENOENT
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn hermes_untrusted_exact_skill_meta_denied() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+    let fx = HermesMetaViewFixture::new(
+        |src| seed_hermes_with_meta(src, "apple", "apple-notes"),
+        None,
+        |_| None,
+    );
+    let meta_dir = fx.nested_skill_meta("apple", "apple-notes");
+    let err = std::fs::metadata(&meta_dir).expect_err("untrusted .skill-meta lookup must fail");
+    assert_eq!(err.raw_os_error(), Some(libc::ENOENT));
+    let manifest = meta_dir.join("manifest.json");
+    let err =
+        std::fs::read(&manifest).expect_err("untrusted .skill-meta/manifest.json read must fail");
+    assert_eq!(err.raw_os_error(), Some(libc::ENOENT));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// H3. Trusted read-only open/stat of category/skill/.skill-meta/... succeeds
+//     and reads live source even when the skill is fallback
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(target_os = "linux")]
+#[test]
+fn hermes_trusted_reads_live_skill_meta() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+    let comm = self_comm();
+    let fx = HermesMetaViewFixture::new(
+        |src| {
+            seed_hermes_with_meta(src, "apple", "apple-notes");
+            std::fs::create_dir_all(src.join("apple/apple-notes/scripts")).unwrap();
+            std::fs::write(
+                src.join("apple/apple-notes/scripts/run.sh"),
+                "#!/bin/sh\necho live\n",
+            )
+            .unwrap();
+            write_snapshot(
+                src,
+                "apple/apple-notes",
+                "v000001.snapshot",
+                "---\nname: apple-notes\ndescription: snapshot\n---\n",
+                &[("scripts/run.sh", "#!/bin/sh\necho snapshot\n")],
+            );
+        },
+        Some(TrustedWriterConfig::with_process_name(comm)),
+        |src_root| {
+            let snap_dir = src_root.join("apple/apple-notes/.skill-meta/versions/v000001.snapshot");
+            let r = ActiveSkillResolver::new(src_root);
+            r.set(
+                "apple/apple-notes",
+                ActiveTarget::Snapshot {
+                    snapshot_dir: snap_dir,
+                    version: "v000001.snapshot".to_string(),
+                },
+            );
+            Some(Arc::new(r))
+        },
+    );
+    let manifest = std::fs::read_to_string(
+        fx.nested_skill_meta("apple", "apple-notes")
+            .join("manifest.json"),
+    )
+    .expect("trusted .skill-meta must be readable even in fallback");
+    assert!(
+        manifest.contains("\"live\":true"),
+        ".skill-meta must come from live source, got: {manifest}"
+    );
+    let script = std::fs::read_to_string(
+        fx.nested_skill_dir("apple", "apple-notes")
+            .join("scripts/run.sh"),
+    )
+    .expect("regular file should be readable");
+    assert!(
+        script.contains("echo snapshot"),
+        "regular file must come from snapshot, got: {script}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// H4. Trusted hidden nested skill can read live .skill-meta but cannot read
+//     ordinary hidden files
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(target_os = "linux")]
+#[test]
+fn hermes_trusted_hidden_meta_no_ordinary_files() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+    let comm = self_comm();
+    let fx = HermesMetaViewFixture::new(
+        |src| {
+            seed_hermes_with_meta(src, "apple", "apple-notes");
+            std::fs::write(
+                src.join("apple/apple-notes/private.txt"),
+                "secret content\n",
+            )
+            .unwrap();
+        },
+        Some(TrustedWriterConfig::with_process_name(comm)),
+        |src_root| {
+            let r = ActiveSkillResolver::new(src_root);
+            r.set(
+                "apple/apple-notes",
+                ActiveTarget::Hidden {
+                    reason: "no trusted version available".to_string(),
+                },
+            );
+            Some(Arc::new(r))
+        },
+    );
+    let manifest = std::fs::read_to_string(
+        fx.nested_skill_meta("apple", "apple-notes")
+            .join("manifest.json"),
+    )
+    .expect("trusted .skill-meta must be readable on hidden nested skill");
+    assert!(manifest.contains("\"live\":true"));
+    let err = std::fs::read_to_string(
+        fx.nested_skill_dir("apple", "apple-notes")
+            .join("private.txt"),
+    )
+    .expect_err("hidden nested skill regular file must remain inaccessible");
+    assert_eq!(err.raw_os_error(), Some(libc::ENOENT));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// H5. Untrusted write/create under nested .skill-meta is rejected
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn hermes_untrusted_write_nested_skill_meta_rejected() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+    let fx = HermesMetaViewFixture::new(
+        |src| seed_hermes_with_meta(src, "apple", "apple-notes"),
+        None,
+        |_| None,
+    );
+    let manifest = fx
+        .nested_skill_meta("apple", "apple-notes")
+        .join("manifest.json");
+    let err = std::fs::write(&manifest, b"overwritten\n")
+        .expect_err("untrusted write to nested .skill-meta must be denied");
+    assert_eq!(err.raw_os_error(), Some(libc::ENOENT));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// H6. Trusted mutating open/create under nested .skill-meta goes through
+//     enforce_skill_meta and preserves existing audit/policy semantics
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(target_os = "linux")]
+#[test]
+fn hermes_trusted_mutating_open_goes_through_policy() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+    let comm = self_comm();
+    let fx = HermesMetaViewFixture::new(
+        |src| seed_hermes_with_meta(src, "apple", "apple-notes"),
+        Some(TrustedWriterConfig::with_process_name(comm)),
+        |_| None,
+    );
+    let manifest = fx
+        .nested_skill_meta("apple", "apple-notes")
+        .join("manifest.json");
+    let _content = std::fs::read_to_string(&manifest).expect("trusted read must succeed");
+    std::fs::write(&manifest, b"{\"updated\":true}\n")
+        .expect("trusted writer write must succeed through policy gate");
+    let updated = std::fs::read_to_string(&manifest).expect("re-read after write");
+    assert!(
+        updated.contains("\"updated\":true"),
+        "write must have landed, got: {updated}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// H7. Symlink/hardlink under nested .skill-meta remains rejected even for
+//     trusted writer, matching flat behavior
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(target_os = "linux")]
+#[test]
+fn hermes_trusted_meta_symlink_hardlink_rejected() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+    let comm = self_comm();
+    let fx = HermesMetaViewFixture::new(
+        |src| {
+            seed_hermes_with_meta(src, "apple", "apple-notes");
+            std::fs::write(src.join("apple/apple-notes/regular.txt"), b"normal\n").unwrap();
+        },
+        Some(TrustedWriterConfig::with_process_name(comm)),
+        |_| None,
+    );
+    let _manifest = std::fs::read_to_string(
+        fx.nested_skill_meta("apple", "apple-notes")
+            .join("manifest.json"),
+    )
+    .expect("trusted read must work");
+    let link_path = fx
+        .nested_skill_meta("apple", "apple-notes")
+        .join("link-to-regular");
+    let err = std::os::unix::fs::symlink("../regular.txt", &link_path)
+        .expect_err("symlink inside nested .skill-meta must be denied");
+    // Nested paths are rejected at the link-type gate (EROFS) since
+    // symlink_impl only accepts flat Passthrough targets.
+    assert!(
+        err.raw_os_error() == Some(libc::EACCES) || err.raw_os_error() == Some(libc::EROFS),
+        "expected EACCES or EROFS, got {err:?}"
+    );
+    let dst = fx
+        .nested_skill_dir("apple", "apple-notes")
+        .join("manifest-copy.json");
+    let err = std::fs::hard_link(
+        fx.nested_skill_meta("apple", "apple-notes")
+            .join("manifest.json"),
+        &dst,
+    )
+    .expect_err("hardlink from nested .skill-meta must be denied");
+    assert!(
+        err.raw_os_error() == Some(libc::EACCES) || err.raw_os_error() == Some(libc::EROFS),
+        "expected EACCES or EROFS, got {err:?}"
     );
 }

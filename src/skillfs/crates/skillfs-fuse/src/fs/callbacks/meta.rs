@@ -423,6 +423,7 @@ impl SkillFs {
                         self.resolve_hermes_nested_read(category, skill_name),
                         crate::fs::read_resolution::ReadResolution::Hidden
                     )
+                    && !self.evaluate_trusted_writer(_req).is_allowed()
                 {
                     reply.error(libc::ENOENT);
                     return;
@@ -483,6 +484,34 @@ impl SkillFs {
                 ref skill_name,
                 ref relative_path,
             } => {
+                let npt = PathType::NestedPassthrough {
+                    category: category.clone(),
+                    skill_name: skill_name.clone(),
+                    relative_path: relative_path.clone(),
+                };
+                match self.is_trusted_skill_meta_access(&npt, _req) {
+                    Some(false) => {
+                        reply.error(libc::ENOENT);
+                        return;
+                    }
+                    Some(true) => {
+                        let physical_path = self
+                            .hermes_skill_physical_dir(category, skill_name)
+                            .join(relative_path);
+                        match std::fs::symlink_metadata(&physical_path) {
+                            Ok(meta) => {
+                                let mut attr = file_attr_from_metadata(&meta);
+                                let ino = self.inodes.allocate(&path_str, attr.kind, parent);
+                                self.inodes.remember(ino);
+                                attr.ino = ino;
+                                reply.entry(&Duration::from_secs(1), &attr, 0);
+                            }
+                            Err(e) => reply.error(errno(&e)),
+                        }
+                        return;
+                    }
+                    None => {}
+                }
                 let nested_id_lu = Self::hermes_skill_id(category, skill_name);
                 if !self.is_staging_skill_root(&nested_id_lu)
                     && !self.is_pending_install(&nested_id_lu)
@@ -884,6 +913,32 @@ impl SkillFs {
                 ref skill_name,
                 ref relative_path,
             } => {
+                let npt = PathType::NestedPassthrough {
+                    category: category.clone(),
+                    skill_name: skill_name.clone(),
+                    relative_path: relative_path.clone(),
+                };
+                match self.is_trusted_skill_meta_access(&npt, _req) {
+                    Some(false) => {
+                        reply.error(libc::ENOENT);
+                        return;
+                    }
+                    Some(true) => {
+                        let physical_path = self
+                            .hermes_skill_physical_dir(category, skill_name)
+                            .join(relative_path);
+                        match std::fs::symlink_metadata(&physical_path) {
+                            Ok(meta) => {
+                                let mut attr = file_attr_from_metadata(&meta);
+                                attr.ino = ino;
+                                reply.attr(&Duration::from_secs(1), &attr);
+                            }
+                            Err(e) => reply.error(errno(&e)),
+                        }
+                        return;
+                    }
+                    None => {}
+                }
                 let nid = Self::hermes_skill_id(category, skill_name);
                 if !self.is_staging_skill_root(&nid)
                     && !self.is_pending_install(&nid)
@@ -1125,9 +1180,58 @@ impl SkillFs {
                     reply.error(result);
                 }
             }
-            PathType::NestedSkillDir { .. }
-            | PathType::NestedSkillMd { .. }
-            | PathType::NestedPassthrough { .. } => {
+            PathType::NestedSkillDir { .. } | PathType::NestedSkillMd { .. } => {
+                let physical = match self.resolve_physical_path(&path) {
+                    Some(p) => p,
+                    None => return reply.error(libc::ENOENT),
+                };
+                let result = self.check_physical_access_result(&physical, mask, req);
+                if result == 0 {
+                    reply.ok();
+                } else {
+                    reply.error(result);
+                }
+            }
+            PathType::NestedPassthrough {
+                ref category,
+                ref skill_name,
+                ref relative_path,
+            } => {
+                let npt = PathType::NestedPassthrough {
+                    category: category.clone(),
+                    skill_name: skill_name.clone(),
+                    relative_path: relative_path.clone(),
+                };
+                match self.is_trusted_skill_meta_access(&npt, req) {
+                    Some(false) => {
+                        reply.error(libc::ENOENT);
+                        return;
+                    }
+                    Some(true) => {
+                        let file_path = self
+                            .hermes_skill_physical_dir(category, skill_name)
+                            .join(relative_path);
+                        let result = self.check_physical_access_result(&file_path, mask, req);
+                        if result == 0 {
+                            reply.ok();
+                        } else {
+                            reply.error(result);
+                        }
+                        return;
+                    }
+                    None => {}
+                }
+                if (mask & libc::W_OK) != 0 {
+                    if let Some(errno) = self.enforce_skill_meta(
+                        &npt,
+                        SkillEventKind::Metadata,
+                        req,
+                        Some(format!("access mask=0x{:x}", mask)),
+                    ) {
+                        reply.error(errno);
+                        return;
+                    }
+                }
                 let physical = match self.resolve_physical_path(&path) {
                     Some(p) => p,
                     None => return reply.error(libc::ENOENT),
