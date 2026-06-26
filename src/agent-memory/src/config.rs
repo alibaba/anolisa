@@ -79,6 +79,13 @@ pub struct MemoryConfig {
     /// intentional for append-style logging.
     #[serde(default = "default_max_append_bytes")]
     pub max_append_bytes: u64,
+    /// Maximum bytes accepted for the `hint` field in memory_observe.
+    /// Prevents a rogue/misconfigured model from injecting an arbitrarily
+    /// long hint that would bloat the YAML frontmatter block in observed
+    /// notes. Hints exceeding this cap are rejected with InvalidArgument.
+    /// Default 512 bytes.
+    #[serde(default = "default_max_hint_bytes")]
+    pub max_hint_bytes: u64,
 }
 
 impl Default for MemoryConfig {
@@ -98,6 +105,7 @@ impl Default for MemoryConfig {
             max_read_bytes: default_max_read_bytes(),
             max_write_bytes: default_max_write_bytes(),
             max_append_bytes: default_max_append_bytes(),
+            max_hint_bytes: default_max_hint_bytes(),
         }
     }
 }
@@ -325,6 +333,10 @@ fn default_max_write_bytes() -> u64 {
 
 fn default_max_append_bytes() -> u64 {
     4 * 1_048_576 // 4 MiB
+}
+
+fn default_max_hint_bytes() -> u64 {
+    512
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -586,6 +598,12 @@ impl AppConfig {
             match v.parse::<u64>() {
                 Ok(n) => self.memory.max_append_bytes = n,
                 Err(e) => tracing::warn!("MEMORY_MAX_APPEND_BYTES={v:?} not a u64: {e}; ignoring"),
+            }
+        }
+        if let Ok(v) = std::env::var("MEMORY_MAX_HINT_BYTES") {
+            match v.parse::<u64>() {
+                Ok(n) => self.memory.max_hint_bytes = n,
+                Err(e) => tracing::warn!("MEMORY_MAX_HINT_BYTES={v:?} not a u64: {e}; ignoring"),
             }
         }
     }

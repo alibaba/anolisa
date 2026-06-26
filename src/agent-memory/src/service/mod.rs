@@ -190,7 +190,7 @@ impl MemoryService {
         hint: Option<&str>,
         memory_type: Option<&str>,
     ) -> Result<String> {
-        crate::tools::memory_observe(self, content, hint, memory_type)
+        crate::tools::memory_observe(self, content, hint, memory_type, &self.config.memory)
     }
 
     pub fn memory_get_context(&self, max_tokens: usize) -> Result<String> {
