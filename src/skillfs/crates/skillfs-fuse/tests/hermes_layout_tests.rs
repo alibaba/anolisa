@@ -620,6 +620,101 @@ fn hermes_nested_write_triggers_notify() {
 }
 
 // -----------------------------------------------------------------------
+// H3-14. Management path writes produce zero notify even with
+//        staging + pending install controllers attached.
+// -----------------------------------------------------------------------
+
+#[test]
+fn hermes_management_no_notify_with_install_controllers() {
+    skip_if_no_fuse!();
+
+    use parking_lot::RwLock;
+    use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
+    use skillfs_fuse::security::{
+        ActiveSkillResolver, ActiveTarget, InMemoryNotifyClient, InstallerStagingController,
+        NotifyController, PendingInstallController, StagingConfig, StagingMatcher, StagingPattern,
+    };
+    use skillfs_fuse::{MountConfig, MountOptions, SkillLayout, mount_background_configured};
+
+    let source = tempfile::tempdir().unwrap();
+    seed_hermes_workspace(source.path());
+
+    let mut store = SkillStore::new();
+    store.load_from_directory(source.path(), &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+    let mountpoint = tempfile::tempdir().unwrap();
+
+    let notify_client = Arc::new(InMemoryNotifyClient::new());
+    let notify_ctrl = NotifyController::new(
+        notify_client.clone(),
+        source.path().to_path_buf(),
+        Duration::from_millis(50),
+        5000,
+    );
+
+    let staging_config = StagingConfig {
+        patterns: vec![StagingPattern::PrefixStar(
+            ".openclaw-install-stage-".to_string(),
+        )],
+        ..StagingConfig::default()
+    };
+    let matcher = Arc::new(StagingMatcher::new(staging_config));
+    let staging_ctrl = InstallerStagingController::new(matcher.clone(), notify_ctrl.clone());
+
+    let resolver = Arc::new(ActiveSkillResolver::new(source.path()));
+    resolver.set(
+        "apple/apple-notes",
+        ActiveTarget::Current {
+            source_dir: source.path().join("apple/apple-notes"),
+        },
+    );
+
+    let pending_ctrl = PendingInstallController::new(
+        notify_ctrl.clone(),
+        Duration::from_millis(200),
+        source.path().to_path_buf(),
+    );
+
+    let config = MountConfig {
+        notify_controller: Some(notify_ctrl.clone()),
+        staging_matcher: Some(matcher),
+        staging_controller: Some(staging_ctrl),
+        active_resolver: Some(resolver),
+        pending_install_controller: Some(pending_ctrl.clone()),
+        skill_layout: Some(SkillLayout::Hermes),
+        ..MountConfig::default()
+    };
+
+    let _handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        shared,
+        MountOptions::default(),
+        true,
+        config,
+    )
+    .unwrap();
+
+    std::thread::sleep(Duration::from_millis(300));
+
+    let mp = mountpoint.path();
+
+    std::fs::write(mp.join(".hub/new-file.json"), r#"{"test": true}"#).unwrap();
+    std::fs::write(mp.join(".bundled_manifest"), "updated-manifest").unwrap();
+
+    std::thread::sleep(Duration::from_millis(300));
+    pending_ctrl.flush_for_testing();
+    notify_ctrl.flush_for_testing();
+    assert!(
+        notify_client.is_empty(),
+        "management path writes must not trigger notify even with \
+         staging+pending controllers, got {} events",
+        notify_client.len()
+    );
+}
+
+// -----------------------------------------------------------------------
 // 9. Non-skill subdirectory under category is accessible
 // -----------------------------------------------------------------------
 

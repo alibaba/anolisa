@@ -2469,7 +2469,6 @@ fn post_publish_grace_direct_pending_complete_triggers_session() {
         .args(["-u", &mountpoint.path().to_string_lossy()])
         .output();
 }
-
 // ─────────────────────────────────────────────────────────────────────────────
 // I4: Post-publish grace fallback snapshot tests
 //
@@ -2757,4 +2756,594 @@ fn post_publish_grace_fallback_skill_md_not_opened_via_grace() {
         "SKILL.md must come from snapshot, not physical source: {}",
         content
     );
+}
+// ─────────────────────────────────────────────────────────────────────────────
+// H3: Hermes installer compatibility tests
+//
+// Tests for installer transactions under Hermes layout mode: staging dirs
+// inside categories, direct-write pending install with nested skill IDs,
+// post-publish grace for nested skills, and management path noise regression.
+// ─────────────────────────────────────────────────────────────────────────────
+
+use skillfs_fuse::SkillLayout;
+
+fn seed_hermes_workspace(dir: &Path) {
+    std::fs::create_dir_all(dir.join(".hub")).unwrap();
+    std::fs::write(dir.join(".hub/config.json"), r#"{"version": 1}"#).unwrap();
+    std::fs::write(dir.join(".bundled_manifest"), "manifest-content").unwrap();
+
+    let apple_notes = dir.join("apple/apple-notes");
+    std::fs::create_dir_all(&apple_notes).unwrap();
+    std::fs::write(
+        apple_notes.join("SKILL.md"),
+        "---\nname: apple-notes\ndescription: notes\n---\n",
+    )
+    .unwrap();
+}
+
+struct HermesStagingFixture {
+    #[allow(dead_code)]
+    source: tempfile::TempDir,
+    mountpoint: tempfile::TempDir,
+    handle: Option<MountHandle>,
+    notify_client: Arc<InMemoryNotifyClient>,
+    notify_controller: Arc<NotifyController>,
+    #[allow(dead_code)]
+    staging_controller: Arc<InstallerStagingController>,
+}
+
+impl HermesStagingFixture {
+    fn new(seed: impl FnOnce(&Path)) -> Self {
+        let source = tempfile::tempdir().unwrap();
+        seed(source.path());
+
+        let mut store = SkillStore::new();
+        store.load_from_directory(source.path(), &ParseConfig::default());
+        let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+        let mountpoint = tempfile::tempdir().unwrap();
+        let notify_client = Arc::new(InMemoryNotifyClient::new());
+
+        let notify_ctrl = NotifyController::new(
+            notify_client.clone(),
+            source.path().to_path_buf(),
+            Duration::from_millis(50),
+            5000,
+        );
+
+        let staging_config = StagingConfig {
+            patterns: vec![StagingPattern::PrefixStar(
+                ".openclaw-install-stage-".to_string(),
+            )],
+            ..StagingConfig::default()
+        };
+        let matcher = Arc::new(StagingMatcher::new(staging_config));
+        let staging_ctrl = InstallerStagingController::new(matcher.clone(), notify_ctrl.clone());
+
+        let config = MountConfig {
+            notify_controller: Some(notify_ctrl.clone()),
+            staging_matcher: Some(matcher),
+            staging_controller: Some(staging_ctrl.clone()),
+            skill_layout: Some(SkillLayout::Hermes),
+            ..MountConfig::default()
+        };
+
+        let handle = mount_background_configured(
+            mountpoint.path(),
+            source.path(),
+            shared,
+            MountOptions::default(),
+            true,
+            config,
+        )
+        .unwrap();
+
+        std::thread::sleep(Duration::from_millis(300));
+
+        Self {
+            source,
+            mountpoint,
+            handle: Some(handle),
+            notify_client,
+            notify_controller: notify_ctrl,
+            staging_controller: staging_ctrl,
+        }
+    }
+
+    fn mp(&self) -> &Path {
+        self.mountpoint.path()
+    }
+
+    fn wait_for_notify(&self, expected: usize) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            self.notify_controller.flush_for_testing();
+            if self.notify_client.len() >= expected {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "timed out waiting for {} notify events, got {}",
+                    expected,
+                    self.notify_client.len()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+impl Drop for HermesStagingFixture {
+    fn drop(&mut self) {
+        self.notify_controller.shutdown();
+        if let Some(handle) = self.handle.take() {
+            drop(handle);
+        }
+        let mp = self.mountpoint.path().to_path_buf();
+        std::thread::sleep(Duration::from_millis(150));
+        let _ = std::process::Command::new("fusermount3")
+            .args(["-u", &mp.to_string_lossy()])
+            .output();
+    }
+}
+
+#[test]
+fn hermes_staging_writes_no_notify() {
+    skip_if_no_fuse!();
+
+    let fix = HermesStagingFixture::new(|src| {
+        seed_hermes_workspace(src);
+    });
+
+    let staging = fix.mp().join("apple/.openclaw-install-stage-new");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::write(
+        staging.join("SKILL.md"),
+        "---\nname: new-skill\ndescription: test\n---\n",
+    )
+    .unwrap();
+    std::fs::write(staging.join("data.txt"), "payload").unwrap();
+
+    std::thread::sleep(Duration::from_millis(500));
+    fix.notify_controller.flush_for_testing();
+
+    let staging_events: Vec<_> = fix
+        .notify_client
+        .events()
+        .iter()
+        .filter(|e| e.skill_name.contains(".openclaw-install-stage-"))
+        .cloned()
+        .collect();
+    assert!(
+        staging_events.is_empty(),
+        "Hermes staging writes must not trigger any notify: {:?}",
+        staging_events
+    );
+}
+
+#[test]
+fn hermes_staging_rename_triggers_notify() {
+    skip_if_no_fuse!();
+
+    let fix = HermesStagingFixture::new(|src| {
+        seed_hermes_workspace(src);
+    });
+
+    let staging = fix.mp().join("apple/.openclaw-install-stage-beta");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::write(
+        staging.join("SKILL.md"),
+        "---\nname: beta\ndescription: installed\n---\n",
+    )
+    .unwrap();
+
+    let final_path = fix.mp().join("apple/beta");
+    std::fs::rename(&staging, &final_path).unwrap();
+
+    fix.wait_for_notify(1);
+
+    let events = fix.notify_client.events();
+    let rename_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.skill_name == "apple/beta" && e.event_kind == "rename")
+        .collect();
+    assert_eq!(
+        rename_events.len(),
+        1,
+        "expected one rename notify for apple/beta, got: {:?}",
+        events
+    );
+    assert!(
+        rename_events[0].skill_dir.ends_with("/apple/beta"),
+        "skillDir must end with /apple/beta, got: {}",
+        rename_events[0].skill_dir
+    );
+
+    let staging_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.skill_name.contains(".openclaw-install-stage-"))
+        .collect();
+    assert!(
+        staging_events.is_empty(),
+        "no staging name events must exist: {:?}",
+        staging_events
+    );
+}
+
+#[test]
+fn hermes_staging_hidden_from_category_listing() {
+    skip_if_no_fuse!();
+
+    let fix = HermesStagingFixture::new(|src| {
+        seed_hermes_workspace(src);
+        let staging = src.join("apple/.openclaw-install-stage-gamma");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("SKILL.md"), "---\nname: gamma\n---\n").unwrap();
+    });
+
+    let entries = common::list_dir_names(&fix.mp().join("apple"));
+    assert!(
+        entries.contains(&"apple-notes".to_string()),
+        "existing skill must be visible: {:?}",
+        entries
+    );
+    assert!(
+        !entries.contains(&".openclaw-install-stage-gamma".to_string()),
+        "staging root must NOT appear in category listing: {:?}",
+        entries
+    );
+}
+
+#[test]
+fn hermes_staging_exact_path_accessible() {
+    skip_if_no_fuse!();
+
+    let fix = HermesStagingFixture::new(|src| {
+        seed_hermes_workspace(src);
+        let staging = src.join("apple/.openclaw-install-stage-delta");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("data.txt"), "payload").unwrap();
+    });
+
+    let staging = fix.mp().join("apple/.openclaw-install-stage-delta");
+    let meta = std::fs::metadata(&staging);
+    assert!(
+        meta.is_ok(),
+        "staging root must be accessible via exact path"
+    );
+    assert!(meta.unwrap().is_dir());
+
+    let data = std::fs::read_to_string(staging.join("data.txt")).unwrap();
+    assert_eq!(data, "payload");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// H3: Hermes pending install tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct HermesPendingFixture {
+    #[allow(dead_code)]
+    source: tempfile::TempDir,
+    mountpoint: tempfile::TempDir,
+    handle: Option<MountHandle>,
+    notify_client: Arc<InMemoryNotifyClient>,
+    notify_controller: Arc<NotifyController>,
+    pending_controller: Arc<PendingInstallController>,
+    #[allow(dead_code)]
+    resolver: Arc<ActiveSkillResolver>,
+}
+
+impl HermesPendingFixture {
+    fn new(pending_timeout_ms: u64, seed: impl FnOnce(&Path)) -> Self {
+        let source = tempfile::tempdir().unwrap();
+        seed(source.path());
+
+        let mut store = SkillStore::new();
+        store.load_from_directory(source.path(), &ParseConfig::default());
+        let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+        let mountpoint = tempfile::tempdir().unwrap();
+        let notify_client = Arc::new(InMemoryNotifyClient::new());
+
+        let notify_ctrl = NotifyController::new(
+            notify_client.clone(),
+            source.path().to_path_buf(),
+            Duration::from_millis(50),
+            5000,
+        );
+
+        let resolver = Arc::new(ActiveSkillResolver::new(source.path()));
+        resolver.set(
+            "apple/apple-notes",
+            ActiveTarget::Current {
+                source_dir: source.path().join("apple/apple-notes"),
+            },
+        );
+
+        let pending_ctrl = PendingInstallController::new(
+            notify_ctrl.clone(),
+            Duration::from_millis(pending_timeout_ms),
+            source.path().to_path_buf(),
+        );
+
+        let config = MountConfig {
+            notify_controller: Some(notify_ctrl.clone()),
+            active_resolver: Some(resolver.clone()),
+            pending_install_controller: Some(pending_ctrl.clone()),
+            skill_layout: Some(SkillLayout::Hermes),
+            ..MountConfig::default()
+        };
+
+        let handle = mount_background_configured(
+            mountpoint.path(),
+            source.path(),
+            shared,
+            MountOptions::default(),
+            true,
+            config,
+        )
+        .unwrap();
+
+        std::thread::sleep(Duration::from_millis(300));
+
+        Self {
+            source,
+            mountpoint,
+            handle: Some(handle),
+            notify_client,
+            notify_controller: notify_ctrl,
+            pending_controller: pending_ctrl,
+            resolver,
+        }
+    }
+
+    fn mp(&self) -> &Path {
+        self.mountpoint.path()
+    }
+}
+
+impl Drop for HermesPendingFixture {
+    fn drop(&mut self) {
+        self.pending_controller.shutdown();
+        self.notify_controller.shutdown();
+        if let Some(handle) = self.handle.take() {
+            drop(handle);
+        }
+        let mp = self.mountpoint.path().to_path_buf();
+        std::thread::sleep(Duration::from_millis(150));
+        let _ = std::process::Command::new("fusermount3")
+            .args(["-u", &mp.to_string_lossy()])
+            .output();
+    }
+}
+
+#[test]
+fn hermes_pending_complete_notifies() {
+    skip_if_no_fuse!();
+
+    let fix = HermesPendingFixture::new(200, |src| {
+        seed_hermes_workspace(src);
+    });
+
+    let new_skill = fix.mp().join("apple/new-skill");
+    std::fs::create_dir(&new_skill).unwrap();
+    std::fs::write(
+        new_skill.join("SKILL.md"),
+        "---\nname: new-skill\ndescription: test\n---\n",
+    )
+    .unwrap();
+
+    std::thread::sleep(Duration::from_millis(400));
+    fix.pending_controller.flush_for_testing();
+    fix.notify_controller.flush_for_testing();
+
+    let events = fix.notify_client.events();
+    let new_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.skill_name == "apple/new-skill")
+        .collect();
+    assert_eq!(
+        new_events.len(),
+        1,
+        "complete Hermes pending install must trigger one notify: {:?}",
+        events
+    );
+}
+
+#[test]
+fn hermes_pending_incomplete_no_notify() {
+    skip_if_no_fuse!();
+
+    let fix = HermesPendingFixture::new(150, |src| {
+        seed_hermes_workspace(src);
+    });
+
+    let new_skill = fix.mp().join("apple/incomplete");
+    std::fs::create_dir(&new_skill).unwrap();
+    std::fs::write(new_skill.join("data.txt"), "no SKILL.md").unwrap();
+
+    std::thread::sleep(Duration::from_millis(300));
+    fix.pending_controller.flush_for_testing();
+    fix.notify_controller.flush_for_testing();
+
+    let events = fix.notify_client.events();
+    let inc_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.skill_name == "apple/incomplete")
+        .collect();
+    assert!(
+        inc_events.is_empty(),
+        "incomplete Hermes pending install must not notify: {:?}",
+        inc_events
+    );
+}
+
+#[test]
+fn hermes_pending_hidden_from_category_listing() {
+    skip_if_no_fuse!();
+
+    let fix = HermesPendingFixture::new(5000, |src| {
+        seed_hermes_workspace(src);
+    });
+
+    let new_skill = fix.mp().join("apple/pending-hidden");
+    std::fs::create_dir(&new_skill).unwrap();
+
+    let entries = common::list_dir_names(&fix.mp().join("apple"));
+    assert!(
+        entries.contains(&"apple-notes".to_string()),
+        "existing skill must be visible: {:?}",
+        entries
+    );
+    assert!(
+        !entries.contains(&"pending-hidden".to_string()),
+        "pending skill must NOT appear in category listing: {:?}",
+        entries
+    );
+}
+
+#[test]
+fn hermes_pending_exact_path_accessible() {
+    skip_if_no_fuse!();
+
+    let fix = HermesPendingFixture::new(5000, |src| {
+        seed_hermes_workspace(src);
+    });
+
+    let new_skill = fix.mp().join("apple/pending-access");
+    std::fs::create_dir(&new_skill).unwrap();
+
+    let meta = std::fs::metadata(&new_skill);
+    assert!(
+        meta.is_ok(),
+        "pending nested skill must be accessible via exact path"
+    );
+    assert!(meta.unwrap().is_dir());
+
+    std::fs::write(new_skill.join("data.txt"), "test").unwrap();
+    let content = std::fs::read_to_string(new_skill.join("data.txt")).unwrap();
+    assert_eq!(content, "test");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// H3: Hermes post-publish grace tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn hermes_post_publish_grace_allows_whitelisted() {
+    skip_if_no_fuse!();
+
+    use skillfs_fuse::security::PostPublishWritePattern;
+
+    let source = tempfile::tempdir().unwrap();
+    seed_hermes_workspace(source.path());
+
+    let mut store = SkillStore::new();
+    store.load_from_directory(source.path(), &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+    let mountpoint = tempfile::tempdir().unwrap();
+    let notify_client = Arc::new(InMemoryNotifyClient::new());
+
+    let notify_ctrl = NotifyController::new(
+        notify_client.clone(),
+        source.path().to_path_buf(),
+        Duration::from_millis(50),
+        5000,
+    );
+
+    let staging_config = StagingConfig {
+        patterns: vec![StagingPattern::PrefixStar(
+            ".openclaw-install-stage-".to_string(),
+        )],
+        ..StagingConfig::default()
+    };
+    let matcher = Arc::new(StagingMatcher::new(staging_config));
+    let staging_ctrl = InstallerStagingController::new(matcher.clone(), notify_ctrl.clone());
+
+    let resolver = Arc::new(ActiveSkillResolver::new(source.path()));
+    resolver.set(
+        "apple/apple-notes",
+        ActiveTarget::Current {
+            source_dir: source.path().join("apple/apple-notes"),
+        },
+    );
+
+    let pp_patterns = vec![PostPublishWritePattern::PrefixRecursive(
+        ".openclaw".to_string(),
+    )];
+    let pp_ctrl = PostPublishGraceController::new(Duration::from_millis(5000), pp_patterns);
+
+    let config = MountConfig {
+        notify_controller: Some(notify_ctrl.clone()),
+        staging_matcher: Some(matcher),
+        staging_controller: Some(staging_ctrl),
+        active_resolver: Some(resolver),
+        post_publish_controller: Some(pp_ctrl.clone()),
+        skill_layout: Some(SkillLayout::Hermes),
+        ..MountConfig::default()
+    };
+
+    let handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        shared,
+        MountOptions::default(),
+        true,
+        config,
+    )
+    .unwrap();
+
+    std::thread::sleep(Duration::from_millis(300));
+
+    let mp = mountpoint.path();
+
+    let staging = mp.join("apple/.openclaw-install-stage-grace");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::write(
+        staging.join("SKILL.md"),
+        "---\nname: grace-test\ndescription: test\n---\n",
+    )
+    .unwrap();
+    let final_path = mp.join("apple/grace-test");
+    std::fs::rename(&staging, &final_path).unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        notify_ctrl.flush_for_testing();
+        if !notify_client.is_empty() {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "timed out waiting for rename notify, events: {:?}",
+                notify_client.events()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // Grace: whitelisted .openclaw/** write must succeed.
+    std::fs::create_dir(final_path.join(".openclaw")).unwrap();
+    let result = std::fs::write(final_path.join(".openclaw/metadata.tmp"), "installer-data");
+    assert!(
+        result.is_ok(),
+        "whitelisted .openclaw/** write must succeed during grace: {:?}",
+        result.err()
+    );
+
+    // Non-whitelisted write must fail.
+    let result = std::fs::create_dir(final_path.join("other-dir"));
+    assert!(
+        result.is_err(),
+        "non-whitelisted path must be rejected during grace"
+    );
+
+    pp_ctrl.shutdown();
+    notify_ctrl.shutdown();
+    drop(handle);
+    std::thread::sleep(Duration::from_millis(150));
+    let _ = std::process::Command::new("fusermount3")
+        .args(["-u", &mountpoint.path().to_string_lossy()])
+        .output();
 }
