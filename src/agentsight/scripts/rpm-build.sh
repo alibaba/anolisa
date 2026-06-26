@@ -17,7 +17,8 @@
 #   1. Build frontend (npm install && npm run build:embed)
 #   2. Build Rust binary (cargo build --release)
 #   3. Create a tarball: agentsight-<version>.tar.gz
-#   4. The tarball contains: agentsight, agentsight-start, agentsight.service, README.md, README_CN.md, LICENSE
+#   4. The tarball contains: agentsight, agentsight-start, agentsight.service,
+#      component.toml, README.md, README_CN.md, LICENSE
 # =============================================================================
 
 set -e
@@ -52,7 +53,8 @@ The script will:
     1. Build frontend (npm install && npm run build:embed)
     2. Build Rust binary (cargo build --release)
     3. Create a tarball: agentsight-<version>.tar.gz
-    4. The tarball contains: agentsight, agentsight-start, agentsight.service, README.md, README_CN.md, LICENSE
+    4. The tarball contains: agentsight, agentsight-start, agentsight.service,
+       component.toml, README.md, README_CN.md, LICENSE
 
 Example:
     $(basename "$0")                    # Build with default version
@@ -142,6 +144,7 @@ mkdir -p "$TARBALL_DIR"
 cp "target/release/agentsight" "$TARBALL_DIR/"
 cp "$PROJECT_ROOT/scripts/agentsight-start.sh" "$TARBALL_DIR/agentsight-start"
 cp "$PROJECT_ROOT/scripts/agentsight.service" "$TARBALL_DIR/"
+cp "$PROJECT_ROOT/component.toml" "$TARBALL_DIR/"
 cp "$PROJECT_ROOT/README.md" "$TARBALL_DIR/"
 cp "$PROJECT_ROOT/README_CN.md" "$TARBALL_DIR/"
 cp "$PROJECT_ROOT/LICENSE" "$TARBALL_DIR/"

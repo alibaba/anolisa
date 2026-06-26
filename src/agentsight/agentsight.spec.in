@@ -17,6 +17,7 @@ BuildRequires:  perl-core
 # Runtime dependencies
 # Requires for eBPF components
 Requires:       elfutils-libelf
+Provides:       anolisa-component(agentsight)
 
 %description
 AgentSight is an eBPF-based AI Agent observability tool that provides zero-intrusion 
@@ -34,10 +35,12 @@ rm -rf $RPM_BUILD_ROOT
 install -d -m 0755 %{buildroot}/usr/local/bin
 install -d -m 0755 %{buildroot}%{_unitdir}
 install -d -m 0755 %{buildroot}%{_docdir}/agentsight
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/components/agentsight
 
 install -p -m 0755 agentsight %{buildroot}/usr/local/bin/
 install -p -m 0755 agentsight-start %{buildroot}/usr/local/bin/
 install -p -m 0644 agentsight.service %{buildroot}%{_unitdir}/
+install -p -m 0644 component.toml %{buildroot}%{_datadir}/anolisa/components/agentsight/component.toml
 install -p -m 0644 README.md %{buildroot}%{_docdir}/agentsight/
 install -p -m 0644 README_CN.md %{buildroot}%{_docdir}/agentsight/
 install -p -m 0644 LICENSE %{buildroot}%{_docdir}/agentsight/
@@ -56,6 +59,7 @@ install -p -m 0644 LICENSE %{buildroot}%{_docdir}/agentsight/
 %attr(0755,root,root) /usr/local/bin/agentsight
 %attr(0755,root,root) /usr/local/bin/agentsight-start
 %{_unitdir}/agentsight.service
+%{_datadir}/anolisa/components/agentsight/component.toml
 %doc %{_docdir}/agentsight/README.md
 %doc %{_docdir}/agentsight/README_CN.md
 %license %{_docdir}/agentsight/LICENSE
