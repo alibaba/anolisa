@@ -57,6 +57,23 @@ pub enum MessageContentBlock {
     },
 }
 
+impl MessageContent {
+    /// Extract the full text content, joining blocks if necessary.
+    pub fn as_text(&self) -> String {
+        match self {
+            MessageContent::Text(s) => s.clone(),
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .filter_map(|b| match b {
+                    MessageContentBlock::Text { text } => Some(text.as_str()),
+                    MessageContentBlock::ToolResult { content, .. } => Some(content.as_str()),
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    }
+}
+
 impl Message {
     pub fn user(content: &str) -> Self {
         Self {

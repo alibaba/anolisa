@@ -159,6 +159,10 @@ impl CoshCore {
         W: Write,
         R: AsyncBufReadExt + Unpin,
     {
+        // Generate a unique run_id for this agent run.
+        let run_id = uuid::Uuid::new_v4().to_string();
+        self.hook_system.set_run_id(run_id);
+
         // ─── Hook: UserPromptSubmit ───
         let cwd_str = self.cwd().to_string_lossy().to_string();
         let prompt_result = self
@@ -280,7 +284,7 @@ impl CoshCore {
             // ─── Hook: BeforeModel ───
             let before_model_result = self
                 .hook_system
-                .fire_before_model(&self.session_id, &cwd_str, self.messages.len())
+                .fire_before_model(&self.session_id, &cwd_str, &self.model, &self.messages)
                 .await;
             self.emit_hook_notifications(writer, &before_model_result.notifications, None);
 
@@ -306,6 +310,7 @@ impl CoshCore {
 
             let mut text_buf = String::new();
             let mut tool_calls: Vec<PendingToolCall> = Vec::new();
+            let mut usage_info: Option<(u32, u32, u32)> = None;
             let mut block_index: u32 = 0;
             let mut text_block_started = false;
             let mut thinking_block_started = false;
@@ -398,7 +403,9 @@ impl CoshCore {
                             block_index = block_index.max(bi + 1);
                         }
                     }
-                    GenerateEvent::Usage { .. } => {}
+                    GenerateEvent::Usage { prompt_tokens, completion_tokens, total_tokens } => {
+                        usage_info = Some((prompt_tokens, completion_tokens, total_tokens));
+                    }
                     GenerateEvent::MessageEnd => break,
                     GenerateEvent::Error(e) => return Err(e),
                 }
@@ -408,7 +415,10 @@ impl CoshCore {
             // ─── Hook: AfterModel ───
             let after_model_result = self
                 .hook_system
-                .fire_after_model(&self.session_id, &cwd_str, !tool_calls.is_empty(), &text_buf)
+                .fire_after_model(
+                    &self.session_id, &cwd_str, !tool_calls.is_empty(), &text_buf,
+                    &self.model, &self.messages, usage_info,
+                )
                 .await;
             self.emit_hook_notifications(writer, &after_model_result.notifications, None);
 
@@ -608,10 +618,12 @@ impl CoshCore {
 
                 let params_for_post_hook = params.clone();
 
+                let mut tool_result_already_emitted = false;
                 let result = match outcome {
                     Outcome::Allow => {
                         let result = self.execute_tool(&tc.name, params, &ctx).await;
                         self.emit_provider_native_tool_result(writer, &tc.id, &result);
+                        tool_result_already_emitted = true;
                         result
                     }
                     Outcome::RequireApproval => {
@@ -641,6 +653,7 @@ impl CoshCore {
                             ApprovalResult::Allowed => {
                                 let result = self.execute_tool(&tc.name, params, &ctx).await;
                                 self.emit_provider_native_tool_result(writer, &tc.id, &result);
+                                tool_result_already_emitted = true;
                                 result
                             }
                             ApprovalResult::HostExecutedShell { llm_content, exit_code } => {
@@ -690,14 +703,13 @@ impl CoshCore {
 
                 // ─── Hook: PostToolUseFailure ───
                 if result.is_error {
-                    // Emit tool_result BEFORE running PostToolUseFailure hooks.
-                    // This is critical for the Control Protocol path: when a command
-                    // fails in cosh-shell's foreground PTY (e.g., sandbox bwrap error),
-                    // cosh-shell delivers HostExecutedShell and starts a stall timer.
-                    // If cosh-core doesn't produce output quickly, cosh-shell triggers
-                    // "Agent recovery" which races against our PostToolUseFailure hooks.
-                    // Emitting tool_result here signals progress to cosh-shell.
-                    self.emit_provider_native_tool_result(writer, &tc.id, &result);
+                    // Emit tool_result BEFORE running PostToolUseFailure hooks, but only
+                    // if it hasn't been emitted yet. The Allowed path already emits
+                    // in-line; HostExecutedShell needs this early emit to prevent
+                    // cosh-shell stall timeout from racing against hook execution.
+                    if !tool_result_already_emitted {
+                        self.emit_provider_native_tool_result(writer, &tc.id, &result);
+                    }
                     let failure_hook = self
                         .hook_system
                         .fire_post_tool_use_failure(
@@ -743,8 +755,11 @@ impl CoshCore {
                                 self.hook_system.set_hook_disabled("sandbox-guard", true);
                                 let retry_params = serde_json::json!({"command": &bypass.original_command});
                                 let retry = self.execute_tool(&tc.name, retry_params, &ctx).await;
-                                self.emit_provider_native_tool_result(writer, &tc.id, &retry);
+                                // Re-enable immediately after execute, before any other
+                                // operation. execute_tool returns ToolResult (infallible),
+                                // so this line is always reached.
                                 self.hook_system.set_hook_disabled("sandbox-guard", false);
+                                self.emit_provider_native_tool_result(writer, &tc.id, &retry);
                                 result = retry;
                             }
                             ApprovalResult::HostExecutedShell { llm_content, exit_code } => {

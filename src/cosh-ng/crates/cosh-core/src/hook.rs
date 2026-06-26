@@ -41,6 +41,8 @@ impl HookEventName {
 #[derive(Debug, Clone, Serialize)]
 pub struct HookInput {
     pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
     pub cwd: String,
     pub hook_event_name: String,
     pub timestamp: String,
@@ -144,6 +146,8 @@ pub struct HookSystem {
     enabled: bool,
     disabled: HashSet<String>,
     hooks: HashMap<HookEventName, Vec<HookDefinition>>,
+    /// Current run_id, set at the start of each agent run.
+    run_id: Option<String>,
 }
 
 impl HookSystem {
@@ -178,7 +182,7 @@ impl HookSystem {
         hooks.insert(HookEventName::BeforeModel, filter_named(&config.before_model));
         hooks.insert(HookEventName::AfterModel, filter_named(&config.after_model));
 
-        Self { enabled, disabled, hooks }
+        Self { enabled, disabled, hooks, run_id: None }
     }
 
     pub fn new_disabled() -> Self {
@@ -186,7 +190,13 @@ impl HookSystem {
             enabled: false,
             disabled: HashSet::new(),
             hooks: HashMap::new(),
+            run_id: None,
         }
+    }
+
+    /// Set the current run_id for this agent run (used in hook inputs).
+    pub(crate) fn set_run_id(&mut self, run_id: String) {
+        self.run_id = Some(run_id);
     }
 
     /// Dynamically append hook definitions from extensions.
@@ -571,7 +581,8 @@ impl HookSystem {
     }
 
     /// Temporarily disable/enable a hook by name (used for sandbox bypass).
-    pub fn set_hook_disabled(&mut self, hook_name: &str, disabled: bool) {
+    /// Not persisted to states/hooks.json — only affects the current session.
+    pub(crate) fn set_hook_disabled(&mut self, hook_name: &str, disabled: bool) {
         if disabled {
             self.disabled.insert(hook_name.to_string());
         } else {
@@ -583,7 +594,8 @@ impl HookSystem {
         &self,
         session_id: &str,
         cwd: &str,
-        messages_count: usize,
+        model: &str,
+        messages: &[crate::provider::Message],
     ) -> BeforeModelResult {
         if !self.enabled {
             return BeforeModelResult { notifications: vec![] };
@@ -594,8 +606,20 @@ impl HookSystem {
             return BeforeModelResult { notifications: vec![] };
         }
 
+        // 对齐 copilot-shell hookTranslator.toHookLLMRequest 格式：
+        // llm_request 包含 model 和 messages 数组。
+        let hook_messages: Vec<serde_json::Value> = messages.iter().map(|m| {
+            serde_json::json!({
+                "role": &m.role,
+                "content": m.content.as_text(),
+            })
+        }).collect();
+
         let event_data = serde_json::json!({
-            "messages_count": messages_count,
+            "llm_request": {
+                "model": model,
+                "messages": hook_messages,
+            },
         });
         let input = self.build_input(session_id, cwd, HookEventName::BeforeModel, event_data);
         let outputs = self.run_hooks(&defs, &input).await;
@@ -614,6 +638,9 @@ impl HookSystem {
         cwd: &str,
         has_tool_calls: bool,
         response_text: &str,
+        model: &str,
+        messages: &[crate::provider::Message],
+        usage: Option<(u32, u32, u32)>,
     ) -> AfterModelResult {
         if !self.enabled {
             return AfterModelResult { notifications: vec![] };
@@ -624,21 +651,41 @@ impl HookSystem {
             return AfterModelResult { notifications: vec![] };
         }
 
-        // 对齐 copilot-shell hookTranslator.toHookLLMResponse 格式：
-        // hook 脚本（如 pii_checker）通过 llm_response.text 或
-        // llm_response.candidates[].content.parts 读取模型响应。
+        // 对齐 copilot-shell hookTranslator 格式：
+        // llm_request: {model, messages}
+        // llm_response: {text, candidates, usageMetadata}
+        let hook_messages: Vec<serde_json::Value> = messages.iter().map(|m| {
+            serde_json::json!({
+                "role": &m.role,
+                "content": m.content.as_text(),
+            })
+        }).collect();
+
+        let mut llm_response = serde_json::json!({
+            "text": response_text,
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [response_text],
+                },
+                "finishReason": "STOP",
+            }],
+        });
+        if let Some((prompt_tokens, completion_tokens, total_tokens)) = usage {
+            llm_response["usageMetadata"] = serde_json::json!({
+                "promptTokenCount": prompt_tokens,
+                "candidatesTokenCount": completion_tokens,
+                "totalTokenCount": total_tokens,
+            });
+        }
+
         let event_data = serde_json::json!({
             "has_tool_calls": has_tool_calls,
-            "llm_response": {
-                "text": response_text,
-                "candidates": [{
-                    "content": {
-                        "role": "model",
-                        "parts": [response_text],
-                    },
-                    "finishReason": "STOP",
-                }],
+            "llm_request": {
+                "model": model,
+                "messages": hook_messages,
             },
+            "llm_response": llm_response,
         });
         let input = self.build_input(session_id, cwd, HookEventName::AfterModel, event_data);
         let outputs = self.run_hooks(&defs, &input).await;
@@ -662,6 +709,7 @@ impl HookSystem {
     ) -> HookInput {
         HookInput {
             session_id: session_id.to_string(),
+            run_id: self.run_id.clone(),
             cwd: cwd.to_string(),
             hook_event_name: event.as_str().to_string(),
             timestamp: chrono::Utc::now().to_rfc3339(),
