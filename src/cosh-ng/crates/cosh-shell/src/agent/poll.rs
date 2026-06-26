@@ -88,17 +88,18 @@ fn poll_active_agent_run_with_policy<W: Write>(
             || provider_native_shell_tool_call_pending
             || provider_native_shell_transcript_pending
             || (provider_native_shell_result_pending && !provider_native_shell_result_idle);
+        let active_run_idle_for_stall = state
+            .agent_run
+            .active
+            .as_ref()
+            .is_some_and(active_run_has_stalled_shell_evidence_delivery);
         let stalled_provider_shell_fallback =
             should_start_stalled_provider_shell_fallback(StalledProviderShellFallbackInputs {
                 provider_shell_activity_pending,
                 pending_interaction: pending_interaction_before_poll,
                 queued_before_held_text,
                 unrendered_interaction: unrendered_interaction_pending,
-                active_run_idle: state
-                    .agent_run
-                    .active
-                    .as_ref()
-                    .is_some_and(active_run_has_stalled_shell_evidence_delivery),
+                active_run_idle: active_run_idle_for_stall,
             })
             .then(|| stalled_provider_shell_handoff_continuation_request(state))
             .flatten();
