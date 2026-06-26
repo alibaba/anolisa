@@ -34,7 +34,7 @@ pub(crate) fn poll_active_agent_run_deferred<W: Write>(
         active_run.status_animation.clear(output)?;
         output.flush()?;
     }
-    poll_active_agent_run_with_policy(state, output, adapter, true, false, false, true)
+    poll_active_agent_run_with_policy(state, output, adapter, true, true, false, true)
 }
 
 fn poll_active_agent_run_with_policy<W: Write>(
@@ -176,6 +176,13 @@ fn poll_active_agent_run_with_policy<W: Write>(
             action,
         } = &event
         {
+            crate::agent::heartbeat::render_agent_shell_evidence_pending_status(
+                active_run, output,
+            )?;
+            output.flush()?;
+            let duplicate_provider_request = state
+                .shell_evidence
+                .record_action_signature(run_id, shell_evidence_action_signature(action));
             let result = match action {
                 crate::adapter::ShellEvidenceAction::ListCommands { limit, cursor } => {
                     crate::runtime::shell_evidence::list_shell_evidence_commands(
@@ -190,14 +197,22 @@ fn poll_active_agent_run_with_policy<W: Write>(
                     lines,
                     bypass_recent_filter,
                 } => {
-                    if !*bypass_recent_filter
-                        && state.shell_evidence.read_output_recently_delivered(
+                    let excerpt_recently_delivered =
+                        state.shell_evidence.read_output_excerpt_recently_delivered(
                             output_id,
                             Some(run_id.as_str()),
                             direction.as_str(),
                             *lines,
-                        )
-                    {
+                        );
+                    let recently_delivered = excerpt_recently_delivered
+                        || (!*bypass_recent_filter
+                            && state.shell_evidence.read_output_recently_delivered(
+                                output_id,
+                                Some(run_id.as_str()),
+                                direction.as_str(),
+                                *lines,
+                            ));
+                    if recently_delivered {
                         crate::runtime::shell_evidence::shell_evidence_read_unavailable_guard(
                             &state.session_blocks,
                             state.approval_mode,
@@ -252,6 +267,11 @@ fn poll_active_agent_run_with_policy<W: Write>(
                 ..
             } = action
             {
+                let command =
+                    crate::runtime::shell_evidence::command_preview_for_terminal_output_id(
+                        &state.session_blocks,
+                        output_id,
+                    );
                 if result.metadata.excerpt_status == "available" && !result.metadata.is_error {
                     state.shell_evidence.record_shell_evidence_read_output(
                         output_id.clone(),
@@ -263,6 +283,7 @@ fn poll_active_agent_run_with_policy<W: Write>(
                 crate::activity::runtime::record_shell_evidence_action(
                     state.language,
                     &mut state.activity.rows,
+                    &mut state.activity.tool_invocations,
                     run_id,
                     request_id,
                     tool_use_id,
@@ -272,11 +293,16 @@ fn poll_active_agent_run_with_policy<W: Write>(
                     Some(*lines),
                     &status,
                     result.metadata.reason.as_deref(),
+                    command.as_deref(),
+                    None,
+                    false,
+                    duplicate_provider_request,
                 );
             } else {
                 crate::activity::runtime::record_shell_evidence_action(
                     state.language,
                     &mut state.activity.rows,
+                    &mut state.activity.tool_invocations,
                     run_id,
                     request_id,
                     tool_use_id,
@@ -286,6 +312,10 @@ fn poll_active_agent_run_with_policy<W: Write>(
                     None,
                     &status,
                     result.metadata.reason.as_deref(),
+                    None,
+                    result.metadata.command_count,
+                    result.metadata.next_cursor.is_some(),
+                    duplicate_provider_request,
                 );
             }
             let _ = active_run.handle.respond_approval(ApprovalResponse {
@@ -302,6 +332,15 @@ fn poll_active_agent_run_with_policy<W: Write>(
             AgentEvent::AgentCompleted { .. }
                 | AgentEvent::AgentFailed { .. }
                 | AgentEvent::AgentCancelled { .. }
+        );
+        let structured_result_boundary = matches!(
+            event,
+            AgentEvent::ToolCompleted { .. }
+                | AgentEvent::ShellEvidenceRequest { .. }
+                | AgentEvent::UserQuestion { .. }
+                | AgentEvent::AuthRequired { .. }
+                | AgentEvent::Action { .. }
+                | AgentEvent::ToolPermissionRequest { .. }
         );
         let deny_reentrant_shell_request = deny_shell_during_recovery;
         deny_reentrant_shell_request_after_foreground_evidence(
@@ -331,6 +370,9 @@ fn poll_active_agent_run_with_policy<W: Write>(
             should_finish = finish_completed;
             break;
         }
+        if structured_result_boundary {
+            break;
+        }
     }
 
     if let Some((fallback, selectable_after_event_index)) = first_text_fallback {
@@ -352,6 +394,17 @@ fn poll_active_agent_run_with_policy<W: Write>(
     if render_structured {
         render_new_agent_structured_events(state, output, adapter)?;
         output.flush()?;
+        if !suppress_heartbeat
+            && !state_has_pending_interaction(state)
+            && !state.control.shell_handoff().has_active_handoff()
+        {
+            if let Some(active_run) = state.agent_run.active.as_mut() {
+                if !active_run.completed {
+                    render_agent_heartbeat(active_run, output, false)?;
+                    output.flush()?;
+                }
+            }
+        }
     }
 
     if should_finish {
@@ -359,6 +412,26 @@ fn poll_active_agent_run_with_policy<W: Write>(
     }
 
     Ok(())
+}
+
+fn shell_evidence_action_signature(action: &crate::adapter::ShellEvidenceAction) -> String {
+    match action {
+        crate::adapter::ShellEvidenceAction::ListCommands { limit, cursor } => {
+            format!(
+                "list_commands:limit={limit}:cursor={}",
+                cursor.as_deref().unwrap_or("<none>")
+            )
+        }
+        crate::adapter::ShellEvidenceAction::ReadOutput {
+            output_id,
+            direction,
+            lines,
+            ..
+        } => format!(
+            "read_output:output_id={output_id}:direction={}:lines={lines}",
+            direction.as_str()
+        ),
+    }
 }
 
 fn active_run_has_stalled_shell_evidence_delivery(active_run: &ActiveAgentRun) -> bool {
@@ -592,6 +665,7 @@ mod tests {
             current_message: String::new(),
             has_visible_text_delta: false,
             completed: false,
+            host_completed_tool_ids: Vec::new(),
             pending_hook_notifications: Vec::new(),
         }
     }
@@ -680,6 +754,48 @@ mod tests {
                 status: "success".to_string(),
             }
         ));
+    }
+
+    #[test]
+    fn shell_evidence_duplicate_signature_distinguishes_list_command_pages() {
+        let first =
+            shell_evidence_action_signature(&crate::adapter::ShellEvidenceAction::ListCommands {
+                limit: 20,
+                cursor: None,
+            });
+        let same_first =
+            shell_evidence_action_signature(&crate::adapter::ShellEvidenceAction::ListCommands {
+                limit: 20,
+                cursor: None,
+            });
+        let second_page =
+            shell_evidence_action_signature(&crate::adapter::ShellEvidenceAction::ListCommands {
+                limit: 20,
+                cursor: Some("cursor-2".to_string()),
+            });
+
+        assert_eq!(first, same_first);
+        assert_ne!(first, second_page);
+    }
+
+    #[test]
+    fn shell_evidence_duplicate_signature_ignores_read_output_bypass() {
+        let normal =
+            shell_evidence_action_signature(&crate::adapter::ShellEvidenceAction::ReadOutput {
+                output_id: "terminal-output://session-1/cmd-1".to_string(),
+                direction: crate::adapter::ShellOutputDirection::Tail,
+                lines: 120,
+                bypass_recent_filter: false,
+            });
+        let bypass =
+            shell_evidence_action_signature(&crate::adapter::ShellEvidenceAction::ReadOutput {
+                output_id: "terminal-output://session-1/cmd-1".to_string(),
+                direction: crate::adapter::ShellOutputDirection::Tail,
+                lines: 120,
+                bypass_recent_filter: true,
+            });
+
+        assert_eq!(normal, bypass);
     }
 
     #[test]

@@ -34,6 +34,7 @@ fn raw_cli_approve_slash_is_not_recommendation_or_governance_alias() {
     let output = run_raw_cli_with_input(
         "fake",
         "ls /path/that/does/not/exist\n\
+         /explain last error\n\
          /approve 2\n\
          /deny 2\n\
          echo after-approve-slash\n\

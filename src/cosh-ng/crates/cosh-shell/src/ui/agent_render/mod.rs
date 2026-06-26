@@ -32,7 +32,10 @@ pub use actions::{
     hook_approval_action_max_index, ApprovalActionDescriptor, ApprovalPanelAction,
     APPROVAL_PANEL_ACTIONS,
 };
-pub use activity::{ActivityDetailsPanelModel, ActivityPanelModel, ActivityRowModel};
+pub use activity::{
+    ActivityDetailsPanelModel, ActivityPanelModel, ActivityRowModel, ActivityToolRowModel,
+    ToolInvocationCardModel, ToolInvocationDensity, ToolInvocationTone,
+};
 pub(crate) use approval::hook_warning_icon;
 pub use approval::{ApprovalPanelModel, HookWarningView};
 pub use approval_details::{ApprovalDetailsPanelModel, CommandAssessmentSummaryModel};

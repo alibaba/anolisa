@@ -7,6 +7,7 @@ pub(crate) mod finish;
 pub(crate) mod governance;
 pub(crate) mod heartbeat;
 pub(crate) mod intercept;
+mod pending_tools;
 pub(crate) mod poll;
 pub(super) mod run;
 

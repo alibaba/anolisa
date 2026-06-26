@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
@@ -580,9 +581,168 @@ fn pending_control_tool_call_drops_matching_shell_snapshot() {
         })
         .is_empty());
 
-    assert!(pending.take_matching_control_shell("toolu-1"));
+    assert!(pending.take_matching_control_shell("run-1", "toolu-1"));
 
     assert!(pending.flush().is_empty());
+}
+
+#[test]
+fn pending_control_tool_call_drops_matching_shell_evidence_snapshot_and_result() {
+    let mut pending = PendingControlProtocolToolCall::default();
+
+    assert!(pending
+        .stage_or_emit(AgentEvent::ToolCall {
+            run_id: "run-1".to_string(),
+            tool_id: Some("toolu-evidence".to_string()),
+            name: "cosh_shell_evidence".to_string(),
+            input: r#"{"action":"read_output"}"#.to_string(),
+        })
+        .is_empty());
+
+    assert!(pending.take_matching_control_tool_call("run-1", "toolu-evidence"));
+    assert!(pending
+        .stage_or_emit(AgentEvent::ToolOutputDelta {
+            run_id: "run-1".to_string(),
+            tool_id: "toolu-evidence".to_string(),
+            stream: "stdout".to_string(),
+            text: "ShellEvidenceExcerpt".to_string(),
+        })
+        .is_empty());
+    assert!(pending
+        .stage_or_emit(AgentEvent::ToolCompleted {
+            run_id: "run-1".to_string(),
+            tool_id: "toolu-evidence".to_string(),
+            status: "success".to_string(),
+        })
+        .is_empty());
+
+    assert!(pending.flush().is_empty());
+}
+
+#[test]
+fn pending_control_tool_call_drops_shell_evidence_result_after_late_control_request() {
+    let mut pending = PendingControlProtocolToolCall::default();
+
+    assert!(pending
+        .stage_or_emit(AgentEvent::ToolCall {
+            run_id: "run-1".to_string(),
+            tool_id: Some("toolu-evidence".to_string()),
+            name: "cosh_shell_evidence".to_string(),
+            input: r#"{"action":"read_output"}"#.to_string(),
+        })
+        .is_empty());
+
+    let released = pending.flush_stalled(Duration::from_millis(0));
+    assert!(matches!(
+        &released[..],
+        [AgentEvent::ToolCall {
+            tool_id: Some(tool_id),
+            ..
+        }] if tool_id == "toolu-evidence"
+    ));
+
+    assert!(!pending.take_matching_control_tool_call("run-1", "toolu-evidence"));
+    assert!(pending
+        .stage_or_emit(AgentEvent::ToolOutputDelta {
+            run_id: "run-1".to_string(),
+            tool_id: "toolu-evidence".to_string(),
+            stream: "stdout".to_string(),
+            text: "ShellEvidenceExcerpt".to_string(),
+        })
+        .is_empty());
+    assert!(pending
+        .stage_or_emit(AgentEvent::ToolCompleted {
+            run_id: "run-1".to_string(),
+            tool_id: "toolu-evidence".to_string(),
+            status: "success".to_string(),
+        })
+        .is_empty());
+}
+
+#[test]
+fn pending_control_tool_call_consumed_tool_id_is_run_scoped() {
+    let mut pending = PendingControlProtocolToolCall::default();
+
+    assert!(!pending.take_matching_control_tool_call("run-1", "toolu-evidence"));
+
+    let events = pending.stage_or_emit(AgentEvent::ToolCompleted {
+        run_id: "run-2".to_string(),
+        tool_id: "toolu-evidence".to_string(),
+        status: "success".to_string(),
+    });
+
+    assert!(matches!(
+        &events[..],
+        [AgentEvent::ToolCompleted { run_id, tool_id, .. }]
+            if run_id == "run-2" && tool_id == "toolu-evidence"
+    ));
+}
+
+#[test]
+fn pending_control_tool_call_consumed_tool_id_expires() {
+    let mut pending = PendingControlProtocolToolCall::default();
+
+    assert!(!pending.take_matching_control_tool_call("run-1", "toolu-evidence"));
+    assert!(pending
+        .stage_or_emit(AgentEvent::ToolCompleted {
+            run_id: "run-1".to_string(),
+            tool_id: "toolu-evidence".to_string(),
+            status: "success".to_string(),
+        })
+        .is_empty());
+
+    pending.expire_consumed_control_tool_ids_for_test();
+    let events = pending.stage_or_emit(AgentEvent::ToolCompleted {
+        run_id: "run-1".to_string(),
+        tool_id: "toolu-evidence".to_string(),
+        status: "success".to_string(),
+    });
+
+    assert!(matches!(
+        &events[..],
+        [AgentEvent::ToolCompleted { run_id, tool_id, .. }]
+            if run_id == "run-1" && tool_id == "toolu-evidence"
+    ));
+}
+
+#[test]
+fn pending_control_tool_call_consumed_tool_id_releases_after_suppressed_completion() {
+    let mut pending = PendingControlProtocolToolCall::default();
+
+    assert!(!pending.take_matching_control_tool_call("run-1", "toolu-evidence"));
+    assert!(pending
+        .stage_or_emit(AgentEvent::ToolOutputDelta {
+            run_id: "run-1".to_string(),
+            tool_id: "toolu-evidence".to_string(),
+            stream: "stdout".to_string(),
+            text: "ShellEvidenceExcerpt".to_string(),
+        })
+        .is_empty());
+    assert!(pending
+        .stage_or_emit(AgentEvent::ToolCompleted {
+            run_id: "run-1".to_string(),
+            tool_id: "toolu-evidence".to_string(),
+            status: "success".to_string(),
+        })
+        .is_empty());
+
+    assert!(pending
+        .stage_or_emit(AgentEvent::ToolCall {
+            run_id: "run-1".to_string(),
+            tool_id: Some("toolu-evidence".to_string()),
+            name: "cosh_shell_evidence".to_string(),
+            input: r#"{"action":"list_commands"}"#.to_string(),
+        })
+        .is_empty());
+    let released = pending.flush_stalled(Duration::from_millis(0));
+    assert!(matches!(
+        &released[..],
+        [AgentEvent::ToolCall {
+            run_id,
+            tool_id: Some(tool_id),
+            ..
+        }] if run_id == "run-1" && tool_id == "toolu-evidence"
+    ));
 }
 
 #[test]

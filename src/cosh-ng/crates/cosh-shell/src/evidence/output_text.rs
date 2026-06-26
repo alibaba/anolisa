@@ -43,9 +43,10 @@ pub(super) fn provider_output_preview(output_ref: Option<&str>) -> ProviderOutpu
 }
 
 pub(super) fn redact_sensitive_output(text: &str) -> (String, bool) {
-    let (redacted, mut changed) = redact_home_path(text);
+    let (redacted, _) = redact_home_path(text);
 
     let mut lines = Vec::new();
+    let mut changed = false;
     for line in redacted.lines() {
         let (line, line_changed) = redact_sensitive_line(line);
         changed |= line_changed;

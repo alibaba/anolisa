@@ -388,6 +388,32 @@ mod tests {
     }
 
     #[test]
+    fn bounded_excerpt_home_path_redaction_does_not_block_delivery() {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/tester".to_string());
+        let dir = std::env::temp_dir().join(format!(
+            "cosh-shell-evidence-excerpt-home-path-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let output = dir.join("output.txt");
+        std::fs::write(
+            &output,
+            format!(
+                "USER PID COMMAND\nme 123 {home}/Applications/Codex.app/Contents/MacOS/Codex\n"
+            ),
+        )
+        .expect("write output");
+        let output_ref = output.to_str().expect("utf8 output path");
+
+        let excerpt =
+            bounded_output_excerpt(Some(output_ref), OutputExcerptDirection::Tail, 10, 1024);
+
+        assert_eq!(excerpt.redaction_status, "excerpt_included");
+        assert!(!excerpt.text.as_deref().unwrap_or_default().contains(&home));
+        assert!(excerpt.text.as_deref().unwrap_or_default().contains("~/"));
+    }
+
+    #[test]
     fn bounded_excerpt_cleans_terminal_control_sequences() {
         let dir = std::env::temp_dir().join(format!(
             "cosh-shell-evidence-excerpt-ansi-{}",

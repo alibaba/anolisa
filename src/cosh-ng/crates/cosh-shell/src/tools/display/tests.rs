@@ -113,10 +113,27 @@ fn grep_tool() {
 
 #[test]
 fn qwen_grep_alias_uses_canonical_display() {
-    let info = display_for_tool("grep_search", r#"{"pattern":"TODO","path":"src/"}"#);
-    assert_eq!(info.label, "Grep");
-    assert_eq!(info.preview, "/TODO/ in src/");
-    assert_eq!(info.color, ToolColor::ReadOnly);
+    for name in ["grep", "grep_search"] {
+        let info = display_for_tool(name, r#"{"pattern":"TODO","path":"src/"}"#);
+        assert_eq!(info.label, "Grep");
+        assert_eq!(info.preview, "/TODO/ in src/");
+        assert_eq!(info.color, ToolColor::ReadOnly);
+    }
+}
+
+#[test]
+fn file_search_query_alias_uses_query_as_search_target() {
+    for name in ["FileSearch", "file_search", "search_file_content"] {
+        let presentation = presentation_for_tool(name, r#"{"query":"needle","path":"src/"}"#);
+        assert_eq!(
+            presentation.kind,
+            ToolPresentationKind::FileSearch,
+            "{name}"
+        );
+        assert_eq!(presentation.canonical_name, "Grep", "{name}");
+        assert_eq!(presentation.target.as_deref(), Some("\"needle\" in src/"));
+        assert_eq!(presentation.preview, "/needle/ in src/");
+    }
 }
 
 #[test]
@@ -163,11 +180,261 @@ fn web_search_tool() {
 }
 
 #[test]
+fn agent_aliases_use_bounded_prompt_task_or_description_target() {
+    let long_prompt = format!(r#"{{"prompt":"{}"}}"#, "review ".repeat(40));
+    let cases = [
+        ("Task", r#"{"task":"Review the tool card result quality"}"#),
+        ("Subagent", r#"{"description":"Audit display.rs"}"#),
+        ("Delegate", long_prompt.as_str()),
+    ];
+
+    for (name, input) in cases {
+        let presentation = presentation_for_tool(name, input);
+        assert_eq!(presentation.kind, ToolPresentationKind::Agent, "{name}");
+        assert_eq!(presentation.canonical_name, name, "{name}");
+        assert!(presentation
+            .target
+            .as_deref()
+            .is_some_and(|target| target.len() <= 83));
+        assert!(!presentation.preview.contains("\"prompt\""), "{name}");
+    }
+}
+
+#[test]
+fn context_mutation_tools_use_specific_receipt_canonical_names() {
+    let cases = [
+        ("save_memory", r#"{"fact":"keep this"}"#, "Memory", "saved"),
+        ("TodoWrite", r#"{"task_id":"todo-1"}"#, "Todo", "updated"),
+        ("TaskCreate", r#"{"title":"follow up"}"#, "Task", "created"),
+        ("CronDelete", r#"{"cron_id":"cron-1"}"#, "Cron", "deleted"),
+        (
+            "ScheduleWakeup",
+            r#"{"time":"2026-06-27T09:00:00+08:00"}"#,
+            "Wakeup",
+            "scheduled",
+        ),
+    ];
+
+    for (name, input, canonical, receipt) in cases {
+        let presentation = presentation_for_tool(name, input);
+        assert_eq!(presentation.kind, ToolPresentationKind::Memory, "{name}");
+        assert_eq!(presentation.canonical_name, canonical, "{name}");
+        assert_eq!(presentation.secondary.as_deref(), Some(receipt), "{name}");
+    }
+}
+
+#[test]
+fn tool_presentation_covers_spec_tool_aliases() {
+    let cases = [
+        (
+            "ReadFolder",
+            r#"{"path":"src"}"#,
+            ToolPresentationKind::DirectoryList,
+            ToolImpact::ReadOnly,
+            "LS",
+        ),
+        (
+            "search_file_content",
+            r#"{"pattern":"TODO","path":"src"}"#,
+            ToolPresentationKind::FileSearch,
+            ToolImpact::ReadOnly,
+            "Grep",
+        ),
+        (
+            "NotebookEdit",
+            r#"{"file_path":"notes.ipynb","old_string":"a","new_string":"b"}"#,
+            ToolPresentationKind::FileEdit,
+            ToolImpact::Write,
+            "Notebook edit",
+        ),
+        (
+            "web_fetch",
+            r#"{"url":"https://example.com"}"#,
+            ToolPresentationKind::WebFetch,
+            ToolImpact::OpenWorld,
+            "WebFetch",
+        ),
+        (
+            "google_web_search",
+            r#"{"query":"rust async"}"#,
+            ToolPresentationKind::WebSearch,
+            ToolImpact::OpenWorld,
+            "WebSearch",
+        ),
+        (
+            "read_skill",
+            r#"{"skill":"linux_memory"}"#,
+            ToolPresentationKind::Skill,
+            ToolImpact::ContextMutation,
+            "Skill",
+        ),
+        (
+            "skill",
+            r#"{"action":"list"}"#,
+            ToolPresentationKind::Skill,
+            ToolImpact::ContextMutation,
+            "Skill",
+        ),
+        (
+            "TodoWrite",
+            r#"{"task_id":"task-1"}"#,
+            ToolPresentationKind::Memory,
+            ToolImpact::ContextMutation,
+            "Todo",
+        ),
+        (
+            "Agent",
+            r#"{"name":"reviewer"}"#,
+            ToolPresentationKind::Agent,
+            ToolImpact::ContextMutation,
+            "Agent",
+        ),
+        (
+            "AskUserQuestion",
+            r#"{"question":"Pick one"}"#,
+            ToolPresentationKind::Question,
+            ToolImpact::Unknown,
+            "Question",
+        ),
+        (
+            "cosh_shell_evidence",
+            r#"{"action":"read_output","output_id":"terminal-output://s/c"}"#,
+            ToolPresentationKind::ShellEvidence,
+            ToolImpact::ReadOnly,
+            "Evidence",
+        ),
+    ];
+
+    for (name, input, kind, impact, canonical) in cases {
+        let presentation = presentation_for_tool(name, input);
+        assert_eq!(presentation.kind, kind, "{name}");
+        assert_eq!(presentation.impact, impact, "{name}");
+        assert_eq!(presentation.canonical_name, canonical, "{name}");
+        assert!(!presentation.preview.contains("\"content\""), "{name}");
+        assert!(
+            !presentation.preview.contains("terminal-output://"),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn tool_presentation_covers_every_kind() {
+    let cases = [
+        (
+            "Bash",
+            r#"{"command":"pwd"}"#,
+            ToolPresentationKind::ShellCommand,
+        ),
+        (
+            "Read",
+            r#"{"file_path":"Cargo.toml"}"#,
+            ToolPresentationKind::FileRead,
+        ),
+        (
+            "Write",
+            r#"{"file_path":"out.txt","content":"ok"}"#,
+            ToolPresentationKind::FileWrite,
+        ),
+        (
+            "Edit",
+            r#"{"file_path":"out.txt","old_string":"a","new_string":"b"}"#,
+            ToolPresentationKind::FileEdit,
+        ),
+        (
+            "Grep",
+            r#"{"pattern":"TODO","path":"src"}"#,
+            ToolPresentationKind::FileSearch,
+        ),
+        (
+            "Glob",
+            r#"{"pattern":"**/*.rs"}"#,
+            ToolPresentationKind::FileGlob,
+        ),
+        (
+            "LS",
+            r#"{"path":"src"}"#,
+            ToolPresentationKind::DirectoryList,
+        ),
+        (
+            "read_many_files",
+            r#"{"paths":["a.rs","b.rs"]}"#,
+            ToolPresentationKind::MultiFileRead,
+        ),
+        (
+            "LSP",
+            r#"{"operation":"hover","filePath":"src/main.rs","line":1}"#,
+            ToolPresentationKind::Lsp,
+        ),
+        (
+            "WebFetch",
+            r#"{"url":"https://example.com"}"#,
+            ToolPresentationKind::WebFetch,
+        ),
+        (
+            "WebSearch",
+            r#"{"query":"rust"}"#,
+            ToolPresentationKind::WebSearch,
+        ),
+        (
+            "Skill",
+            r#"{"skill":"linux_memory"}"#,
+            ToolPresentationKind::Skill,
+        ),
+        ("skill", r#"{"action":"list"}"#, ToolPresentationKind::Skill),
+        (
+            "Agent",
+            r#"{"name":"reviewer"}"#,
+            ToolPresentationKind::Agent,
+        ),
+        (
+            "save_memory",
+            r#"{"fact":"remember"}"#,
+            ToolPresentationKind::Memory,
+        ),
+        (
+            "AskUserQuestion",
+            r#"{"question":"Pick one"}"#,
+            ToolPresentationKind::Question,
+        ),
+        (
+            "cosh_shell_evidence",
+            r#"{"action":"list_commands"}"#,
+            ToolPresentationKind::ShellEvidence,
+        ),
+        (
+            "CustomTool",
+            r#"{"name":"custom"}"#,
+            ToolPresentationKind::Custom,
+        ),
+    ];
+
+    for (name, input, kind) in cases {
+        assert_eq!(presentation_for_tool(name, input).kind, kind, "{name}");
+    }
+}
+
+#[test]
+fn terminal_output_read_target_uses_bookmark_label() {
+    let presentation = presentation_for_tool(
+        "Read",
+        r#"{"file_path":"terminal-output://session-1/cmd-1"}"#,
+    );
+
+    assert_eq!(presentation.kind, ToolPresentationKind::FileRead);
+    assert_eq!(
+        presentation.target.as_deref(),
+        Some("Shell output bookmark")
+    );
+    assert_eq!(presentation.preview, "terminal-output://session-1/cmd-1");
+}
+
+#[test]
 fn unknown_tool() {
     let info = display_for_tool("CustomTool", r#"{"x":1}"#);
     assert_eq!(info.label, "CustomTool");
     assert_eq!(info.color, ToolColor::Unknown);
-    assert_eq!(info.preview, r#"{"x":1}"#);
+    assert_eq!(info.preview, "input: structured payload");
 }
 
 #[test]
@@ -183,7 +450,70 @@ fn malformed_json_unknown_tool() {
     let info = display_for_tool("Foo", "broken{json");
     assert_eq!(info.label, "Foo");
     assert_eq!(info.color, ToolColor::Unknown);
-    assert_eq!(info.preview, "broken{json");
+    assert_eq!(info.preview, "input: opaque payload");
+}
+
+#[test]
+fn unknown_mcp_tool_extracts_server_and_tool_without_raw_json() {
+    let presentation = presentation_for_tool(
+        "mcp__github__create_issue",
+        r#"{"title":"Bug","body":"secret body"}"#,
+    );
+    assert_eq!(presentation.kind, ToolPresentationKind::Custom);
+    assert_eq!(
+        presentation.preview,
+        "server: github; tool: create_issue; title: Bug"
+    );
+    let raw = presentation
+        .raw_input_preview
+        .as_deref()
+        .unwrap_or_default();
+    assert!(raw.contains(r#""title":"Bug""#));
+    assert!(raw.contains(r#""body":"secret body""#));
+}
+
+#[test]
+fn read_many_files_caps_visible_paths_at_twenty() {
+    let paths = (0..25)
+        .map(|idx| format!(r#""file-{idx:02}.rs""#))
+        .collect::<Vec<_>>()
+        .join(",");
+    let input = format!(r#"{{"paths":[{paths}]}}"#);
+
+    let presentation = presentation_for_tool("read_many_files", &input);
+
+    assert_eq!(presentation.kind, ToolPresentationKind::MultiFileRead);
+    assert_eq!(presentation.target.as_deref(), Some("25 files"));
+    assert!(presentation.preview.contains("file-00.rs"));
+    assert!(presentation.preview.contains("file-19.rs"));
+    assert!(presentation.preview.contains("+5 more"));
+    assert!(!presentation.preview.contains("file-20.rs"));
+    assert_eq!(
+        presentation
+            .fields
+            .iter()
+            .filter(|field| field.label == "path")
+            .count(),
+        20
+    );
+    assert!(presentation
+        .fields
+        .iter()
+        .any(|field| { field.label == "omitted_paths" && field.value == "5" }));
+    assert!(!presentation
+        .fields
+        .iter()
+        .any(|field| field.value == "file-20.rs"));
+}
+
+#[test]
+fn malformed_unknown_tool_is_opaque_but_auditable() {
+    let presentation = presentation_for_tool("CustomTool", "not-json-secret");
+    assert_eq!(presentation.preview, "input: opaque payload");
+    assert_eq!(
+        presentation.raw_input_preview.as_deref(),
+        Some("not-json-secret")
+    );
 }
 
 #[test]

@@ -316,6 +316,10 @@ impl MarkdownStreamBlock {
         self.started
     }
 
+    pub fn has_buffered_text(&self) -> bool {
+        !self.pending.trim().is_empty()
+    }
+
     fn write_markdown_fragment<W: Write>(&mut self, output: &mut W, text: &str) -> io::Result<()> {
         if self.renderer.styled && !self.renderer.plain {
             return self.write_styled_markdown_fragment(output, text);

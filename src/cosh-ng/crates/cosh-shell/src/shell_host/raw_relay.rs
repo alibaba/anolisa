@@ -513,7 +513,7 @@ fn resolve_pty_emit<W: Write>(
                 handoff_request_file,
                 false,
             )?;
-            Ok(RawObserverAction::Continue)
+            Ok(RawObserverAction::RawPassthrough)
         }
         RawObserverAction::EmitToPtyWithPromptRestore(request) => {
             emit_to_pty(
@@ -528,7 +528,7 @@ fn resolve_pty_emit<W: Write>(
                 handoff_request_file,
                 true,
             )?;
-            Ok(RawObserverAction::Continue)
+            Ok(RawObserverAction::RawPassthrough)
         }
         RawObserverAction::InterruptForeground => {
             output.flush()?;

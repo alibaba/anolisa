@@ -328,7 +328,7 @@ pub(super) fn start_control_protocol_qwen_process(
                         } => {
                             let _ = pending_control_tool_call
                                 .borrow_mut()
-                                .take_matching_control_shell(&tool_use_id);
+                                .take_matching_control_shell(&run_id, &tool_use_id);
                             if let Some(response) =
                                 control_protocol::analysis_continuation_shell_deny_response(
                                     &prompt_for_loop,
@@ -400,6 +400,9 @@ pub(super) fn start_control_protocol_qwen_process(
                             tool_use_id,
                             action,
                         } => {
+                            let _ = pending_control_tool_call
+                                .borrow_mut()
+                                .take_matching_control_tool_call(&run_id, &tool_use_id);
                             send_agent_event(
                                 &event_tx,
                                 AgentEvent::ShellEvidenceRequest {
@@ -504,4 +507,40 @@ fn qwen_control_capabilities(
 ) -> control_protocol::ControlProtocolCapabilities {
     capabilities.can_handle_host_executed_shell_tool_result = true;
     capabilities
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qwen_driver_deduplicates_late_shell_evidence_snapshot_result() {
+        let mut pending = control_protocol::PendingControlProtocolToolCall::default();
+
+        assert!(pending
+            .stage_or_emit(AgentEvent::ToolCall {
+                run_id: "run-qwen".to_string(),
+                tool_id: Some("toolu-evidence".to_string()),
+                name: "cosh_shell_evidence".to_string(),
+                input: r#"{"action":"list_commands"}"#.to_string(),
+            })
+            .is_empty());
+        assert_eq!(
+            pending
+                .flush_stalled(control_protocol::PENDING_CONTROL_TOOL_CALL_GRACE)
+                .len(),
+            0
+        );
+
+        let released = pending.flush_stalled(Duration::from_millis(0));
+        assert_eq!(released.len(), 1);
+        assert!(!pending.take_matching_control_tool_call("run-qwen", "toolu-evidence"));
+        assert!(pending
+            .stage_or_emit(AgentEvent::ToolCompleted {
+                run_id: "run-qwen".to_string(),
+                tool_id: "toolu-evidence".to_string(),
+                status: "success".to_string(),
+            })
+            .is_empty());
+    }
 }

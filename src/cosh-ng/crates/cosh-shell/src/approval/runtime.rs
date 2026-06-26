@@ -142,6 +142,9 @@ pub(crate) fn render_approval_actions<W: Write>(
 
                 if outcome == ApprovalOutcome::ForegroundShellHandoff {
                     render_approval_resolution(state, &decision.request, decision.title, output)?;
+                    if decision.request.status == ApprovalRequestStatus::Approved {
+                        mark_provider_approval_resolved(state);
+                    }
                     if !request_can_receive_host_executed_result(state, &decision.request) {
                         stop_active_agent_run_without_rendering(state, output)?;
                     }
@@ -164,6 +167,7 @@ pub(crate) fn render_approval_actions<W: Write>(
             } else {
                 render_approval_resolution(state, &decision.request, decision.title, output)?;
                 if decision.run_approved_tool {
+                    mark_provider_approval_resolved(state);
                     stop_active_agent_run_without_rendering(state, output)?;
                     queue_approved_shell_handoff(state, &decision.request);
                 } else if should_send_approval_resolution_to_agent(state, &decision.request) {

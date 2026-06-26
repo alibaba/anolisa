@@ -348,23 +348,23 @@ fn raw_cli_trust_mode_runs_bash_tool_without_approval_panel() {
 
 #[test]
 fn raw_cli_auto_mode_skips_readonly_builtin_tool_approval_panel() {
-    let output = run_raw_cli_with_input(
+    let output = run_raw_cli_with_delayed_input(
         "fake",
-        "/mode approval auto\n\
-         ?? request readonly builtin tool\n\
-         exit\n",
+        vec![
+            (b"/mode approval auto\n".to_vec(), Duration::ZERO),
+            (
+                b"?? request readonly builtin tool\n".to_vec(),
+                Duration::from_millis(200),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(2_000)),
+        ],
     );
 
     assert!(output.contains("Mode set to auto."), "{output}");
     assert!(!output.contains("Auto-approved req-"), "{output}");
-    assert!(
-        output.contains("Read called: Cargo.toml; [Details] tool-1"),
-        "{output}"
-    );
-    assert!(
-        output.contains("Grep called: /cosh/ in crates/cosh-shell; [Details] tool-2"),
-        "{output}"
-    );
+    assert!(!output.contains("Read called"), "{output}");
+    assert!(!output.contains("Grep called"), "{output}");
+    assert!(!output.contains("[Details] tool-"), "{output}");
     assert!(!output.contains("Approval required"), "{output}");
     assert!(!output.contains("[ Allow once ]"), "{output}");
     assert!(!output.contains("$ {\"file_path\""), "{output}");

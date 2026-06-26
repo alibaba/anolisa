@@ -105,13 +105,13 @@ fn prepare_invocation_prompt_uses_shell_output_tool_mode() {
     );
     assert!(inv.prompt.contains("action=read_output"), "{}", inv.prompt);
     assert!(
-        inv.prompt
-            .contains("read relevant outputs before making result claims"),
+        inv.prompt.contains("Use current tool results first"),
         "{}",
         inv.prompt
     );
     assert!(
-        inv.prompt.contains("up to 3 outputs per answer"),
+        inv.prompt
+            .contains("Use read_output only for older shell ledger output"),
         "{}",
         inv.prompt
     );

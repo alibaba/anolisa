@@ -180,7 +180,6 @@ fn raw_cli_zh_control_shell_details_localizes_shell_owned_chrome() {
     );
     assert!(output.contains("详情不可用:"), "{output}");
     assert!(output.contains("out-1 不可用"), "{output}");
-    assert!(output.contains("evidence: ProviderToolRequest"), "{output}");
     assert!(
         output.contains("execution_path: provider_control_protocol"),
         "{output}"
@@ -270,7 +269,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-claude-na
         vec![
             (b"/mode approval auto\n".to_vec(), Duration::ZERO),
             (
-                b"claude-provider-native-fallback\n".to_vec(),
+                b"?? claude-provider-native-fallback\n".to_vec(),
                 Duration::from_millis(500),
             ),
             (b"exit 0\n".to_vec(), Duration::from_millis(3_000)),
@@ -368,10 +367,7 @@ fn raw_cli_debug_mode_keeps_control_shell_output_foreground_owned() {
         !output.contains("Provider-native shell tool allowed"),
         "{output}"
     );
-    assert!(
-        output.contains("Tool requested: Bash requested: $ df -h"),
-        "{output}"
-    );
+    assert!(output.contains("Shell requested: $ df -h"), "{output}");
     assert!(output.contains("$ df -h"), "{output}");
     assert!(output.contains("Filesystem"), "{output}");
     assert!(

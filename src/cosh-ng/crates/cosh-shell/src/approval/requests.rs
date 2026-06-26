@@ -1,5 +1,6 @@
 use crate::approval::journal::approval_journal_entry;
 use crate::runtime::prelude::*;
+use crate::tools::display::{presentation_for_tool, ToolPresentation};
 
 pub(crate) fn record_approval_requests(
     state: &mut InlineState,
@@ -125,11 +126,12 @@ fn approval_request_from_event(
             if ignore_tool_calls {
                 return None;
             }
-            let info = display_for_tool(name, input);
-            if is_readonly_builtin_tool_name(&info.label) {
+            let presentation = presentation_for_tool(name, input);
+            let (label, preview) = approval_tool_label_preview(&presentation);
+            if is_readonly_builtin_tool_name(&label) {
                 return None;
             }
-            let assessment = shell_tool_assessment_from_preview(&info.label, &info.preview);
+            let assessment = shell_tool_assessment_from_preview(&label, &preview);
             let risk = assessment
                 .as_ref()
                 .map(|assessment| assessment.impact.legacy_risk())
@@ -142,8 +144,8 @@ fn approval_request_from_event(
                 source: "agent",
                 provider_shell_request_kind: ProviderShellRequestKind::StreamedToolCallFallback,
                 kind: ApprovalRequestKind::Tool,
-                subject: info.label,
-                preview: info.preview,
+                subject: label,
+                preview,
                 risk,
                 request_id: None,
                 tool_use_id: tool_id.clone(),
@@ -193,12 +195,14 @@ fn approval_request_from_event(
             hook_requires_approval,
         } => {
             let input_str = serde_json::to_string(tool_input).unwrap_or_default();
-            let info = display_for_tool(tool_name, &input_str);
+            let presentation = presentation_for_tool(tool_name, &input_str);
+            let (label, preview) = approval_tool_label_preview(&presentation);
             let assessment = provider_tool_permission_assessment(tool_name, tool_input);
             let risk = assessment
                 .as_ref()
                 .map(|assessment| assessment.impact.legacy_risk())
                 .unwrap_or("medium");
+            let tool_use_id = non_empty_tool_use_id(tool_use_id);
             Some(RuntimeApprovalRequest {
                 id: next_approval_id(state),
                 run_id: run_id.clone(),
@@ -207,11 +211,11 @@ fn approval_request_from_event(
                 source: "control-protocol",
                 provider_shell_request_kind: ProviderShellRequestKind::ControlPermission,
                 kind: ApprovalRequestKind::Tool,
-                subject: info.label,
-                preview: info.preview,
+                subject: label,
+                preview,
                 risk,
                 request_id: Some(request_id.clone()),
-                tool_use_id: Some(tool_use_id.clone()),
+                tool_use_id,
                 tool_input: Some(tool_input.clone()),
                 original_user_request: original_user_request.map(ToString::to_string),
                 status: ApprovalRequestStatus::Pending,
@@ -225,6 +229,17 @@ fn approval_request_from_event(
         }
         _ => None,
     }
+}
+
+fn non_empty_tool_use_id(tool_use_id: &str) -> Option<String> {
+    (!tool_use_id.trim().is_empty()).then(|| tool_use_id.to_string())
+}
+
+fn approval_tool_label_preview(presentation: &ToolPresentation) -> (String, String) {
+    (
+        presentation.canonical_name.clone(),
+        presentation.preview.clone(),
+    )
 }
 
 fn original_user_request(run_request: Option<&AgentRequest>) -> Option<String> {

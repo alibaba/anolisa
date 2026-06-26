@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io::{self, Write};
 
 use ratatui::{
@@ -9,7 +10,10 @@ use ratatui::{
     widgets::{block::Padding, Block, Paragraph, Widget, Wrap},
 };
 
-use super::{buffer_to_lines, buffer_to_styled_lines, wrap_plain_line, RatatuiInlineRenderer};
+use super::{
+    buffer_to_lines, buffer_to_styled_lines, display_width, wrap_plain_line, RatatuiInlineRenderer,
+};
+use crate::tools::display::ToolPresentationKind;
 
 #[derive(Debug, Clone)]
 pub struct ActivityRowModel<'a> {
@@ -18,6 +22,14 @@ pub struct ActivityRowModel<'a> {
     pub status: &'a str,
     pub subject: &'a str,
     pub summary: &'a str,
+    pub tool: Option<ActivityToolRowModel<'a>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActivityToolRowModel<'a> {
+    pub kind: ToolPresentationKind,
+    pub name: &'a str,
+    pub primary: Cow<'a, str>,
 }
 
 #[derive(Debug, Clone)]
@@ -34,6 +46,36 @@ pub struct ActivityDetailsPanelModel<'a> {
     pub subject: &'a str,
     pub summary: &'a str,
     pub detail: &'a str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolInvocationTone {
+    Pending,
+    Success,
+    Warning,
+    Failure,
+    Custom,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolInvocationDensity {
+    Receipt,
+    Summary,
+    Diagnostic,
+    ActionRequired,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolInvocationCardModel {
+    pub title: String,
+    pub status: String,
+    pub density: ToolInvocationDensity,
+    pub primary: String,
+    pub result: String,
+    pub metrics: Vec<String>,
+    pub action: Option<String>,
+    pub debug_ref: Option<String>,
+    pub tone: ToolInvocationTone,
 }
 
 impl RatatuiInlineRenderer {
@@ -105,6 +147,48 @@ impl RatatuiInlineRenderer {
             writeln!(output, "{line}")?;
         }
         Ok(lines.len())
+    }
+
+    pub fn write_tool_invocation_cards<W: Write>(
+        &self,
+        output: &mut W,
+        cards: Vec<ToolInvocationCardModel>,
+    ) -> io::Result<usize> {
+        let lines = self.tool_invocation_cards_write_lines(cards);
+        for line in &lines {
+            writeln!(output, "{line}")?;
+        }
+        Ok(lines.len())
+    }
+
+    pub fn tool_invocation_card_lines(&self, card: ToolInvocationCardModel) -> Vec<String> {
+        self.tool_invocation_cards_write_lines(vec![card])
+    }
+
+    fn tool_invocation_cards_write_lines(
+        &self,
+        cards: Vec<ToolInvocationCardModel>,
+    ) -> Vec<String> {
+        let mut out = Vec::new();
+        for card in cards {
+            if !out.is_empty() {
+                out.push(String::new());
+            }
+            if self.plain {
+                out.extend(plain_tool_invocation_card_lines(
+                    &card,
+                    activity_panel_content_width(self.panel_standard_width()),
+                ));
+            } else {
+                out.extend(styled_tool_invocation_card_lines(
+                    &card,
+                    self.panel_standard_width(),
+                    self.styled,
+                    card.debug_ref.is_some(),
+                ));
+            }
+        }
+        out
     }
 
     pub fn activity_details_panel_lines(
@@ -185,6 +269,183 @@ impl RatatuiInlineRenderer {
     }
 }
 
+fn plain_tool_invocation_card_lines(
+    card: &ToolInvocationCardModel,
+    content_width: usize,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(card.title.clone());
+    lines.extend(wrapped_tool_invocation_semantic_lines(
+        card,
+        card.debug_ref.is_some(),
+        content_width,
+    ));
+    lines
+}
+
+fn styled_tool_invocation_card_lines(
+    card: &ToolInvocationCardModel,
+    width: u16,
+    styled: bool,
+    include_debug: bool,
+) -> Vec<String> {
+    let content_width = activity_panel_content_width(width);
+    let body_lines = wrapped_tool_invocation_semantic_lines(card, include_debug, content_width)
+        .into_iter()
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    let height = body_lines.len().max(1) as u16 + 2;
+    let area = Rect::new(0, 0, width, height);
+    let mut buffer = Buffer::empty(area);
+    let block = Block::bordered()
+        .padding(Padding::horizontal(1))
+        .title(Line::from(Span::styled(
+            format!(" {} ", card.title),
+            Style::default().add_modifier(Modifier::BOLD),
+        )))
+        .border_set(ROUNDED)
+        .border_style(Style::default().fg(tone_color(card.tone)));
+    let inner = block.inner(area);
+    block.render(area, &mut buffer);
+    Paragraph::new(Text::from(body_lines))
+        .wrap(Wrap { trim: true })
+        .render(inner, &mut buffer);
+    if styled {
+        buffer_to_styled_lines(&buffer, area)
+    } else {
+        buffer_to_lines(&buffer, area)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ToolInvocationSemanticRole {
+    Primary,
+    Result,
+    Metrics,
+    Action,
+    Debug,
+}
+
+#[derive(Debug, Clone)]
+struct ToolInvocationSemanticLine {
+    role: ToolInvocationSemanticRole,
+    text: String,
+}
+
+fn wrapped_tool_invocation_semantic_lines(
+    card: &ToolInvocationCardModel,
+    include_debug: bool,
+    content_width: usize,
+) -> Vec<String> {
+    tool_invocation_semantic_lines(card, include_debug)
+        .into_iter()
+        .flat_map(|semantic| {
+            let max_lines = max_tool_invocation_physical_lines(card.density, semantic.role);
+            cap_wrapped_lines(
+                wrap_plain_line(&semantic.text, content_width),
+                max_lines,
+                content_width,
+            )
+        })
+        .collect()
+}
+
+fn tool_invocation_semantic_lines(
+    card: &ToolInvocationCardModel,
+    include_debug: bool,
+) -> Vec<ToolInvocationSemanticLine> {
+    let mut lines = Vec::new();
+    if !card.primary.is_empty() {
+        lines.push(ToolInvocationSemanticLine {
+            role: ToolInvocationSemanticRole::Primary,
+            text: card.primary.clone(),
+        });
+    }
+    if !card.result.is_empty() {
+        lines.push(ToolInvocationSemanticLine {
+            role: ToolInvocationSemanticRole::Result,
+            text: card.result.clone(),
+        });
+    }
+    if !card.metrics.is_empty() {
+        lines.push(ToolInvocationSemanticLine {
+            role: ToolInvocationSemanticRole::Metrics,
+            text: card.metrics.join("; "),
+        });
+    }
+    if let Some(action) = &card.action {
+        if !action.is_empty() {
+            lines.push(ToolInvocationSemanticLine {
+                role: ToolInvocationSemanticRole::Action,
+                text: action.clone(),
+            });
+        }
+    }
+    if include_debug {
+        if let Some(debug_ref) = &card.debug_ref {
+            lines.push(ToolInvocationSemanticLine {
+                role: ToolInvocationSemanticRole::Debug,
+                text: format!("debug: {debug_ref}"),
+            });
+        }
+    }
+    lines
+}
+
+fn max_tool_invocation_physical_lines(
+    density: ToolInvocationDensity,
+    role: ToolInvocationSemanticRole,
+) -> usize {
+    match role {
+        ToolInvocationSemanticRole::Primary => 2,
+        ToolInvocationSemanticRole::Result => match density {
+            ToolInvocationDensity::Diagnostic | ToolInvocationDensity::ActionRequired => 3,
+            ToolInvocationDensity::Receipt | ToolInvocationDensity::Summary => 2,
+        },
+        ToolInvocationSemanticRole::Metrics => 1,
+        ToolInvocationSemanticRole::Action => 2,
+        ToolInvocationSemanticRole::Debug => 1,
+    }
+}
+
+fn cap_wrapped_lines(mut lines: Vec<String>, max_lines: usize, width: usize) -> Vec<String> {
+    if lines.len() <= max_lines {
+        return lines;
+    }
+    lines.truncate(max_lines.max(1));
+    if let Some(last) = lines.last_mut() {
+        *last = truncate_with_ellipsis(last, width);
+    }
+    lines
+}
+
+fn truncate_with_ellipsis(value: &str, width: usize) -> String {
+    if display_width(value) <= width {
+        return value.to_string();
+    }
+    let target = width.saturating_sub(3).max(1);
+    let mut out = String::new();
+    for ch in value.chars() {
+        let mut candidate = out.clone();
+        candidate.push(ch);
+        if display_width(&candidate) > target {
+            break;
+        }
+        out = candidate;
+    }
+    format!("{out}...")
+}
+
+fn tone_color(tone: ToolInvocationTone) -> Color {
+    match tone {
+        ToolInvocationTone::Pending => Color::Cyan,
+        ToolInvocationTone::Success => Color::Green,
+        ToolInvocationTone::Warning => Color::Yellow,
+        ToolInvocationTone::Failure => Color::Red,
+        ToolInvocationTone::Custom => Color::Blue,
+    }
+}
+
 fn activity_panel_height(i18n: &crate::I18n, model: &ActivityPanelModel<'_>, width: u16) -> u16 {
     let content_width = activity_panel_content_width(width);
     activity_row_heights(i18n, model, content_width)
@@ -236,6 +497,9 @@ fn activity_summary(i18n: &crate::I18n, status: &str, summary: &str) -> String {
 }
 
 fn activity_row_text(i18n: &crate::I18n, row: &ActivityRowModel<'_>) -> String {
+    if let Some(tool) = &row.tool {
+        return activity_tool_row_text(i18n, row, tool);
+    }
     let summary = activity_summary(i18n, row.status, row.summary);
     match row.kind {
         "skill" => {
@@ -285,6 +549,63 @@ fn activity_row_text(i18n: &crate::I18n, row: &ActivityRowModel<'_>) -> String {
             }
         }
     }
+}
+
+fn activity_tool_row_text(
+    i18n: &crate::I18n,
+    row: &ActivityRowModel<'_>,
+    tool: &ActivityToolRowModel<'_>,
+) -> String {
+    let label = activity_tool_kind_label(i18n, tool.kind, tool.name);
+    let status = activity_status_label(i18n, row.status);
+    let summary = activity_summary(i18n, row.status, row.summary);
+    let primary = tool.primary.trim();
+    if matches!(tool.kind, ToolPresentationKind::ShellEvidence) && !primary.is_empty() {
+        return format!("{label} {status}: {primary}");
+    }
+    if primary.is_empty() {
+        if summary.is_empty() || summary == row.status {
+            return format!("{label} {status}");
+        }
+        let status_prefix = format!("{status} · ");
+        let summary = summary.strip_prefix(&status_prefix).unwrap_or(&summary);
+        return format!("{label} {status}: {summary}");
+    }
+    let status_prefix = format!("{status} · ");
+    let summary = summary.strip_prefix(&status_prefix).unwrap_or(&summary);
+    if summary.is_empty() || summary == row.status || summary.contains(primary) {
+        format!("{label} {status}: {primary}")
+    } else {
+        format!("{label} {status}: {primary} · {summary}")
+    }
+}
+
+fn activity_tool_kind_label(
+    i18n: &crate::I18n,
+    kind: ToolPresentationKind,
+    fallback: &str,
+) -> String {
+    let label = match kind {
+        ToolPresentationKind::ShellCommand => i18n.t(crate::MessageId::ToolCardShellLabel),
+        ToolPresentationKind::FileRead | ToolPresentationKind::MultiFileRead => {
+            i18n.t(crate::MessageId::ToolCardReadFileLabel)
+        }
+        ToolPresentationKind::FileWrite => i18n.t(crate::MessageId::ToolCardWriteFileLabel),
+        ToolPresentationKind::FileEdit => i18n.t(crate::MessageId::ToolCardEditFileLabel),
+        ToolPresentationKind::FileSearch | ToolPresentationKind::Lsp => {
+            i18n.t(crate::MessageId::ToolCardSearchFilesLabel)
+        }
+        ToolPresentationKind::FileGlob => i18n.t(crate::MessageId::ToolCardFindFilesLabel),
+        ToolPresentationKind::DirectoryList => i18n.t(crate::MessageId::ToolCardListDirectoryLabel),
+        ToolPresentationKind::WebFetch => i18n.t(crate::MessageId::ToolCardWebFetchLabel),
+        ToolPresentationKind::WebSearch => i18n.t(crate::MessageId::ToolCardWebSearchLabel),
+        ToolPresentationKind::Skill => i18n.t(crate::MessageId::ToolCardSkillLabel),
+        ToolPresentationKind::Agent => i18n.t(crate::MessageId::ToolCardAgentLabel),
+        ToolPresentationKind::Memory => i18n.t(crate::MessageId::ToolCardMemoryLabel),
+        ToolPresentationKind::ShellEvidence => i18n.t(crate::MessageId::ToolCardEvidenceLabel),
+        ToolPresentationKind::Question | ToolPresentationKind::Custom => fallback,
+    };
+    label.to_string()
 }
 
 fn activity_kind_label(i18n: &crate::I18n, kind: &str) -> String {
@@ -355,11 +676,16 @@ fn activity_subject_suffix<'a>(row: &ActivityRowModel<'a>) -> Option<&'a str> {
         || row.subject == row.id
         || row.summary.contains(row.subject)
         || (row.kind == "output" && row.subject.starts_with("tool-"))
+        || ((row.kind == "tool" || row.kind == "shell") && is_internal_tool_subject(row.subject))
     {
         None
     } else {
         Some(row.subject)
     }
+}
+
+fn is_internal_tool_subject(subject: &str) -> bool {
+    subject.starts_with("tool-") || subject.starts_with("toolu")
 }
 
 fn activity_details_panel_height(

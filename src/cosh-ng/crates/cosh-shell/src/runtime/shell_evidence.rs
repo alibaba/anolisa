@@ -251,6 +251,17 @@ pub(crate) fn read_shell_evidence_output(
     }
 }
 
+pub(crate) fn command_preview_for_terminal_output_id(
+    blocks: &[CommandBlock],
+    output_id: &str,
+) -> Option<String> {
+    let parsed = parse_terminal_output_id(output_id)?;
+    blocks
+        .iter()
+        .find(|block| block.session_id == parsed.shell_session_id && block.id == parsed.command_id)
+        .map(|block| redact_provider_command_text(&block.command))
+}
+
 pub(crate) fn shell_evidence_read_unavailable_guard(
     blocks: &[CommandBlock],
     approval_mode: CoshApprovalMode,
@@ -699,6 +710,27 @@ mod tests {
         );
         assert!(!result.llm_content.contains("BEGIN PRIVATE KEY"));
         assert!(!result.llm_content.contains("secret"));
+    }
+
+    #[test]
+    fn home_path_redacted_excerpt_is_delivered() {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/tester".to_string());
+        let file = output_file(&format!(
+            "USER PID COMMAND\nme 123 {home}/Applications/Codex.app/Contents/MacOS/Codex\n"
+        ));
+        let block = command_block("raw-session-a", "cmd-1", Some(file.path()));
+        let result = read_shell_evidence_output(
+            &[block],
+            CoshApprovalMode::Trust,
+            "terminal-output://raw-session-a/cmd-1",
+            "tail",
+            120,
+        );
+
+        assert!(!result.metadata.is_error);
+        assert_eq!(result.metadata.excerpt_status, "available");
+        assert!(!result.llm_content.contains(&home));
+        assert!(result.llm_content.contains("~/"));
     }
 
     struct TempOutputFile {

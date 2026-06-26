@@ -31,6 +31,34 @@ pub(crate) struct ActiveAgentRun {
     pub(crate) current_message: String,
     pub(crate) has_visible_text_delta: bool,
     pub(crate) completed: bool,
+    pub(crate) host_completed_tool_ids: Vec<String>,
+}
+
+impl ActiveAgentRun {
+    pub(crate) fn prepare_structured_surface<W: Write>(
+        &mut self,
+        output: &mut W,
+    ) -> std::io::Result<bool> {
+        self.status_animation.clear(output)?;
+        let finished = self.markdown_stream.finish(output, None)?;
+        if finished {
+            self.has_visible_text_delta = false;
+        }
+        Ok(finished)
+    }
+
+    pub(crate) fn mark_host_completed_tool(&mut self, tool_id: &str) {
+        if tool_id.trim().is_empty() {
+            return;
+        }
+        if !self
+            .host_completed_tool_ids
+            .iter()
+            .any(|existing| existing == tool_id)
+        {
+            self.host_completed_tool_ids.push(tool_id.to_string());
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +156,7 @@ fn start_agent_run_with_queue_policy<W: Write>(
         current_message: i18n.t(MessageId::AgentStatusWaitingBackend).to_string(),
         has_visible_text_delta: false,
         completed: false,
+        host_completed_tool_ids: Vec::new(),
     });
     poll_active_agent_run(state, output, adapter)
 }

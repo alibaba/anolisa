@@ -136,9 +136,7 @@ impl RatatuiInlineRenderer {
         }
 
         if is_hook_approval_request(&model) {
-            let mut lines = vec![
-                i18n.t(crate::MessageId::ApprovalHookHeading).to_string(),
-            ];
+            let mut lines = vec![i18n.t(crate::MessageId::ApprovalHookHeading).to_string()];
             for warning in &model.hook_warnings {
                 let icon = hook_warning_icon(warning.decision);
                 lines.push(format!("\u{2502} {icon} {}", warning.hook_name));
@@ -212,8 +210,10 @@ impl RatatuiInlineRenderer {
 
 fn approval_panel_height(model: &ApprovalPanelModel<'_>, width: u16) -> u16 {
     let content_width = approval_content_width(width);
-    let hook_warning_rows = model.hook_warnings.iter()
-        .map(|w| 1 + w.message.lines().count())  // 1 for hookName line + N message lines
+    let hook_warning_rows = model
+        .hook_warnings
+        .iter()
+        .map(|w| 1 + w.message.lines().count()) // 1 for hookName line + N message lines
         .sum::<usize>() as u16;
     if is_hook_approval_request(model) {
         // heading + hook_warnings + queue(opt) + actions + keys + border(2)
@@ -313,7 +313,9 @@ fn render_approval_panel(
         .map(|reason| approval_reason_rows(reason, inner.width.saturating_sub(2) as usize, i18n))
         .unwrap_or_default();
     let reason_height = reason_rows.len() as u16;
-    let hook_warning_height = model.hook_warnings.iter()
+    let hook_warning_height = model
+        .hook_warnings
+        .iter()
         .map(|w| 1 + w.message.lines().count())
         .sum::<usize>() as u16;
     let mut constraints = vec![
@@ -362,10 +364,7 @@ fn render_approval_panel(
             let icon = hook_warning_icon(w.decision);
             // Line 1: colored left bar + icon + bold hookName
             warning_lines.push(Line::from(vec![
-                Span::styled(
-                    format!("\u{2502} {icon} "),
-                    Style::default().fg(color),
-                ),
+                Span::styled(format!("\u{2502} {icon} "), Style::default().fg(color)),
                 Span::styled(
                     w.hook_name.to_string(),
                     Style::default().fg(color).add_modifier(Modifier::BOLD),
@@ -480,7 +479,9 @@ fn render_command_tool_approval_panel(
         .reason
         .map(|reason| approval_reason_rows(reason, inner.width.saturating_sub(2) as usize, i18n))
         .unwrap_or_default();
-    let hook_warning_height = model.hook_warnings.iter()
+    let hook_warning_height = model
+        .hook_warnings
+        .iter()
         .map(|w| 1 + w.message.lines().count())
         .sum::<usize>() as u16;
     let queue_height = u16::from(model.queue_total > 1);
@@ -515,10 +516,7 @@ fn render_command_tool_approval_panel(
             let color = hook_warning_color(w.decision);
             let icon = hook_warning_icon(w.decision);
             warning_lines.push(Line::from(vec![
-                Span::styled(
-                    format!("\u{2502} {icon} "),
-                    Style::default().fg(color),
-                ),
+                Span::styled(format!("\u{2502} {icon} "), Style::default().fg(color)),
                 Span::styled(
                     w.hook_name.to_string(),
                     Style::default().fg(color).add_modifier(Modifier::BOLD),
@@ -630,10 +628,7 @@ fn render_hook_approval_panel(
             let color = hook_warning_color(w.decision);
             let icon = hook_warning_icon(w.decision);
             warning_lines.push(Line::from(vec![
-                Span::styled(
-                    format!("\u{2502} {icon} "),
-                    Style::default().fg(color),
-                ),
+                Span::styled(format!("\u{2502} {icon} "), Style::default().fg(color)),
                 Span::styled(
                     w.hook_name.to_string(),
                     Style::default().fg(color).add_modifier(Modifier::BOLD),
@@ -895,9 +890,9 @@ fn hook_warning_color(decision: Option<&str>) -> Color {
 /// Decision icon for hook warnings.
 pub(crate) fn hook_warning_icon(decision: Option<&str>) -> &'static str {
     match decision {
-        Some("allow") | Some("approve") => "\u{2713}",  // ✓
+        Some("allow") | Some("approve") => "\u{2713}", // ✓
         Some("ask") => "?",
-        Some("block") | Some("deny") => "\u{2717}",     // ✗
-        _ => "\u{2022}",                                // •
+        Some("block") | Some("deny") => "\u{2717}", // ✗
+        _ => "\u{2022}",                            // •
     }
 }

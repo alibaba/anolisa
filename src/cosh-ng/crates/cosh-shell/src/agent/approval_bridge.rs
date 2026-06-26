@@ -5,6 +5,7 @@ use crate::approval::broker::{
     provider_deny_response, ApprovalExecutionMetadata, ApprovalOutcome, ApprovalOutcomeInput,
     ProviderApprovalStatus, ProviderResponseInput,
 };
+use crate::approval::provider::mark_provider_approval_resolved;
 use crate::approval::resolution::request_can_receive_host_executed_result;
 use crate::runtime::prelude::*;
 
@@ -394,6 +395,7 @@ fn apply_auto_approved_request_outcome<W: Write>(
         }
         ApprovalOutcome::LocalOnly => Ok(AutoApprovalFlow::Continue),
         ApprovalOutcome::ForegroundShellHandoff => {
+            mark_provider_approval_resolved(state);
             queue_approved_shell_handoff(state, request);
             if !request_can_receive_host_executed_result(state, request) {
                 stop_active_agent_run_without_rendering(state, output)?;

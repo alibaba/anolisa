@@ -1,15 +1,17 @@
 use super::{
     strip_ansi_escape, ActivityDetailsPanelModel, ActivityPanelModel, ActivityRowModel,
-    ApprovalDetailsPanelModel, ApprovalJournalEntryModel, ApprovalJournalPanelModel,
-    ApprovalPanelAction, ApprovalPanelModel, ApprovalReceiptPanelModel, HealthBannerModel,
-    NoticePanelModel, QuestionAnswerPanelModel, QuestionPanelModel, RatatuiInlineRenderer,
-    RecommendationActionPanelModel, RecommendationPanelModel,
+    ActivityToolRowModel, ApprovalDetailsPanelModel, ApprovalJournalEntryModel,
+    ApprovalJournalPanelModel, ApprovalPanelAction, ApprovalPanelModel, ApprovalReceiptPanelModel,
+    HealthBannerModel, NoticePanelModel, QuestionAnswerPanelModel, QuestionPanelModel,
+    RatatuiInlineRenderer, RecommendationActionPanelModel, RecommendationPanelModel,
+    ToolInvocationCardModel, ToolInvocationDensity, ToolInvocationTone,
 };
 use crate::diagnostics::health::{
     HealthCollector, HealthFact, HealthFactCategory, HealthFactSource, HealthFactValue,
     HealthFinding, HealthFindingCategory, HealthMessageId, HealthScanReport, HealthSeverity,
     HealthTryItem, HealthTryKind, HealthUnavailableReason, UnavailableCollector,
 };
+use crate::tools::display::ToolPresentationKind;
 use crate::types::{
     AgentEvent, GovernanceDecision, GovernancePolicyDecision, GovernedEvent, QuestionSelectionMode,
 };
@@ -219,6 +221,7 @@ fn activity_panel_renders_tool_output_rows() {
                     status: "captured",
                     subject: "tool-1",
                     summary: "stdout captured; [Details] out-1",
+                    tool: None,
                 },
                 ActivityRowModel {
                     id: "tool-1",
@@ -226,6 +229,7 @@ fn activity_panel_renders_tool_output_rows() {
                     status: "completed",
                     subject: "tool-1",
                     summary: "exit 0",
+                    tool: None,
                 },
             ],
         })
@@ -246,6 +250,132 @@ fn activity_panel_renders_tool_output_rows() {
 }
 
 #[test]
+fn tool_invocation_card_renders_primary_result_and_metrics_without_details_link() {
+    let renderer = RatatuiInlineRenderer::with_width(72);
+    let text = renderer
+        .tool_invocation_card_lines(ToolInvocationCardModel {
+            title: "Read completed".to_string(),
+            status: "success".to_string(),
+            density: ToolInvocationDensity::Receipt,
+            primary: "Cargo.toml".to_string(),
+            result: "2 lines returned".to_string(),
+            metrics: vec!["stdout: 2 lines".to_string()],
+            action: None,
+            debug_ref: None,
+            tone: ToolInvocationTone::Success,
+        })
+        .join("\n");
+
+    assert!(text.contains("Read completed"), "{text}");
+    assert!(text.contains("Cargo.toml"), "{text}");
+    assert!(text.contains("2 lines returned"), "{text}");
+    assert!(text.contains("stdout: 2 lines"), "{text}");
+    assert!(!text.contains("[Details]"), "{text}");
+    assert_rendered_width(&text, 72);
+    assert_box_lines_aligned(&text, 72);
+}
+
+#[test]
+fn tool_invocation_card_renders_debug_ref_without_details_link() {
+    let renderer = RatatuiInlineRenderer::with_width(72);
+    let text = renderer
+        .tool_invocation_card_lines(ToolInvocationCardModel {
+            title: "Read completed".to_string(),
+            status: "success".to_string(),
+            density: ToolInvocationDensity::Receipt,
+            primary: "Cargo.toml".to_string(),
+            result: "2 lines returned".to_string(),
+            metrics: Vec::new(),
+            action: None,
+            debug_ref: Some("toolu-read".to_string()),
+            tone: ToolInvocationTone::Success,
+        })
+        .join("\n");
+
+    assert!(text.contains("debug: toolu-read"), "{text}");
+    assert!(!text.contains("[Details]"), "{text}");
+    assert_rendered_width(&text, 72);
+    assert_box_lines_aligned(&text, 72);
+}
+
+#[test]
+fn plain_tool_invocation_card_keeps_same_semantic_content() {
+    let renderer = RatatuiInlineRenderer::plain_with_width(40);
+    let text = renderer
+        .tool_invocation_card_lines(ToolInvocationCardModel {
+            title: "Write requested".to_string(),
+            status: "requested".to_string(),
+            density: ToolInvocationDensity::ActionRequired,
+            primary: "/tmp/cosh-write.txt".to_string(),
+            result: "will modify workspace state".to_string(),
+            metrics: Vec::new(),
+            action: Some("approval required".to_string()),
+            debug_ref: None,
+            tone: ToolInvocationTone::Pending,
+        })
+        .join("\n");
+
+    assert!(text.contains("Write requested"), "{text}");
+    assert!(text.contains("/tmp/cosh-write.txt"), "{text}");
+    assert!(text.contains("will modify workspace state"), "{text}");
+    assert!(text.contains("approval required"), "{text}");
+    assert!(!text.contains("[Details]"), "{text}");
+    assert!(!text.contains('╭'), "{text}");
+}
+
+#[test]
+fn tool_invocation_card_narrow_width_keeps_primary_result_metrics_and_action() {
+    let renderer = RatatuiInlineRenderer::with_width(40);
+    let text = renderer
+        .tool_invocation_card_lines(ToolInvocationCardModel {
+            title: "Edit completed".to_string(),
+            status: "success".to_string(),
+            density: ToolInvocationDensity::Summary,
+            primary: "src/main.rs".to_string(),
+            result: "edit completed".to_string(),
+            metrics: vec!["stdout: 1 line".to_string()],
+            action: Some("review changes".to_string()),
+            debug_ref: None,
+            tone: ToolInvocationTone::Success,
+        })
+        .join("\n");
+
+    assert!(text.contains("src/main.rs"), "{text}");
+    assert!(text.contains("edit completed"), "{text}");
+    assert!(text.contains("stdout: 1 line"), "{text}");
+    assert!(text.contains("review changes"), "{text}");
+    assert_rendered_width(&text, 40);
+    assert_box_lines_aligned(&text, 40);
+}
+
+#[test]
+fn tool_invocation_card_caps_long_primary_before_result_lines() {
+    let renderer = RatatuiInlineRenderer::plain_with_width(32);
+    let long_path = format!("/very/long/{}SENTINEL", "nested/".repeat(20));
+    let lines = renderer.tool_invocation_card_lines(ToolInvocationCardModel {
+        title: "Read completed".to_string(),
+        status: "success".to_string(),
+        density: ToolInvocationDensity::Receipt,
+        primary: long_path,
+        result: "RESULT SURVIVES".to_string(),
+        metrics: vec!["stdout: 1 line".to_string()],
+        action: Some("ACTION SURVIVES".to_string()),
+        debug_ref: None,
+        tone: ToolInvocationTone::Success,
+    });
+    let text = lines.join("\n");
+    let result_index = lines
+        .iter()
+        .position(|line| line.contains("RESULT SURVIVES"))
+        .expect(&text);
+
+    assert!(result_index <= 3, "{text}");
+    assert!(text.contains("stdout: 1 line"), "{text}");
+    assert!(text.contains("ACTION SURVIVES"), "{text}");
+    assert!(!text.contains("SENTINEL"), "{text}");
+}
+
+#[test]
 fn activity_panel_uses_zh_catalog_labels() {
     let renderer = RatatuiInlineRenderer::with_width(100).with_language(crate::Language::ZhCn);
     let text = renderer
@@ -257,6 +387,7 @@ fn activity_panel_uses_zh_catalog_labels() {
                     status: "captured",
                     subject: "tool-1",
                     summary: "stdout 已捕获；[Details] out-1",
+                    tool: None,
                 },
                 ActivityRowModel {
                     id: "skill-1",
@@ -264,6 +395,7 @@ fn activity_panel_uses_zh_catalog_labels() {
                     status: "failed",
                     subject: "linux_memory",
                     summary: "linux_memory 失败",
+                    tool: None,
                 },
                 ActivityRowModel {
                     id: "tool-1",
@@ -271,6 +403,7 @@ fn activity_panel_uses_zh_catalog_labels() {
                     status: "requested",
                     subject: "toolu-1",
                     summary: "run_shell_command 请求审批：$ df -h；[Details] tool-1",
+                    tool: None,
                 },
             ],
         })
@@ -293,6 +426,84 @@ fn activity_panel_uses_zh_catalog_labels() {
 }
 
 #[test]
+fn activity_panel_prefers_typed_tool_row_in_en() {
+    let renderer = RatatuiInlineRenderer::with_width(100);
+    let text = renderer
+        .activity_panel_lines(ActivityPanelModel {
+            rows: vec![ActivityRowModel {
+                id: "tool-1",
+                kind: "tool",
+                status: "requested",
+                subject: "toolu-read",
+                summary: "Read requested: Cargo.toml; [Details] tool-1",
+                tool: Some(ActivityToolRowModel {
+                    kind: ToolPresentationKind::FileRead,
+                    name: "Read",
+                    primary: "Cargo.toml".into(),
+                }),
+            }],
+        })
+        .join("\n");
+
+    assert!(text.contains("Read requested: Cargo.toml"), "{text}");
+    assert!(!text.contains("Tool requested"), "{text}");
+    assert!(!text.contains("[Details]"), "{text}");
+    assert_rendered_width(&text, 100);
+}
+
+#[test]
+fn activity_panel_prefers_typed_tool_row_in_zh() {
+    let renderer = RatatuiInlineRenderer::with_width(100).with_language(crate::Language::ZhCn);
+    let text = renderer
+        .activity_panel_lines(ActivityPanelModel {
+            rows: vec![ActivityRowModel {
+                id: "tool-1",
+                kind: "tool",
+                status: "requested",
+                subject: "toolu-shell",
+                summary: "Bash 请求审批：$ df -h；[Details] tool-1",
+                tool: Some(ActivityToolRowModel {
+                    kind: ToolPresentationKind::ShellCommand,
+                    name: "Bash",
+                    primary: "$ df -h".into(),
+                }),
+            }],
+        })
+        .join("\n");
+
+    assert!(text.contains("Shell 请求审批: $ df -h"), "{text}");
+    assert!(!text.contains("Tool 请求审批"), "{text}");
+    assert!(!text.contains("[Details]"), "{text}");
+    assert!(!text.contains("toolu-shell"), "{text}");
+    assert_rendered_width(&text, 100);
+}
+
+#[test]
+fn activity_panel_preserves_interactive_handoff_action() {
+    let renderer = RatatuiInlineRenderer::with_width(100);
+    let text = renderer
+        .activity_panel_lines(ActivityPanelModel {
+            rows: vec![ActivityRowModel {
+                id: "handoff-1",
+                kind: "shell",
+                status: "error",
+                subject: "toolu-shell",
+                summary: "sudo: a terminal is required; may require foreground shell; [Send to shell] handoff-1; [Details] tool-2",
+                tool: None,
+            }],
+        })
+        .join("\n");
+
+    assert!(text.contains("Shell: error"), "{text}");
+    assert!(text.contains("sudo: a terminal is required"), "{text}");
+    assert!(text.contains("[Send to shell]"), "{text}");
+    assert!(text.contains("handoff-1"), "{text}");
+    assert!(text.contains("[Details] tool-2"), "{text}");
+    assert!(!text.contains("toolu-shell"), "{text}");
+    assert_rendered_width(&text, 100);
+}
+
+#[test]
 fn activity_panel_wraps_long_rows_without_dropping_details_reference() {
     let renderer = RatatuiInlineRenderer::with_width(54);
     let text = renderer
@@ -303,6 +514,7 @@ fn activity_panel_wraps_long_rows_without_dropping_details_reference() {
                 status: "captured",
                 subject: "req-7",
                 summary: "stdout captured from approved request with a long summary; inspect [Details] out-1",
+                tool: None,
             }],
         })
         .join("\n");
@@ -325,6 +537,7 @@ fn activity_panel_keeps_card_border_aligned_to_renderer_width() {
                 status: "captured",
                 subject: "tool-1",
                 summary: "stdout captured from 中文路径 🧪; inspect [Details] out-1",
+                tool: None,
             }],
         })
         .join("\n");
@@ -355,6 +568,7 @@ fn activity_panel_write_preserves_ratatui_styles_for_terminal_output() {
                     status: "captured",
                     subject: "tool-1",
                     summary: "stdout captured; [Details] out-1",
+                    tool: None,
                 }],
             },
         )
@@ -379,6 +593,7 @@ fn plain_activity_panel_keeps_user_facing_row_text() {
                 status: "captured",
                 subject: "tool-1",
                 summary: "stdout captured; [Details] out-1",
+                tool: None,
             }],
         })
         .join("\n");
@@ -403,6 +618,7 @@ fn plain_activity_panel_wraps_long_rows_without_dropping_details_reference() {
                 status: "captured",
                 subject: "req-7",
                 summary: "stdout captured from approved request with a long summary; inspect [Details] out-1",
+                tool: None,
             }],
         })
         .join("\n");

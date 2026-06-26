@@ -645,6 +645,7 @@ exit 1
             current_message: String::new(),
             has_visible_text_delta: false,
             completed: false,
+            host_completed_tool_ids: Vec::new(),
             pending_hook_notifications: Vec::new(),
         }
     }

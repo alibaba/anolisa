@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use crate::activity::runtime::RuntimeActivityRow;
+use crate::activity::runtime::{RuntimeActivityRow, ToolInvocationRecord};
 use crate::agent::run::{ActiveAgentRun, PendingAgentRequest};
 use crate::diagnostics::health::HealthScanReport;
 use crate::hooks::state::HookRuntimeState;
@@ -152,6 +152,7 @@ impl StartupHealthState {
 pub(crate) struct ShellEvidenceState {
     pub(crate) last_action: Option<ShellEvidenceActionRecord>,
     recent_shell_tool_outputs: VecDeque<RecentShellToolOutput>,
+    recent_action_signatures: VecDeque<ShellEvidenceActionSignature>,
 }
 
 #[derive(Debug, Clone)]
@@ -172,6 +173,12 @@ pub(crate) struct RecentShellToolOutput {
     pub(crate) output_id: String,
     pub(crate) run_id: Option<String>,
     pub(crate) coverage: EvidenceCoverage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShellEvidenceActionSignature {
+    run_id: String,
+    signature: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,6 +229,41 @@ impl ShellEvidenceState {
                     .map_or(true, |record_run_id| Some(record_run_id) == run_id)
                 && record.coverage.covers(direction, lines)
         })
+    }
+
+    pub(crate) fn read_output_excerpt_recently_delivered(
+        &self,
+        output_id: &str,
+        run_id: Option<&str>,
+        direction: &str,
+        lines: u16,
+    ) -> bool {
+        self.recent_shell_tool_outputs.iter().rev().any(|record| {
+            record.output_id == output_id
+                && record
+                    .run_id
+                    .as_deref()
+                    .map_or(true, |record_run_id| Some(record_run_id) == run_id)
+                && matches!(record.coverage, EvidenceCoverage::Excerpt { .. })
+                && record.coverage.covers(direction, lines)
+        })
+    }
+
+    pub(crate) fn record_action_signature(&mut self, run_id: &str, signature: String) -> bool {
+        let duplicate = self
+            .recent_action_signatures
+            .iter()
+            .rev()
+            .any(|record| record.run_id == run_id && record.signature == signature);
+        self.recent_action_signatures
+            .push_back(ShellEvidenceActionSignature {
+                run_id: run_id.to_string(),
+                signature,
+            });
+        while self.recent_action_signatures.len() > RECENT_SHELL_TOOL_OUTPUT_WINDOW * 2 {
+            self.recent_action_signatures.pop_front();
+        }
+        duplicate
     }
 
     fn push_recent_shell_tool_output(
@@ -339,6 +381,41 @@ mod shell_evidence_recent_tests {
     }
 
     #[test]
+    fn recent_shell_evidence_excerpt_query_ignores_summary_coverage() {
+        let mut state = ShellEvidenceState::default();
+        state.record_host_executed_shell_output(
+            "terminal-output://session-1/cmd-1".to_string(),
+            Some("run-1".to_string()),
+        );
+
+        assert!(state.read_output_recently_delivered(
+            "terminal-output://session-1/cmd-1",
+            Some("run-1"),
+            "tail",
+            120,
+        ));
+        assert!(!state.read_output_excerpt_recently_delivered(
+            "terminal-output://session-1/cmd-1",
+            Some("run-1"),
+            "tail",
+            120,
+        ));
+
+        state.record_shell_evidence_read_output(
+            "terminal-output://session-1/cmd-1".to_string(),
+            Some("run-1".to_string()),
+            "tail".to_string(),
+            120,
+        );
+        assert!(state.read_output_excerpt_recently_delivered(
+            "terminal-output://session-1/cmd-1",
+            Some("run-1"),
+            "tail",
+            120,
+        ));
+    }
+
+    #[test]
     fn recent_shell_evidence_window_evicts_oldest_and_clear_resets() {
         let mut state = ShellEvidenceState::default();
         for index in 1..=RECENT_SHELL_TOOL_OUTPUT_WINDOW + 1 {
@@ -437,6 +514,7 @@ impl AgentRunState {
 #[derive(Default)]
 pub(crate) struct ActivityState {
     pub(crate) rows: Vec<RuntimeActivityRow>,
+    pub(crate) tool_invocations: Vec<ToolInvocationRecord>,
     pub(crate) output_dir: Option<PathBuf>,
 }
 

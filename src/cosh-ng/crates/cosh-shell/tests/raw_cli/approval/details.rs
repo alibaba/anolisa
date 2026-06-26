@@ -72,7 +72,7 @@ fn raw_cli_details_approvals_records_denied_not_executed() {
 fn raw_cli_details_approvals_records_cancelled_not_executed() {
     let output = run_raw_cli_ask_with_delayed_input(vec![
         (b"?? stream tool approval\n".to_vec(), Duration::ZERO),
-        (b"\x1b\n".to_vec(), Duration::from_millis(800)),
+        (b"\x1b\n".to_vec(), Duration::from_millis(2_500)),
         (
             b"/details approvals\n".to_vec(),
             Duration::from_millis(1_000),

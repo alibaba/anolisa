@@ -9,8 +9,10 @@ use crate::approval::resolution::{
     apply_approval_decision, approval_outcome_for_request, approval_resolution_agent_request,
 };
 use crate::runtime::prelude::{
-    ApprovalDecision, GovernanceDecision, GovernancePolicyDecision, I18n, Language,
+    AgentEvent, AgentRunHandle, AgentRunPoll, ApprovalDecision, CoshApprovalMode, CoshCoreAdapter,
+    GovernanceDecision, GovernancePolicyDecision, I18n, Language,
 };
+use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 
 #[test]
@@ -177,6 +179,53 @@ fn duplicate_provider_permission_tool_use_id_is_not_recorded_twice() {
         state.approvals.requests[0].tool_use_id.as_deref(),
         Some("toolu-1")
     );
+}
+
+#[test]
+fn provider_permission_identity_falls_back_to_request_id_when_tool_use_id_is_empty() {
+    let mut state = InlineState::default();
+    let first = governed_provider_tool_permission("ctrl-1", "");
+    let second = governed_provider_tool_permission("ctrl-2", "");
+
+    let ids = record_approval_requests(&mut state, &[first, second], None, false);
+
+    assert_eq!(ids, vec!["req-1", "req-2"]);
+    assert_eq!(state.approvals.requests.len(), 2);
+    assert_eq!(
+        state.approvals.requests[0].request_id.as_deref(),
+        Some("ctrl-1")
+    );
+    assert!(state.approvals.requests[0].tool_use_id.is_none());
+    assert_eq!(
+        state.approvals.requests[1].request_id.as_deref(),
+        Some("ctrl-2")
+    );
+    assert!(state.approvals.requests[1].tool_use_id.is_none());
+}
+
+#[test]
+fn local_shell_action_uses_approval_id_surface_identity() {
+    let mut state = InlineState::default();
+    let governed = GovernedEvent {
+        policy_decision: GovernancePolicyDecision::NeedsUserApproval,
+        decision: GovernanceDecision::Display,
+        display_text: "approval required".to_string(),
+        reason: "needs user approval".to_string(),
+        auto_execute: false,
+        event: AgentEvent::Action {
+            run_id: "run-1".to_string(),
+            command: "df -h".to_string(),
+        },
+    };
+
+    let ids = record_approval_requests(&mut state, &[governed], None, false);
+
+    assert_eq!(ids, vec!["req-1"]);
+    let request = &state.approvals.requests[0];
+    assert_eq!(request.id, "req-1");
+    assert_eq!(request.kind, ApprovalRequestKind::ShellCommand);
+    assert!(request.request_id.is_none());
+    assert!(request.tool_use_id.is_none());
 }
 
 #[test]
@@ -437,7 +486,7 @@ fn non_shell_provider_permission_approval_stays_provider_owned() {
 
 #[test]
 fn provider_approval_response_refreshes_active_run_idle_clock() {
-    let mut active_run = active_run_for_approval_test();
+    let (dir, mut active_run) = active_run_for_approval_test();
     active_run.last_activity_at = Instant::now() - Duration::from_secs(60);
     let mut request = provider_tool_request(
         "Read",
@@ -448,6 +497,7 @@ fn provider_approval_response_refreshes_active_run_idle_clock() {
 
     assert!(respond_active_run_approval(&mut active_run, response));
     assert!(active_run.last_activity_at.elapsed() < Duration::from_secs(2));
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -499,7 +549,7 @@ fn provider_tool_request(
     }
 }
 
-fn active_run_for_approval_test() -> ActiveAgentRun {
+fn active_run_for_approval_test() -> (std::path::PathBuf, ActiveAgentRun) {
     let request = AgentRequest {
         id: "request-1".to_string(),
         session_id: "session-1".to_string(),
@@ -529,34 +579,91 @@ fn active_run_for_approval_test() -> ActiveAgentRun {
         hook_finding: None,
         recommended_skill: None,
     };
-    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
-    let handle = adapter.start_cancellable(request.clone(), CoshApprovalMode::Recommend);
+    let (dir, handle) = open_control_approval_handle(&request);
     let renderer = RatatuiInlineRenderer::for_terminal();
-    ActiveAgentRun {
-        request,
-        handle,
-        provider_name: "fake",
-        language: Language::EnUs,
-        renderer: renderer.clone(),
-        status_animation: renderer.status_animation(),
-        markdown_stream: renderer.stream_markdown_agent(),
-        governed_events: Vec::new(),
-        deferred_events: Vec::new(),
-        held_events: Vec::new(),
-        cosh_request_filter: crate::evidence::stream::CoshRequestStreamFilter::default(),
-        pending_cosh_requests: Vec::new(),
-        pending_cosh_request_audits: Vec::new(),
-        rendered_governed_event_count: 0,
-        selectable_after_event_index: None,
-        started_at: Instant::now(),
-        last_activity_at: Instant::now(),
-        last_heartbeat_at: Instant::now(),
-        current_phase: String::new(),
-        current_message: String::new(),
-        has_visible_text_delta: false,
-        completed: false,
-        pending_hook_notifications: Vec::new(),
+    (
+        dir,
+        ActiveAgentRun {
+            request,
+            handle,
+            provider_name: "cosh-core",
+            language: Language::EnUs,
+            renderer: renderer.clone(),
+            status_animation: renderer.status_animation(),
+            markdown_stream: renderer.stream_markdown_agent(),
+            governed_events: Vec::new(),
+            deferred_events: Vec::new(),
+            held_events: Vec::new(),
+            cosh_request_filter: crate::evidence::stream::CoshRequestStreamFilter::default(),
+            pending_cosh_requests: Vec::new(),
+            pending_cosh_request_audits: Vec::new(),
+            rendered_governed_event_count: 0,
+            selectable_after_event_index: None,
+            started_at: Instant::now(),
+            last_activity_at: Instant::now(),
+            last_heartbeat_at: Instant::now(),
+            current_phase: String::new(),
+            current_message: String::new(),
+            has_visible_text_delta: false,
+            completed: false,
+            host_completed_tool_ids: Vec::new(),
+            pending_hook_notifications: Vec::new(),
+        },
+    )
+}
+
+fn open_control_approval_handle(request: &AgentRequest) -> (std::path::PathBuf, AgentRunHandle) {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "cosh-shell-approval-control-{}-{unique}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let program = dir.join("cosh-core-approval-control.sh");
+    std::fs::write(
+        &program,
+        r#"#!/bin/sh
+read -r init
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true}}}}'
+printf '%s\n' '{"type":"system","subtype":"init","model":"mock-cosh-core","session_id":"mock-approval-control"}'
+read -r user_message
+printf '%s\n' '{"type":"control_request","request_id":"ctrl-open","request":{"subtype":"can_use_tool","tool_name":"Read","input":{"file_path":"Cargo.toml"},"tool_use_id":"toolu-open"}}'
+if IFS= read -r response; then
+  printf '%s\n' '{"type":"result","subtype":"success","session_id":"mock-approval-control","is_error":false,"result":"done"}'
+  exit 0
+fi
+printf '%s\n' '{"type":"result","subtype":"error","session_id":"mock-approval-control","is_error":true,"result":"missing approval response"}'
+exit 1
+"#,
+    )
+    .expect("write mock cosh-core");
+    let mut permissions = std::fs::metadata(&program)
+        .expect("mock metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&program, permissions).expect("chmod mock cosh-core");
+    let adapter = CoshCoreAdapter {
+        program: program.to_string_lossy().to_string(),
+        allow_model_call: true,
+        session_id: std::sync::Arc::default(),
+        session_cwd: std::sync::Arc::default(),
+    };
+    let handle = adapter.start_cancellable(request.clone(), CoshApprovalMode::Auto);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        match handle.poll_event_timeout(Duration::from_millis(100)) {
+            Ok(AgentRunPoll::Event(AgentEvent::ToolPermissionRequest { .. })) => {
+                return (dir, handle);
+            }
+            Ok(AgentRunPoll::Event(_)) | Ok(AgentRunPoll::Timeout) => continue,
+            Ok(AgentRunPoll::Finished) => break,
+            Err(err) => panic!("mock cosh-core control run failed: {err:?}"),
+        }
     }
+    panic!("mock provider did not emit tool permission");
 }
 
 fn governed_provider_tool_permission(request_id: &str, tool_use_id: &str) -> GovernedEvent {

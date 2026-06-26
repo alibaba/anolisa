@@ -147,7 +147,7 @@ printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-no
 read -r user_message
 case "$user_message" in
   *cosh-core-provider-write-pass-through*)
-    printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-write","request":{"subtype":"can_use_tool","tool_name":"write_file","input":{"file_path":"/tmp/cosh-core-provider-smoke.txt","content":"ok"},"tool_use_id":"toolu-cosh-core-write"}}'
+    printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-write","request":{"subtype":"can_use_tool","tool_name":"write_file","input":{"file_path":"/tmp/cosh-core-provider-smoke.txt","content":"SHOULD_NOT_LEAK_WRITE_CONTENT"},"tool_use_id":"toolu-cosh-core-write"}}'
     if IFS= read -r response; then
       case "$response" in
         *'"request_id":"ctrl-cosh-core-write"'*'"behavior":"allow"'*)
@@ -176,14 +176,18 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
                 b"?? cosh-core-provider-write-pass-through\n".to_vec(),
                 Duration::from_millis(500),
             ),
-            (b"\n".to_vec(), Duration::from_millis(1_000)),
-            (b"exit 0\n".to_vec(), Duration::from_millis(1_000)),
+            (b"\n".to_vec(), Duration::from_millis(2_500)),
+            (b"exit 0\n".to_vec(), Duration::from_millis(2_000)),
         ],
     );
     let _ = fs::remove_dir_all(&home);
 
     assert!(output.contains("Approval required"), "{output}");
     assert!(output.contains("Subject: Write"), "{output}");
+    assert!(
+        output.contains("/tmp/cosh-core-provider-smoke.txt"),
+        "{output}"
+    );
     assert!(output.contains("Approved req-1"), "{output}");
     assert!(
         output.contains(
@@ -195,10 +199,88 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
     assert!(!output.contains("host_executed_shell"), "{output}");
     assert!(!output.contains("foreground_shell_pty"), "{output}");
     assert!(
+        !output.contains("SHOULD_NOT_LEAK_WRITE_CONTENT"),
+        "{output}"
+    );
+    assert!(!output.contains("\"content\""), "{output}");
+    assert!(
         !output.contains("missing non-shell allow response"),
         "{output}"
     );
     assert!(!output.contains("Agent timed out:"), "{output}");
+}
+
+#[test]
+fn raw_cli_cosh_core_write_permission_details_hide_content_json() {
+    let home = temp_shell_home("cosh-core-non-shell-write-details");
+    let bin_dir = home.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let cosh_core_path = bin_dir.join("cosh-core");
+    write_executable(
+        &cosh_core_path,
+        r#"#!/bin/sh
+read -r init
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-write-details","model":"cosh-core-test"}'
+read -r user_message
+case "$user_message" in
+  *cosh-core-provider-write-details*)
+    printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-write-details","request":{"subtype":"can_use_tool","tool_name":"write_file","input":{"file_path":"/tmp/cosh-core-provider-details.txt","content":"SHOULD_NOT_LEAK_WRITE_DETAILS_CONTENT"},"tool_use_id":"toolu-cosh-core-write-details"}}'
+    if IFS= read -r response; then
+      case "$response" in
+        *'"request_id":"ctrl-cosh-core-write-details"'*'"behavior":"deny"'*)
+          printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-write-details","message":{"content":[{"type":"text","text":"Cosh-core write details cancelled without content leak."}]}}'
+          printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-write-details","is_error":false,"result":"done"}'
+          exit 0
+          ;;
+      esac
+    fi
+    printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-write-details","is_error":true,"result":"missing write details deny response"}'
+    exit 1
+    ;;
+esac
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-write-details","is_error":false,"result":"ignored"}'
+"#,
+    );
+    let home_str = home.to_string_lossy().to_string();
+    let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "cosh-core",
+        &[],
+        &[("HOME", &home_str), ("COSH_CORE_PATH", &cosh_core_path_str)],
+        vec![
+            (b"/mode approval auto\n".to_vec(), Duration::ZERO),
+            (
+                b"?? cosh-core-provider-write-details\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            (b"d".to_vec(), Duration::from_millis(1_000)),
+            (b"\x1b".to_vec(), Duration::from_millis(300)),
+            (b"exit 0\n".to_vec(), Duration::from_millis(1_000)),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+
+    assert!(output.contains("Approval required"), "{output}");
+    assert!(output.contains("Subject: Write"), "{output}");
+    assert!(
+        output.contains("/tmp/cosh-core-provider-details.txt"),
+        "{output}"
+    );
+    assert!(output.contains("Cancelled req-1"), "{output}");
+    assert!(
+        output.contains("Cosh-core write details cancelled without content leak."),
+        "{output}"
+    );
+    assert!(
+        !output.contains("SHOULD_NOT_LEAK_WRITE_DETAILS_CONTENT"),
+        "{output}"
+    );
+    assert!(!output.contains("\"content\""), "{output}");
+    assert!(
+        !output.contains("missing write details deny response"),
+        "{output}"
+    );
 }
 
 #[test]

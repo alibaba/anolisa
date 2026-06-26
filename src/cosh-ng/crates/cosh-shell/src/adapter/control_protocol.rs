@@ -10,6 +10,7 @@ const SHELL_HANDOFF_EVIDENCE_PROMPT_MARKER: &str = "ShellCommandCompleted";
 const SHELL_HANDOFF_CONTINUATION_HINT: &str =
     "analysis-only continuation after foreground shell handoff";
 pub const PENDING_CONTROL_TOOL_CALL_GRACE: Duration = Duration::from_millis(200);
+const CONSUMED_CONTROL_TOOL_ID_TTL: Duration = Duration::from_secs(30);
 pub const ANALYSIS_ONLY_SHELL_DENY_MESSAGE: &str = "The foreground shell command already completed and its output was injected. Summarize the existing shell evidence or ask the user to start a new request before running another shell command.";
 
 pub enum ControlRequest {
@@ -117,6 +118,7 @@ pub struct ControlProtocolCapabilities {
 pub struct PendingControlProtocolToolCall {
     pending_shell_tool_calls: Vec<PendingShellToolCall>,
     held_events: Vec<AgentEvent>,
+    consumed_control_tool_ids: Vec<ConsumedControlToolId>,
 }
 
 #[derive(Debug)]
@@ -125,8 +127,20 @@ struct PendingShellToolCall {
     staged_at: Instant,
 }
 
+#[derive(Debug)]
+struct ConsumedControlToolId {
+    run_id: String,
+    tool_use_id: String,
+    consumed_at: Instant,
+}
+
 impl PendingControlProtocolToolCall {
-    pub fn take_matching_control_shell(&mut self, tool_use_id: &str) -> bool {
+    pub fn take_matching_control_shell(&mut self, run_id: &str, tool_use_id: &str) -> bool {
+        self.take_matching_control_tool_call(run_id, tool_use_id)
+    }
+
+    pub fn take_matching_control_tool_call(&mut self, run_id: &str, tool_use_id: &str) -> bool {
+        self.record_consumed_control_tool_id(run_id, tool_use_id);
         if let Some(index) = self.pending_shell_tool_call_index(tool_use_id) {
             self.pending_shell_tool_calls.remove(index);
             if self.pending_shell_tool_calls.is_empty() {
@@ -139,7 +153,16 @@ impl PendingControlProtocolToolCall {
     }
 
     pub fn stage_or_emit(&mut self, event: AgentEvent) -> Vec<AgentEvent> {
-        if matches!(&event, AgentEvent::ToolCall { tool_id: Some(_), name, .. } if is_shell_tool_name(name))
+        self.prune_consumed_control_tool_ids(Instant::now());
+        if let Some(tool_id) = provider_tool_call_id(&event) {
+            if event_run_id(&event)
+                .is_some_and(|run_id| self.is_consumed_control_tool_id(run_id, tool_id))
+            {
+                return Vec::new();
+            }
+        }
+
+        if matches!(&event, AgentEvent::ToolCall { tool_id: Some(_), name, .. } if is_control_backed_tool_name(name))
         {
             self.pending_shell_tool_calls.push(PendingShellToolCall {
                 event,
@@ -149,6 +172,14 @@ impl PendingControlProtocolToolCall {
         }
 
         if let Some(tool_id) = provider_tool_result_id(&event) {
+            if let Some(run_id) = event_run_id(&event) {
+                if self.is_consumed_control_tool_id(run_id, tool_id) {
+                    if matches!(event, AgentEvent::ToolCompleted { .. }) {
+                        self.remove_consumed_control_tool_id(run_id, tool_id);
+                    }
+                    return Vec::new();
+                }
+            }
             let mut events = self.take_pending_shell_tool_call(tool_id);
             events.push(event);
             if self.pending_shell_tool_calls.is_empty() {
@@ -186,7 +217,48 @@ impl PendingControlProtocolToolCall {
             .map(|pending| pending.event)
             .collect::<Vec<_>>();
         events.append(&mut self.held_events);
+        self.consumed_control_tool_ids.clear();
         events
+    }
+
+    fn record_consumed_control_tool_id(&mut self, run_id: &str, tool_use_id: &str) {
+        self.prune_consumed_control_tool_ids(Instant::now());
+        if self
+            .consumed_control_tool_ids
+            .iter()
+            .any(|entry| entry.run_id == run_id && entry.tool_use_id == tool_use_id)
+        {
+            return;
+        }
+        self.consumed_control_tool_ids.push(ConsumedControlToolId {
+            run_id: run_id.to_string(),
+            tool_use_id: tool_use_id.to_string(),
+            consumed_at: Instant::now(),
+        });
+    }
+
+    fn prune_consumed_control_tool_ids(&mut self, now: Instant) {
+        self.consumed_control_tool_ids.retain(|entry| {
+            now.saturating_duration_since(entry.consumed_at) < CONSUMED_CONTROL_TOOL_ID_TTL
+        });
+    }
+
+    fn is_consumed_control_tool_id(&self, run_id: &str, tool_use_id: &str) -> bool {
+        self.consumed_control_tool_ids
+            .iter()
+            .any(|entry| entry.run_id == run_id && entry.tool_use_id == tool_use_id)
+    }
+
+    fn remove_consumed_control_tool_id(&mut self, run_id: &str, tool_use_id: &str) {
+        self.consumed_control_tool_ids
+            .retain(|entry| entry.run_id != run_id || entry.tool_use_id != tool_use_id);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn expire_consumed_control_tool_ids_for_test(&mut self) {
+        for entry in &mut self.consumed_control_tool_ids {
+            entry.consumed_at = Instant::now() - CONSUMED_CONTROL_TOOL_ID_TTL;
+        }
     }
 
     pub fn flush_stalled(&mut self, grace: Duration) -> Vec<AgentEvent> {
@@ -224,6 +296,25 @@ impl PendingControlProtocolToolCall {
     }
 }
 
+fn event_run_id(event: &AgentEvent) -> Option<&str> {
+    match event {
+        AgentEvent::ToolCall { run_id, .. }
+        | AgentEvent::ToolOutputDelta { run_id, .. }
+        | AgentEvent::ToolCompleted { run_id, .. } => Some(run_id),
+        _ => None,
+    }
+}
+
+fn provider_tool_call_id(event: &AgentEvent) -> Option<&str> {
+    match event {
+        AgentEvent::ToolCall {
+            tool_id: Some(tool_id),
+            ..
+        } => Some(tool_id),
+        _ => None,
+    }
+}
+
 fn provider_tool_result_id(event: &AgentEvent) -> Option<&str> {
     match event {
         AgentEvent::ToolOutputDelta { tool_id, .. } | AgentEvent::ToolCompleted { tool_id, .. } => {
@@ -231,6 +322,10 @@ fn provider_tool_result_id(event: &AgentEvent) -> Option<&str> {
         }
         _ => None,
     }
+}
+
+fn is_control_backed_tool_name(name: &str) -> bool {
+    is_shell_tool_name(name) || name == "cosh_shell_evidence"
 }
 
 fn is_terminal_agent_event(event: &AgentEvent) -> bool {

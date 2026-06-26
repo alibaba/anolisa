@@ -18,50 +18,164 @@ pub struct ToolDisplayInfo {
     pub preview: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolPresentationKind {
+    ShellCommand,
+    FileRead,
+    FileWrite,
+    FileEdit,
+    FileSearch,
+    FileGlob,
+    DirectoryList,
+    MultiFileRead,
+    Lsp,
+    WebFetch,
+    WebSearch,
+    Skill,
+    Agent,
+    Memory,
+    Question,
+    ShellEvidence,
+    Custom,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolImpact {
+    ReadOnly,
+    Write,
+    Execute,
+    Destructive,
+    OpenWorld,
+    ContextMutation,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolPresentationField {
+    pub label: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolPresentation {
+    pub canonical_name: String,
+    pub original_name: String,
+    pub kind: ToolPresentationKind,
+    pub impact: ToolImpact,
+    pub target: Option<String>,
+    pub secondary: Option<String>,
+    pub preview: String,
+    pub fields: Vec<ToolPresentationField>,
+    pub raw_input_preview: Option<String>,
+}
+
 pub fn display_for_tool(name: &str, input_json: &str) -> ToolDisplayInfo {
-    let parsed = serde_json::from_str::<Value>(input_json).ok();
-
-    if is_shell_tool_name(name) {
-        return display_bash(&parsed, input_json);
-    }
-
-    match name {
-        "Read" | "read_file" => display_read(&parsed, input_json),
-        "Write" | "write_file" => display_write(&parsed, input_json),
-        "Edit" => display_edit(&parsed, input_json),
-        "Grep" | "grep_search" => display_grep(&parsed, input_json),
-        "Glob" => display_glob(&parsed, input_json),
-        "LS" | "list_directory" => display_ls(&parsed, input_json),
-        "read_many_files" => display_many_files(&parsed, input_json),
-        "LSP" => display_lsp(&parsed, input_json),
-        "WebFetch" => display_web_fetch(&parsed, input_json),
-        "WebSearch" => display_web_search(&parsed, input_json),
-        _ => ToolDisplayInfo {
-            label: name.to_string(),
-            color: ToolColor::Unknown,
-            preview: compact_json(input_json),
-        },
+    let presentation = presentation_for_tool(name, input_json);
+    ToolDisplayInfo {
+        label: presentation.canonical_name,
+        color: color_for_impact(&presentation.impact),
+        preview: presentation.preview,
     }
 }
 
-fn display_bash(parsed: &Option<Value>, input_json: &str) -> ToolDisplayInfo {
+pub fn presentation_for_tool(name: &str, input_json: &str) -> ToolPresentation {
+    let parsed = serde_json::from_str::<Value>(input_json).ok();
+
+    if is_shell_tool_name(name) {
+        return presentation_bash(name, &parsed, input_json);
+    }
+
+    match name {
+        "Read" | "read_file" => presentation_read(name, &parsed, input_json),
+        "Write" | "write_file" => presentation_write(name, &parsed, input_json),
+        "Edit" | "replace" | "NotebookEdit" => presentation_edit(name, &parsed, input_json),
+        "Grep" | "grep" | "grep_search" | "search_file_content" | "FileSearch" | "file_search" => {
+            presentation_grep(name, &parsed, input_json)
+        }
+        "Glob" | "glob" | "FindFiles" => presentation_glob(name, &parsed, input_json),
+        "LS" | "list_directory" | "ReadFolder" => presentation_ls(name, &parsed, input_json),
+        "read_many_files" => presentation_many_files(name, &parsed, input_json),
+        "LSP" => presentation_lsp(name, &parsed, input_json),
+        "WebFetch" | "web_fetch" => presentation_web_fetch(name, &parsed, input_json),
+        "WebSearch" | "google_web_search" => presentation_web_search(name, &parsed, input_json),
+        "Skill" | "skill" | "read_skill" | "ReadSkill" => {
+            presentation_skill(name, &parsed, input_json)
+        }
+        "Agent" | "Workflow" | "SendMessage" | "Task" | "Subagent" | "Delegate" => {
+            presentation_agent(name, &parsed, input_json)
+        }
+        "save_memory" | "TodoWrite" | "TaskCreate" | "TaskUpdate" | "TaskList" | "TaskGet"
+        | "TaskStop" | "CronCreate" | "CronDelete" | "CronList" | "ScheduleWakeup" => {
+            presentation_memory(name, &parsed, input_json)
+        }
+        "AskUserQuestion" | "ask_user_question" | "ask_user" | "AskUser" => {
+            presentation_question(name, &parsed, input_json)
+        }
+        "cosh_shell_evidence" => presentation_shell_evidence(name, &parsed, input_json),
+        _ => presentation_custom(name, &parsed, input_json),
+    }
+}
+
+fn base_presentation(
+    original_name: &str,
+    canonical_name: &str,
+    kind: ToolPresentationKind,
+    impact: ToolImpact,
+    target: Option<String>,
+    secondary: Option<String>,
+    preview: String,
+    raw_input_preview: Option<String>,
+) -> ToolPresentation {
+    ToolPresentation {
+        canonical_name: canonical_name.to_string(),
+        original_name: original_name.to_string(),
+        kind,
+        impact,
+        target,
+        secondary,
+        preview,
+        fields: Vec::new(),
+        raw_input_preview,
+    }
+}
+
+fn color_for_impact(impact: &ToolImpact) -> ToolColor {
+    match impact {
+        ToolImpact::ReadOnly | ToolImpact::OpenWorld => ToolColor::ReadOnly,
+        ToolImpact::Write | ToolImpact::ContextMutation => ToolColor::Write,
+        ToolImpact::Execute => ToolColor::Execute,
+        ToolImpact::Destructive => ToolColor::Dangerous,
+        ToolImpact::Unknown => ToolColor::Unknown,
+    }
+}
+
+fn presentation_bash(
+    original_name: &str,
+    parsed: &Option<Value>,
+    input_json: &str,
+) -> ToolPresentation {
     let command = parsed
         .as_ref()
         .and_then(|v| v.get("command"))
         .and_then(|v| v.as_str())
         .unwrap_or(input_json);
 
-    let color = if is_dangerous_command(command) {
-        ToolColor::Dangerous
+    let impact = if is_dangerous_command(command) {
+        ToolImpact::Destructive
     } else {
-        ToolColor::Execute
+        ToolImpact::Execute
     };
 
-    ToolDisplayInfo {
-        label: "Bash".to_string(),
-        color,
-        preview: format!("$ {command}"),
-    }
+    base_presentation(
+        original_name,
+        "Bash",
+        ToolPresentationKind::ShellCommand,
+        impact,
+        Some(format!("$ {command}")),
+        None,
+        format!("$ {command}"),
+        malformed_raw_preview(parsed, input_json),
+    )
 }
 
 fn is_dangerous_command(command: &str) -> bool {
@@ -71,8 +185,14 @@ fn is_dangerous_command(command: &str) -> bool {
         .any(|t| *t == "sudo" || *t == "rm" || *t == "kill")
 }
 
-fn display_read(parsed: &Option<Value>, input_json: &str) -> ToolDisplayInfo {
-    let file_path = str_field(parsed, "file_path").unwrap_or(input_json);
+fn presentation_read(
+    original_name: &str,
+    parsed: &Option<Value>,
+    input_json: &str,
+) -> ToolPresentation {
+    let file_path = str_field(parsed, "file_path")
+        .or_else(|| str_field(parsed, "path"))
+        .unwrap_or(input_json);
 
     let mut preview = file_path.to_string();
     if let Some(offset) = parsed
@@ -90,25 +210,52 @@ fn display_read(parsed: &Option<Value>, input_json: &str) -> ToolDisplayInfo {
         }
     }
 
-    ToolDisplayInfo {
-        label: "Read".to_string(),
-        color: ToolColor::ReadOnly,
+    let target = if file_path.starts_with("terminal-output://") {
+        Some("Shell output bookmark".to_string())
+    } else {
+        Some(file_path.to_string())
+    };
+    base_presentation(
+        original_name,
+        "Read",
+        ToolPresentationKind::FileRead,
+        ToolImpact::ReadOnly,
+        target,
+        None,
         preview,
-    }
+        malformed_raw_preview(parsed, input_json),
+    )
 }
 
-fn display_write(parsed: &Option<Value>, input_json: &str) -> ToolDisplayInfo {
-    let file_path = str_field(parsed, "file_path").unwrap_or(input_json);
+fn presentation_write(
+    original_name: &str,
+    parsed: &Option<Value>,
+    input_json: &str,
+) -> ToolPresentation {
+    let file_path = str_field(parsed, "file_path")
+        .or_else(|| str_field(parsed, "path"))
+        .unwrap_or(input_json);
 
-    ToolDisplayInfo {
-        label: "Write".to_string(),
-        color: ToolColor::Write,
-        preview: format!("{file_path} (new file)"),
-    }
+    base_presentation(
+        original_name,
+        "Write",
+        ToolPresentationKind::FileWrite,
+        ToolImpact::Write,
+        Some(file_path.to_string()),
+        Some("new file".to_string()),
+        format!("{file_path} (new file)"),
+        malformed_raw_preview(parsed, input_json),
+    )
 }
 
-fn display_edit(parsed: &Option<Value>, input_json: &str) -> ToolDisplayInfo {
-    let file_path = str_field(parsed, "file_path").unwrap_or(input_json);
+fn presentation_edit(
+    original_name: &str,
+    parsed: &Option<Value>,
+    input_json: &str,
+) -> ToolPresentation {
+    let file_path = str_field(parsed, "file_path")
+        .or_else(|| str_field(parsed, "path"))
+        .unwrap_or(input_json);
     let old = str_field(parsed, "old_string").unwrap_or("");
     let new = str_field(parsed, "new_string").unwrap_or("");
 
@@ -120,61 +267,153 @@ fn display_edit(parsed: &Option<Value>, input_json: &str) -> ToolDisplayInfo {
         String::new()
     };
 
-    ToolDisplayInfo {
-        label: "Edit".to_string(),
-        color: ToolColor::Write,
-        preview: format!("{file_path}{diff}"),
-    }
+    base_presentation(
+        original_name,
+        if original_name == "NotebookEdit" {
+            "Notebook edit"
+        } else {
+            "Edit"
+        },
+        ToolPresentationKind::FileEdit,
+        ToolImpact::Write,
+        Some(file_path.to_string()),
+        if diff.is_empty() {
+            None
+        } else {
+            Some(diff.trim().trim_matches(['(', ')']).to_string())
+        },
+        format!("{file_path}{diff}"),
+        malformed_raw_preview(parsed, input_json),
+    )
 }
 
-fn display_grep(parsed: &Option<Value>, input_json: &str) -> ToolDisplayInfo {
-    let pattern = str_field(parsed, "pattern").unwrap_or("?");
+fn presentation_grep(
+    original_name: &str,
+    parsed: &Option<Value>,
+    input_json: &str,
+) -> ToolPresentation {
+    let pattern = str_field(parsed, "pattern")
+        .or_else(|| str_field(parsed, "query"))
+        .unwrap_or("?");
     let path = str_field(parsed, "path").unwrap_or(input_json);
 
-    ToolDisplayInfo {
-        label: "Grep".to_string(),
-        color: ToolColor::ReadOnly,
-        preview: format!("/{pattern}/ in {path}"),
-    }
+    base_presentation(
+        original_name,
+        "Grep",
+        ToolPresentationKind::FileSearch,
+        ToolImpact::ReadOnly,
+        Some(format!("\"{pattern}\" in {path}")),
+        None,
+        format!("/{pattern}/ in {path}"),
+        malformed_raw_preview(parsed, input_json),
+    )
 }
 
-fn display_glob(parsed: &Option<Value>, input_json: &str) -> ToolDisplayInfo {
+fn presentation_glob(
+    original_name: &str,
+    parsed: &Option<Value>,
+    input_json: &str,
+) -> ToolPresentation {
     let pattern = str_field(parsed, "pattern").unwrap_or(input_json);
 
-    ToolDisplayInfo {
-        label: "Glob".to_string(),
-        color: ToolColor::ReadOnly,
-        preview: pattern.to_string(),
-    }
+    base_presentation(
+        original_name,
+        "Glob",
+        ToolPresentationKind::FileGlob,
+        ToolImpact::ReadOnly,
+        Some(pattern.to_string()),
+        None,
+        pattern.to_string(),
+        malformed_raw_preview(parsed, input_json),
+    )
 }
 
-fn display_ls(parsed: &Option<Value>, input_json: &str) -> ToolDisplayInfo {
+fn presentation_ls(
+    original_name: &str,
+    parsed: &Option<Value>,
+    input_json: &str,
+) -> ToolPresentation {
     let path = str_field(parsed, "path")
         .or_else(|| str_field(parsed, "dir_path"))
         .unwrap_or(input_json);
 
-    ToolDisplayInfo {
-        label: "LS".to_string(),
-        color: ToolColor::ReadOnly,
-        preview: path.to_string(),
-    }
+    base_presentation(
+        original_name,
+        "LS",
+        ToolPresentationKind::DirectoryList,
+        ToolImpact::ReadOnly,
+        Some(path.to_string()),
+        None,
+        path.to_string(),
+        malformed_raw_preview(parsed, input_json),
+    )
 }
 
-fn display_many_files(parsed: &Option<Value>, input_json: &str) -> ToolDisplayInfo {
-    let preview = parsed
-        .as_ref()
-        .and_then(|v| v.get("paths"))
-        .map(Value::to_string)
-        .unwrap_or_else(|| compact_json(input_json));
+fn presentation_many_files(
+    original_name: &str,
+    parsed: &Option<Value>,
+    input_json: &str,
+) -> ToolPresentation {
+    let paths = string_array_field(parsed, "paths");
+    let (target, preview, secondary, fields) = if paths.is_empty() {
+        (
+            "multiple files".to_string(),
+            compact_json(input_json),
+            None,
+            Vec::new(),
+        )
+    } else {
+        let visible = paths
+            .iter()
+            .take(20)
+            .map(|path| truncate(path, 80))
+            .collect::<Vec<_>>();
+        let omitted = paths.len().saturating_sub(visible.len());
+        let mut fields = visible
+            .iter()
+            .map(|path| ToolPresentationField {
+                label: "path".to_string(),
+                value: path.clone(),
+            })
+            .collect::<Vec<_>>();
+        if omitted > 0 {
+            fields.push(ToolPresentationField {
+                label: "omitted_paths".to_string(),
+                value: omitted.to_string(),
+            });
+        }
+        let preview = if omitted > 0 {
+            format!("{}; +{} more", visible.join("; "), omitted)
+        } else {
+            visible.join("; ")
+        };
+        (
+            format!("{} files", paths.len()),
+            preview,
+            (omitted > 0).then(|| format!("showing first 20; {omitted} more")),
+            fields,
+        )
+    };
 
-    ToolDisplayInfo {
-        label: "Read".to_string(),
-        color: ToolColor::ReadOnly,
+    let mut presentation = base_presentation(
+        original_name,
+        "Read",
+        ToolPresentationKind::MultiFileRead,
+        ToolImpact::ReadOnly,
+        Some(target),
+        secondary,
         preview,
-    }
+        malformed_raw_preview(parsed, input_json),
+    );
+    presentation.fields = fields;
+    presentation
 }
 
-fn display_lsp(parsed: &Option<Value>, _input_json: &str) -> ToolDisplayInfo {
+fn presentation_lsp(
+    original_name: &str,
+    parsed: &Option<Value>,
+    input_json: &str,
+) -> ToolPresentation {
     let operation = str_field(parsed, "operation").unwrap_or("unknown");
     let file_path = str_field(parsed, "filePath").unwrap_or("?");
     let line = parsed
@@ -184,35 +423,326 @@ fn display_lsp(parsed: &Option<Value>, _input_json: &str) -> ToolDisplayInfo {
         .map(|l| l.to_string())
         .unwrap_or_else(|| "?".to_string());
 
-    ToolDisplayInfo {
-        label: format!("LSP {operation}"),
-        color: ToolColor::ReadOnly,
-        preview: format!("{file_path}:{line}"),
-    }
+    base_presentation(
+        original_name,
+        &format!("LSP {operation}"),
+        ToolPresentationKind::Lsp,
+        ToolImpact::ReadOnly,
+        Some(format!("{file_path}:{line}")),
+        Some(operation.to_string()),
+        format!("{file_path}:{line}"),
+        malformed_raw_preview(parsed, input_json),
+    )
 }
 
-fn display_web_fetch(parsed: &Option<Value>, input_json: &str) -> ToolDisplayInfo {
+fn presentation_web_fetch(
+    original_name: &str,
+    parsed: &Option<Value>,
+    input_json: &str,
+) -> ToolPresentation {
     let url = str_field(parsed, "url").unwrap_or(input_json);
 
-    ToolDisplayInfo {
-        label: "WebFetch".to_string(),
-        color: ToolColor::ReadOnly,
-        preview: url.to_string(),
+    base_presentation(
+        original_name,
+        "WebFetch",
+        ToolPresentationKind::WebFetch,
+        ToolImpact::OpenWorld,
+        Some(url.to_string()),
+        None,
+        url.to_string(),
+        malformed_raw_preview(parsed, input_json),
+    )
+}
+
+fn presentation_web_search(
+    original_name: &str,
+    parsed: &Option<Value>,
+    input_json: &str,
+) -> ToolPresentation {
+    let query = str_field(parsed, "query").unwrap_or(input_json);
+
+    base_presentation(
+        original_name,
+        "WebSearch",
+        ToolPresentationKind::WebSearch,
+        ToolImpact::OpenWorld,
+        Some(format!("\"{query}\"")),
+        None,
+        format!("\"{query}\""),
+        malformed_raw_preview(parsed, input_json),
+    )
+}
+
+fn presentation_skill(
+    original_name: &str,
+    parsed: &Option<Value>,
+    input_json: &str,
+) -> ToolPresentation {
+    let skill = str_field(parsed, "skill")
+        .or_else(|| str_field(parsed, "skill_name"))
+        .or_else(|| str_field(parsed, "name"));
+    let action = str_field(parsed, "action");
+    let target = skill
+        .or(action)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "skill".to_string());
+    let mut presentation = base_presentation(
+        original_name,
+        "Skill",
+        ToolPresentationKind::Skill,
+        ToolImpact::ContextMutation,
+        Some(target.clone()),
+        None,
+        target,
+        malformed_raw_preview(parsed, input_json),
+    );
+    if let Some(action) = action {
+        presentation.fields.push(ToolPresentationField {
+            label: "action".to_string(),
+            value: action.to_string(),
+        });
+    }
+    presentation
+}
+
+fn presentation_agent(
+    original_name: &str,
+    parsed: &Option<Value>,
+    input_json: &str,
+) -> ToolPresentation {
+    let agent = str_field(parsed, "prompt")
+        .or_else(|| str_field(parsed, "task"))
+        .or_else(|| str_field(parsed, "description"))
+        .or_else(|| str_field(parsed, "agent"))
+        .or_else(|| str_field(parsed, "subagent"))
+        .or_else(|| str_field(parsed, "name"))
+        .unwrap_or("agent");
+    let canonical = match original_name {
+        "Task" => "Task",
+        "Subagent" => "Subagent",
+        "Delegate" => "Delegate",
+        _ => "Agent",
+    };
+    base_presentation(
+        original_name,
+        canonical,
+        ToolPresentationKind::Agent,
+        ToolImpact::ContextMutation,
+        Some(truncate(agent, 80)),
+        None,
+        truncate(agent, 80),
+        malformed_raw_preview(parsed, input_json),
+    )
+}
+
+fn presentation_memory(
+    original_name: &str,
+    parsed: &Option<Value>,
+    input_json: &str,
+) -> ToolPresentation {
+    let target = str_field(parsed, "task_id")
+        .or_else(|| str_field(parsed, "todo_id"))
+        .or_else(|| str_field(parsed, "cron_id"))
+        .or_else(|| str_field(parsed, "schedule_id"))
+        .or_else(|| str_field(parsed, "title"))
+        .or_else(|| str_field(parsed, "name"))
+        .or_else(|| str_field(parsed, "fact"))
+        .or_else(|| str_field(parsed, "time"))
+        .unwrap_or("context");
+    let (canonical, receipt) = memory_tool_receipt(original_name);
+    base_presentation(
+        original_name,
+        canonical,
+        ToolPresentationKind::Memory,
+        ToolImpact::ContextMutation,
+        Some(truncate(target, 80)),
+        Some(receipt.to_string()),
+        truncate(target, 80),
+        malformed_raw_preview(parsed, input_json),
+    )
+}
+
+fn memory_tool_receipt(name: &str) -> (&str, &'static str) {
+    match name {
+        "TodoWrite" => ("Todo", "updated"),
+        "TaskCreate" => ("Task", "created"),
+        "TaskUpdate" => ("Task", "updated"),
+        "TaskList" => ("Task", "listed"),
+        "TaskGet" => ("Task", "loaded"),
+        "TaskStop" => ("Task", "stopped"),
+        "CronCreate" => ("Cron", "created"),
+        "CronDelete" => ("Cron", "deleted"),
+        "CronList" => ("Cron", "listed"),
+        "ScheduleWakeup" => ("Wakeup", "scheduled"),
+        "save_memory" => ("Memory", "saved"),
+        _ => (name, "updated"),
     }
 }
 
-fn display_web_search(parsed: &Option<Value>, input_json: &str) -> ToolDisplayInfo {
-    let query = str_field(parsed, "query").unwrap_or(input_json);
+fn presentation_question(
+    original_name: &str,
+    parsed: &Option<Value>,
+    input_json: &str,
+) -> ToolPresentation {
+    let question = str_field(parsed, "question").unwrap_or("question");
+    base_presentation(
+        original_name,
+        "Question",
+        ToolPresentationKind::Question,
+        ToolImpact::Unknown,
+        Some(question.to_string()),
+        None,
+        question.to_string(),
+        malformed_raw_preview(parsed, input_json),
+    )
+}
 
-    ToolDisplayInfo {
-        label: "WebSearch".to_string(),
-        color: ToolColor::ReadOnly,
-        preview: format!("\"{query}\""),
+fn presentation_shell_evidence(
+    original_name: &str,
+    parsed: &Option<Value>,
+    input_json: &str,
+) -> ToolPresentation {
+    let action = str_field(parsed, "action").unwrap_or("evidence");
+    let command = str_field(parsed, "command").filter(|value| *value != "<none>");
+    let command_label = str_field(parsed, "command_label").filter(|value| *value != "<none>");
+    let preview = match action {
+        "list_commands" => "command history",
+        "read_output" => "shell output excerpt",
+        "already_delivered" => "already delivered shell evidence",
+        _ => "shell evidence",
     }
+    .to_string();
+    let mut presentation = base_presentation(
+        original_name,
+        "Evidence",
+        ToolPresentationKind::ShellEvidence,
+        ToolImpact::ReadOnly,
+        command_label
+            .map(ToString::to_string)
+            .or_else(|| {
+                command.map(|command| {
+                    if command.starts_with('$') {
+                        command.to_string()
+                    } else {
+                        format!("$ {command}")
+                    }
+                })
+            })
+            .or(Some(preview.clone())),
+        None,
+        preview,
+        malformed_raw_preview(parsed, input_json),
+    );
+    presentation.fields.push(ToolPresentationField {
+        label: "action".to_string(),
+        value: action.to_string(),
+    });
+    for key in [
+        "command",
+        "output_id",
+        "command_label",
+        "command_count",
+        "has_more",
+        "direction",
+        "lines",
+        "status",
+        "reason",
+        "duplicate_provider_request",
+    ] {
+        if let Some(value) = str_field(parsed, key) {
+            if value == "<none>" {
+                continue;
+            }
+            presentation.fields.push(ToolPresentationField {
+                label: key.to_string(),
+                value: value.to_string(),
+            });
+        }
+    }
+    presentation
+}
+
+fn presentation_custom(
+    original_name: &str,
+    parsed: &Option<Value>,
+    input_json: &str,
+) -> ToolPresentation {
+    let mut fields = Vec::new();
+    if let Some((server, tool)) = mcp_server_tool(original_name) {
+        fields.push(ToolPresentationField {
+            label: "server".to_string(),
+            value: server.to_string(),
+        });
+        fields.push(ToolPresentationField {
+            label: "tool".to_string(),
+            value: tool.to_string(),
+        });
+    }
+    for key in [
+        "path",
+        "file_path",
+        "command",
+        "query",
+        "url",
+        "name",
+        "title",
+        "action",
+        "operation",
+    ] {
+        if fields.len() >= 3 {
+            break;
+        }
+        if let Some(value) = str_field(parsed, key) {
+            fields.push(ToolPresentationField {
+                label: key.to_string(),
+                value: truncate(value, 80),
+            });
+        }
+    }
+    let preview = if fields.is_empty() {
+        match parsed {
+            Some(Value::Object(_)) | Some(Value::Array(_)) => "input: structured payload",
+            Some(_) | None => "input: opaque payload",
+        }
+        .to_string()
+    } else {
+        fields
+            .iter()
+            .map(|field| format!("{}: {}", field.label, field.value))
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+    let mut presentation = base_presentation(
+        original_name,
+        original_name,
+        ToolPresentationKind::Custom,
+        ToolImpact::Unknown,
+        Some(preview.clone()),
+        None,
+        preview,
+        Some(compact_json(input_json)),
+    );
+    presentation.fields = fields;
+    presentation
 }
 
 fn str_field<'a>(parsed: &'a Option<Value>, key: &str) -> Option<&'a str> {
     parsed.as_ref()?.get(key)?.as_str()
+}
+
+fn string_array_field(parsed: &Option<Value>, key: &str) -> Vec<String> {
+    parsed
+        .as_ref()
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -231,6 +761,24 @@ fn compact_json(input: &str) -> String {
             truncate(&s, 120)
         }
         Err(_) => truncate(input, 120),
+    }
+}
+
+fn malformed_raw_preview(parsed: &Option<Value>, input_json: &str) -> Option<String> {
+    if parsed.is_none() {
+        Some(truncate(input_json, 120))
+    } else {
+        None
+    }
+}
+
+fn mcp_server_tool(name: &str) -> Option<(&str, &str)> {
+    let rest = name.strip_prefix("mcp__")?;
+    let (server, tool) = rest.split_once("__")?;
+    if server.is_empty() || tool.is_empty() {
+        None
+    } else {
+        Some((server, tool))
     }
 }
 

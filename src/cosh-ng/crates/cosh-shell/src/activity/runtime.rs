@@ -1,5 +1,6 @@
 use crate::runtime::evidence_delivery::record_shell_handoff_completion;
 use crate::runtime::state::PendingInteractiveShellHandoff;
+use crate::tools::display::{presentation_for_tool, ToolPresentation};
 
 use crate::runtime::prelude::*;
 
@@ -8,6 +9,18 @@ pub(crate) use super::runtime_output::write_tool_output_ref;
 pub(crate) use super::runtime_render::{
     render_activity_details_by_id, render_activity_rows, render_provider_native_shell_transcript,
 };
+use super::tool_invocation::{
+    complete_tool_invocation, control_tool_invocation_id, first_error_line,
+    tool_output_ref_for_row, update_tool_output_invocation, upsert_tool_call_invocation,
+};
+pub(crate) use super::tool_invocation::{
+    record_shell_evidence_action, ToolInvocationPhase, ToolInvocationRecord, ToolOutputRef,
+};
+
+#[derive(Debug, Clone)]
+pub(crate) enum ActivityPresentation {
+    Tool(ToolPresentation),
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeActivityRow {
@@ -18,6 +31,7 @@ pub(crate) struct RuntimeActivityRow {
     pub(crate) subject: String,
     pub(crate) summary: String,
     pub(crate) detail: String,
+    pub(crate) presentation: Option<ActivityPresentation>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -54,7 +68,21 @@ pub(crate) fn record_activity_rows_with_policy(
             _ => None,
         })
         .collect::<HashSet<_>>();
-    for event in governed_events {
+    for (event_index, event) in governed_events.iter().enumerate() {
+        if let AgentEvent::ShellEvidenceRequest {
+            run_id,
+            request_id,
+            tool_use_id,
+            ..
+        } = &event.event
+        {
+            if let Some(id) = shell_evidence_activity_row_id(state, run_id, request_id, tool_use_id)
+            {
+                ids.push(id);
+            }
+            continue;
+        }
+
         let row = match &event.event {
             AgentEvent::ToolCall {
                 run_id,
@@ -94,36 +122,72 @@ pub(crate) fn record_activity_rows_with_policy(
                             }
                             continue;
                         }
-                        Some(provider_native_shell_auto_approved_row(
+                        let row = provider_native_shell_auto_approved_row(
                             state,
                             run_id,
                             tool_id.as_deref(),
                             name,
                             input,
                             None,
-                        ))
+                        );
+                        let invocation_id =
+                            tool_call_invocation_id(run_id, tool_id.as_deref(), event_index);
+                        upsert_tool_call_invocation(
+                            state,
+                            run_id,
+                            &invocation_id,
+                            name,
+                            input,
+                            "auto-approved",
+                            &row.id,
+                        );
+                        Some(row)
                     } else {
-                        Some(provider_tool_call_row(
+                        let row = provider_tool_call_row(
                             state,
                             run_id,
                             tool_id.as_deref(),
                             name,
                             input,
                             policy.shell_evidence_tool_available,
-                        ))
+                        );
+                        let invocation_id =
+                            tool_call_invocation_id(run_id, tool_id.as_deref(), event_index);
+                        upsert_tool_call_invocation(
+                            state,
+                            run_id,
+                            &invocation_id,
+                            name,
+                            input,
+                            "called",
+                            &row.id,
+                        );
+                        Some(row)
                     }
                 } else {
                     if covered_by_control_permission {
                         continue;
                     }
-                    Some(provider_tool_call_row(
+                    let row = provider_tool_call_row(
                         state,
                         run_id,
                         tool_id.as_deref(),
                         name,
                         input,
                         policy.shell_evidence_tool_available,
-                    ))
+                    );
+                    let invocation_id =
+                        tool_call_invocation_id(run_id, tool_id.as_deref(), event_index);
+                    upsert_tool_call_invocation(
+                        state,
+                        run_id,
+                        &invocation_id,
+                        name,
+                        input,
+                        "called",
+                        &row.id,
+                    );
+                    Some(row)
                 }
             }
             AgentEvent::ToolOutputDelta {
@@ -141,9 +205,31 @@ pub(crate) fn record_activity_rows_with_policy(
                     || (state.control.provider_tool_is_shell(tool_id)
                         && state.control.provider_shell_transcript_seen(tool_id))
                 {
+                    update_tool_output_invocation(
+                        state,
+                        run_id,
+                        tool_id,
+                        stream,
+                        text,
+                        None,
+                        None,
+                        Some(event_index),
+                    );
                     continue;
                 } else {
-                    Some(tool_output_row(state, run_id, tool_id, stream, text))
+                    let row = tool_output_row(state, run_id, tool_id, stream, text);
+                    let output_ref = tool_output_ref_for_row(&row);
+                    update_tool_output_invocation(
+                        state,
+                        run_id,
+                        tool_id,
+                        stream,
+                        text,
+                        Some(&row.id),
+                        output_ref,
+                        Some(event_index),
+                    );
+                    Some(row)
                 }
             }
             AgentEvent::ToolPermissionRequest {
@@ -164,7 +250,7 @@ pub(crate) fn record_activity_rows_with_policy(
                         .control
                         .mark_provider_control_permission_shell_tool(tool_use_id);
                 }
-                Some(provider_tool_request_row(
+                let row = provider_tool_request_row(
                     state,
                     run_id,
                     request_id,
@@ -172,7 +258,19 @@ pub(crate) fn record_activity_rows_with_policy(
                     tool_input,
                     tool_use_id,
                     policy.shell_evidence_tool_available,
-                ))
+                );
+                let input_str = serde_json::to_string(tool_input).unwrap_or_default();
+                let invocation_id = control_tool_invocation_id(tool_use_id, request_id);
+                upsert_tool_call_invocation(
+                    state,
+                    run_id,
+                    &invocation_id,
+                    tool_name,
+                    &input_str,
+                    "requested",
+                    &row.id,
+                );
+                Some(row)
             }
             AgentEvent::ToolCompleted {
                 run_id,
@@ -185,9 +283,26 @@ pub(crate) fn record_activity_rows_with_policy(
                     || (state.control.provider_tool_is_shell(tool_id)
                         && state.control.provider_shell_transcript_seen(tool_id))
                 {
+                    complete_tool_invocation(
+                        state,
+                        run_id,
+                        tool_id,
+                        status,
+                        None,
+                        Some(event_index),
+                    );
                     continue;
                 } else {
-                    Some(tool_completed_row(state, run_id, tool_id, status))
+                    let row = tool_completed_row(state, run_id, tool_id, status);
+                    complete_tool_invocation(
+                        state,
+                        run_id,
+                        tool_id,
+                        status,
+                        Some(&row.id),
+                        Some(event_index),
+                    );
+                    Some(row)
                 }
             }
             _ => None,
@@ -199,6 +314,48 @@ pub(crate) fn record_activity_rows_with_policy(
         }
     }
     ids
+}
+
+fn shell_evidence_activity_row_id(
+    state: &InlineState,
+    run_id: &str,
+    request_id: &str,
+    tool_use_id: &str,
+) -> Option<String> {
+    let invocation_id = control_tool_invocation_id(tool_use_id, request_id);
+    if let Some(id) = state
+        .activity
+        .tool_invocations
+        .iter()
+        .rev()
+        .find(|record| {
+            record.run_id == run_id
+                && record.invocation_id == invocation_id
+                && record.tool_name == "cosh_shell_evidence"
+        })
+        .and_then(|record| record.activity_row_ids.last())
+    {
+        return Some(id.clone());
+    }
+
+    state
+        .activity
+        .rows
+        .iter()
+        .rev()
+        .find(|row| row.run_id == run_id && row.subject == invocation_id)
+        .map(|row| row.id.clone())
+}
+
+pub(super) fn tool_call_invocation_id(
+    run_id: &str,
+    tool_id: Option<&str>,
+    event_index: usize,
+) -> String {
+    tool_id
+        .filter(|id| !id.trim().is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("{run_id}:event-{event_index}"))
 }
 
 fn provider_shell_transcript_seen(state: &InlineState, tool_id: Option<&str>) -> bool {
@@ -259,19 +416,22 @@ fn provider_native_shell_auto_approved_row(
             truncate_activity_preview(text, 4_000)
         ));
     }
-    let preview = activity_summary_preview(&format!("$ {command}"), 120);
+    let preview = legacy_activity_summary_preview(&format!("$ {command}"), 120);
     RuntimeActivityRow {
         id: id.clone(),
         run_id: run_id.to_string(),
         kind: ActivityKind::Tool,
         status: "auto-approved".to_string(),
         subject,
-        summary: activity_summary_message(
+        summary: legacy_activity_summary_message(
             state,
             MessageId::ActivityProviderNativeShellBypassSummary,
             &[("tool", tool_name), ("preview", &preview), ("id", &id)],
         ),
         detail,
+        presentation: Some(ActivityPresentation::Tool(presentation_for_tool(
+            tool_name, input,
+        ))),
     }
 }
 
@@ -284,6 +444,7 @@ fn provider_tool_call_row(
     shell_evidence_tool_available: bool,
 ) -> RuntimeActivityRow {
     let id = next_activity_id(state, "tool");
+    let presentation = presentation_for_tool(tool_name, input);
     let info = display_for_tool(tool_name, input);
     let misroute_detail =
         terminal_output_misroute_detail(tool_name, input, shell_evidence_tool_available);
@@ -293,12 +454,12 @@ fn provider_tool_call_row(
         kind: ActivityKind::Tool,
         status: "called".to_string(),
         subject: tool_id.unwrap_or(&info.label).to_string(),
-        summary: activity_summary_message(
+        summary: legacy_activity_summary_message(
             state,
             MessageId::ActivityToolCalledSummary,
             &[
                 ("tool", tool_name),
-                ("preview", &activity_summary_preview(&info.preview, 120)),
+                ("preview", &legacy_activity_summary_preview(&info.preview, 120)),
                 ("id", &id),
             ],
         ),
@@ -308,6 +469,7 @@ fn provider_tool_call_row(
             info.preview,
             misroute_detail
         ),
+        presentation: Some(ActivityPresentation::Tool(presentation)),
     }
 }
 
@@ -322,6 +484,7 @@ fn provider_tool_request_row(
 ) -> RuntimeActivityRow {
     let id = next_activity_id(state, "tool");
     let input_str = serde_json::to_string(tool_input).unwrap_or_default();
+    let presentation = presentation_for_tool(tool_name, &input_str);
     let info = display_for_tool(tool_name, &input_str);
     let preview = provider_tool_input_preview(tool_name, tool_input, &info.preview);
     let misroute_detail =
@@ -331,19 +494,28 @@ fn provider_tool_request_row(
         run_id: run_id.to_string(),
         kind: ActivityKind::Tool,
         status: "requested".to_string(),
-        subject: tool_use_id.to_string(),
-        summary: activity_summary_message(
+        subject: provider_tool_request_subject(tool_use_id, request_id),
+        summary: legacy_activity_summary_message(
             state,
             MessageId::ActivityToolRequestedSummary,
             &[
                 ("tool", &info.label),
-                ("preview", &activity_summary_preview(&preview, 120)),
+                ("preview", &legacy_activity_summary_preview(&preview, 120)),
                 ("id", &id),
             ],
         ),
         detail: format!(
             "evidence: ProviderToolRequest\nprovider: provider_control_protocol\nexecution_path: provider_control_protocol\nrequest_id: {request_id}\ntool_use_id: {tool_use_id}\ntool_name: {tool_name}\ninput_preview: {preview}{misroute_detail}\nagent_result_visibility: provider_native_result"
         ),
+        presentation: Some(ActivityPresentation::Tool(presentation)),
+    }
+}
+
+fn provider_tool_request_subject(tool_use_id: &str, request_id: &str) -> String {
+    if tool_use_id.trim().is_empty() {
+        request_id.to_string()
+    } else {
+        tool_use_id.to_string()
     }
 }
 
@@ -375,49 +547,6 @@ fn terminal_output_id_from_read_tool_input(tool_name: &str, input: &str) -> Opti
         .filter_map(|key| value.get(key).and_then(|value| value.as_str()))
         .find(|path| path.starts_with("terminal-output://"))
         .map(ToString::to_string)
-}
-
-pub(crate) fn record_shell_evidence_action(
-    language: Language,
-    rows: &mut Vec<RuntimeActivityRow>,
-    run_id: &str,
-    request_id: &str,
-    tool_use_id: &str,
-    action: &str,
-    output_id: Option<&str>,
-    direction: Option<&str>,
-    lines: Option<u16>,
-    status: &str,
-    failure_reason: Option<&str>,
-) -> String {
-    let id = next_activity_id_from_rows(rows, "evidence");
-    let reason = failure_reason.unwrap_or("<none>");
-    let output_id = output_id.unwrap_or("<none>");
-    let direction = direction.unwrap_or("<none>");
-    let lines = lines
-        .map(|lines| lines.to_string())
-        .unwrap_or_else(|| "<none>".to_string());
-    let preview = format!("{action} {output_id} {direction} lines={lines}");
-    let row = RuntimeActivityRow {
-        id: id.clone(),
-        run_id: run_id.to_string(),
-        kind: ActivityKind::Tool,
-        status: status.to_string(),
-        subject: tool_use_id.to_string(),
-        summary: I18n::new(language).format(
-            MessageId::ActivityToolRequestedSummary,
-            &[
-                ("tool", "cosh_shell_evidence"),
-                ("preview", &activity_summary_preview(&preview, 120)),
-                ("id", &id),
-            ],
-        ),
-        detail: format!(
-            "evidence: ShellEvidenceAction\nprovider: provider_control_protocol\nexecution_path: control_protocol_shell_evidence\nrequest_id: {request_id}\ntool_use_id: {tool_use_id}\ntool_name: cosh_shell_evidence\naction: {action}\noutput_id: {output_id}\ndirection: {direction}\nlines: {lines}\nstatus: {status}\nfailure_reason: {reason}\nagent_result_visibility: provider_tool_result"
-        ),
-    };
-    rows.push(row);
-    id
 }
 
 fn provider_tool_input_preview(
@@ -467,7 +596,7 @@ fn tool_completed_row(
         detail.push_str(stderr);
     }
     if let Some(handoff) = interactive_handoff {
-        let handoff_summary = activity_summary_message(
+        let handoff_summary = legacy_activity_summary_message(
             state,
             MessageId::ActivityToolNeedsForegroundShellSummary,
             &[("handoff", &handoff.id), ("id", &id)],
@@ -489,14 +618,8 @@ fn tool_completed_row(
         subject: tool_id.to_string(),
         summary,
         detail,
+        presentation: None,
     }
-}
-
-fn first_error_line(text: &str) -> Option<String> {
-    text.lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(|line| truncate_activity_preview(line, 160))
 }
 
 fn maybe_queue_interactive_shell_handoff(
@@ -509,7 +632,7 @@ fn maybe_queue_interactive_shell_handoff(
         .queue_interactive_shell_handoff_for_tool_failure(tool_id, status)
 }
 
-fn truncate_activity_preview(value: &str, max_chars: usize) -> String {
+pub(super) fn truncate_activity_preview(value: &str, max_chars: usize) -> String {
     let mut chars = value.chars();
     let truncated = chars.by_ref().take(max_chars).collect::<String>();
     if chars.next().is_some() {
@@ -519,7 +642,7 @@ fn truncate_activity_preview(value: &str, max_chars: usize) -> String {
     }
 }
 
-fn activity_summary_preview(value: &str, max_chars: usize) -> String {
+fn legacy_activity_summary_preview(value: &str, max_chars: usize) -> String {
     truncate_activity_preview(&value.replace('\n', "\\n"), max_chars)
 }
 
@@ -561,6 +684,17 @@ pub(crate) fn record_approved_shell_handoff_blocks(
             state
                 .control
                 .mark_provider_shell_transcript_seen(tool_use_id);
+            if let Some(active_run) = state.agent_run.active.as_mut() {
+                if active_run.request.id == handoff_request.run_id {
+                    active_run.mark_host_completed_tool(tool_use_id);
+                }
+            }
+        } else if let Some(request_id) = handoff_request.request_id.as_deref() {
+            if let Some(active_run) = state.agent_run.active.as_mut() {
+                if active_run.request.id == handoff_request.run_id {
+                    active_run.mark_host_completed_tool(request_id);
+                }
+            }
         }
         state
             .analyzed_blocks
@@ -571,7 +705,7 @@ pub(crate) fn record_approved_shell_handoff_blocks(
             kind: ActivityKind::ShellHandoff,
             status: evidence.status.to_string(),
             subject: evidence.approval_id.clone().unwrap_or_default(),
-            summary: activity_summary_message(
+            summary: legacy_activity_summary_message(
                 state,
                 MessageId::ActivityShellHandoffSentSummary,
                 &[("approval", &handoff_request.approval_id)],
@@ -605,6 +739,7 @@ pub(crate) fn record_approved_shell_handoff_blocks(
                     )
                 )
             ),
+            presentation: None,
         });
         ids.push(id);
     }
@@ -676,29 +811,12 @@ fn tool_output_row(
             provider_native_shell_command,
             provider_shell_tool,
         ),
+        presentation: None,
     }
 }
 
 pub(crate) fn next_activity_id(state: &InlineState, prefix: &str) -> String {
     next_activity_id_excluding(state, prefix, std::iter::empty())
-}
-
-fn next_activity_id_from_rows(rows: &[RuntimeActivityRow], prefix: &str) -> String {
-    let prefix_with_dash = format!("{prefix}-");
-    let used_ids = rows
-        .iter()
-        .filter(|row| row.id.starts_with(&prefix_with_dash))
-        .map(|row| row.id.clone())
-        .collect::<HashSet<_>>();
-
-    let mut next = 1;
-    loop {
-        let id = format!("{prefix}-{next}");
-        if !used_ids.contains(&id) {
-            return id;
-        }
-        next += 1;
-    }
 }
 
 fn next_activity_id_excluding<'a>(
@@ -726,7 +844,11 @@ fn next_activity_id_excluding<'a>(
     }
 }
 
-fn activity_summary_message(state: &InlineState, id: MessageId, args: &[(&str, &str)]) -> String {
+fn legacy_activity_summary_message(
+    state: &InlineState,
+    id: MessageId,
+    args: &[(&str, &str)],
+) -> String {
     state.i18n().format(id, args)
 }
 
@@ -736,5 +858,5 @@ fn tool_output_summary(state: &InlineState, stream: &str, id: &str) -> String {
         "stderr" => MessageId::ToolOutputStderrCapturedSummary,
         _ => MessageId::ActivityToolOutputCapturedSummary,
     };
-    activity_summary_message(state, message_id, &[("stream", stream), ("id", id)])
+    legacy_activity_summary_message(state, message_id, &[("stream", stream), ("id", id)])
 }

@@ -365,7 +365,12 @@ mod tests {
     #[test]
     fn details_renders_command_block_with_opaque_output_id() {
         let state = InlineState::default();
-        let block = command_block("session-1", "cmd-1", Some("/tmp/internal-output-ref.txt"));
+        let output_ref = test_output_ref("details-available", "one\ntwo\n");
+        let block = command_block(
+            "session-1",
+            "cmd-1",
+            Some(output_ref.to_str().expect("utf8 output path")),
+        );
         let mut output = Vec::new();
 
         render_runtime_details(&state, &[block], "cmd-1", &mut output).expect("render details");
@@ -382,9 +387,10 @@ mod tests {
             "{rendered}"
         );
         assert!(
-            !rendered.contains("/tmp/internal-output-ref.txt"),
+            !rendered.contains(output_ref.to_str().unwrap()),
             "{rendered}"
         );
+        let _ = std::fs::remove_file(output_ref);
     }
 
     #[test]
@@ -398,6 +404,7 @@ mod tests {
             subject: "Read".to_string(),
             summary: "Read called".to_string(),
             detail: "tool_name: Read\ninput_preview: README.md".to_string(),
+            presentation: None,
         });
         let mut event = ShellEvent::user_input_intercepted("session-1", "tool-1");
         event.component = Some("card".to_string());
@@ -415,7 +422,12 @@ mod tests {
     #[test]
     fn details_marks_capture_truncated_without_internal_path() {
         let state = InlineState::default();
-        let mut block = command_block("session-1", "cmd-1", Some("/tmp/internal-output-ref.txt"));
+        let output_ref = test_output_ref("details-truncated", "one\ntwo\n");
+        let mut block = command_block(
+            "session-1",
+            "cmd-1",
+            Some(output_ref.to_str().expect("utf8 output path")),
+        );
         block.output.terminal_output_bytes = COMMAND_OUTPUT_REF_MAX_BYTES as u64 + 1;
         let mut output = Vec::new();
 
@@ -431,9 +443,10 @@ mod tests {
             "{rendered}"
         );
         assert!(
-            !rendered.contains("/tmp/internal-output-ref.txt"),
+            !rendered.contains(output_ref.to_str().unwrap()),
             "{rendered}"
         );
+        let _ = std::fs::remove_file(output_ref);
     }
 
     #[test]
@@ -629,5 +642,18 @@ mod tests {
                 terminal_output_bytes: 123,
             },
         }
+    }
+
+    fn test_output_ref(name: &str, text: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "cosh-shell-{name}-{}-{unique}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&path, text).expect("write test output ref");
+        path
     }
 }

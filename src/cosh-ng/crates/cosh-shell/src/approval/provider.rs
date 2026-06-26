@@ -27,7 +27,7 @@ pub(super) fn provider_approval_status(status: ApprovalRequestStatus) -> Provide
     }
 }
 
-pub(super) fn mark_provider_approval_resolved(state: &mut InlineState) {
+pub(crate) fn mark_provider_approval_resolved(state: &mut InlineState) {
     let i18n = state.i18n();
     if let Some(active_run) = state.agent_run.active.as_mut() {
         active_run.current_phase = i18n.t(MessageId::AgentStatusTool).to_string();

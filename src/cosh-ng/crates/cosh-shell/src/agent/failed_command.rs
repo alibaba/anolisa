@@ -707,10 +707,9 @@ mod tests {
         .expect("handle card analyze");
 
         assert!(state.analyzed_blocks.contains("target"));
-        assert!(
-            state.agent_run.active.is_some() || !state.agent_run.queued_requests.is_empty(),
-            "expected active or queued Agent run"
-        );
+        let output = String::from_utf8(output).expect("utf8 output");
+        assert!(output.contains("Agent"), "{output}");
+        assert!(output.contains("Thinking"), "{output}");
     }
 
     #[test]

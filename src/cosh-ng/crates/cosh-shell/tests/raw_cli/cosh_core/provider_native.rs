@@ -127,24 +127,25 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
                 b"?? cosh-core-provider-native-visible\n".to_vec(),
                 Duration::from_millis(500),
             ),
-            (b"/details tool-1\n".to_vec(), Duration::from_millis(1_500)),
-            (b"exit\n".to_vec(), Duration::from_millis(500)),
+            (b"exit\n".to_vec(), Duration::from_millis(2_000)),
         ],
     );
     let _ = fs::remove_dir_all(&home);
 
     assert!(output.contains("$ echo COSH_CORE_NATIVE_SHELL"), "{output}");
     assert!(output.contains("COSH_CORE_NATIVE_SHELL"), "{output}");
+    assert!(output.contains("Auto-approved req-1"), "{output}");
     assert!(
-        output.contains("auto-approved by provider: $ echo COSH_CORE_NATIVE_SHELL; [Details]"),
-        "{output}"
-    );
-    assert!(
-        output.contains("provider_native_shell_bypassed_control_protocol"),
+        output.contains("Provider-native shell tool allowed"),
         "{output}"
     );
     assert!(
         output.contains("COSH CORE PROVIDER NATIVE VISIBLE FINAL"),
+        "{output}"
+    );
+    assert!(!output.contains("auto-approved by provider"), "{output}");
+    assert!(
+        !output.contains("provider_native_shell_bypassed_control_protocol"),
         "{output}"
     );
     assert!(!output.contains("host_executed_shell"), "{output}");
@@ -399,12 +400,12 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
     );
     let _ = fs::remove_dir_all(&home);
 
-    assert!(
-        output.contains("Read called: Cargo.toml; [Details]"),
-        "{output}"
-    );
-    assert!(output.contains("evidence: ProviderToolCall"), "{output}");
-    assert!(output.contains("input_preview: Cargo.toml"), "{output}");
+    assert!(output.contains("Read completed"), "{output}");
+    assert!(output.contains("Cargo.toml"), "{output}");
+    assert!(output.contains("1 lines returned"), "{output}");
+    assert!(output.contains("stdout: 1 lines"), "{output}");
+    assert!(output.contains("Classification: file-read"), "{output}");
+    assert!(output.contains("Preview: Cargo.toml"), "{output}");
     assert!(output.contains("Tool output - stdout captured"), "{output}");
     assert!(output.contains("read output visible"), "{output}");
     assert!(
