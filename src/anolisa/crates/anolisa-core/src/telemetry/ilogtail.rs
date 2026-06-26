@@ -220,12 +220,12 @@ impl<'a> IlogtailInstaller<'a> {
             .map_err(|e| TelemetryError::Command(format!("chmod failed: {e}")))?;
 
         let install = if region_info.use_internal {
-            Command::new("sh")
+            Command::new("bash")
                 .args([&tmp_script, "install", region_id.as_str()])
                 .output()
         } else {
             let public_region = format!("{region_id}-internet");
-            Command::new("sh")
+            Command::new("bash")
                 .args([tmp_script.as_str(), "install", &public_region])
                 .output()
         };
