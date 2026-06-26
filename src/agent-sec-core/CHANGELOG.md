@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.7.0
+
+**Codex Plugin — Full security integration for OpenAI Codex**
+
+- Added codex-plugin with code scanning, prompt scanning, skill ledger, and PII checking hooks. (#1074)
+- Supported packaging codex-plugin into RPM. (#1138)
+- Fixed codex-plugin paths in Makefile and CI for correct RPM install verification. (#1165)
+
+**Code Scanner**
+
+- Added code-scanner LLM mode for AI-assisted security analysis. (#1108)
+- Added code-scanner static rules for expanded coverage. (#1033)
+
+**Prompt Scanner**
+
+- Added L4 multi-turn intent detection with ollama model service. (#1060)
+- Routed prompt scan to daemon and added prompt model preload for reduced latency. (#786)
+- Controlled prompt scan call to use daemon by env variable. (#933)
+
+**Skill Ledger — Activation daemon and policy engine**
+
+- Added Skill Ledger activation daemon for background integrity monitoring. (#857)
+- Added runtime activation resolver for skill trust decisions. (#826)
+- Added skill ledger activation policy for configurable enforcement. (#944)
+- Updated skill ledger activation and event contracts. (#983)
+- Updated Skill Ledger hook defaults and reconcile notify behavior. (#1086)
+- Aligned skill ledger hooks across all agent platforms. (#1135)
+- Resolved Skill Ledger FUSE and unmanaged roots handling. (#1141)
+- Fail-open unsupported Hermes skill ledger scenarios. (#1155)
+
+**Daemon & Telemetry**
+
+- Added daemon service with systemd integration and RPM build support. (#1090)
+- Exposed SQL query endpoint at daemon for observability queries. (#1042)
+- Enhanced daemon logging including requests and jobs. (#871)
+- Added telemetry schema definition and SLS JSONL writer. (#977, #1008)
+- Passed agent_name to telemetry data for multi-agent identification. (#1032)
+- Added logging system for structured agent-sec-cli output. (#651)
+- Added security daemon socket fallback under `/run/user/<uid>` for user-scoped deployments. (#1129)
+
+**PII Scanner**
+
+- Extended PII scanning coverage with additional pattern detectors. (#925)
+
+**Security Observability**
+
+- Added session report command for post-session security summaries. (#703)
+
+**Sandbox**
+
+- Converged sandbox trigger rules for consistent enforcement. (#979)
+
+**Adapter & Build**
+
+- Added ANOLISA CLI component.toml for adapter manifest integration. (#1067)
+- Added systemd-rpm-macros as RPM build dependency. (#1156)
+
 ## 0.6.0
 
 **Self-Protection — Tamper-resistance for agent-sec-core itself**
