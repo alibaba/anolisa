@@ -230,7 +230,7 @@ jobs:
 
   package-skillfs:
     name: "Package: skillfs"
-    runs-on: [self-hosted, ubuntu]
+    runs-on: ubuntu-22.04
     needs: versions
     steps:
       - uses: actions/checkout@v4
