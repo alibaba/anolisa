@@ -93,10 +93,9 @@ pub enum AdapterError {
     },
 
     /// The manifest declares an `adapter_type` that is not yet supported
-    /// by any built-in driver (e.g. `skill_bundle`, `extension`). Only
-    /// `plugin` (or absent, defaulting to plugin) is implemented.
+    /// by any built-in driver (e.g. `extension`, `service`).
     #[error(
-        "adapter type '{adapter_type}' for {component}/{framework} is not supported; only 'plugin' is implemented"
+        "adapter type '{adapter_type}' for {component}/{framework} is not supported; only 'plugin' and 'skill_bundle' are implemented"
     )]
     UnsupportedAdapterType {
         /// Component whose adapter was requested.

@@ -575,10 +575,11 @@ pub struct AdapterSpec {
     /// Adapter kind (`first-party`, `third-party`, `protocol`, ...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
-    /// Adapter type within the framework (`plugin`, `extension`,
-    /// `service`, `skill_bundle`, ...). The adapter manager gates on this
-    /// value: only `"plugin"` (or absent/`None`, defaulting to plugin) is
-    /// supported; all other values are rejected at enable time.
+    /// Adapter type within the framework (`plugin`, `skill_bundle`,
+    /// `extension`, `service`, ...). The adapter manager gates on this
+    /// value: only `"plugin"`, `"skill_bundle"`, or absent/`None`
+    /// (defaulting to plugin) is supported; all other values are
+    /// rejected at enable time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter_type: Option<String>,
     /// Trust level (`first-party`, `third-party`, `protocol`). Separate

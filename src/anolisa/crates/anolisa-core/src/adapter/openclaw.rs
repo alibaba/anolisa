@@ -1,13 +1,13 @@
 //! OpenClaw framework driver.
 //!
-//! OpenClaw loads plugins from a CLI-managed registry, not from a dropped
-//! directory, so `enable` runs `openclaw plugins install <resource_root>`
-//! and `disable` runs `openclaw plugins uninstall <plugin_id>`. Status is
-//! the read-only `openclaw plugins list`. All three go through the
-//! Manager's [`run_framework_cli`](super::driver::AdapterOps::run_framework_cli)
-//! helper (timeout, output
-//! truncation, central log) — the driver only builds argv arrays from
-//! validated data.
+//! OpenClaw plugin adapters use the CLI-managed registry: `enable` runs
+//! `openclaw plugins install <resource_root>` and `disable` runs
+//! `openclaw plugins uninstall <plugin_id>`. Skill-only adapters
+//! (`adapter_type = "skill_bundle"`) skip registry operations and only
+//! copy declared skills into the OpenClaw skills directory. Status is the
+//! read-only `openclaw plugins list` for plugin adapters. All CLI and
+//! filesystem operations go through the Manager's helpers — the driver
+//! only builds argv arrays from validated data.
 //!
 //! The CLI env contract mirrors `openclaw/scripts/install.sh`: unset
 //! `OPENCLAW_HOME`, set `OPENCLAW_STATE_DIR` to the resolved home, and
@@ -112,15 +112,18 @@ impl FrameworkDriver for OpenClawDriver {
             });
         }
 
-        let manifest_file = ctx
-            .declared_bundle_entry
-            .as_deref()
-            .unwrap_or("openclaw.plugin.json");
-        let plugin_id = ctx
-            .declared_plugin_id
-            .clone()
-            .or(read_plugin_manifest_id(root, manifest_file)?)
-            .or_else(|| Some(ctx.component.clone()));
+        let plugin_id = if ctx.is_skill_bundle() {
+            None
+        } else {
+            let manifest_file = ctx
+                .declared_bundle_entry
+                .as_deref()
+                .unwrap_or("openclaw.plugin.json");
+            ctx.declared_plugin_id
+                .clone()
+                .or(read_plugin_manifest_id(root, manifest_file)?)
+                .or_else(|| Some(ctx.component.clone()))
+        };
 
         Ok(AdapterBundle {
             resource_root: root.clone(),
@@ -134,14 +137,19 @@ impl FrameworkDriver for OpenClawDriver {
         bundle: &AdapterBundle,
         ctx: &DriverCtx,
     ) -> Result<DriverPlan, AdapterError> {
-        let plugin_id = require_plugin_id(bundle)?;
-        validate_plugin_id(&plugin_id)?;
         let home = require_home(ctx)?;
-        let cmd = build_install_cmd(&bundle.resource_root, &home, ctx.user_home.as_deref());
-        let mut actions = vec![format!(
-            "register openclaw plugin '{plugin_id}' from {}",
-            bundle.resource_root.display()
-        )];
+        let mut actions = Vec::new();
+        let mut register_command = None;
+        if !ctx.is_skill_bundle() {
+            let plugin_id = require_plugin_id(bundle)?;
+            validate_plugin_id(&plugin_id)?;
+            let cmd = build_install_cmd(&bundle.resource_root, &home, ctx.user_home.as_deref());
+            register_command = Some(display_command(&cmd));
+            actions.push(format!(
+                "register openclaw plugin '{plugin_id}' from {}",
+                bundle.resource_root.display()
+            ));
+        }
 
         for skill in &ctx.declared_skills {
             let src_display = match skill.source {
@@ -156,19 +164,21 @@ impl FrameworkDriver for OpenClawDriver {
                 skill.name,
             ));
         }
-        for (i, cfg) in ctx.declared_config.iter().enumerate() {
-            actions.push(format!(
-                "set openclaw config [{i}] {} = {}",
-                cfg.key,
-                config_value_display(&cfg.value)
-            ));
+        if !ctx.is_skill_bundle() {
+            for (i, cfg) in ctx.declared_config.iter().enumerate() {
+                actions.push(format!(
+                    "set openclaw config [{i}] {} = {}",
+                    cfg.key,
+                    config_value_display(&cfg.value)
+                ));
+            }
         }
 
         Ok(DriverPlan {
             framework: self.name().to_string(),
             component: ctx.component.clone(),
             actions,
-            register_command: Some(display_command(&cmd)),
+            register_command,
         })
     }
 
@@ -177,25 +187,27 @@ impl FrameworkDriver for OpenClawDriver {
         bundle: &AdapterBundle,
         ctx: &DriverCtx,
     ) -> Result<AdapterClaim, AdapterError> {
-        let plugin_id = require_plugin_id(bundle)?;
-        validate_plugin_id(&plugin_id)?;
         let home = require_home(ctx)?;
-
-        let mut resources = vec![
-            ClaimResource {
-                id: RES_STATE_DIR.to_string(),
-                purpose: "openclaw_state_dir".to_string(),
-                kind: ClaimResourceKind::ExternalPath { path: home.clone() },
-            },
-            ClaimResource {
+        let mut resources = vec![ClaimResource {
+            id: RES_STATE_DIR.to_string(),
+            purpose: "openclaw_state_dir".to_string(),
+            kind: ClaimResourceKind::ExternalPath { path: home.clone() },
+        }];
+        let plugin_id = if ctx.is_skill_bundle() {
+            None
+        } else {
+            let plugin_id = require_plugin_id(bundle)?;
+            validate_plugin_id(&plugin_id)?;
+            resources.push(ClaimResource {
                 id: RES_PLUGIN.to_string(),
                 purpose: "openclaw_plugin".to_string(),
                 kind: ClaimResourceKind::FrameworkPlugin {
                     framework: self.name().to_string(),
                     plugin_id: plugin_id.clone(),
                 },
-            },
-        ];
+            });
+            Some(plugin_id)
+        };
 
         let mut skill_resources = Vec::new();
         for skill in &ctx.declared_skills {
@@ -211,24 +223,27 @@ impl FrameworkDriver for OpenClawDriver {
         }
 
         let mut config_resources = Vec::new();
-        for (i, cfg) in ctx.declared_config.iter().enumerate() {
-            let res_id = format!("openclaw_config_{i}");
-            resources.push(ClaimResource {
-                id: res_id.clone(),
-                purpose: "openclaw_config".to_string(),
-                kind: ClaimResourceKind::FrameworkConfig {
-                    framework: self.name().to_string(),
-                    key: cfg.key.clone(),
-                },
-            });
-            config_resources.push(res_id);
+        if !ctx.is_skill_bundle() {
+            for (i, cfg) in ctx.declared_config.iter().enumerate() {
+                let res_id = format!("openclaw_config_{i}");
+                resources.push(ClaimResource {
+                    id: res_id.clone(),
+                    purpose: "openclaw_config".to_string(),
+                    kind: ClaimResourceKind::FrameworkConfig {
+                        framework: self.name().to_string(),
+                        key: cfg.key.clone(),
+                    },
+                });
+                config_resources.push(res_id);
+            }
         }
 
         Ok(AdapterClaim {
             claim_schema: CLAIM_SCHEMA_VERSION,
             component: ctx.component.clone(),
             framework: self.name().to_string(),
-            plugin_id: Some(plugin_id),
+            plugin_id,
+            adapter_type: ctx.adapter_type.clone(),
             enabled_at: now_iso8601(),
             resource_root: bundle.resource_root.clone(),
             bundle_digest: bundle.digest.clone(),
@@ -237,7 +252,11 @@ impl FrameworkDriver for OpenClawDriver {
             resources,
             driver_payload: DriverPayload::OpenClaw(OpenClawClaim {
                 state_dir_resource: RES_STATE_DIR.to_string(),
-                plugin_resource: RES_PLUGIN.to_string(),
+                plugin_resource: if ctx.is_skill_bundle() {
+                    String::new()
+                } else {
+                    RES_PLUGIN.to_string()
+                },
                 skill_resources,
                 config_resources,
             }),
@@ -245,25 +264,26 @@ impl FrameworkDriver for OpenClawDriver {
     }
 
     fn apply_enable(&self, claim: &AdapterClaim, ctx: &DriverCtx) -> Result<(), AdapterError> {
-        let plugin_id = claim_plugin_id(claim).ok_or_else(|| AdapterError::BundleInvalid {
-            root: claim.resource_root.clone(),
-            reason: "openclaw receipt has no plugin id".to_string(),
-        })?;
-        validate_plugin_id(&plugin_id)?;
         let home = require_home(ctx)?;
 
-        // 1. Register the plugin.
-        let cmd = build_install_cmd(&claim.resource_root, &home, ctx.user_home.as_deref());
-        let program = cmd.program.clone();
-        let output = ctx.ops.run_framework_cli(cmd)?;
-        if !output.success() {
-            return Err(AdapterError::FrameworkCli {
-                program,
-                reason: cli_failure_reason("plugins install", &output),
-            });
+        if !ctx.is_skill_bundle() {
+            let plugin_id = claim_plugin_id(claim).ok_or_else(|| AdapterError::BundleInvalid {
+                root: claim.resource_root.clone(),
+                reason: "openclaw receipt has no plugin id".to_string(),
+            })?;
+            validate_plugin_id(&plugin_id)?;
+
+            let cmd = build_install_cmd(&claim.resource_root, &home, ctx.user_home.as_deref());
+            let program = cmd.program.clone();
+            let output = ctx.ops.run_framework_cli(cmd)?;
+            if !output.success() {
+                return Err(AdapterError::FrameworkCli {
+                    program,
+                    reason: cli_failure_reason("plugins install", &output),
+                });
+            }
         }
 
-        // 2. Deliver skills through the Manager's controlled IO.
         for skill in &ctx.declared_skills {
             let src = skill
                 .source
@@ -273,16 +293,18 @@ impl FrameworkDriver for OpenClawDriver {
             ctx.ops.copy_tree(&src, &dst)?;
         }
 
-        // 3. Apply config entries via `openclaw config set <key> <value>`.
-        for cfg in &ctx.declared_config {
-            let cmd = build_config_set_cmd(&cfg.key, &cfg.value, &home, ctx.user_home.as_deref());
-            let program = cmd.program.clone();
-            let output = ctx.ops.run_framework_cli(cmd)?;
-            if !output.success() {
-                return Err(AdapterError::FrameworkCli {
-                    program,
-                    reason: cli_failure_reason("config set", &output),
-                });
+        if !ctx.is_skill_bundle() {
+            for cfg in &ctx.declared_config {
+                let cmd =
+                    build_config_set_cmd(&cfg.key, &cfg.value, &home, ctx.user_home.as_deref());
+                let program = cmd.program.clone();
+                let output = ctx.ops.run_framework_cli(cmd)?;
+                if !output.success() {
+                    return Err(AdapterError::FrameworkCli {
+                        program,
+                        reason: cli_failure_reason("config set", &output),
+                    });
+                }
             }
         }
 
@@ -310,48 +332,59 @@ impl FrameworkDriver for OpenClawDriver {
         // 2. Resource bundle still matches the enable-time digest?
         conditions.push(self.bundle_match_condition(claim));
 
-        // 3. Plugin still registered? Requires the CLI for a read-only
-        //    `plugins list`.
-        let plugin_id = claim_plugin_id(claim);
-        let (plugin_cond, verify_cond, plugin_registered) = if !detect.detected {
-            (
-                AdapterCondition {
-                    kind: AdapterConditionKind::PluginRegistered,
-                    status: ConditionStatus::Unknown,
-                    reason: Some("framework not detected; cannot verify".to_string()),
-                    resource: plugin_id.as_ref().map(|_| ClaimResourceRef {
-                        id: RES_PLUGIN.to_string(),
-                    }),
-                },
-                AdapterCondition {
-                    kind: AdapterConditionKind::VerificationSupported,
-                    status: ConditionStatus::False,
-                    reason: Some("openclaw CLI unavailable".to_string()),
-                    resource: None,
-                },
-                ConditionStatus::Unknown,
-            )
-        } else if let Some(pid) = &plugin_id {
-            self.plugin_registered_condition(pid, ctx)
+        // 3. Plugin still registered? Skill-only receipts have no plugin
+        //    registry entry by design, so status does not require one.
+        let plugin_registered = if claim.is_skill_bundle() {
+            conditions.push(AdapterCondition {
+                kind: AdapterConditionKind::VerificationSupported,
+                status: bool_status(detect.detected),
+                reason: Some("skill_bundle has no plugin registry entry".to_string()),
+                resource: None,
+            });
+            ConditionStatus::True
         } else {
-            (
-                AdapterCondition {
-                    kind: AdapterConditionKind::PluginRegistered,
-                    status: ConditionStatus::Unknown,
-                    reason: Some("receipt has no plugin id".to_string()),
-                    resource: None,
-                },
-                AdapterCondition {
-                    kind: AdapterConditionKind::VerificationSupported,
-                    status: ConditionStatus::True,
-                    reason: None,
-                    resource: None,
-                },
-                ConditionStatus::Unknown,
-            )
+            let plugin_id = claim_plugin_id(claim);
+            let (plugin_cond, verify_cond, plugin_registered) = if !detect.detected {
+                (
+                    AdapterCondition {
+                        kind: AdapterConditionKind::PluginRegistered,
+                        status: ConditionStatus::Unknown,
+                        reason: Some("framework not detected; cannot verify".to_string()),
+                        resource: plugin_id.as_ref().map(|_| ClaimResourceRef {
+                            id: RES_PLUGIN.to_string(),
+                        }),
+                    },
+                    AdapterCondition {
+                        kind: AdapterConditionKind::VerificationSupported,
+                        status: ConditionStatus::False,
+                        reason: Some("openclaw CLI unavailable".to_string()),
+                        resource: None,
+                    },
+                    ConditionStatus::Unknown,
+                )
+            } else if let Some(pid) = &plugin_id {
+                self.plugin_registered_condition(pid, ctx)
+            } else {
+                (
+                    AdapterCondition {
+                        kind: AdapterConditionKind::PluginRegistered,
+                        status: ConditionStatus::Unknown,
+                        reason: Some("receipt has no plugin id".to_string()),
+                        resource: None,
+                    },
+                    AdapterCondition {
+                        kind: AdapterConditionKind::VerificationSupported,
+                        status: ConditionStatus::True,
+                        reason: None,
+                        resource: None,
+                    },
+                    ConditionStatus::Unknown,
+                )
+            };
+            conditions.push(plugin_cond);
+            conditions.push(verify_cond);
+            plugin_registered
         };
-        conditions.push(plugin_cond);
-        conditions.push(verify_cond);
 
         let summary = summarize(claim.status, detect.detected, plugin_registered);
         Ok(AdapterStatusReport {
@@ -365,50 +398,39 @@ impl FrameworkDriver for OpenClawDriver {
         claim: &AdapterClaim,
         ctx: &DriverCtx,
     ) -> Result<DisableReport, AdapterError> {
-        let plugin_id = match claim_plugin_id(claim) {
-            Some(p) => p,
-            None => {
-                // No plugin recorded: nothing to unregister.
-                return Ok(DisableReport {
-                    cleanup_complete: true,
-                    messages: vec!["receipt records no plugin to unregister".to_string()],
-                });
-            }
-        };
-        validate_plugin_id(&plugin_id)?;
-
-        if find_binary_in_path(&openclaw_bin()).is_none() {
-            return Ok(DisableReport {
-                cleanup_complete: false,
-                messages: vec![
-                    "openclaw CLI not found on PATH; receipt kept so cleanup can be retried"
-                        .to_string(),
-                ],
-            });
-        }
-
         let home = require_home(ctx)?;
         let mut messages = Vec::new();
         let mut cleanup_complete = true;
 
-        // 1. Unregister the plugin.
-        let cmd = build_uninstall_cmd(&plugin_id, &home, ctx.user_home.as_deref());
-        let output = ctx.ops.run_framework_cli(cmd)?;
-        if output.success() {
-            messages.push(format!("unregistered openclaw plugin '{plugin_id}'"));
+        if let Some(plugin_id) = claim_plugin_id(claim) {
+            validate_plugin_id(&plugin_id)?;
+            if find_binary_in_path(&openclaw_bin()).is_none() {
+                return Ok(DisableReport {
+                    cleanup_complete: false,
+                    messages: vec![
+                        "openclaw CLI not found on PATH; receipt kept so cleanup can be retried"
+                            .to_string(),
+                    ],
+                });
+            }
+
+            let cmd = build_uninstall_cmd(&plugin_id, &home, ctx.user_home.as_deref());
+            let output = ctx.ops.run_framework_cli(cmd)?;
+            if output.success() {
+                messages.push(format!("unregistered openclaw plugin '{plugin_id}'"));
+            } else {
+                return Ok(DisableReport {
+                    cleanup_complete: false,
+                    messages: vec![format!(
+                        "openclaw plugin uninstall failed: {}",
+                        cli_failure_reason("plugins uninstall", &output)
+                    )],
+                });
+            }
         } else {
-            // Keep the receipt (Manager marks cleanup_failed) so disable can
-            // be retried — do NOT delete anything else.
-            return Ok(DisableReport {
-                cleanup_complete: false,
-                messages: vec![format!(
-                    "openclaw plugin uninstall failed: {}",
-                    cli_failure_reason("plugins uninstall", &output)
-                )],
-            });
+            messages.push("receipt records no plugin to unregister".to_string());
         }
 
-        // 2. Remove delivered skill directories through Manager IO.
         let skill_resources = claim_skill_resources(claim);
         for skill_name in &skill_resources {
             let skill_dir = home.join("skills").join(skill_name);
@@ -1358,6 +1380,7 @@ mod tests {
             component: "test".to_string(),
             framework: "openclaw".to_string(),
             plugin_id: None,
+            adapter_type: None,
             enabled_at: "2026-01-01T00:00:00Z".to_string(),
             resource_root: PathBuf::from("/tmp"),
             bundle_digest: None,
@@ -1377,5 +1400,98 @@ mod tests {
         let skills = claim_skill_resources(&claim);
         assert_eq!(skills, vec!["sec-audit", "cred-scan"]);
         assert_eq!(claim_config_count(&claim), 1);
+    }
+
+    #[test]
+    fn skill_bundle_plan_and_claim_skip_plugin_registration() {
+        use crate::adapter::driver::{AdapterOps, CliOutput, DeclaredSkill};
+
+        struct StubOps;
+        impl AdapterOps for StubOps {
+            fn run_framework_cli(&self, _: FrameworkCommand) -> Result<CliOutput, AdapterError> {
+                unimplemented!()
+            }
+            fn copy_tree(&self, _: &Path, _: &Path) -> Result<(), AdapterError> {
+                unimplemented!()
+            }
+            fn copy_file(&self, _: &Path, _: &Path) -> Result<(), AdapterError> {
+                unimplemented!()
+            }
+            fn remove_tree(&self, _: &Path) -> Result<bool, AdapterError> {
+                unimplemented!()
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("marker"), b"x").expect("write");
+        let layout = anolisa_platform::fs_layout::FsLayout::user(PathBuf::from("/tmp/test-home"));
+        let ops = StubOps;
+        let ctx = DriverCtx {
+            component: "os-skills".to_string(),
+            framework: "openclaw".to_string(),
+            layout: &layout,
+            resource_root: dir.path().to_path_buf(),
+            user_home: Some(PathBuf::from("/tmp/test-home")),
+            declared_plugin_id: None,
+            adapter_type: Some("skill_bundle".to_string()),
+            declared_skills: vec![DeclaredSkill {
+                name: "install-openclaw".to_string(),
+                source: Some(PathBuf::from("/usr/share/anolisa/skills/install-openclaw")),
+            }],
+            declared_config: Vec::new(),
+            declared_bundle_entry: None,
+            dry_run: true,
+            ops: &ops,
+        };
+        let driver = OpenClawDriver::new();
+        let bundle = driver.read_bundle(&ctx).expect("read bundle");
+        assert!(bundle.plugin_id.is_none());
+
+        let plan = driver.plan_enable(&bundle, &ctx).expect("plan");
+        assert!(plan.register_command.is_none());
+        assert!(
+            plan.actions
+                .iter()
+                .all(|action| !action.contains("register openclaw plugin")),
+        );
+
+        let claim = driver.prepare_enable(&bundle, &ctx).expect("claim");
+        assert!(claim.plugin_id.is_none());
+        assert_eq!(claim.adapter_type.as_deref(), Some("skill_bundle"));
+        assert!(
+            claim.resources.iter().all(|resource| !matches!(
+                resource.kind,
+                ClaimResourceKind::FrameworkPlugin { .. }
+            )),
+        );
+        assert_eq!(claim_skill_resources(&claim), vec!["install-openclaw"]);
+
+        let previous_bin = std::env::var_os("OPENCLAW_BIN");
+        // SAFETY: test-only; restored before the test returns.
+        unsafe {
+            std::env::set_var("OPENCLAW_BIN", "/bin/sh");
+        }
+        let report = driver.status(&claim, &ctx).expect("status");
+        // SAFETY: test-only; restore the process environment.
+        unsafe {
+            if let Some(value) = previous_bin {
+                std::env::set_var("OPENCLAW_BIN", value);
+            } else {
+                std::env::remove_var("OPENCLAW_BIN");
+            }
+        }
+
+        assert_eq!(report.summary, AdapterSummary::Healthy);
+        assert!(
+            report
+                .conditions
+                .iter()
+                .all(|condition| condition.kind != AdapterConditionKind::PluginRegistered),
+            "skill_bundle status must not require plugin registration"
+        );
+        assert!(report.conditions.iter().any(|condition| {
+            condition.kind == AdapterConditionKind::VerificationSupported
+                && condition.status == ConditionStatus::True
+        }));
     }
 }

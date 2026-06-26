@@ -62,6 +62,9 @@ pub struct DriverCtx<'a> {
     /// Plugin id declared in the component's adapter manifest, if any.
     /// A driver may fall back to it when the bundle does not name one.
     pub declared_plugin_id: Option<String>,
+    /// Adapter type declared in the component manifest. Absent means the
+    /// legacy plugin adapter model.
+    pub adapter_type: Option<String>,
     /// Skills declared in the component's adapter manifest. Each entry
     /// carries an optional resolved `source` path; when absent, the driver
     /// falls back to `<resource_root>/skills/<name>/`.
@@ -80,6 +83,13 @@ pub struct DriverCtx<'a> {
     /// Controlled IO helpers. The only sanctioned way to run a framework
     /// CLI.
     pub ops: &'a dyn AdapterOps,
+}
+
+impl DriverCtx<'_> {
+    /// Whether this operation is for a skill-only adapter.
+    pub fn is_skill_bundle(&self) -> bool {
+        self.adapter_type.as_deref() == Some("skill_bundle")
+    }
 }
 
 /// Parsed framework-native bundle from the resource directory.

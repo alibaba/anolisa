@@ -64,6 +64,10 @@ pub struct AdapterClaim {
     /// field is a convenience for listing/scan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_id: Option<String>,
+    /// Adapter type declared at enable time. Persisted so status/disable can
+    /// preserve skill-only semantics without trusting the current manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_type: Option<String>,
     /// RFC3339 UTC timestamp when enable last wrote this receipt.
     pub enabled_at: String,
     /// Resource directory read at enable time. Kept for status display and
@@ -87,6 +91,11 @@ pub struct AdapterClaim {
 }
 
 impl AdapterClaim {
+    /// Whether this receipt represents a skill-only adapter bundle.
+    pub fn is_skill_bundle(&self) -> bool {
+        self.adapter_type.as_deref() == Some("skill_bundle")
+    }
+
     /// Find a resource by its stable `id`.
     pub fn resource(&self, id: &str) -> Option<&ClaimResource> {
         self.resources.iter().find(|r| r.id == id)
@@ -515,6 +524,7 @@ mod tests {
             component: "tokenless".to_string(),
             framework: "openclaw".to_string(),
             plugin_id: Some("tokenless".to_string()),
+            adapter_type: None,
             enabled_at: "2026-06-12T10:30:45Z".to_string(),
             resource_root: PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/openclaw"),
             bundle_digest: Some("sha256:abc".to_string()),
@@ -639,6 +649,7 @@ mod tests {
             component: "agent-sec".to_string(),
             framework: "hermes".to_string(),
             plugin_id: Some("agent-sec".to_string()),
+            adapter_type: None,
             enabled_at: "2026-06-22T10:30:45Z".to_string(),
             resource_root: PathBuf::from("/usr/local/share/anolisa/adapters/agent-sec/hermes"),
             bundle_digest: Some("sha256:def".to_string()),
@@ -714,6 +725,7 @@ mod tests {
             component: "sec-core".to_string(),
             framework: "openclaw".to_string(),
             plugin_id: Some("sec-core".to_string()),
+            adapter_type: None,
             enabled_at: "2026-06-22T12:00:00Z".to_string(),
             resource_root: PathBuf::from("/data/adapters/sec-core/openclaw"),
             bundle_digest: None,

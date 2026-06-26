@@ -1656,6 +1656,7 @@ mod tests {
             component: component.to_string(),
             framework: framework.to_string(),
             plugin_id: None,
+            adapter_type: None,
             enabled_at: "2026-06-01T10:00:00Z".to_string(),
             resource_root: PathBuf::from("/tmp/anolisa-uninstall-test"),
             bundle_digest: None,

@@ -389,12 +389,11 @@ impl AdapterManager {
             self.load_visible_component_manifest(component, &state)?;
         let framework = self.resolve_framework(component, framework, &manifest)?;
 
-        // Fail-closed: only `plugin` (or absent/None, defaulting to
-        // plugin) is supported. Any other adapter_type must be rejected
-        // before we invoke a driver.
+        // Fail-closed: only `plugin`, `skill_bundle`, or an absent value
+        // (legacy plugin default) is supported.
         let adapter_type = declared_adapter_type(&manifest, &framework);
         if let Some(ref at) = adapter_type
-            && at != "plugin"
+            && !is_supported_adapter_type(at)
         {
             return Err(AdapterError::UnsupportedAdapterType {
                 component: component.to_string(),
@@ -407,6 +406,13 @@ impl AdapterManager {
         let skill_specs = declared_skills(&manifest, &framework);
         let config = declared_config(&manifest, &framework);
         let bundle_entry = declared_bundle_entry(&manifest, &framework);
+        if adapter_type.as_deref() == Some("skill_bundle") && !config.is_empty() {
+            return Err(AdapterError::InvalidAdapterInput {
+                component: component.to_string(),
+                framework: framework.clone(),
+                reason: "skill_bundle adapters do not support framework config entries".to_string(),
+            });
+        }
 
         for skill in &skill_specs {
             super::claim::validate_skill_name(&skill.name).map_err(|mut err| {
@@ -480,6 +486,7 @@ impl AdapterManager {
             resource_root: resource_root.clone(),
             user_home: self.user_home.clone(),
             declared_plugin_id: declared_plugin_id.clone(),
+            adapter_type: adapter_type.clone(),
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: None,
@@ -516,6 +523,7 @@ impl AdapterManager {
             resource_root: resource_root.clone(),
             user_home: self.user_home.clone(),
             declared_plugin_id,
+            adapter_type,
             declared_skills: skills,
             declared_config: config,
             declared_bundle_entry: bundle_entry,
@@ -682,6 +690,7 @@ impl AdapterManager {
             resource_root: resource_root.clone(),
             user_home: self.user_home.clone(),
             declared_plugin_id: None,
+            adapter_type: claim.adapter_type.clone(),
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: None,
@@ -708,6 +717,7 @@ impl AdapterManager {
             resource_root,
             user_home: self.user_home.clone(),
             declared_plugin_id: None,
+            adapter_type: claim.adapter_type.clone(),
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: None,
@@ -801,6 +811,7 @@ impl AdapterManager {
                 resource_root,
                 user_home: self.user_home.clone(),
                 declared_plugin_id: None,
+                adapter_type: claim.adapter_type.clone(),
                 declared_skills: Vec::new(),
                 declared_config: Vec::new(),
                 declared_bundle_entry: None,
@@ -1682,6 +1693,10 @@ fn declared_adapter_type(manifest: &ComponentManifest, framework: &str) -> Optio
         .map(str::to_string)
 }
 
+fn is_supported_adapter_type(adapter_type: &str) -> bool {
+    matches!(adapter_type, "plugin" | "skill_bundle")
+}
+
 /// Whether a component status makes it visible to adapter scan/enable.
 /// Both fully-installed and adopted components should be adapter-visible.
 fn is_adapter_visible_status(status: ObjectStatus) -> bool {
@@ -2034,13 +2049,13 @@ mod tests {
         let err = AdapterError::UnsupportedAdapterType {
             component: "tokenless".to_string(),
             framework: "openclaw".to_string(),
-            adapter_type: "skill_bundle".to_string(),
+            adapter_type: "service".to_string(),
         };
         let msg = err.to_string();
-        assert!(msg.contains("skill_bundle"));
+        assert!(msg.contains("service"));
         assert!(msg.contains("tokenless"));
         assert!(msg.contains("openclaw"));
-        assert!(msg.contains("only 'plugin' is implemented"));
+        assert!(msg.contains("'plugin' and 'skill_bundle'"));
     }
 
     #[test]
@@ -2064,14 +2079,14 @@ mod tests {
         };
         let msg = err.to_string();
         assert!(msg.contains("magic"));
-        assert!(msg.contains("only 'plugin' is implemented"));
+        assert!(msg.contains("'plugin' and 'skill_bundle'"));
     }
 
     #[test]
     fn plugin_adapter_type_passes_gate() {
         let manifest = manifest_with_adapter_type(Some("plugin"));
         let at = declared_adapter_type(&manifest, "openclaw");
-        let should_reject = at.as_ref().is_some_and(|t| t != "plugin");
+        let should_reject = at.as_ref().is_some_and(|t| !is_supported_adapter_type(t));
         assert!(!should_reject, "plugin must pass the gate");
     }
 
@@ -2079,16 +2094,66 @@ mod tests {
     fn absent_adapter_type_passes_gate() {
         let manifest = manifest_with_adapter_type(None);
         let at = declared_adapter_type(&manifest, "openclaw");
-        let should_reject = at.as_ref().is_some_and(|t| t != "plugin");
+        let should_reject = at.as_ref().is_some_and(|t| !is_supported_adapter_type(t));
         assert!(!should_reject, "absent adapter_type must pass the gate");
     }
 
     #[test]
-    fn skill_bundle_adapter_type_fails_gate() {
+    fn skill_bundle_adapter_type_passes_gate() {
         let manifest = manifest_with_adapter_type(Some("skill_bundle"));
         let at = declared_adapter_type(&manifest, "openclaw");
-        let should_reject = at.as_ref().is_some_and(|t| t != "plugin");
-        assert!(should_reject, "skill_bundle must be rejected");
+        let should_reject = at.as_ref().is_some_and(|t| !is_supported_adapter_type(t));
+        assert!(!should_reject, "skill_bundle must pass the gate");
+    }
+
+    #[test]
+    fn skill_bundle_with_config_is_rejected() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        std::fs::create_dir_all(&layout.state_dir).expect("mkdir state");
+        std::fs::create_dir_all(&layout.log_dir).expect("mkdir log");
+        seed_installed_state(&layout.state_dir, "os-skills", ObjectStatus::Installed);
+
+        let contract = r#"
+[component]
+name = "os-skills"
+version = "0.1.0"
+layer = "runtime"
+
+[[adapters]]
+framework = "openclaw"
+adapter_type = "skill_bundle"
+dest = "{datadir}/skills"
+
+[adapters.openclaw]
+skills = ["install-openclaw"]
+
+[[adapters.openclaw.config]]
+key = "plugins.entries.os-skills.enabled"
+value = true
+"#;
+        write_contract_with_content(&layout.datadir, "os-skills", contract);
+
+        let mut manager =
+            AdapterManager::new(layout.clone(), Some(tmp.path().join("home")), "test".into());
+        manager.visible_roots = vec![VisibleRoot {
+            state_dir: layout.state_dir.clone(),
+            contract_datadir_roots: vec![layout.datadir.clone()],
+        }];
+        manager.all_datadir_roots = vec![layout.datadir.clone()];
+
+        let err = manager
+            .enable("os-skills", Some("openclaw"), true)
+            .expect_err("skill_bundle config must fail fast");
+        assert!(
+            matches!(err, AdapterError::InvalidAdapterInput { .. }),
+            "expected InvalidAdapterInput, got {err:?}"
+        );
+        assert!(
+            err.to_string()
+                .contains("skill_bundle adapters do not support framework config"),
+            "error must explain unsupported config: {err}"
+        );
     }
 
     // -- scan with Adopted + datadir-only contract ----------------------------

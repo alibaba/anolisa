@@ -1,17 +1,13 @@
 //! Hermes framework driver.
 //!
 //! Hermes manages plugins and skills under `$HERMES_HOME` (default
-//! `~/.hermes`). `enable` places the plugin by copying the resource root
-//! into `$HERMES_HOME/plugins/<plugin_id>/` via
-//! [`AdapterOps::copy_tree`](super::driver::AdapterOps::copy_tree), then
-//! runs `hermes plugins enable <plugin_id>`. `disable` runs
-//! `hermes plugins disable <plugin_id>`, then removes the placed plugin
-//! directory and any delivered skill directories through
-//! [`AdapterOps::remove_tree`](super::driver::AdapterOps::remove_tree).
-//! Skill directories discovered under `<resource_root>/skills/` are
-//! copied into `$HERMES_HOME/skills/` during enable. Status uses the
-//! read-only `hermes plugins list --plain --no-bundled`. All CLI and
-//! filesystem operations go through the Manager's
+//! `~/.hermes`). Plugin adapters place the resource root into
+//! `$HERMES_HOME/plugins/<plugin_id>/` and run
+//! `hermes plugins enable <plugin_id>`. Skill-only adapters
+//! (`adapter_type = "skill_bundle"`) skip plugin placement and only copy
+//! declared skills into `$HERMES_HOME/skills/`. Status uses the read-only
+//! `hermes plugins list --plain --no-bundled` for plugin adapters. All
+//! CLI and filesystem operations go through the Manager's
 //! [`AdapterOps`](super::driver::AdapterOps) — the driver never
 //! performs direct IO.
 //!
@@ -115,10 +111,14 @@ impl FrameworkDriver for HermesDriver {
             });
         }
 
-        let plugin_id = match ctx.declared_plugin_id.clone().filter(|id| !id.is_empty()) {
-            Some(id) => Some(id),
-            None => read_plugin_manifest_id(root, ctx.declared_bundle_entry.as_deref())?
-                .or_else(|| Some(ctx.component.clone())),
+        let plugin_id = if ctx.is_skill_bundle() {
+            None
+        } else {
+            match ctx.declared_plugin_id.clone().filter(|id| !id.is_empty()) {
+                Some(id) => Some(id),
+                None => read_plugin_manifest_id(root, ctx.declared_bundle_entry.as_deref())?
+                    .or_else(|| Some(ctx.component.clone())),
+            }
         };
 
         Ok(AdapterBundle {
@@ -133,19 +133,21 @@ impl FrameworkDriver for HermesDriver {
         bundle: &AdapterBundle,
         ctx: &DriverCtx,
     ) -> Result<DriverPlan, AdapterError> {
-        let plugin_id = require_plugin_id(bundle)?;
-        validate_plugin_id(&plugin_id)?;
         let home = require_home(ctx)?;
-        let enable_cmd = build_enable_cmd(&plugin_id);
-
-        let mut actions = vec![
-            format!(
+        let mut actions = Vec::new();
+        let mut register_command = None;
+        if !ctx.is_skill_bundle() {
+            let plugin_id = require_plugin_id(bundle)?;
+            validate_plugin_id(&plugin_id)?;
+            let enable_cmd = build_enable_cmd(&plugin_id);
+            register_command = Some(display_command(&enable_cmd));
+            actions.push(format!(
                 "place hermes plugin '{plugin_id}' from {} to {}/plugins/{plugin_id}",
                 bundle.resource_root.display(),
                 home.display(),
-            ),
-            format!("enable hermes plugin '{plugin_id}'"),
-        ];
+            ));
+            actions.push(format!("enable hermes plugin '{plugin_id}'"));
+        }
 
         for skill in &ctx.declared_skills {
             let src_display = match skill.source {
@@ -165,7 +167,7 @@ impl FrameworkDriver for HermesDriver {
             framework: self.name().to_string(),
             component: ctx.component.clone(),
             actions,
-            register_command: Some(display_command(&enable_cmd)),
+            register_command,
         })
     }
 
@@ -174,24 +176,26 @@ impl FrameworkDriver for HermesDriver {
         bundle: &AdapterBundle,
         ctx: &DriverCtx,
     ) -> Result<AdapterClaim, AdapterError> {
-        let plugin_id = require_plugin_id(bundle)?;
-        validate_plugin_id(&plugin_id)?;
         let home = require_home(ctx)?;
-
-        let mut resources = vec![
-            ClaimResource {
-                id: RES_HOME.to_string(),
-                purpose: "hermes_home".to_string(),
-                kind: ClaimResourceKind::ExternalPath { path: home.clone() },
-            },
-            ClaimResource {
+        let mut resources = vec![ClaimResource {
+            id: RES_HOME.to_string(),
+            purpose: "hermes_home".to_string(),
+            kind: ClaimResourceKind::ExternalPath { path: home.clone() },
+        }];
+        let plugin_id = if ctx.is_skill_bundle() {
+            None
+        } else {
+            let plugin_id = require_plugin_id(bundle)?;
+            validate_plugin_id(&plugin_id)?;
+            resources.push(ClaimResource {
                 id: RES_PLUGIN.to_string(),
                 purpose: "hermes_plugin_dir".to_string(),
                 kind: ClaimResourceKind::ExternalPath {
                     path: home.join("plugins").join(&plugin_id),
                 },
-            },
-        ];
+            });
+            Some(plugin_id)
+        };
 
         let mut skill_resource_ids = Vec::new();
         for skill in &ctx.declared_skills {
@@ -210,7 +214,8 @@ impl FrameworkDriver for HermesDriver {
             claim_schema: CLAIM_SCHEMA_VERSION,
             component: ctx.component.clone(),
             framework: self.name().to_string(),
-            plugin_id: Some(plugin_id),
+            plugin_id,
+            adapter_type: ctx.adapter_type.clone(),
             enabled_at: now_iso8601(),
             resource_root: bundle.resource_root.clone(),
             bundle_digest: bundle.digest.clone(),
@@ -219,38 +224,40 @@ impl FrameworkDriver for HermesDriver {
             resources,
             driver_payload: DriverPayload::Hermes(HermesClaim {
                 home_resource: RES_HOME.to_string(),
-                plugin_resource: RES_PLUGIN.to_string(),
+                plugin_resource: if ctx.is_skill_bundle() {
+                    String::new()
+                } else {
+                    RES_PLUGIN.to_string()
+                },
                 skill_resources: skill_resource_ids,
             }),
         })
     }
 
     fn apply_enable(&self, claim: &AdapterClaim, ctx: &DriverCtx) -> Result<(), AdapterError> {
-        let plugin_id = claim_plugin_id(claim).ok_or_else(|| AdapterError::BundleInvalid {
-            root: claim.resource_root.clone(),
-            reason: "hermes receipt has no plugin id".to_string(),
-        })?;
-        validate_plugin_id(&plugin_id)?;
         let home = require_home(ctx)?;
 
-        // 1. Place the plugin: copy the resource root into
-        //    $HERMES_HOME/plugins/<plugin_id>/, excluding the `skills/`
-        //    subtree (delivered separately to $HERMES_HOME/skills/).
-        let plugin_dest = home.join("plugins").join(&plugin_id);
-        copy_bundle_excluding_skills(&claim.resource_root, &plugin_dest, ctx)?;
+        if !ctx.is_skill_bundle() {
+            let plugin_id = claim_plugin_id(claim).ok_or_else(|| AdapterError::BundleInvalid {
+                root: claim.resource_root.clone(),
+                reason: "hermes receipt has no plugin id".to_string(),
+            })?;
+            validate_plugin_id(&plugin_id)?;
 
-        // 2. Enable the placed plugin via the Hermes CLI.
-        let enable_cmd = build_enable_cmd(&plugin_id);
-        let program = enable_cmd.program.clone();
-        let output = ctx.ops.run_framework_cli(enable_cmd)?;
-        if !output.success() {
-            return Err(AdapterError::FrameworkCli {
-                program,
-                reason: cli_failure_reason("plugins enable", &output),
-            });
+            let plugin_dest = home.join("plugins").join(&plugin_id);
+            copy_bundle_excluding_skills(&claim.resource_root, &plugin_dest, ctx)?;
+
+            let enable_cmd = build_enable_cmd(&plugin_id);
+            let program = enable_cmd.program.clone();
+            let output = ctx.ops.run_framework_cli(enable_cmd)?;
+            if !output.success() {
+                return Err(AdapterError::FrameworkCli {
+                    program,
+                    reason: cli_failure_reason("plugins enable", &output),
+                });
+            }
         }
 
-        // 3. Deliver skills through the Manager's controlled IO.
         for skill in &ctx.declared_skills {
             let src = skill
                 .source
@@ -284,48 +291,59 @@ impl FrameworkDriver for HermesDriver {
         // 2. Resource bundle still matches the enable-time digest?
         conditions.push(self.bundle_match_condition(claim));
 
-        // 3. Plugin still registered? Requires the CLI for a read-only
-        //    `plugins list`.
-        let plugin_id = claim_plugin_id(claim);
-        let (plugin_cond, verify_cond, plugin_registered) = if !detect.detected {
-            (
-                AdapterCondition {
-                    kind: AdapterConditionKind::PluginRegistered,
-                    status: ConditionStatus::Unknown,
-                    reason: Some("framework not detected; cannot verify".to_string()),
-                    resource: plugin_id.as_ref().map(|_| ClaimResourceRef {
-                        id: RES_PLUGIN.to_string(),
-                    }),
-                },
-                AdapterCondition {
-                    kind: AdapterConditionKind::VerificationSupported,
-                    status: ConditionStatus::False,
-                    reason: Some("hermes CLI unavailable".to_string()),
-                    resource: None,
-                },
-                ConditionStatus::Unknown,
-            )
-        } else if let Some(pid) = &plugin_id {
-            self.plugin_registered_condition(pid, ctx)
+        // 3. Plugin still registered? Skill-only receipts have no plugin
+        //    registry entry by design, so status does not require one.
+        let plugin_registered = if claim.is_skill_bundle() {
+            conditions.push(AdapterCondition {
+                kind: AdapterConditionKind::VerificationSupported,
+                status: bool_status(detect.detected),
+                reason: Some("skill_bundle has no plugin registry entry".to_string()),
+                resource: None,
+            });
+            ConditionStatus::True
         } else {
-            (
-                AdapterCondition {
-                    kind: AdapterConditionKind::PluginRegistered,
-                    status: ConditionStatus::Unknown,
-                    reason: Some("receipt has no plugin id".to_string()),
-                    resource: None,
-                },
-                AdapterCondition {
-                    kind: AdapterConditionKind::VerificationSupported,
-                    status: ConditionStatus::True,
-                    reason: None,
-                    resource: None,
-                },
-                ConditionStatus::Unknown,
-            )
+            let plugin_id = claim_plugin_id(claim);
+            let (plugin_cond, verify_cond, plugin_registered) = if !detect.detected {
+                (
+                    AdapterCondition {
+                        kind: AdapterConditionKind::PluginRegistered,
+                        status: ConditionStatus::Unknown,
+                        reason: Some("framework not detected; cannot verify".to_string()),
+                        resource: plugin_id.as_ref().map(|_| ClaimResourceRef {
+                            id: RES_PLUGIN.to_string(),
+                        }),
+                    },
+                    AdapterCondition {
+                        kind: AdapterConditionKind::VerificationSupported,
+                        status: ConditionStatus::False,
+                        reason: Some("hermes CLI unavailable".to_string()),
+                        resource: None,
+                    },
+                    ConditionStatus::Unknown,
+                )
+            } else if let Some(pid) = &plugin_id {
+                self.plugin_registered_condition(pid, ctx)
+            } else {
+                (
+                    AdapterCondition {
+                        kind: AdapterConditionKind::PluginRegistered,
+                        status: ConditionStatus::Unknown,
+                        reason: Some("receipt has no plugin id".to_string()),
+                        resource: None,
+                    },
+                    AdapterCondition {
+                        kind: AdapterConditionKind::VerificationSupported,
+                        status: ConditionStatus::True,
+                        reason: None,
+                        resource: None,
+                    },
+                    ConditionStatus::Unknown,
+                )
+            };
+            conditions.push(plugin_cond);
+            conditions.push(verify_cond);
+            plugin_registered
         };
-        conditions.push(plugin_cond);
-        conditions.push(verify_cond);
 
         let summary = summarize(claim.status, detect.detected, plugin_registered);
         Ok(AdapterStatusReport {
@@ -339,58 +357,47 @@ impl FrameworkDriver for HermesDriver {
         claim: &AdapterClaim,
         ctx: &DriverCtx,
     ) -> Result<DisableReport, AdapterError> {
-        let plugin_id = match claim_plugin_id(claim) {
-            Some(p) => p,
-            None => {
-                // No plugin recorded: nothing to unregister.
-                return Ok(DisableReport {
-                    cleanup_complete: true,
-                    messages: vec!["receipt records no plugin to unregister".to_string()],
-                });
-            }
-        };
-        validate_plugin_id(&plugin_id)?;
-
-        if find_binary_in_path(&hermes_bin()).is_none() {
-            return Ok(DisableReport {
-                cleanup_complete: false,
-                messages: vec![
-                    "hermes CLI not found on PATH; receipt kept so cleanup can be retried"
-                        .to_string(),
-                ],
-            });
-        }
-
         let mut messages = Vec::new();
         let mut cleanup_complete = true;
-
         let home = require_home(ctx)?;
 
-        // 1. Disable the plugin (ignore failure — might already be disabled).
-        let disable_cmd = build_disable_cmd(&plugin_id);
-        let _ = ctx.ops.run_framework_cli(disable_cmd);
-
-        // 2. Remove the placed plugin directory through controlled IO.
-        let plugin_dir = home.join("plugins").join(&plugin_id);
-        match ctx.ops.remove_tree(&plugin_dir) {
-            Ok(true) => messages.push(format!(
-                "removed hermes plugin directory {}",
-                plugin_dir.display()
-            )),
-            Ok(false) => messages.push(format!(
-                "hermes plugin directory {} already absent",
-                plugin_dir.display()
-            )),
-            Err(err) => {
-                cleanup_complete = false;
-                messages.push(format!(
-                    "failed to remove hermes plugin directory {}: {err}",
-                    plugin_dir.display()
-                ));
+        if let Some(plugin_id) = claim_plugin_id(claim) {
+            validate_plugin_id(&plugin_id)?;
+            if find_binary_in_path(&hermes_bin()).is_none() {
+                return Ok(DisableReport {
+                    cleanup_complete: false,
+                    messages: vec![
+                        "hermes CLI not found on PATH; receipt kept so cleanup can be retried"
+                            .to_string(),
+                    ],
+                });
             }
+
+            let disable_cmd = build_disable_cmd(&plugin_id);
+            let _ = ctx.ops.run_framework_cli(disable_cmd);
+
+            let plugin_dir = home.join("plugins").join(&plugin_id);
+            match ctx.ops.remove_tree(&plugin_dir) {
+                Ok(true) => messages.push(format!(
+                    "removed hermes plugin directory {}",
+                    plugin_dir.display()
+                )),
+                Ok(false) => messages.push(format!(
+                    "hermes plugin directory {} already absent",
+                    plugin_dir.display()
+                )),
+                Err(err) => {
+                    cleanup_complete = false;
+                    messages.push(format!(
+                        "failed to remove hermes plugin directory {}: {err}",
+                        plugin_dir.display()
+                    ));
+                }
+            }
+        } else {
+            messages.push("receipt records no plugin to unregister".to_string());
         }
 
-        // 3. Remove skill directories through Manager IO.
         if let DriverPayload::Hermes(ref hermes) = claim.driver_payload {
             for skill_res_id in &hermes.skill_resources {
                 if let Some(resource) = claim.resource(skill_res_id) {
@@ -971,6 +978,7 @@ mod tests {
             resource_root: dir.path().to_path_buf(),
             user_home: Some(PathBuf::from("/tmp/test-home-a")),
             declared_plugin_id: Some("agent-sec".to_string()),
+            adapter_type: None,
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: None,
@@ -1018,6 +1026,7 @@ mod tests {
             resource_root: root.to_path_buf(),
             user_home: Some(PathBuf::from("/tmp/test-home-c")),
             declared_plugin_id: Some("test-plugin".to_string()),
+            adapter_type: None,
             declared_skills: vec![DeclaredSkill {
                 name: "sec-audit".to_string(),
                 source: None,
@@ -1063,5 +1072,91 @@ mod tests {
         } else {
             panic!("expected Hermes driver payload");
         }
+    }
+
+    #[test]
+    fn skill_bundle_plan_and_claim_skip_plugin_enable() {
+        use crate::adapter::driver::DeclaredSkill;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("marker"), b"x").expect("write");
+
+        let driver = HermesDriver::new();
+        let ops = StubOps;
+        let layout = anolisa_platform::fs_layout::FsLayout::user(PathBuf::from("/tmp/test-home-d"));
+        let ctx = DriverCtx {
+            component: "os-skills".to_string(),
+            framework: "hermes".to_string(),
+            layout: &layout,
+            resource_root: dir.path().to_path_buf(),
+            user_home: Some(PathBuf::from("/tmp/test-home-d")),
+            declared_plugin_id: None,
+            adapter_type: Some("skill_bundle".to_string()),
+            declared_skills: vec![DeclaredSkill {
+                name: "install-hermes".to_string(),
+                source: Some(PathBuf::from("/usr/share/anolisa/skills/install-hermes")),
+            }],
+            declared_config: Vec::new(),
+            declared_bundle_entry: None,
+            dry_run: true,
+            ops: &ops,
+        };
+        let bundle = driver.read_bundle(&ctx).expect("read bundle");
+        assert!(bundle.plugin_id.is_none());
+
+        let plan = driver.plan_enable(&bundle, &ctx).expect("plan");
+        assert!(plan.register_command.is_none());
+        assert!(
+            plan.actions
+                .iter()
+                .all(|action| !action.contains("enable hermes plugin")),
+        );
+
+        let claim = driver.prepare_enable(&bundle, &ctx).expect("claim");
+        assert!(claim.plugin_id.is_none());
+        assert_eq!(claim.adapter_type.as_deref(), Some("skill_bundle"));
+        let plugin_paths = claim
+            .resources
+            .iter()
+            .filter(|resource| resource.purpose == "hermes_plugin_dir")
+            .count();
+        assert_eq!(plugin_paths, 0);
+        if let DriverPayload::Hermes(HermesClaim {
+            ref skill_resources,
+            ..
+        }) = claim.driver_payload
+        {
+            assert_eq!(skill_resources, &["hermes_skill_install-hermes"]);
+        } else {
+            panic!("expected Hermes driver payload");
+        }
+
+        let previous_bin = std::env::var_os("HERMES_BIN");
+        // SAFETY: test-only; restored before the test returns.
+        unsafe {
+            std::env::set_var("HERMES_BIN", "/bin/sh");
+        }
+        let report = driver.status(&claim, &ctx).expect("status");
+        // SAFETY: test-only; restore the process environment.
+        unsafe {
+            if let Some(value) = previous_bin {
+                std::env::set_var("HERMES_BIN", value);
+            } else {
+                std::env::remove_var("HERMES_BIN");
+            }
+        }
+
+        assert_eq!(report.summary, AdapterSummary::Healthy);
+        assert!(
+            report
+                .conditions
+                .iter()
+                .all(|condition| condition.kind != AdapterConditionKind::PluginRegistered),
+            "skill_bundle status must not require plugin registration"
+        );
+        assert!(report.conditions.iter().any(|condition| {
+            condition.kind == AdapterConditionKind::VerificationSupported
+                && condition.status == ConditionStatus::True
+        }));
     }
 }
