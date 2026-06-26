@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Instant;
 
 use futures::StreamExt;
 use tokio::io::AsyncBufReadExt;
@@ -15,6 +16,7 @@ use crate::config::{self, CoreConfig};
 use crate::context::ContextBuilder;
 use crate::hook::{HookDecision, HookNotification, HookSystem};
 use crate::loop_detect::LoopDetector;
+use crate::metrics::TurnMetrics;
 use crate::protocol::{InputMessage, OutputMessage, ShellContext, ShellControlRequest};
 use crate::provider::{ContentGenerator, GenerateConfig, GenerateEvent, Message};
 use crate::tool::{ToolContext, ToolKind, ToolRegistry, ToolResult};
@@ -30,6 +32,7 @@ pub struct CoshCore {
     pub shell_context: Option<ShellContext>,
     pub extra_params: Option<serde_json::Value>,
     pub hook_system: HookSystem,
+    pub metrics: TurnMetrics,
     loaded_policy: LoadedPolicy,
     request_counter: AtomicU32,
     truncator: OutputTruncator,
@@ -60,6 +63,7 @@ impl CoshCore {
             shell_context: None,
             extra_params: None,
             hook_system,
+            metrics: TurnMetrics::default(),
             loaded_policy,
             request_counter: AtomicU32::new(0),
             truncator: OutputTruncator::default(),
@@ -291,6 +295,10 @@ impl CoshCore {
             let mut msgs_with_system = vec![Message::system(&system_prompt)];
             msgs_with_system.extend(self.messages.clone());
 
+            // ─── SLS: API request timing ───
+            self.metrics.api_requests += 1;
+            let api_start = Instant::now();
+
             let stream_result = self
                 .provider
                 .generate(&msgs_with_system, &tool_decls, &generate_config)
@@ -299,13 +307,19 @@ impl CoshCore {
             let mut stream = match stream_result {
                 Ok(s) => s,
                 Err(e) if is_auth_error(&e) => {
+                    self.metrics.api_errors += 1;
+                    self.metrics.api_latency_ms += api_start.elapsed().as_millis() as u64;
                     // Attempt re-auth
                     if self.try_reauth(reader, writer).await {
                         continue; // Retry the turn with new credentials
                     }
                     return Err(e);
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    self.metrics.api_errors += 1;
+                    self.metrics.api_latency_ms += api_start.elapsed().as_millis() as u64;
+                    return Err(e);
+                }
             };
 
             let mut text_buf = String::new();
@@ -405,9 +419,20 @@ impl CoshCore {
                     }
                     GenerateEvent::Usage { prompt_tokens, completion_tokens, total_tokens } => {
                         usage_info = Some((prompt_tokens, completion_tokens, total_tokens));
+                        // ─── SLS: token usage ───
+                        self.metrics.tokens_input += prompt_tokens as u64;
+                        self.metrics.tokens_output += completion_tokens as u64;
+                        self.metrics.tokens_total += total_tokens as u64;
                     }
-                    GenerateEvent::MessageEnd => break,
-                    GenerateEvent::Error(e) => return Err(e),
+                    GenerateEvent::MessageEnd => {
+                        self.metrics.api_latency_ms += api_start.elapsed().as_millis() as u64;
+                        break;
+                    }
+                    GenerateEvent::Error(e) => {
+                        self.metrics.api_errors += 1;
+                        self.metrics.api_latency_ms += api_start.elapsed().as_millis() as u64;
+                        return Err(e);
+                    }
                 }
             }
             drop(stream);
@@ -588,6 +613,9 @@ impl CoshCore {
 
                 let (outcome, params) = match hook_result.decision {
                     HookDecision::Block(reason) => {
+                        // ─── SLS: hook-blocked tool call counts as total + fail ───
+                        self.metrics.tool_calls_total += 1;
+                        self.metrics.tool_calls_fail += 1;
                         let result = ToolResult::error(format!("Blocked by hook: {reason}"));
                         self.messages.push(Message::tool_result(
                             &tc.id,
@@ -619,6 +647,7 @@ impl CoshCore {
                 let params_for_post_hook = params.clone();
 
                 let mut tool_result_already_emitted = false;
+                let tool_start = Instant::now();
                 let result = match outcome {
                     Outcome::Allow => {
                         let result = self.execute_tool(&tc.name, params, &ctx).await;
@@ -646,34 +675,53 @@ impl CoshCore {
                             .get(&tc.name)
                             .map(|tool| tool.kind() == ToolKind::ShellExec)
                             .unwrap_or(false);
-                        match self
+                        // ─── SLS: approval wait timing ───
+                        let approval_start = Instant::now();
+                        let approval_result = self
                             .wait_for_approval(&request_id, accepts_host_executed_shell, reader)
-                            .await
-                        {
+                            .await;
+                        self.metrics.approval_wait_ms += approval_start.elapsed().as_millis() as u64;
+                        self.metrics.approval_count += 1;
+                        match approval_result {
                             ApprovalResult::Allowed => {
+                                self.metrics.approval_allow += 1;
                                 let result = self.execute_tool(&tc.name, params, &ctx).await;
                                 self.emit_provider_native_tool_result(writer, &tc.id, &result);
                                 tool_result_already_emitted = true;
                                 result
                             }
                             ApprovalResult::HostExecutedShell { llm_content, exit_code } => {
+                                self.metrics.approval_allow += 1;
                                 let is_error = exit_code.is_some_and(|c| c != 0);
                                 ToolResult { output: llm_content, is_error }
                             }
-                            ApprovalResult::Denied(reason) => ToolResult::error(format!(
-                                "Tool call denied: {}",
-                                reason.unwrap_or_else(|| "no reason given".to_string())
-                            )),
+                            ApprovalResult::Denied(reason) => {
+                                self.metrics.approval_deny += 1;
+                                ToolResult::error(format!(
+                                    "Tool call denied: {}",
+                                    reason.unwrap_or_else(|| "no reason given".to_string())
+                                ))
+                            }
                             ApprovalResult::Interrupted => {
+                                self.metrics.approval_deny += 1;
                                 interrupted = true;
                                 ToolResult::error("Interrupted by user")
                             }
                         }
                     }
                     Outcome::Deny => {
+                        self.metrics.approval_deny += 1;
                         ToolResult::error(format!("Tool '{}' denied by security policy", tc.name))
                     }
                 };
+                // ─── SLS: tool call total/duration/success/fail ───
+                self.metrics.tool_calls_total += 1;
+                self.metrics.tool_calls_duration_ms += tool_start.elapsed().as_millis() as u64;
+                if result.is_error {
+                    self.metrics.tool_calls_fail += 1;
+                } else {
+                    self.metrics.tool_calls_success += 1;
+                }
 
                 // ─── Hook: PostToolUse ───
                 let post_hook = self
@@ -727,7 +775,9 @@ impl CoshCore {
                     // ─── Sandbox Bypass ───
                     // If a hook requests sandbox bypass, present an approval
                     // panel with the original (un-sandboxed) command.
+                    // ─── SLS: sandbox blocked ───
                     if let Some(bypass) = failure_hook.sandbox_bypass_request {
+                        self.metrics.sandbox_blocked += 1;
                         self.emit(
                             writer,
                             &OutputMessage::hook_notification(

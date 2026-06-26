@@ -7,9 +7,11 @@ use crate::cli::CliArgs;
 use crate::config::{self, CoreConfig};
 use crate::core::CoshCore;
 use crate::extension::ExtensionManager;
+use crate::metrics::TurnMetrics;
 use crate::protocol::{AuthReason, InputMessage, OutputMessage, ShellControlRequest};
 use crate::skill::manager::expand_path;
 use crate::skill::SkillManager;
+use crate::sls;
 use crate::tool::ToolRegistry;
 
 pub async fn run(args: &CliArgs, mut config: CoreConfig) {
@@ -76,6 +78,8 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) {
             .await
         {
             Ok(()) => {
+                let duration = start.elapsed();
+                sls::append_sls_log(&engine.build_sls_record(duration));
                 let result_msg = OutputMessage::Result {
                     subtype: Some("success".to_string()),
                     is_error: false,
@@ -83,11 +87,12 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) {
                     errors: None,
                     session_id: Some(engine.session_id.clone()),
                     env_delta: None,
-                    duration_ms: Some(start.elapsed().as_millis() as u64),
+                    duration_ms: Some(duration.as_millis() as u64),
                 };
                 engine.emit(&mut writer, &result_msg);
             }
             Err(e) => {
+                sls::append_sls_log(&engine.build_sls_record(start.elapsed()));
                 let err_msg = OutputMessage::result_error(&engine.session_id, &e);
                 engine.emit(&mut writer, &err_msg);
             }
@@ -231,6 +236,8 @@ where
                 engine.shell_context = Some(ctx);
             }
 
+            // Reset per-turn metrics before each user message
+            engine.metrics = TurnMetrics::default();
             let start = std::time::Instant::now();
 
             match engine
@@ -238,6 +245,8 @@ where
                 .await
             {
                 Ok(()) => {
+                    let duration = start.elapsed();
+                    sls::append_sls_log(&engine.build_sls_record(duration));
                     let result_msg = OutputMessage::Result {
                         subtype: Some("success".to_string()),
                         is_error: false,
@@ -245,11 +254,12 @@ where
                         errors: None,
                         session_id: Some(engine.session_id.clone()),
                         env_delta: None,
-                        duration_ms: Some(start.elapsed().as_millis() as u64),
+                        duration_ms: Some(duration.as_millis() as u64),
                     };
                     engine.emit(writer, &result_msg);
                 }
                 Err(e) => {
+                    sls::append_sls_log(&engine.build_sls_record(start.elapsed()));
                     let err_msg = OutputMessage::result_error(&engine.session_id, &e);
                     engine.emit(writer, &err_msg);
                 }
