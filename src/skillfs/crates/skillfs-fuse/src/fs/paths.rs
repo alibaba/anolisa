@@ -288,9 +288,18 @@ impl SkillFs {
     }
 
     pub(super) fn is_staging_skill_root(&self, skill_name: &str) -> bool {
-        self.staging_matcher
-            .as_ref()
-            .is_some_and(|m| m.is_staging_root(skill_name))
+        self.staging_matcher.as_ref().is_some_and(|m| {
+            if m.is_staging_root(skill_name) {
+                return true;
+            }
+            // H3: Hermes nested ID — check the leaf component.
+            if let Some(leaf) = skill_name.split('/').next_back() {
+                if leaf != skill_name {
+                    return m.is_staging_root(leaf);
+                }
+            }
+            false
+        })
     }
 
     pub(super) fn is_pending_install(&self, skill_name: &str) -> bool {

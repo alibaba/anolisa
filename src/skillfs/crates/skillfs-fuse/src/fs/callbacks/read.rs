@@ -472,22 +472,42 @@ impl SkillFs {
                 category,
                 skill_name,
                 ..
-            } => match self.resolve_hermes_nested_read(category, skill_name) {
-                ReadResolution::Hidden => {
-                    reply.error(libc::ENOENT);
-                    return;
+            } => {
+                // H3: staging and pending install bypass for nested skills.
+                let nested_id = Self::hermes_skill_id(category, skill_name);
+                if !self.is_staging_skill_root(&nested_id) && !self.is_pending_install(&nested_id) {
+                    let grace_rel = match &path_type {
+                        PathType::NestedPassthrough { relative_path, .. } => {
+                            Some(relative_path.as_path())
+                        }
+                        PathType::NestedSkillMd { .. } => Some(Path::new("SKILL.md")),
+                        _ => None,
+                    };
+                    match self.resolve_hermes_nested_read(category, skill_name) {
+                        ReadResolution::Hidden
+                            if !self.is_post_publish_grace_allowed(&nested_id, grace_rel) =>
+                        {
+                            reply.error(libc::ENOENT);
+                            return;
+                        }
+                        ReadResolution::Hidden => {
+                            // H3: grace bypass — let the open proceed against source.
+                        }
+                        ReadResolution::Snapshot { dir, .. } if !is_mutating_open => {
+                            match &path_type {
+                                PathType::NestedSkillMd { .. } => {
+                                    physical = dir.join("SKILL.md");
+                                }
+                                PathType::NestedPassthrough { relative_path, .. } => {
+                                    physical = dir.join(relative_path);
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
                 }
-                ReadResolution::Snapshot { dir, .. } if !is_mutating_open => match &path_type {
-                    PathType::NestedSkillMd { .. } => {
-                        physical = dir.join("SKILL.md");
-                    }
-                    PathType::NestedPassthrough { relative_path, .. } => {
-                        physical = dir.join(relative_path);
-                    }
-                    _ => {}
-                },
-                _ => {}
-            },
+            }
             _ => {}
         }
 

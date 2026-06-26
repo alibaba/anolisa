@@ -339,14 +339,32 @@ impl SkillFs {
             return;
         }
 
-        // I4: reject create on hidden skills unless the path matches
-        // the post-publish grace whitelist.
-        if let PathType::Passthrough {
-            ref skill_name,
-            ref relative_path,
-        } = path_type
+        // I4/H3: reject create on hidden skills unless the path
+        // matches the post-publish grace whitelist.
         {
-            if self.should_reject_hidden_write(skill_name, Some(relative_path)) {
+            let reject = match &path_type {
+                PathType::Passthrough {
+                    skill_name,
+                    relative_path,
+                } => self.should_reject_hidden_write(skill_name, Some(relative_path)),
+                PathType::NestedPassthrough {
+                    category,
+                    skill_name,
+                    relative_path,
+                } => {
+                    let nid = Self::hermes_skill_id(category, skill_name);
+                    self.should_reject_hidden_write(&nid, Some(relative_path))
+                }
+                PathType::NestedSkillMd {
+                    category,
+                    skill_name,
+                } => {
+                    let nid = Self::hermes_skill_id(category, skill_name);
+                    self.should_reject_hidden_write(&nid, Some(Path::new("SKILL.md")))
+                }
+                _ => false,
+            };
+            if reject {
                 reply.error(libc::ENOENT);
                 return;
             }
@@ -917,18 +935,35 @@ impl SkillFs {
             }
         }
 
-        // I4: reject setattr mutations on hidden skills unless
+        // I4/H3: reject setattr mutations on hidden skills unless
         // the path matches the post-publish grace whitelist.
         if has_mutation {
-            let (skill_name, rel) = match &path_type {
+            let reject = match &path_type {
                 PathType::Passthrough {
                     skill_name,
                     relative_path,
-                } => (skill_name.as_str(), relative_path.as_path()),
-                PathType::SkillMd { skill_name } => (skill_name.as_str(), Path::new("SKILL.md")),
-                _ => ("", Path::new("")),
+                } => self.should_reject_hidden_write(skill_name, Some(relative_path)),
+                PathType::SkillMd { skill_name } => {
+                    self.should_reject_hidden_write(skill_name, Some(Path::new("SKILL.md")))
+                }
+                PathType::NestedPassthrough {
+                    category,
+                    skill_name,
+                    relative_path,
+                } => {
+                    let nested_id = Self::hermes_skill_id(category, skill_name);
+                    self.should_reject_hidden_write(&nested_id, Some(relative_path))
+                }
+                PathType::NestedSkillMd {
+                    category,
+                    skill_name,
+                } => {
+                    let nested_id = Self::hermes_skill_id(category, skill_name);
+                    self.should_reject_hidden_write(&nested_id, Some(Path::new("SKILL.md")))
+                }
+                _ => false,
             };
-            if !skill_name.is_empty() && self.should_reject_hidden_write(skill_name, Some(rel)) {
+            if reject {
                 reply.error(libc::ENOENT);
                 return;
             }

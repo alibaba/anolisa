@@ -31,10 +31,16 @@ impl SkillFs {
         relative_path: Option<&Path>,
         kind: MutationKind,
     ) {
-        // I2: staging roots bypass normal refresh/notify.
+        // I2/H3: staging roots bypass normal refresh/notify.
         if let Some(ref matcher) = self.staging_matcher {
             if matcher.is_staging_root(skill_name) {
                 return;
+            }
+            // H3: Hermes nested ID — check the leaf component.
+            if let Some(leaf) = skill_name.split('/').next_back() {
+                if leaf != skill_name && matcher.is_staging_root(leaf) {
+                    return;
+                }
             }
         }
         // Pending install: if a pending_install_controller is attached,

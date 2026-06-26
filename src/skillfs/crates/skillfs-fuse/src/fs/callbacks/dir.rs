@@ -457,6 +457,16 @@ impl SkillFs {
                         if !entry.path().is_dir() {
                             continue;
                         }
+                        // H3: staging roots inside category are hidden
+                        // from listing.
+                        if self.is_staging_skill_root(&name) {
+                            continue;
+                        }
+                        let nested_id = Self::hermes_skill_id(category, &name);
+                        // H3: pending installs hidden from listing.
+                        if self.is_pending_install(&nested_id) {
+                            continue;
+                        }
                         if has_resolver {
                             let is_skill_leaf = entry.path().join("SKILL.md").exists();
                             if is_skill_leaf {
@@ -477,10 +487,15 @@ impl SkillFs {
                 ref category,
                 ref skill_name,
             } => {
-                if matches!(
-                    self.resolve_hermes_nested_read(category, skill_name),
-                    ReadResolution::Hidden
-                ) {
+                // H3: staging and pending install bypass for nested skills.
+                let nested_id = Self::hermes_skill_id(category, skill_name);
+                if !self.is_staging_skill_root(&nested_id)
+                    && !self.is_pending_install(&nested_id)
+                    && matches!(
+                        self.resolve_hermes_nested_read(category, skill_name),
+                        ReadResolution::Hidden
+                    )
+                {
                     reply.error(libc::ENOENT);
                     return;
                 }
@@ -514,10 +529,14 @@ impl SkillFs {
                 ref skill_name,
                 ref relative_path,
             } => {
-                if matches!(
-                    self.resolve_hermes_nested_read(category, skill_name),
-                    ReadResolution::Hidden
-                ) {
+                let nested_id = Self::hermes_skill_id(category, skill_name);
+                if !self.is_staging_skill_root(&nested_id)
+                    && !self.is_pending_install(&nested_id)
+                    && matches!(
+                        self.resolve_hermes_nested_read(category, skill_name),
+                        ReadResolution::Hidden
+                    )
+                {
                     reply.error(libc::ENOENT);
                     return;
                 }
@@ -1047,6 +1066,14 @@ impl SkillFs {
                         phys_entries.sort_by_key(|e| e.file_name());
                         for entry in phys_entries {
                             let name = entry.file_name().to_string_lossy().to_string();
+                            // H3: staging roots inside category hidden from listing.
+                            if entry.path().is_dir() && self.is_staging_skill_root(&name) {
+                                continue;
+                            }
+                            let nested_id = Self::hermes_skill_id(category, &name);
+                            if self.is_pending_install(&nested_id) {
+                                continue;
+                            }
                             if has_resolver && entry.path().is_dir() {
                                 let is_skill_leaf = entry.path().join("SKILL.md").exists();
                                 if is_skill_leaf {
@@ -1072,10 +1099,14 @@ impl SkillFs {
                 ref category,
                 ref skill_name,
             } => {
-                if matches!(
-                    self.resolve_hermes_nested_read(category, skill_name),
-                    ReadResolution::Hidden
-                ) {
+                let nested_id = Self::hermes_skill_id(category, skill_name);
+                if !self.is_staging_skill_root(&nested_id)
+                    && !self.is_pending_install(&nested_id)
+                    && matches!(
+                        self.resolve_hermes_nested_read(category, skill_name),
+                        ReadResolution::Hidden
+                    )
+                {
                     return reply.error(libc::ENOENT);
                 }
                 let phys_dir = self
@@ -1114,10 +1145,14 @@ impl SkillFs {
                 ref skill_name,
                 ref relative_path,
             } => {
-                if matches!(
-                    self.resolve_hermes_nested_read(category, skill_name),
-                    ReadResolution::Hidden
-                ) {
+                let nested_id = Self::hermes_skill_id(category, skill_name);
+                if !self.is_staging_skill_root(&nested_id)
+                    && !self.is_pending_install(&nested_id)
+                    && matches!(
+                        self.resolve_hermes_nested_read(category, skill_name),
+                        ReadResolution::Hidden
+                    )
+                {
                     return reply.error(libc::ENOENT);
                 }
                 let phys_dir = match self.resolve_hermes_nested_read(category, skill_name) {

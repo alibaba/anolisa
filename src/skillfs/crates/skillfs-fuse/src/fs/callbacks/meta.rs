@@ -414,10 +414,16 @@ impl SkillFs {
                 ref category,
                 ref skill_name,
             } => {
-                if matches!(
-                    self.resolve_hermes_nested_read(category, skill_name),
-                    crate::fs::read_resolution::ReadResolution::Hidden
-                ) {
+                // H3: staging and pending install bypass for nested
+                // skill lookup.
+                let nested_id = Self::hermes_skill_id(category, skill_name);
+                if !self.is_staging_skill_root(&nested_id)
+                    && !self.is_pending_install(&nested_id)
+                    && matches!(
+                        self.resolve_hermes_nested_read(category, skill_name),
+                        crate::fs::read_resolution::ReadResolution::Hidden
+                    )
+                {
                     reply.error(libc::ENOENT);
                     return;
                 }
@@ -438,10 +444,14 @@ impl SkillFs {
                 ref category,
                 ref skill_name,
             } => {
-                if matches!(
-                    self.resolve_hermes_nested_read(category, skill_name),
-                    crate::fs::read_resolution::ReadResolution::Hidden
-                ) {
+                let nested_id = Self::hermes_skill_id(category, skill_name);
+                if !self.is_staging_skill_root(&nested_id)
+                    && !self.is_pending_install(&nested_id)
+                    && matches!(
+                        self.resolve_hermes_nested_read(category, skill_name),
+                        crate::fs::read_resolution::ReadResolution::Hidden
+                    )
+                {
                     reply.error(libc::ENOENT);
                     return;
                 }
@@ -473,10 +483,14 @@ impl SkillFs {
                 ref skill_name,
                 ref relative_path,
             } => {
-                if matches!(
-                    self.resolve_hermes_nested_read(category, skill_name),
-                    crate::fs::read_resolution::ReadResolution::Hidden
-                ) {
+                let nested_id_lu = Self::hermes_skill_id(category, skill_name);
+                if !self.is_staging_skill_root(&nested_id_lu)
+                    && !self.is_pending_install(&nested_id_lu)
+                    && matches!(
+                        self.resolve_hermes_nested_read(category, skill_name),
+                        crate::fs::read_resolution::ReadResolution::Hidden
+                    )
+                {
                     reply.error(libc::ENOENT);
                     return;
                 }
@@ -808,10 +822,14 @@ impl SkillFs {
                 ref category,
                 ref skill_name,
             } => {
-                if matches!(
-                    self.resolve_hermes_nested_read(category, skill_name),
-                    crate::fs::read_resolution::ReadResolution::Hidden
-                ) {
+                let nid = Self::hermes_skill_id(category, skill_name);
+                if !self.is_staging_skill_root(&nid)
+                    && !self.is_pending_install(&nid)
+                    && matches!(
+                        self.resolve_hermes_nested_read(category, skill_name),
+                        crate::fs::read_resolution::ReadResolution::Hidden
+                    )
+                {
                     reply.error(libc::ENOENT);
                     return;
                 }
@@ -831,10 +849,14 @@ impl SkillFs {
                 ref category,
                 ref skill_name,
             } => {
-                if matches!(
-                    self.resolve_hermes_nested_read(category, skill_name),
-                    crate::fs::read_resolution::ReadResolution::Hidden
-                ) {
+                let nid = Self::hermes_skill_id(category, skill_name);
+                if !self.is_staging_skill_root(&nid)
+                    && !self.is_pending_install(&nid)
+                    && matches!(
+                        self.resolve_hermes_nested_read(category, skill_name),
+                        crate::fs::read_resolution::ReadResolution::Hidden
+                    )
+                {
                     reply.error(libc::ENOENT);
                     return;
                 }
@@ -862,10 +884,14 @@ impl SkillFs {
                 ref skill_name,
                 ref relative_path,
             } => {
-                if matches!(
-                    self.resolve_hermes_nested_read(category, skill_name),
-                    crate::fs::read_resolution::ReadResolution::Hidden
-                ) {
+                let nid = Self::hermes_skill_id(category, skill_name);
+                if !self.is_staging_skill_root(&nid)
+                    && !self.is_pending_install(&nid)
+                    && matches!(
+                        self.resolve_hermes_nested_read(category, skill_name),
+                        crate::fs::read_resolution::ReadResolution::Hidden
+                    )
+                {
                     reply.error(libc::ENOENT);
                     return;
                 }
