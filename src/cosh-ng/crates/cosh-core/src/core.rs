@@ -408,7 +408,7 @@ impl CoshCore {
             // ─── Hook: AfterModel ───
             let after_model_result = self
                 .hook_system
-                .fire_after_model(&self.session_id, &cwd_str, !tool_calls.is_empty())
+                .fire_after_model(&self.session_id, &cwd_str, !tool_calls.is_empty(), &text_buf)
                 .await;
             self.emit_hook_notifications(writer, &after_model_result.notifications, None);
 
@@ -643,8 +643,9 @@ impl CoshCore {
                                 self.emit_provider_native_tool_result(writer, &tc.id, &result);
                                 result
                             }
-                            ApprovalResult::HostExecutedShell { llm_content } => {
-                                ToolResult::success(llm_content)
+                            ApprovalResult::HostExecutedShell { llm_content, exit_code } => {
+                                let is_error = exit_code.is_some_and(|c| c != 0);
+                                ToolResult { output: llm_content, is_error }
                             }
                             ApprovalResult::Denied(reason) => ToolResult::error(format!(
                                 "Tool call denied: {}",
@@ -676,7 +677,7 @@ impl CoshCore {
                     .await;
                 self.emit_hook_notifications(writer, &post_hook.notifications, Some(&tc.id));
 
-                let result = if let HookDecision::Block(reason) = &post_hook.decision {
+                let mut result = if let HookDecision::Block(reason) = &post_hook.decision {
                     ToolResult::error(format!("Post-tool hook denied: {reason}"))
                 } else if let Some(ref extra) = post_hook.additional_context {
                     ToolResult {
@@ -689,6 +690,14 @@ impl CoshCore {
 
                 // ─── Hook: PostToolUseFailure ───
                 if result.is_error {
+                    // Emit tool_result BEFORE running PostToolUseFailure hooks.
+                    // This is critical for the Control Protocol path: when a command
+                    // fails in cosh-shell's foreground PTY (e.g., sandbox bwrap error),
+                    // cosh-shell delivers HostExecutedShell and starts a stall timer.
+                    // If cosh-core doesn't produce output quickly, cosh-shell triggers
+                    // "Agent recovery" which races against our PostToolUseFailure hooks.
+                    // Emitting tool_result here signals progress to cosh-shell.
+                    self.emit_provider_native_tool_result(writer, &tc.id, &result);
                     let failure_hook = self
                         .hook_system
                         .fire_post_tool_use_failure(
@@ -702,6 +711,49 @@ impl CoshCore {
                         )
                         .await;
                     self.emit_hook_notifications(writer, &failure_hook.notifications, Some(&tc.id));
+
+                    // ─── Sandbox Bypass ───
+                    // If a hook requests sandbox bypass, present an approval
+                    // panel with the original (un-sandboxed) command.
+                    if let Some(bypass) = failure_hook.sandbox_bypass_request {
+                        self.emit(
+                            writer,
+                            &OutputMessage::hook_notification(
+                                "sandbox-failure-handler",
+                                &bypass.reason,
+                                Some(&tc.id),
+                                Some("ask"),
+                            ),
+                        );
+                        let request_id = self.next_request_id();
+                        let bypass_tool_use_id = format!("{}-bypass", &tc.id);
+                        self.emit(
+                            writer,
+                            &OutputMessage::can_use_tool(
+                                &request_id,
+                                &tc.name,
+                                serde_json::json!({"command": &bypass.original_command}),
+                                &bypass_tool_use_id,
+                                true,
+                            ),
+                        );
+
+                        match self.wait_for_approval(&request_id, true, reader).await {
+                            ApprovalResult::Allowed => {
+                                self.hook_system.set_hook_disabled("sandbox-guard", true);
+                                let retry_params = serde_json::json!({"command": &bypass.original_command});
+                                let retry = self.execute_tool(&tc.name, retry_params, &ctx).await;
+                                self.emit_provider_native_tool_result(writer, &tc.id, &retry);
+                                self.hook_system.set_hook_disabled("sandbox-guard", false);
+                                result = retry;
+                            }
+                            ApprovalResult::HostExecutedShell { llm_content, exit_code } => {
+                                let is_error = exit_code.is_some_and(|c| c != 0);
+                                result = ToolResult { output: llm_content, is_error };
+                            }
+                            _ => { /* denied / interrupted: keep original error */ }
+                        }
+                    }
                 }
 
                 self.messages.push(Message::tool_result(
@@ -1095,8 +1147,14 @@ impl CoshCore {
                                     "host_executed_shell response missing result".to_string(),
                                 ));
                             };
+                            let exit_code = result.metadata
+                                .as_ref()
+                                .and_then(|m| m.get("exit_code"))
+                                .and_then(|v| v.as_i64())
+                                .map(|v| v as i32);
                             return ApprovalResult::HostExecutedShell {
                                 llm_content: result.llm_content,
+                                exit_code,
                             };
                         }
                         _ => return ApprovalResult::Denied(Some("unknown response".to_string())),
@@ -1180,7 +1238,7 @@ impl CoshCore {
 enum ApprovalResult {
     Allowed,
     Denied(Option<String>),
-    HostExecutedShell { llm_content: String },
+    HostExecutedShell { llm_content: String, exit_code: Option<i32> },
     Interrupted,
 }
 
