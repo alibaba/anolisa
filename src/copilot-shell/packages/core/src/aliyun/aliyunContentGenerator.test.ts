@@ -5,7 +5,10 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { AliyunContentGenerator } from './aliyunContentGenerator.js';
+import {
+  AliyunContentGenerator,
+  createAliyunContentGenerator,
+} from './aliyunContentGenerator.js';
 import type { GenerateContentParameters } from '@google/genai';
 import { Type } from '@google/genai';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
@@ -237,6 +240,34 @@ describe('AliyunContentGenerator', () => {
 
       expect(result.tools).toBeUndefined();
     });
+
+    it('should include instance_id when set', () => {
+      generator.setInstanceId('i-bp1234567890abcdef');
+      const request: GenerateContentParameters = {
+        model: 'qwen3-coder-plus',
+        contents: [{ role: 'user', parts: [{ text: 'test' }] }],
+        config: {},
+      };
+
+      // @ts-expect-error - accessing private method for testing
+      const result = generator.convertToAliyunFormat(request);
+
+      expect(result.instance_id).toBe('i-bp1234567890abcdef');
+    });
+
+    it('should omit instance_id when null', () => {
+      generator.setInstanceId(null);
+      const request: GenerateContentParameters = {
+        model: 'qwen3-coder-plus',
+        contents: [{ role: 'user', parts: [{ text: 'test' }] }],
+        config: {},
+      };
+
+      // @ts-expect-error - accessing private method for testing
+      const result = generator.convertToAliyunFormat(request);
+
+      expect(result.instance_id).toBeUndefined();
+    });
   });
 });
 
@@ -459,5 +490,58 @@ describe('AliyunContentGenerator - STS 凭证支持', () => {
       // @ts-expect-error - accessing private field for testing
       expect(generator.isSTS).toBe(true);
     });
+  });
+});
+
+describe('createAliyunContentGenerator', () => {
+  let mockConfig: Config;
+
+  beforeEach(() => {
+    mockConfig = {
+      getModel: vi.fn().mockReturnValue('qwen3-coder-plus'),
+    } as unknown as Config;
+    vi.clearAllMocks();
+  });
+
+  it('should set instanceId from ECS metadata when on ECS', async () => {
+    const spy = vi
+      .spyOn(aliyunAuthService, 'getECSInstanceId')
+      .mockResolvedValue('i-bp1234567890abcdef');
+
+    const contentGeneratorConfig: ContentGeneratorConfig = {
+      model: 'qwen3-coder-plus',
+    };
+
+    const generator = await createAliyunContentGenerator(
+      contentGeneratorConfig,
+      mockConfig,
+    );
+
+    // @ts-expect-error - accessing private field for testing
+    expect(generator.instanceId).toBe('i-bp1234567890abcdef');
+    expect(spy).toHaveBeenCalled();
+
+    spy.mockRestore();
+  });
+
+  it('should set instanceId to null when not on ECS', async () => {
+    const spy = vi
+      .spyOn(aliyunAuthService, 'getECSInstanceId')
+      .mockResolvedValue(null);
+
+    const contentGeneratorConfig: ContentGeneratorConfig = {
+      model: 'qwen3-coder-plus',
+    };
+
+    const generator = await createAliyunContentGenerator(
+      contentGeneratorConfig,
+      mockConfig,
+    );
+
+    // @ts-expect-error - accessing private field for testing
+    expect(generator.instanceId).toBeNull();
+    expect(spy).toHaveBeenCalled();
+
+    spy.mockRestore();
   });
 });

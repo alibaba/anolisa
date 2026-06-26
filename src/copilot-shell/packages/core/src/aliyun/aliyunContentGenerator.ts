@@ -27,7 +27,10 @@ import {
   type AliyunCredentialsWithSTS,
   type AliyunSTSCredentials,
 } from './aliyunCredentials.js';
-import { getValidSTSCredentials } from './aliyunAuthService.js';
+import {
+  getValidSTSCredentials,
+  getECSInstanceId,
+} from './aliyunAuthService.js';
 import * as SysomModule from '@alicloud/sysom20231230';
 import { GenerateCopilotResponseRequest } from '@alicloud/sysom20231230';
 import { $OpenApiUtil } from '@alicloud/openapi-core';
@@ -60,7 +63,7 @@ function getSysomClientClass(): new (
 const ALIYUN_SYSOM_ENDPOINT = 'sysom.cn-hangzhou.aliyuncs.com';
 
 // 默认模型
-const DEFAULT_MODEL = 'qwen3-coder-plus';
+const DEFAULT_MODEL = 'qwen3.7-plus';
 
 /**
  * Message format for Aliyun API
@@ -102,6 +105,7 @@ interface AliyunRequestParams {
   model: string;
   stream: boolean;
   use_dashscope?: boolean;
+  instance_id?: string;
 }
 
 /**
@@ -206,6 +210,7 @@ export class AliyunContentGenerator implements ContentGenerator {
   private contentGeneratorConfig: ContentGeneratorConfig;
   private credentials: AliyunCredentialsWithSTS;
   private isSTS: boolean;
+  private instanceId: string | null = null;
 
   constructor(
     credentials: AliyunCredentialsWithSTS,
@@ -223,6 +228,13 @@ export class AliyunContentGenerator implements ContentGenerator {
     this.runtime = new $Util.RuntimeOptions({});
     this.runtime.readTimeout = 180000;
     this.runtime.connectTimeout = 180000;
+  }
+
+  /**
+   * Set ECS instance ID for request tracking
+   */
+  setInstanceId(instanceId: string | null): void {
+    this.instanceId = instanceId;
   }
 
   /**
@@ -500,6 +512,7 @@ export class AliyunContentGenerator implements ContentGenerator {
         request.model || this.contentGeneratorConfig.model || DEFAULT_MODEL,
       stream: false,
       use_dashscope: true,
+      ...(this.instanceId ? { instance_id: this.instanceId } : {}),
     };
   }
 
@@ -570,6 +583,7 @@ export class AliyunContentGenerator implements ContentGenerator {
     const requestParams = this.convertToAliyunFormat(request);
     const headers: Record<string, string> = {
       'content-type': 'application/json',
+      'x-sysom-invoke-source': 'cosh',
     };
     const aliyunRequest = new GenerateCopilotResponseRequest({
       llmParamString: JSON.stringify(requestParams),
@@ -758,6 +772,7 @@ export class AliyunContentGenerator implements ContentGenerator {
 
     const headers: Record<string, string> = {
       'content-type': 'application/json',
+      'x-sysom-invoke-source': 'cosh',
     };
 
     // Build request for low-level SSE API call
@@ -852,16 +867,21 @@ export async function createAliyunContentGenerator(
   contentGeneratorConfig: ContentGeneratorConfig,
   config: Config,
 ): Promise<AliyunContentGenerator> {
-  const credentials = await loadAliyunCredentials();
+  const [credentials, instanceId] = await Promise.all([
+    loadAliyunCredentials(),
+    getECSInstanceId(),
+  ]);
   if (!credentials) {
     throw new Error(
       'Aliyun credentials not found. Please use /auth to configure your Access Key ID and Secret.',
     );
   }
 
-  return new AliyunContentGenerator(
+  const generator = new AliyunContentGenerator(
     credentials,
     contentGeneratorConfig,
     config,
   );
+  generator.setInstanceId(instanceId);
+  return generator;
 }

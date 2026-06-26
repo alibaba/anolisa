@@ -17,7 +17,7 @@ const ALIYUN_CREDS_FILENAME = 'aliyun_creds.json';
 /**
  * Default model for Aliyun auth
  */
-export const ALIYUN_DEFAULT_MODEL = 'qwen3-coder-plus';
+export const ALIYUN_DEFAULT_MODEL = 'qwen3.7-plus';
 
 /**
  * 阿里云凭证类型分层说明
