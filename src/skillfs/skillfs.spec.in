@@ -22,6 +22,7 @@ BuildRequires:  pkgconfig(fuse3)
 
 Requires:       fuse3
 Requires:       fuse3-libs%{?_isa}
+Provides:       anolisa-component(skillfs)
 
 %description
 SkillFS is a FUSE-based filesystem that exposes AI agent skills through
@@ -41,6 +42,10 @@ rm -rf %{buildroot}
 install -d -m 0755 %{buildroot}%{_localbindir}
 install -p -m 0755 target/release/skillfs %{buildroot}%{_localbindir}/skillfs
 
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/components/skillfs
+install -p -m 0644 component.toml \
+    %{buildroot}%{_datadir}/anolisa/components/skillfs/component.toml
+
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/runtime/skills/skillfs
 cp -rp docs/skills/skillfs-mount/. \
     %{buildroot}%{_datadir}/anolisa/runtime/skills/skillfs/
@@ -49,6 +54,8 @@ cp -rp docs/skills/skillfs-mount/. \
 %license LICENSE
 %doc README.md CHANGELOG.md
 %attr(0755,root,root) %{_localbindir}/skillfs
+%dir %{_datadir}/anolisa/components/skillfs
+%{_datadir}/anolisa/components/skillfs/component.toml
 %dir %{_datadir}/anolisa/runtime
 %dir %{_datadir}/anolisa/runtime/skills
 %{_datadir}/anolisa/runtime/skills/skillfs/
