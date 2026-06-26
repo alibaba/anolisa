@@ -7,26 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-26
+
 ### Added
-- Trusted peer control socket (`--control-socket`, `--trusted-peer-exe`) with
-  `SO_PEERCRED` identity verification, activation write API, and bounded
-  request size (64 KB limit).
-- Installer staging compatibility: `[install] staging_patterns` config for
-  installer-private workspaces with rename-boundary mutation notify.
-- Quiet-timeout notifications: aggregated mutation notify after a configurable
-  quiet window for installers that do not use rename or `.install-complete`.
-- Direct pending install transactions: track newly created skill directories
-  and suppress notify until a quiet window confirms completion.
-- Post-publish grace sessions: time-limited exact-path writes to whitelisted
-  patterns after staging rename or pending install completion.
-- Backing root propagation isolation: `MS_PRIVATE | MS_REC` after bind mount
-  to prevent the FUSE over-mount from leaking into the backing root.
-- Backing root accessibility validation at startup for in-place mounts with
-  activation or notify enabled.
-- Canonical skill identity: store key is the directory basename, not the
-  frontmatter `name:` field.
-- `enqueue_immediate()` on `NotifyController` for staging and quiet-timeout
-  dispatch that bypasses debounce.
+- Runtime security integration for agent skill directories. SkillFS can now
+  consume activation decisions from `.skill-meta/activation.json` or the
+  `user.agent_sec.skill_ledger.activation` xattr, then expose each skill as
+  current, hidden, or a trusted fallback snapshot.
+- File-change notification for external security daemons. With
+  `--activation-mode file`, `--notify-socket`, `--activation-events-log`, and
+  `--activation-reload-mode poll`, SkillFS reports skill mutations, reloads
+  activation decisions, and keeps already-opened file handles pinned to their
+  original target.
+- Trusted control socket for activation writes. A daemon verified with
+  `SO_PEERCRED`, executable identity, and start-time checks can update
+  activation JSON or activation xattr through a bounded request API instead of
+  writing `.skill-meta` through the agent-visible mount path.
+- Installer compatibility for common skill installation flows. Staging
+  directories, direct writes, quiet-timeout completion, and post-publish grace
+  windows allow installers to finish writing a skill before SkillFS asks the
+  security provider to scan and activate it.
+- In-place mount support for security daemons. Ledger backing roots are bind
+  mounted privately and validated at startup so scanners read the real source
+  tree rather than the agent-facing FUSE view.
+- Canonical skill identity based on the directory basename. Frontmatter
+  `name:` remains display metadata and no longer changes the SkillFS store key
+  or daemon-facing skill id.
+
+### Changed
+- `.skill-meta/**` is hidden from ordinary agents and remains accessible only
+  through trusted metadata paths or the control socket.
+- Skill mutation notify uses ordinary filesystem event kinds, including
+  `create`, `write`, `rename`, `unlink`, `rmdir`, and truncate events, instead
+  of a separate install-complete protocol event.
+- POSIX passthrough behavior was expanded for symlink, hardlink, FIFO, path
+  length fallback, open-after-unlink, xattr, and inode consistency cases.
+
+### Fixed
+- Prevented stale activation views by combining notify-triggered reload,
+  polling, and activation watcher convergence.
+- Hardened trusted-writer and trusted-peer checks against process reuse and
+  executable replacement with start-time and file-identity validation.
+- Avoided installer and daemon visibility bugs around hidden skills, fallback
+  snapshots, staging paths, and backing-root propagation.
 
 ## [0.2.0] - 2026-05-09
 

@@ -61,5 +61,8 @@ cp -rp docs/skills/skillfs-mount/. \
 %{_datadir}/anolisa/runtime/skills/skillfs/
 
 %changelog
+* Fri Jun 26 2026 Kongche <kongche.jbw@alibaba-inc.com> - 0.3.0-1
+- Release SkillFS runtime security and installer compatibility updates.
+
 * Wed Jun 24 2026 Kongche <kongche.jbw@alibaba-inc.com> - 0.2.0-1
 - Package SkillFS from the ANOLISA monorepo.
