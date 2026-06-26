@@ -620,6 +620,78 @@ fn hermes_nested_write_triggers_notify() {
 }
 
 // -----------------------------------------------------------------------
+// H3-15. Hermes nested file rename triggers notify
+// -----------------------------------------------------------------------
+
+#[test]
+fn hermes_nested_file_rename_triggers_notify() {
+    skip_if_no_fuse!();
+
+    use parking_lot::RwLock;
+    use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
+    use skillfs_fuse::security::{InMemoryNotifyClient, NotifyController};
+    use skillfs_fuse::{MountConfig, MountOptions, SkillLayout, mount_background_configured};
+
+    let source = tempfile::tempdir().unwrap();
+    seed_hermes_workspace(source.path());
+    std::fs::write(source.path().join("apple/apple-notes/old.txt"), "rename-me").unwrap();
+
+    let mut store = SkillStore::new();
+    store.load_from_directory(source.path(), &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+    let mountpoint = tempfile::tempdir().unwrap();
+
+    let notify_client = Arc::new(InMemoryNotifyClient::new());
+    let notify_ctrl = NotifyController::new(
+        notify_client.clone(),
+        source.path().to_path_buf(),
+        Duration::from_millis(50),
+        5000,
+    );
+
+    let config = MountConfig {
+        notify_controller: Some(notify_ctrl.clone()),
+        skill_layout: Some(SkillLayout::Hermes),
+        ..MountConfig::default()
+    };
+
+    let _handle = mount_background_configured(
+        mountpoint.path(),
+        source.path(),
+        shared,
+        MountOptions::default(),
+        true,
+        config,
+    )
+    .unwrap();
+
+    std::thread::sleep(Duration::from_millis(300));
+
+    let mp = mountpoint.path();
+
+    std::fs::rename(
+        mp.join("apple/apple-notes/old.txt"),
+        mp.join("apple/apple-notes/new.txt"),
+    )
+    .unwrap();
+
+    std::thread::sleep(Duration::from_millis(300));
+    notify_ctrl.flush_for_testing();
+
+    let events = notify_client.events();
+    let rename_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.skill_name == "apple/apple-notes" && e.event_kind == "rename")
+        .collect();
+    assert!(
+        !rename_events.is_empty(),
+        "nested file rename must trigger notify for apple/apple-notes, got: {:?}",
+        events
+    );
+}
+
+// -----------------------------------------------------------------------
 // H3-14. Management path writes produce zero notify even with
 //        staging + pending install controllers attached.
 // -----------------------------------------------------------------------
