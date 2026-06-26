@@ -1079,6 +1079,28 @@ impl SkillFs {
                     PathType::InboxSkillDir { skill_name } => {
                         Some((skill_name.clone(), None, true))
                     }
+                    // H3: Hermes nested paths.
+                    PathType::NestedSkillMd {
+                        category,
+                        skill_name,
+                    } => Some((
+                        Self::hermes_skill_id(category, skill_name),
+                        Some(PathBuf::from("SKILL.md")),
+                        false,
+                    )),
+                    PathType::NestedPassthrough {
+                        category,
+                        skill_name,
+                        relative_path,
+                    } => Some((
+                        Self::hermes_skill_id(category, skill_name),
+                        Some(relative_path.clone()),
+                        false,
+                    )),
+                    PathType::NestedSkillDir {
+                        category,
+                        skill_name,
+                    } => Some((Self::hermes_skill_id(category, skill_name), None, false)),
                     _ => None,
                 };
                 let new_skill_path = match &new_type {
@@ -1097,6 +1119,27 @@ impl SkillFs {
                     PathType::InboxSkillDir { skill_name } => {
                         Some((skill_name.clone(), None, true))
                     }
+                    PathType::NestedSkillMd {
+                        category,
+                        skill_name,
+                    } => Some((
+                        Self::hermes_skill_id(category, skill_name),
+                        Some(PathBuf::from("SKILL.md")),
+                        false,
+                    )),
+                    PathType::NestedPassthrough {
+                        category,
+                        skill_name,
+                        relative_path,
+                    } => Some((
+                        Self::hermes_skill_id(category, skill_name),
+                        Some(relative_path.clone()),
+                        false,
+                    )),
+                    PathType::NestedSkillDir {
+                        category,
+                        skill_name,
+                    } => Some((Self::hermes_skill_id(category, skill_name), None, false)),
                     _ => None,
                 };
                 let observe_pair = |fs: &Self, skill: &str, rel: Option<&Path>, is_inbox: bool| {
