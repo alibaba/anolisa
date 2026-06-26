@@ -45,7 +45,7 @@ impl CoshCore {
         let model = config.resolve_provider().model;
         let (loaded_policy, warning) = LoadedPolicy::load();
         if let Some(w) = warning {
-            eprintln!("[cosh-core] {w}");
+            tracing::warn!("{w}");
         }
 
         let hook_system = HookSystem::from_config(&config.hooks);
@@ -1219,7 +1219,7 @@ impl CoshCore {
 
         if response.persist {
             if let Err(e) = config::persist_config(&self.config) {
-                eprintln!("[cosh-core] Warning: failed to persist config: {e}");
+                tracing::warn!("failed to persist config: {e}");
             }
         }
 

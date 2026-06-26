@@ -179,8 +179,9 @@ impl ExtensionManager {
                     map.insert(ext.name.clone(), ext);
                 }
                 None => {
-                    eprintln!(
-                        "[extension] Failed to load extension from: {}",
+                    tracing::warn!(
+                        target: "extension",
+                        "Failed to load extension from: {}",
                         resolved_path.display()
                     );
                 }
@@ -193,8 +194,9 @@ impl ExtensionManager {
         let config_content = match std::fs::read_to_string(&config_path) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!(
-                    "[extension] Failed to read {}: {e}",
+                tracing::warn!(
+                    target: "extension",
+                    "Failed to read {}: {e}",
                     config_path.display()
                 );
                 return None;
@@ -202,8 +204,9 @@ impl ExtensionManager {
         };
         let mut config: ExtensionConfig = serde_json::from_str(&config_content)
             .map_err(|e| {
-                eprintln!(
-                    "[extension] Failed to parse {}: {e}",
+                tracing::warn!(
+                    target: "extension",
+                    "Failed to parse {}: {e}",
                     config_path.display()
                 );
             })
@@ -223,16 +226,18 @@ impl ExtensionManager {
                 Ok(s) => match serde_json::from_str::<InstallMetadata>(&s) {
                     Ok(m) => Some(m),
                     Err(e) => {
-                        eprintln!(
-                            "[extension] Failed to parse {}: {e}",
+                        tracing::warn!(
+                            target: "extension",
+                            "Failed to parse {}: {e}",
                             metadata_path.display()
                         );
                         None
                     }
                 },
                 Err(e) => {
-                    eprintln!(
-                        "[extension] Failed to read {}: {e}",
+                    tracing::warn!(
+                        target: "extension",
+                        "Failed to read {}: {e}",
                         metadata_path.display()
                     );
                     None

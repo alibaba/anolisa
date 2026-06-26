@@ -208,9 +208,9 @@ impl ContentGenerator for SysomProvider {
             Ok(stream) => Ok(stream),
             Err(e) if self.is_sts && is_sts_error(&e) => {
                 // STS credential expired — try to refresh from ECS metadata and retry once
-                eprintln!("[cosh-core] STS credential error, attempting refresh...");
+                tracing::debug!("STS credential error, attempting refresh...");
                 if self.refresh_sts_credentials().await {
-                    eprintln!("[cosh-core] STS credentials refreshed, retrying...");
+                    tracing::debug!("STS credentials refreshed, retrying...");
                     self.do_streaming_request(&body_bytes).await
                 } else {
                     Err(e)
@@ -390,14 +390,14 @@ impl SysomProvider {
         let resp = match client.get(&url).send().await {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("[cosh-core] STS refresh failed: {e}");
+                tracing::warn!("STS refresh failed: {e}");
                 return false;
             }
         };
         let body: Value = match resp.json().await {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("[cosh-core] STS refresh parse failed: {e}");
+                tracing::warn!("STS refresh parse failed: {e}");
                 return false;
             }
         };
@@ -413,7 +413,7 @@ impl SysomProvider {
             creds.security_token = Some(token.to_string());
             true
         } else {
-            eprintln!("[cosh-core] STS refresh: missing fields in response");
+            tracing::warn!("STS refresh: missing fields in response");
             false
         }
     }

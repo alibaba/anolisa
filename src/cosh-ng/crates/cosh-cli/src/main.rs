@@ -100,6 +100,19 @@ fn main() {
         dispatch_core();
     }
 
+    // Initialize tracing (stderr-only, controlled by COSH_LOG or RUST_LOG)
+    let filter = std::env::var("COSH_LOG")
+        .or_else(|_| std::env::var("RUST_LOG"))
+        .unwrap_or_else(|_| "warn".to_string());
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_new(&filter)
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_writer(std::io::stderr)
+        .with_target(true)
+        .try_init();
+
     let cli = Cli::parse();
     let distro = Distro::detect();
     let start = Instant::now();

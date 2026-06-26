@@ -143,6 +143,33 @@ Key fields for Agents: `ok` (success?), `error.recoverable` (retry-worthy?), `er
 4. **Classified errors** — `recoverable` tells Agent whether to retry
 5. **Dry-run** — `--dry-run` on all write operations, preview before execute
 
+## Logging
+
+All binaries use structured logging via `tracing`. Logs are written to `~/.copilot-shell/logs/` with daily rotation.
+
+### Log level control
+
+| Method | Example | Scope |
+|--------|---------|-------|
+| Config file | `[ui] log_level = "debug"` (cosh-shell) | Persistent |
+| Config file | `[logging] level = "info"` (cosh-core) | Persistent |
+| Environment variable | `COSH_LOG=debug cosh-shell raw` | Per-invocation |
+| CLI flag | `cosh-core --verbose` | Per-invocation |
+| Legacy | `COSH_SHELL_DEBUG=1` (maps to debug) | Per-invocation |
+
+Priority: `COSH_LOG` > `RUST_LOG` > `--verbose` > config file > default (`warn`)
+
+Valid levels: `error`, `warn`, `info`, `debug`, `trace`
+
+### Log files
+
+```
+~/.copilot-shell/logs/
+├── cosh-shell.log.2026-06-26    # daily rotation
+├── cosh-core.log.2026-06-26
+└── ...
+```
+
 ## Supported distros
 
 | Distro | Package manager | Service manager |

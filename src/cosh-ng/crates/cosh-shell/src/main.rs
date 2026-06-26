@@ -23,6 +23,8 @@ mod journal;
 #[allow(dead_code, unused_imports)]
 mod ledger;
 #[allow(dead_code, unused_imports)]
+mod logging;
+#[allow(dead_code, unused_imports)]
 mod parser;
 mod question;
 #[allow(dead_code, unused_imports)]
@@ -83,6 +85,11 @@ fn main() {
     }
 
     runtime::terminal::install_terminal_recovery();
+
+    // Initialize structured logging (file output to ~/.copilot-shell/logs/)
+    let cosh_config = config::load_config();
+    logging::init_logging(&cosh_config.log_level);
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "cosh-shell starting");
 
     let has_subcommand = matches!(
         args.get(1).map(String::as_str),

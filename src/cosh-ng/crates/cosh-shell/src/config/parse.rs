@@ -32,6 +32,7 @@ pub(super) fn parse_simple_config(content: &str, config: &mut CoshConfig) {
                 "ui.startup_banner" => config.startup_banner = parse_bool_value(value),
                 "ui.startup_hooks" => config.startup_hooks = parse_bool_value(value),
                 "ui.debug" => config.debug = parse_bool_value(value),
+                "ui.log_level" => config.log_level = value.to_string(),
                 "health.enabled" => config.health.enabled = parse_bool_value(value),
                 "health.role" => {
                     config.health.role = non_empty_string(value);
@@ -71,6 +72,9 @@ pub(super) fn parse_toml_config(content: &str, config: &mut CoshConfig) {
         }
         if let Some(debug) = ui.get("debug").and_then(toml::Value::as_bool) {
             config.debug = debug;
+        }
+        if let Some(log_level) = ui.get("log_level").and_then(toml::Value::as_str) {
+            config.log_level = log_level.to_string();
         }
     }
     parse_shell_toml_config(&value, config);

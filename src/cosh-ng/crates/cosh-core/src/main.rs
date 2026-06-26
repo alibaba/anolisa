@@ -10,6 +10,7 @@ mod extension;
 mod headless;
 mod hook;
 mod interactive;
+mod logging;
 mod loop_detect;
 mod migrate;
 mod protocol;
@@ -32,7 +33,7 @@ fn create_provider(config: &CoreConfig) -> Box<dyn provider::ContentGenerator> {
     // Aliyun provider uses AK/SK, not API key
     if resolved.provider_type == "aliyun" {
         if resolved.access_key_id.is_empty() || resolved.access_key_secret.is_empty() {
-            eprintln!("[cosh-core] Warning: no AK/SK configured for aliyun, using mock provider");
+            tracing::warn!("no AK/SK configured for aliyun, using mock provider");
             return Box::new(provider::mock::MockProvider::text_only(
                 "No AK/SK configured. Please set ALIBABA_CLOUD_ACCESS_KEY_ID/SECRET or use /auth.",
             ));
@@ -44,7 +45,7 @@ fn create_provider(config: &CoreConfig) -> Box<dyn provider::ContentGenerator> {
         ));
     }
     if resolved.api_key.is_empty() {
-        eprintln!("[cosh-core] Warning: no API key configured, using mock provider");
+        tracing::warn!("no API key configured, using mock provider");
         return Box::new(provider::mock::MockProvider::text_only(
             "No API key configured. Please set DASHSCOPE_API_KEY or configure [ai.providers] in config.toml.",
         ));
@@ -76,6 +77,10 @@ fn needs_auth(config: &CoreConfig) -> bool {
 async fn main() {
     let args = cli::CliArgs::parse();
     let config = CoreConfig::load();
+
+    let log_level = config.logging.effective_level(args.verbose);
+    logging::init_logging(&log_level);
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "cosh-core starting");
 
     if args.is_registry() {
         registry::run(&args, config).await;

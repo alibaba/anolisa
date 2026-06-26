@@ -43,7 +43,7 @@ pub async fn run(_args: &CliArgs, config: CoreConfig) {
     let msg: InputMessage = match serde_json::from_str(line.trim()) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("[cosh-core/registry] Failed to parse input: {e}");
+            tracing::debug!("failed to parse input: {e}");
             return;
         }
     };
@@ -60,7 +60,7 @@ pub async fn run(_args: &CliArgs, config: CoreConfig) {
             emit(&mut writer, &response);
         }
         _ => {
-            eprintln!("[cosh-core/registry] Expected registry_request, got other message type");
+            tracing::debug!("expected registry_request, got other message type");
         }
     }
 }

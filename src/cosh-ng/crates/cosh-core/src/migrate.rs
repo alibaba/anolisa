@@ -27,11 +27,11 @@ pub fn try_migrate() {
         return;
     }
 
-    eprintln!("[cosh-core] Migrating settings.json → config.toml ...");
+    tracing::info!("Migrating settings.json → config.toml ...");
 
     match migrate_settings(&settings_path, &config_path, &dir) {
-        Ok(()) => eprintln!("[cosh-core] Migration complete: {}", config_path.display()),
-        Err(e) => eprintln!("[cosh-core] Migration warning: {e} (continuing with defaults)"),
+        Ok(()) => tracing::info!("Migration complete: {}", config_path.display()),
+        Err(e) => tracing::warn!("Migration warning: {e} (continuing with defaults)"),
     }
 
     try_migrate_aliyun_credentials(&dir, &config_path);
@@ -107,7 +107,7 @@ fn try_migrate_aliyun_credentials(cfg_dir: &Path, config_path: &Path) {
         return;
     }
 
-    eprintln!("[cosh-core] Migrated Aliyun credentials from aliyun_creds.json");
+    tracing::info!("Migrated Aliyun credentials from aliyun_creds.json");
 }
 
 fn escape_toml_migrate(s: &str) -> String {
@@ -138,7 +138,7 @@ fn migrate_settings(
         match decrypt_credential(raw_api_key, &salt_path) {
             Some(k) => k,
             None => {
-                eprintln!("[cosh-core] Warning: failed to decrypt API key, skipping");
+                tracing::warn!("failed to decrypt API key, skipping");
                 String::new()
             }
         }

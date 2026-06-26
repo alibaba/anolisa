@@ -17,6 +17,8 @@ serde.workspace = true
 serde_json.workspace = true
 which.workspace = true
 chrono = { workspace = true, features = ["clock"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

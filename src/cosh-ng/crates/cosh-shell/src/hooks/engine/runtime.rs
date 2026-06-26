@@ -55,9 +55,10 @@ pub(super) fn run_external_hook(
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| {
-            eprintln!(
-                "cosh-shell: external hook {:?} spawn failed: {e}",
-                config.path
+            tracing::error!(
+                target: "cosh_hook",
+                path = %config.path.display(),
+                "external hook spawn failed: {e}"
             );
         })
         .ok()?;
@@ -72,25 +73,29 @@ pub(super) fn run_external_hook(
     match child.wait_timeout(timeout) {
         Ok(Some(status)) if status.success() => {}
         Ok(Some(_)) => {
-            eprintln!(
-                "cosh-shell: external hook {:?} exited with error",
-                config.path
+            tracing::warn!(
+                target: "cosh_hook",
+                path = %config.path.display(),
+                "external hook exited with error"
             );
             return None;
         }
         Ok(None) => {
             let _ = child.kill();
             let _ = child.wait();
-            eprintln!(
-                "cosh-shell: external hook {:?} timed out after {}ms",
-                config.path, config.timeout_ms
+            tracing::warn!(
+                target: "cosh_hook",
+                path = %config.path.display(),
+                timeout_ms = config.timeout_ms,
+                "external hook timed out"
             );
             return None;
         }
         Err(e) => {
-            eprintln!(
-                "cosh-shell: external hook {:?} wait failed: {e}",
-                config.path
+            tracing::warn!(
+                target: "cosh_hook",
+                path = %config.path.display(),
+                "external hook wait failed: {e}"
             );
             return None;
         }
@@ -120,9 +125,10 @@ pub(super) fn run_external_hook(
     }
     serde_json::from_str::<HookFinding>(stdout.trim())
         .map_err(|e| {
-            eprintln!(
-                "cosh-shell: external hook {:?} invalid JSON output: {e}",
-                config.path
+            tracing::warn!(
+                target: "cosh_hook",
+                path = %config.path.display(),
+                "external hook invalid JSON output: {e}"
             );
         })
         .ok()

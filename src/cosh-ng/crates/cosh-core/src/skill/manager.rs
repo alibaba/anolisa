@@ -177,7 +177,7 @@ impl SkillManager {
         let mut watcher = match watcher_result {
             Ok(w) => w,
             Err(e) => {
-                eprintln!("[skill-manager] Failed to create file watcher: {e}");
+                tracing::warn!(target: "skill_manager", "Failed to create file watcher: {e}");
                 return;
             }
         };
@@ -185,8 +185,9 @@ impl SkillManager {
         for dir in self.watch_dirs() {
             if dir.exists() {
                 if let Err(e) = watcher.watch(&dir, RecursiveMode::Recursive) {
-                    eprintln!(
-                        "[skill-manager] Failed to watch {}: {e}",
+                    tracing::warn!(
+                        target: "skill_manager",
+                        "Failed to watch {}: {e}",
                         dir.display()
                     );
                 }

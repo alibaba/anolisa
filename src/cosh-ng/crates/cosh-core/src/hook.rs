@@ -162,7 +162,7 @@ impl HookSystem {
             defs.iter()
                 .filter(|d| {
                     if d.name.is_none() {
-                        eprintln!("[cosh-hook] Skipping config hook without name: {}", d.command);
+                        tracing::warn!(target: "cosh_hook", "Skipping config hook without name: {}", d.command);
                         false
                     } else {
                         true
@@ -225,7 +225,7 @@ impl HookSystem {
                 .into_iter()
                 .filter(|d| {
                     if d.name.is_none() {
-                        eprintln!("[cosh-hook] Skipping hook without name: {}", d.command);
+                        tracing::warn!(target: "cosh_hook", "Skipping hook without name: {}", d.command);
                         false
                     } else {
                         true
@@ -769,7 +769,7 @@ impl HookSystem {
         let mut child = match child {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("[cosh-hook] Failed to spawn hook '{command}': {e}");
+                tracing::error!(target: "cosh_hook", "Failed to spawn hook '{command}': {e}");
                 return HookOutput::default();
             }
         };
@@ -784,11 +784,11 @@ impl HookSystem {
         let output = match result {
             Ok(Ok(o)) => o,
             Ok(Err(e)) => {
-                eprintln!("[cosh-hook] Hook '{command}' execution failed: {e}");
+                tracing::error!(target: "cosh_hook", "Hook '{command}' execution failed: {e}");
                 return HookOutput::default();
             }
             Err(_) => {
-                eprintln!("[cosh-hook] Hook '{command}' timed out");
+                tracing::warn!(target: "cosh_hook", "Hook '{command}' timed out");
                 return HookOutput::default();
             }
         };
@@ -804,7 +804,7 @@ impl HookSystem {
                     return HookOutput::default();
                 }
                 serde_json::from_str::<HookOutput>(trimmed).unwrap_or_else(|e| {
-                    eprintln!("[cosh-hook] Failed to parse output from '{command}': {e}");
+                    tracing::warn!(target: "cosh_hook", "Failed to parse output from '{command}': {e}");
                     HookOutput::default()
                 })
             }
@@ -824,7 +824,7 @@ impl HookSystem {
             _ => {
                 // Non-zero (not 2) = warning, do not block
                 if !stderr.is_empty() {
-                    eprintln!("[cosh-hook] Hook '{command}' warning: {}", stderr.trim());
+                    tracing::warn!(target: "cosh_hook", "Hook '{command}' warning: {}", stderr.trim());
                 }
                 HookOutput::default()
             }
