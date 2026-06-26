@@ -2409,7 +2409,7 @@ mod tests {
         let mut obs_state = InstalledState::default();
         obs_state.upsert_object(rpm_observed_object(
             "copilot-shell",
-            "anolisa-copilot-shell",
+            "copilot-shell",
             "2.3.0-1.al8",
         ));
         let obs = select_components(
@@ -2421,7 +2421,7 @@ mod tests {
             None,
         );
         assert_eq!(obs[0].status, "adopted", "rpm-observed must not escalate");
-        assert_eq!(obs[0].rpm_package.as_deref(), Some("anolisa-copilot-shell"));
+        assert_eq!(obs[0].rpm_package.as_deref(), Some("copilot-shell"));
         assert_eq!(obs[0].rpm_evr.as_deref(), Some("2.3.0-1.al8"));
         assert_eq!(obs[0].rpm_source_repo.as_deref(), Some("@System"));
     }
@@ -2470,14 +2470,14 @@ mod tests {
     fn observed_record_reports_installed_default_name() {
         let q = FakeQuery {
             installed: vec![(
-                "anolisa-copilot-shell".to_string(),
-                pkg_info("anolisa-copilot-shell", "2.3.0", "1.al8"),
+                "copilot-shell".to_string(),
+                pkg_info("copilot-shell", "2.3.0", "1.al8"),
             )],
-            origins: vec![("anolisa-copilot-shell".to_string(), "@System".to_string())],
+            origins: vec![("copilot-shell".to_string(), "@System".to_string())],
         };
         let rec = observed_record("copilot-shell", None, None, &q).expect("observed");
         assert_eq!(rec.status, "observed");
-        assert_eq!(rec.rpm_package.as_deref(), Some("anolisa-copilot-shell"));
+        assert_eq!(rec.rpm_package.as_deref(), Some("copilot-shell"));
         assert_eq!(rec.rpm_evr.as_deref(), Some("2.3.0-1.al8"));
         assert_eq!(rec.rpm_source_repo.as_deref(), Some("@System"));
         assert_eq!(rec.version.as_deref(), Some("2.3.0-1.al8"));
@@ -2547,11 +2547,11 @@ mod tests {
     /// rpmdb EVR matching the recorded one is not drift.
     #[test]
     fn probe_rpm_drift_none_when_evr_matches() {
-        let meta = rpm_meta("anolisa-copilot-shell", "2.3.0-1.al8");
+        let meta = rpm_meta("copilot-shell", "2.3.0-1.al8");
         let q = FakeQuery {
             installed: vec![(
-                "anolisa-copilot-shell".to_string(),
-                pkg_info("anolisa-copilot-shell", "2.3.0", "1.al8"),
+                "copilot-shell".to_string(),
+                pkg_info("copilot-shell", "2.3.0", "1.al8"),
             )],
             origins: Vec::new(),
         };
@@ -2561,11 +2561,11 @@ mod tests {
     /// A newer rpmdb EVR than recorded (manual `dnf update`) is drift.
     #[test]
     fn probe_rpm_drift_detects_evr_mismatch() {
-        let meta = rpm_meta("anolisa-copilot-shell", "2.2.0-1.al8");
+        let meta = rpm_meta("copilot-shell", "2.2.0-1.al8");
         let q = FakeQuery {
             installed: vec![(
-                "anolisa-copilot-shell".to_string(),
-                pkg_info("anolisa-copilot-shell", "2.3.0", "1.al8"),
+                "copilot-shell".to_string(),
+                pkg_info("copilot-shell", "2.3.0", "1.al8"),
             )],
             origins: Vec::new(),
         };
@@ -2578,7 +2578,7 @@ mod tests {
     /// The package gone from rpmdb (manual `rpm -e`) is Missing.
     #[test]
     fn probe_rpm_drift_detects_missing() {
-        let meta = rpm_meta("anolisa-copilot-shell", "2.2.0-1.al8");
+        let meta = rpm_meta("copilot-shell", "2.2.0-1.al8");
         let q = FakeQuery::default();
         assert!(matches!(
             probe_rpm_drift(&meta, &q),
@@ -2589,7 +2589,7 @@ mod tests {
     /// A same-name multi-version rpmdb is surfaced as drift, not a silent pass.
     #[test]
     fn probe_rpm_drift_multi_version_is_drifted() {
-        let meta = rpm_meta("anolisa-copilot-shell", "2.2.0-1.al8");
+        let meta = rpm_meta("copilot-shell", "2.2.0-1.al8");
         let q = ErrQuery(PackageQueryError::UnexpectedOutput {
             command: "rpm".to_string(),
             detail: "2 installed versions".to_string(),
@@ -2603,7 +2603,7 @@ mod tests {
     /// Missing rpm/dnf tooling cannot prove drift; the recorded status stands.
     #[test]
     fn probe_rpm_drift_tooling_missing_keeps_status() {
-        let meta = rpm_meta("anolisa-copilot-shell", "2.2.0-1.al8");
+        let meta = rpm_meta("copilot-shell", "2.2.0-1.al8");
         let q = ErrQuery(PackageQueryError::CommandMissing {
             command: "rpm".to_string(),
         });
@@ -2617,7 +2617,7 @@ mod tests {
         let mut state = InstalledState::default();
         state.upsert_object(rpm_observed_object(
             "copilot-shell",
-            "anolisa-copilot-shell",
+            "copilot-shell",
             "2.2.0-1.al8",
         ));
         let mut records = select_components(
@@ -2632,8 +2632,8 @@ mod tests {
 
         let q = FakeQuery {
             installed: vec![(
-                "anolisa-copilot-shell".to_string(),
-                pkg_info("anolisa-copilot-shell", "2.3.0", "1.al8"),
+                "copilot-shell".to_string(),
+                pkg_info("copilot-shell", "2.3.0", "1.al8"),
             )],
             origins: Vec::new(),
         };
@@ -2655,7 +2655,7 @@ mod tests {
         let mut state = InstalledState::default();
         state.upsert_object(rpm_observed_object(
             "copilot-shell",
-            "anolisa-copilot-shell",
+            "copilot-shell",
             "2.2.0-1.al8",
         ));
         let mut records = select_components(
@@ -2712,7 +2712,7 @@ mod tests {
         let mut state = InstalledState::default();
         state.upsert_object(rpm_observed_object(
             "copilot-shell",
-            "anolisa-copilot-shell",
+            "copilot-shell",
             "2.2.0-1.al8",
         ));
         // A record whose live projection already escalated past `installed`.
@@ -2732,8 +2732,8 @@ mod tests {
         // rpmdb has drifted, but the failed status must survive untouched.
         let q = FakeQuery {
             installed: vec![(
-                "anolisa-copilot-shell".to_string(),
-                pkg_info("anolisa-copilot-shell", "2.3.0", "1.al8"),
+                "copilot-shell".to_string(),
+                pkg_info("copilot-shell", "2.3.0", "1.al8"),
             )],
             origins: Vec::new(),
         };

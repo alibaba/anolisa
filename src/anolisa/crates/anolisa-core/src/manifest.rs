@@ -113,7 +113,7 @@ pub struct DistributionSelector {
 /// format a distribution uses*): this says *what the component is named under a
 /// given backend*. Only populated where a backend needs an explicit name; an
 /// absent table leaves package-name resolution to the lower mapping tiers
-/// (repo.toml `package_map` / RPM provides / default `anolisa-<component>`).
+/// (repo.toml `package_map` / RPM provides / the bare component name).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ManifestBackends {
     /// RPM backend packaging info; `None` falls through to the lower tiers.
@@ -132,7 +132,7 @@ impl ManifestBackends {
 /// `[backends.rpm]` — RPM-backend packaging info for a component.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RpmBackendSpec {
-    /// RPM package name for this component (e.g. `anolisa-copilot-shell`),
+    /// RPM package name for this component (e.g. `copilot-shell`),
     /// the highest-precedence package-name source after a CLI `--package`
     /// override.
     pub package: String,
@@ -1720,11 +1720,11 @@ mod tests {
             layer = "runtime"
 
             [backends.rpm]
-            package = "anolisa-copilot-shell"
+            package = "copilot-shell"
         "#;
         let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
         assert!(!m.backends.is_empty());
-        assert_eq!(m.rpm_package(), Some("anolisa-copilot-shell"));
+        assert_eq!(m.rpm_package(), Some("copilot-shell"));
     }
 
     #[test]
@@ -1740,13 +1740,13 @@ mod tests {
             layer = "runtime"
 
             [backends.rpm]
-            package = "anolisa-copilot-shell"
+            package = "copilot-shell"
         "#,
         )
         .expect("parse");
         let dumped = toml::to_string(&with_rpm).expect("serialize");
         assert!(
-            dumped.contains("anolisa-copilot-shell"),
+            dumped.contains("copilot-shell"),
             "rpm package must round-trip: {dumped}"
         );
 

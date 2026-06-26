@@ -1755,13 +1755,13 @@ mod tests {
             &c,
             vec![rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 Ownership::RpmObserved,
             )],
             Vec::new(),
         );
         let snapshot_dir = seed_manifest_snapshot(&c, "copilot-shell");
-        let rpm = FakeRpm::present("anolisa-copilot-shell");
+        let rpm = FakeRpm::present("copilot-shell");
         run(args("copilot-shell", false), &c, &rpm, true).expect("uninstall ok");
 
         assert_eq!(
@@ -1804,12 +1804,12 @@ mod tests {
             &c,
             vec![rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 Ownership::RpmObserved,
             )],
             Vec::new(),
         );
-        let rpm = FakeRpm::present("anolisa-copilot-shell");
+        let rpm = FakeRpm::present("copilot-shell");
         run(args_rm("copilot-shell"), &c, &rpm, true).expect("uninstall ok");
 
         assert_eq!(
@@ -1844,12 +1844,12 @@ mod tests {
             &c,
             vec![rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 Ownership::RpmObserved,
             )],
             Vec::new(),
         );
-        let rpm = FakeRpm::present("anolisa-copilot-shell");
+        let rpm = FakeRpm::present("copilot-shell");
         let err = run(args_rm("copilot-shell"), &c, &rpm, false).expect_err("must refuse");
 
         assert_eq!(err.code(), "EXECUTION_FAILED");
@@ -1882,12 +1882,12 @@ mod tests {
             &c,
             vec![rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 Ownership::RpmManaged,
             )],
             Vec::new(),
         );
-        let rpm = FakeRpm::present("anolisa-copilot-shell");
+        let rpm = FakeRpm::present("copilot-shell");
         run(args("copilot-shell", false), &c, &rpm, true).expect("uninstall ok");
 
         assert_eq!(
@@ -1967,13 +1967,13 @@ mod tests {
             &c,
             vec![rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 Ownership::RpmObserved,
             )],
             Vec::new(),
         );
         let snapshot_dir = seed_manifest_snapshot(&c, "copilot-shell");
-        let rpm = FakeRpm::present("anolisa-copilot-shell");
+        let rpm = FakeRpm::present("copilot-shell");
         run(args_rm("copilot-shell"), &c, &rpm, true).expect("dry-run ok");
 
         assert_eq!(rpm.remove_calls.get(), 0, "dry-run must not run dnf");
@@ -2004,12 +2004,12 @@ mod tests {
             &c,
             vec![rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 Ownership::RpmObserved,
             )],
             Vec::new(),
         );
-        let rpm = FakeRpm::absent("anolisa-copilot-shell");
+        let rpm = FakeRpm::absent("copilot-shell");
         run(args_rm("copilot-shell"), &c, &rpm, true).expect("uninstall ok");
 
         assert_eq!(
@@ -2040,12 +2040,12 @@ mod tests {
             &c,
             vec![rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 Ownership::RpmObserved,
             )],
             Vec::new(),
         );
-        let rpm = FakeRpm::present("anolisa-copilot-shell").failing();
+        let rpm = FakeRpm::present("copilot-shell").failing();
         let err =
             run(args_rm("copilot-shell"), &c, &rpm, true).expect_err("dnf failure must surface");
 
@@ -2080,12 +2080,12 @@ mod tests {
             &c,
             vec![rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 Ownership::RpmManaged,
             )],
             Vec::new(),
         );
-        let rpm = FakeRpm::present("anolisa-copilot-shell").tooling_missing();
+        let rpm = FakeRpm::present("copilot-shell").tooling_missing();
         let err = run(args_rm("copilot-shell"), &c, &rpm, true)
             .expect_err("missing rpm tooling must surface");
 
@@ -2124,12 +2124,12 @@ mod tests {
             &c,
             vec![rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 Ownership::RpmObserved,
             )],
             Vec::new(),
         );
-        let rpm = FakeRpm::present("anolisa-copilot-shell").tooling_missing();
+        let rpm = FakeRpm::present("copilot-shell").tooling_missing();
         let err = run(args_rm("copilot-shell"), &c, &rpm, true)
             .expect_err("missing rpm tooling must surface");
 
@@ -2159,12 +2159,12 @@ mod tests {
             &c,
             vec![rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 Ownership::RpmManaged,
             )],
             Vec::new(),
         );
-        let rpm = FakeRpm::present("anolisa-copilot-shell").remove_tooling_missing();
+        let rpm = FakeRpm::present("copilot-shell").remove_tooling_missing();
         let err = run(args("copilot-shell", false), &c, &rpm, true)
             .expect_err("missing dnf must surface");
 
@@ -2273,12 +2273,12 @@ mod tests {
             &c,
             vec![rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 Ownership::RpmObserved,
             )],
             vec![sample_claim("copilot-shell", "openclaw")],
         );
-        let rpm = FakeRpm::present("anolisa-copilot-shell");
+        let rpm = FakeRpm::present("copilot-shell");
         let err = run(args_rm("copilot-shell"), &c, &rpm, true).expect_err("adapter must block");
 
         assert_eq!(err.code(), "INVALID_ARGUMENT");
@@ -2316,15 +2316,15 @@ mod tests {
             &c,
             vec![rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 Ownership::RpmObserved,
             )],
             vec![sample_claim("copilot-shell", "openclaw")],
         );
-        let rpm = FakeRpm::present("anolisa-copilot-shell");
+        let rpm = FakeRpm::present("copilot-shell");
         let err = uninstall_rpm_component(
             "copilot-shell",
-            "anolisa-copilot-shell",
+            "copilot-shell",
             Ownership::RpmObserved,
             true,
             &c,
@@ -2367,15 +2367,15 @@ mod tests {
             &c,
             vec![rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 Ownership::RpmObserved,
             )],
             Vec::new(),
         );
-        let rpm = FakeRpm::present("anolisa-copilot-shell");
+        let rpm = FakeRpm::present("copilot-shell");
         uninstall_rpm_component(
             "copilot-shell",
-            "anolisa-copilot-shell",
+            "copilot-shell",
             Ownership::RpmManaged, // stale pre-lock read; the on-disk state is observed
             false,                 // no --remove-system-package
             &c,
@@ -2410,14 +2410,10 @@ mod tests {
             InstallMode::System,
             Some(tmp.path().to_path_buf()),
         );
-        let mut obj = rpm_object(
-            "copilot-shell",
-            "anolisa-copilot-shell",
-            Ownership::RpmObserved,
-        );
+        let mut obj = rpm_object("copilot-shell", "copilot-shell", Ownership::RpmObserved);
         obj.rpm_metadata = None;
         seed(&c, vec![obj], Vec::new());
-        let rpm = FakeRpm::present("anolisa-copilot-shell");
+        let rpm = FakeRpm::present("copilot-shell");
         let err = run(args("copilot-shell", false), &c, &rpm, true).expect_err("must refuse");
 
         assert_eq!(err.code(), "EXECUTION_FAILED");

@@ -512,31 +512,31 @@ mod tests {
     #[test]
     fn installed_returns_info() {
         let q = query_with_rpm(
-            "anolisa-tokenless",
-            ok_out(Some(0), "anolisa-tokenless|(none)|2.0.1|1.al8|x86_64", ""),
+            "tokenless",
+            ok_out(Some(0), "tokenless|(none)|2.0.1|1.al8|x86_64", ""),
         );
         let info = q
-            .query_installed("anolisa-tokenless")
+            .query_installed("tokenless")
             .unwrap()
             .expect("installed package should yield Some");
-        assert_eq!(info.name, "anolisa-tokenless");
+        assert_eq!(info.name, "tokenless");
         assert_eq!(info.version.epoch, None);
         assert_eq!(info.version.version, "2.0.1");
         assert_eq!(info.version.release.as_deref(), Some("1.al8"));
         assert_eq!(info.arch, "x86_64");
         assert_eq!(info.origin, None);
         assert_eq!(info.version.to_string(), "2.0.1-1.al8");
-        assert!(q.is_installed("anolisa-tokenless").unwrap());
+        assert!(q.is_installed("tokenless").unwrap());
     }
 
     #[test]
     fn not_installed_returns_none() {
         let q = query_with_rpm(
-            "anolisa-tokenless",
-            ok_out(Some(1), "package anolisa-tokenless is not installed", ""),
+            "tokenless",
+            ok_out(Some(1), "package tokenless is not installed", ""),
         );
-        assert_eq!(q.query_installed("anolisa-tokenless").unwrap(), None);
-        assert!(!q.is_installed("anolisa-tokenless").unwrap());
+        assert_eq!(q.query_installed("tokenless").unwrap(), None);
+        assert!(!q.is_installed("tokenless").unwrap());
     }
 
     #[test]
@@ -580,20 +580,17 @@ mod tests {
 
     #[test]
     fn unexpected_field_count_maps_to_error() {
-        let q = query_with_rpm(
-            "anolisa-tokenless",
-            ok_out(Some(0), "anolisa-tokenless|2.0.1", ""),
-        );
-        let err = q.query_installed("anolisa-tokenless").unwrap_err();
+        let q = query_with_rpm("tokenless", ok_out(Some(0), "tokenless|2.0.1", ""));
+        let err = q.query_installed("tokenless").unwrap_err();
         assert!(matches!(err, PackageQueryError::UnexpectedOutput { .. }));
     }
 
     #[test]
     fn multiple_installed_is_unexpected() {
-        let two = "anolisa-tokenless|(none)|2.0.1|1.al8|x86_64\n\
-                   anolisa-tokenless|(none)|2.0.2|1.al8|x86_64\n";
-        let q = query_with_rpm("anolisa-tokenless", ok_out(Some(0), two, ""));
-        let err = q.query_installed("anolisa-tokenless").unwrap_err();
+        let two = "tokenless|(none)|2.0.1|1.al8|x86_64\n\
+                   tokenless|(none)|2.0.2|1.al8|x86_64\n";
+        let q = query_with_rpm("tokenless", ok_out(Some(0), two, ""));
+        let err = q.query_installed("tokenless").unwrap_err();
         match err {
             PackageQueryError::UnexpectedOutput { detail, .. } => {
                 assert!(
@@ -634,10 +631,10 @@ mod tests {
 
     #[test]
     fn available_returns_candidates() {
-        let out = "anolisa-tokenless|(none)|2.0.1|1.al8|x86_64|anolisa\n\
-                   anolisa-tokenless|(none)|2.0.1|1.al8|aarch64|baseos\n";
-        let q = query_with_dnf("anolisa-tokenless", ok_out(Some(0), out, ""));
-        let candidates = q.query_available("anolisa-tokenless").unwrap();
+        let out = "tokenless|(none)|2.0.1|1.al8|x86_64|anolisa\n\
+                   tokenless|(none)|2.0.1|1.al8|aarch64|baseos\n";
+        let q = query_with_dnf("tokenless", ok_out(Some(0), out, ""));
+        let candidates = q.query_available("tokenless").unwrap();
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].origin.as_deref(), Some("anolisa"));
         assert_eq!(candidates[0].arch, "x86_64");
@@ -683,9 +680,9 @@ mod tests {
 
     #[test]
     fn installed_origin_returns_reponame() {
-        let q = query_with_dnf("anolisa-tokenless", ok_out(Some(0), "@System\n", ""));
+        let q = query_with_dnf("tokenless", ok_out(Some(0), "@System\n", ""));
         assert_eq!(
-            q.installed_origin("anolisa-tokenless").unwrap().as_deref(),
+            q.installed_origin("tokenless").unwrap().as_deref(),
             Some("@System")
         );
     }
@@ -694,8 +691,8 @@ mod tests {
     fn installed_origin_empty_is_none() {
         // A package with no reported reponame yields an empty repoquery result;
         // origin is supplementary, so absence is a non-fatal `None`.
-        let q = query_with_dnf("anolisa-tokenless", ok_out(Some(0), "", ""));
-        assert_eq!(q.installed_origin("anolisa-tokenless").unwrap(), None);
+        let q = query_with_dnf("tokenless", ok_out(Some(0), "", ""));
+        assert_eq!(q.installed_origin("tokenless").unwrap(), None);
     }
 
     #[test]
@@ -722,12 +719,12 @@ mod tests {
     fn what_provides_returns_single_name() {
         let q = query_with_rpm(
             "anolisa-component(tokenless)",
-            ok_out(Some(0), "anolisa-tokenless\n", ""),
+            ok_out(Some(0), "tokenless\n", ""),
         );
         let names = q
             .what_provides_installed("anolisa-component(tokenless)")
             .unwrap();
-        assert_eq!(names, vec!["anolisa-tokenless".to_string()]);
+        assert_eq!(names, vec!["tokenless".to_string()]);
     }
 
     #[test]
@@ -736,12 +733,12 @@ mod tests {
         // the same name must collapse to a single entry.
         let q = query_with_rpm(
             "anolisa-component(tokenless)",
-            ok_out(Some(0), "anolisa-tokenless\nanolisa-tokenless\n", ""),
+            ok_out(Some(0), "tokenless\ntokenless\n", ""),
         );
         let names = q
             .what_provides_installed("anolisa-component(tokenless)")
             .unwrap();
-        assert_eq!(names, vec!["anolisa-tokenless".to_string()]);
+        assert_eq!(names, vec!["tokenless".to_string()]);
     }
 
     #[test]
@@ -750,17 +747,14 @@ mod tests {
         // case callers must detect; both names are preserved in order.
         let q = query_with_rpm(
             "anolisa-component(tokenless)",
-            ok_out(Some(0), "anolisa-tokenless\nvendor-tokenless\n", ""),
+            ok_out(Some(0), "tokenless\nvendor-tokenless\n", ""),
         );
         let names = q
             .what_provides_installed("anolisa-component(tokenless)")
             .unwrap();
         assert_eq!(
             names,
-            vec![
-                "anolisa-tokenless".to_string(),
-                "vendor-tokenless".to_string()
-            ]
+            vec!["tokenless".to_string(), "vendor-tokenless".to_string()]
         );
     }
 

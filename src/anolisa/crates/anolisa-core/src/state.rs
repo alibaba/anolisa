@@ -161,7 +161,7 @@ impl Ownership {
 /// time; refreshed on `repair` and `update`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RpmMetadata {
-    /// RPM package name (e.g. `anolisa-copilot-shell`).
+    /// RPM package name (e.g. `copilot-shell`).
     pub package_name: String,
     /// Full EVR (epoch:version-release) string from rpmdb.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1242,7 +1242,7 @@ mod tests {
         obj.adopted = true;
         obj.install_backend = Some("rpm".to_string());
         obj.rpm_metadata = Some(RpmMetadata {
-            package_name: "anolisa-copilot-shell".to_string(),
+            package_name: "copilot-shell".to_string(),
             evr: Some("0:1.2.3-1.al8".to_string()),
             arch: Some("x86_64".to_string()),
             source_repo: Some("@System".to_string()),
@@ -1261,7 +1261,7 @@ mod tests {
         assert!(!comp.owns_removal());
 
         let rpm = comp.rpm_metadata.as_ref().expect("rpm_metadata present");
-        assert_eq!(rpm.package_name, "anolisa-copilot-shell");
+        assert_eq!(rpm.package_name, "copilot-shell");
         assert_eq!(rpm.evr.as_deref(), Some("0:1.2.3-1.al8"));
         assert_eq!(rpm.arch.as_deref(), Some("x86_64"));
         assert_eq!(rpm.source_repo.as_deref(), Some("@System"));
@@ -1277,7 +1277,7 @@ mod tests {
         obj.ownership = Some(Ownership::RpmManaged);
         obj.install_backend = Some("rpm".to_string());
         obj.rpm_metadata = Some(RpmMetadata {
-            package_name: "anolisa-copilot-shell".to_string(),
+            package_name: "copilot-shell".to_string(),
             evr: Some("0:1.2.3-1.al8".to_string()),
             arch: Some("x86_64".to_string()),
             source_repo: Some("anolisa-release".to_string()),

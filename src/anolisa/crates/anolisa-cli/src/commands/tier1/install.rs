@@ -667,7 +667,7 @@ pub(crate) fn probe_rpm_situation(
     let package = candidates
         .into_iter()
         .next()
-        .unwrap_or_else(|| format!("anolisa-{component}"));
+        .unwrap_or_else(|| component.to_string());
 
     match query.query_installed(&package) {
         Ok(Some(info)) => Ok(RpmSituation::Adoptable { package, info }),
@@ -682,11 +682,13 @@ pub(crate) fn probe_rpm_situation(
 
 /// Resolve candidate RPM package names for `component`, highest precedence
 /// first (§5): CLI `--package` > manifest `[backends.rpm].package` > repo.toml
-/// `package_map` > RPM `provides` reverse-lookup > default `anolisa-<name>`.
+/// `package_map` > RPM `provides` reverse-lookup > the bare component name.
 ///
 /// The first four levels short-circuit to a single candidate; only the
-/// `provides` level can yield several (the ambiguous case, §5.5). The default
-/// name backfills whenever `provides` is empty, so the result is never empty.
+/// `provides` level can yield several (the ambiguous case, §5.5). The bare
+/// component name backfills whenever `provides` is empty, so the result is
+/// never empty. The component name matches the RPM spec `Name:` (e.g.
+/// `tokenless`), which carries no `anolisa-` prefix.
 ///
 /// # Errors
 /// Propagates a hard [`PackageQueryError`] from the `provides` query; an empty
@@ -715,7 +717,10 @@ pub(crate) fn rpm_package_candidates(
     if !provides.is_empty() {
         return Ok(provides);
     }
-    Ok(vec![format!("anolisa-{component}")])
+    // Default to the bare component name: it matches the published RPM spec
+    // `Name:` (no `anolisa-` prefix) and mirrors the raw backend's default in
+    // `RepoConfig::package_name`.
+    Ok(vec![component.to_string()])
 }
 
 /// Best-effort lookup of a component's manifest from the bundled catalog, for
@@ -5552,7 +5557,7 @@ scope = "@anolisa"
             &self,
             _capability: &str,
         ) -> Result<Vec<String>, PackageQueryError> {
-            // Default-naming path: the probe falls through to `anolisa-<name>`.
+            // Default-naming path: the probe falls through to the bare component name.
             Ok(Vec::new())
         }
     }
@@ -5736,12 +5741,12 @@ scope = "@anolisa"
         let q = FakeQuery {
             provides: vec![(
                 "anolisa-component(copilot-shell)".to_string(),
-                vec!["anolisa-copilot-shell".to_string()],
+                vec!["copilot-shell".to_string()],
             )],
             ..Default::default()
         };
         let got = rpm_package_candidates(None, None, None, &q, "copilot-shell").unwrap();
-        assert_eq!(got, vec!["anolisa-copilot-shell".to_string()]);
+        assert_eq!(got, vec!["copilot-shell".to_string()]);
     }
 
     #[test]
@@ -5761,7 +5766,7 @@ scope = "@anolisa"
     fn candidates_falls_back_to_default_naming() {
         let q = FakeQuery::default();
         let got = rpm_package_candidates(None, None, None, &q, "copilot-shell").unwrap();
-        assert_eq!(got, vec!["anolisa-copilot-shell".to_string()]);
+        assert_eq!(got, vec!["copilot-shell".to_string()]);
     }
 
     // ── §5/§7.1 situation probe ──
@@ -5772,8 +5777,8 @@ scope = "@anolisa"
         let repo = RepoConfig::load(&common::resolve_layout(&ctx)).expect("repo");
         let q = FakeQuery {
             installed: vec![(
-                "anolisa-copilot-shell".to_string(),
-                pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+                "copilot-shell".to_string(),
+                pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
             )],
             ..Default::default()
         };
@@ -5788,7 +5793,7 @@ scope = "@anolisa"
         .expect("probe");
         match situation {
             RpmSituation::Adoptable { package, info } => {
-                assert_eq!(package, "anolisa-copilot-shell");
+                assert_eq!(package, "copilot-shell");
                 assert_eq!(info.version.to_string(), "2.3.0-1.al8");
             }
             other => panic!(
@@ -5843,7 +5848,7 @@ scope = "@anolisa"
         let (_tmp, ctx) = system_ctx_with_raw_repo(false);
         let repo = RepoConfig::load(&common::resolve_layout(&ctx)).expect("repo");
         let q = FakeQuery {
-            multi_version: vec!["anolisa-copilot-shell".to_string()],
+            multi_version: vec!["copilot-shell".to_string()],
             ..Default::default()
         };
         let situation = probe_rpm_situation(
@@ -5874,10 +5879,10 @@ scope = "@anolisa"
         let (_tmp, ctx) = system_ctx_with_raw_repo(false);
         let q = FakeQuery {
             installed: vec![(
-                "anolisa-copilot-shell".to_string(),
-                pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+                "copilot-shell".to_string(),
+                pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
             )],
-            origins: vec![("anolisa-copilot-shell".to_string(), "@System".to_string())],
+            origins: vec![("copilot-shell".to_string(), "@System".to_string())],
             ..Default::default()
         };
         let outcome =
@@ -5897,7 +5902,7 @@ scope = "@anolisa"
         assert!(obj.files.is_empty(), "RPM-owned files stay out of state");
         assert_eq!(obj.version, "2.3.0-1.al8");
         let meta = obj.rpm_metadata.as_ref().expect("rpm metadata");
-        assert_eq!(meta.package_name, "anolisa-copilot-shell");
+        assert_eq!(meta.package_name, "copilot-shell");
         assert_eq!(meta.evr.as_deref(), Some("2.3.0-1.al8"));
         assert_eq!(meta.arch.as_deref(), Some("x86_64"));
         assert_eq!(meta.source_repo.as_deref(), Some("@System"));
@@ -5908,8 +5913,8 @@ scope = "@anolisa"
         let (_tmp, ctx) = system_ctx_with_raw_repo(true);
         let q = FakeQuery {
             installed: vec![(
-                "anolisa-copilot-shell".to_string(),
-                pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+                "copilot-shell".to_string(),
+                pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
             )],
             ..Default::default()
         };
@@ -5946,7 +5951,7 @@ scope = "@anolisa"
             install_backend: Some("rpm".to_string()),
             ownership: Some(Ownership::RpmObserved),
             rpm_metadata: Some(RpmMetadata {
-                package_name: "anolisa-copilot-shell".to_string(),
+                package_name: "copilot-shell".to_string(),
                 evr: Some("2.2.0-1.al8".to_string()),
                 arch: Some("x86_64".to_string()),
                 source_repo: Some("@System".to_string()),
@@ -5974,10 +5979,10 @@ scope = "@anolisa"
         // rpmdb now reports a newer EVR.
         let q = FakeQuery {
             installed: vec![(
-                "anolisa-copilot-shell".to_string(),
-                pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+                "copilot-shell".to_string(),
+                pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
             )],
-            origins: vec![("anolisa-copilot-shell".to_string(), "@System".to_string())],
+            origins: vec![("copilot-shell".to_string(), "@System".to_string())],
             ..Default::default()
         };
         // No --backend: existing rpm-observed state must route to adopt-refresh,
@@ -6046,8 +6051,8 @@ scope = "@anolisa"
             &layout,
             "install copilot-shell",
             "copilot-shell",
-            "anolisa-copilot-shell".to_string(),
-            pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+            "copilot-shell".to_string(),
+            pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
             &q,
         )
         .expect_err("must refuse to clobber a concurrent raw install");
@@ -6119,7 +6124,7 @@ scope = "@anolisa"
             install_backend: Some("rpm".to_string()),
             ownership: Some(Ownership::RpmManaged),
             rpm_metadata: Some(RpmMetadata {
-                package_name: "anolisa-copilot-shell".to_string(),
+                package_name: "copilot-shell".to_string(),
                 evr: Some("2.3.0-1.al8".to_string()),
                 arch: Some("x86_64".to_string()),
                 source_repo: Some("alinux-updates".to_string()),
@@ -6146,8 +6151,8 @@ scope = "@anolisa"
             &layout,
             "adopt copilot-shell",
             "copilot-shell",
-            "anolisa-copilot-shell".to_string(),
-            pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+            "copilot-shell".to_string(),
+            pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
             &q,
         )
         .expect_err("must refuse to downgrade an rpm-managed component");
@@ -6187,7 +6192,7 @@ scope = "@anolisa"
             install_backend: Some("rpm".to_string()),
             ownership: Some(Ownership::RpmManaged),
             rpm_metadata: Some(RpmMetadata {
-                package_name: "anolisa-copilot-shell".to_string(),
+                package_name: "copilot-shell".to_string(),
                 evr: Some("2.3.0-1.al8".to_string()),
                 arch: Some("x86_64".to_string()),
                 source_repo: Some("alinux-updates".to_string()),
@@ -6211,8 +6216,8 @@ scope = "@anolisa"
         // rpmdb still has the package, so the re-probe yields Adoptable.
         let q = FakeQuery {
             installed: vec![(
-                "anolisa-copilot-shell".to_string(),
-                pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+                "copilot-shell".to_string(),
+                pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
             )],
             ..Default::default()
         };
@@ -6243,8 +6248,8 @@ scope = "@anolisa"
         let (_tmp, ctx) = system_ctx_with_raw_repo(false);
         let q = FakeQuery {
             installed: vec![(
-                "anolisa-copilot-shell".to_string(),
-                pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+                "copilot-shell".to_string(),
+                pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
             )],
             origin_fails: true,
             ..Default::default()
@@ -6275,8 +6280,8 @@ scope = "@anolisa"
     fn delegated_install_writes_rpm_managed_state() {
         let (_tmp, ctx) = system_ctx_with_raw_repo(false);
         let fake = FakeInstaller::new(
-            "anolisa-copilot-shell",
-            pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+            "copilot-shell",
+            pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
         )
         .with_origin("anolisa");
         let exec = RpmExec {
@@ -6304,7 +6309,7 @@ scope = "@anolisa"
         assert!(obj.files.is_empty(), "dnf-owned files stay out of state");
         assert_eq!(obj.version, "2.3.0-1.al8");
         let meta = obj.rpm_metadata.as_ref().expect("rpm metadata");
-        assert_eq!(meta.package_name, "anolisa-copilot-shell");
+        assert_eq!(meta.package_name, "copilot-shell");
         assert_eq!(meta.evr.as_deref(), Some("2.3.0-1.al8"));
         assert_eq!(meta.arch.as_deref(), Some("x86_64"));
         assert_eq!(meta.source_repo.as_deref(), Some("anolisa"));
@@ -6317,8 +6322,8 @@ scope = "@anolisa"
     fn delegated_install_non_root_is_refused() {
         let (_tmp, ctx) = system_ctx_with_raw_repo(false);
         let fake = FakeInstaller::new(
-            "anolisa-copilot-shell",
-            pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+            "copilot-shell",
+            pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
         );
         let exec = RpmExec {
             query: &fake,
@@ -6351,8 +6356,8 @@ scope = "@anolisa"
     fn delegated_install_dry_run_previews_without_txn_or_state() {
         let (_tmp, ctx) = system_ctx_with_raw_repo(true);
         let fake = FakeInstaller::new(
-            "anolisa-copilot-shell",
-            pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+            "copilot-shell",
+            pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
         );
         let exec = RpmExec {
             query: &fake,
@@ -6379,8 +6384,8 @@ scope = "@anolisa"
     fn delegated_install_dnf_failure_surfaces() {
         let (_tmp, ctx) = system_ctx_with_raw_repo(false);
         let fake = FakeInstaller::new(
-            "anolisa-copilot-shell",
-            pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+            "copilot-shell",
+            pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
         )
         .failing_install();
         let exec = RpmExec {
@@ -6560,8 +6565,8 @@ scope = "@anolisa"
 
         let q = FakeQuery {
             installed: vec![(
-                "anolisa-copilot-shell".to_string(),
-                pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+                "copilot-shell".to_string(),
+                pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
             )],
             ..Default::default()
         };
@@ -6601,10 +6606,10 @@ scope = "@anolisa"
 
         let q = FakeQuery {
             installed: vec![(
-                "anolisa-copilot-shell".to_string(),
-                pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+                "copilot-shell".to_string(),
+                pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
             )],
-            origins: vec![("anolisa-copilot-shell".to_string(), "@System".to_string())],
+            origins: vec![("copilot-shell".to_string(), "@System".to_string())],
             ..Default::default()
         };
         let outcome =
@@ -6631,10 +6636,10 @@ scope = "@anolisa"
 
         let q = FakeQuery {
             installed: vec![(
-                "anolisa-copilot-shell".to_string(),
-                pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+                "copilot-shell".to_string(),
+                pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
             )],
-            origins: vec![("anolisa-copilot-shell".to_string(), "@System".to_string())],
+            origins: vec![("copilot-shell".to_string(), "@System".to_string())],
             ..Default::default()
         };
         let outcome =
@@ -6659,8 +6664,8 @@ scope = "@anolisa"
         seed_datadir_contract(&layout, "copilot-shell", &contract);
 
         let fake = FakeInstaller::new(
-            "anolisa-copilot-shell",
-            pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+            "copilot-shell",
+            pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
         )
         .with_origin("anolisa");
         let exec = RpmExec {
@@ -6693,8 +6698,8 @@ scope = "@anolisa"
         // No datadir contract seeded.
 
         let fake = FakeInstaller::new(
-            "anolisa-copilot-shell",
-            pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+            "copilot-shell",
+            pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
         )
         .with_origin("anolisa");
         let exec = RpmExec {
@@ -6738,10 +6743,10 @@ scope = "@anolisa"
 
         let q = FakeQuery {
             installed: vec![(
-                "anolisa-copilot-shell".to_string(),
-                pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+                "copilot-shell".to_string(),
+                pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
             )],
-            origins: vec![("anolisa-copilot-shell".to_string(), "@System".to_string())],
+            origins: vec![("copilot-shell".to_string(), "@System".to_string())],
             ..Default::default()
         };
         let outcome =
@@ -6788,10 +6793,10 @@ scope = "@anolisa"
 
         let q = FakeQuery {
             installed: vec![(
-                "anolisa-copilot-shell".to_string(),
-                pkg_info("anolisa-copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+                "copilot-shell".to_string(),
+                pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
             )],
-            origins: vec![("anolisa-copilot-shell".to_string(), "@System".to_string())],
+            origins: vec![("copilot-shell".to_string(), "@System".to_string())],
             ..Default::default()
         };
         let outcome =

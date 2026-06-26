@@ -291,7 +291,7 @@ mod tests {
                     "status": "available",
                     "backends": [
                         {"type": "oss", "url": "https://example.com/agentsight.tar.gz", "sha256": "abc"},
-                        {"type": "rpm", "repo_url": "https://repo.example.com", "package": "anolisa-agentsight"}
+                        {"type": "rpm", "repo_url": "https://repo.example.com", "package": "agentsight"}
                     ],
                     "platforms": [{"os": "linux", "arch": "x86_64", "distros": ["alinux3"]}],
                     "tags": ["agent", "trace"]

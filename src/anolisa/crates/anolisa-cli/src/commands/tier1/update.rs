@@ -2071,27 +2071,17 @@ mod tests {
             &c,
             rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 "2.2.0-1.al8",
                 Ownership::RpmObserved,
                 ObjectStatus::Adopted,
             ),
         );
         let rpm = FakeRpm::new(
-            "anolisa-copilot-shell",
-            Some(pkg_info(
-                "anolisa-copilot-shell",
-                "2.2.0",
-                Some("1.al8"),
-                "x86_64",
-            )),
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.2.0", Some("1.al8"), "x86_64")),
         )
-        .upgrading_to(pkg_info(
-            "anolisa-copilot-shell",
-            "2.3.0",
-            Some("1.al8"),
-            "x86_64",
-        ));
+        .upgrading_to(pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"));
 
         update_component_with_deps("copilot-shell", &c, &rpm, &rpm, true).expect("update ok");
         assert_eq!(rpm.update_calls.get(), 1, "dnf update must run once");
@@ -2126,27 +2116,17 @@ mod tests {
             &c,
             rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 "1.0.0-1.al8",
                 Ownership::RpmManaged,
                 ObjectStatus::Installed,
             ),
         );
         let rpm = FakeRpm::new(
-            "anolisa-copilot-shell",
-            Some(pkg_info(
-                "anolisa-copilot-shell",
-                "1.0.0",
-                Some("1.al8"),
-                "x86_64",
-            )),
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "1.0.0", Some("1.al8"), "x86_64")),
         )
-        .upgrading_to(pkg_info(
-            "anolisa-copilot-shell",
-            "1.1.0",
-            Some("1.al8"),
-            "x86_64",
-        ));
+        .upgrading_to(pkg_info("copilot-shell", "1.1.0", Some("1.al8"), "x86_64"));
 
         update_component_with_deps("copilot-shell", &c, &rpm, &rpm, true).expect("update ok");
 
@@ -2169,20 +2149,15 @@ mod tests {
             &c,
             rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 "2.2.0-1.al8",
                 Ownership::RpmObserved,
                 ObjectStatus::Adopted,
             ),
         );
         let rpm = FakeRpm::new(
-            "anolisa-copilot-shell",
-            Some(pkg_info(
-                "anolisa-copilot-shell",
-                "2.2.0",
-                Some("1.al8"),
-                "x86_64",
-            )),
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.2.0", Some("1.al8"), "x86_64")),
         );
 
         let err = update_component_with_deps("copilot-shell", &c, &rpm, &rpm, false)
@@ -2214,23 +2189,18 @@ mod tests {
             &c,
             rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 "2.2.0-1.al8",
                 Ownership::RpmObserved,
                 ObjectStatus::Adopted,
             ),
         );
         let rpm = FakeRpm::new(
-            "anolisa-copilot-shell",
-            Some(pkg_info(
-                "anolisa-copilot-shell",
-                "2.2.0",
-                Some("1.al8"),
-                "x86_64",
-            )),
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.2.0", Some("1.al8"), "x86_64")),
         )
         .with_available(vec![pkg_info(
-            "anolisa-copilot-shell",
+            "copilot-shell",
             "2.3.0",
             Some("1.al8"),
             "x86_64",
@@ -2254,7 +2224,7 @@ mod tests {
     fn unknown_component_routes_to_invalid_argument() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
-        let rpm = FakeRpm::new("anolisa-copilot-shell", None);
+        let rpm = FakeRpm::new("copilot-shell", None);
         let err = update_component_with_deps("copilot-shell", &c, &rpm, &rpm, true)
             .expect_err("absent component must error");
         assert_eq!(err.code(), "INVALID_ARGUMENT");
@@ -2307,14 +2277,14 @@ mod tests {
             &c,
             rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 "2.2.0-1.al8",
                 Ownership::RpmObserved,
                 ObjectStatus::Adopted,
             ),
         );
         // rpmdb reports nothing installed for the package.
-        let rpm = FakeRpm::new("anolisa-copilot-shell", None);
+        let rpm = FakeRpm::new("copilot-shell", None);
         let err = update_component_with_deps("copilot-shell", &c, &rpm, &rpm, true)
             .expect_err("drift must error");
         assert_eq!(err.code(), "EXECUTION_FAILED");
@@ -2973,13 +2943,8 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
             &raw_artifact("copilot-shell", "0.2.0", b"new\n"),
         );
         let rpm = FakeRpm::new(
-            "anolisa-copilot-shell",
-            Some(pkg_info(
-                "anolisa-copilot-shell",
-                "2.2.0",
-                Some("1.al8"),
-                "x86_64",
-            )),
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.2.0", Some("1.al8"), "x86_64")),
         );
 
         update_component_with_deps("copilot-shell", &c, &rpm, &rpm, true)
@@ -3010,20 +2975,15 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
             &c,
             rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 "2.2.0-1.al8",
                 Ownership::RpmObserved,
                 ObjectStatus::Adopted,
             ),
         );
         let rpm = FakeRpm::new(
-            "anolisa-copilot-shell",
-            Some(pkg_info(
-                "anolisa-copilot-shell",
-                "2.2.0",
-                Some("1.al8"),
-                "x86_64",
-            )),
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.2.0", Some("1.al8"), "x86_64")),
         )
         .failing_update();
 
@@ -3050,20 +3010,15 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
             &c,
             rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 "2.2.0-1.al8",
                 Ownership::RpmObserved,
                 ObjectStatus::Adopted,
             ),
         );
         let rpm = FakeRpm::new(
-            "anolisa-copilot-shell",
-            Some(pkg_info(
-                "anolisa-copilot-shell",
-                "2.2.0",
-                Some("1.al8"),
-                "x86_64",
-            )),
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.2.0", Some("1.al8"), "x86_64")),
         )
         .multi_version();
         let err = update_component_with_deps("copilot-shell", &c, &rpm, &rpm, true)
@@ -3083,7 +3038,7 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
             &c,
             rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 "2.3.0-1.al8",
                 Ownership::RpmObserved,
                 ObjectStatus::Adopted,
@@ -3091,13 +3046,8 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
         );
         // upgrade_to is None => update() is a no-op; EVR stays the same.
         let rpm = FakeRpm::new(
-            "anolisa-copilot-shell",
-            Some(pkg_info(
-                "anolisa-copilot-shell",
-                "2.3.0",
-                Some("1.al8"),
-                "x86_64",
-            )),
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64")),
         );
         update_component_with_deps("copilot-shell", &c, &rpm, &rpm, true).expect("update ok");
         assert_eq!(rpm.update_calls.get(), 1);
@@ -3121,20 +3071,15 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
             &c,
             rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 "2.2.0-1.al8",
                 Ownership::RpmObserved,
                 ObjectStatus::Adopted,
             ),
         );
         let rpm = FakeRpm::new(
-            "anolisa-copilot-shell",
-            Some(pkg_info(
-                "anolisa-copilot-shell",
-                "2.2.0",
-                Some("1.al8"),
-                "x86_64",
-            )),
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.2.0", Some("1.al8"), "x86_64")),
         )
         .post_update_missing();
 

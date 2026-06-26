@@ -701,7 +701,7 @@ mod tests {
             &c,
             rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 "2.2.0-1.al8",
                 Ownership::RpmObserved,
                 ObjectStatus::Adopted,
@@ -709,13 +709,8 @@ mod tests {
         );
         // rpmdb has moved on to 2.3.0 via a manual dnf update.
         let rpm = FakeQuery::new(
-            "anolisa-copilot-shell",
-            Some(pkg_info(
-                "anolisa-copilot-shell",
-                "2.3.0",
-                Some("1.al8"),
-                "x86_64",
-            )),
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64")),
         )
         .with_origin("alinux-updates");
 
@@ -750,20 +745,15 @@ mod tests {
             &c,
             rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 "2.2.0-1.al8",
                 Ownership::RpmManaged,
                 ObjectStatus::Installed,
             ),
         );
         let rpm = FakeQuery::new(
-            "anolisa-copilot-shell",
-            Some(pkg_info(
-                "anolisa-copilot-shell",
-                "2.3.0",
-                Some("1.al8"),
-                "x86_64",
-            )),
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64")),
         );
         repair_with_query("copilot-shell", &c, &rpm).expect("repair ok");
 
@@ -790,7 +780,7 @@ mod tests {
             &c,
             rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 "2.2.0-1.al8",
                 Ownership::RpmObserved,
                 ObjectStatus::Adopted,
@@ -798,13 +788,8 @@ mod tests {
         );
         // No origin configured on the fake -> installed_origin yields None.
         let rpm = FakeQuery::new(
-            "anolisa-copilot-shell",
-            Some(pkg_info(
-                "anolisa-copilot-shell",
-                "2.3.0",
-                Some("1.al8"),
-                "x86_64",
-            )),
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64")),
         );
         repair_with_query("copilot-shell", &c, &rpm).expect("repair ok");
         let obj = load_state(&c)
@@ -827,13 +812,13 @@ mod tests {
             &c,
             rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 "2.2.0-1.al8",
                 Ownership::RpmObserved,
                 ObjectStatus::Adopted,
             ),
         );
-        let rpm = FakeQuery::new("anolisa-copilot-shell", None);
+        let rpm = FakeQuery::new("copilot-shell", None);
         let err =
             repair_with_query("copilot-shell", &c, &rpm).expect_err("removed package must error");
         assert_eq!(err.code(), "EXECUTION_FAILED");
@@ -861,20 +846,15 @@ mod tests {
             &c,
             rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 "2.2.0-1.al8",
                 Ownership::RpmManaged,
                 ObjectStatus::Installed,
             ),
         );
         let rpm = FakeQuery::new(
-            "anolisa-copilot-shell",
-            Some(pkg_info(
-                "anolisa-copilot-shell",
-                "2.2.0",
-                Some("1.al8"),
-                "x86_64",
-            )),
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.2.0", Some("1.al8"), "x86_64")),
         )
         .multi_version();
         let err =
@@ -893,13 +873,13 @@ mod tests {
             &c,
             rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 "2.2.0-1.al8",
                 Ownership::RpmObserved,
                 ObjectStatus::Adopted,
             ),
         );
-        let rpm = FakeQuery::new("anolisa-copilot-shell", None).command_missing();
+        let rpm = FakeQuery::new("copilot-shell", None).command_missing();
         let err =
             repair_with_query("copilot-shell", &c, &rpm).expect_err("missing tooling must error");
         assert_eq!(err.code(), "EXECUTION_FAILED");
@@ -914,7 +894,7 @@ mod tests {
         // this test uses system mode to keep the seeded state under `tmp`.
         let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
         seed(&c, raw_object("copilot-shell", "9.9.9"));
-        let rpm = FakeQuery::new("anolisa-copilot-shell", None);
+        let rpm = FakeQuery::new("copilot-shell", None);
         let err = repair_with_query("copilot-shell", &c, &rpm)
             .expect_err("raw repair is not implemented");
         assert_eq!(err.code(), "NOT_IMPLEMENTED");
@@ -925,7 +905,7 @@ mod tests {
     fn repair_unknown_component_routes_to_invalid_argument() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
-        let rpm = FakeQuery::new("anolisa-copilot-shell", None);
+        let rpm = FakeQuery::new("copilot-shell", None);
         let err =
             repair_with_query("copilot-shell", &c, &rpm).expect_err("absent component must error");
         assert_eq!(err.code(), "INVALID_ARGUMENT");
@@ -942,20 +922,15 @@ mod tests {
             &c,
             rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 "2.2.0-1.al8",
                 Ownership::RpmObserved,
                 ObjectStatus::Adopted,
             ),
         );
         let rpm = FakeQuery::new(
-            "anolisa-copilot-shell",
-            Some(pkg_info(
-                "anolisa-copilot-shell",
-                "2.3.0",
-                Some("1.al8"),
-                "x86_64",
-            )),
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64")),
         );
         repair_with_query("copilot-shell", &c, &rpm).expect("dry-run ok");
         assert_eq!(
@@ -978,20 +953,15 @@ mod tests {
             &c,
             rpm_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 "2.3.0-1.al8",
                 Ownership::RpmObserved,
                 ObjectStatus::Adopted,
             ),
         );
         let rpm = FakeQuery::new(
-            "anolisa-copilot-shell",
-            Some(pkg_info(
-                "anolisa-copilot-shell",
-                "2.3.0",
-                Some("1.al8"),
-                "x86_64",
-            )),
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64")),
         );
         repair_with_query("copilot-shell", &c, &rpm).expect("repair ok");
         let obj = load_state(&c)
@@ -1018,15 +988,11 @@ mod tests {
         );
         obj.rpm_metadata = None;
         seed(&c, obj);
-        // Candidate chain falls through to the default `anolisa-<component>`.
+        // No recorded package_name, so the candidate chain falls through to the
+        // bare component name `<component>`.
         let rpm = FakeQuery::new(
-            "anolisa-legacy-rpm",
-            Some(pkg_info(
-                "anolisa-legacy-rpm",
-                "1.0.0",
-                Some("1.al8"),
-                "x86_64",
-            )),
+            "legacy-rpm",
+            Some(pkg_info("legacy-rpm", "1.0.0", Some("1.al8"), "x86_64")),
         )
         .with_origin("@System");
         repair_with_query("legacy-rpm", &c, &rpm).expect("repair ok");
@@ -1035,7 +1001,7 @@ mod tests {
             .cloned()
             .expect("present");
         let meta = obj.rpm_metadata.expect("metadata backfilled");
-        assert_eq!(meta.package_name, "anolisa-legacy-rpm");
+        assert_eq!(meta.package_name, "legacy-rpm");
         assert_eq!(meta.evr.as_deref(), Some("1.0.0-1.al8"));
         assert_eq!(obj.version, "1.0.0-1.al8");
     }

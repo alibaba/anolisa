@@ -246,7 +246,7 @@ mod tests {
             install_backend: Some(if is_rpm { "rpm" } else { "raw" }.to_string()),
             ownership: Some(ownership),
             rpm_metadata: is_rpm.then(|| RpmMetadata {
-                package_name: format!("anolisa-{name}"),
+                package_name: name.to_string(),
                 evr: Some("1.0.0-1.al8".to_string()),
                 arch: Some("x86_64".to_string()),
                 source_repo: Some("@System".to_string()),
@@ -296,10 +296,10 @@ mod tests {
         seed(&c, Vec::new());
         let q = FakeQuery {
             installed: vec![(
-                "anolisa-copilot-shell".to_string(),
-                pkg_info("anolisa-copilot-shell", "2.2.0", Some("1.al8"), "x86_64"),
+                "copilot-shell".to_string(),
+                pkg_info("copilot-shell", "2.2.0", Some("1.al8"), "x86_64"),
             )],
-            origins: vec![("anolisa-copilot-shell".to_string(), "@System".to_string())],
+            origins: vec![("copilot-shell".to_string(), "@System".to_string())],
             ..Default::default()
         };
         adopt_with_query("copilot-shell", None, &c, &q).expect("adopt ok");
@@ -311,7 +311,7 @@ mod tests {
         assert_eq!(obj.effective_ownership(), Ownership::RpmObserved);
         assert_eq!(obj.status, ObjectStatus::Adopted);
         let meta = obj.rpm_metadata.as_ref().expect("rpm metadata");
-        assert_eq!(meta.package_name, "anolisa-copilot-shell");
+        assert_eq!(meta.package_name, "copilot-shell");
         assert_eq!(meta.evr.as_deref(), Some("2.2.0-1.al8"));
         assert!(
             after
@@ -338,8 +338,8 @@ mod tests {
         );
         let q = FakeQuery {
             installed: vec![(
-                "anolisa-copilot-shell".to_string(),
-                pkg_info("anolisa-copilot-shell", "2.0.0", Some("1.al8"), "x86_64"),
+                "copilot-shell".to_string(),
+                pkg_info("copilot-shell", "2.0.0", Some("1.al8"), "x86_64"),
             )],
             ..Default::default()
         };
@@ -373,7 +373,7 @@ mod tests {
                 ObjectStatus::Adopted,
             )],
         );
-        // Existing observed package is `anolisa-copilot-shell`; the user pins a
+        // Existing observed package is `copilot-shell`; the user pins a
         // different installed package via --package.
         let q = FakeQuery {
             installed: vec![(
@@ -387,7 +387,7 @@ mod tests {
 
         assert_eq!(err.code(), "INVALID_ARGUMENT");
         assert!(
-            err.reason().contains("anolisa-copilot-shell")
+            err.reason().contains("copilot-shell")
                 && err.reason().contains("anolisa-other")
                 && err.reason().contains("forget"),
             "refusal must name both packages and point at forget: {}",
@@ -401,7 +401,7 @@ mod tests {
             .clone()
             .expect("rpm metadata");
         assert_eq!(
-            meta.package_name, "anolisa-copilot-shell",
+            meta.package_name, "copilot-shell",
             "package identity must be preserved when the repoint is refused",
         );
         assert_eq!(meta.evr.as_deref(), Some("1.0.0-1.al8"), "EVR unchanged");
@@ -434,7 +434,7 @@ mod tests {
 
         assert_eq!(err.code(), "INVALID_ARGUMENT");
         assert!(
-            err.reason().contains("anolisa-copilot-shell")
+            err.reason().contains("copilot-shell")
                 && err.reason().contains("anolisa-other")
                 && err.reason().contains("forget"),
             "dry-run refusal must match the real run: {}",
@@ -447,7 +447,7 @@ mod tests {
             .rpm_metadata
             .clone()
             .expect("rpm metadata");
-        assert_eq!(meta.package_name, "anolisa-copilot-shell");
+        assert_eq!(meta.package_name, "copilot-shell");
     }
 
     /// A raw-managed component is not silently downgraded; adopt points at
@@ -556,10 +556,10 @@ mod tests {
         let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
         let q = FakeQuery {
             installed: vec![(
-                "anolisa-copilot-shell".to_string(),
-                pkg_info("anolisa-copilot-shell", "2.2.0", Some("1.al8"), "x86_64"),
+                "copilot-shell".to_string(),
+                pkg_info("copilot-shell", "2.2.0", Some("1.al8"), "x86_64"),
             )],
-            multi_version: vec!["anolisa-copilot-shell".to_string()],
+            multi_version: vec!["copilot-shell".to_string()],
             ..Default::default()
         };
         let err = adopt_with_query("copilot-shell", None, &c, &q)
@@ -575,8 +575,8 @@ mod tests {
         let c = ctx(tmp.path().to_path_buf(), InstallMode::System, true);
         let q = FakeQuery {
             installed: vec![(
-                "anolisa-copilot-shell".to_string(),
-                pkg_info("anolisa-copilot-shell", "2.2.0", Some("1.al8"), "x86_64"),
+                "copilot-shell".to_string(),
+                pkg_info("copilot-shell", "2.2.0", Some("1.al8"), "x86_64"),
             )],
             ..Default::default()
         };

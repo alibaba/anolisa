@@ -62,7 +62,7 @@ adopted = true
 subscription_scope = "none"
 
 [objects.rpm_metadata]
-package_name = "anolisa-copilot-shell"
+package_name = "copilot-shell"
 evr = "0:1.2.3-1.al8"
 arch = "x86_64"
 source_repo = "@System"

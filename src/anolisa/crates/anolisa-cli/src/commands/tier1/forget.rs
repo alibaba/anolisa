@@ -422,7 +422,7 @@ mod tests {
             &c,
             vec![rpm_observed_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 "2.2.0-1.al8",
             )],
             Vec::new(),
@@ -484,7 +484,7 @@ mod tests {
             &c,
             vec![rpm_observed_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 "2.2.0-1.al8",
             )],
             vec![sample_claim("copilot-shell", "openclaw")],
@@ -524,7 +524,7 @@ mod tests {
             &c,
             vec![rpm_observed_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 "2.2.0-1.al8",
             )],
             vec![sample_claim("copilot-shell", "openclaw")],
@@ -554,7 +554,7 @@ mod tests {
             &c,
             vec![rpm_observed_object(
                 "copilot-shell",
-                "anolisa-copilot-shell",
+                "copilot-shell",
                 "2.2.0-1.al8",
             )],
             Vec::new(),

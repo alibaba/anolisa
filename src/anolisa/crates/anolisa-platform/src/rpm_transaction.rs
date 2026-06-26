@@ -179,30 +179,30 @@ mod tests {
     fn update_success_returns_ok() {
         let t = txn(
             "update",
-            "anolisa-copilot-shell",
-            ok_out(Some(0), "Upgraded:\n  anolisa-copilot-shell\n", ""),
+            "copilot-shell",
+            ok_out(Some(0), "Upgraded:\n  copilot-shell\n", ""),
         );
-        t.update("anolisa-copilot-shell").expect("update ok");
+        t.update("copilot-shell").expect("update ok");
     }
 
     #[test]
     fn install_success_returns_ok() {
         let t = txn(
             "install",
-            "anolisa-copilot-shell",
-            ok_out(Some(0), "Installed:\n  anolisa-copilot-shell\n", ""),
+            "copilot-shell",
+            ok_out(Some(0), "Installed:\n  copilot-shell\n", ""),
         );
-        t.install("anolisa-copilot-shell").expect("install ok");
+        t.install("copilot-shell").expect("install ok");
     }
 
     #[test]
     fn remove_success_returns_ok() {
         let t = txn(
             "remove",
-            "anolisa-copilot-shell",
-            ok_out(Some(0), "Removed:\n  anolisa-copilot-shell\n", ""),
+            "copilot-shell",
+            ok_out(Some(0), "Removed:\n  copilot-shell\n", ""),
         );
-        t.remove("anolisa-copilot-shell").expect("remove ok");
+        t.remove("copilot-shell").expect("remove ok");
     }
 
     #[test]
@@ -211,14 +211,10 @@ mod tests {
         // remove failure apart from an install/update failure.
         let t = txn(
             "remove",
-            "anolisa-copilot-shell",
-            ok_out(
-                Some(1),
-                "",
-                "Error: No match for argument: anolisa-copilot-shell",
-            ),
+            "copilot-shell",
+            ok_out(Some(1), "", "Error: No match for argument: copilot-shell"),
         );
-        let err = t.remove("anolisa-copilot-shell").unwrap_err();
+        let err = t.remove("copilot-shell").unwrap_err();
         match err {
             PackageTransactionError::TransactionFailed {
                 operation, stderr, ..
@@ -234,10 +230,10 @@ mod tests {
     fn update_nonzero_exit_maps_to_transaction_failed() {
         let t = txn(
             "update",
-            "anolisa-copilot-shell",
+            "copilot-shell",
             ok_out(Some(1), "", "Error: nothing to do, repo unreachable"),
         );
-        let err = t.update("anolisa-copilot-shell").unwrap_err();
+        let err = t.update("copilot-shell").unwrap_err();
         match err {
             PackageTransactionError::TransactionFailed {
                 command,
@@ -260,10 +256,10 @@ mod tests {
         // an install failure apart from an update failure.
         let t = txn(
             "install",
-            "anolisa-copilot-shell",
+            "copilot-shell",
             ok_out(Some(1), "", "Error: No match for argument"),
         );
-        let err = t.install("anolisa-copilot-shell").unwrap_err();
+        let err = t.install("copilot-shell").unwrap_err();
         match err {
             PackageTransactionError::TransactionFailed {
                 operation, stderr, ..
@@ -281,14 +277,14 @@ mod tests {
         // an empty diagnostic.
         let t = txn(
             "update",
-            "anolisa-copilot-shell",
+            "copilot-shell",
             ok_out(
                 Some(1),
                 "Error: This command has to be run with superuser privileges",
                 "",
             ),
         );
-        let err = t.update("anolisa-copilot-shell").unwrap_err();
+        let err = t.update("copilot-shell").unwrap_err();
         match err {
             PackageTransactionError::TransactionFailed { stderr, .. } => {
                 assert!(stderr.contains("superuser privileges"), "got: {stderr}");
