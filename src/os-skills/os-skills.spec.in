@@ -25,6 +25,9 @@ workflows, kernel development, security auditing, and system administration.
 %install
 rm -rf %{buildroot}
 install -d -m 0755 %{buildroot}%{_datadir}/anolisa/skills
+install -d -m 0755 %{buildroot}%{_datadir}/anolisa/components/os-skills
+install -p -m 0644 component.toml \
+    %{buildroot}%{_datadir}/anolisa/components/os-skills/component.toml
 
 # Find each skill directory (identified by containing SKILL.md) and copy it
 # flattened into the target skills directory.
@@ -53,6 +56,9 @@ install -p -m 0755 adapters/hermes/scripts/*.sh \
 %files
 %license LICENSE
 %dir %{_datadir}/anolisa
+%dir %{_datadir}/anolisa/components
+%dir %{_datadir}/anolisa/components/os-skills
+%{_datadir}/anolisa/components/os-skills/component.toml
 %dir %{_datadir}/anolisa/skills
 %{_datadir}/anolisa/skills/*
 %dir %{_datadir}/anolisa/adapters
