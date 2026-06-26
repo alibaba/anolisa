@@ -15,7 +15,7 @@
         ]
       },
       {
-        "matcher": "run_shell_command",
+        "matcher": "^(run_shell_command|shell)$",
         "hooks": [
           {
             "type": "command",
@@ -27,6 +27,7 @@
         ]
       },
       {
+        "matcher": "^(run_shell_command|shell)$",
         "hooks": [
           {
             "type": "command",
@@ -163,6 +164,7 @@
         ]
       },
       {
+        "matcher": "^(run_shell_command|shell)$",
         "hooks": [
           {
             "type": "command",

@@ -293,13 +293,12 @@ def main():
         print(json.dumps({"decision": "allow"}))
         return
 
-    tool_name = input_data.get("tool_name", "")
     tool_input = input_data.get("tool_input", {})
     command = tool_input.get("command", "")
     cwd = input_data.get("cwd", "/tmp")
 
-    # 只拦截 shell 工具
-    if tool_name != "run_shell_command" or not command.strip():
+    # matcher 已保证只在 shell 类工具上触发，这里只剩空命令短路。
+    if not command.strip():
         print(json.dumps({"decision": "allow"}))
         return
 

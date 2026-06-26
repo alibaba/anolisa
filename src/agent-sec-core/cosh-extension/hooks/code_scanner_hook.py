@@ -24,6 +24,7 @@ from trace_context import with_trace_context
 # cosh tool_name -> field in tool_input that carries the command
 _TOOL_FIELD = {
     "run_shell_command": "command",
+    "shell": "command",
 }
 _DEFAULT_LANGUAGE = "bash"
 

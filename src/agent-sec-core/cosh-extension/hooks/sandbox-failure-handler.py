@@ -100,14 +100,8 @@ def main():
         print(json.dumps({}))
         return
 
-    tool_name = input_data.get("tool_name", "")
     tool_input = input_data.get("tool_input", {})
     error_msg = input_data.get("error", "")
-
-    # 只处理 run_shell_command 的失败
-    if tool_name != "run_shell_command":
-        print(json.dumps({}))
-        return
 
     sandboxed_cmd = tool_input.get("command", "")
     if not sandboxed_cmd:
