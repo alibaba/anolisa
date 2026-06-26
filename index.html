@@ -540,7 +540,39 @@ h1 span{color:var(--accent-light)}
 
       <div class="release-list" id="release-list">
         <!-- ANOLISA_CLI_CHANGELOG_START -->
-        <article class="release reveal reveal-d1" id="anolisa-cli-0-1-14">
+        <article class="release reveal reveal-d1" id="anolisa-cli-0-1-15">
+          <div class="release-meta">
+            <div class="release-version">0.1.15</div>
+            <div class="release-date">2026-06-25</div>
+          </div>
+          <div class="release-body">
+          <div class="release-body-section">
+            <h3>Added</h3>
+            <ul>
+              <li><code>anolisa doctor</code> now reports component health, dependency status, and suggested fixes.</li>
+              <li>Raw components can now declare runtime dependencies for install and update preflight checks.</li>
+              <li><code>anolisa install --dry-run</code> now previews runtime dependency status for raw components.</li>
+            </ul>
+          </div>
+          <div class="release-body-section">
+            <h3>Changed</h3>
+            <ul>
+              <li><code>anolisa install</code> and <code>update &lt;component&gt;</code> now refuse raw components with missing runtime dependencies before changing files.</li>
+              <li><code>anolisa restart &lt;component&gt;</code> now restarts service units shipped by RPM-backed components.</li>
+              <li><code>anolisa restart &lt;component&gt;</code> now shows guidance for RPM-backed template services instead of failing.</li>
+            </ul>
+          </div>
+          <div class="release-body-section">
+            <h3>Fixed</h3>
+            <ul>
+              <li><code>anolisa adapter enable</code> now expands <code>{datadir}</code> from the package that provided the adapter metadata.</li>
+              <li>After <code>anolisa uninstall</code> or <code>forget</code>, adapter commands no longer see stale component metadata.</li>
+            </ul>
+          </div>
+          </div>
+        </article>
+
+        <article class="release reveal reveal-d2" id="anolisa-cli-0-1-14">
           <div class="release-meta">
             <div class="release-version">0.1.14</div>
             <div class="release-date">2026-06-24</div>
@@ -574,7 +606,7 @@ h1 span{color:var(--accent-light)}
           </div>
         </article>
 
-        <article class="release reveal reveal-d2" id="anolisa-cli-0-1-13">
+        <article class="release reveal reveal-d3" id="anolisa-cli-0-1-13">
           <div class="release-meta">
             <div class="release-version">0.1.13</div>
             <div class="release-date">2026-06-23</div>
@@ -617,7 +649,7 @@ h1 span{color:var(--accent-light)}
           </div>
         </article>
 
-        <article class="release reveal reveal-d3" id="anolisa-cli-0-1-12">
+        <article class="release reveal reveal-d4" id="anolisa-cli-0-1-12">
           <div class="release-meta">
             <div class="release-version">0.1.12</div>
             <div class="release-date">2026-06-22</div>
@@ -655,7 +687,7 @@ h1 span{color:var(--accent-light)}
           </div>
         </article>
 
-        <article class="release reveal reveal-d4" id="anolisa-cli-0-1-11">
+        <article class="release reveal reveal-d5" id="anolisa-cli-0-1-11">
           <div class="release-meta">
             <div class="release-version">0.1.11</div>
             <div class="release-date">2026-06-18</div>
@@ -679,41 +711,6 @@ h1 span{color:var(--accent-light)}
           </div>
           </div>
         </article>
-
-        <article class="release reveal reveal-d5" id="anolisa-cli-0-1-10">
-          <div class="release-meta">
-            <div class="release-version">0.1.10</div>
-            <div class="release-date">2026-06-17</div>
-          </div>
-          <div class="release-body">
-          <div class="release-body-section">
-            <h3>Added</h3>
-            <ul>
-              <li><code>anolisa install --backend rpm</code> can install missing RPM components through <code>dnf</code> and track them as managed.</li>
-              <li><code>anolisa install</code> can adopt matching pre-installed system RPMs without downloading a raw package.</li>
-              <li><code>anolisa update &lt;component&gt;</code> can update RPM-managed and RPM-observed components through <code>dnf</code>.</li>
-              <li><code>anolisa status</code> now shows package, version, architecture, and source repo for RPM-backed components.</li>
-              <li><code>anolisa status &lt;component&gt;</code> now reports matching untracked system RPMs as observed.</li>
-            </ul>
-          </div>
-          <div class="release-body-section">
-            <h3>Changed</h3>
-            <ul>
-              <li><code>anolisa update runtime &lt;component&gt;</code> is now <code>anolisa update &lt;component&gt;</code>; <code>self</code> and <code>all</code> stay subcommands.</li>
-              <li><code>repo.toml</code> now uses <code>[backends.rpm]</code> instead of <code>[backends.yum]</code>.</li>
-              <li><code>anolisa install --all</code> now lists adopted RPM components in the batch summary.</li>
-            </ul>
-          </div>
-          <div class="release-body-section">
-            <h3>Fixed</h3>
-            <ul>
-              <li><code>anolisa install --all</code> now prints the reason for each failed component in human output.</li>
-              <li><code>anolisa install</code> now refuses automatic RPM detection when <code>rpm</code> or <code>dnf</code> is missing, with a <code>--backend raw</code> hint.</li>
-              <li><code>anolisa install</code> no longer replaces a raw install if another install finishes first.</li>
-            </ul>
-          </div>
-          </div>
-        </article>
         <!-- ANOLISA_CLI_CHANGELOG_END -->
       </div>
 
@@ -724,7 +721,7 @@ h1 span{color:var(--accent-light)}
         <!-- ANOLISA_CHANGELOG_DATA_START -->
         <script type="application/json" id="changelog-data">{
   "limit": 5,
-  "latestVersion": "0.1.14",
+  "latestVersion": "0.1.15",
   "components": [
     {
       "id": "anolisa",
@@ -735,6 +732,35 @@ h1 span{color:var(--accent-light)}
         "en": {
           "label": "EN",
           "releases": [
+            {
+              "version": "0.1.15",
+              "date": "2026-06-25",
+              "sections": [
+                {
+                  "title": "Added",
+                  "items": [
+                    "`anolisa doctor` now reports component health, dependency status, and suggested fixes.",
+                    "Raw components can now declare runtime dependencies for install and update preflight checks.",
+                    "`anolisa install --dry-run` now previews runtime dependency status for raw components."
+                  ]
+                },
+                {
+                  "title": "Changed",
+                  "items": [
+                    "`anolisa install` and `update \u003ccomponent>` now refuse raw components with missing runtime dependencies before changing files.",
+                    "`anolisa restart \u003ccomponent>` now restarts service units shipped by RPM-backed components.",
+                    "`anolisa restart \u003ccomponent>` now shows guidance for RPM-backed template services instead of failing."
+                  ]
+                },
+                {
+                  "title": "Fixed",
+                  "items": [
+                    "`anolisa adapter enable` now expands `{datadir}` from the package that provided the adapter metadata.",
+                    "After `anolisa uninstall` or `forget`, adapter commands no longer see stale component metadata."
+                  ]
+                }
+              ]
+            },
             {
               "version": "0.1.14",
               "date": "2026-06-24",
@@ -862,44 +888,41 @@ h1 span{color:var(--accent-light)}
                   ]
                 }
               ]
-            },
-            {
-              "version": "0.1.10",
-              "date": "2026-06-17",
-              "sections": [
-                {
-                  "title": "Added",
-                  "items": [
-                    "`anolisa install --backend rpm` can install missing RPM components through `dnf` and track them as managed.",
-                    "`anolisa install` can adopt matching pre-installed system RPMs without downloading a raw package.",
-                    "`anolisa update \u003ccomponent>` can update RPM-managed and RPM-observed components through `dnf`.",
-                    "`anolisa status` now shows package, version, architecture, and source repo for RPM-backed components.",
-                    "`anolisa status \u003ccomponent>` now reports matching untracked system RPMs as observed."
-                  ]
-                },
-                {
-                  "title": "Changed",
-                  "items": [
-                    "`anolisa update runtime \u003ccomponent>` is now `anolisa update \u003ccomponent>`; `self` and `all` stay subcommands.",
-                    "`repo.toml` now uses `[backends.rpm]` instead of `[backends.yum]`.",
-                    "`anolisa install --all` now lists adopted RPM components in the batch summary."
-                  ]
-                },
-                {
-                  "title": "Fixed",
-                  "items": [
-                    "`anolisa install --all` now prints the reason for each failed component in human output.",
-                    "`anolisa install` now refuses automatic RPM detection when `rpm` or `dnf` is missing, with a `--backend raw` hint.",
-                    "`anolisa install` no longer replaces a raw install if another install finishes first."
-                  ]
-                }
-              ]
             }
           ]
         },
         "zh": {
           "label": "中文",
           "releases": [
+            {
+              "version": "0.1.15",
+              "date": "2026-06-25",
+              "sections": [
+                {
+                  "title": "新增",
+                  "items": [
+                    "`anolisa doctor` 现输出组件健康、依赖和修复建议。",
+                    "raw 组件现可声明运行依赖供安装和更新检查。",
+                    "`anolisa install --dry-run` 现预览 raw 组件依赖状态。"
+                  ]
+                },
+                {
+                  "title": "变更",
+                  "items": [
+                    "`anolisa install` 和 `update \u003ccomponent>` 缺依赖时先停止。",
+                    "`anolisa restart \u003ccomponent>` 现重启 RPM 组件服务。",
+                    "`anolisa restart \u003ccomponent>` 遇到 RPM 模板服务时给出指引。"
+                  ]
+                },
+                {
+                  "title": "修复",
+                  "items": [
+                    "`anolisa adapter enable` 现按包内元数据展开 `{datadir}`。",
+                    "`anolisa uninstall` 和 `forget` 后 adapter 不再见旧元数据。"
+                  ]
+                }
+              ]
+            },
             {
               "version": "0.1.14",
               "date": "2026-06-24",
@@ -1024,38 +1047,6 @@ h1 span{color:var(--accent-light)}
                     "`anolisa status \u003ccomponent>` 现报告 RPM 状态漂移。",
                     "`anolisa uninstall` 默认保留观察到的系统 RPM。",
                     "`anolisa install` 接管 RPM 时保留适配器资源。"
-                  ]
-                }
-              ]
-            },
-            {
-              "version": "0.1.10",
-              "date": "2026-06-17",
-              "sections": [
-                {
-                  "title": "新增",
-                  "items": [
-                    "`anolisa install --backend rpm` 可通过 `dnf` 安装缺失 RPM 组件。",
-                    "`anolisa install` 可接管匹配的预装系统 RPM。",
-                    "`anolisa update \u003ccomponent>` 可通过 `dnf` 更新 RPM 组件。",
-                    "`anolisa status` 现显示 RPM 组件的软件包来源。",
-                    "`anolisa status \u003ccomponent>` 现显示匹配的未跟踪系统 RPM。"
-                  ]
-                },
-                {
-                  "title": "变更",
-                  "items": [
-                    "`anolisa update runtime \u003ccomponent>` 改为 `anolisa update \u003ccomponent>`。",
-                    "`repo.toml` 现使用 `[backends.rpm]` 替代 `[backends.yum]`。",
-                    "`anolisa install --all` 现在批量摘要列出接管的 RPM。"
-                  ]
-                },
-                {
-                  "title": "修复",
-                  "items": [
-                    "`anolisa install --all` 现在普通输出显示各组件失败原因。",
-                    "`anolisa install` 在缺少 `rpm` 或 `dnf` 时提示 `--backend raw`。",
-                    "`anolisa install` 不再覆盖先完成的 raw 安装。"
                   ]
                 }
               ]
@@ -1890,6 +1881,41 @@ h1 span{color:var(--accent-light)}
           "label": "EN",
           "releases": [
             {
+              "version": "0.4.0",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Breaking Changes",
+                  "items": [
+                    "**BREAKING** checkpoint `-i`/`--id` flag replaced by `-s`/`--snapshot` as primary; `-i` remains as hidden alias but may be removed in a future release (#1064)"
+                  ]
+                },
+                {
+                  "title": "Features",
+                  "items": [
+                    "Added plugin install/uninstall subcommand (#1005)",
+                    "Added component.toml for anolisa-cli adapter discovery (#1005)",
+                    "Added rollback preview support with --preview parameter (#1103)",
+                    "Added elapsed time display after each CLI operation (#1075)",
+                    "Added auto-generated snapshot ID when --snapshot is omitted (#1064)",
+                    "Added SLS ops log output for dashboard metrics (#1059)",
+                    "Added optional -t flag for diff to compare snapshot against current workspace (#848)",
+                    "Added rollback-by-ancestor-count and snapshot DAG tracking (#877)",
+                    "Added cron-based scheduled checkpoint snapshots (#819)"
+                  ]
+                },
+                {
+                  "title": "Bug Fixes",
+                  "items": [
+                    "Fixed --snapshot/-s as primary flag and aligned plugin flag handling (#1103, #1064)",
+                    "Fixed SKILL.md to sync with actual CLI/plugin implementation (#847)",
+                    "Fixed init and recover to guard against replaced workspace symlink (#860)",
+                    "Fixed init rsync by dropping --copy-unsafe-links (#873)"
+                  ]
+                }
+              ]
+            },
+            {
               "version": "0.3.3",
               "date": "",
               "sections": [
@@ -1954,24 +1980,6 @@ h1 span{color:var(--accent-light)}
                     "Followed `make install` contract for build-all integration",
                     "Fixed bugs in list and diff sub-commands",
                     "Made daemon stateful"
-                  ]
-                }
-              ]
-            },
-            {
-              "version": "0.2.0",
-              "date": "",
-              "sections": [
-                {
-                  "title": "Release",
-                  "items": [
-                    "Added auto_cleanup feature and switch",
-                    "Unified config modification entry through the TOML file",
-                    "Added global CLI warning when any workspace>1000 snapshots or filesystem usage>90%",
-                    "Fixed backend detection and daemon state recovery logic",
-                    "Fixed image size configuration not taking effect after daemon restart",
-                    "Removed obsolete fs_warn_threshold_percent parameter",
-                    "Fixed config.toml to ship as a sample file"
                   ]
                 }
               ]
