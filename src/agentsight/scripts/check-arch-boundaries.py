@@ -65,6 +65,7 @@ CROSS_CUTTING = {
     "logging",         # logging init
     "utils",           # utility functions
     "discovery",       # process discovery (Cross in ARCHITECTURE.md)
+    "lineage",         # process lineage tree (Cross: L8 populates, L7 reads)
     "skill_metrics",   # metric helpers
     "token_breakdown", # token analysis helpers
     "ecs_metadata",    # shared ECS metadata client primitives

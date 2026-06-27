@@ -198,6 +198,9 @@ impl GenAISqliteStore {
         // v8: stable key used to reconcile idle stream snapshots on completion
         ensure_col!("pending_match_key", "TEXT", "idx_genai_pending_match_key");
 
+        // v9: process type from lineage tree (agent/sub_agent/tool)
+        ensure_col!("process_type", "TEXT");
+
         Ok(())
     }
 

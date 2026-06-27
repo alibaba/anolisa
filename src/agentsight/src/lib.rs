@@ -57,6 +57,8 @@ pub mod health;
 #[cfg(target_os = "linux")]
 pub mod interruption;
 #[cfg(target_os = "linux")]
+pub mod lineage;
+#[cfg(target_os = "linux")]
 pub mod parser;
 #[cfg(target_os = "linux")]
 pub mod probes;

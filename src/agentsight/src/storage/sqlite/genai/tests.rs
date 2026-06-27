@@ -668,6 +668,7 @@ fn test_insert_pending() {
         call_kind: "main".to_string(),
         pending_origin: PendingOrigin::RequestCapture,
         pending_match_key: None,
+        process_type: None,
     };
     store.insert_pending(&info).unwrap();
     let conn = store.conn.lock().unwrap();
@@ -709,6 +710,7 @@ fn test_insert_pending_records_idle_origin_and_match_key() {
         call_kind: "main".to_string(),
         pending_origin: PendingOrigin::IdleDrain,
         pending_match_key: Some("match-idle-1".to_string()),
+        process_type: None,
     };
     store.insert_pending(&info).unwrap();
 
@@ -752,6 +754,7 @@ fn test_complete_pending_promotes_idle_snapshot_by_match_key() {
         call_kind: "main".to_string(),
         pending_origin: PendingOrigin::IdleDrain,
         pending_match_key: Some("match-idle-2".to_string()),
+        process_type: None,
     };
     store.insert_pending(&info).unwrap();
 
@@ -923,6 +926,7 @@ fn test_crash_sweep_ignores_idle_drain_pending() {
             call_kind: "main".to_string(),
             pending_origin: origin,
             pending_match_key: Some(format!("match-{call_id}")),
+            process_type: None,
         };
         store.insert_pending(&info).unwrap();
     }
@@ -1048,6 +1052,7 @@ fn make_store_with_pending(records: &[(&str, &str, &str, &str, i64)]) -> GenAISq
             call_kind: kind.to_string(),
             pending_origin: PendingOrigin::RequestCapture,
             pending_match_key: None,
+            process_type: None,
         };
         store.insert_pending(&info).unwrap();
     }
@@ -1219,6 +1224,7 @@ fn poison_recovery_flush_still_operational() {
         call_kind: "main".to_string(),
         pending_origin: PendingOrigin::RequestCapture,
         pending_match_key: None,
+        process_type: None,
     };
     store.insert_pending(&info).unwrap();
 
@@ -1265,4 +1271,135 @@ fn poison_recovery_flush_still_operational() {
     store.flush();
 
     cleanup_db(&path);
+}
+
+#[test]
+fn test_token_usage_by_process_type() {
+    let path = std::env::temp_dir().join(format!(
+        "test_token_by_ptype_{}.db",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+
+    // Insert events with different process_types
+    let mut call1 = LLMCall::new(
+        "c1".into(),
+        1000,
+        "openai".into(),
+        "gpt-4".into(),
+        LLMRequest {
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            top_p: None,
+            top_k: None,
+            seed: None,
+            stop_sequences: None,
+            stream: false,
+            tools: None,
+            raw_body: None,
+        },
+        100,
+        "agent".into(),
+    );
+    call1.process_type = Some("agent".into());
+    call1.token_usage = Some(crate::genai::semantic::TokenUsage {
+        input_tokens: 100,
+        output_tokens: 50,
+        total_tokens: 150,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+    });
+    call1.end_timestamp_ns = 2000;
+    call1.duration_ns = 1000;
+    store
+        .store_event(&GenAISemanticEvent::LLMCall(call1))
+        .unwrap();
+
+    let mut call2 = LLMCall::new(
+        "c2".into(),
+        1500,
+        "openai".into(),
+        "gpt-4".into(),
+        LLMRequest {
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            top_p: None,
+            top_k: None,
+            seed: None,
+            stop_sequences: None,
+            stream: false,
+            tools: None,
+            raw_body: None,
+        },
+        200,
+        "tool".into(),
+    );
+    call2.process_type = Some("tool".into());
+    call2.token_usage = Some(crate::genai::semantic::TokenUsage {
+        input_tokens: 30,
+        output_tokens: 10,
+        total_tokens: 40,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+    });
+    call2.end_timestamp_ns = 2500;
+    call2.duration_ns = 1000;
+    store
+        .store_event(&GenAISemanticEvent::LLMCall(call2))
+        .unwrap();
+
+    // Insert a pending-status event that should be EXCLUDED by the query's
+    // `status = 'complete'` filter. Without this negative case, deleting the
+    // filter from the SQL would not cause the test to fail.
+    let pending = super::pending::PendingCallInfo {
+        call_id: "pending-1".into(),
+        trace_id: None,
+        conversation_id: None,
+        session_id: None,
+        start_timestamp_ns: 2000,
+        pid: 300,
+        process_name: "agent".into(),
+        agent_name: Some("pending-agent".into()),
+        http_method: Some("POST".into()),
+        http_path: Some("/v1/chat".into()),
+        is_sse: true,
+        input_messages: None,
+        system_instructions: None,
+        user_query: None,
+        model: None,
+        provider: None,
+        call_kind: "main".into(),
+        pending_origin: PendingOrigin::RequestCapture,
+        pending_match_key: None,
+        process_type: Some("agent".into()),
+    };
+    store.insert_pending(&pending).unwrap();
+
+    let result = store.token_usage_by_process_type(0, 10000).unwrap();
+    assert_eq!(
+        result.len(),
+        2,
+        "pending row must be excluded by status='complete' filter"
+    );
+    // Sorted by total_tokens DESC: agent first
+    assert_eq!(result[0].0, "agent");
+    assert_eq!(
+        result[0].1, 1,
+        "call_count for agent must be 1 (pending row excluded)"
+    );
+    assert_eq!(result[0].4, 150); // total_tokens
+    assert_eq!(result[1].0, "tool");
+    assert_eq!(result[1].1, 1);
+    assert_eq!(result[1].4, 40);
+
+    std::fs::remove_file(&path).ok();
 }

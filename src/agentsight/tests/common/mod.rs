@@ -244,6 +244,7 @@ pub fn make_test_llm_call(call_id: &str) -> agentsight::genai::LLMCall {
         pid: 1234,
         process_name: "test".to_string(),
         agent_name: Some("test-agent".to_string()),
+        process_type: None,
         metadata: HashMap::new(),
     }
 }

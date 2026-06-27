@@ -197,6 +197,7 @@ impl GenAIBuilder {
                     .unwrap_or_else(|| "main".to_string()),
                 pending_origin: PendingOrigin::RequestCapture,
                 pending_match_key: llm_call.metadata.get("pending_match_key").cloned(),
+                process_type: None,
             });
 
             events.push(GenAISemanticEvent::LLMCall(llm_call));
@@ -448,6 +449,7 @@ impl GenAIBuilder {
             call_kind: call_kind.to_string(),
             pending_origin: PendingOrigin::DeadPidDrain,
             pending_match_key: Some(pending_match_key),
+            process_type: None,
         })
     }
 

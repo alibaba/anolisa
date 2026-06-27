@@ -48,6 +48,9 @@ pub struct LLMCall {
     pub process_name: String,
     /// Resolved agent name from discovery registry (e.g. "OpenClaw", "Cosh")
     pub agent_name: Option<String>,
+    /// Process type from lineage tree (agent/sub_agent/tool)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_type: Option<String>,
     /// Additional metadata
     pub metadata: HashMap<String, String>,
 }
@@ -304,6 +307,7 @@ impl LLMCall {
             pid,
             process_name,
             agent_name: None,
+            process_type: None,
             metadata: HashMap::new(),
         }
     }

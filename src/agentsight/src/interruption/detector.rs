@@ -832,6 +832,7 @@ mod tests {
             pid: 1234,
             process_name: "agent".to_string(),
             agent_name: Some("TestAgent".to_string()),
+            process_type: None,
             metadata: HashMap::from([("status_code".to_string(), "200".to_string())]),
         }
     }

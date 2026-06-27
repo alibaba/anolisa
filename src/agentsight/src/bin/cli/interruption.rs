@@ -568,17 +568,24 @@ fn print_record_detail(r: &InterruptionRecord) {
     );
     println!("  Agent:        {}", r.agent_name.as_deref().unwrap_or("-"));
     if let Some(ref detail) = r.detail {
-        // Pretty-print JSON detail
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(detail) {
-            println!("  Detail:");
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&v).unwrap_or_else(|_| detail.clone())
-            );
+            if r.interruption_type == "agent_crash" && v.get("signal").is_some() {
+                print_crash_report(&v);
+            } else {
+                println!("  Detail:");
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&v).unwrap_or_else(|_| detail.clone())
+                );
+            }
         } else {
             println!("  Detail:       {detail}");
         }
     }
+}
+
+fn print_crash_report(detail: &serde_json::Value) {
+    print!("{}", agentsight::lineage::format_crash_report(detail));
 }
 
 /// Print any Serialize value as JSON.

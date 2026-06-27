@@ -590,6 +590,9 @@ pub fn events_to_flat_records(
                 if let Some(ref name) = call.agent_name {
                     m.insert("agentsight.agent.name".to_string(), name.clone());
                 }
+                if let Some(ref ptype) = call.process_type {
+                    m.insert("agentsight.process_type".to_string(), ptype.clone());
+                }
                 m.insert(
                     "agentsight.duration_ns".to_string(),
                     call.duration_ns.to_string(),

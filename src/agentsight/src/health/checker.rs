@@ -669,6 +669,7 @@ mod tests {
             call_kind: "main".to_string(),
             pending_origin: crate::storage::sqlite::genai::PendingOrigin::RequestCapture,
             pending_match_key: None,
+            process_type: None,
         };
         genai_store.insert_pending(&info).expect("insert_pending");
         let checker = HealthChecker::new(

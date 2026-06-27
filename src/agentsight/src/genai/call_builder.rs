@@ -238,6 +238,7 @@ impl GenAIBuilder {
             process_name: crate::discovery::scanner::read_comm(http.pid)
                 .unwrap_or_else(|| http.comm.clone()),
             agent_name: Some(agent_name.clone()),
+            process_type: None,
             metadata: {
                 let mut meta = HashMap::new();
                 meta.insert("method".to_string(), http.method);

@@ -1316,6 +1316,7 @@ mod tests {
             pid,
             process_name: "test".to_string(),
             agent_name: agent_name.map(str::to_string),
+            process_type: None,
             metadata: std::collections::HashMap::new(),
         }
     }

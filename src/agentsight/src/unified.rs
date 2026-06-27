@@ -112,6 +112,8 @@ pub struct AgentSight {
     process_killer: Arc<dyn crate::utils::process::ProcessKiller>,
     /// Cached feature flags so runtime paths can check them without the config.
     features: crate::config::FeatureFlags,
+    /// Blood lineage tree tracking process parent-child relationships and type classification
+    lineage_tree: Arc<std::sync::RwLock<crate::lineage::LineageTree>>,
 }
 
 /// GenAI events waiting for session_id resolution via ResponseSessionMapper.
@@ -343,8 +345,7 @@ impl AgentSight {
 
         if let Some(ref path) = sysom_logtail_path {
             log::info!(
-                "SLS sysom mode detected (path={}), skipping SQLite and default SLS exporter",
-                path
+                "SLS sysom mode detected (path={path}), skipping SQLite and default SLS exporter"
             );
             if logtail_currently_enabled {
                 let exporter = LogtailExporter::new_with_fixed_path(
@@ -574,6 +575,23 @@ impl AgentSight {
             deadloop_kill_after_count: config.deadloop_kill_after_count,
             process_killer: Arc::new(crate::utils::process::LibcProcessKiller),
             features: config.features.clone(),
+            lineage_tree: {
+                let tree = crate::lineage::LineageTree::new();
+                let tree = Arc::new(std::sync::RwLock::new(tree));
+                if let Ok(mut t) = tree.write() {
+                    for agent in &existing_agents {
+                        t.insert_and_classify(
+                            agent.pid,
+                            1,
+                            &agent.agent_info.name,
+                            Some(agent.agent_info.name.clone()),
+                            false,
+                            true,
+                        );
+                    }
+                }
+                tree
+            },
         })
     }
 
@@ -675,6 +693,11 @@ impl AgentSight {
             return None;
         }
 
+        // Maintain lineage tree from proctrace exec/exit events
+        if let Event::Proc(ref proc_event) = event {
+            self.update_lineage_from_proc(proc_event);
+        }
+
         // Handle FileWatch events via callback (not through the pipeline)
         if let Event::FileWatch(ref fw_event) = event {
             self.handle_filewatch_event(fw_event);
@@ -756,11 +779,27 @@ impl AgentSight {
             let mut analysis_results = self.analyzer.analyze_aggregated(agg_result);
 
             // Build GenAI semantic events AND pending info in one pass
-            let (output, pending_info) = self.genai_builder.build_with_pending(
+            let (mut output, mut pending_info) = self.genai_builder.build_with_pending(
                 &analysis_results,
                 &self.response_mapper,
                 &self.pid_agent_name_cache,
             );
+
+            // Enrich events with process_type from lineage tree
+            if let Ok(tree) = self.lineage_tree.read() {
+                for event in &mut output.events {
+                    if let crate::genai::semantic::GenAISemanticEvent::LLMCall(call) = event {
+                        call.process_type = tree
+                            .get(call.pid as u32)
+                            .map(|n| n.process_type.as_str().to_string());
+                    }
+                }
+                if let Some(ref mut info) = pending_info {
+                    info.process_type = tree
+                        .get(info.pid as u32)
+                        .map(|n| n.process_type.as_str().to_string());
+                }
+            }
 
             // Backfill TokenRecord.agent from pid_agent_name_cache, falling back
             // to the *process* comm (/proc/<pid>/comm) and only then the event's
@@ -895,7 +934,9 @@ impl AgentSight {
         use crate::probes::procmon::Event as ProcMonEvent;
 
         match event {
-            ProcMonEvent::Exec { pid, comm, .. } => {
+            ProcMonEvent::Exec {
+                pid, ppid, comm, ..
+            } => {
                 // Read cmdline for deny-check and custom matching
                 let cmdline_args =
                     crate::discovery::scanner::read_cmdline(&format!("/proc/{pid}/cmdline"));
@@ -907,20 +948,112 @@ impl AgentSight {
                 }
 
                 // Phase 2: check if this is a known agent and start tracking
-                if let Some(agent) = self.scanner.on_process_create(*pid, comm) {
+                let matched = self.scanner.on_process_create(*pid, comm);
+
+                if let Some(agent) = matched {
                     let agent_name = agent.agent_info.name.clone();
                     self.pid_agent_name_cache.put(*pid, agent_name.clone());
                     self.attach_process(*pid, &agent_name);
+                    // proctrace does not emit an exec event for a scanner-matched
+                    // root (it was not yet in traced_processes when it execed).
+                    self.ensure_lineage_node(*pid, *ppid, comm, Some(agent_name), true);
+                } else {
+                    // PID reuse: new non-agent process inherited a recycled PID.
+                    // Clear stale cache so record_exec won't misclassify it.
+                    self.pid_agent_name_cache.pop(pid);
                 }
             }
             ProcMonEvent::Exit { pid, exit_code, .. } => {
-                // Remove from tracking if it was an agent
                 if let Some(agent) = self.scanner.on_process_exit(*pid) {
                     let agent_name = agent.agent_info.name.clone();
                     self.probes.detach_ssl_probes(*pid);
                     self.handle_agent_crash_detection(*pid, &agent_name, *exit_code);
+                } else if matches!(
+                    crate::lineage::classify_exit(*exit_code as i32),
+                    crate::lineage::ExitClassification::SignalCrash { .. }
+                ) {
+                    // SubAgent/Tool signal crash only (not AbnormalExit — child
+                    // exit(1) after parent dies is normal cleanup, not a crash).
+                    let child_crash_name = self.lineage_tree.read().ok().and_then(|tree| {
+                        tree.get(*pid).and_then(|node| {
+                            if matches!(
+                                node.process_type,
+                                crate::lineage::ProcessType::SubAgent
+                                    | crate::lineage::ProcessType::Tool
+                            ) {
+                                Some(
+                                    tree.root_agent_ancestor(*pid)
+                                        .and_then(|a| a.agent_name.clone())
+                                        .unwrap_or_else(|| node.comm.clone()),
+                                )
+                            } else {
+                                None
+                            }
+                        })
+                    });
+                    if let Some(agent_name) = child_crash_name {
+                        self.handle_agent_crash_detection(*pid, &agent_name, *exit_code);
+                    }
+                }
+                // Clean lineage tree (root agents may not be in proctrace child_pids)
+                if let Ok(mut tree) = self.lineage_tree.write() {
+                    tree.remove(*pid);
                 }
             }
+        }
+    }
+
+    /// Ensure a lineage node exists and is correctly classified after procmon
+    /// provides agent info. Handles the race where the proctrace exec event is
+    /// missed because the process was not yet in traced_processes when it execed.
+    fn ensure_lineage_node(
+        &mut self,
+        pid: u32,
+        ppid: u32,
+        comm: &str,
+        agent_name: Option<String>,
+        matches_agent: bool,
+    ) {
+        if let Ok(mut tree) = self.lineage_tree.write() {
+            tree.insert_and_classify(pid, ppid, comm, agent_name, false, matches_agent);
+        }
+    }
+
+    /// Update lineage tree from proctrace exec/exit events
+    fn update_lineage_from_proc(&mut self, event: &crate::probes::proctrace::VariableEvent) {
+        use crate::probes::proctrace::VariableEvent;
+
+        match event {
+            VariableEvent::Exec { header, .. } => {
+                let comm = event.comm_str();
+                let agent_name = self.pid_agent_name_cache.get(&header.pid).cloned();
+                if let Ok(mut tree) = self.lineage_tree.write() {
+                    let ptype = tree.record_exec(
+                        header.pid,
+                        header.ppid,
+                        &comm,
+                        agent_name,
+                        header.timestamp_ns,
+                    );
+                    log::debug!(
+                        "Lineage: added pid={} ppid={} type={ptype:?}",
+                        header.pid,
+                        header.ppid,
+                    );
+                }
+            }
+            VariableEvent::Exit { header, .. } => {
+                // Do NOT remove from lineage tree here — procmon Exit handler
+                // does the authoritative remove (line ~884). Removing here first
+                // would race: if proctrace exit arrives before procmon exit for
+                // the same PID, tree.get(pid) in the procmon SubAgent/Tool crash
+                // detection branch returns None, silently dropping the crash event.
+                log::debug!(
+                    "Lineage: proctrace exit pid={} (deferred to procmon handler)",
+                    header.pid,
+                );
+            }
+            _ => {}
         }
     }
 
@@ -1359,6 +1492,7 @@ impl AgentSight {
 
         // 4. Record agent_crash interruptions unless the exit was clean
         if let Some(ref istore) = self.interruption_store {
+            let tree = self.lineage_tree.read().ok();
             record_agent_crash_interruptions(
                 pid,
                 agent_name,
@@ -1366,6 +1500,7 @@ impl AgentSight {
                 &pending_calls,
                 istore,
                 self.genai_sqlite_store.as_deref(),
+                tree.as_deref(),
             );
         }
     }
@@ -2115,6 +2250,11 @@ fn take_deferred_genai_for_pid(
 /// signal, which covers the SIGKILL sent by the OOM killer) keep the previous
 /// behavior, with the decoded exit status embedded in the detail JSON.
 ///
+/// When a `lineage` tree is provided, the event severity is downgraded for
+/// SubAgent/Tool crashes (their blast radius is recoverable by the root
+/// agent) and the detail JSON is enriched with the process type, blast
+/// radius and the process subtree at exit time.
+///
 /// Extracted as a free function so the crash decision is unit-testable
 /// without constructing a full `AgentSight` instance.
 fn record_agent_crash_interruptions(
@@ -2124,8 +2264,9 @@ fn record_agent_crash_interruptions(
     pending_calls: &[(String, Option<String>, Option<String>, Option<String>)],
     istore: &InterruptionStore,
     genai_store: Option<&GenAISqliteStore>,
+    lineage: Option<&crate::lineage::LineageTree>,
 ) {
-    use crate::interruption::{InterruptionEvent, InterruptionType, was_pid_oom_killed};
+    use crate::interruption::{InterruptionEvent, InterruptionType, Severity, was_pid_oom_killed};
 
     // Nothing to record without pending calls; guard here so future callers
     // cannot emit call-less crash events by accident.
@@ -2147,6 +2288,26 @@ fn record_agent_crash_interruptions(
         .unwrap_or(0);
 
     let is_oom = was_pid_oom_killed(pid as i32);
+
+    // Base severity from the kernel exit status: fatal signals are critical,
+    // non-zero exit codes are high. Lineage downgrades SubAgent/Tool crashes
+    // because the root agent can usually recover from them.
+    let mut severity = if exit_status.signal != 0 {
+        Severity::Critical
+    } else {
+        Severity::High
+    };
+    if let Some(node) = lineage.and_then(|tree| tree.get(pid)) {
+        match node.process_type {
+            crate::lineage::ProcessType::Tool => severity = Severity::Medium,
+            crate::lineage::ProcessType::SubAgent => {
+                if severity == Severity::Critical {
+                    severity = Severity::High;
+                }
+            }
+            _ => {}
+        }
+    }
 
     // Group by (session_id, conversation_id) to produce one event per conversation
     let mut by_conv: std::collections::HashMap<(Option<String>, Option<String>), Vec<String>> =
@@ -2171,7 +2332,25 @@ fn record_agent_crash_interruptions(
         if is_oom {
             detail["oom"] = serde_json::json!(true);
         }
-        let event = InterruptionEvent::new(
+        if let Some(tree) = lineage {
+            if let Some(subtree) = tree.subtree(pid) {
+                detail["process_tree"] = serde_json::to_value(&subtree).unwrap_or_default();
+            }
+            let children = tree.children_at_exit(pid);
+            if !children.is_empty() {
+                detail["children_at_exit"] = serde_json::json!(children);
+            }
+            if let Some(node) = tree.get(pid) {
+                detail["process_type"] = serde_json::json!(node.process_type.as_str());
+                detail["blast_radius"] = serde_json::json!(match node.process_type {
+                    crate::lineage::ProcessType::Agent => "total_session_loss",
+                    crate::lineage::ProcessType::SubAgent => "partial",
+                    crate::lineage::ProcessType::Tool => "recoverable",
+                    _ => "unknown",
+                });
+            }
+        }
+        let mut event = InterruptionEvent::new(
             InterruptionType::AgentCrash,
             session_id.clone(),
             None,
@@ -2182,6 +2361,7 @@ fn record_agent_crash_interruptions(
             now_ns,
             Some(detail),
         );
+        event.severity = severity.clone();
         if let Err(e) = istore.insert(&event) {
             log::warn!("[CrashDetect] Failed to record agent_crash for pid={pid}: {e}");
         } else {
@@ -2274,6 +2454,7 @@ mod tests {
             &pending,
             &istore,
             Some(genai_store.as_ref()),
+            None,
         );
 
         assert!(
@@ -2310,6 +2491,7 @@ mod tests {
             &pending,
             &istore,
             Some(genai_store.as_ref()),
+            None,
         );
 
         let events = list_crash_events(&istore);
@@ -2350,6 +2532,7 @@ mod tests {
             &pending,
             &istore,
             Some(genai_store.as_ref()),
+            None,
         );
 
         let events = list_crash_events(&istore);
@@ -2379,6 +2562,7 @@ mod tests {
             &pending,
             &istore,
             Some(genai_store.as_ref()),
+            None,
         );
 
         let events = list_crash_events(&istore);
@@ -2483,6 +2667,7 @@ mod tests {
             pid: 1234,
             process_name: "test".to_string(),
             agent_name: Some("test-agent".to_string()),
+            process_type: None,
             metadata: std::collections::HashMap::new(),
         }
     }
@@ -2508,6 +2693,7 @@ mod tests {
             call_kind: "main".to_string(),
             pending_origin: crate::storage::sqlite::genai::PendingOrigin::RequestCapture,
             pending_match_key: None,
+            process_type: None,
         }
     }
 

@@ -70,6 +70,8 @@ pub struct PendingCallInfo {
     pub pending_origin: PendingOrigin,
     /// Deterministic key used to reconcile idle snapshots with resumed streams.
     pub pending_match_key: Option<String>,
+    /// Process type from lineage tree (agent/sub_agent/tool)
+    pub process_type: Option<String>,
 }
 
 /// Data extracted from captured SSE events for enriching a pending record.
@@ -100,14 +102,14 @@ impl GenAISqliteStore {
                 start_timestamp_ns, pid, process_name, agent_name,
                 http_method, http_path, is_sse,
                 input_messages, system_instructions, user_query,
-                model, provider, call_kind, pending_origin, pending_match_key,
+                model, provider, call_kind, pending_origin, pending_match_key, process_type,
                 event_json
             ) VALUES (
                 'llm_call', 'pending', ?1, ?2, ?3, ?4, ?5,
                 ?6, ?7, ?8, ?9,
                 ?10, ?11, ?12,
                 ?13, ?14, ?15,
-                ?16, ?17, ?18, ?19, ?20,
+                ?16, ?17, ?18, ?19, ?20, ?21,
                 '{}'
             )",
             params![
@@ -131,6 +133,7 @@ impl GenAISqliteStore {
                 info.call_kind,
                 info.pending_origin.as_str(),
                 info.pending_match_key,
+                info.process_type,
             ],
         )?;
         Ok(())

@@ -1391,6 +1391,7 @@ mod tests {
                 call_kind: "main".to_string(),
                 pending_origin: PendingOrigin::RequestCapture,
                 pending_match_key: None,
+                process_type: None,
             })
             .unwrap();
         store.flush();

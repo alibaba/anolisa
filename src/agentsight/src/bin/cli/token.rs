@@ -24,6 +24,10 @@ pub struct TokenCommand {
     #[structopt(long)]
     pub json: bool,
 
+    /// Group token usage by process type (agent/sub_agent/tool)
+    #[structopt(long)]
+    pub by_type: bool,
+
     /// Custom data file path
     #[structopt(long)]
     pub data_file: Option<String>,
@@ -31,9 +35,10 @@ pub struct TokenCommand {
 
 impl TokenCommand {
     pub fn execute(&self) {
-        // Determine data file path
-        // Use the unified database path (agentsight.db) as default,
-        // which is where Storage writes all tables.
+        if self.by_type {
+            self.execute_by_type();
+            return;
+        }
         let data_path = self
             .data_file
             .as_ref()
@@ -41,6 +46,49 @@ impl TokenCommand {
             .unwrap_or_else(|| SqliteConfig::default().db_path());
 
         self.execute_summary(&data_path);
+    }
+
+    fn execute_by_type(&self) {
+        use agentsight::storage::sqlite::GenAISqliteStore;
+
+        let genai_path = self
+            .data_file
+            .as_ref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(GenAISqliteStore::default_path);
+        let store = match GenAISqliteStore::new_with_path(&genai_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Failed to open GenAI store: {e}");
+                return;
+            }
+        };
+
+        let hours = self.hours.unwrap_or(24);
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
+        let start_ns = now_ns - (hours as i64) * 3_600_000_000_000;
+
+        match store.token_usage_by_process_type(start_ns, now_ns) {
+            Ok(rows) if rows.is_empty() => {
+                println!("No LLM calls with process_type in the last {hours} hours.");
+            }
+            Ok(rows) => {
+                if self.json {
+                    println!("{}", agentsight::lineage::format_token_by_type_json(&rows));
+                } else {
+                    print!(
+                        "{}",
+                        agentsight::lineage::format_token_by_type_table(&rows, hours)
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!("Query failed: {e}");
+            }
+        }
     }
 
     fn execute_summary(&self, data_path: &std::path::Path) {

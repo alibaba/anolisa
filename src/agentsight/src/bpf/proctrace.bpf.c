@@ -362,7 +362,8 @@ int trace_process_exit(void *ctx)
     
     // Fill exit_data
     struct proc_exit_data *exit_data = (void *)(event + 1);
-    exit_data->exit_code = 0;  // TODO: Get actual exit code from sched_process_exit
+    struct task_struct *exit_task = (struct task_struct *)bpf_get_current_task();
+    exit_data->exit_code = BPF_CORE_READ(exit_task, exit_code);
     
     bpf_ringbuf_submit(event, 0);
     return 0;

@@ -328,6 +328,43 @@ impl GenAISqliteStore {
         }
     }
 
+    /// Aggregate token usage grouped by process_type within a time range.
+    pub fn token_usage_by_process_type(
+        &self,
+        start_ns: i64,
+        end_ns: i64,
+    ) -> Result<Vec<(String, i64, i64, i64, i64)>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(process_type, 'unknown'), \
+                    COUNT(*), \
+                    COALESCE(SUM(input_tokens), 0), \
+                    COALESCE(SUM(output_tokens), 0), \
+                    COALESCE(SUM(total_tokens), 0) \
+             FROM genai_events \
+             WHERE event_type = 'llm_call' \
+               AND status = 'complete' \
+               AND start_timestamp_ns >= ?1 \
+               AND start_timestamp_ns <= ?2 \
+             GROUP BY COALESCE(process_type, 'unknown') \
+             ORDER BY COALESCE(SUM(total_tokens), 0) DESC",
+        )?;
+        let rows = stmt.query_map(params![start_ns, end_ns], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
     /// Try to insert an event without size check
     fn try_insert_event(
         &self,
@@ -448,12 +485,13 @@ impl GenAISqliteStore {
                         cache_creation_tokens, cache_read_tokens,
                         system_instructions, input_messages, output_messages,
                         user_query, http_method, http_path, status_code,
-                        is_sse, sse_event_count, event_json, tool_call_ids, call_kind
+                        is_sse, sse_event_count, event_json, tool_call_ids, call_kind,
+                        process_type
                     ) VALUES (
                         ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
                         ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
                         ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32,
-                        ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41
+                        ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42
                     )",
                     params![
                         "llm_call",
@@ -497,6 +535,7 @@ impl GenAISqliteStore {
                         event_json,
                         tool_call_ids,
                         call.metadata.get("call_kind").map(|s| s.as_str()).unwrap_or("main"),
+                        call.process_type,
                     ],
                 )?;
             }
