@@ -20,6 +20,8 @@ pub struct DaemonConfig {
     #[serde(default)]
     pub policy: PolicySection,
     #[serde(default)]
+    pub storage: StorageSection,
+    #[serde(default)]
     pub pool: PoolSection,
     #[serde(default)]
     pub template: TemplateSection,
@@ -122,6 +124,22 @@ impl Default for MetricsSection {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageSection {
+    /// Primary directory for vmlinux, rootfs base images, memfile bases.
+    /// All runtime image files are looked up here by default.
+    #[serde(default = "default_images_dir")]
+    pub images_dir: PathBuf,
+}
+
+impl Default for StorageSection {
+    fn default() -> Self {
+        Self {
+            images_dir: default_images_dir(),
+        }
+    }
+}
+
 impl DaemonConfig {
     /// Load and parse a daemon configuration file at `path`.
     pub fn load(path: &Path) -> Result<Self> {
@@ -166,6 +184,9 @@ fn default_template_idle_ttl() -> String {
 }
 fn default_prometheus_socket() -> PathBuf {
     PathBuf::from("/run/anvil/metrics.sock")
+}
+fn default_images_dir() -> PathBuf {
+    PathBuf::from("/var/lib/anvil/images")
 }
 
 #[cfg(test)]
