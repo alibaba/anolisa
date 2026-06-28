@@ -4,6 +4,43 @@ All notable changes to the cosh-ng project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] — 2026-06-28
+
+### Added
+- Aliyun authentication provider with ECS auto-detection, STS credentials, and QR code flow
+- SysOM Aliyun provider with ACS3 signing for LLM API access
+- Per-turn SLS JSONL logging for observability
+- SysOM request source identification headers
+- Structured tracing logging system across all crates
+- Sandbox bypass approval flow on PostToolUseFailure hook events
+- Startup health scan for environment diagnostics
+- Extension/hook/skill enable/disable commands (`/extensions`, `/hooks`, `/skills`)
+- Unified component state management module
+- Dedicated HOOK approval panel with simplified UI
+- UserPromptSubmit hook with Ask approval enforcement
+- Shell evidence read admission control in cosh-core
+- Tool activity rendering in cosh-shell
+- `cosh-switch` hint in startup banner for toggling between cosh-ng and copilot-shell
+
+### Changed
+- **BREAKING**: Rename CLI binary from `cosh` to `cosh-cli`; remove dispatch_core
+- RPM spec: install cosh-cli binary, `/usr/bin/cosh` launcher, cosh-switch script, `Conflicts: copilot-shell`
+- Replace eprintln with structured tracing macros
+- Unify hook decision aggregation with fold_decision
+- Update workspace repository URL to github.com/alibaba/anolisa
+
+### Fixed
+- Auth ECS flow and panel overlap on phase transitions
+- Auth QR code rendered without ANSI escape codes
+- Use SysomProvider for aliyun after auth success
+- Align hook input fields and AfterModel/wrap_tool_response with copilot-shell protocol
+- tool_result dedup guard and visibility
+- Restore prompt before shell handoff
+- Suppress duplicate evidence reads
+- Reduce failed-command auto analysis noise
+- Skill existence check and harden approval matching
+- Resolve clippy warnings across cosh-core and cosh-shell
+
 ## [0.10.0] — 2026-06-23
 
 ### Added
