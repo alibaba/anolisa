@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       component:
-        description: "Component to build (copilot-shell, agent-sec-core, agentsight, os-skills, tokenless, ws-ckpt, agent-memory, skillfs)"
+        description: "Component to build (copilot-shell, cosh-ng, agent-sec-core, agentsight, os-skills, tokenless, ws-ckpt, agent-memory, skillfs)"
         required: true
         type: string
       version:
@@ -49,6 +49,9 @@ jobs:
           case "${{ inputs.component }}" in
             copilot-shell)
               dnf install -y nodejs npm
+              ;;
+            cosh-ng)
+              dnf install -y rust cargo openssl-devel pkgconfig
               ;;
             agent-sec-core)
               dnf install -y clang llvm openssl-devel libseccomp-devel bubblewrap python3-pip systemd-rpm-macros

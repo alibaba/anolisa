@@ -104,6 +104,14 @@
                     "github": "kongche-jbw"
                 }
             ]
+        },
+        {
+            "label": "component:cosh-ng",
+            "maintainers": [
+                {
+                    "github": "samchu-zsl"
+                }
+            ]
         }
     ],
     "default": {

@@ -15,6 +15,7 @@ on:
         type: choice
         options:
           - copilot-shell
+          - cosh-ng
           - agent-sec-core
           - agentsight
           - os-skills

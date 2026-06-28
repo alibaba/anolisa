@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'cosh/v*'
+      - 'cosh-ng/v*'
       - 'sec-core/v*'
       - 'sight/v*'
       - 'skill/v*'
@@ -45,6 +46,7 @@ jobs:
 
           case "$SCOPE" in
             cosh)     COMPONENT="copilot-shell" ;;
+            cosh-ng)  COMPONENT="cosh-ng" ;;
             sec-core) COMPONENT="agent-sec-core" ;;
             sight)    COMPONENT="agentsight" ;;
             skill)    COMPONENT="os-skills" ;;
@@ -144,6 +146,7 @@ jobs:
 
           case "$COMPONENT" in
             copilot-shell)  PREFIX="cosh/v" ;;
+            cosh-ng)        PREFIX="cosh-ng/v" ;;
             agent-sec-core) PREFIX="sec-core/v" ;;
             agentsight)     PREFIX="sight/v" ;;
             os-skills)      PREFIX="skill/v" ;;

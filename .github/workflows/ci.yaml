@@ -47,6 +47,11 @@ on:
         required: false
         type: boolean
         default: false
+      run_cosh_ng:
+        description: 'Force run cosh-ng tests (ignore change detection)'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -67,6 +72,7 @@ jobs:
       agent_memory: ${{ steps.changes.outputs.agent_memory }}
       anolisa: ${{ steps.changes.outputs.anolisa }}
       skillfs: ${{ steps.changes.outputs.skillfs }}
+      cosh_ng: ${{ steps.changes.outputs.cosh_ng }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -95,6 +101,7 @@ jobs:
           AGENT_MEMORY=false
           ANOLISA=false
           SKILLFS=false
+          COSH_NG=false
 
           # Path-based detection
           if echo "$CHANGED" | grep -q "^src/copilot-shell/"; then
@@ -120,6 +127,9 @@ jobs:
           fi
           if echo "$CHANGED" | grep -q "^src/skillfs/"; then
             SKILLFS=true
+          fi
+          if echo "$CHANGED" | grep -q "^src/cosh-ng/"; then
+            COSH_NG=true
           fi
 
           # Manual override via workflow_dispatch
@@ -147,6 +157,9 @@ jobs:
           if [[ "${{ inputs.run_skillfs }}" == "true" ]]; then
             SKILLFS=true
           fi
+          if [[ "${{ inputs.run_cosh_ng }}" == "true" ]]; then
+            COSH_NG=true
+          fi
 
           echo "copilot_shell=$COPILOT_SHELL" >> $GITHUB_OUTPUT
           echo "agent_sec_core=$AGENT_SEC" >> $GITHUB_OUTPUT
@@ -156,6 +169,7 @@ jobs:
           echo "agent_memory=$AGENT_MEMORY" >> $GITHUB_OUTPUT
           echo "anolisa=$ANOLISA" >> $GITHUB_OUTPUT
           echo "skillfs=$SKILLFS" >> $GITHUB_OUTPUT
+          echo "cosh_ng=$COSH_NG" >> $GITHUB_OUTPUT
 
           echo "### Change Detection Results" >> $GITHUB_STEP_SUMMARY
           echo "| Component | Changed |" >> $GITHUB_STEP_SUMMARY
@@ -168,6 +182,7 @@ jobs:
           echo "| agent-memory | $AGENT_MEMORY |" >> $GITHUB_STEP_SUMMARY
           echo "| anolisa | $ANOLISA |" >> $GITHUB_STEP_SUMMARY
           echo "| SkillFS | $SKILLFS |" >> $GITHUB_STEP_SUMMARY
+          echo "| cosh-ng | $COSH_NG |" >> $GITHUB_STEP_SUMMARY
 
   # =========================================================================
   # Step 2: Build & Lint copilot-shell
@@ -906,3 +921,42 @@ jobs:
         run: |
           cd src/skillfs
           scripts/test.sh
+
+  # =========================================================================
+  # Step 11: Test cosh-ng (Rust workspace)
+  # =========================================================================
+  test-cosh-ng:
+    name: Test cosh-ng
+    needs: detect-changes
+    if: needs.detect-changes.outputs.cosh_ng == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: 'rustfmt, clippy'
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/cosh-ng
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Check formatting
+        run: |
+          cd src/cosh-ng
+          cargo fmt --all --check
+
+      - name: Lint
+        run: |
+          cd src/cosh-ng
+          cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run tests
+        run: |
+          cd src/cosh-ng
+          cargo test --workspace

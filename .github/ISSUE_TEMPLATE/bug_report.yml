@@ -17,6 +17,7 @@ body:
       options:
         - anolisa
         - cosh
+        - cosh-ng
         - sec-core
         - skill
         - sight

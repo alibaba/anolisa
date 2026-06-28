@@ -8,6 +8,7 @@
       "always",
       [
         "cosh",
+        "cosh-ng",
         "sec-core",
         "skill",
         "sight",

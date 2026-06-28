@@ -16,6 +16,7 @@ body:
       description: Which component does this feature relate to?
       options:
         - cosh
+        - cosh-ng
         - sec-core
         - skill
         - sight
