@@ -1,40 +1,22 @@
-# cosh-ng — Computable Operating System Harness
+# cosh-ng
+
+[中文版](README_CN.md)
 
 ## What is cosh
 
-**Computable Operating System Harness** — a deterministic Agent-OS interface with a single `cosh` entry point that provides dual-mode behavior:
-
-- **Interactive mode**: Run `cosh` with no arguments to launch the TUI (equivalent to `cosh-core`)
-- **CLI mode**: Run `cosh <subsystem> <action>` for structured JSON output consumed by Agents and scripts
-
-One command (`cosh pkg install nginx`) works across dnf/apt/zypper and returns structured JSON — no text parsing, no distro guessing.
-
-**Status**: MVP v2 — compiles and runs, core subcommands implemented. 20 tests passing (7 unit + 13 integration).
-
-## When to use cosh
-
-| Scenario | Use |
-|----------|-----|
-| Agent needs reversible operations (checkpoint) | **cosh** |
-| Agent needs cross-distro command execution (pkg/svc) | **cosh** |
-| Agent needs structured JSON from system commands | **cosh** |
-| Agent needs to learn operational knowledge | **OS documentation / runbooks** |
-| cosh is unavailable on target host | **OS documentation / runbooks** |
-| One-off commands where structured output isn't needed | **raw bash** |
+**Computable Operating System Harness** — a deterministic Agent-OS interface that provides cross-distro structured system operations for AI Agents.
 
 ## Architecture
 
-3-crate workspace with strict dependency direction:
+5-crate workspace with strict dependency direction:
 
 ```
-cosh-types          cosh-platform          cosh-cli
-  (types only)    ← (distro detect +    ← (CLI entry point,
-   zero side       backend routing)       binary: cosh)
-   effects)              │                     │
-                         └── depends on ───────┘
-                                cosh-types
+cosh-types          cosh-platform          cosh-cli / cosh-core / cosh-shell
+  (types only)    ← (distro detect +    ← (CLI entry, interactive TUI,
+   zero side       backend routing)       AI-augmented shell)
+   effects)
 
-Dependency: cosh-cli → cosh-platform → cosh-types
+Dependency: cosh-cli / cosh-core / cosh-shell → cosh-platform → cosh-types
 ```
 
 ### Crate layout
@@ -46,27 +28,15 @@ cosh-ng/
 │   │   └── src/          # checkpoint.rs, config.rs, error.rs, output.rs, pkg.rs, svc.rs
 │   ├── cosh-platform/    # Distro detection + backend routing
 │   │   └── src/          # checkpoint.rs, detect.rs, pkg.rs, svc.rs
-│   └── cosh-cli/         # CLI entry (binary: cosh)
-│       ├── src/          # main.rs, cmd/{pkg,svc,checkpoint,audit}.rs
-│       └── tests/        # 13 CLI integration tests
+│   ├── cosh-cli/         # CLI entry (binary: cosh-cli)
+│   │   ├── src/          # main.rs, cmd/{pkg,svc,checkpoint,audit}.rs
+│   │   └── tests/        # CLI integration tests
+│   ├── cosh-core/        # Interactive TUI + headless JSONL backend (binary: cosh-core)
+│   │   └── src/          # LLM chat, tool execution, hook system, session management
+│   └── cosh-shell/       # AI-augmented interactive shell (binary: cosh-shell)
+│       ├── src/          # PTY host, OSC markers, approval control, streaming AI
+│       └── tests/        # Protocol + integration tests
 └── Cargo.toml
-```
-
-## Ecosystem
-
-| Component | Relationship |
-|-----------|-------------|
-| **Tokenless** | Complementary — cosh generates JSON, Tokenless compresses it |
-| **ws-ckpt** | cosh wraps ws-ckpt daemon capabilities via Unix socket IPC |
-
-```
-Agent Framework
-  │
-  │  cosh pkg install nginx
-  ▼
-cosh-cli
-  ├── pkg/svc → cosh-platform → dnf / apt-get / systemctl
-  └── checkpoint → cosh-platform → ws-ckpt daemon → btrfs snapshot (μs)
 ```
 
 ## Quick start
@@ -75,49 +45,50 @@ cosh-cli
 # Build
 cargo build --workspace
 
-# Interactive mode — launches TUI
-cosh
-
-# CLI mode — structured JSON output
-cosh pkg install nginx
+# Structured JSON output
+cosh-cli pkg install nginx
 # → {"ok":true,"data":{"package":"nginx","version":"1.24.0","already_installed":false},...}
 
-cosh pkg install nginx --dry-run   # preview without executing
+cosh-cli pkg install nginx --dry-run   # preview without executing
 
 # Service management (systemd)
-cosh svc status nginx
+cosh-cli svc status nginx
 # → {"ok":true,"data":{"name":"nginx","active":true,"enabled":true,"recent_logs":[...]},...}
 
-cosh svc restart nginx --dry-run
+cosh-cli svc restart nginx --dry-run
 
 # Workspace checkpoint (requires ws-ckpt daemon)
-cosh checkpoint create --workspace /home/agent/project -m "before refactor"
+cosh-cli checkpoint create --workspace /home/agent/project --id step-042 -m "before refactor"
 # → {"ok":true,"data":{"checkpoint_id":"step-042","step":42},...}
 
-cosh checkpoint restore step-040 --workspace /home/agent/project
+cosh-cli checkpoint restore step-040 --workspace /home/agent/project
 
 # Security audit
-cosh audit check --action "rm -rf /var/log"
-# → {"ok":true,"data":{"action":"rm -rf /var/log","allowed":true},...}
+cosh-cli audit check --action "rm -rf /var/log"
+# → {"ok":true,"data":{"outcome":"Deny","matched_rule":"shell-deny-destructive",...},...}
 ```
 
 ## Command reference
 
 | Subcommand | Example | Backend |
-|-----------|---------|---------|
-| `cosh pkg install <name>` | `cosh pkg install nginx` | dnf / apt-get / zypper |
-| `cosh pkg remove <name>` | `cosh pkg remove nginx` | dnf / apt-get / zypper |
-| `cosh pkg search <query>` | `cosh pkg search "web server"` | dnf / apt-cache / zypper |
-| `cosh svc status <name>` | `cosh svc status nginx` | systemctl show |
-| `cosh svc start/stop/restart` | `cosh svc restart nginx` | systemctl |
-| `cosh svc enable/disable` | `cosh svc enable nginx` | systemctl |
-| `cosh svc list` | `cosh svc list --state running` | systemctl list-units |
-| `cosh checkpoint create` | `cosh checkpoint create -w /path -m "msg"` | ws-ckpt daemon |
-| `cosh checkpoint list` | `cosh checkpoint list -w /path` | ws-ckpt daemon |
-| `cosh checkpoint restore <id>` | `cosh checkpoint restore step-003 -w /path` | ws-ckpt daemon |
-| `cosh checkpoint status` | `cosh checkpoint status -w /path` | ws-ckpt daemon |
-| `cosh audit check` | `cosh audit check --action "..."` | Security subsystem (stub) |
-| `cosh audit log` | `cosh audit log --session abc123` | Security subsystem (stub) |
+|-----------|---------|----------|
+| `cosh-cli pkg install <name>` | `cosh-cli pkg install nginx` | dnf / apt-get / zypper |
+| `cosh-cli pkg remove <name>` | `cosh-cli pkg remove nginx` | dnf / apt-get / zypper |
+| `cosh-cli pkg search <query>` | `cosh-cli pkg search "web server"` | dnf / apt-cache / zypper |
+| `cosh-cli svc status <name>` | `cosh-cli svc status nginx` | systemctl show |
+| `cosh-cli svc start/stop/restart` | `cosh-cli svc restart nginx` | systemctl |
+| `cosh-cli svc enable/disable` | `cosh-cli svc enable nginx` | systemctl |
+| `cosh-cli svc list` | `cosh-cli svc list --state running` | systemctl list-units |
+| `cosh-cli checkpoint create` | `cosh-cli checkpoint create --workspace /path --id snap-001 -m "msg"` | ws-ckpt daemon |
+| `cosh-cli checkpoint list` | `cosh-cli checkpoint list --workspace /path` | ws-ckpt daemon |
+| `cosh-cli checkpoint restore <id>` | `cosh-cli checkpoint restore step-003 --workspace /path` | ws-ckpt daemon |
+| `cosh-cli checkpoint status` | `cosh-cli checkpoint status` | ws-ckpt daemon |
+| `cosh-cli checkpoint init` | `cosh-cli checkpoint init --workspace /path` | ws-ckpt daemon |
+| `cosh-cli checkpoint delete` | `cosh-cli checkpoint delete --snapshot snap-001` | ws-ckpt daemon |
+| `cosh-cli checkpoint diff` | `cosh-cli checkpoint diff --workspace /path --from a --to b` | ws-ckpt daemon |
+| `cosh-cli audit check` | `cosh-cli audit check --action "rm -rf /"` | Policy engine |
+| `cosh-cli audit log` | `cosh-cli audit log --session abc123` | Policy engine |
+| `cosh-cli audit policy show` | `cosh-cli audit policy show` | Policy engine |
 
 ## Output format
 
@@ -130,7 +101,7 @@ All commands output a unified JSON envelope (`CoshResponse<T>`):
 On error:
 
 ```json
-{"ok":false,"error":{"code":"PkgNotFound","message":"package 'nginx-extra' not found","recoverable":true,"hint":"try 'cosh pkg search nginx'","subsystem":"pkg"},"meta":{...}}
+{"ok":false,"error":{"code":"PkgNotFound","message":"package 'nginx-extra' not found","recoverable":true,"hint":"try 'cosh-cli pkg search nginx'","subsystem":"pkg"},"meta":{...}}
 ```
 
 Key fields for Agents: `ok` (success?), `error.recoverable` (retry-worthy?), `error.hint` (next step suggestion).
@@ -189,15 +160,7 @@ cargo test --workspace
 cargo test --package cosh-cli --test cli_integration  # integration only
 ```
 
-**Prerequisites**: Linux, Rust 1.70+, root/sudo for pkg/svc commands, ws-ckpt daemon for checkpoint commands.
-
-## Development Phases
-
-| Phase | Stage | Form | Status |
-|-------|-------|------|--------|
-| 1 | NLP human interaction | copilot-shell (TypeScript TUI) | Done |
-| 1.5 | Rust Core | cosh-core (ratatui) | In Progress |
-| 2 | Agent command wrapping | cosh CLI (Rust + JSON) | **Current** |
+**Prerequisites**: Linux, Rust 1.74+, root/sudo for pkg/svc commands, ws-ckpt daemon for checkpoint commands.
 
 ## License
 

@@ -1,12 +1,11 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to AI coding assistants when working with code in this repository.
 
 ## Project Overview
 
-cosh-ng (Computable Operating System Harness) is a deterministic Agent-OS interface. It provides a unified `cosh` binary with dual-mode behavior:
-- **CLI mode** (`cosh <subsystem> <action>`): structured JSON output for AI Agents
-- **Interactive mode** (`cosh` with no args): launches `cosh-core` via exec
+cosh-ng (Computable Operating System Harness) is a deterministic Agent-OS interface. It provides a `cosh-cli` binary for structured JSON output:
+- **CLI mode** (`cosh-cli <subsystem> <action>`): structured JSON output for AI Agents
 
 ## Build & Test Commands
 
@@ -42,16 +41,16 @@ cargo test --package cosh-shell --test shell_host -- --test-threads=4
 cargo test --package cosh-shell -- --test-threads=4
 ```
 
-cosh-shell 测试布局必须遵循 `../../../specs/shell-test-organization/standard.md`：
+cosh-shell 测试布局规则：
 
 - `src/` 只放 private 纯逻辑或轻量 component tests。
 - public API 多模块逻辑测试进入 logic layer，目标 target 是 `logic`。
 - adapter/control protocol 测试进入 protocol layer，目标 target 是 `protocol`。
 - spawn `cosh-shell` binary、scripted raw shell、approval/question card、provider handoff 进入 `raw_cli` layer。
 - PTY shell host、OSC、termios、foreground/native shell 行为进入 `shell_host` layer。
-- 真实 provider、manual TTY、视觉/体验验证归入 `specs/shell-e2e-validation`，不混入默认 cargo test gate。
+- 真实 provider、manual TTY、视觉/体验验证不混入默认 cargo test gate。
 
-联合布局审计入口：
+布局审计入口：
 
 ```bash
 crates/cosh-shell/scripts/check-layout.sh
@@ -59,23 +58,21 @@ crates/cosh-shell/scripts/check-layout.sh
 
 该脚本必须保持通过；新增或迁移代码不能增加新的 violation group。脚本中的 registered debt 只表示迁移债务被 inventory 追踪，不代表最终验收已完成。
 
-测试改动 review 必须同时参考 `../../../specs/shell-test-organization/review.md`；代码组织改动 review 必须同时参考 `../../../specs/cosh-ng-code-organization/review.md`。AI reviewer 发现测试落位、命名、fixture/helper、heavy gate、root facade、public API、self-crate path 或 dependency direction 问题时，应按对应 review 文档给出纠错意见。
-
-Prerequisites: Linux (or macOS for limited functionality), Rust 1.70+. pkg/svc commands need root/sudo. Checkpoint commands need a running ws-ckpt daemon.
+Prerequisites: Linux (or macOS for limited functionality), Rust 1.74+. pkg/svc commands need root/sudo. Checkpoint commands need a running ws-ckpt daemon.
 
 ## Architecture
 
-5-crate workspace with strict dependency direction: `cosh-cli` / `cosh-core` / `cosh-shell` → `cosh-platform` → `cosh-types`
+5-crate workspace. Dependency direction: `cosh-cli` / `cosh-core` → `cosh-platform` → `cosh-types`; `cosh-shell` is standalone (no internal crate deps).
 
 - **cosh-types**: Pure types, zero side effects. Defines `CoshResponse<T>` envelope, `CoshError` (with error codes, recoverable flag, hint), and ws-ckpt IPC protocol types.
 - **cosh-platform**: Platform abstraction layer. Distro detection from `/etc/os-release`, package manager routing (dnf/apt/zypper/brew), systemd service adapter, ws-ckpt daemon Unix socket IPC client.
-- **cosh-cli**: CLI entry point (binary: `cosh`). 4 command domains: `pkg`, `svc`, `checkpoint`, `audit`. All output is JSON via `CoshResponse<T>`. Uses clap derive for argument parsing.
-- **cosh-core**: Interactive TUI (binary: `cosh-core`). Uses ratatui + crossterm. Has slash commands, optional LLM chat, theme system.
-- **cosh-shell**: AI-augmented interactive shell (binary: `cosh-shell`). PTY wrapper over bash/zsh with OSC marker-based command boundary detection, streaming AI analysis (Claude/Qwen adapters), inline card rendering, tool approval control protocol. See [`docs/cosh-shell-architecture.md`](docs/cosh-shell-architecture.md) for detailed architecture.
+- **cosh-cli**: CLI entry point (binary: `cosh-cli`). 4 command domains: `pkg`, `svc`, `checkpoint`, `audit`. All output is JSON via `CoshResponse<T>`. Uses clap derive for argument parsing.
+- **cosh-core**: Unified agent core (binary: `cosh-core`). Headless JSONL backend + LLM provider integration (OpenAI-compat, SysOM/Aliyun). Includes hooks, tools, skills, extensions, and config management. Interactive TUI mode is declared but not yet implemented.
+- **cosh-shell**: AI-augmented interactive shell (binary: `cosh-shell`). PTY wrapper over bash/zsh with OSC marker-based command boundary detection, streaming AI analysis (Claude/Qwen adapters), inline card rendering (ratatui), tool approval control protocol.
 
 ### cosh-shell Code Organization
 
-cosh-shell 代码组织必须遵循 `../../../specs/cosh-ng-code-organization/standard.md` 和 `../../../specs/cosh-shell-joint-execution-plan.md`。本轮改造只允许动 `crates/cosh-shell/`；不要顺手修改 `cosh-types`、`cosh-platform`、`cosh-cli`、`cosh-core`、lockfile、`.env` 或 workspace 外代码。
+本轮改造只允许动 `crates/cosh-shell/`；不要顺手修改 `cosh-types`、`cosh-platform`、`cosh-cli`、`cosh-core`、lockfile、`.env` 或 workspace 外代码。
 
 长期 owner 约定：
 
@@ -105,7 +102,7 @@ cosh-shell 代码组织必须遵循 `../../../specs/cosh-ng-code-organization/st
 
 ## Security Heuristics
 
-When writing safety gates that auto-approve commands, don't pattern-match substrings of the *raw* command — shell metas don't need spaces, and Tab/newline are word separators. Tokenize first (split on whitespace including `\t`/`\n`/`\r`), reject metacharacters anywhere (`;` `|` `&` `>` `<` `$` `` ` `` `(` `)` `{` `}`), then dispatch on tokens. When in doubt, fall through to user approval rather than auto-allow. New regression tests must cover Tab-separated, newline-separated, and unspaced-meta variants. Reference: `crates/cosh-core/src/tools/shell.rs::is_safe_command`.
+When writing safety gates that auto-approve commands, don't pattern-match substrings of the *raw* command — shell metas don't need spaces, and Tab/newline are word separators. Tokenize first (split on whitespace including `\t`/`\n`/`\r`), reject metacharacters anywhere (`;` `|` `&` `>` `<` `$` `` ` `` `(` `)` `{` `}`), then dispatch on tokens. When in doubt, fall through to user approval rather than auto-allow. New regression tests must cover Tab-separated, newline-separated, and unspaced-meta variants. Reference: `crates/cosh-shell/src/tools/readonly_rules/`.
 
 ## Debugging Guidelines
 
@@ -136,7 +133,7 @@ Don't trust development reports — verify before merging:
 Strict [Conventional Commits](https://www.conventionalcommits.org/):
 
 - `type(scope): subject` — types limited to `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`. **Do not use `harden:` / `cleanup:`** — they aren't standard. Map them: closing a known vulnerability → `fix:`; adding a new defensive mechanism → `feat:`; lint/dead-code cleanup → `chore:`.
-- `scope` is the crate name (`cli`, `platform`, `tui`, `types`); use `cli,platform` for multi-crate changes.
+- `scope` is the crate short name (`cli`, `core`, `shell`, `platform`, `types`); use `cli,platform` for multi-crate changes.
 - Subject in imperative mood, ≤ 72 chars, no trailing period. Body explains *why*, not *what*.
 
 ## Git History Hygiene

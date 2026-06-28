@@ -13,7 +13,7 @@ version = "0.10.0"
 edition = "2021"
 rust-version = "1.74"
 license = "Apache-2.0"
-repository = "https://gitlab.alibaba-inc.com/Agentic-OS/cosh-ng"
+repository = "https://github.com/alibaba/anolisa"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
