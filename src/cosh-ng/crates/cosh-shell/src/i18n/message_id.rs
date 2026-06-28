@@ -10,6 +10,7 @@ pub enum MessageId {
     StartupHooksRustProjectFinding,
     StartupHooksNoFindings,
     StartupHooksReadOnlyNote,
+    StartupSwitchHint,
     HelpTitle,
     HelpFooter,
     HelpGroupConfig,

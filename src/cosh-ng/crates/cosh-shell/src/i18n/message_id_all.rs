@@ -12,6 +12,7 @@ impl MessageId {
         MessageId::StartupHooksRustProjectFinding,
         MessageId::StartupHooksNoFindings,
         MessageId::StartupHooksReadOnlyNote,
+        MessageId::StartupSwitchHint,
         MessageId::HelpTitle,
         MessageId::HelpFooter,
         MessageId::HelpGroupConfig,

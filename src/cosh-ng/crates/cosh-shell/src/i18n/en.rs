@@ -20,6 +20,9 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::StartupHooksReadOnlyNote => {
             "`cosh-shell` only inspected lightweight startup context."
         }
+        MessageId::StartupSwitchHint => {
+            "\u{1f4a1} Run \"cosh-switch\" to switch between cosh-ng and copilot-shell"
+        }
         MessageId::HelpTitle => "Slash commands",
         MessageId::HelpFooter => "Mode: {mode}. Strategy: {strategy}.",
         MessageId::HelpGroupConfig => "Config",

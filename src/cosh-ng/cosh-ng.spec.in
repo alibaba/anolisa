@@ -16,12 +16,14 @@ BuildRequires:  gcc
 BuildRequires:  openssl-devel
 Requires(post):   lua
 Requires(postun): lua
-Provides:       %{_bindir}/cosh %{_bindir}/cosh-shell
+Requires:       openssl-libs
+Provides:       %{_bindir}/cosh-cli %{_bindir}/cosh
+Provides:       anolisa-component(cosh)
+Conflicts:      copilot-shell
 
 %description
 Computable Operating System Harness (cosh-ng) - a deterministic Agent-OS interface
-with a single `cosh` entry point that provides dual-mode behavior:
-interactive TUI mode and structured CLI mode with JSON output for Agents.
+providing cross-distro structured system operations with JSON output for AI Agents.
 
 %prep
 %setup -q
@@ -39,32 +41,56 @@ install -m 0755 target/release/cosh-shell %{buildroot}%{_libexecdir_cosh}/cosh-s
 
 # Install CLI binary
 install -d %{buildroot}%{_bindir}
-install -m 0755 target/release/cosh %{buildroot}%{_bindir}/cosh
+install -m 0755 target/release/cosh-cli %{buildroot}%{_bindir}/cosh-cli
 
 # Install launcher script
-cat > %{buildroot}%{_bindir}/cosh-shell << 'EOF'
+cat > %{buildroot}%{_bindir}/cosh << 'EOF'
 #!/bin/bash
-exec %{_libexecdir}/anolisa/cosh-ng/cosh-shell raw cosh-core "$@"
+exec %{_libexecdir_cosh}/cosh-shell raw cosh-core "$@"
 EOF
-chmod 0755 %{buildroot}%{_bindir}/cosh-shell
+chmod 0755 %{buildroot}%{_bindir}/cosh
+
+# Install cosh-switch script
+cat > %{buildroot}%{_bindir}/cosh-switch << 'EOF'
+#!/bin/bash
+set -e
+current=$(rpm -q --qf '%%{NAME}' -f /usr/bin/cosh 2>/dev/null || echo "none")
+case "$current" in
+  cosh-ng)
+    echo "Current: cosh-ng -> switching to copilot-shell"
+    sudo yum swap cosh-ng copilot-shell ;;
+  copilot-shell)
+    echo "Current: copilot-shell -> switching to cosh-ng"
+    sudo yum swap copilot-shell cosh-ng ;;
+  *)
+    echo "Error: neither cosh-ng nor copilot-shell is installed."; exit 1 ;;
+esac
+EOF
+chmod 0755 %{buildroot}%{_bindir}/cosh-switch
 
 # Install documentation
 install -d %{buildroot}%{_docdir}/%{name}
 install -m 0644 LICENSE %{buildroot}%{_docdir}/%{name}/LICENSE
 install -m 0644 README.md %{buildroot}%{_docdir}/%{name}/README.md
 
+# Install anolisa component manifest
+install -d %{buildroot}%{_datadir}/anolisa/components/cosh
+install -m 0644 component.toml %{buildroot}%{_datadir}/anolisa/components/cosh/component.toml
+
 %files
 %license %{_docdir}/%{name}/LICENSE
 %doc %{_docdir}/%{name}/README.md
+%{_bindir}/cosh-cli
 %{_bindir}/cosh
-%{_bindir}/cosh-shell
+%{_bindir}/cosh-switch
 %dir %{_libexecdir_cosh}
 %{_libexecdir_cosh}/cosh-core
 %{_libexecdir_cosh}/cosh-shell
+%{_datadir}/anolisa/components/cosh/component.toml
 
 %post -p <lua>
 nl        = '\n'
-cosh      = '%{_bindir}/cosh-shell'..nl
+cosh      = '%{_bindir}/cosh'..nl
 f = io.open('/etc/shells', 'a+')
 if f then
   local shells = nl..f:read('*all')..nl
@@ -79,7 +105,7 @@ then
   t={}
   for line in io.lines("/etc/shells")
   do
-    if line ~= "%{_bindir}/cosh-shell"
+    if line ~= "%{_bindir}/cosh"
     then
       table.insert(t,line)
     end
@@ -94,5 +120,5 @@ then
 end
 
 %changelog
-* Mon Jun 16 2026 Shenglong Zhu <shenglongzhu@linux.alibaba.com> - 0.6.0-1
+* Mon Jun 16 2026 Shenglong Zhu <shenglongzhu@linux.alibaba.com> - 0.0.0-1
 - Initial RPM package

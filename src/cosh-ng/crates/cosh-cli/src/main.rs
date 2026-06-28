@@ -3,7 +3,6 @@
 //!
 //! Deterministic OS capability interface for Agents.
 
-use std::path::PathBuf;
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
@@ -14,7 +13,7 @@ use cosh_platform::detect::Distro;
 use cosh_types::output::{CoshResponse, ResponseMeta};
 
 #[derive(Parser)]
-#[command(name = "cosh", version, about = "Computable Operating System Harness — deterministic OS capability interface")]
+#[command(name = "cosh-cli", version, about = "Computable Operating System Harness — deterministic OS capability interface")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -44,62 +43,7 @@ enum Commands {
     },
 }
 
-/// Locate the `cosh-core` binary: first check adjacent to the current executable,
-/// then fall back to PATH lookup.
-fn find_cosh_core() -> Option<PathBuf> {
-    // Try sibling directory of the current executable.
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let sibling = dir.join("cosh-core");
-            if sibling.is_file() {
-                return Some(sibling);
-            }
-        }
-    }
-    // Fall back to PATH lookup via `which`-style resolution.
-    which::which("cosh-core").ok()
-}
-
-/// Attempt to exec into `cosh-core` when invoked with no arguments.
-fn dispatch_core() -> ! {
-    match find_cosh_core() {
-        Some(core_path) => {
-            exec_core(&core_path);
-        }
-        None => {
-            eprintln!("cosh: no subcommand provided and `cosh-core` was not found.");
-            eprintln!("  Install cosh-core or run `cosh --help` for available subcommands.");
-            std::process::exit(127);
-        }
-    }
-}
-
-/// Platform-specific exec into the core binary.
-#[cfg(unix)]
-fn exec_core(path: &PathBuf) -> ! {
-    use std::os::unix::process::CommandExt;
-    let err = std::process::Command::new(path).exec();
-    eprintln!("cosh: failed to exec cosh-core: {err}");
-    std::process::exit(1);
-}
-
-#[cfg(not(unix))]
-fn exec_core(path: &PathBuf) -> ! {
-    let status = std::process::Command::new(path)
-        .status()
-        .unwrap_or_else(|e| {
-            eprintln!("cosh: failed to launch cosh-core: {e}");
-            std::process::exit(1);
-        });
-    std::process::exit(status.code().unwrap_or(1));
-}
-
 fn main() {
-    // If invoked with zero arguments (only the binary name), dispatch to cosh-core.
-    if std::env::args().count() == 1 {
-        dispatch_core();
-    }
-
     // Initialize tracing (stderr-only, controlled by COSH_LOG or RUST_LOG)
     let filter = std::env::var("COSH_LOG")
         .or_else(|_| std::env::var("RUST_LOG"))

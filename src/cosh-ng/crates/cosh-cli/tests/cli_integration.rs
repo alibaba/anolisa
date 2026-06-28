@@ -1,4 +1,4 @@
-//! Integration tests for the cosh CLI binary.
+//! Integration tests for the cosh-cli binary.
 //!
 //! These tests exercise the compiled binary and verify:
 //! - JSON output envelope structure (ok, data/error, meta fields)
@@ -9,12 +9,12 @@
 use std::path::Path;
 use std::process::Command;
 
-/// Get the path to the compiled cosh binary.
+/// Get the path to the compiled cosh-cli binary.
 fn cosh_bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_cosh"))
+    Command::new(env!("CARGO_BIN_EXE_cosh-cli"))
 }
 
-/// Spawn `cosh` with audit env vars pinned to a sandbox: log redirected to
+/// Spawn `cosh-cli` with audit env vars pinned to a sandbox: log redirected to
 /// `audit_log` and any external `COSH_AUDIT_POLICY` cleared so the built-in
 /// `balanced` preset is used. Use this for any test that exercises the
 /// audit subsystem so it doesn't pollute the user's real audit log.
@@ -44,7 +44,7 @@ fn test_version_output() {
     let output = cosh_bin().arg("--version").output().unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("cosh"));
+    assert!(stdout.contains("cosh-cli"));
 }
 
 #[test]
@@ -1017,8 +1017,9 @@ fn test_pkg_remove_rejects_shell_metachar() {
     assert_eq!(json["error"]["code"], "InvalidInput");
 }
 
-// --- Invalid commands ---
+// --- No subcommand ---
 
+/// When cosh-cli is invoked with no arguments, clap reports missing subcommand.
 #[test]
 fn test_no_subcommand_fails() {
     let output = cosh_bin().output().unwrap();

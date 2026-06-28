@@ -99,6 +99,7 @@ pub(crate) fn render_startup_banner<W: Write>(
             body.push(line);
         }
     }
+    body.push(i18n.t(MessageId::StartupSwitchHint).to_string());
     renderer.write_banner(output, i18n.t(MessageId::StartupTitle), body, None)?;
     writeln!(output)?;
     restore_startup_prompt(state, output)?;

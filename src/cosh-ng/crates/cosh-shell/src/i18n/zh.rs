@@ -14,6 +14,9 @@ pub(super) fn message(id: MessageId) -> &'static str {
         }
         MessageId::StartupHooksNoFindings => "内置只读检查未发现启动项。",
         MessageId::StartupHooksReadOnlyNote => "`cosh-shell` 只检查了轻量启动上下文。",
+        MessageId::StartupSwitchHint => {
+            "\u{1f4a1} 运行 \"cosh-switch\" 可在 cosh-ng 与 copilot-shell 之间切换"
+        }
         MessageId::HelpTitle => "Slash 命令",
         MessageId::HelpFooter => "模式: {mode}. 策略: {strategy}.",
         MessageId::HelpGroupConfig => "配置",
