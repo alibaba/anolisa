@@ -239,7 +239,7 @@ fn output_ref_file_is_capped_but_preserves_head_and_tail() {
     let _ = std::fs::remove_dir_all(&dir);
     let mut output = Vec::new();
     output.extend_from_slice(b"head-line\n");
-    output.extend(std::iter::repeat(b'x').take(COMMAND_OUTPUT_REF_MAX_BYTES));
+    output.extend(std::iter::repeat_n(b'x', COMMAND_OUTPUT_REF_MAX_BYTES));
     output.extend_from_slice(b"\ntail-line\n");
 
     let path = write_output_ref(&dir, "cmd-1", &output).expect("write output ref");

@@ -308,11 +308,11 @@ fn expand_env_vars(s: &str) -> String {
     let mut out = String::new();
     let mut chars = result.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '$' && chars.peek().map_or(false, |c| c.is_ascii_alphabetic() || *c == '_') {
+        if c == '$' && chars.peek().is_some_and(|c| c.is_ascii_alphabetic() || *c == '_') {
             let mut var = String::new();
             while chars
                 .peek()
-                .map_or(false, |c| c.is_ascii_alphanumeric() || *c == '_')
+                .is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_')
             {
                 var.push(chars.next().unwrap());
             }

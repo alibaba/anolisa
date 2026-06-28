@@ -6,7 +6,7 @@ use std::time::Instant;
 use futures::StreamExt;
 use tokio::io::AsyncBufReadExt;
 
-use cosh_platform::audit::{self, LoadedPolicy};
+use cosh_platform::audit::LoadedPolicy;
 use cosh_types::audit::Outcome;
 
 use crate::auth::{
@@ -116,7 +116,7 @@ impl CoshCore {
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     }
 
-    fn classify_tool(&self, tool_name: &str, params: &serde_json::Value) -> Outcome {
+    fn classify_tool(&self, tool_name: &str, _params: &serde_json::Value) -> Outcome {
         let mode = self.config.agent.approval_mode.as_str();
 
         if mode == "trust" {

@@ -107,11 +107,9 @@ fn poll_active_agent_run_with_policy<W: Write>(
             || provider_native_shell_transcript_pending
             || provider_native_shell_result_pending
             || analysis_only_recovery_pending
-        {
-            Duration::from_millis(100)
-        } else if state.agent_run.host_executed_shell_result_delivered
-            && !pending_interaction_before_poll
-            && !queued_before_held_text
+            || (state.agent_run.host_executed_shell_result_delivered
+                && !pending_interaction_before_poll
+                && !queued_before_held_text)
         {
             Duration::from_millis(100)
         } else {

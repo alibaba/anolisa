@@ -160,42 +160,6 @@ pub(super) fn start_cancellable_claude_process(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn claude_driver_deduplicates_late_shell_evidence_snapshot_result() {
-        let mut pending = control_protocol::PendingControlProtocolToolCall::default();
-
-        assert!(pending
-            .stage_or_emit(AgentEvent::ToolCall {
-                run_id: "run-claude".to_string(),
-                tool_id: Some("toolu-evidence".to_string()),
-                name: "cosh_shell_evidence".to_string(),
-                input: r#"{"action":"list_commands"}"#.to_string(),
-            })
-            .is_empty());
-        assert_eq!(
-            pending
-                .flush_stalled(control_protocol::PENDING_CONTROL_TOOL_CALL_GRACE)
-                .len(),
-            0
-        );
-
-        let released = pending.flush_stalled(Duration::from_millis(0));
-        assert_eq!(released.len(), 1);
-        assert!(!pending.take_matching_control_tool_call("run-claude", "toolu-evidence"));
-        assert!(pending
-            .stage_or_emit(AgentEvent::ToolCompleted {
-                run_id: "run-claude".to_string(),
-                tool_id: "toolu-evidence".to_string(),
-                status: "success".to_string(),
-            })
-            .is_empty());
-    }
-}
-
 pub(super) fn start_control_protocol_claude_process(
     run_id: String,
     prepared: PreparedInvocation,
@@ -541,5 +505,41 @@ pub(super) fn start_control_protocol_claude_process(
         control_capabilities,
         pending_provider_session: Some(pending_session),
         cancellation_artifacts,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claude_driver_deduplicates_late_shell_evidence_snapshot_result() {
+        let mut pending = control_protocol::PendingControlProtocolToolCall::default();
+
+        assert!(pending
+            .stage_or_emit(AgentEvent::ToolCall {
+                run_id: "run-claude".to_string(),
+                tool_id: Some("toolu-evidence".to_string()),
+                name: "cosh_shell_evidence".to_string(),
+                input: r#"{"action":"list_commands"}"#.to_string(),
+            })
+            .is_empty());
+        assert_eq!(
+            pending
+                .flush_stalled(control_protocol::PENDING_CONTROL_TOOL_CALL_GRACE)
+                .len(),
+            0
+        );
+
+        let released = pending.flush_stalled(Duration::from_millis(0));
+        assert_eq!(released.len(), 1);
+        assert!(!pending.take_matching_control_tool_call("run-claude", "toolu-evidence"));
+        assert!(pending
+            .stage_or_emit(AgentEvent::ToolCompleted {
+                run_id: "run-claude".to_string(),
+                tool_id: "toolu-evidence".to_string(),
+                status: "success".to_string(),
+            })
+            .is_empty());
     }
 }

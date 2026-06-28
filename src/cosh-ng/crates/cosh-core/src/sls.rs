@@ -34,7 +34,7 @@ fn append_sls_log_to(path: &str, record: &serde_json::Value) {
         return;
     };
     let result = OpenOptions::new()
-        .write(true)
+        
         .append(true)
         .open(path);
     let Ok(mut file) = result else { return };

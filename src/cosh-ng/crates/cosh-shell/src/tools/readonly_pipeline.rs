@@ -183,9 +183,9 @@ fn parse_pipeline(command: &str) -> Result<Vec<Vec<String>>, ReadonlyPipelineErr
     let mut tokens = Vec::new();
     let mut token = String::new();
     let mut quote: Option<char> = None;
-    let mut chars = command.chars().peekable();
+    let chars = command.chars().peekable();
 
-    while let Some(ch) = chars.next() {
+    for ch in chars {
         if let Some(quote_ch) = quote {
             if ch == quote_ch {
                 quote = None;

@@ -226,7 +226,7 @@ impl ShellEvidenceState {
                 && record
                     .run_id
                     .as_deref()
-                    .map_or(true, |record_run_id| Some(record_run_id) == run_id)
+                    .is_none_or(|record_run_id| Some(record_run_id) == run_id)
                 && record.coverage.covers(direction, lines)
         })
     }
@@ -243,7 +243,7 @@ impl ShellEvidenceState {
                 && record
                     .run_id
                     .as_deref()
-                    .map_or(true, |record_run_id| Some(record_run_id) == run_id)
+                    .is_none_or(|record_run_id| Some(record_run_id) == run_id)
                 && matches!(record.coverage, EvidenceCoverage::Excerpt { .. })
                 && record.coverage.covers(direction, lines)
         })

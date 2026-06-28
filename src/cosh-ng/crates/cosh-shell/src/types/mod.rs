@@ -124,6 +124,7 @@ pub enum ShellEventKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum CommandOrigin {
     UserInteractive,
     UserSendToShell,
@@ -131,14 +132,10 @@ pub enum CommandOrigin {
     AgentHandoff,
     ProviderTool,
     ShellInternal,
+    #[default]
     Unknown,
 }
 
-impl Default for CommandOrigin {
-    fn default() -> Self {
-        Self::Unknown
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellEvent {

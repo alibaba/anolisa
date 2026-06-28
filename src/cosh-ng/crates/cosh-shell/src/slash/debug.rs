@@ -240,6 +240,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn debug_session_shows_shell_evidence_state() {
         let adapter = AdapterInstance::CoshCore(CoshCoreAdapter::default());
         let mut state = InlineState::default();

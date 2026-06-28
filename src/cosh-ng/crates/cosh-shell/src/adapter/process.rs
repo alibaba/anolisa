@@ -132,6 +132,7 @@ impl StderrTail {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_provider_process_loop(
     run_id: String,
     provider_label: &'static str,

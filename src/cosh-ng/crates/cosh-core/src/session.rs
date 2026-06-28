@@ -56,7 +56,7 @@ impl SessionStore {
             .flatten()
             .filter_map(|e| {
                 let path = e.path();
-                if path.extension().map_or(false, |ext| ext == "json") {
+                if path.extension().is_some_and(|ext| ext == "json") {
                     path.file_stem().map(|s| s.to_string_lossy().to_string())
                 } else {
                     None

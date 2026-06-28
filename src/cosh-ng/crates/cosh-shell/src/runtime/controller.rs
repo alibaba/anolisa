@@ -336,6 +336,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn pending_shell_handoff_restores_prompt_with_first_emit() {
         let adapter = AdapterInstance::Fake(FakeAgentAdapter);
         let mut state = InlineState::default();

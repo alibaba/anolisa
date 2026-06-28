@@ -389,6 +389,7 @@ pub enum ContentBlockInfo {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
+#[allow(clippy::enum_variant_names)]
 pub enum ContentDelta {
     #[serde(rename = "text_delta")]
     TextDelta { text: String },

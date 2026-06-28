@@ -1,6 +1,6 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -27,7 +27,7 @@ fn mock_provider_script(name: &str, body: &str) -> PathBuf {
     path
 }
 
-fn qwen_adapter(program: &PathBuf, session_id: Arc<Mutex<Option<String>>>) -> QwenCliAdapter {
+fn qwen_adapter(program: &Path, session_id: Arc<Mutex<Option<String>>>) -> QwenCliAdapter {
     QwenCliAdapter {
         program: program.display().to_string(),
         allow_model_call: true,
@@ -35,7 +35,7 @@ fn qwen_adapter(program: &PathBuf, session_id: Arc<Mutex<Option<String>>>) -> Qw
     }
 }
 
-fn claude_adapter(program: &PathBuf) -> ClaudeCodeAdapter {
+fn claude_adapter(program: &Path) -> ClaudeCodeAdapter {
     ClaudeCodeAdapter {
         program: program.display().to_string(),
         model: "mock".to_string(),

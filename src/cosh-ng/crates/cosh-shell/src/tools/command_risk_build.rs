@@ -106,6 +106,7 @@ pub(super) fn high_shell_syntax(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn assessment(
     source: AssessmentSource,
     command: &str,

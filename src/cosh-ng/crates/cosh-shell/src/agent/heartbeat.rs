@@ -688,8 +688,7 @@ mod tests {
 
     #[test]
     fn pending_tool_status_deduplicates_matching_permission_request() {
-        let events = vec![
-            GovernedEvent {
+        let events = [GovernedEvent {
                 decision: GovernanceDecision::Display,
                 policy_decision: GovernancePolicyDecision::DisplayOnly,
                 event: AgentEvent::ToolCall {
@@ -719,8 +718,7 @@ mod tests {
                 reason: "approval".to_string(),
                 display_text: String::new(),
                 auto_execute: false,
-            },
-        ];
+            }];
 
         let summary =
             pending_tool_status_detail(Language::ZhCn, events.iter()).expect("pending summary");
@@ -732,8 +730,7 @@ mod tests {
 
     #[test]
     fn pending_tool_status_uses_request_id_when_tool_use_id_is_empty() {
-        let events = vec![
-            GovernedEvent {
+        let events = [GovernedEvent {
                 decision: GovernanceDecision::Display,
                 policy_decision: GovernancePolicyDecision::NeedsUserApproval,
                 event: AgentEvent::ToolPermissionRequest {
@@ -762,8 +759,7 @@ mod tests {
                 reason: "approval".to_string(),
                 display_text: String::new(),
                 auto_execute: false,
-            },
-        ];
+            }];
 
         let summary =
             pending_tool_status_detail(Language::ZhCn, events.iter()).expect("pending summary");

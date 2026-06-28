@@ -164,17 +164,17 @@ fn set_interactive_terminal_baseline(fd: i32) -> io::Result<()> {
     {
         termios.c_oflag |= libc::ONLCR;
     }
-    set_control_char(&mut termios, libc::VINTR as usize, 0x03);
-    set_control_char(&mut termios, libc::VQUIT as usize, 0x1c);
-    set_control_char(&mut termios, libc::VERASE as usize, 0x7f);
-    set_control_char(&mut termios, libc::VKILL as usize, 0x15);
-    set_control_char(&mut termios, libc::VEOF as usize, 0x04);
-    set_control_char(&mut termios, libc::VEOL as usize, 0x00);
-    set_control_char(&mut termios, libc::VMIN as usize, 0x01);
-    set_control_char(&mut termios, libc::VTIME as usize, 0x00);
-    set_control_char(&mut termios, libc::VSUSP as usize, 0x1a);
-    set_control_char(&mut termios, libc::VSTART as usize, 0x11);
-    set_control_char(&mut termios, libc::VSTOP as usize, 0x13);
+    set_control_char(&mut termios, libc::VINTR, 0x03);
+    set_control_char(&mut termios, libc::VQUIT, 0x1c);
+    set_control_char(&mut termios, libc::VERASE, 0x7f);
+    set_control_char(&mut termios, libc::VKILL, 0x15);
+    set_control_char(&mut termios, libc::VEOF, 0x04);
+    set_control_char(&mut termios, libc::VEOL, 0x00);
+    set_control_char(&mut termios, libc::VMIN, 0x01);
+    set_control_char(&mut termios, libc::VTIME, 0x00);
+    set_control_char(&mut termios, libc::VSUSP, 0x1a);
+    set_control_char(&mut termios, libc::VSTART, 0x11);
+    set_control_char(&mut termios, libc::VSTOP, 0x13);
 
     if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &termios) } < 0 {
         return Err(io::Error::last_os_error());

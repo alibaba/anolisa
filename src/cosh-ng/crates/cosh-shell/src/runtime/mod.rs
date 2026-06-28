@@ -8,6 +8,7 @@ pub(crate) mod events;
 pub(crate) mod evidence_delivery;
 pub(crate) mod evidence_requests;
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod evidence_requests_tests;
 pub(crate) mod evidence_state;
 pub(crate) mod hooks;

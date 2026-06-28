@@ -81,13 +81,11 @@ impl ClaudeStreamParser {
             let tool_result_events = self.extract_tool_result_events(&value);
             if !tool_result_events.is_empty() {
                 events.extend(tool_result_events);
-            } else {
-                if let Some(text) = self.extract_assistant_snapshot_delta(&value) {
+            } else if let Some(text) = self.extract_assistant_snapshot_delta(&value) {
+                self.push_text_event(&mut events, text);
+            } else if !self.emitted_text {
+                if let Some(text) = extract_claude_result_text(&value) {
                     self.push_text_event(&mut events, text);
-                } else if !self.emitted_text {
-                    if let Some(text) = extract_claude_result_text(&value) {
-                        self.push_text_event(&mut events, text);
-                    }
                 }
             }
         }

@@ -77,10 +77,10 @@ impl Message {
             crate::provider::MessageContent::Text(t) => t.clone(),
             crate::provider::MessageContent::Blocks(blocks) => blocks
                 .iter()
-                .filter_map(|b| match b {
-                    crate::provider::MessageContentBlock::Text { text } => Some(text.clone()),
+                .map(|b| match b {
+                    crate::provider::MessageContentBlock::Text { text } => text.clone(),
                     crate::provider::MessageContentBlock::ToolResult { content, .. } => {
-                        Some(content.clone())
+                        content.clone()
                     }
                 })
                 .collect::<Vec<_>>()

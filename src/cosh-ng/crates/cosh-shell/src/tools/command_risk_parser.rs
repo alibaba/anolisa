@@ -105,8 +105,8 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
     if !tokens.is_empty() {
         stages.push(tokens);
     }
-    if matches!(shape, CommandShape::Simple) {
-        if stages.first().is_some_and(|tokens| {
+    if matches!(shape, CommandShape::Simple)
+        && stages.first().is_some_and(|tokens| {
             tokens
                 .iter()
                 .take_while(|token| is_env_assignment(token))
@@ -115,7 +115,6 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
         }) {
             shape = CommandShape::EnvSimple;
         }
-    }
 
     ParsedCommand { shape, stages }
 }

@@ -391,6 +391,7 @@ pub(super) fn tool_output_ref_for_row(row: &RuntimeActivityRow) -> Option<ToolOu
         .or_else(|| Some(ToolOutputRef::OpaqueAuditRef(row.id.clone())))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn record_shell_evidence_action(
     language: Language,
     rows: &mut Vec<RuntimeActivityRow>,

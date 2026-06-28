@@ -64,9 +64,9 @@ impl MessageContent {
             MessageContent::Text(s) => s.clone(),
             MessageContent::Blocks(blocks) => blocks
                 .iter()
-                .filter_map(|b| match b {
-                    MessageContentBlock::Text { text } => Some(text.as_str()),
-                    MessageContentBlock::ToolResult { content, .. } => Some(content.as_str()),
+                .map(|b| match b {
+                    MessageContentBlock::Text { text } => text.as_str(),
+                    MessageContentBlock::ToolResult { content, .. } => content.as_str(),
                 })
                 .collect::<Vec<_>>()
                 .join("\n"),

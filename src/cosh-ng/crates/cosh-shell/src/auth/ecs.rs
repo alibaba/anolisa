@@ -153,6 +153,7 @@ pub(crate) fn poll_for_authorization() -> bool {
 
 /// Result of an ECS detection + authorization background task.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) enum EcsTaskResult {
     /// Not on ECS — fall back to manual AK/SK input.
     NotOnEcs,
@@ -196,6 +197,7 @@ pub(crate) fn poll_and_get_credentials() -> EcsTaskResult {
 }
 
 /// Run full ECS authorization flow (blocking): detect → poll → get credentials.
+#[allow(dead_code)]
 pub(crate) fn run_ecs_authorization() -> EcsTaskResult {
     match detect_ecs_environment() {
         None => EcsTaskResult::NotOnEcs,

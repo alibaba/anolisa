@@ -27,9 +27,9 @@ pub fn load_skills_from_dir(base_dir: &Path, level: SkillLevel) -> Vec<SkillConf
                     skills.push(skill);
                 }
             }
-        } else if path.extension().map_or(false, |ext| ext == "md") {
+        } else if path.extension().is_some_and(|ext| ext == "md") {
             // Skip a top-level SKILL.md sitting directly in the base dir
-            if path.file_name().map_or(false, |n| n == SKILL_MANIFEST) {
+            if path.file_name().is_some_and(|n| n == SKILL_MANIFEST) {
                 continue;
             }
             flat_files.push(path);
