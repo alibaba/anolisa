@@ -34,6 +34,13 @@ export const FEATURE_TIPS: readonly FeatureTip[] = [
       'Use /dir cd <path> to switch the current working directory without leaving Copilot Shell.',
     priority: 5,
   },
+  {
+    id: 'cosh-switch',
+    emoji: '\uD83D\uDD04',
+    message:
+      'Use /cosh-switch or run "cosh-switch" in bash to switch between copilot-shell and cosh-ng.',
+    priority: 15,
+  },
   // Append new feature tips here
 ];
 

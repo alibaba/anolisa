@@ -1505,6 +1505,8 @@ export default {
     'Use /bash to switch to an interactive Bash shell at any time. Type "exit" or press Ctrl+D to return to Copilot Shell.',
   'Use /dir cd <path> to switch the current working directory without leaving Copilot Shell.':
     'Use /dir cd <path> to switch the current working directory without leaving Copilot Shell.',
+  'Use /cosh-switch or run "cosh-switch" in bash to switch between copilot-shell and cosh-ng.':
+    'Use /cosh-switch or run "cosh-switch" in bash to switch between copilot-shell and cosh-ng.',
   // Agent Key sharing flow
   '{{agentName}} configuration detected':
     '{{agentName}} configuration detected',

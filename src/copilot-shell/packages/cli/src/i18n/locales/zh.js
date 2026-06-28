@@ -1336,6 +1336,8 @@ export default {
     '使用 /bash 可随时切换到交互式 Bash Shell。输入 "exit" 或按 Ctrl+D 可返回 Copilot Shell。',
   'Use /dir cd <path> to switch the current working directory without leaving Copilot Shell.':
     '使用 /dir cd <路径> 可直接切换当前工作目录，无需离开 Copilot Shell。',
+  'Use /cosh-switch or run "cosh-switch" in bash to switch between copilot-shell and cosh-ng.':
+    '使用 /cosh-switch 命令或在 bash 终端中运行 "cosh-switch" 可在 copilot-shell 和 cosh-ng 之间切换。',
   // Agent Key 共享流程
   '{{agentName}} configuration detected': '检测到 {{agentName}} 配置',
   'The following configuration from {{agentName}} will be imported':

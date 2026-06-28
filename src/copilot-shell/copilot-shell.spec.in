@@ -16,6 +16,7 @@ Requires(post):	  lua
 Requires(postun): lua
 Provides:       %{_bindir}/co %{_bindir}/copilot %{_bindir}/cosh
 Provides:       anolisa-component(cosh)
+Conflicts:      cosh-ng
 
 %description
 Copilot Shell - Entrance to AI-native OS.
@@ -34,6 +35,51 @@ make install DESTDIR=%{buildroot} PREFIX=%{_prefix}
 install -d %{buildroot}%{_datadir}/anolisa/components/cosh
 install -m 0644 component.toml %{buildroot}%{_datadir}/anolisa/components/cosh/component.toml
 
+# Install cosh-switch script
+cat > %{buildroot}%{_bindir}/cosh-switch << 'EOF'
+#!/bin/bash
+set -e
+current=$(rpm -q --qf '%%{NAME}' -f /usr/bin/cosh 2>/dev/null || echo "none")
+case "$current" in
+  cosh-ng)
+    echo "Current: cosh-ng -> switching to copilot-shell"
+    sudo yum swap cosh-ng copilot-shell ;;
+  copilot-shell)
+    echo "Current: copilot-shell -> switching to cosh-ng"
+    sudo yum swap copilot-shell cosh-ng ;;
+  *)
+    echo "Error: neither cosh-ng nor copilot-shell is installed."; exit 1 ;;
+esac
+EOF
+chmod 0755 %{buildroot}%{_bindir}/cosh-switch
+
+# Install cosh-switch extension (provides /cosh-switch slash command)
+install -d %{buildroot}%{_datadir}/anolisa/extensions/cosh-switch/commands
+cat > %{buildroot}%{_datadir}/anolisa/extensions/cosh-switch/cosh-extension.json << 'EOF'
+{
+  "name": "cosh-switch",
+  "version": "1.0.0",
+  "commands": ["commands"]
+}
+EOF
+cat > %{buildroot}%{_datadir}/anolisa/extensions/cosh-switch/commands/cosh-switch.toml << 'EOF'
+description = "Switch between copilot-shell and cosh-ng"
+show_command = false
+run = """set -e
+current=$(rpm -q --qf '%%{NAME}' -f /usr/bin/cosh 2>/dev/null || echo 'none')
+case "$current" in
+  cosh-ng)
+    echo "Current: cosh-ng -> switching to copilot-shell"
+    sudo yum swap cosh-ng copilot-shell ;;
+  copilot-shell)
+    echo "Current: copilot-shell -> switching to cosh-ng"
+    sudo yum swap copilot-shell cosh-ng ;;
+  *)
+    echo "Error: neither cosh-ng nor copilot-shell is installed."; exit 1 ;;
+esac"""
+EOF
+
+
 %files
 %license %{_docdir}/%{name}/LICENSE
 %doc %{_docdir}/%{name}/README.md
@@ -43,6 +89,8 @@ install -m 0644 component.toml %{buildroot}%{_datadir}/anolisa/components/cosh/c
 %{_bindir}/co
 %{_bindir}/copilot
 %{_bindir}/cosh
+%{_bindir}/cosh-switch
+%{_datadir}/anolisa/extensions/cosh-switch
 
 %post -p <lua>
 nl        = '\n'
