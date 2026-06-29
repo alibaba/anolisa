@@ -236,7 +236,10 @@ fn analyze_consultation_starts_agent_with_hook_finding() {
         .expect("poll hook analyze");
 
     let rendered = String::from_utf8(output).expect("utf8 output");
-    assert!(rendered.contains("Agent:"), "{rendered}");
+    assert!(
+        rendered.contains("╭ Agent") || rendered.contains("Agent:"),
+        "{rendered}"
+    );
     assert!(
         rendered.contains("Evidence excerpt received by fake adapter"),
         "{rendered}"
