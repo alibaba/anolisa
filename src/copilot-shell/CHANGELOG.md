@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.6.0
+
+- Added cosh-ng compatibility with cosh-switch. (#1169)
+- Added instance_id to SysOM API request params. (#1160)
+- Added anolisa component contract. (#1128)
+- Added SLS JSONL session telemetry with expanded metrics. (#1057)
+- Added authenticated models display in /model dialog. (#1030)
+- Added kitty csi-u keys support with sequence timeout management. (#552)
+- Added large paste placeholder and fixed placeholder id reset on esc cancel. (#312)
+- Fixed SLS log write to skip when file does not exist or is not writable. (#1101)
+- Fixed useless sandbox guard and failure handler hooks by removing them. (#979)
+- Fixed missing keyboard shortcut hints in footer status bar. (#921)
+- Fixed response language and model identity rules. (#920)
+- Fixed sub-model refusal detection and byteLength display. (#895)
+- Fixed webfetch sub-model output validation to avoid silent refusals. (#895)
+- Fixed thinking output to be distinguished from user input with prefix and color. (#894)
+- Fixed custom model configuration to be preserved. (#887)
+- Fixed partial message finalization on API error. (#801)
+- Fixed API error reporting in all output formats, not only text. (#801)
+- Improved escape key handling by unifying it in appcontainer. (#437)
+
 ## 2.5.0
 
 - Fixed missing esc hint in tool confirmation footer status bar (#732)

@@ -1,6 +1,6 @@
 {
   "name": "@copilot-shell/cli",
-  "version": "2.5.0",
+  "version": "2.6.0",
   "description": "Copilot Shell",
   "type": "module",
   "main": "dist/index.js",
