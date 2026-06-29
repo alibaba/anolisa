@@ -195,7 +195,8 @@ fn render_grouped_help(cap: &[(String, String)], mgmt: &[(String, String)]) -> S
 /// surfaces. Handlers must not re-parse global flags from their own
 /// `args` struct.
 pub fn dispatch(cli: Cli, ctx: &CliContext) -> Result<(), CliError> {
-    validate_global_args(ctx)?;
+    let policy = command_policy(&cli.command);
+    validate_global_args(&cli, ctx, policy)?;
     match cli.command {
         Commands::Component(cmd) => match cmd {
             ComponentCommands::List(args) => tier1::list::handle(args, ctx),
@@ -222,7 +223,55 @@ pub fn dispatch(cli: Cli, ctx: &CliContext) -> Result<(), CliError> {
     }
 }
 
-fn validate_global_args(ctx: &CliContext) -> Result<(), CliError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandScope {
+    ReadOnly,
+    ModeScopedMutation {
+        dry_run_without_root: bool,
+    },
+    SystemOnlyMutation {
+        dry_run_without_root: bool,
+        privilege_gate: PrivilegeGate,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrivilegeGate {
+    Dispatcher,
+    Handler,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CommandPolicy {
+    label: &'static str,
+    scope: CommandScope,
+}
+
+impl CommandPolicy {
+    const fn new(label: &'static str, scope: CommandScope) -> Self {
+        Self { label, scope }
+    }
+}
+
+fn validate_global_args(
+    cli: &Cli,
+    ctx: &CliContext,
+    policy: CommandPolicy,
+) -> Result<(), CliError> {
+    validate_global_args_with_euid(
+        ctx,
+        policy,
+        anolisa_platform::privilege::effective_uid(),
+        cli.install_mode.is_some(),
+    )
+}
+
+fn validate_global_args_with_euid(
+    ctx: &CliContext,
+    policy: CommandPolicy,
+    effective_uid: u32,
+    install_mode_explicit: bool,
+) -> Result<(), CliError> {
     if let Some(prefix) = &ctx.prefix
         && !is_safe_absolute_path(prefix)
     {
@@ -234,7 +283,215 @@ fn validate_global_args(ctx: &CliContext) -> Result<(), CliError> {
             ),
         });
     }
+
+    if let CommandScope::SystemOnlyMutation { privilege_gate, .. } = policy.scope
+        && ctx.install_mode != InstallMode::System
+    {
+        let omitted_helper_gated_system_command =
+            !install_mode_explicit && privilege_gate == PrivilegeGate::Handler;
+        if !omitted_helper_gated_system_command {
+            return Err(system_scope_error(policy.label, install_mode_explicit));
+        }
+    }
+
+    match policy.scope {
+        CommandScope::ReadOnly => {}
+        CommandScope::ModeScopedMutation {
+            dry_run_without_root,
+        } => {
+            let dry_run_preview = ctx.dry_run && dry_run_without_root;
+            if ctx.install_mode == InstallMode::System && effective_uid != 0 && !dry_run_preview {
+                return Err(system_permission_error(ctx, policy.label, true));
+            }
+        }
+        CommandScope::SystemOnlyMutation {
+            dry_run_without_root,
+            privilege_gate,
+        } => {
+            let dry_run_preview = ctx.dry_run && dry_run_without_root;
+            if privilege_gate == PrivilegeGate::Dispatcher && effective_uid != 0 && !dry_run_preview
+            {
+                return Err(system_permission_error(ctx, policy.label, false));
+            }
+        }
+    }
+
+    if ctx.install_mode == InstallMode::User && effective_uid == 0 {
+        return Err(root_user_mode_error(policy.label));
+    }
+
     Ok(())
+}
+
+fn root_user_mode_error(command: &str) -> CliError {
+    CliError::InvalidArgument {
+        command: command.to_string(),
+        reason: format!(
+            "--install-mode user is not supported while running as root; run `anolisa --install-mode user {command} ...` without sudo, or omit `--install-mode user` when using sudo for system mode"
+        ),
+    }
+}
+
+fn system_scope_error(command: &str, install_mode_explicit: bool) -> CliError {
+    let reason =
+        format!("command '{command}' operates on system scope, but current install mode is user");
+    if install_mode_explicit {
+        CliError::InvalidArgument {
+            command: command.to_string(),
+            reason,
+        }
+    } else {
+        CliError::PermissionDenied {
+            command: command.to_string(),
+            reason,
+            hint: Some(format!(
+                "run `sudo anolisa {command} ...`; sudo defaults this command to system mode"
+            )),
+        }
+    }
+}
+
+const fn mode_scoped(label: &'static str, dry_run_without_root: bool) -> CommandPolicy {
+    CommandPolicy::new(
+        label,
+        CommandScope::ModeScopedMutation {
+            dry_run_without_root,
+        },
+    )
+}
+
+const fn system_only(label: &'static str, dry_run_without_root: bool) -> CommandPolicy {
+    CommandPolicy::new(
+        label,
+        CommandScope::SystemOnlyMutation {
+            dry_run_without_root,
+            privilege_gate: PrivilegeGate::Dispatcher,
+        },
+    )
+}
+
+fn system_permission_error(ctx: &CliContext, command: &str, user_mode_supported: bool) -> CliError {
+    let target = ctx
+        .prefix
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "/usr/local".to_string());
+    let hint = if user_mode_supported {
+        format!(
+            "run `sudo anolisa {command} ...` for system mode, or `anolisa --install-mode user {command} ...` for user mode"
+        )
+    } else {
+        format!("run `sudo anolisa {command} ...`; sudo defaults this command to system mode")
+    };
+    CliError::PermissionDenied {
+        command: command.to_string(),
+        reason: format!("system mode needs write access to {target} and requires root"),
+        hint: Some(hint),
+    }
+}
+
+fn command_policy(command: &Commands) -> CommandPolicy {
+    match command {
+        Commands::Component(cmd) => match cmd {
+            ComponentCommands::List(_) => CommandPolicy::new("list", CommandScope::ReadOnly),
+            ComponentCommands::Install(_) => mode_scoped("install", true),
+            ComponentCommands::Uninstall(_) => mode_scoped("uninstall", true),
+            ComponentCommands::Status(_) => CommandPolicy::new("status", CommandScope::ReadOnly),
+            ComponentCommands::Doctor(_) => CommandPolicy::new("doctor", CommandScope::ReadOnly),
+            ComponentCommands::Logs(_) => CommandPolicy::new("logs", CommandScope::ReadOnly),
+            ComponentCommands::Restart(_) => mode_scoped("restart", false),
+            ComponentCommands::Update(_) => mode_scoped("update", true),
+            ComponentCommands::Repair(_) => system_only("repair", true),
+            ComponentCommands::Forget(_) => mode_scoped("forget", true),
+            ComponentCommands::Adopt(_) => system_only("adopt", false),
+            ComponentCommands::Adapter(args) => {
+                CommandPolicy::new("adapter", adapter_command_scope(args))
+            }
+        },
+        Commands::Management(cmd) => match cmd {
+            ManagementCommands::Register(args) => {
+                CommandPolicy::new("register", register_command_scope(args))
+            }
+            ManagementCommands::Unregister(_) => system_only("unregister", false),
+            ManagementCommands::Env(_) => CommandPolicy::new("env", CommandScope::ReadOnly),
+            ManagementCommands::Bug(_) => CommandPolicy::new("bug", CommandScope::ReadOnly),
+            ManagementCommands::Osbase(args) => {
+                CommandPolicy::new("osbase", osbase_command_scope(args))
+            }
+            ManagementCommands::System(args) => {
+                CommandPolicy::new("system", system_command_scope(args))
+            }
+        },
+    }
+}
+
+fn adapter_command_scope(args: &adapter::AdapterArgs) -> CommandScope {
+    match &args.command {
+        adapter::AdapterCommands::Scan | adapter::AdapterCommands::Status { .. } => {
+            CommandScope::ReadOnly
+        }
+        adapter::AdapterCommands::Enable { .. } => CommandScope::ModeScopedMutation {
+            dry_run_without_root: true,
+        },
+        adapter::AdapterCommands::Disable { .. } => CommandScope::ModeScopedMutation {
+            dry_run_without_root: false,
+        },
+    }
+}
+
+fn register_command_scope(args: &register::RegisterArgs) -> CommandScope {
+    match &args.command {
+        Some(register::RegisterCommands::Status { .. }) => CommandScope::ReadOnly,
+        None => system_only_scope(false),
+    }
+}
+
+fn system_command_scope(args: &system::SystemArgs) -> CommandScope {
+    match &args.command {
+        system::SystemCommands::Status { .. } => CommandScope::ReadOnly,
+        system::SystemCommands::Serve { .. }
+        | system::SystemCommands::Setup { .. }
+        | system::SystemCommands::Teardown => system_only_scope(false),
+    }
+}
+
+fn osbase_command_scope(args: &osbase::OsbaseArgs) -> CommandScope {
+    match &args.command {
+        osbase::OsbaseCommands::Kernel(kernel) => match &kernel.command {
+            osbase::KernelCommands::Status => CommandScope::ReadOnly,
+            osbase::KernelCommands::Install { .. } | osbase::KernelCommands::Remove => {
+                helper_gated_system_only_scope()
+            }
+        },
+        osbase::OsbaseCommands::Sandbox(sandbox) => match &sandbox.command {
+            osbase::SandboxCommands::List { .. } | osbase::SandboxCommands::Status { .. } => {
+                CommandScope::ReadOnly
+            }
+            osbase::SandboxCommands::Install { .. }
+            | osbase::SandboxCommands::Uninstall { .. }
+            | osbase::SandboxCommands::Remove { .. } => helper_gated_system_only_scope(),
+        },
+        osbase::OsbaseCommands::Security(security) => match &security.command {
+            osbase::SecurityCommands::Status { .. } => CommandScope::ReadOnly,
+            osbase::SecurityCommands::Install { .. } | osbase::SecurityCommands::Remove { .. } => {
+                helper_gated_system_only_scope()
+            }
+        },
+    }
+}
+
+const fn system_only_scope(dry_run_without_root: bool) -> CommandScope {
+    CommandScope::SystemOnlyMutation {
+        dry_run_without_root,
+        privilege_gate: PrivilegeGate::Dispatcher,
+    }
+}
+
+const fn helper_gated_system_only_scope() -> CommandScope {
+    CommandScope::SystemOnlyMutation {
+        dry_run_without_root: false,
+        privilege_gate: PrivilegeGate::Handler,
+    }
 }
 
 fn is_safe_absolute_path(path: &Path) -> bool {
@@ -265,20 +522,232 @@ mod tests {
         }
     }
 
+    fn user_ctx() -> CliContext {
+        CliContext {
+            install_mode: InstallMode::User,
+            prefix: None,
+            json: false,
+            dry_run: false,
+            verbose: false,
+            quiet: false,
+            no_color: false,
+        }
+    }
+
     #[test]
     fn global_prefix_must_be_absolute() {
-        let err = validate_global_args(&ctx_with_prefix(PathBuf::from("relative")))
-            .expect_err("relative prefix must be rejected");
+        let err = validate_global_args_with_euid(
+            &ctx_with_prefix(PathBuf::from("relative")),
+            mode_scoped("global", false),
+            0,
+            true,
+        )
+        .expect_err("relative prefix must be rejected");
 
         assert_eq!(err.code(), "INVALID_ARGUMENT");
     }
 
     #[test]
     fn global_prefix_rejects_traversal_segments() {
-        let err = validate_global_args(&ctx_with_prefix(PathBuf::from("/opt/../etc")))
-            .expect_err("traversing prefix must be rejected");
+        let err = validate_global_args_with_euid(
+            &ctx_with_prefix(PathBuf::from("/opt/../etc")),
+            mode_scoped("global", false),
+            0,
+            true,
+        )
+        .expect_err("traversing prefix must be rejected");
 
         assert_eq!(err.code(), "INVALID_ARGUMENT");
+    }
+
+    #[test]
+    fn system_mode_without_root_is_rejected_before_writes() {
+        let err = validate_global_args_with_euid(
+            &ctx_with_prefix(PathBuf::from("/")),
+            mode_scoped("install", true),
+            1000,
+            true,
+        )
+        .expect_err("non-root system mode must be rejected");
+
+        assert_eq!(err.code(), "PERMISSION_DENIED");
+        assert!(err.reason().contains("system mode"));
+        assert!(err.hint().unwrap().contains("--install-mode user"));
+    }
+
+    #[test]
+    fn system_mode_dry_run_without_root_is_allowed_for_previewing_commands() {
+        let mut ctx = ctx_with_prefix(PathBuf::from("/"));
+        ctx.dry_run = true;
+
+        validate_global_args_with_euid(&ctx, mode_scoped("install", true), 1000, true)
+            .expect("non-root system dry-run should reach preview-capable handlers");
+    }
+
+    #[test]
+    fn system_only_dry_run_without_root_is_allowed_for_previewing_commands() {
+        let mut ctx = ctx_with_prefix(PathBuf::from("/"));
+        ctx.dry_run = true;
+
+        validate_global_args_with_euid(&ctx, system_only("repair", true), 1000, true)
+            .expect("non-root system dry-run should reach preview-capable system handlers");
+    }
+
+    #[test]
+    fn system_mode_dry_run_without_root_is_rejected_without_preview_contract() {
+        let mut ctx = ctx_with_prefix(PathBuf::from("/"));
+        ctx.dry_run = true;
+
+        let err = validate_global_args_with_euid(&ctx, mode_scoped("restart", false), 1000, true)
+            .expect_err("dry-run should not bypass commands without preview semantics");
+
+        assert_eq!(err.code(), "PERMISSION_DENIED");
+    }
+
+    #[test]
+    fn system_only_dry_run_without_root_is_rejected_without_preview_contract() {
+        let mut ctx = ctx_with_prefix(PathBuf::from("/"));
+        ctx.dry_run = true;
+
+        let err = validate_global_args_with_euid(&ctx, system_only("adopt", false), 1000, true)
+            .expect_err("dry-run should not bypass system commands without preview semantics");
+
+        assert_eq!(err.code(), "PERMISSION_DENIED");
+    }
+
+    #[test]
+    fn helper_gated_system_only_mutation_reaches_handler_without_root_in_explicit_system_mode() {
+        validate_global_args_with_euid(
+            &ctx_with_prefix(PathBuf::from("/")),
+            CommandPolicy::new("osbase", helper_gated_system_only_scope()),
+            1000,
+            true,
+        )
+        .expect("helper-gated system mutations should reach their handler preflight");
+    }
+
+    #[test]
+    fn helper_gated_system_only_mutation_reaches_handler_when_mode_is_omitted() {
+        let command = Commands::Management(ManagementCommands::Osbase(osbase::OsbaseArgs {
+            command: osbase::OsbaseCommands::Sandbox(osbase::SandboxArgs {
+                command: osbase::SandboxCommands::Install {
+                    target: "kata-containers".to_string(),
+                    dry_run: false,
+                    force: false,
+                    no_verify: false,
+                },
+            }),
+        }));
+
+        validate_global_args_with_euid(&user_ctx(), command_policy(&command), 1000, false)
+            .expect("omitted install mode should not block helper-gated system mutations");
+    }
+
+    #[test]
+    fn helper_gated_system_only_mutation_still_rejects_explicit_user_mode() {
+        let err = validate_global_args_with_euid(
+            &user_ctx(),
+            CommandPolicy::new("osbase", helper_gated_system_only_scope()),
+            1000,
+            true,
+        )
+        .expect_err("explicit user mode is invalid for helper-gated system commands");
+
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert!(err.reason().contains("system scope"));
+        assert!(err.hint().is_none());
+    }
+
+    #[test]
+    fn read_only_system_mode_without_root_is_not_preemptively_rejected() {
+        validate_global_args_with_euid(
+            &ctx_with_prefix(PathBuf::from("/")),
+            CommandPolicy::new("status", CommandScope::ReadOnly),
+            1000,
+            true,
+        )
+        .expect("read-only commands should reach their normal read path");
+    }
+
+    #[test]
+    fn root_user_mode_is_rejected() {
+        let err =
+            validate_global_args_with_euid(&user_ctx(), mode_scoped("install", true), 0, true)
+                .expect_err("root user-mode would create ambiguous ownership semantics");
+
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert!(err.reason().contains("not supported while running as root"));
+        assert!(err.reason().contains("without sudo"));
+    }
+
+    #[test]
+    fn nested_read_only_commands_are_not_preemptively_rejected() {
+        fn assert_read_only(command: Commands) {
+            let policy = command_policy(&command);
+            validate_global_args_with_euid(
+                &ctx_with_prefix(PathBuf::from("/")),
+                policy,
+                1000,
+                true,
+            )
+            .expect("nested read-only commands should reach their handlers");
+        }
+
+        assert_read_only(Commands::Component(ComponentCommands::Adapter(
+            adapter::AdapterArgs {
+                command: adapter::AdapterCommands::Status { component: None },
+            },
+        )));
+        assert_read_only(Commands::Management(ManagementCommands::Register(
+            register::RegisterArgs {
+                command: Some(register::RegisterCommands::Status { json: false }),
+                yes: false,
+            },
+        )));
+        assert_read_only(Commands::Management(ManagementCommands::System(
+            system::SystemArgs {
+                command: system::SystemCommands::Status { json: false },
+            },
+        )));
+        assert_read_only(Commands::Management(ManagementCommands::Osbase(
+            osbase::OsbaseArgs {
+                command: osbase::OsbaseCommands::Sandbox(osbase::SandboxArgs {
+                    command: osbase::SandboxCommands::List { json: false },
+                }),
+            },
+        )));
+    }
+
+    #[test]
+    fn system_only_user_mode_points_at_sudo_default() {
+        let err =
+            validate_global_args_with_euid(&user_ctx(), system_only("adopt", false), 1000, false)
+                .expect_err("system-only command should reject user mode");
+
+        assert_eq!(err.code(), "PERMISSION_DENIED");
+        assert!(err.hint().unwrap().contains("sudo anolisa adopt"));
+        assert!(!err.hint().unwrap().contains("--install-mode system"));
+    }
+
+    #[test]
+    fn system_only_explicit_user_mode_is_invalid_argument() {
+        let err =
+            validate_global_args_with_euid(&user_ctx(), system_only("adopt", false), 1000, true)
+                .expect_err("explicit user mode is invalid for system-only commands");
+
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert!(err.reason().contains("system scope"));
+        assert!(err.hint().is_none());
+    }
+
+    #[test]
+    fn root_system_only_user_mode_reports_scope_error() {
+        let err = validate_global_args_with_euid(&user_ctx(), system_only("adopt", false), 0, true)
+            .expect_err("system-only command should not use generic root user-mode guidance");
+
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert!(err.reason().contains("system scope"));
+        assert!(!err.reason().contains("without sudo"));
     }
 
     #[test]

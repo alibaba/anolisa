@@ -27,7 +27,7 @@ const INSTALLED_COMPONENT_MANIFESTS_SUBDIR: &str = "component-manifests";
 const INSTALLED_COMPONENT_MANIFEST_FILE: &str = "component.toml";
 
 /// Build the layout for the active install mode, honoring `--prefix`
-/// (system-mode) and resolving `$HOME` via `EnvService::detect` (user-mode).
+/// (system-mode) and the current process user's home (user-mode).
 pub fn resolve_layout(ctx: &CliContext) -> FsLayout {
     match ctx.install_mode {
         InstallMode::System => FsLayout::system(ctx.prefix.clone()),
@@ -35,6 +35,52 @@ pub fn resolve_layout(ctx: &CliContext) -> FsLayout {
             let home = anolisa_env::EnvService::detect().home;
             FsLayout::user(home)
         }
+    }
+}
+
+/// Refuse a handler-level system-only path when called with user-mode context.
+///
+/// The dispatcher handles normal CLI entry. This guard protects direct calls
+/// from tests and shared command helpers that bypass the dispatcher.
+pub(crate) fn require_system_mode(
+    ctx: &CliContext,
+    command: &str,
+    reason: &str,
+    sudo_command: &str,
+) -> Result<(), CliError> {
+    if ctx.install_mode == InstallMode::System {
+        return Ok(());
+    }
+
+    Err(CliError::InvalidArgument {
+        command: command.to_string(),
+        reason: format!("{reason}; run `{sudo_command}`"),
+    })
+}
+
+/// Build a consistent package-transaction permission error.
+pub(crate) fn package_permission_error(command: &str, bin: &str, action: &str) -> CliError {
+    CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("permission denied running {bin}; re-run the {action} with sudo"),
+    }
+}
+
+/// Build a consistent non-zero package-transaction error.
+pub(crate) fn package_transaction_failed_error(
+    command: &str,
+    operation: &str,
+    code: Option<i32>,
+    stderr: &str,
+) -> CliError {
+    CliError::Runtime {
+        command: command.to_string(),
+        reason: format!(
+            "dnf {operation} failed (exit {}): {}",
+            code.map(|c| c.to_string())
+                .unwrap_or_else(|| "signal".to_string()),
+            stderr.trim(),
+        ),
     }
 }
 

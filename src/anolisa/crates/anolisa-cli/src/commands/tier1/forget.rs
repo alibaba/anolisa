@@ -215,7 +215,6 @@ fn persist_forget(
     if let Err(err) = log.append(&record) {
         eprintln!("warning: failed to write central log: {err}");
     }
-
     Ok((operation_id, ownership_label))
 }
 

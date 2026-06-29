@@ -560,7 +560,7 @@ fn uninstall_rpm_component(
                     return Err(CliError::Runtime {
                         command: command.to_string(),
                         reason: format!(
-                            "removing system RPM '{package}' requires root privileges; re-run with sudo: `sudo anolisa --install-mode system uninstall {component}{flag_suffix}`"
+                            "removing system RPM '{package}' requires root privileges; re-run with sudo: `sudo anolisa uninstall {component}{flag_suffix}`"
                         ),
                     });
                 }
@@ -678,7 +678,6 @@ fn uninstall_rpm_component(
     if let Err(err) = log.append(&record) {
         eprintln!("warning: failed to write central log: {err}");
     }
-
     if !ctx.json && !ctx.quiet {
         let color = Palette::new(ctx.no_color);
         for w in &warnings {
@@ -762,19 +761,12 @@ fn txn_remove_err(err: PackageTransactionError, command: &str) -> CliError {
             command: command.to_string(),
             reason: format!("{bin} not found on PATH; cannot remove the RPM package"),
         },
-        PackageTransactionError::PermissionDenied { command: bin } => CliError::Runtime {
-            command: command.to_string(),
-            reason: format!("permission denied running {bin}; re-run the uninstall with sudo"),
-        },
-        PackageTransactionError::TransactionFailed { code, stderr, .. } => CliError::Runtime {
-            command: command.to_string(),
-            reason: format!(
-                "dnf remove failed (exit {}): {}",
-                code.map(|c| c.to_string())
-                    .unwrap_or_else(|| "signal".to_string()),
-                stderr.trim(),
-            ),
-        },
+        PackageTransactionError::PermissionDenied { command: bin } => {
+            common::package_permission_error(command, &bin, "uninstall")
+        }
+        PackageTransactionError::TransactionFailed { code, stderr, .. } => {
+            common::package_transaction_failed_error(command, "remove", code, &stderr)
+        }
     }
 }
 

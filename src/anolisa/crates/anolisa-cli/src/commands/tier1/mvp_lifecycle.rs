@@ -18,8 +18,8 @@
 //!   covered by `super::status::tests::probe_rpm_drift_detects_missing`
 //! - ③ user-mode raw shadows system RPM — covered by
 //!   `super::update::tests::user_raw_override_does_not_touch_system_rpm`; not
-//!   re-done here because `common::resolve_layout` binds user mode to the real
-//!   `$HOME`, so a command-layer user-mode test cannot be isolated without
+//!   re-done here because `common::resolve_layout` binds user mode to the
+//!   current process home, so a command-layer user-mode test cannot be isolated without
 //!   polluting the home dir or mutating process-global `XDG_*` (which would race
 //!   other tests).
 

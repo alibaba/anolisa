@@ -1139,7 +1139,7 @@ fn update_rpm_component(
         return Err(CliError::Runtime {
             command: command.to_string(),
             reason: format!(
-                "updating system RPM '{package}' requires root privileges; re-run with sudo: `sudo anolisa --install-mode system update {component}`"
+                "updating system RPM '{package}' requires root privileges; re-run with sudo: `sudo anolisa update {component}`"
             ),
         });
     }
@@ -1455,19 +1455,12 @@ fn rpm_tooling_missing_error(command: &str) -> CliError {
 fn txn_err(err: PackageTransactionError, command: &str) -> CliError {
     match err {
         PackageTransactionError::CommandMissing { .. } => rpm_tooling_missing_error(command),
-        PackageTransactionError::PermissionDenied { command: bin } => CliError::Runtime {
-            command: command.to_string(),
-            reason: format!("permission denied running {bin}; re-run the update with sudo"),
-        },
-        PackageTransactionError::TransactionFailed { code, stderr, .. } => CliError::Runtime {
-            command: command.to_string(),
-            reason: format!(
-                "dnf update failed (exit {}): {}",
-                code.map(|c| c.to_string())
-                    .unwrap_or_else(|| "signal".to_string()),
-                stderr.trim(),
-            ),
-        },
+        PackageTransactionError::PermissionDenied { command: bin } => {
+            common::package_permission_error(command, &bin, "update")
+        }
+        PackageTransactionError::TransactionFailed { code, stderr, .. } => {
+            common::package_transaction_failed_error(command, "update", code, &stderr)
+        }
     }
 }
 

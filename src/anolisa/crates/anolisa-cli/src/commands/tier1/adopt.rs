@@ -16,7 +16,7 @@ use anolisa_platform::rpm_query::RpmPackageQuery;
 
 use crate::commands::common;
 use crate::commands::tier1::install::{RpmSituation, execute_adopt, probe_rpm_situation};
-use crate::context::{CliContext, InstallMode};
+use crate::context::CliContext;
 use crate::repo_config::RepoConfig;
 use crate::response::CliError;
 
@@ -59,19 +59,12 @@ pub(crate) fn adopt_with_query(
 ) -> Result<(), CliError> {
     let command = format!("adopt {target}");
 
-    // Adoption records a *system* RPM into system-scope state; user mode has no
-    // system rpmdb to observe into. Refuse rather than record a system package
-    // against user-scope state (mirrors install's `--backend rpm` user-mode
-    // rejection).
-    if ctx.install_mode != InstallMode::System {
-        return Err(CliError::InvalidArgument {
-            command,
-            reason: format!(
-                "adopt records a system RPM and requires system scope; re-run with --install-mode system (got {} mode)",
-                ctx.install_mode.as_str()
-            ),
-        });
-    }
+    common::require_system_mode(
+        ctx,
+        &command,
+        "adopt records a system RPM and requires system scope",
+        &format!("sudo anolisa adopt {target}"),
+    )?;
 
     let installed = common::load_installed_state(ctx, COMMAND)?;
 
@@ -124,7 +117,7 @@ pub(crate) fn adopt_with_query(
         RpmSituation::Absent { package } => Err(CliError::InvalidArgument {
             command,
             reason: format!(
-                "no installed RPM '{package}' found for component '{target}'; adopt only records an already-installed system RPM — run `anolisa --install-mode system install {target}` to install it"
+                "no installed RPM '{package}' found for component '{target}'; adopt only records an already-installed system RPM — run `sudo anolisa install {target}` to install it"
             ),
         }),
         // Several provider packages: the user must disambiguate.
@@ -148,6 +141,7 @@ pub(crate) fn adopt_with_query(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::InstallMode;
 
     use std::path::PathBuf;
 

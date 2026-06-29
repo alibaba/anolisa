@@ -87,6 +87,13 @@ fn repair_with_query(
     query: &dyn PackageQuery,
 ) -> Result<(), CliError> {
     let command = format!("repair {target}");
+    common::require_system_mode(
+        ctx,
+        &command,
+        "repair reconciles system RPM state and requires system scope",
+        &format!("sudo anolisa repair {target}"),
+    )?;
+
     let installed = common::load_installed_state(ctx, COMMAND)?;
 
     let obj = installed
@@ -505,6 +512,7 @@ fn now_iso8601() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::InstallMode;
 
     use std::path::PathBuf;
 
@@ -512,8 +520,6 @@ mod tests {
         InstallMode as StateInstallMode, InstalledObject, InstalledState, ObjectStatus,
     };
     use anolisa_platform::pkg_query::PackageVersion;
-
-    use crate::context::InstallMode;
 
     /// Configurable in-memory [`PackageQuery`] for the repair tests. Repair runs
     /// no transaction, so a query alone drives every path.

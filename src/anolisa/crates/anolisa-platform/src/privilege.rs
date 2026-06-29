@@ -1,19 +1,11 @@
-//! Privilege escalation helpers (sudo/polkit).
+//! Privilege inspection helpers.
 
 /// Check if the current process has root privileges.
 pub fn is_root() -> bool {
     nix::unistd::geteuid().is_root()
 }
 
-/// Escalate privileges via sudo for the given command.
-pub fn escalate_command(cmd: &str, args: &[&str]) -> std::process::Command {
-    if is_root() {
-        let mut command = std::process::Command::new(cmd);
-        command.args(args);
-        command
-    } else {
-        let mut command = std::process::Command::new("sudo");
-        command.arg(cmd).args(args);
-        command
-    }
+/// Effective uid used for permission-gate decisions.
+pub fn effective_uid() -> u32 {
+    nix::unistd::geteuid().as_raw()
 }

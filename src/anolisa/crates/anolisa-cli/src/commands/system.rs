@@ -74,13 +74,11 @@ pub fn handle(args: SystemArgs, ctx: &CliContext) -> Result<(), CliError> {
 }
 
 fn handle_serve(socket: &str) -> Result<(), CliError> {
-    if !privilege::is_root() {
-        return Err(CliError::PermissionDenied {
-            command: "system serve".to_string(),
-            reason: "the system helper daemon must run as root (euid 0)".to_string(),
-            hint: Some("run with sudo or as a systemd service".to_string()),
-        });
-    }
+    require_root(
+        "system serve",
+        "the system helper daemon must run as root (euid 0)",
+        "run with sudo or as a systemd service",
+    )?;
 
     let server = DaemonServer::new(socket);
     server.run().map_err(|e| CliError::Runtime {
@@ -101,6 +99,18 @@ fn resolve_layout(ctx: &CliContext) -> FsLayout {
     FsLayout::system(ctx.prefix.clone())
 }
 
+fn require_root(command: &str, reason: &str, hint: &str) -> Result<(), CliError> {
+    if privilege::is_root() {
+        return Ok(());
+    }
+
+    Err(CliError::PermissionDenied {
+        command: command.to_string(),
+        reason: reason.to_string(),
+        hint: Some(hint.to_string()),
+    })
+}
+
 fn handle_setup(
     helper_path_override: Option<&str>,
     upgrade: bool,
@@ -108,14 +118,11 @@ fn handle_setup(
 ) -> Result<(), CliError> {
     let cmd = "system setup";
 
-    // 1. Check root
-    if !privilege::is_root() {
-        return Err(CliError::PermissionDenied {
-            command: cmd.to_string(),
-            reason: "system setup must be run as root (euid 0)".to_string(),
-            hint: Some("run with: sudo anolisa system setup".to_string()),
-        });
-    }
+    require_root(
+        cmd,
+        "system setup must be run as root (euid 0)",
+        "run with: sudo anolisa system setup",
+    )?;
 
     let layout = resolve_layout(ctx);
     let helper_path: PathBuf = match helper_path_override {
@@ -439,14 +446,11 @@ fn verify_socket(cmd: &str) -> Result<(), CliError> {
 fn handle_teardown(ctx: &CliContext) -> Result<(), CliError> {
     let cmd = "system teardown";
 
-    // 1. Check root
-    if !privilege::is_root() {
-        return Err(CliError::PermissionDenied {
-            command: cmd.to_string(),
-            reason: "system teardown must be run as root (euid 0)".to_string(),
-            hint: Some("run with: sudo anolisa system teardown".to_string()),
-        });
-    }
+    require_root(
+        cmd,
+        "system teardown must be run as root (euid 0)",
+        "run with: sudo anolisa system teardown",
+    )?;
 
     let layout = resolve_layout(ctx);
     let helper_path = layout.libexec_dir.join("anolisa-system-helper");

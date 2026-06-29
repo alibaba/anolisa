@@ -971,7 +971,7 @@ fn render_human(records: &[ComponentRecord], verbose: bool, no_color: bool) {
         // Observed = present in rpmdb but not yet tracked; point at adopt.
         if record.status == "observed" {
             println!(
-                "    {} run 'anolisa --install-mode system install {}' to adopt as rpm-observed",
+                "    {} run 'sudo anolisa adopt {}' to adopt as rpm-observed",
                 color.label("hint:"),
                 record.name,
             );

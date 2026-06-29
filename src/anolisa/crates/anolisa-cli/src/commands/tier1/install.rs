@@ -750,18 +750,12 @@ fn route_rpm_adopt(
     situation: Option<RpmSituation>,
     exec: &RpmExec,
 ) -> Result<InstallOutcome, CliError> {
-    // Adopt is a system-scope action (§4.1). The only way to reach `rpm` in
-    // user mode is an explicit `--backend rpm`, which we reject rather than
-    // record a system RPM into user-scope state.
-    if ctx.install_mode != InstallMode::System {
-        return Err(CliError::InvalidArgument {
-            command: command.to_string(),
-            reason: format!(
-                "--backend rpm adopts a system RPM and requires system scope; re-run with --install-mode system (got {} mode)",
-                ctx.install_mode.as_str()
-            ),
-        });
-    }
+    common::require_system_mode(
+        ctx,
+        command,
+        "--backend rpm adopts a system RPM and requires system scope",
+        &format!("sudo anolisa install --backend rpm {component}"),
+    )?;
 
     // Explicit `--backend rpm` may switch an already-installed component's
     // provenance; reuse the same guard the raw path uses.
@@ -1202,7 +1196,7 @@ fn execute_delegated_install(
         return Err(CliError::Runtime {
             command: command.to_string(),
             reason: format!(
-                "installing system RPM '{package}' requires root privileges; re-run with sudo: `sudo anolisa --install-mode system install --backend rpm {component}`"
+                "installing system RPM '{package}' requires root privileges; re-run with sudo: `sudo anolisa install --backend rpm {component}`"
             ),
         });
     }
@@ -1464,19 +1458,12 @@ fn render_delegated_install(ctx: &CliContext, payload: &DelegatedInstallPayload)
 fn txn_install_err(err: PackageTransactionError, command: &str) -> CliError {
     match err {
         PackageTransactionError::CommandMissing { .. } => rpm_tooling_missing_error(command),
-        PackageTransactionError::PermissionDenied { command: bin } => CliError::Runtime {
-            command: command.to_string(),
-            reason: format!("permission denied running {bin}; re-run the install with sudo"),
-        },
-        PackageTransactionError::TransactionFailed { code, stderr, .. } => CliError::Runtime {
-            command: command.to_string(),
-            reason: format!(
-                "dnf install failed (exit {}): {}",
-                code.map(|c| c.to_string())
-                    .unwrap_or_else(|| "signal".to_string()),
-                stderr.trim(),
-            ),
-        },
+        PackageTransactionError::PermissionDenied { command: bin } => {
+            common::package_permission_error(command, &bin, "install")
+        }
+        PackageTransactionError::TransactionFailed { code, stderr, .. } => {
+            common::package_transaction_failed_error(command, "install", code, &stderr)
+        }
     }
 }
 
@@ -6518,7 +6505,7 @@ scope = "@anolisa"
         assert_eq!(err.code(), "INVALID_ARGUMENT");
         assert!(
             err.reason().contains("system"),
-            "rejection must point at --install-mode system: {}",
+            "rejection must point at system scope: {}",
             err.reason()
         );
     }

@@ -57,10 +57,10 @@ pub struct CliContext {
 /// When the user passes `--install-mode`, that value wins unconditionally.
 /// Otherwise the default is inferred from the process's effective UID:
 /// root → [`InstallMode::System`], non-root → [`InstallMode::User`].
-fn resolve_install_mode(explicit: Option<InstallMode>, is_root: bool) -> InstallMode {
+fn resolve_install_mode(explicit: Option<InstallMode>, effective_uid: u32) -> InstallMode {
     match explicit {
         Some(mode) => mode,
-        None if is_root => InstallMode::System,
+        None if effective_uid == 0 => InstallMode::System,
         None => InstallMode::User,
     }
 }
@@ -72,16 +72,8 @@ impl CliContext {
     /// The effective [`InstallMode`] is inferred from euid when
     /// `--install-mode` is not provided on the command line.
     pub fn from_cli(cli: &crate::commands::Cli) -> Self {
-        let is_root = privilege::is_root();
-        let effective_mode = resolve_install_mode(cli.install_mode, is_root);
-
-        if cli.install_mode == Some(InstallMode::User) && is_root && !cli.quiet {
-            eprintln!(
-                "warning: running as root with --install-mode=user; \
-                 state will resolve under the root user's home directory, \
-                 not the system store"
-            );
-        }
+        let effective_uid = privilege::effective_uid();
+        let effective_mode = resolve_install_mode(cli.install_mode, effective_uid);
 
         Self {
             install_mode: effective_mode,
@@ -101,18 +93,18 @@ mod tests {
 
     #[test]
     fn omitted_as_root_resolves_to_system() {
-        assert_eq!(resolve_install_mode(None, true), InstallMode::System);
+        assert_eq!(resolve_install_mode(None, 0), InstallMode::System);
     }
 
     #[test]
     fn omitted_as_non_root_resolves_to_user() {
-        assert_eq!(resolve_install_mode(None, false), InstallMode::User);
+        assert_eq!(resolve_install_mode(None, 1000), InstallMode::User);
     }
 
     #[test]
     fn explicit_user_stays_user_even_as_root() {
         assert_eq!(
-            resolve_install_mode(Some(InstallMode::User), true),
+            resolve_install_mode(Some(InstallMode::User), 0),
             InstallMode::User,
         );
     }
@@ -120,7 +112,7 @@ mod tests {
     #[test]
     fn explicit_system_stays_system_even_as_non_root() {
         assert_eq!(
-            resolve_install_mode(Some(InstallMode::System), false),
+            resolve_install_mode(Some(InstallMode::System), 1000),
             InstallMode::System,
         );
     }
