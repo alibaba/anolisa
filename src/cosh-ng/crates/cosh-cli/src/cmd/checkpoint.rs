@@ -129,14 +129,18 @@ pub fn run(action: CheckpointCommands, distro: &Distro, start: Instant) -> i32 {
         CheckpointCommands::Init { workspace, socket } => {
             let client = CkptClient::new(&socket);
             match client.init(&workspace) {
-                Ok(result) => print_success(result, build_meta("checkpoint", distro, start, dry_run)),
+                Ok(result) => {
+                    print_success(result, build_meta("checkpoint", distro, start, dry_run))
+                }
                 Err(e) => print_failure(e, build_meta("checkpoint", distro, start, dry_run)),
             }
         }
         CheckpointCommands::Recover { workspace, socket } => {
             let client = CkptClient::new(&socket);
             match client.recover(&workspace) {
-                Ok(result) => print_success(result, build_meta("checkpoint", distro, start, dry_run)),
+                Ok(result) => {
+                    print_success(result, build_meta("checkpoint", distro, start, dry_run))
+                }
                 Err(e) => print_failure(e, build_meta("checkpoint", distro, start, dry_run)),
             }
         }
@@ -149,15 +153,25 @@ pub fn run(action: CheckpointCommands, distro: &Distro, start: Instant) -> i32 {
             socket,
         } => {
             let client = CkptClient::new(&socket);
-            match client.create(&workspace, &id, message.as_deref(), metadata.as_deref(), pin) {
-                Ok(result) => print_success(result, build_meta("checkpoint", distro, start, dry_run)),
+            match client.create(
+                &workspace,
+                &id,
+                message.as_deref(),
+                metadata.as_deref(),
+                pin,
+            ) {
+                Ok(result) => {
+                    print_success(result, build_meta("checkpoint", distro, start, dry_run))
+                }
                 Err(e) => print_failure(e, build_meta("checkpoint", distro, start, dry_run)),
             }
         }
         CheckpointCommands::List { workspace, socket } => {
             let client = CkptClient::new(&socket);
             match client.list(workspace.as_deref()) {
-                Ok(result) => print_success(result, build_meta("checkpoint", distro, start, dry_run)),
+                Ok(result) => {
+                    print_success(result, build_meta("checkpoint", distro, start, dry_run))
+                }
                 Err(e) => print_failure(e, build_meta("checkpoint", distro, start, dry_run)),
             }
         }
@@ -168,14 +182,18 @@ pub fn run(action: CheckpointCommands, distro: &Distro, start: Instant) -> i32 {
         } => {
             let client = CkptClient::new(&socket);
             match client.restore(&workspace, &id) {
-                Ok(result) => print_success(result, build_meta("checkpoint", distro, start, dry_run)),
+                Ok(result) => {
+                    print_success(result, build_meta("checkpoint", distro, start, dry_run))
+                }
                 Err(e) => print_failure(e, build_meta("checkpoint", distro, start, dry_run)),
             }
         }
         CheckpointCommands::Status { workspace, socket } => {
             let client = CkptClient::new(&socket);
             match client.status(workspace.as_deref()) {
-                Ok(result) => print_success(result, build_meta("checkpoint", distro, start, dry_run)),
+                Ok(result) => {
+                    print_success(result, build_meta("checkpoint", distro, start, dry_run))
+                }
                 Err(e) => print_failure(e, build_meta("checkpoint", distro, start, dry_run)),
             }
         }
@@ -187,7 +205,9 @@ pub fn run(action: CheckpointCommands, distro: &Distro, start: Instant) -> i32 {
         } => {
             let client = CkptClient::new(&socket);
             match client.delete(workspace.as_deref(), &snapshot, force) {
-                Ok(result) => print_success(result, build_meta("checkpoint", distro, start, dry_run)),
+                Ok(result) => {
+                    print_success(result, build_meta("checkpoint", distro, start, dry_run))
+                }
                 Err(e) => print_failure(e, build_meta("checkpoint", distro, start, dry_run)),
             }
         }
@@ -199,7 +219,9 @@ pub fn run(action: CheckpointCommands, distro: &Distro, start: Instant) -> i32 {
         } => {
             let client = CkptClient::new(&socket);
             match client.diff(&workspace, &from, &to) {
-                Ok(result) => print_success(result, build_meta("checkpoint", distro, start, dry_run)),
+                Ok(result) => {
+                    print_success(result, build_meta("checkpoint", distro, start, dry_run))
+                }
                 Err(e) => print_failure(e, build_meta("checkpoint", distro, start, dry_run)),
             }
         }
@@ -210,7 +232,9 @@ pub fn run(action: CheckpointCommands, distro: &Distro, start: Instant) -> i32 {
         } => {
             let client = CkptClient::new(&socket);
             match client.cleanup(&workspace, keep) {
-                Ok(result) => print_success(result, build_meta("checkpoint", distro, start, dry_run)),
+                Ok(result) => {
+                    print_success(result, build_meta("checkpoint", distro, start, dry_run))
+                }
                 Err(e) => print_failure(e, build_meta("checkpoint", distro, start, dry_run)),
             }
         }

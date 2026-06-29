@@ -130,10 +130,7 @@ mod tests {
     async fn shell_stderr() {
         let tool = ShellTool;
         let result = tool
-            .invoke(
-                serde_json::json!({"command": "echo err >&2"}),
-                &test_ctx(),
-            )
+            .invoke(serde_json::json!({"command": "echo err >&2"}), &test_ctx())
             .await
             .unwrap();
         assert!(result.output.contains("err"));

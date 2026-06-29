@@ -4,9 +4,7 @@
 //! matching rule wins; if no rule matches, `policy.default` is used.
 //! See `docs/audit-design.md` §4.
 
-use cosh_types::audit::{
-    Action, ActionSubsystem, ArgMatch, Decision, Match, StringMatch,
-};
+use cosh_types::audit::{Action, ActionSubsystem, ArgMatch, Decision, Match, StringMatch};
 
 use super::glob::glob_match;
 use super::policy::LoadedPolicy;
@@ -63,10 +61,10 @@ fn rule_matches(action: &Action, m: &Match) -> bool {
 }
 
 fn arg_match_finds(action: &Action, am: &ArgMatch) -> bool {
-    action.args.iter().any(|(k, v)| {
-        str_match(&am.key, k)
-            && am.value.as_ref().is_none_or(|vm| str_match(vm, v))
-    })
+    action
+        .args
+        .iter()
+        .any(|(k, v)| str_match(&am.key, k) && am.value.as_ref().is_none_or(|vm| str_match(vm, v)))
 }
 
 fn subsystem_eq(a: &ActionSubsystem, b: &ActionSubsystem) -> bool {
@@ -220,10 +218,7 @@ mod tests {
 
     #[test]
     fn balanced_denies_sed_inplace_variants() {
-        for cmd in [
-            "sed -i s/a/b/ file",
-            "sed --in-place s/a/b/ f",
-        ] {
+        for cmd in ["sed -i s/a/b/ file", "sed --in-place s/a/b/ f"] {
             assert_outcome(cmd, Outcome::Deny);
         }
         // sed without -i is allowed (single-token readonly)
@@ -235,10 +230,7 @@ mod tests {
     fn balanced_denies_sed_inplace_glob_variants() {
         // `-i.bak`, `-iEXT`, and `--in-place=...` should all be caught by the
         // glob-key arg-match rules.
-        let tab_friendly_cmds = [
-            "sed -i.bak s/a/b/ file",
-            "sed --in-place=.bak s/a/b/ file",
-        ];
+        let tab_friendly_cmds = ["sed -i.bak s/a/b/ file", "sed --in-place=.bak s/a/b/ file"];
         for cmd in tab_friendly_cmds {
             assert_outcome(cmd, Outcome::Deny);
         }

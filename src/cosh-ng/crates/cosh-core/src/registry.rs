@@ -55,8 +55,15 @@ pub async fn run(_args: &CliArgs, config: CoreConfig) {
             action,
             params,
         } => {
-            let response =
-                handle_registry_request(&request_id, &domain, &action, &params, &ext_manager, &skill_manager).await;
+            let response = handle_registry_request(
+                &request_id,
+                &domain,
+                &action,
+                &params,
+                &ext_manager,
+                &skill_manager,
+            )
+            .await;
             emit(&mut writer, &response);
         }
         _ => {
@@ -114,10 +121,7 @@ fn handle_extensions(
             }
         }
         "detail" => {
-            let name = params
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             match ext_manager.list().iter().find(|e| e.name == name) {
                 Some(ext) => {
                     let detail = serde_json::json!({
@@ -144,10 +148,7 @@ fn handle_extensions(
             }
         }
         "enable" => {
-            let name = params
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             if name.is_empty() {
                 return OutputMessage::RegistryResponse {
                     request_id: request_id.to_string(),
@@ -187,10 +188,7 @@ fn handle_extensions(
             }
         }
         "disable" => {
-            let name = params
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             if name.is_empty() {
                 return OutputMessage::RegistryResponse {
                     request_id: request_id.to_string(),
@@ -263,10 +261,7 @@ async fn handle_skills(
             }
         }
         "detail" => {
-            let name = params
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             match skill_manager.load(name).await {
                 Some(skill) => {
                     let disabled = crate::state::load_disabled(crate::state::SKILLS_STATE);
@@ -294,10 +289,7 @@ async fn handle_skills(
             }
         }
         "enable" => {
-            let name = params
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             if name.is_empty() {
                 return OutputMessage::RegistryResponse {
                     request_id: request_id.to_string(),
@@ -331,10 +323,7 @@ async fn handle_skills(
             }
         }
         "disable" => {
-            let name = params
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             if name.is_empty() {
                 return OutputMessage::RegistryResponse {
                     request_id: request_id.to_string(),
@@ -394,7 +383,10 @@ fn handle_hooks(
                 let events = [
                     ("PreToolUse", &ext.config.hooks.pre_tool_use),
                     ("PostToolUse", &ext.config.hooks.post_tool_use),
-                    ("PostToolUseFailure", &ext.config.hooks.post_tool_use_failure),
+                    (
+                        "PostToolUseFailure",
+                        &ext.config.hooks.post_tool_use_failure,
+                    ),
                     ("UserPromptSubmit", &ext.config.hooks.user_prompt_submit),
                     ("SessionStart", &ext.config.hooks.session_start),
                     ("Stop", &ext.config.hooks.stop),
@@ -403,10 +395,7 @@ fn handle_hooks(
                 ];
                 for (event_name, groups) in events {
                     for hook_def in flatten_hook_groups(groups) {
-                        let name = hook_def
-                            .name
-                            .as_deref()
-                            .unwrap_or(&hook_def.command);
+                        let name = hook_def.name.as_deref().unwrap_or(&hook_def.command);
                         let is_disabled = disabled.contains(name);
                         hooks_list.push(serde_json::json!({
                             "name": name,
@@ -427,10 +416,7 @@ fn handle_hooks(
             }
         }
         "enable" => {
-            let name = params
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             if name.is_empty() {
                 return OutputMessage::RegistryResponse {
                     request_id: request_id.to_string(),
@@ -465,10 +451,7 @@ fn handle_hooks(
             }
         }
         "disable" => {
-            let name = params
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             if name.is_empty() {
                 return OutputMessage::RegistryResponse {
                     request_id: request_id.to_string(),

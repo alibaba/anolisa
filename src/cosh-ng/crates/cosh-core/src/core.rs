@@ -417,7 +417,11 @@ impl CoshCore {
                             block_index = block_index.max(bi + 1);
                         }
                     }
-                    GenerateEvent::Usage { prompt_tokens, completion_tokens, total_tokens } => {
+                    GenerateEvent::Usage {
+                        prompt_tokens,
+                        completion_tokens,
+                        total_tokens,
+                    } => {
                         usage_info = Some((prompt_tokens, completion_tokens, total_tokens));
                         // ─── SLS: token usage ───
                         self.metrics.tokens_input += prompt_tokens as u64;
@@ -441,8 +445,13 @@ impl CoshCore {
             let after_model_result = self
                 .hook_system
                 .fire_after_model(
-                    &self.session_id, &cwd_str, !tool_calls.is_empty(), &text_buf,
-                    &self.model, &self.messages, usage_info,
+                    &self.session_id,
+                    &cwd_str,
+                    !tool_calls.is_empty(),
+                    &text_buf,
+                    &self.model,
+                    &self.messages,
+                    usage_info,
                 )
                 .await;
             self.emit_hook_notifications(writer, &after_model_result.notifications, None);
@@ -580,7 +589,11 @@ impl CoshCore {
                 // 当工具是 skill 且 action=invoke 时，预查 skill_context 透传给
                 // hook（供 agent-sec-core skill-ledger 等扩展使用）。
                 let skill_context = if tc.name == "skill"
-                    && params.get("action").and_then(|v| v.as_str()).unwrap_or("invoke") == "invoke"
+                    && params
+                        .get("action")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("invoke")
+                        == "invoke"
                 {
                     let skill_name = params.get("name").and_then(|v| v.as_str());
                     if let Some(name) = skill_name {
@@ -680,7 +693,8 @@ impl CoshCore {
                         let approval_result = self
                             .wait_for_approval(&request_id, accepts_host_executed_shell, reader)
                             .await;
-                        self.metrics.approval_wait_ms += approval_start.elapsed().as_millis() as u64;
+                        self.metrics.approval_wait_ms +=
+                            approval_start.elapsed().as_millis() as u64;
                         self.metrics.approval_count += 1;
                         match approval_result {
                             ApprovalResult::Allowed => {
@@ -690,10 +704,16 @@ impl CoshCore {
                                 tool_result_already_emitted = true;
                                 result
                             }
-                            ApprovalResult::HostExecutedShell { llm_content, exit_code } => {
+                            ApprovalResult::HostExecutedShell {
+                                llm_content,
+                                exit_code,
+                            } => {
                                 self.metrics.approval_allow += 1;
                                 let is_error = exit_code.is_some_and(|c| c != 0);
-                                ToolResult { output: llm_content, is_error }
+                                ToolResult {
+                                    output: llm_content,
+                                    is_error,
+                                }
                             }
                             ApprovalResult::Denied(reason) => {
                                 self.metrics.approval_deny += 1;
@@ -803,7 +823,8 @@ impl CoshCore {
                         match self.wait_for_approval(&request_id, true, reader).await {
                             ApprovalResult::Allowed => {
                                 self.hook_system.set_hook_disabled("sandbox-guard", true);
-                                let retry_params = serde_json::json!({"command": &bypass.original_command});
+                                let retry_params =
+                                    serde_json::json!({"command": &bypass.original_command});
                                 let retry = self.execute_tool(&tc.name, retry_params, &ctx).await;
                                 // Re-enable immediately after execute, before any other
                                 // operation. execute_tool returns ToolResult (infallible),
@@ -812,9 +833,15 @@ impl CoshCore {
                                 self.emit_provider_native_tool_result(writer, &tc.id, &retry);
                                 result = retry;
                             }
-                            ApprovalResult::HostExecutedShell { llm_content, exit_code } => {
+                            ApprovalResult::HostExecutedShell {
+                                llm_content,
+                                exit_code,
+                            } => {
                                 let is_error = exit_code.is_some_and(|c| c != 0);
-                                result = ToolResult { output: llm_content, is_error };
+                                result = ToolResult {
+                                    output: llm_content,
+                                    is_error,
+                                };
                             }
                             _ => { /* denied / interrupted: keep original error */ }
                         }
@@ -1212,7 +1239,8 @@ impl CoshCore {
                                     "host_executed_shell response missing result".to_string(),
                                 ));
                             };
-                            let exit_code = result.metadata
+                            let exit_code = result
+                                .metadata
                                 .as_ref()
                                 .and_then(|m| m.get("exit_code"))
                                 .and_then(|v| v.as_i64())
@@ -1303,7 +1331,10 @@ impl CoshCore {
 enum ApprovalResult {
     Allowed,
     Denied(Option<String>),
-    HostExecutedShell { llm_content: String, exit_code: Option<i32> },
+    HostExecutedShell {
+        llm_content: String,
+        exit_code: Option<i32>,
+    },
     Interrupted,
 }
 
@@ -2250,12 +2281,24 @@ mod tests {
             output_str.contains(r#""action":"read_output""#),
             "{output_str}"
         );
-        assert!(output_str.contains("evidence hooks bypassed"), "{output_str}");
+        assert!(
+            output_str.contains("evidence hooks bypassed"),
+            "{output_str}"
+        );
         assert!(!output_str.contains("hook_notification"), "{output_str}");
         assert!(!output_str.contains("Blocked by hook"), "{output_str}");
-        assert!(!output_str.contains("Post-tool hook denied"), "{output_str}");
-        assert!(!output_str.contains("pre hook should not run"), "{output_str}");
-        assert!(!output_str.contains("post hook should not run"), "{output_str}");
+        assert!(
+            !output_str.contains("Post-tool hook denied"),
+            "{output_str}"
+        );
+        assert!(
+            !output_str.contains("pre hook should not run"),
+            "{output_str}"
+        );
+        assert!(
+            !output_str.contains("post hook should not run"),
+            "{output_str}"
+        );
     }
 
     #[tokio::test]

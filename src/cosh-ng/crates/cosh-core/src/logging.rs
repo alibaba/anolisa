@@ -35,8 +35,8 @@ fn log_directory() -> Option<std::path::PathBuf> {
 }
 
 fn cleanup_old_logs(dir: &std::path::Path, keep_days: u64) {
-    let cutoff = std::time::SystemTime::now()
-        - std::time::Duration::from_secs(keep_days * 24 * 3600);
+    let cutoff =
+        std::time::SystemTime::now() - std::time::Duration::from_secs(keep_days * 24 * 3600);
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,

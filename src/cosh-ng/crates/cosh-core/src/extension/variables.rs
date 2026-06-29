@@ -36,11 +36,7 @@ pub fn hydrate_config(config: &mut ExtensionConfig, ctx: &VariableContext) {
     hydrate_hook_groups(&mut config.hooks.after_model, &ext_path, &ws_path);
 }
 
-fn hydrate_hook_groups(
-    groups: &mut [super::config::HookGroup],
-    ext_path: &str,
-    ws_path: &str,
-) {
+fn hydrate_hook_groups(groups: &mut [super::config::HookGroup], ext_path: &str, ws_path: &str) {
     for group in groups.iter_mut() {
         for hook in group.hooks.iter_mut() {
             hook.command = hydrate_string(&hook.command, ext_path, ws_path);

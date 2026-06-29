@@ -49,11 +49,7 @@ pub fn load_skills_from_dir(base_dir: &Path, level: SkillLevel) -> Vec<SkillConf
 }
 
 /// Parse a single skill file (SKILL.md inside a dir or a flat .md).
-pub fn parse_skill_file(
-    path: &Path,
-    level: SkillLevel,
-    base_dir: &Path,
-) -> Option<SkillConfig> {
+pub fn parse_skill_file(path: &Path, level: SkillLevel, base_dir: &Path) -> Option<SkillConfig> {
     let content = std::fs::read_to_string(path).ok()?;
     parse_skill_content(&content, path, level, base_dir)
 }
@@ -137,10 +133,7 @@ fn derive_name_from_path(file_path: &Path) -> Option<String> {
             .map(|s| s.to_string())
     } else {
         // Flat format: use file stem
-        file_path
-            .file_stem()?
-            .to_str()
-            .map(|s| s.to_string())
+        file_path.file_stem()?.to_str().map(|s| s.to_string())
     }
 }
 

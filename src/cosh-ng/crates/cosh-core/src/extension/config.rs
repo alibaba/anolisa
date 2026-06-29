@@ -169,8 +169,10 @@ impl ExtensionHooks {
     pub fn merge(&mut self, other: &ExtensionHooks) {
         self.pre_tool_use.extend(other.pre_tool_use.clone());
         self.post_tool_use.extend(other.post_tool_use.clone());
-        self.post_tool_use_failure.extend(other.post_tool_use_failure.clone());
-        self.user_prompt_submit.extend(other.user_prompt_submit.clone());
+        self.post_tool_use_failure
+            .extend(other.post_tool_use_failure.clone());
+        self.user_prompt_submit
+            .extend(other.user_prompt_submit.clone());
         self.session_start.extend(other.session_start.clone());
         self.stop.extend(other.stop.clone());
         self.before_model.extend(other.before_model.clone());
@@ -267,28 +269,24 @@ mod tests {
             HookGroup {
                 matcher: Some("skill".to_string()),
                 sequential: None,
-                hooks: vec![
-                    CommandHookConfig {
-                        hook_type: Some("command".to_string()),
-                        command: "echo a".to_string(),
-                        name: Some("hook-a".to_string()),
-                        description: None,
-                        timeout: Some(3000),
-                    },
-                ],
+                hooks: vec![CommandHookConfig {
+                    hook_type: Some("command".to_string()),
+                    command: "echo a".to_string(),
+                    name: Some("hook-a".to_string()),
+                    description: None,
+                    timeout: Some(3000),
+                }],
             },
             HookGroup {
                 matcher: None,
                 sequential: Some(true),
-                hooks: vec![
-                    CommandHookConfig {
-                        hook_type: None,
-                        command: "echo b".to_string(),
-                        name: None,
-                        description: None,
-                        timeout: None,
-                    },
-                ],
+                hooks: vec![CommandHookConfig {
+                    hook_type: None,
+                    command: "echo b".to_string(),
+                    name: None,
+                    description: None,
+                    timeout: None,
+                }],
             },
         ];
         let flat = flatten_hook_groups(&groups);

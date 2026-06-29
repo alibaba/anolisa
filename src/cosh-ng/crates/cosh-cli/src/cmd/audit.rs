@@ -13,9 +13,7 @@ use serde_json::json;
 
 use cosh_platform::audit::{self, parse_action_string, LoadedPolicy, ParseError};
 use cosh_platform::detect::Distro;
-use cosh_types::audit::{
-    Action, ActionSubsystem, Decision, LogEntry, LogSource, Outcome, Policy,
-};
+use cosh_types::audit::{Action, ActionSubsystem, Decision, LogEntry, LogSource, Outcome, Policy};
 use cosh_types::error::{CoshError, ErrorCode};
 use cosh_types::output::ResponseMeta;
 
@@ -276,7 +274,10 @@ fn run_log(args: LogArgs, distro: &Distro, start: Instant) -> i32 {
     };
     let total = filtered.len();
     print_success(
-        LogOutput { entries: filtered, total },
+        LogOutput {
+            entries: filtered,
+            total,
+        },
         build_meta("audit", distro, start, false),
     )
 }
@@ -345,7 +346,10 @@ fn parse_duration_filter(s: &str) -> Result<chrono::Duration, CoshError> {
     let n: i64 = num_str.parse().map_err(|_| {
         CoshError::new(
             ErrorCode::InvalidInput,
-            format!("invalid --since '{}': numeric component is not a non-negative integer", s),
+            format!(
+                "invalid --since '{}': numeric component is not a non-negative integer",
+                s
+            ),
             "audit",
         )
     })?;
@@ -511,4 +515,3 @@ fn meta_with_optional_warning(
         None => build_meta("audit", distro, start, false),
     }
 }
-

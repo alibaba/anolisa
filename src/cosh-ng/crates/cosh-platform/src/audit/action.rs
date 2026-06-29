@@ -70,7 +70,11 @@ pub fn parse_action_string(raw: &str) -> Result<Action, ParseError> {
         let target = tokens.get(2).map(|s| s.to_string());
         let args: Vec<(String, String)> = tokens
             .get(3..)
-            .map(|rest| rest.iter().map(|t| (t.to_string(), String::new())).collect())
+            .map(|rest| {
+                rest.iter()
+                    .map(|t| (t.to_string(), String::new()))
+                    .collect()
+            })
             .unwrap_or_default();
         return Ok(Action {
             subsystem,
@@ -91,7 +95,11 @@ pub fn parse_action_string(raw: &str) -> Result<Action, ParseError> {
     let target = tokens.get(1).map(|s| s.to_string());
     let args: Vec<(String, String)> = tokens
         .get(1..)
-        .map(|rest| rest.iter().map(|t| (t.to_string(), String::new())).collect())
+        .map(|rest| {
+            rest.iter()
+                .map(|t| (t.to_string(), String::new()))
+                .collect()
+        })
         .unwrap_or_default();
     Ok(Action {
         subsystem: ActionSubsystem::Shell,

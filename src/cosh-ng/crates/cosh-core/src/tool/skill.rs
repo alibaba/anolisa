@@ -69,14 +69,7 @@ impl Tool for SkillTool {
                 }
                 let list: Vec<String> = active_skills
                     .iter()
-                    .map(|s| {
-                        format!(
-                            "- {} ({}): {}",
-                            s.name,
-                            s.level,
-                            s.description
-                        )
-                    })
+                    .map(|s| format!("- {} ({}): {}", s.name, s.level, s.description))
                     .collect();
                 Ok(ToolResult::success(list.join("\n")))
             }
@@ -112,12 +105,10 @@ impl Tool for SkillTool {
                     ))),
                 }
             }
-            other => {
-                Ok(ToolResult::error(format!(
-                    "Unknown action '{}', expected 'list' or 'invoke'",
-                    other
-                )))
-            }
+            other => Ok(ToolResult::error(format!(
+                "Unknown action '{}', expected 'list' or 'invoke'",
+                other
+            ))),
         }
     }
 }
@@ -128,9 +119,7 @@ mod tests {
     use std::io::Write;
     use std::path::PathBuf;
 
-    fn make_manager_with_dir(
-        project_dir: &std::path::Path,
-    ) -> Arc<SkillManager> {
+    fn make_manager_with_dir(project_dir: &std::path::Path) -> Arc<SkillManager> {
         SkillManager::new_isolated(
             project_dir.to_path_buf(),
             vec![],

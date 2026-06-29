@@ -16,17 +16,46 @@ pub const DEFAULT_SOCKET_PATH: &str = "/run/ws-ckpt/ws-ckpt.sock";
 /// CRITICAL: variant order must match ws-ckpt-common/src/lib.rs exactly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WsCkptRequest {
-    Init { workspace: String },
-    Checkpoint { workspace: String, id: String, message: Option<String>, metadata: Option<String>, pin: bool },
-    Rollback { workspace: String, to: String },
-    Delete { workspace: Option<String>, snapshot: String, force: bool },
-    List { workspace: Option<String>, format: Option<String> },
-    Diff { workspace: String, from: String, to: String },
-    Status { workspace: Option<String> },
-    Cleanup { workspace: String, keep: Option<u32> },
+    Init {
+        workspace: String,
+    },
+    Checkpoint {
+        workspace: String,
+        id: String,
+        message: Option<String>,
+        metadata: Option<String>,
+        pin: bool,
+    },
+    Rollback {
+        workspace: String,
+        to: String,
+    },
+    Delete {
+        workspace: Option<String>,
+        snapshot: String,
+        force: bool,
+    },
+    List {
+        workspace: Option<String>,
+        format: Option<String>,
+    },
+    Diff {
+        workspace: String,
+        from: String,
+        to: String,
+    },
+    Status {
+        workspace: Option<String>,
+    },
+    Cleanup {
+        workspace: String,
+        keep: Option<u32>,
+    },
     Config,
     ReloadConfig,
-    Recover { workspace: String },
+    Recover {
+        workspace: String,
+    },
     HealthAdvisory,
 }
 
@@ -34,20 +63,50 @@ pub enum WsCkptRequest {
 /// CRITICAL: variant order must match ws-ckpt-common/src/lib.rs exactly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WsCkptResponse {
-    InitOk { ws_id: String },
-    CheckpointOk { snapshot_id: String },
-    RollbackOk { from: String, to: String },
-    DeleteOk { target: String },
-    Error { code: WsCkptErrorCode, message: String },
-    ListOk { snapshots: Vec<SnapshotEntry> },
-    DiffOk { changes: Vec<DiffEntry> },
-    StatusOk { report: StatusReport },
-    CleanupOk { removed: Vec<String> },
-    ConfigOk { config: ConfigReport },
+    InitOk {
+        ws_id: String,
+    },
+    CheckpointOk {
+        snapshot_id: String,
+    },
+    RollbackOk {
+        from: String,
+        to: String,
+    },
+    DeleteOk {
+        target: String,
+    },
+    Error {
+        code: WsCkptErrorCode,
+        message: String,
+    },
+    ListOk {
+        snapshots: Vec<SnapshotEntry>,
+    },
+    DiffOk {
+        changes: Vec<DiffEntry>,
+    },
+    StatusOk {
+        report: StatusReport,
+    },
+    CleanupOk {
+        removed: Vec<String>,
+    },
+    ConfigOk {
+        config: ConfigReport,
+    },
     ReloadConfigOk,
-    CheckpointSkipped { reason: String },
-    RecoverOk { workspace: String },
-    HealthAdvisoryOk { over_limit_workspace_count: u32, fs_total_bytes: u64, fs_used_bytes: u64 },
+    CheckpointSkipped {
+        reason: String,
+    },
+    RecoverOk {
+        workspace: String,
+    },
+    HealthAdvisoryOk {
+        over_limit_workspace_count: u32,
+        fs_total_bytes: u64,
+        fs_used_bytes: u64,
+    },
 }
 
 /// Error codes from ws-ckpt daemon.
@@ -222,7 +281,9 @@ mod tests {
     #[test]
     fn test_request_bincode_roundtrip() {
         let requests = vec![
-            WsCkptRequest::Init { workspace: "/home/user/project".into() },
+            WsCkptRequest::Init {
+                workspace: "/home/user/project".into(),
+            },
             WsCkptRequest::Checkpoint {
                 workspace: "/home/user/project".into(),
                 id: "snap-001".into(),
@@ -230,18 +291,37 @@ mod tests {
                 metadata: Some(r#"{"key":"val"}"#.into()),
                 pin: true,
             },
-            WsCkptRequest::Rollback { workspace: "/tmp/ws".into(), to: "snap-001".into() },
-            WsCkptRequest::Delete { workspace: Some("/tmp/ws".into()), snapshot: "snap-001".into(), force: false },
-            WsCkptRequest::List { workspace: Some("/tmp/ws".into()), format: None },
-            WsCkptRequest::Diff { workspace: "/tmp/ws".into(), from: "snap-001".into(), to: "snap-002".into() },
+            WsCkptRequest::Rollback {
+                workspace: "/tmp/ws".into(),
+                to: "snap-001".into(),
+            },
+            WsCkptRequest::Delete {
+                workspace: Some("/tmp/ws".into()),
+                snapshot: "snap-001".into(),
+                force: false,
+            },
+            WsCkptRequest::List {
+                workspace: Some("/tmp/ws".into()),
+                format: None,
+            },
+            WsCkptRequest::Diff {
+                workspace: "/tmp/ws".into(),
+                from: "snap-001".into(),
+                to: "snap-002".into(),
+            },
             WsCkptRequest::Status { workspace: None },
-            WsCkptRequest::Cleanup { workspace: "/tmp/ws".into(), keep: Some(5) },
+            WsCkptRequest::Cleanup {
+                workspace: "/tmp/ws".into(),
+                keep: Some(5),
+            },
             WsCkptRequest::Config,
             WsCkptRequest::ReloadConfig,
-            WsCkptRequest::Recover { workspace: "/home/user/project".into() },
+            WsCkptRequest::Recover {
+                workspace: "/home/user/project".into(),
+            },
             WsCkptRequest::HealthAdvisory,
         ];
-    
+
         for req in &requests {
             let encoded = bincode::serialize(req).unwrap();
             let decoded: WsCkptRequest = bincode::deserialize(&encoded).unwrap();
@@ -254,38 +334,72 @@ mod tests {
     #[test]
     fn test_response_bincode_roundtrip() {
         let responses = vec![
-            WsCkptResponse::InitOk { ws_id: "ws-abc".into() },
-            WsCkptResponse::CheckpointOk { snapshot_id: "snap-001".into() },
-            WsCkptResponse::RollbackOk { from: "snap-003".into(), to: "snap-001".into() },
-            WsCkptResponse::DeleteOk { target: "snap-001".into() },
-            WsCkptResponse::Error { code: WsCkptErrorCode::WorkspaceNotFound, message: "not found".into() },
+            WsCkptResponse::InitOk {
+                ws_id: "ws-abc".into(),
+            },
+            WsCkptResponse::CheckpointOk {
+                snapshot_id: "snap-001".into(),
+            },
+            WsCkptResponse::RollbackOk {
+                from: "snap-003".into(),
+                to: "snap-001".into(),
+            },
+            WsCkptResponse::DeleteOk {
+                target: "snap-001".into(),
+            },
+            WsCkptResponse::Error {
+                code: WsCkptErrorCode::WorkspaceNotFound,
+                message: "not found".into(),
+            },
             WsCkptResponse::ListOk { snapshots: vec![] },
-            WsCkptResponse::DiffOk { changes: vec![
-                DiffEntry { path: "src/main.rs".into(), change_type: ChangeType::Modified, detail: None },
-            ]},
-            WsCkptResponse::StatusOk { report: StatusReport {
-                uptime_secs: 3600,
-                workspaces: vec![WorkspaceInfo { ws_id: "ws-1".into(), path: "/tmp".into(), snapshot_count: 3 }],
-                fs_total_bytes: 100_000_000,
-                fs_used_bytes: 50_000_000,
-            }},
-            WsCkptResponse::CleanupOk { removed: vec!["snap-old".into()] },
-            WsCkptResponse::ConfigOk { config: ConfigReport {
-                mount_path: "/mnt/snapshots".into(),
-                socket_path: "/run/ws-ckpt/ws-ckpt.sock".into(),
-                log_level: "info".into(),
-                auto_cleanup: true,
-                auto_cleanup_keep: CleanupRetention::Count(5),
-                auto_cleanup_interval_secs: 3600,
-                health_check_interval_secs: 60,
-                img_path: "/var/lib/ws-ckpt/img".into(),
-                img_size: 10_737_418_240,
-                img_max_percent: 80.0,
-            }},
+            WsCkptResponse::DiffOk {
+                changes: vec![DiffEntry {
+                    path: "src/main.rs".into(),
+                    change_type: ChangeType::Modified,
+                    detail: None,
+                }],
+            },
+            WsCkptResponse::StatusOk {
+                report: StatusReport {
+                    uptime_secs: 3600,
+                    workspaces: vec![WorkspaceInfo {
+                        ws_id: "ws-1".into(),
+                        path: "/tmp".into(),
+                        snapshot_count: 3,
+                    }],
+                    fs_total_bytes: 100_000_000,
+                    fs_used_bytes: 50_000_000,
+                },
+            },
+            WsCkptResponse::CleanupOk {
+                removed: vec!["snap-old".into()],
+            },
+            WsCkptResponse::ConfigOk {
+                config: ConfigReport {
+                    mount_path: "/mnt/snapshots".into(),
+                    socket_path: "/run/ws-ckpt/ws-ckpt.sock".into(),
+                    log_level: "info".into(),
+                    auto_cleanup: true,
+                    auto_cleanup_keep: CleanupRetention::Count(5),
+                    auto_cleanup_interval_secs: 3600,
+                    health_check_interval_secs: 60,
+                    img_path: "/var/lib/ws-ckpt/img".into(),
+                    img_size: 10_737_418_240,
+                    img_max_percent: 80.0,
+                },
+            },
             WsCkptResponse::ReloadConfigOk,
-            WsCkptResponse::CheckpointSkipped { reason: "no changes".into() },
-            WsCkptResponse::RecoverOk { workspace: "/tmp/ws".into() },
-            WsCkptResponse::HealthAdvisoryOk { over_limit_workspace_count: 2, fs_total_bytes: 1_000_000, fs_used_bytes: 800_000 },
+            WsCkptResponse::CheckpointSkipped {
+                reason: "no changes".into(),
+            },
+            WsCkptResponse::RecoverOk {
+                workspace: "/tmp/ws".into(),
+            },
+            WsCkptResponse::HealthAdvisoryOk {
+                over_limit_workspace_count: 2,
+                fs_total_bytes: 1_000_000,
+                fs_used_bytes: 800_000,
+            },
         ];
 
         for resp in &responses {
@@ -301,23 +415,68 @@ mod tests {
         // Verify that each WsCkptRequest variant is serialized with the correct
         // bincode index — this is the wire contract with ws-ckpt daemon.
         let variants: Vec<(u32, WsCkptRequest)> = vec![
-            (0, WsCkptRequest::Init { workspace: "/ws".into() }),
-            (1, WsCkptRequest::Checkpoint {
-                workspace: "/ws".into(),
-                id: "snap".into(),
-                message: None,
-                metadata: None,
-                pin: false,
-            }),
-            (2, WsCkptRequest::Rollback { workspace: "/ws".into(), to: "snap".into() }),
-            (3, WsCkptRequest::Delete { workspace: None, snapshot: "snap".into(), force: false }),
-            (4, WsCkptRequest::List { workspace: None, format: None }),
-            (5, WsCkptRequest::Diff { workspace: "/ws".into(), from: "a".into(), to: "b".into() }),
+            (
+                0,
+                WsCkptRequest::Init {
+                    workspace: "/ws".into(),
+                },
+            ),
+            (
+                1,
+                WsCkptRequest::Checkpoint {
+                    workspace: "/ws".into(),
+                    id: "snap".into(),
+                    message: None,
+                    metadata: None,
+                    pin: false,
+                },
+            ),
+            (
+                2,
+                WsCkptRequest::Rollback {
+                    workspace: "/ws".into(),
+                    to: "snap".into(),
+                },
+            ),
+            (
+                3,
+                WsCkptRequest::Delete {
+                    workspace: None,
+                    snapshot: "snap".into(),
+                    force: false,
+                },
+            ),
+            (
+                4,
+                WsCkptRequest::List {
+                    workspace: None,
+                    format: None,
+                },
+            ),
+            (
+                5,
+                WsCkptRequest::Diff {
+                    workspace: "/ws".into(),
+                    from: "a".into(),
+                    to: "b".into(),
+                },
+            ),
             (6, WsCkptRequest::Status { workspace: None }),
-            (7, WsCkptRequest::Cleanup { workspace: "/ws".into(), keep: None }),
+            (
+                7,
+                WsCkptRequest::Cleanup {
+                    workspace: "/ws".into(),
+                    keep: None,
+                },
+            ),
             (8, WsCkptRequest::Config),
             (9, WsCkptRequest::ReloadConfig),
-            (10, WsCkptRequest::Recover { workspace: "/ws".into() }),
+            (
+                10,
+                WsCkptRequest::Recover {
+                    workspace: "/ws".into(),
+                },
+            ),
             (11, WsCkptRequest::HealthAdvisory),
         ];
 
@@ -369,10 +528,19 @@ mod tests {
         let decoded: CleanupRetention = bincode::deserialize(&bytes).unwrap();
         assert_eq!(decoded, CleanupRetention::Count(5));
 
-        let age = CleanupRetention::Age { raw: "7d".into(), secs: 604800 };
+        let age = CleanupRetention::Age {
+            raw: "7d".into(),
+            secs: 604800,
+        };
         let bytes = bincode::serialize(&age).unwrap();
         let decoded: CleanupRetention = bincode::deserialize(&bytes).unwrap();
-        assert_eq!(decoded, CleanupRetention::Age { raw: "7d".into(), secs: 604800 });
+        assert_eq!(
+            decoded,
+            CleanupRetention::Age {
+                raw: "7d".into(),
+                secs: 604800
+            }
+        );
     }
 
     #[test]

@@ -153,7 +153,12 @@ mod tests {
     fn test_detect_alinux() {
         let content = "NAME=\"Alibaba Cloud Linux\"\nVERSION_ID=\"3\"\nID=alinux\n";
         let distro = Distro::detect_from_content(content);
-        assert_eq!(distro, Distro::Alinux { version: "3".into() });
+        assert_eq!(
+            distro,
+            Distro::Alinux {
+                version: "3".into()
+            }
+        );
         assert_eq!(distro.pkg_manager(), PkgManager::Dnf);
     }
 
@@ -161,7 +166,12 @@ mod tests {
     fn test_detect_ubuntu() {
         let content = "NAME=\"Ubuntu\"\nVERSION_ID=\"22.04\"\nID=ubuntu\n";
         let distro = Distro::detect_from_content(content);
-        assert_eq!(distro, Distro::Ubuntu { version: "22.04".into() });
+        assert_eq!(
+            distro,
+            Distro::Ubuntu {
+                version: "22.04".into()
+            }
+        );
         assert_eq!(distro.pkg_manager(), PkgManager::Apt);
     }
 
@@ -169,7 +179,12 @@ mod tests {
     fn test_detect_fedora() {
         let content = "NAME=\"Fedora Linux\"\nVERSION_ID=\"39\"\nID=fedora\n";
         let distro = Distro::detect_from_content(content);
-        assert_eq!(distro, Distro::Fedora { version: "39".into() });
+        assert_eq!(
+            distro,
+            Distro::Fedora {
+                version: "39".into()
+            }
+        );
         assert_eq!(distro.pkg_manager(), PkgManager::Dnf);
     }
 
@@ -177,15 +192,38 @@ mod tests {
     fn test_detect_opensuse() {
         let content = "NAME=\"openSUSE Leap\"\nVERSION_ID=\"15.5\"\nID=opensuse-leap\n";
         let distro = Distro::detect_from_content(content);
-        assert_eq!(distro, Distro::OpenSUSE { version: "15.5".into() });
+        assert_eq!(
+            distro,
+            Distro::OpenSUSE {
+                version: "15.5".into()
+            }
+        );
         assert_eq!(distro.pkg_manager(), PkgManager::Zypper);
     }
 
     #[test]
     fn test_id_str() {
-        assert_eq!(Distro::Alinux { version: "3".into() }.id_str(), "alinux");
-        assert_eq!(Distro::Ubuntu { version: "22.04".into() }.id_str(), "ubuntu");
-        assert_eq!(Distro::OpenSUSE { version: "15.5".into() }.id_str(), "opensuse");
+        assert_eq!(
+            Distro::Alinux {
+                version: "3".into()
+            }
+            .id_str(),
+            "alinux"
+        );
+        assert_eq!(
+            Distro::Ubuntu {
+                version: "22.04".into()
+            }
+            .id_str(),
+            "ubuntu"
+        );
+        assert_eq!(
+            Distro::OpenSUSE {
+                version: "15.5".into()
+            }
+            .id_str(),
+            "opensuse"
+        );
     }
 
     // --- Edge case tests ---
@@ -194,7 +232,12 @@ mod tests {
     fn test_missing_version_id() {
         let content = "NAME=\"Alibaba Cloud Linux\"\nID=alinux\n";
         let distro = Distro::detect_from_content(content);
-        assert_eq!(distro, Distro::Alinux { version: "unknown".into() });
+        assert_eq!(
+            distro,
+            Distro::Alinux {
+                version: "unknown".into()
+            }
+        );
     }
 
     #[test]
@@ -216,14 +259,24 @@ mod tests {
     fn test_malformed_os_release_no_equals() {
         let content = "NOTAKEYVALUE\nID=ubuntu\nVERSION_ID=22.04";
         let distro = Distro::detect_from_content(content);
-        assert_eq!(distro, Distro::Ubuntu { version: "22.04".into() });
+        assert_eq!(
+            distro,
+            Distro::Ubuntu {
+                version: "22.04".into()
+            }
+        );
     }
 
     #[test]
     fn test_malformed_os_release_garbage() {
         let content = "\\\\\\\n@@@!!!\nID=centos\nVERSION_ID=9";
         let distro = Distro::detect_from_content(content);
-        assert_eq!(distro, Distro::CentOS { version: "9".into() });
+        assert_eq!(
+            distro,
+            Distro::CentOS {
+                version: "9".into()
+            }
+        );
     }
 
     #[test]
@@ -237,35 +290,60 @@ mod tests {
     fn test_comment_lines_ignored() {
         let content = "# This is a comment\n#ID=fake\nID=fedora\nVERSION_ID=40";
         let distro = Distro::detect_from_content(content);
-        assert_eq!(distro, Distro::Fedora { version: "40".into() });
+        assert_eq!(
+            distro,
+            Distro::Fedora {
+                version: "40".into()
+            }
+        );
     }
 
     #[test]
     fn test_blank_lines_ignored() {
         let content = "\n\nID=debian\n\nVERSION_ID=12\n";
         let distro = Distro::detect_from_content(content);
-        assert_eq!(distro, Distro::Debian { version: "12".into() });
+        assert_eq!(
+            distro,
+            Distro::Debian {
+                version: "12".into()
+            }
+        );
     }
 
     #[test]
     fn test_quoted_values() {
         let content = "ID=\"ubuntu\"\nVERSION_ID=\"22.04\"";
         let distro = Distro::detect_from_content(content);
-        assert_eq!(distro, Distro::Ubuntu { version: "22.04".into() });
+        assert_eq!(
+            distro,
+            Distro::Ubuntu {
+                version: "22.04".into()
+            }
+        );
     }
 
     #[test]
     fn test_id_case_insensitive() {
         let content = "ID=Ubuntu\nVERSION_ID=22.04";
         let distro = Distro::detect_from_content(content);
-        assert_eq!(distro, Distro::Ubuntu { version: "22.04".into() });
+        assert_eq!(
+            distro,
+            Distro::Ubuntu {
+                version: "22.04".into()
+            }
+        );
     }
 
     #[test]
     fn test_opensuse_tumbleweed() {
         let content = "ID=opensuse-tumbleweed\nVERSION_ID=20240501";
         let distro = Distro::detect_from_content(content);
-        assert_eq!(distro, Distro::OpenSUSE { version: "20240501".into() });
+        assert_eq!(
+            distro,
+            Distro::OpenSUSE {
+                version: "20240501".into()
+            }
+        );
         assert_eq!(distro.pkg_manager(), PkgManager::Zypper);
     }
 
@@ -273,7 +351,12 @@ mod tests {
     fn test_sles() {
         let content = "ID=sles\nVERSION_ID=15.5";
         let distro = Distro::detect_from_content(content);
-        assert_eq!(distro, Distro::OpenSUSE { version: "15.5".into() });
+        assert_eq!(
+            distro,
+            Distro::OpenSUSE {
+                version: "15.5".into()
+            }
+        );
         assert_eq!(distro.pkg_manager(), PkgManager::Zypper);
     }
 
@@ -287,15 +370,26 @@ mod tests {
 
     #[test]
     fn test_display_name() {
-        assert_eq!(Distro::Alinux { version: "3".into() }.display_name(), "Alinux 3");
-        assert_eq!(Distro::Unknown("arch".into()).display_name(), "Unknown (arch)");
+        assert_eq!(
+            Distro::Alinux {
+                version: "3".into()
+            }
+            .display_name(),
+            "Alinux 3"
+        );
+        assert_eq!(
+            Distro::Unknown("arch".into()).display_name(),
+            "Unknown (arch)"
+        );
     }
 
     // --- macOS tests ---
 
     #[test]
     fn test_macos_variant() {
-        let distro = Distro::MacOS { version: "15.4".into() };
+        let distro = Distro::MacOS {
+            version: "15.4".into(),
+        };
         assert_eq!(distro.id_str(), "macos");
         assert_eq!(distro.display_name(), "macOS 15.4");
         assert_eq!(distro.pkg_manager(), PkgManager::Brew);
@@ -303,13 +397,17 @@ mod tests {
 
     #[test]
     fn test_macos_display_name_format() {
-        let distro = Distro::MacOS { version: "14.2.1".into() };
+        let distro = Distro::MacOS {
+            version: "14.2.1".into(),
+        };
         assert_eq!(distro.display_name(), "macOS 14.2.1");
     }
 
     #[test]
     fn test_macos_unknown_version() {
-        let distro = Distro::MacOS { version: "unknown".into() };
+        let distro = Distro::MacOS {
+            version: "unknown".into(),
+        };
         assert_eq!(distro.display_name(), "macOS unknown");
         assert_eq!(distro.pkg_manager(), PkgManager::Brew);
     }

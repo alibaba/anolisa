@@ -23,7 +23,11 @@ const SVC_TIMEOUT: Duration = Duration::from_secs(30);
 /// Run an external command with a timeout. Reads stdout/stderr in background
 /// threads to avoid pipe-buffer deadlock. Returns `ErrorCode::Timeout` if the
 /// process exceeds the deadline.
-pub fn run_command(cmd: &mut Command, timeout: Duration, subsystem: &str) -> Result<Output, CoshError> {
+pub fn run_command(
+    cmd: &mut Command,
+    timeout: Duration,
+    subsystem: &str,
+) -> Result<Output, CoshError> {
     let mut child = cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -80,8 +84,16 @@ pub fn run_command(cmd: &mut Command, timeout: Duration, subsystem: &str) -> Res
         }
     };
 
-    let stdout = stdout_handle.and_then(|h| h.join().ok()).unwrap_or_default();
-    let stderr = stderr_handle.and_then(|h| h.join().ok()).unwrap_or_default();
+    let stdout = stdout_handle
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+    let stderr = stderr_handle
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
 
-    Ok(Output { status, stdout, stderr })
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
 }

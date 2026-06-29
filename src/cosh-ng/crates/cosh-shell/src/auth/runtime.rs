@@ -144,7 +144,9 @@ pub(crate) enum AuthPhase {
     /// Show existing providers list + "Add new" option
     ManagingProviders,
     /// Action menu after selecting an existing provider
-    ProviderAction { provider_idx: usize },
+    ProviderAction {
+        provider_idx: usize,
+    },
     SelectingProvider,
     FillingField,
     /// Aliyun: ECS detected, showing console URL + QR code, polling in background
@@ -563,10 +565,8 @@ fn handle_auth_answer<W: std::io::Write>(
 
                     // Pre-fill collected_values from existing config
                     let config_path = config_file_path();
-                    let content =
-                        std::fs::read_to_string(&config_path).unwrap_or_default();
-                    let config: MiniConfig =
-                        toml::from_str(&content).unwrap_or_default();
+                    let content = std::fs::read_to_string(&config_path).unwrap_or_default();
+                    let config: MiniConfig = toml::from_str(&content).unwrap_or_default();
                     if let Some(pcfg) = config.ai.providers.get(&existing.name) {
                         if let Some(ref v) = pcfg.api_key {
                             auth.collected_values
@@ -577,8 +577,7 @@ fn handle_auth_answer<W: std::io::Write>(
                                 .insert("base_url".to_string(), v.clone());
                         }
                         if let Some(ref v) = pcfg.model {
-                            auth.collected_values
-                                .insert("model".to_string(), v.clone());
+                            auth.collected_values.insert("model".to_string(), v.clone());
                         }
                         if let Some(ref v) = pcfg.access_key_id {
                             auth.collected_values
@@ -596,8 +595,7 @@ fn handle_auth_answer<W: std::io::Write>(
 
                     auth.phase = AuthPhase::FillingField;
                     auth.current_field = 0;
-                    let first_field_name =
-                        auth.current_field_info().map(|f| f.name.clone());
+                    let first_field_name = auth.current_field_info().map(|f| f.name.clone());
                     if let Some(name) = first_field_name {
                         auth.field_input = auth
                             .collected_values
@@ -779,17 +777,15 @@ fn persist_auth_credentials(response: &AuthResponse, editing_name: Option<&str>)
     let mut config: MiniConfig = toml::from_str(&existing_content).unwrap_or_default();
 
     // Determine the section name for this provider
-    let section_name = editing_name
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            // For new providers, generate a section name based on type
-            match response.provider_id.as_str() {
-                "dashscope" => "dashscope".to_string(),
-                "aliyun" => "aliyun".to_string(),
-                "openai_compat" => "openai_compat".to_string(),
-                other => other.to_string(),
-            }
-        });
+    let section_name = editing_name.map(|s| s.to_string()).unwrap_or_else(|| {
+        // For new providers, generate a section name based on type
+        match response.provider_id.as_str() {
+            "dashscope" => "dashscope".to_string(),
+            "aliyun" => "aliyun".to_string(),
+            "openai_compat" => "openai_compat".to_string(),
+            other => other.to_string(),
+        }
+    });
 
     // Build the provider config
     let provider_type = match response.provider_id.as_str() {
@@ -818,8 +814,10 @@ fn persist_auth_credentials(response: &AuthResponse, editing_name: Option<&str>)
         pcfg.access_key_secret = response.values.get("access_key_secret").cloned();
         pcfg.security_token = response.values.get("security_token").cloned();
     } else {
-        let base_url = response.values.get("base_url").cloned()
-            .or_else(|| builtin_base_url_for_provider(&response.provider_id).map(str::to_string));
+        let base_url =
+            response.values.get("base_url").cloned().or_else(|| {
+                builtin_base_url_for_provider(&response.provider_id).map(str::to_string)
+            });
         pcfg.base_url = base_url;
         pcfg.api_key = response.values.get("api_key").cloned();
     }
@@ -963,15 +961,9 @@ fn render_current_auth_panel<W: std::io::Write>(
         }
         AuthPhase::ProviderAction { provider_idx } => {
             let ep = &auth.existing_providers[provider_idx];
-            let title = format!(
-                "\u{1f511} {} \u{2014} \"{}\":",
-                ep.label, ep.name
-            );
+            let title = format!("\u{1f511} {} \u{2014} \"{}\":", ep.label, ep.name);
             let options: Vec<String> = if ep.is_active {
-                vec![
-                    "Edit configuration".to_string(),
-                    "Cancel".to_string(),
-                ]
+                vec!["Edit configuration".to_string(), "Cancel".to_string()]
             } else {
                 vec![
                     "Set as active provider".to_string(),
@@ -1017,7 +1009,10 @@ fn render_current_auth_panel<W: std::io::Write>(
             let provider = auth.current_provider();
             let is_editing = auth.editing_provider_name.is_some();
             let action = if is_editing { "Edit" } else { "Enter" };
-            let mut question = format!("\u{1f511} {} \u{2014} {} {}:", provider.label, action, label);
+            let mut question = format!(
+                "\u{1f511} {} \u{2014} {} {}:",
+                provider.label, action, label
+            );
             if !hint_text.is_empty() {
                 question.push_str(&format!("\n  hint: {}", hint_text));
             }

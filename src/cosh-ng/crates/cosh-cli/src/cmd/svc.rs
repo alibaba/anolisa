@@ -119,11 +119,9 @@ pub fn run(action: SvcCommands, distro: &Distro, start: Instant) -> i32 {
                 Err(e) => print_failure(e, build_meta("svc", distro, start, dry_run)),
             }
         }
-        SvcCommands::List { state } => {
-            match svc::svc_list(state.as_deref()) {
-                Ok(result) => print_success(result, build_meta("svc", distro, start, false)),
-                Err(e) => print_failure(e, build_meta("svc", distro, start, false)),
-            }
-        }
+        SvcCommands::List { state } => match svc::svc_list(state.as_deref()) {
+            Ok(result) => print_success(result, build_meta("svc", distro, start, false)),
+            Err(e) => print_failure(e, build_meta("svc", distro, start, false)),
+        },
     }
 }

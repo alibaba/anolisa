@@ -3,8 +3,8 @@ use std::path::Path;
 use aes_gcm::aead::generic_array::typenum::U16;
 use aes_gcm::{
     aead::{Aead, KeyInit},
-    AesGcm,
     aes::Aes256,
+    AesGcm,
 };
 use scrypt::{scrypt, Params};
 
@@ -85,10 +85,19 @@ fn try_migrate_aliyun_credentials(cfg_dir: &Path, config_path: &Path) {
 
     existing.push_str("\n[ai.providers.aliyun]\n");
     existing.push_str("type = \"aliyun\"\n");
-    existing.push_str(&format!("access_key_id = \"{}\"\n", escape_toml_migrate(ak)));
-    existing.push_str(&format!("access_key_secret = \"{}\"\n", escape_toml_migrate(sk)));
+    existing.push_str(&format!(
+        "access_key_id = \"{}\"\n",
+        escape_toml_migrate(ak)
+    ));
+    existing.push_str(&format!(
+        "access_key_secret = \"{}\"\n",
+        escape_toml_migrate(sk)
+    ));
     if let Some(token) = st {
-        existing.push_str(&format!("security_token = \"{}\"\n", escape_toml_migrate(token)));
+        existing.push_str(&format!(
+            "security_token = \"{}\"\n",
+            escape_toml_migrate(token)
+        ));
     }
     existing.push_str("model = \"qwen3.7-plus\"\n");
 
@@ -111,7 +120,9 @@ fn try_migrate_aliyun_credentials(cfg_dir: &Path, config_path: &Path) {
 }
 
 fn escape_toml_migrate(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }
 
 fn migrate_settings(

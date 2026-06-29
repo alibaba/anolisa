@@ -136,7 +136,6 @@ pub enum CommandOrigin {
     Unknown,
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellEvent {
     pub kind: ShellEventKind,

@@ -54,11 +54,10 @@ impl ContentGenerator for MockProvider {
         let idx = self
             .call_index
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let events = self
-            .responses
-            .get(idx)
-            .cloned()
-            .unwrap_or_else(|| vec![GenerateEvent::Error("no more mock responses".to_string())]);
+        let events =
+            self.responses.get(idx).cloned().unwrap_or_else(|| {
+                vec![GenerateEvent::Error("no more mock responses".to_string())]
+            });
         Ok(Box::pin(stream::iter(events)))
     }
 
@@ -85,8 +84,7 @@ mod tests {
 
     #[tokio::test]
     async fn mock_provider_with_tool_call() {
-        let provider =
-            MockProvider::with_tool_call("shell", "call-1", r#"{"command":"ls"}"#);
+        let provider = MockProvider::with_tool_call("shell", "call-1", r#"{"command":"ls"}"#);
         let stream = provider
             .generate(&[], &[], &GenerateConfig::default())
             .await
@@ -99,14 +97,26 @@ mod tests {
     #[tokio::test]
     async fn mock_provider_multi_turn() {
         let provider = MockProvider::new(vec![
-            vec![GenerateEvent::TextDelta("first".to_string()), GenerateEvent::MessageEnd],
-            vec![GenerateEvent::TextDelta("second".to_string()), GenerateEvent::MessageEnd],
+            vec![
+                GenerateEvent::TextDelta("first".to_string()),
+                GenerateEvent::MessageEnd,
+            ],
+            vec![
+                GenerateEvent::TextDelta("second".to_string()),
+                GenerateEvent::MessageEnd,
+            ],
         ]);
-        let s1 = provider.generate(&[], &[], &GenerateConfig::default()).await.unwrap();
+        let s1 = provider
+            .generate(&[], &[], &GenerateConfig::default())
+            .await
+            .unwrap();
         let e1: Vec<_> = s1.collect().await;
         assert!(matches!(&e1[0], GenerateEvent::TextDelta(t) if t == "first"));
 
-        let s2 = provider.generate(&[], &[], &GenerateConfig::default()).await.unwrap();
+        let s2 = provider
+            .generate(&[], &[], &GenerateConfig::default())
+            .await
+            .unwrap();
         let e2: Vec<_> = s2.collect().await;
         assert!(matches!(&e2[0], GenerateEvent::TextDelta(t) if t == "second"));
     }

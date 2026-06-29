@@ -195,7 +195,10 @@ name = "test-hook"
     );
     let notif = hook_notification.unwrap();
     assert!(
-        notif["status"].as_str().unwrap().contains("hello from hook"),
+        notif["status"]
+            .as_str()
+            .unwrap()
+            .contains("hello from hook"),
         "hook notification should contain message"
     );
 }

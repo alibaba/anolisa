@@ -145,7 +145,10 @@ mod tests {
         let ctx = test_ctx();
 
         let r = tool
-            .invoke(serde_json::json!({"action": "add", "text": "buy milk"}), &ctx)
+            .invoke(
+                serde_json::json!({"action": "add", "text": "buy milk"}),
+                &ctx,
+            )
             .await
             .unwrap();
         assert!(!r.is_error);

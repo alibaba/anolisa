@@ -33,10 +33,7 @@ fn append_sls_log_to(path: &str, record: &serde_json::Value) {
     let Ok(line) = serde_json::to_string(record) else {
         return;
     };
-    let result = OpenOptions::new()
-        
-        .append(true)
-        .open(path);
+    let result = OpenOptions::new().append(true).open(path);
     let Ok(mut file) = result else { return };
     let _ = writeln!(file, "{line}");
 }
@@ -120,8 +117,7 @@ mod tests {
 
     fn test_engine() -> CoshCore {
         let config = crate::config::CoreConfig::default();
-        let provider =
-            Box::new(crate::provider::mock::MockProvider::text_only("test"));
+        let provider = Box::new(crate::provider::mock::MockProvider::text_only("test"));
         let tools = crate::tool::ToolRegistry::new();
         CoshCore::new(config, provider, tools)
     }

@@ -112,9 +112,10 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                 .take_while(|token| is_env_assignment(token))
                 .count()
                 > 0
-        }) {
-            shape = CommandShape::EnvSimple;
-        }
+        })
+    {
+        shape = CommandShape::EnvSimple;
+    }
 
     ParsedCommand { shape, stages }
 }

@@ -23,15 +23,10 @@ impl ContextBuilder {
             parts.push(format!("# Project Context\n{ctx}"));
         }
 
-        parts.push(format!(
-            "# Approval Mode\nCurrent mode: `{approval_mode}`"
-        ));
+        parts.push(format!("# Approval Mode\nCurrent mode: `{approval_mode}`"));
 
         if !tool_names.is_empty() {
-            parts.push(format!(
-                "# Available Tools\n{}",
-                tool_names.join(", ")
-            ));
+            parts.push(format!("# Available Tools\n{}", tool_names.join(", ")));
         }
 
         if !skill_summaries.is_empty() {
@@ -47,9 +42,7 @@ impl ContextBuilder {
         }
 
         if let Some(lang) = output_language {
-            parts.push(format!(
-                "# Output Language\nRespond in {lang}."
-            ));
+            parts.push(format!("# Output Language\nRespond in {lang}."));
         }
 
         parts.join("\n\n")
@@ -57,7 +50,9 @@ impl ContextBuilder {
 
     fn load_project_context(cwd: &Path) -> Option<String> {
         let path = cwd.join(".copilot-shell/CONTEXT.md");
-        std::fs::read_to_string(&path).ok().filter(|s| !s.trim().is_empty())
+        std::fs::read_to_string(&path)
+            .ok()
+            .filter(|s| !s.trim().is_empty())
     }
 }
 
@@ -80,8 +75,7 @@ mod tests {
     #[test]
     fn prompt_with_language() {
         let cwd = PathBuf::from("/tmp");
-        let prompt =
-            ContextBuilder::build_system_prompt(&cwd, &[], &[], "trust", Some("Chinese"));
+        let prompt = ContextBuilder::build_system_prompt(&cwd, &[], &[], "trust", Some("Chinese"));
 
         assert!(prompt.contains("Respond in Chinese"));
     }

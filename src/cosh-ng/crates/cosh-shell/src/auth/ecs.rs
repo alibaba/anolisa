@@ -190,9 +190,7 @@ pub(crate) fn poll_and_get_credentials() -> EcsTaskResult {
             None => EcsTaskResult::AuthorizationFailed("Failed to get STS credentials".into()),
         }
     } else {
-        EcsTaskResult::AuthorizationFailed(
-            "Timeout waiting for RAM Role authorization".into(),
-        )
+        EcsTaskResult::AuthorizationFailed("Timeout waiting for RAM Role authorization".into())
     }
 }
 

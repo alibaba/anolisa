@@ -39,7 +39,10 @@ pub fn svc_status(name: &str) -> Result<SvcStatus, CoshError> {
         .with_hint("Try 'cosh svc list' to see available services"));
     }
 
-    let active_state = props.get("ActiveState").map(|s| s.as_str()).unwrap_or("unknown");
+    let active_state = props
+        .get("ActiveState")
+        .map(|s| s.as_str())
+        .unwrap_or("unknown");
     let state = match active_state {
         "active" => SvcState::Running,
         "inactive" => SvcState::Stopped,
@@ -88,7 +91,10 @@ pub fn svc_action(name: &str, action: &str, dry_run: bool) -> Result<SvcActionRe
     if !valid_actions.contains(&action) {
         return Err(CoshError::new(
             ErrorCode::InvalidInput,
-            format!("Invalid action '{}'. Valid: start, stop, restart, enable, disable", action),
+            format!(
+                "Invalid action '{}'. Valid: start, stop, restart, enable, disable",
+                action
+            ),
             "svc",
         ));
     }
@@ -156,11 +162,7 @@ pub fn svc_list(state_filter: Option<&str>) -> Result<SvcListResult, CoshError> 
         args.push(state);
     }
 
-    let output = run_command(
-        Command::new("systemctl").args(&args),
-        SVC_TIMEOUT,
-        "svc",
-    )?;
+    let output = run_command(Command::new("systemctl").args(&args), SVC_TIMEOUT, "svc")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut services = Vec::new();
@@ -214,18 +216,38 @@ fn parse_svc_list_line(line: &str) -> Option<SvcStatus> {
 /// Validate a `--state` filter value for `systemctl list-units`.
 fn validate_state_filter(state: &str) -> Result<(), CoshError> {
     const VALID_STATES: &[&str] = &[
-        "active", "inactive", "activating", "deactivating", "reloading",
-        "loaded", "not-found", "masked",
-        "running", "dead", "exited", "failed", "waiting", "listening",
-        "mounted", "plugged",
-        "enabled", "disabled", "static", "generated", "indirect",
+        "active",
+        "inactive",
+        "activating",
+        "deactivating",
+        "reloading",
+        "loaded",
+        "not-found",
+        "masked",
+        "running",
+        "dead",
+        "exited",
+        "failed",
+        "waiting",
+        "listening",
+        "mounted",
+        "plugged",
+        "enabled",
+        "disabled",
+        "static",
+        "generated",
+        "indirect",
     ];
     if VALID_STATES.contains(&state) {
         Ok(())
     } else {
         Err(CoshError::new(
             ErrorCode::InvalidInput,
-            format!("Invalid state filter '{}'. Valid: {}", state, VALID_STATES.join(", ")),
+            format!(
+                "Invalid state filter '{}'. Valid: {}",
+                state,
+                VALID_STATES.join(", ")
+            ),
             "svc",
         ))
     }
@@ -276,12 +298,10 @@ fn fetch_journal_lines(unit: &str, count: usize) -> Vec<String> {
     );
 
     match result {
-        Ok(o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .map(|l| l.to_string())
-                .collect()
-        }
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(|l| l.to_string())
+            .collect(),
         _ => vec![],
     }
 }
@@ -300,7 +320,10 @@ mod tests {
         assert_eq!(props.get("ActiveState").unwrap(), "active");
         assert_eq!(props.get("MainPID").unwrap(), "1234");
         assert_eq!(props.get("UnitFileState").unwrap(), "enabled");
-        assert_eq!(props.get("Description").unwrap(), "nginx - high performance web server");
+        assert_eq!(
+            props.get("Description").unwrap(),
+            "nginx - high performance web server"
+        );
         assert_eq!(props.get("MemoryCurrent").unwrap(), "1048576");
     }
 
@@ -343,7 +366,10 @@ mod tests {
     #[test]
     fn test_svc_state_active() {
         let props = parse_systemctl_show("ActiveState=active");
-        let active_state = props.get("ActiveState").map(|s| s.as_str()).unwrap_or("unknown");
+        let active_state = props
+            .get("ActiveState")
+            .map(|s| s.as_str())
+            .unwrap_or("unknown");
         let state = match active_state {
             "active" => SvcState::Running,
             "inactive" => SvcState::Stopped,
@@ -358,7 +384,10 @@ mod tests {
     #[test]
     fn test_svc_state_inactive() {
         let props = parse_systemctl_show("ActiveState=inactive");
-        let active_state = props.get("ActiveState").map(|s| s.as_str()).unwrap_or("unknown");
+        let active_state = props
+            .get("ActiveState")
+            .map(|s| s.as_str())
+            .unwrap_or("unknown");
         let state = match active_state {
             "active" => SvcState::Running,
             "inactive" => SvcState::Stopped,
@@ -373,7 +402,10 @@ mod tests {
     #[test]
     fn test_svc_state_failed() {
         let props = parse_systemctl_show("ActiveState=failed");
-        let active_state = props.get("ActiveState").map(|s| s.as_str()).unwrap_or("unknown");
+        let active_state = props
+            .get("ActiveState")
+            .map(|s| s.as_str())
+            .unwrap_or("unknown");
         let state = match active_state {
             "active" => SvcState::Running,
             "inactive" => SvcState::Stopped,
@@ -388,7 +420,10 @@ mod tests {
     #[test]
     fn test_svc_state_activating() {
         let props = parse_systemctl_show("ActiveState=activating");
-        let active_state = props.get("ActiveState").map(|s| s.as_str()).unwrap_or("unknown");
+        let active_state = props
+            .get("ActiveState")
+            .map(|s| s.as_str())
+            .unwrap_or("unknown");
         let state = match active_state {
             "active" => SvcState::Running,
             "inactive" => SvcState::Stopped,
@@ -403,7 +438,10 @@ mod tests {
     #[test]
     fn test_svc_state_unknown() {
         let props = parse_systemctl_show("ActiveState=maintenance");
-        let active_state = props.get("ActiveState").map(|s| s.as_str()).unwrap_or("unknown");
+        let active_state = props
+            .get("ActiveState")
+            .map(|s| s.as_str())
+            .unwrap_or("unknown");
         let state = match active_state {
             "active" => SvcState::Running,
             "inactive" => SvcState::Stopped,
@@ -418,7 +456,10 @@ mod tests {
     #[test]
     fn test_svc_state_missing_defaults_to_unknown() {
         let props = parse_systemctl_show("MainPID=0");
-        let active_state = props.get("ActiveState").map(|s| s.as_str()).unwrap_or("unknown");
+        let active_state = props
+            .get("ActiveState")
+            .map(|s| s.as_str())
+            .unwrap_or("unknown");
         let state = match active_state {
             "active" => SvcState::Running,
             "inactive" => SvcState::Stopped,
@@ -441,7 +482,8 @@ mod tests {
 
     #[test]
     fn test_parse_systemctl_show_utf8_description_with_special_chars() {
-        let output = "ActiveState=active\nDescription=nginx — высокопроизводительный сервер\nMainPID=100";
+        let output =
+            "ActiveState=active\nDescription=nginx — высокопроизводительный сервер\nMainPID=100";
         let props = parse_systemctl_show(output);
         assert!(props.get("Description").unwrap().contains("nginx"));
     }
@@ -527,7 +569,10 @@ mod tests {
 
         // Non-numeric value
         let mut props2 = std::collections::HashMap::new();
-        props2.insert("ActiveEnterTimestampMonotonic".to_string(), "n/a".to_string());
+        props2.insert(
+            "ActiveEnterTimestampMonotonic".to_string(),
+            "n/a".to_string(),
+        );
         let uptime2 = parse_uptime_secs(&props2);
         assert!(uptime2.is_none());
     }
@@ -559,12 +604,16 @@ mod tests {
 
     #[test]
     fn test_parse_svc_list_line_active_running() {
-        let line = "cron.service loaded active running Regular background program processing daemon";
+        let line =
+            "cron.service loaded active running Regular background program processing daemon";
         let svc = parse_svc_list_line(line).unwrap();
         assert_eq!(svc.name, "cron");
         assert!(svc.active);
         assert_eq!(svc.state, SvcState::Running);
-        assert_eq!(svc.description, Some("Regular background program processing daemon".to_string()));
+        assert_eq!(
+            svc.description,
+            Some("Regular background program processing daemon".to_string())
+        );
     }
 
     #[test]

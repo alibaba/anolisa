@@ -117,8 +117,7 @@ impl ContentGenerator for OpenAICompatProvider {
         }
 
         let cancelled = Arc::clone(&self.cancelled);
-        let thinking_field: Option<String> =
-            self.profile.thinking_field().map(|s| s.to_string());
+        let thinking_field: Option<String> = self.profile.thinking_field().map(|s| s.to_string());
         let byte_stream = response.bytes_stream();
         let buffer = String::new();
         let event_queue: Vec<GenerateEvent> = Vec::new();
@@ -192,7 +191,13 @@ impl ContentGenerator for OpenAICompatProvider {
                                                     pending = events;
                                                     return Some((
                                                         first,
-                                                        (stream, buf, cancelled, pending, thinking_field),
+                                                        (
+                                                            stream,
+                                                            buf,
+                                                            cancelled,
+                                                            pending,
+                                                            thinking_field,
+                                                        ),
                                                     ));
                                                 }
                                             }
@@ -218,10 +223,7 @@ impl ContentGenerator for OpenAICompatProvider {
     }
 }
 
-fn parse_sse_chunk(
-    chunk: &Value,
-    thinking_field: Option<&str>,
-) -> Option<Vec<GenerateEvent>> {
+fn parse_sse_chunk(chunk: &Value, thinking_field: Option<&str>) -> Option<Vec<GenerateEvent>> {
     let mut events = Vec::new();
 
     if let Some(choices) = chunk.get("choices").and_then(|c| c.as_array()) {
@@ -243,8 +245,7 @@ fn parse_sse_chunk(
 
                 if let Some(tool_calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
                     for tc in tool_calls {
-                        let index =
-                            tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
+                        let index = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
 
                         if let Some(function) = tc.get("function") {
                             if let Some(name) = function.get("name").and_then(|n| n.as_str()) {
@@ -260,9 +261,7 @@ fn parse_sse_chunk(
                                 });
                             }
 
-                            if let Some(args) =
-                                function.get("arguments").and_then(|a| a.as_str())
-                            {
+                            if let Some(args) = function.get("arguments").and_then(|a| a.as_str()) {
                                 if !args.is_empty() {
                                     events.push(GenerateEvent::ToolCallDelta {
                                         index,

@@ -172,9 +172,7 @@ fn io_err(op: &str, path: &Path, e: std::io::Error) -> CoshError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cosh_types::audit::{
-        Action, ActionSubsystem, Decision, LogEntry, LogSource, Outcome,
-    };
+    use cosh_types::audit::{Action, ActionSubsystem, Decision, LogEntry, LogSource, Outcome};
 
     fn sample_entry(seq: u32) -> LogEntry {
         LogEntry {

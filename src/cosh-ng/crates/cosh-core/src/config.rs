@@ -182,7 +182,12 @@ fn expand_env_vars(s: &str) -> String {
         if let Some(end) = result[start..].find('}') {
             let var_name = &result[start + 2..start + end];
             let replacement = std::env::var(var_name).unwrap_or_default();
-            result = format!("{}{}{}", &result[..start], replacement, &result[start + end + 1..]);
+            result = format!(
+                "{}{}{}",
+                &result[..start],
+                replacement,
+                &result[start + end + 1..]
+            );
         } else {
             break;
         }
@@ -260,9 +265,7 @@ impl CoreConfig {
             .and_then(|p| p.base_url.as_deref())
             .map(expand_env_vars)
             .or_else(|| std::env::var("OPENAI_BASE_URL").ok())
-            .unwrap_or_else(|| {
-                "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string()
-            });
+            .unwrap_or_else(|| "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string());
 
         let api_key = provider_cfg
             .and_then(|p| p.api_key.as_deref())
@@ -330,8 +333,7 @@ pub struct ResolvedProvider {
 /// Only writes the [ai] section to avoid overwriting other settings.
 pub fn persist_config(config: &CoreConfig) -> Result<(), String> {
     let dir = config_dir();
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("Failed to create config dir: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create config dir: {e}"))?;
 
     let config_path = dir.join("config.toml");
 
@@ -355,13 +357,22 @@ pub fn persist_config(config: &CoreConfig) -> Result<(), String> {
 
     preserved.push_str("[ai]\n");
     if let Some(ref active) = config.ai.active_provider {
-        preserved.push_str(&format!("active_provider = \"{}\"\n", escape_toml_value(active)));
+        preserved.push_str(&format!(
+            "active_provider = \"{}\"\n",
+            escape_toml_value(active)
+        ));
     }
     if let Some(ref model) = config.ai.active_model {
-        preserved.push_str(&format!("active_model = \"{}\"\n", escape_toml_value(model)));
+        preserved.push_str(&format!(
+            "active_model = \"{}\"\n",
+            escape_toml_value(model)
+        ));
     }
     if let Some(ref lang) = config.ai.output_language {
-        preserved.push_str(&format!("output_language = \"{}\"\n", escape_toml_value(lang)));
+        preserved.push_str(&format!(
+            "output_language = \"{}\"\n",
+            escape_toml_value(lang)
+        ));
     }
     if let Some(ref thinking) = config.ai.thinking {
         preserved.push_str(&format!("thinking = \"{}\"\n", escape_toml_value(thinking)));
@@ -386,7 +397,10 @@ pub fn persist_config(config: &CoreConfig) -> Result<(), String> {
             preserved.push_str(&format!("access_key_id = \"{}\"\n", escape_toml_value(ak)));
         }
         if let Some(ref sk) = provider.access_key_secret {
-            preserved.push_str(&format!("access_key_secret = \"{}\"\n", escape_toml_value(sk)));
+            preserved.push_str(&format!(
+                "access_key_secret = \"{}\"\n",
+                escape_toml_value(sk)
+            ));
         }
         if let Some(ref st) = provider.security_token {
             preserved.push_str(&format!("security_token = \"{}\"\n", escape_toml_value(st)));
@@ -396,8 +410,7 @@ pub fn persist_config(config: &CoreConfig) -> Result<(), String> {
 
     let pid = std::process::id();
     let tmp_path = dir.join(format!("config.toml.tmp.{pid}"));
-    std::fs::write(&tmp_path, &preserved)
-        .map_err(|e| format!("Failed to write config: {e}"))?;
+    std::fs::write(&tmp_path, &preserved).map_err(|e| format!("Failed to write config: {e}"))?;
 
     #[cfg(unix)]
     {
@@ -406,17 +419,18 @@ pub fn persist_config(config: &CoreConfig) -> Result<(), String> {
         let _ = std::fs::set_permissions(&tmp_path, perms);
     }
 
-    std::fs::rename(&tmp_path, &config_path)
-        .map_err(|e| {
-            let _ = std::fs::remove_file(&tmp_path);
-            format!("Failed to rename config: {e}")
-        })?;
+    std::fs::rename(&tmp_path, &config_path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        format!("Failed to rename config: {e}")
+    })?;
 
     Ok(())
 }
 
 fn escape_toml_value(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }
 
 #[cfg(test)]

@@ -57,9 +57,7 @@ impl CallerInfo {
         let session_id = std::env::var("COSH_SESSION_ID")
             .ok()
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| {
-                format!("p{}-t{}", std::process::id(), Utc::now().timestamp())
-            });
+            .unwrap_or_else(|| format!("p{}-t{}", std::process::id(), Utc::now().timestamp()));
         let sudo_user = std::env::var("SUDO_USER").ok().filter(|s| !s.is_empty());
         let uid = nix::unistd::Uid::current().as_raw();
         let euid = nix::unistd::Uid::effective().as_raw();
@@ -150,7 +148,9 @@ mod tests {
     /// otherwise race and overwrite each other's log paths.
     fn env_lock() -> MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     struct LogEnvGuard {
@@ -162,7 +162,10 @@ mod tests {
         let lock = env_lock();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("COSH_AUDIT_LOG", dir.path().join("audit.log"));
-        LogEnvGuard { _dir: dir, _lock: lock }
+        LogEnvGuard {
+            _dir: dir,
+            _lock: lock,
+        }
     }
 
     fn pkg_install() -> Action {

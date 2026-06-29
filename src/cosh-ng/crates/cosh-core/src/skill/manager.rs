@@ -31,7 +31,11 @@ impl SkillManager {
     /// * `custom_paths` – already-expanded custom skill directory paths from
     ///   config (`skills.custom_paths`).
     /// * `extension_paths` – skill directories contributed by loaded extensions.
-    pub fn new(project_root: PathBuf, custom_paths: Vec<PathBuf>, extension_paths: Vec<PathBuf>) -> Arc<Self> {
+    pub fn new(
+        project_root: PathBuf,
+        custom_paths: Vec<PathBuf>,
+        extension_paths: Vec<PathBuf>,
+    ) -> Arc<Self> {
         let (change_tx, _) = broadcast::channel(16);
         Arc::new(Self {
             cache: RwLock::new(HashMap::new()),
@@ -90,8 +94,7 @@ impl SkillManager {
             let mut custom_skills: Vec<SkillConfig> = Vec::new();
             for custom_path in &self.custom_paths {
                 if custom_path.exists() {
-                    let skills =
-                        loader::load_skills_from_dir(custom_path, SkillLevel::Custom);
+                    let skills = loader::load_skills_from_dir(custom_path, SkillLevel::Custom);
                     custom_skills.extend(skills);
                 }
             }
@@ -105,8 +108,7 @@ impl SkillManager {
             let mut ext_skills: Vec<SkillConfig> = Vec::new();
             for ext_path in &self.extension_paths {
                 if ext_path.exists() {
-                    let skills =
-                        loader::load_skills_from_dir(ext_path, SkillLevel::Extension);
+                    let skills = loader::load_skills_from_dir(ext_path, SkillLevel::Extension);
                     ext_skills.extend(skills);
                 }
             }
@@ -224,11 +226,7 @@ impl SkillManager {
                 if home.is_some() && home == project {
                     None
                 } else {
-                    Some(
-                        self.project_root
-                            .join(COPILOT_CONFIG_DIR)
-                            .join(SKILLS_DIR),
-                    )
+                    Some(self.project_root.join(COPILOT_CONFIG_DIR).join(SKILLS_DIR))
                 }
             }
             SkillLevel::Custom => None, // custom paths are iterated separately
@@ -308,7 +306,11 @@ fn expand_env_vars(s: &str) -> String {
     let mut out = String::new();
     let mut chars = result.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '$' && chars.peek().is_some_and(|c| c.is_ascii_alphabetic() || *c == '_') {
+        if c == '$'
+            && chars
+                .peek()
+                .is_some_and(|c| c.is_ascii_alphabetic() || *c == '_')
+        {
             let mut var = String::new();
             while chars
                 .peek()
@@ -344,10 +346,7 @@ mod tests {
     }
 
     /// Create an isolated manager that only scans project + custom dirs.
-    fn isolated_manager(
-        project_root: &Path,
-        custom_paths: Vec<PathBuf>,
-    ) -> Arc<SkillManager> {
+    fn isolated_manager(project_root: &Path, custom_paths: Vec<PathBuf>) -> Arc<SkillManager> {
         let empty = tempfile::tempdir().unwrap();
         SkillManager::new_isolated(
             project_root.to_path_buf(),
@@ -362,9 +361,7 @@ mod tests {
         std::fs::create_dir_all(&skills_dir).unwrap();
         std::fs::write(
             skills_dir.join(format!("{skill_name}.md")),
-            format!(
-                "---\nname: {skill_name}\ndescription: flat desc\n---\n\nFlat body."
-            ),
+            format!("---\nname: {skill_name}\ndescription: flat desc\n---\n\nFlat body."),
         )
         .unwrap();
     }
@@ -375,10 +372,7 @@ mod tests {
         let user_dir = tempfile::tempdir().unwrap();
 
         // Create a user-level skill
-        let user_skills = user_dir
-            .path()
-            .join(COPILOT_CONFIG_DIR)
-            .join(SKILLS_DIR);
+        let user_skills = user_dir.path().join(COPILOT_CONFIG_DIR).join(SKILLS_DIR);
         std::fs::create_dir_all(user_skills.join("shared")).unwrap();
         std::fs::write(
             user_skills.join("shared").join("SKILL.md"),
@@ -416,10 +410,7 @@ mod tests {
         .unwrap();
 
         let project_dir = tempfile::tempdir().unwrap();
-        let mgr = isolated_manager(
-            project_dir.path(),
-            vec![custom_dir.path().to_path_buf()],
-        );
+        let mgr = isolated_manager(project_dir.path(), vec![custom_dir.path().to_path_buf()]);
         mgr.refresh().await;
 
         let all = mgr.list().await;
@@ -455,10 +446,7 @@ mod tests {
         let project_dir = tempfile::tempdir().unwrap();
         let custom_dir = tempfile::tempdir().unwrap();
 
-        let mgr = isolated_manager(
-            project_dir.path(),
-            vec![custom_dir.path().to_path_buf()],
-        );
+        let mgr = isolated_manager(project_dir.path(), vec![custom_dir.path().to_path_buf()]);
         mgr.refresh().await;
         assert!(mgr.list().await.is_empty());
 

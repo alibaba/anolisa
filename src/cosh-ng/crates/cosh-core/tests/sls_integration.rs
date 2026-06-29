@@ -52,7 +52,10 @@ fn user_message_produces_sls_record() {
         .unwrap();
 
     let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
-    assert!(!lines.is_empty(), "expected at least 1 SLS JSONL line, file was empty");
+    assert!(
+        !lines.is_empty(),
+        "expected at least 1 SLS JSONL line, file was empty"
+    );
 
     let record: Value = serde_json::from_str(lines[0]).expect("SLS record should be valid JSON");
 

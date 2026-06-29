@@ -55,11 +55,7 @@ pub struct SysomProvider {
 }
 
 impl SysomProvider {
-    pub fn new(
-        access_key_id: &str,
-        access_key_secret: &str,
-        security_token: Option<&str>,
-    ) -> Self {
+    pub fn new(access_key_id: &str, access_key_secret: &str, security_token: Option<&str>) -> Self {
         let is_sts = security_token.is_some();
         let instance_id = resolve_instance_id();
         Self {
@@ -119,9 +115,7 @@ impl SysomProvider {
         }
 
         if let Some(extra) = &config.extra_params {
-            if let (Some(inner_obj), Some(extra_obj)) =
-                (inner.as_object_mut(), extra.as_object())
-            {
+            if let (Some(inner_obj), Some(extra_obj)) = (inner.as_object_mut(), extra.as_object()) {
                 for (k, v) in extra_obj {
                     inner_obj.insert(k.clone(), v.clone());
                 }
@@ -170,7 +164,7 @@ impl SysomProvider {
             "{}\n{}\n{}\n{}\n{}\n{}",
             method,
             pathname,
-            "",  // query string (empty)
+            "", // query string (empty)
             canonical_headers,
             signed_headers_str,
             hashed_payload,
@@ -181,7 +175,10 @@ impl SysomProvider {
         let string_to_sign = format!("{}\n{}", signature_algorithm, hashed_canonical);
 
         // Signature
-        let signature = hex_hmac_sha256(creds.access_key_secret.as_bytes(), string_to_sign.as_bytes());
+        let signature = hex_hmac_sha256(
+            creds.access_key_secret.as_bytes(),
+            string_to_sign.as_bytes(),
+        );
 
         format!(
             "{} Credential={},SignedHeaders={},Signature={}",
@@ -227,10 +224,7 @@ impl ContentGenerator for SysomProvider {
 
 impl SysomProvider {
     /// Send a streaming request using current credentials.
-    async fn do_streaming_request(
-        &self,
-        body_bytes: &[u8],
-    ) -> Result<GenerateStream, String> {
+    async fn do_streaming_request(&self, body_bytes: &[u8]) -> Result<GenerateStream, String> {
         let creds = self.credentials.read().unwrap().clone();
         let url = format!("https://{}{}", self.endpoint, API_PATH);
         let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
@@ -244,10 +238,7 @@ impl SysomProvider {
             ("x-acs-action".to_string(), API_ACTION.to_string()),
             ("x-acs-date".to_string(), timestamp.clone()),
             ("x-acs-signature-nonce".to_string(), nonce.clone()),
-            (
-                "x-acs-content-sha256".to_string(),
-                hashed_payload.clone(),
-            ),
+            ("x-acs-content-sha256".to_string(), hashed_payload.clone()),
             (
                 "content-type".to_string(),
                 "application/json; charset=utf-8".to_string(),
@@ -255,11 +246,15 @@ impl SysomProvider {
         ];
 
         if let Some(ref token) = creds.security_token {
-            sign_headers.push(("x-acs-accesskey-id".to_string(), creds.access_key_id.clone()));
+            sign_headers.push((
+                "x-acs-accesskey-id".to_string(),
+                creds.access_key_id.clone(),
+            ));
             sign_headers.push(("x-acs-security-token".to_string(), token.clone()));
         }
 
-        let authorization = self.sign_request("POST", API_PATH, &sign_headers, &hashed_payload, &creds);
+        let authorization =
+            self.sign_request("POST", API_PATH, &sign_headers, &hashed_payload, &creds);
 
         // Build reqwest request
         let client = reqwest::Client::new();
@@ -342,8 +337,7 @@ impl SysomProvider {
                             if !buf.trim().is_empty() {
                                 let event_block = buf.trim().to_string();
                                 buf.clear();
-                                if let Some(event) =
-                                    parse_sysom_sse_event(&event_block, &mut state)
+                                if let Some(event) = parse_sysom_sse_event(&event_block, &mut state)
                                 {
                                     return Some((event, (stream, buf, cancelled, state)));
                                 }
@@ -510,10 +504,8 @@ fn parse_sysom_sse_event(block: &str, state: &mut SseParseState) -> Option<Gener
                             .and_then(|n| n.as_str())
                             .unwrap_or("")
                             .to_string();
-                        let index = new_tc
-                            .get("index")
-                            .and_then(|i| i.as_u64())
-                            .unwrap_or(0) as u32;
+                        let index =
+                            new_tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
 
                         return Some(GenerateEvent::ToolCallStart { index, id, name });
                     }
@@ -651,8 +643,7 @@ fn hex_sha256(data: &[u8]) -> String {
 }
 
 fn hex_hmac_sha256(key: &[u8], data: &[u8]) -> String {
-    let mut mac =
-        HmacSha256::new_from_slice(key).expect("HMAC can take key of any size");
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC can take key of any size");
     mac.update(data);
     hex::encode(mac.finalize().into_bytes())
 }

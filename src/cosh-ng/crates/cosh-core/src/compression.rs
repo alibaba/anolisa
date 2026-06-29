@@ -95,10 +95,7 @@ mod tests {
 
     #[test]
     fn estimate_tokens_basic() {
-        let messages = vec![
-            Message::user("hello world"),
-            Message::assistant("hi there"),
-        ];
+        let messages = vec![Message::user("hello world"), Message::assistant("hi there")];
         let tokens = ChatCompression::estimate_tokens(&messages);
         assert!(tokens > 0);
     }
@@ -106,10 +103,7 @@ mod tests {
     #[test]
     fn no_compression_needed_for_short_conversations() {
         let cc = ChatCompression::new(128_000);
-        let messages = vec![
-            Message::user("hello"),
-            Message::assistant("hi"),
-        ];
+        let messages = vec![Message::user("hello"), Message::assistant("hi")];
         assert!(!cc.needs_compression(&messages));
     }
 
@@ -117,7 +111,11 @@ mod tests {
     fn compression_needed_for_long_conversations() {
         let cc = ChatCompression::new(100);
         let messages: Vec<Message> = (0..50)
-            .map(|i| Message::user(&format!("message {i} with some content to inflate token count")))
+            .map(|i| {
+                Message::user(&format!(
+                    "message {i} with some content to inflate token count"
+                ))
+            })
             .collect();
         assert!(cc.needs_compression(&messages));
     }
@@ -139,10 +137,7 @@ mod tests {
     #[test]
     fn compress_too_short_returns_original() {
         let cc = ChatCompression::new(128_000);
-        let messages = vec![
-            Message::user("a"),
-            Message::assistant("b"),
-        ];
+        let messages = vec![Message::user("a"), Message::assistant("b")];
         let compressed = cc.compress(&messages);
         assert_eq!(compressed.len(), messages.len());
     }

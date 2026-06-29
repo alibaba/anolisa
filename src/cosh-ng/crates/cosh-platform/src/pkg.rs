@@ -10,7 +10,11 @@ use crate::detect::{Distro, PkgManager};
 use crate::{run_command, PKG_TIMEOUT};
 
 /// Execute a package install operation on the detected distro.
-pub fn pkg_install(distro: &Distro, package: &str, dry_run: bool) -> Result<PkgInstallResult, CoshError> {
+pub fn pkg_install(
+    distro: &Distro,
+    package: &str,
+    dry_run: bool,
+) -> Result<PkgInstallResult, CoshError> {
     let mgr = distro.pkg_manager();
     let (cmd, args) = match mgr {
         PkgManager::Dnf => ("dnf", build_dnf_install_args(package, dry_run)),
@@ -36,11 +40,7 @@ pub fn pkg_install(distro: &Distro, package: &str, dry_run: bool) -> Result<PkgI
         });
     }
 
-    let output = run_command(
-        Command::new(cmd).args(&args),
-        PKG_TIMEOUT,
-        "pkg",
-    )?;
+    let output = run_command(Command::new(cmd).args(&args), PKG_TIMEOUT, "pkg")?;
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -73,7 +73,10 @@ pub fn pkg_install(distro: &Distro, package: &str, dry_run: bool) -> Result<PkgI
                 "pkg",
             )
             .recoverable(true)
-            .with_hint(format!("Try 'cosh pkg search {}' to check availability", package)))
+            .with_hint(format!(
+                "Try 'cosh pkg search {}' to check availability",
+                package
+            )))
         }
     }
 }
@@ -95,11 +98,7 @@ pub fn pkg_search(distro: &Distro, query: &str) -> Result<PkgSearchResult, CoshE
         }
     };
 
-    let output = run_command(
-        Command::new(cmd).args(&args),
-        PKG_TIMEOUT,
-        "pkg",
-    )?;
+    let output = run_command(Command::new(cmd).args(&args), PKG_TIMEOUT, "pkg")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut packages = parse_search_output(&stdout, mgr);
@@ -141,11 +140,7 @@ pub fn pkg_list(distro: &Distro, installed_only: bool) -> Result<PkgListResult, 
         }
     };
 
-    let output = run_command(
-        Command::new(cmd).args(&args),
-        PKG_TIMEOUT,
-        "pkg",
-    )?;
+    let output = run_command(Command::new(cmd).args(&args), PKG_TIMEOUT, "pkg")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let packages = match mgr {
@@ -161,7 +156,11 @@ pub fn pkg_list(distro: &Distro, installed_only: bool) -> Result<PkgListResult, 
 }
 
 /// Execute a package remove operation.
-pub fn pkg_remove(distro: &Distro, package: &str, dry_run: bool) -> Result<PkgRemoveResult, CoshError> {
+pub fn pkg_remove(
+    distro: &Distro,
+    package: &str,
+    dry_run: bool,
+) -> Result<PkgRemoveResult, CoshError> {
     let mgr = distro.pkg_manager();
     let (cmd, args) = match mgr {
         PkgManager::Dnf => ("dnf", build_dnf_remove_args(package, dry_run)),
@@ -185,11 +184,7 @@ pub fn pkg_remove(distro: &Distro, package: &str, dry_run: bool) -> Result<PkgRe
         });
     }
 
-    let output = run_command(
-        Command::new(cmd).args(&args),
-        PKG_TIMEOUT,
-        "pkg",
-    )?;
+    let output = run_command(Command::new(cmd).args(&args), PKG_TIMEOUT, "pkg")?;
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -230,8 +225,7 @@ fn is_already_installed(stdout: &str) -> bool {
 
 /// Detect whether remove output indicates the package was not found.
 fn is_remove_not_found(stdout: &str) -> bool {
-    stdout.contains("No match for argument")
-        || stdout.contains("No packages marked for removal")
+    stdout.contains("No match for argument") || stdout.contains("No packages marked for removal")
 }
 
 // --- Argument builders ---
@@ -292,15 +286,18 @@ fn get_installed_names(mgr: PkgManager) -> HashSet<String> {
     let result = match mgr {
         PkgManager::Dnf => run_command(
             Command::new("rpm").args(["-qa", "--qf", "%{NAME}\n"]),
-            PKG_TIMEOUT, "pkg",
+            PKG_TIMEOUT,
+            "pkg",
         ),
         PkgManager::Apt => run_command(
             Command::new("dpkg-query").args(["-W", "-f", "${Package}\n"]),
-            PKG_TIMEOUT, "pkg",
+            PKG_TIMEOUT,
+            "pkg",
         ),
         PkgManager::Brew => run_command(
             Command::new("brew").args(["list", "--formula", "-1"]),
-            PKG_TIMEOUT, "pkg",
+            PKG_TIMEOUT,
+            "pkg",
         ),
         PkgManager::Zypper | PkgManager::Unknown => return HashSet::new(),
     };
@@ -332,19 +329,23 @@ fn parse_installed_version(package: &str, mgr: PkgManager) -> String {
     let result = match mgr {
         PkgManager::Dnf => run_command(
             Command::new("rpm").args(["-q", "--qf", "%{VERSION}-%{RELEASE}", package]),
-            PKG_TIMEOUT, "pkg",
+            PKG_TIMEOUT,
+            "pkg",
         ),
         PkgManager::Apt => run_command(
             Command::new("dpkg-query").args(["-W", "-f", "${Version}", package]),
-            PKG_TIMEOUT, "pkg",
+            PKG_TIMEOUT,
+            "pkg",
         ),
         PkgManager::Zypper => run_command(
             Command::new("rpm").args(["-q", "--qf", "%{VERSION}-%{RELEASE}", package]),
-            PKG_TIMEOUT, "pkg",
+            PKG_TIMEOUT,
+            "pkg",
         ),
         PkgManager::Brew => run_command(
             Command::new("brew").args(["list", "--versions", package]),
-            PKG_TIMEOUT, "pkg",
+            PKG_TIMEOUT,
+            "pkg",
         ),
         PkgManager::Unknown => return String::new(),
     };
@@ -400,8 +401,16 @@ fn parse_search_output(stdout: &str, mgr: PkgManager) -> Vec<PkgSearchEntry> {
                 if parts.len() >= 3 {
                     results.push(PkgSearchEntry {
                         name: parts[1].trim().to_string(),
-                        version: if parts.len() > 3 { parts[3].trim().to_string() } else { String::new() },
-                        summary: if parts.len() > 2 { parts[2].trim().to_string() } else { String::new() },
+                        version: if parts.len() > 3 {
+                            parts[3].trim().to_string()
+                        } else {
+                            String::new()
+                        },
+                        summary: if parts.len() > 2 {
+                            parts[2].trim().to_string()
+                        } else {
+                            String::new()
+                        },
                         installed: parts[0].trim() == "i",
                     });
                 }
@@ -513,13 +522,21 @@ fn parse_zypper_list_output(output: &str) -> Vec<PkgListEntry> {
             let version = parts[3].trim().to_string();
             let arch = if parts.len() > 4 {
                 let a = parts[4].trim();
-                if a.is_empty() { None } else { Some(a.to_string()) }
+                if a.is_empty() {
+                    None
+                } else {
+                    Some(a.to_string())
+                }
             } else {
                 None
             };
             let repo = if parts.len() > 5 {
                 let r = parts[5].trim();
-                if r.is_empty() { None } else { Some(r.to_string()) }
+                if r.is_empty() {
+                    None
+                } else {
+                    Some(r.to_string())
+                }
             } else {
                 None
             };
@@ -620,7 +637,10 @@ mod tests {
         let results = parse_search_output(output, PkgManager::Apt);
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].name, "nginx");
-        assert_eq!(results[0].summary, "small, powerful, scalable web/proxy server");
+        assert_eq!(
+            results[0].summary,
+            "small, powerful, scalable web/proxy server"
+        );
         assert_eq!(results[1].name, "nginx-common");
     }
 
@@ -704,7 +724,9 @@ mod tests {
 
     #[test]
     fn test_pkg_install_dry_run() {
-        let distro = Distro::Alinux { version: "3".into() };
+        let distro = Distro::Alinux {
+            version: "3".into(),
+        };
         let result = pkg_install(&distro, "nginx", true).unwrap();
         assert_eq!(result.package, "nginx");
         assert_eq!(result.version, "(dry-run)");
@@ -712,7 +734,9 @@ mod tests {
 
     #[test]
     fn test_pkg_remove_dry_run() {
-        let distro = Distro::Ubuntu { version: "22.04".into() };
+        let distro = Distro::Ubuntu {
+            version: "22.04".into(),
+        };
         let result = pkg_remove(&distro, "nginx", true).unwrap();
         assert_eq!(result.package, "nginx");
         assert_eq!(result.version_removed, "(dry-run)");
@@ -805,7 +829,9 @@ mod tests {
 
     #[test]
     fn test_pkg_install_dry_run_brew() {
-        let distro = Distro::MacOS { version: "15.4".into() };
+        let distro = Distro::MacOS {
+            version: "15.4".into(),
+        };
         let result = pkg_install(&distro, "wget", true).unwrap();
         assert_eq!(result.package, "wget");
         assert_eq!(result.version, "(dry-run)");
@@ -813,7 +839,9 @@ mod tests {
 
     #[test]
     fn test_pkg_remove_dry_run_brew() {
-        let distro = Distro::MacOS { version: "15.4".into() };
+        let distro = Distro::MacOS {
+            version: "15.4".into(),
+        };
         let result = pkg_remove(&distro, "wget", true).unwrap();
         assert_eq!(result.package, "wget");
         assert_eq!(result.version_removed, "(dry-run)");
@@ -983,13 +1011,14 @@ mod tests {
         }
 
         assert_eq!(packages.len(), 2);
-        assert!(packages[0].installed);   // bash is installed
-        assert!(!packages[1].installed);  // nginx is not
+        assert!(packages[0].installed); // bash is installed
+        assert!(!packages[1].installed); // nginx is not
     }
 
     #[test]
     fn test_search_marks_installed_apt() {
-        let search_output = "bash - The GNU Bourne Again shell\nnginx - A high performance web server\n";
+        let search_output =
+            "bash - The GNU Bourne Again shell\nnginx - A high performance web server\n";
         let mut packages = parse_search_output(search_output, PkgManager::Apt);
 
         let mut installed_set = HashSet::new();

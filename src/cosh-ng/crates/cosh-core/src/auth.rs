@@ -5,8 +5,7 @@ use tokio::io::AsyncBufReadExt;
 
 use crate::config::{CoreConfig, ProviderConfig};
 use crate::protocol::{
-    AuthField, AuthProvider, ControlResponseBody, InputMessage,
-    ShellControlRequest,
+    AuthField, AuthProvider, ControlResponseBody, InputMessage, ShellControlRequest,
 };
 
 /// Timeout for waiting for auth response from Shell.
@@ -22,9 +21,7 @@ pub fn builtin_auth_providers() -> Vec<AuthProvider> {
                 AuthField {
                     name: "api_key".to_string(),
                     label: "API Key".to_string(),
-                    hint: Some(
-                        "获取地址: https://dashscope.console.aliyun.com/apiKey".to_string(),
-                    ),
+                    hint: Some("获取地址: https://dashscope.console.aliyun.com/apiKey".to_string()),
                     secret: true,
                     required: true,
                     placeholder: None,
@@ -38,9 +35,7 @@ pub fn builtin_auth_providers() -> Vec<AuthProvider> {
                     placeholder: Some("qwen3.7-plus".to_string()),
                 },
             ],
-            builtin_base_url: Some(
-                "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
-            ),
+            builtin_base_url: Some("https://dashscope.aliyuncs.com/compatible-mode/v1".to_string()),
             builtin_provider_type: "dashscope".to_string(),
             builtin_default_model: Some("qwen3.7-plus".to_string()),
         },
@@ -138,24 +133,20 @@ pub fn apply_auth_credentials(config: &mut CoreConfig, response: &AuthResponse) 
             t.builtin_default_model.clone(),
         ),
         None => (
-            response
-                .values
-                .get("base_url")
-                .cloned()
-                .unwrap_or_default(),
+            response.values.get("base_url").cloned().unwrap_or_default(),
             "generic".to_string(),
             None,
         ),
     };
 
-    let user_model = response.values.get("model").filter(|m| !m.is_empty()).cloned();
+    let user_model = response
+        .values
+        .get("model")
+        .filter(|m| !m.is_empty())
+        .cloned();
     let final_model = user_model.or(default_model);
 
-    let api_key = response
-        .values
-        .get("api_key")
-        .cloned()
-        .unwrap_or_default();
+    let api_key = response.values.get("api_key").cloned().unwrap_or_default();
 
     // Aliyun provider uses AK/SK instead of API key
     let access_key_id = response.values.get("access_key_id").cloned();
@@ -325,7 +316,10 @@ mod tests {
         let response = AuthResponse {
             provider_id: "openai_compat".to_string(),
             values: HashMap::from([
-                ("base_url".to_string(), "https://api.openai.com/v1".to_string()),
+                (
+                    "base_url".to_string(),
+                    "https://api.openai.com/v1".to_string(),
+                ),
                 ("api_key".to_string(), "sk-openai".to_string()),
             ]),
             persist: false,
@@ -375,7 +369,10 @@ mod tests {
             answer: None,
             selected_options: None,
             provider_id: Some("dashscope".to_string()),
-            values: Some(HashMap::from([("api_key".to_string(), "sk-xxx".to_string())])),
+            values: Some(HashMap::from([(
+                "api_key".to_string(),
+                "sk-xxx".to_string(),
+            )])),
             persist: Some(true),
         };
         let resp = parse_auth_response(&body).unwrap();

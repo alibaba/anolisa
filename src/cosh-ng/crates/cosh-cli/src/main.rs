@@ -13,7 +13,11 @@ use cosh_platform::detect::Distro;
 use cosh_types::output::{CoshResponse, ResponseMeta};
 
 #[derive(Parser)]
-#[command(name = "cosh-cli", version, about = "Computable Operating System Harness — deterministic OS capability interface")]
+#[command(
+    name = "cosh-cli",
+    version,
+    about = "Computable Operating System Harness — deterministic OS capability interface"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -108,7 +112,13 @@ pub fn build_meta(subsystem: &str, distro: &Distro, start: Instant, dry_run: boo
 }
 
 /// Build ResponseMeta with a warning message.
-pub fn build_meta_with_warning(subsystem: &str, distro: &Distro, start: Instant, dry_run: bool, warning: &str) -> ResponseMeta {
+pub fn build_meta_with_warning(
+    subsystem: &str,
+    distro: &Distro,
+    start: Instant,
+    dry_run: bool,
+    warning: &str,
+) -> ResponseMeta {
     ResponseMeta {
         subsystem: subsystem.to_string(),
         duration_ms: start.elapsed().as_millis() as u64,

@@ -44,11 +44,7 @@ pub struct CoshError {
 }
 
 impl CoshError {
-    pub fn new(
-        code: ErrorCode,
-        message: impl Into<String>,
-        subsystem: impl Into<String>,
-    ) -> Self {
+    pub fn new(code: ErrorCode, message: impl Into<String>, subsystem: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),

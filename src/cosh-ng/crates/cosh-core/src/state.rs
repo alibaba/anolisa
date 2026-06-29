@@ -162,8 +162,7 @@ mod tests {
         add_disabled("test.json", "b").unwrap();
         add_disabled("test.json", "c").unwrap();
 
-        let to_remove: HashSet<String> =
-            ["a".to_string(), "c".to_string()].into_iter().collect();
+        let to_remove: HashSet<String> = ["a".to_string(), "c".to_string()].into_iter().collect();
         remove_disabled_set("test.json", &to_remove).unwrap();
 
         let loaded = load_disabled("test.json");

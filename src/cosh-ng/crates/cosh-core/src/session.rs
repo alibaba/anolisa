@@ -9,9 +9,7 @@ pub struct SessionStore {
 impl SessionStore {
     pub fn new(persist_dir: &str) -> Self {
         let base_dir = if persist_dir.starts_with('~') {
-            dirs::home_dir()
-                .unwrap_or_default()
-                .join(&persist_dir[2..])
+            dirs::home_dir().unwrap_or_default().join(&persist_dir[2..])
         } else {
             PathBuf::from(persist_dir)
         };
@@ -44,8 +42,7 @@ impl SessionStore {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read session file: {e}"))?;
 
-        serde_json::from_str(&content)
-            .map_err(|e| format!("Failed to parse session file: {e}"))
+        serde_json::from_str(&content).map_err(|e| format!("Failed to parse session file: {e}"))
     }
 
     pub fn list(&self) -> Vec<String> {
@@ -84,10 +81,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::new(dir.path().to_str().unwrap());
 
-        let messages = vec![
-            Message::user("hello"),
-            Message::assistant("hi there"),
-        ];
+        let messages = vec![Message::user("hello"), Message::assistant("hi there")];
 
         store.persist("test-session", &messages).unwrap();
         let loaded = store.resume("test-session").unwrap();

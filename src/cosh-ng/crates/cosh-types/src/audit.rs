@@ -167,12 +167,8 @@ impl Match {
 #[serde(untagged)]
 pub enum StringMatch {
     Exact(String),
-    OneOf {
-        one_of: Vec<String>,
-    },
-    Glob {
-        glob: String,
-    },
+    OneOf { one_of: Vec<String> },
+    Glob { glob: String },
 }
 
 /// Match an entry in `Action.args`. An ArgMatch fires when the action has at

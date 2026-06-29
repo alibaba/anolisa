@@ -451,7 +451,12 @@ impl OutputMessage {
         }
     }
 
-    pub fn hook_notification(hook_name: &str, message: &str, tool_use_id: Option<&str>, decision: Option<&str>) -> Self {
+    pub fn hook_notification(
+        hook_name: &str,
+        message: &str,
+        tool_use_id: Option<&str>,
+        decision: Option<&str>,
+    ) -> Self {
         Self::System {
             subtype: "hook_notification".to_string(),
             payload: SystemPayload {

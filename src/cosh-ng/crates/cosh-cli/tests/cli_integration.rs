@@ -114,7 +114,10 @@ fn test_audit_check_returns_deny_decision_for_rm() {
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "audit check should not fail-fast on a Deny decision");
+    assert!(
+        output.status.success(),
+        "audit check should not fail-fast on a Deny decision"
+    );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
 
     assert_eq!(json["ok"], true);
@@ -140,10 +143,14 @@ fn test_audit_check_structured_input_pkg_install_is_require_approval() {
     let log = dir.path().join("audit.log");
     let output = cosh_bin_with_audit_sandbox(&log)
         .args([
-            "audit", "check",
-            "--subsystem", "pkg",
-            "--operation", "install",
-            "--target", "nginx",
+            "audit",
+            "check",
+            "--subsystem",
+            "pkg",
+            "--operation",
+            "install",
+            "--target",
+            "nginx",
         ])
         .output()
         .unwrap();
@@ -159,7 +166,14 @@ fn test_audit_check_pkg_search_is_allow() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("audit.log");
     let output = cosh_bin_with_audit_sandbox(&log)
-        .args(["audit", "check", "--subsystem", "pkg", "--operation", "search"])
+        .args([
+            "audit",
+            "check",
+            "--subsystem",
+            "pkg",
+            "--operation",
+            "search",
+        ])
         .output()
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -204,7 +218,14 @@ fn test_audit_log_starts_empty_and_grows_with_check() {
 
     // Run a check, then expect 1 entry.
     let _ = cosh_bin_with_audit_sandbox(&log)
-        .args(["audit", "check", "--subsystem", "pkg", "--operation", "search"])
+        .args([
+            "audit",
+            "check",
+            "--subsystem",
+            "pkg",
+            "--operation",
+            "search",
+        ])
         .output()
         .unwrap();
     let output = cosh_bin_with_audit_sandbox(&log)
@@ -253,7 +274,10 @@ fn test_audit_policy_list_returns_three_presets() {
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let presets = json["data"]["presets"].as_array().unwrap();
-    let names: Vec<&str> = presets.iter().map(|p| p["name"].as_str().unwrap()).collect();
+    let names: Vec<&str> = presets
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
     assert!(names.contains(&"permissive"));
     assert!(names.contains(&"balanced"));
     assert!(names.contains(&"strict"));
@@ -325,7 +349,10 @@ fn test_audit_policy_explain_returns_match_decision() {
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["data"]["decision"]["outcome"], "Deny");
-    assert_eq!(json["data"]["decision"]["matched_rule"], "shell-deny-git-mutating");
+    assert_eq!(
+        json["data"]["decision"]["matched_rule"],
+        "shell-deny-git-mutating"
+    );
 }
 
 // --- 17+ bypass regressions migrated from cosh-core::is_safe_command ---
@@ -346,12 +373,20 @@ fn audit_check_outcome(audit_log: &Path, action: &str) -> String {
 
 fn assert_deny(audit_log: &Path, action: &str) {
     let outcome = audit_check_outcome(audit_log, action);
-    assert_eq!(outcome, "Deny", "expected Deny for {:?}, got {}", action, outcome);
+    assert_eq!(
+        outcome, "Deny",
+        "expected Deny for {:?}, got {}",
+        action, outcome
+    );
 }
 
 fn assert_allow(audit_log: &Path, action: &str) {
     let outcome = audit_check_outcome(audit_log, action);
-    assert_eq!(outcome, "Allow", "expected Allow for {:?}, got {}", action, outcome);
+    assert_eq!(
+        outcome, "Allow",
+        "expected Allow for {:?}, got {}",
+        action, outcome
+    );
 }
 
 #[test]
@@ -425,7 +460,11 @@ fn test_bypass_regression_safe_pair_install_subcommand() {
         "kubectl delete pod foo",
     ] {
         let outcome = audit_check_outcome(&log, cmd);
-        assert_ne!(outcome, "Allow", "{:?} must not be Allow, got {}", cmd, outcome);
+        assert_ne!(
+            outcome, "Allow",
+            "{:?} must not be Allow, got {}",
+            cmd, outcome
+        );
     }
     // ...but the read-only subcommands are.
     assert_allow(&log, "apt list --installed");
@@ -441,12 +480,18 @@ fn test_redacted_password_does_not_appear_in_log() {
     // Submit a structured action with a password arg.
     let _ = cosh_bin_with_audit_sandbox(&log)
         .args([
-            "audit", "check",
-            "--subsystem", "pkg",
-            "--operation", "install",
-            "--target", "nginx",
-            "--arg-key", "password",
-            "--arg-value", "hunter2",
+            "audit",
+            "check",
+            "--subsystem",
+            "pkg",
+            "--operation",
+            "install",
+            "--target",
+            "nginx",
+            "--arg-key",
+            "password",
+            "--arg-value",
+            "hunter2",
         ])
         .output()
         .unwrap();
@@ -455,7 +500,10 @@ fn test_redacted_password_does_not_appear_in_log() {
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(!stdout.contains("hunter2"), "raw password leaked into audit log output");
+    assert!(
+        !stdout.contains("hunter2"),
+        "raw password leaked into audit log output"
+    );
     assert!(stdout.contains("<redacted>"), "redacted marker missing");
 }
 
@@ -685,10 +733,7 @@ fn test_checkpoint_cleanup_daemon_unavailable() {
 
 #[test]
 fn test_pkg_search_bash_shows_installed() {
-    let output = cosh_bin()
-        .args(["pkg", "search", "bash"])
-        .output()
-        .unwrap();
+    let output = cosh_bin().args(["pkg", "search", "bash"]).output().unwrap();
 
     assert!(output.status.success());
 
@@ -700,12 +745,10 @@ fn test_pkg_search_bash_shows_installed() {
 
     // Find the entry named exactly "bash" — it must be marked installed
     let bash_entry = packages.iter().find(|p| p["name"] == "bash");
-    assert!(
-        bash_entry.is_some(),
-        "Expected 'bash' in search results"
-    );
+    assert!(bash_entry.is_some(), "Expected 'bash' in search results");
     assert_eq!(
-        bash_entry.unwrap()["installed"], true,
+        bash_entry.unwrap()["installed"],
+        true,
         "bash should be marked as installed"
     );
 }
@@ -773,10 +816,7 @@ fn test_pkg_remove_dry_run_json_envelope() {
 
 #[test]
 fn test_svc_list_json_envelope() {
-    let output = cosh_bin()
-        .args(["svc", "list"])
-        .output()
-        .unwrap();
+    let output = cosh_bin().args(["svc", "list"]).output().unwrap();
 
     assert!(output.status.success());
 
@@ -844,7 +884,12 @@ fn test_svc_status_nonexistent_service() {
 #[test]
 fn test_svc_enable_dry_run_json_envelope() {
     let output = cosh_bin()
-        .args(["svc", "enable", "--dry-run", "cosh-nonexistent-test-svc-xyz"])
+        .args([
+            "svc",
+            "enable",
+            "--dry-run",
+            "cosh-nonexistent-test-svc-xyz",
+        ])
         .output()
         .unwrap();
 
@@ -860,7 +905,12 @@ fn test_svc_enable_dry_run_json_envelope() {
 #[test]
 fn test_svc_disable_dry_run_json_envelope() {
     let output = cosh_bin()
-        .args(["svc", "disable", "--dry-run", "cosh-nonexistent-test-svc-xyz"])
+        .args([
+            "svc",
+            "disable",
+            "--dry-run",
+            "cosh-nonexistent-test-svc-xyz",
+        ])
         .output()
         .unwrap();
 

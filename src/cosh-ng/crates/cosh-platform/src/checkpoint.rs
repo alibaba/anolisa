@@ -204,7 +204,11 @@ impl CkptClient {
     }
 
     /// Cleanup old snapshots.
-    pub fn cleanup(&self, workspace: &str, keep: Option<u32>) -> Result<CkptCleanupResult, CoshError> {
+    pub fn cleanup(
+        &self,
+        workspace: &str,
+        keep: Option<u32>,
+    ) -> Result<CkptCleanupResult, CoshError> {
         let req = WsCkptRequest::Cleanup {
             workspace: workspace.to_string(),
             keep,
@@ -227,10 +231,7 @@ impl CkptClient {
         if !Path::new(&self.socket_path).exists() {
             return Err(CoshError::new(
                 ErrorCode::CheckpointDaemonUnavailable,
-                format!(
-                    "ws-ckpt daemon socket not found at {}",
-                    self.socket_path
-                ),
+                format!("ws-ckpt daemon socket not found at {}", self.socket_path),
                 "checkpoint",
             )
             .with_hint("Start daemon with: systemctl start ws-ckpt")
@@ -480,7 +481,9 @@ mod tests {
 
     #[test]
     fn test_encode_decode_frame() {
-        let req = WsCkptRequest::Status { workspace: Some("/tmp/ws".into()) };
+        let req = WsCkptRequest::Status {
+            workspace: Some("/tmp/ws".into()),
+        };
         let frame = encode_frame(&req).unwrap();
 
         // Frame should start with 4-byte LE length
@@ -497,7 +500,9 @@ mod tests {
 
     #[test]
     fn test_decode_response_valid() {
-        let resp = WsCkptResponse::CheckpointOk { snapshot_id: "snap-123".into() };
+        let resp = WsCkptResponse::CheckpointOk {
+            snapshot_id: "snap-123".into(),
+        };
         let data = bincode::serialize(&resp).unwrap();
         let decoded = decode_response(&data).unwrap();
         match decoded {

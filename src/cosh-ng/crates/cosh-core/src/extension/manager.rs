@@ -3,9 +3,7 @@ use std::path::PathBuf;
 
 use super::config::{flatten_hook_groups, ExtensionConfig, ExtensionHooks};
 use super::variables::{hydrate_config, VariableContext};
-use super::{
-    Extension, InstallMetadata, EXTENSION_CONFIG_FILENAME, INSTALL_METADATA_FILENAME,
-};
+use super::{Extension, InstallMetadata, EXTENSION_CONFIG_FILENAME, INSTALL_METADATA_FILENAME};
 
 /// Central manager for discovering, loading, and querying extensions.
 pub struct ExtensionManager {
@@ -148,11 +146,7 @@ impl ExtensionManager {
 
     // ─── Private helpers ─────────────────────────────────────────────
 
-    fn scan_directory(
-        &self,
-        dir: &PathBuf,
-        map: &mut HashMap<String, Extension>,
-    ) {
+    fn scan_directory(&self, dir: &PathBuf, map: &mut HashMap<String, Extension>) {
         let entries = match std::fs::read_dir(dir) {
             Ok(entries) => entries,
             Err(_) => return, // Directory doesn't exist or not readable
@@ -282,11 +276,8 @@ mod tests {
             r#"{"name": "my-ext", "version": "1.0.0"}"#,
         );
 
-        let mut mgr = ExtensionManager::new_isolated(
-            PathBuf::from("/workspace"),
-            Some(user_dir),
-            None,
-        );
+        let mut mgr =
+            ExtensionManager::new_isolated(PathBuf::from("/workspace"), Some(user_dir), None);
         mgr.refresh();
 
         assert_eq!(mgr.list().len(), 1);
@@ -345,11 +336,7 @@ mod tests {
             }"#,
         );
 
-        let mut mgr = ExtensionManager::new_isolated(
-            PathBuf::from("/ws"),
-            Some(user_dir),
-            None,
-        );
+        let mut mgr = ExtensionManager::new_isolated(PathBuf::from("/ws"), Some(user_dir), None);
         mgr.refresh();
 
         let hooks = mgr.hook_definitions();
@@ -378,11 +365,8 @@ mod tests {
             r#"{"name": "shared-ext", "version": "2.0.0"}"#,
         );
 
-        let mut mgr = ExtensionManager::new_isolated(
-            PathBuf::from("/ws"),
-            Some(user_dir),
-            Some(sys_dir),
-        );
+        let mut mgr =
+            ExtensionManager::new_isolated(PathBuf::from("/ws"), Some(user_dir), Some(sys_dir));
         mgr.refresh();
 
         assert_eq!(mgr.list().len(), 1);
@@ -430,17 +414,9 @@ mod tests {
         // Create dir WITHOUT cosh-extension.json
         fs::create_dir_all(user_dir.join("no-config")).unwrap();
         // Create one WITH config
-        create_extension_dir(
-            &user_dir,
-            "valid-ext",
-            r#"{"name": "valid-ext"}"#,
-        );
+        create_extension_dir(&user_dir, "valid-ext", r#"{"name": "valid-ext"}"#);
 
-        let mut mgr = ExtensionManager::new_isolated(
-            PathBuf::from("/ws"),
-            Some(user_dir),
-            None,
-        );
+        let mut mgr = ExtensionManager::new_isolated(PathBuf::from("/ws"), Some(user_dir), None);
         mgr.refresh();
 
         assert_eq!(mgr.list().len(), 1);
@@ -464,11 +440,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut mgr = ExtensionManager::new_isolated(
-            PathBuf::from("/ws"),
-            Some(user_dir),
-            None,
-        );
+        let mut mgr = ExtensionManager::new_isolated(PathBuf::from("/ws"), Some(user_dir), None);
         mgr.refresh();
 
         let ext = &mgr.list()[0];

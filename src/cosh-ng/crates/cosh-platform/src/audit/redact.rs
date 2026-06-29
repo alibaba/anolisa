@@ -7,13 +7,7 @@
 
 use cosh_types::audit::Action;
 
-const SENSITIVE_KEY_NEEDLES: &[&str] = &[
-    "password",
-    "secret",
-    "token",
-    "api_key",
-    "apikey",
-];
+const SENSITIVE_KEY_NEEDLES: &[&str] = &["password", "secret", "token", "api_key", "apikey"];
 
 const PEM_HEADERS: &[&str] = &[
     "BEGIN PRIVATE KEY",
@@ -62,7 +56,10 @@ mod tests {
             subsystem: ActionSubsystem::Pkg,
             operation: "install".to_string(),
             target: Some("nginx".to_string()),
-            args: args.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            args: args
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
             raw: None,
         }
     }
@@ -107,7 +104,10 @@ mod tests {
             operation: "echo".to_string(),
             target: None,
             args: vec![],
-            raw: Some("echo -----BEGIN PRIVATE KEY-----\\nMIIE...\\n-----END PRIVATE KEY-----".to_string()),
+            raw: Some(
+                "echo -----BEGIN PRIVATE KEY-----\\nMIIE...\\n-----END PRIVATE KEY-----"
+                    .to_string(),
+            ),
         };
         assert!(redact_action(&mut a));
         assert_eq!(a.raw.as_deref(), Some("<redacted-pem>"));

@@ -54,11 +54,16 @@ fn activity_row_model(row: &RuntimeActivityRow, language: Language) -> ActivityR
         status: &row.status,
         subject: &row.subject,
         summary: &row.summary,
-        tool: row.presentation.as_ref().map(|ActivityPresentation::Tool(presentation)| ActivityToolRowModel {
-                kind: presentation.kind,
-                name: &presentation.canonical_name,
-                primary: activity_tool_primary_cow(presentation, language),
-            }),
+        tool: row
+            .presentation
+            .as_ref()
+            .map(
+                |ActivityPresentation::Tool(presentation)| ActivityToolRowModel {
+                    kind: presentation.kind,
+                    name: &presentation.canonical_name,
+                    primary: activity_tool_primary_cow(presentation, language),
+                },
+            ),
     }
 }
 

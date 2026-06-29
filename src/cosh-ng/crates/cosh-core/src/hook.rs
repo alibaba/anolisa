@@ -173,16 +173,39 @@ impl HookSystem {
         };
 
         let mut hooks: HashMap<HookEventName, Vec<HookDefinition>> = HashMap::new();
-        hooks.insert(HookEventName::PreToolUse, filter_named(&config.pre_tool_use));
-        hooks.insert(HookEventName::PostToolUse, filter_named(&config.post_tool_use));
-        hooks.insert(HookEventName::PostToolUseFailure, filter_named(&config.post_tool_use_failure));
-        hooks.insert(HookEventName::UserPromptSubmit, filter_named(&config.user_prompt_submit));
-        hooks.insert(HookEventName::SessionStart, filter_named(&config.session_start));
+        hooks.insert(
+            HookEventName::PreToolUse,
+            filter_named(&config.pre_tool_use),
+        );
+        hooks.insert(
+            HookEventName::PostToolUse,
+            filter_named(&config.post_tool_use),
+        );
+        hooks.insert(
+            HookEventName::PostToolUseFailure,
+            filter_named(&config.post_tool_use_failure),
+        );
+        hooks.insert(
+            HookEventName::UserPromptSubmit,
+            filter_named(&config.user_prompt_submit),
+        );
+        hooks.insert(
+            HookEventName::SessionStart,
+            filter_named(&config.session_start),
+        );
         hooks.insert(HookEventName::Stop, filter_named(&config.stop));
-        hooks.insert(HookEventName::BeforeModel, filter_named(&config.before_model));
+        hooks.insert(
+            HookEventName::BeforeModel,
+            filter_named(&config.before_model),
+        );
         hooks.insert(HookEventName::AfterModel, filter_named(&config.after_model));
 
-        Self { enabled, disabled, hooks, run_id: None }
+        Self {
+            enabled,
+            disabled,
+            hooks,
+            run_id: None,
+        }
     }
 
     pub fn new_disabled() -> Self {
@@ -330,8 +353,7 @@ impl HookSystem {
                         pattern == name
                     }
                 };
-                matches_one(tool_name)
-                    || Self::tool_name_alias(tool_name).is_some_and(matches_one)
+                matches_one(tool_name) || Self::tool_name_alias(tool_name).is_some_and(matches_one)
             }
         }
     }
@@ -472,11 +494,7 @@ impl HookSystem {
         self.aggregate_user_prompt(outputs, &defs)
     }
 
-    pub async fn fire_session_start(
-        &self,
-        session_id: &str,
-        cwd: &str,
-    ) -> SessionStartResult {
+    pub async fn fire_session_start(&self, session_id: &str, cwd: &str) -> SessionStartResult {
         if !self.enabled {
             return SessionStartResult {
                 additional_context: None,
@@ -499,12 +517,7 @@ impl HookSystem {
         self.aggregate_session_start(outputs, &defs)
     }
 
-    pub async fn fire_stop(
-        &self,
-        session_id: &str,
-        cwd: &str,
-        last_message: &str,
-    ) -> StopResult {
+    pub async fn fire_stop(&self, session_id: &str, cwd: &str, last_message: &str) -> StopResult {
         if !self.enabled {
             return StopResult {
                 decision: HookDecision::Passthrough,
@@ -538,7 +551,10 @@ impl HookSystem {
         skill_context: Option<&Value>,
     ) -> PostToolUseFailureResult {
         if !self.enabled {
-            return PostToolUseFailureResult { notifications: vec![], sandbox_bypass_request: None };
+            return PostToolUseFailureResult {
+                notifications: vec![],
+                sandbox_bypass_request: None,
+            };
         }
 
         let defs: Vec<&HookDefinition> = self
@@ -548,7 +564,10 @@ impl HookSystem {
             .collect();
 
         if defs.is_empty() {
-            return PostToolUseFailureResult { notifications: vec![], sandbox_bypass_request: None };
+            return PostToolUseFailureResult {
+                notifications: vec![],
+                sandbox_bypass_request: None,
+            };
         }
 
         let mut event_data = serde_json::json!({
@@ -560,7 +579,12 @@ impl HookSystem {
         if let Some(ctx) = skill_context {
             event_data["skill_context"] = ctx.clone();
         }
-        let input = self.build_input(session_id, cwd, HookEventName::PostToolUseFailure, event_data);
+        let input = self.build_input(
+            session_id,
+            cwd,
+            HookEventName::PostToolUseFailure,
+            event_data,
+        );
         let outputs = self.run_hooks(&defs, &input).await;
 
         let mut notifications = Vec::new();
@@ -571,13 +595,17 @@ impl HookSystem {
             // Extract sandbox_bypass_request from hookSpecificOutput (last valid wins).
             if let Some(ref specific) = out.hook_specific_output {
                 if let Some(req) = specific.get("sandbox_bypass_request") {
-                    if let Ok(parsed) = serde_json::from_value::<SandboxBypassRequest>(req.clone()) {
+                    if let Ok(parsed) = serde_json::from_value::<SandboxBypassRequest>(req.clone())
+                    {
                         sandbox_bypass_request = Some(parsed);
                     }
                 }
             }
         }
-        PostToolUseFailureResult { notifications, sandbox_bypass_request }
+        PostToolUseFailureResult {
+            notifications,
+            sandbox_bypass_request,
+        }
     }
 
     /// Temporarily disable/enable a hook by name (used for sandbox bypass).
@@ -598,22 +626,29 @@ impl HookSystem {
         messages: &[crate::provider::Message],
     ) -> BeforeModelResult {
         if !self.enabled {
-            return BeforeModelResult { notifications: vec![] };
+            return BeforeModelResult {
+                notifications: vec![],
+            };
         }
 
         let defs = self.active_hooks(HookEventName::BeforeModel);
         if defs.is_empty() {
-            return BeforeModelResult { notifications: vec![] };
+            return BeforeModelResult {
+                notifications: vec![],
+            };
         }
 
         // 对齐 copilot-shell hookTranslator.toHookLLMRequest 格式：
         // llm_request 包含 model 和 messages 数组。
-        let hook_messages: Vec<serde_json::Value> = messages.iter().map(|m| {
-            serde_json::json!({
-                "role": &m.role,
-                "content": m.content.as_text(),
+        let hook_messages: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "role": &m.role,
+                    "content": m.content.as_text(),
+                })
             })
-        }).collect();
+            .collect();
 
         let event_data = serde_json::json!({
             "llm_request": {
@@ -643,23 +678,30 @@ impl HookSystem {
         usage: Option<(u32, u32, u32)>,
     ) -> AfterModelResult {
         if !self.enabled {
-            return AfterModelResult { notifications: vec![] };
+            return AfterModelResult {
+                notifications: vec![],
+            };
         }
 
         let defs = self.active_hooks(HookEventName::AfterModel);
         if defs.is_empty() {
-            return AfterModelResult { notifications: vec![] };
+            return AfterModelResult {
+                notifications: vec![],
+            };
         }
 
         // 对齐 copilot-shell hookTranslator 格式：
         // llm_request: {model, messages}
         // llm_response: {text, candidates, usageMetadata}
-        let hook_messages: Vec<serde_json::Value> = messages.iter().map(|m| {
-            serde_json::json!({
-                "role": &m.role,
-                "content": m.content.as_text(),
+        let hook_messages: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "role": &m.role,
+                    "content": m.content.as_text(),
+                })
             })
-        }).collect();
+            .collect();
 
         let mut llm_response = serde_json::json!({
             "text": response_text,
@@ -1010,9 +1052,7 @@ fn fold_decision(current: HookDecision, raw: Option<&str>, reason: Option<String
             // hook without a reason overwrite an existing detailed message.
             match (&current, &reason) {
                 (HookDecision::Block(_), None) => current,
-                _ => HookDecision::Block(
-                    reason.unwrap_or_else(|| "Blocked by hook".to_string()),
-                ),
+                _ => HookDecision::Block(reason.unwrap_or_else(|| "Blocked by hook".to_string())),
             }
         }
         Some("ask") => match current {
@@ -1065,7 +1105,8 @@ mod tests {
 
     #[test]
     fn parse_hook_output_allow_with_patch() {
-        let json = r#"{"decision":"allow","hook_specific_output":{"tool_input":{"safe_mode":true}}}"#;
+        let json =
+            r#"{"decision":"allow","hook_specific_output":{"tool_input":{"safe_mode":true}}}"#;
         let out: HookOutput = serde_json::from_str(json).unwrap();
         assert_eq!(out.decision.as_deref(), Some("allow"));
         let patch = out.hook_specific_output.unwrap();
@@ -1087,7 +1128,8 @@ mod tests {
     fn disabled_system_returns_passthrough() {
         let sys = HookSystem::new_disabled();
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(sys.fire_pre_tool_use("s1", "/tmp", "tool-1", "shell", &Value::Null, None));
+        let result =
+            rt.block_on(sys.fire_pre_tool_use("s1", "/tmp", "tool-1", "shell", &Value::Null, None));
         assert_eq!(result.decision, HookDecision::Passthrough);
     }
 
@@ -1147,7 +1189,10 @@ mod tests {
                 None,
             )
             .await;
-        assert_eq!(result.decision, HookDecision::Block("no rm allowed".to_string()));
+        assert_eq!(
+            result.decision,
+            HookDecision::Block("no rm allowed".to_string())
+        );
         assert!(!result.notifications.is_empty());
     }
 
@@ -1207,14 +1252,7 @@ mod tests {
         };
         let sys = HookSystem::from_config(&config);
         let result = sys
-            .fire_pre_tool_use(
-                "s1",
-                "/tmp",
-                "tool-1",
-                "any",
-                &serde_json::json!({}),
-                None,
-            )
+            .fire_pre_tool_use("s1", "/tmp", "tool-1", "any", &serde_json::json!({}), None)
             .await;
         assert_eq!(result.decision, HookDecision::Block("blocked".to_string()));
     }
@@ -1277,10 +1315,7 @@ mod tests {
     #[test]
     fn pick_additional_context_falls_back_to_camel_case() {
         let v = serde_json::json!({"additionalContext": "only-camel"});
-        assert_eq!(
-            HookSystem::pick_additional_context(&v),
-            Some("only-camel")
-        );
+        assert_eq!(HookSystem::pick_additional_context(&v), Some("only-camel"));
     }
 
     #[test]

@@ -91,7 +91,10 @@ fn registry_unsupported_action_returns_error() {
     let resp = run_registry_request("extensions", "invalid_action", Value::Null);
     assert_eq!(resp["type"], "registry_response");
     assert_eq!(resp["success"], false);
-    assert!(resp["error"].as_str().unwrap().contains("unsupported action"));
+    assert!(resp["error"]
+        .as_str()
+        .unwrap()
+        .contains("unsupported action"));
 }
 
 #[test]

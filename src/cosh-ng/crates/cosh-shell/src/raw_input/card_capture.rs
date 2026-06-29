@@ -134,7 +134,8 @@ impl CardInputState {
             match input[idx] {
                 CTRL_C => {
                     match capture {
-                        RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
+                        RawInputCapture::Approval { id, .. }
+                        | RawInputCapture::Consultation { id } => {
                             events.push(RawInputEvent::CardCancel(id.clone()))
                         }
                         RawInputCapture::Mode { id, .. } => {
@@ -192,7 +193,8 @@ impl CardInputState {
                 }
                 0x1b if input.get(idx + 1) == Some(&0x1b) => {
                     match capture {
-                        RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
+                        RawInputCapture::Approval { id, .. }
+                        | RawInputCapture::Consultation { id } => {
                             events.push(RawInputEvent::CardCancel(id.clone()))
                         }
                         RawInputCapture::Mode { id, .. } => {
@@ -419,7 +421,8 @@ impl CardInputState {
                 }
             }
             RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
-                let max_idx = if matches!(capture, RawInputCapture::Approval { is_hook: true, .. }) {
+                let max_idx = if matches!(capture, RawInputCapture::Approval { is_hook: true, .. })
+                {
                     hook_approval_action_max_index()
                 } else {
                     approval_action_max_index()
