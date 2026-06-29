@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.7.0
+
+### Features
+- Add Codex CLI adaptation with three-tier SSL probe attach (symbol table → byte pattern → offset table) and cross-chunk SSE continuation buffer.
+- Add security observability dashboard and server proxy for agent threat visibility.
+- Add memory optimization with bounded event buffers, feature flags (`features.*`) and configurable runtime limits (`runtime_limits.*`).
+- Add `container_id` to `AgentsightLLMData` for container-level attribution.
+- Derive `session_id` from process environment variables and request metadata instead of message content.
+- Add `call_kind` classification (chat / completion / embedding / tool_use) to GenAI semantic events.
+- Add `--exclude` filter to `agentsight audit` CLI for noise reduction, and show non-streaming LLM calls in audit output.
+- Add unified `agentsight summary` command for one-shot status overview.
+- Enhance token savings page with baseline comparison, strategy breakdown, line-level diff highlighting and optimization tips.
+- Upload skill metrics via SLS Logtail exporter.
+- Improve agent health UX: role badges (P1/P2), TTL-based cleanup, process-ancestry grouping, and Session ID help tooltip.
+- Filter client processes from health API to reduce dashboard noise.
+- Add anolisa component contract for RPM lifecycle integration.
+
+### Fixes
+- Fix sslsniff BPF verifier rejection on kernel 5.15 and add BPF load tests.
+- Fix traced_processes BPF map leak causing uprobe attach failure after long runtime.
+- Prevent duplicate uprobe `Link`s by retaining inodes in `traced_files` on detach.
+- Decode compressed (zstd/brotli) SSE streams so Claude Code and similar agents are fully captured.
+- Harden compressed SSE decode against partial chunk boundaries.
+- Extract token usage from non-streaming and HTTP/2 responses.
+- Fix namespace PID usage in udpdns and tcpsniff probes.
+- Strip `/proc/{pid}/root` prefix for uprobe attach in containerized environments.
+- Implement tiered SSL and tcpsniff ring buffer reservations to reduce dropped events.
+- Clamp before mask in filewrite/udpdns BPF probes; cap stdout payload to `MAX-1`.
+- Change cgroup gate to OR semantics and add `trace_cgroup` FFI interface.
+- Tighten SSE truncation detection and write pending row for deferred GenAI calls.
+- Respect dynamic sysom path in SLS exporter mode selection; replace removed `sysom_logtail_path` with `logtail_path` filter.
+- Validate ring buffer size is power-of-two at startup.
+- Wire feature flags and runtime limits to actual runtime code paths.
+
+### Refactoring
+- Split `genai/builder.rs` into 4 focused modules and `genai.rs` into 5 submodules.
+- Bundle shared BPF maps into `SharedMaps` for reduced duplication.
+- Extract background threads module with stop-signal support.
+- Replace remaining `unwrap()` calls with `if-let` / `?` patterns.
+
+### CI & Quality
+- Add fmt, clippy, unit test coverage, and architecture boundary check CI gates.
+- Add `clippy.toml` + `cargo-deny` for lint and supply-chain auditing.
+- Add architecture boundary check script (`check-arch-boundary.py`).
+- Add scoped AGENTS.md for FFI, unified orchestrator, and storage modules.
+- Define Footprint Ladder for code surface growth control.
+- Add `agentsight-code-review` and `pr-body` develop-skills.
+
 ## 0.6.1
 
 - Add real-time agent_crash detection in trace mode.
