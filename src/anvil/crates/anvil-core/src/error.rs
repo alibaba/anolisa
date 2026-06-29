@@ -46,6 +46,9 @@ pub enum AnvilError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("backend error: {msg}")]
+    BackendError { msg: String },
 }
 
 /// Internal wrapper that lets [`AnvilError::ConfigError`] carry either a

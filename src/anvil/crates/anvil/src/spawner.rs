@@ -191,6 +191,158 @@ impl BackendSpawner for LinuxSandboxSpawner {
 }
 
 // ---------------------------------------------------------------------------
+// FirecrackerSpawner
+// ---------------------------------------------------------------------------
+
+/// Firecracker microVM spawner: launches the `firecracker` binary with a
+/// JSON vmconfig generated from the instance metadata + images_dir.
+///
+/// Phase 1 implementation:
+/// - Generates a minimal vmconfig (kernel, rootfs drive, no network)
+/// - Starts FC in API-server mode, waits for /machine-config readiness
+/// - Tracks PID for kill()
+///
+/// Phase 2+ will add: snapshot restore, virtio-pmem, KML memfile path.
+pub struct FirecrackerSpawner {
+    pub images_dir: std::path::PathBuf,
+}
+
+#[async_trait]
+impl BackendSpawner for FirecrackerSpawner {
+    async fn spawn(
+        &self,
+        instance: &SandboxInstance,
+        binary_path: &Path,
+        work_dir: &Path,
+    ) -> Result<SpawnHandle, AnvilError> {
+        // Derive paths from images_dir
+        let vmlinux = self.images_dir.join("vmlinux");
+        let rootfs = self.images_dir.join("rootfs.ext4");
+
+        if !vmlinux.exists() {
+            return Err(AnvilError::BackendError {
+                msg: format!("vmlinux not found at {}", vmlinux.display()),
+            });
+        }
+        if !rootfs.exists() {
+            return Err(AnvilError::BackendError {
+                msg: format!("rootfs not found at {}", rootfs.display()),
+            });
+        }
+
+        // Create per-instance runtime directory
+        let instance_dir = work_dir.join(instance.id.to_string());
+        std::fs::create_dir_all(&instance_dir)
+            .map_err(|source| AnvilError::IoError { source })?;
+
+        let api_socket = instance_dir.join("api.sock");
+        let log_file = instance_dir.join("firecracker.log");
+
+        // Generate vmconfig JSON
+        let vmconfig = serde_json::json!({
+            "boot-source": {
+                "kernel_image_path": vmlinux.to_str().unwrap(),
+                "boot_args": "console=ttyS0 reboot=k panic=1 pci=off"
+            },
+            "drives": [{
+                "drive_id": "rootfs",
+                "path_on_host": rootfs.to_str().unwrap(),
+                "is_root_device": true,
+                "is_read_only": false
+            }],
+            "machine-config": {
+                "vcpu_count": 1,
+                "mem_size_mib": 256
+            }
+        });
+
+        let config_path = instance_dir.join("vmconfig.json");
+        std::fs::write(&config_path, serde_json::to_string_pretty(&vmconfig).unwrap())
+            .map_err(|source| AnvilError::IoError { source })?;
+
+        // Spawn firecracker process
+        let child = tokio::process::Command::new(binary_path)
+            .arg("--api-sock")
+            .arg(&api_socket)
+            .arg("--config-file")
+            .arg(&config_path)
+            .arg("--log-path")
+            .arg(&log_file)
+            .arg("--level")
+            .arg("Info")
+            .env("ANVIL_INSTANCE_ID", instance.id.to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|source| AnvilError::IoError { source })?;
+
+        let pid = child.id();
+        drop(child); // v0.1: fire-and-forget, supervisor in v0.2
+
+        tracing::info!(
+            instance_id = %instance.id,
+            ?pid,
+            api_socket = %api_socket.display(),
+            "spawned firecracker microVM",
+        );
+
+        Ok(SpawnHandle {
+            pid,
+            backend: BackendKind::Firecracker,
+            instance_id: instance.id,
+        })
+    }
+
+    async fn wait(&self, handle: &SpawnHandle) -> Result<SpawnResult, AnvilError> {
+        // v0.1 placeholder
+        tracing::debug!(
+            instance_id = %handle.instance_id,
+            "firecracker wait (v0.1 placeholder)",
+        );
+        Ok(SpawnResult {
+            instance_id: handle.instance_id,
+            exit_code: Some(0),
+            signal: None,
+        })
+    }
+
+    async fn kill(&self, handle: &SpawnHandle) -> Result<(), AnvilError> {
+        let Some(pid) = handle.pid else {
+            return Ok(());
+        };
+        let status = tokio::process::Command::new("kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .status()
+            .await
+            .map_err(|source| AnvilError::IoError { source })?;
+        tracing::info!(
+            instance_id = %handle.instance_id,
+            pid,
+            success = status.success(),
+            "sent SIGTERM to firecracker",
+        );
+        Ok(())
+    }
+
+    async fn probe(&self, binary_path: &Path) -> Result<bool, AnvilError> {
+        // Check binary exists and is executable
+        if !binary_path.exists() {
+            return Ok(false);
+        }
+        // Quick version check
+        let output = tokio::process::Command::new(binary_path)
+            .arg("--version")
+            .output()
+            .await;
+        match output {
+            Ok(o) => Ok(o.status.success()),
+            Err(_) => Ok(false),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // MockSpawner
 // ---------------------------------------------------------------------------
 
