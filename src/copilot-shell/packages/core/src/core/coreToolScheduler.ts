@@ -1651,8 +1651,7 @@ export class CoreToolScheduler {
                     const isBlockingFailure =
                       failureOutput.isBlockingDecision() ||
                       failureOutput.shouldStopExecution();
-                    const isAskFailure =
-                      failureOutput.isAskDecision?.() ?? false;
+                    const isAskFailure = failureOutput.isAskDecision();
                     const mergedDecisionFailure: HookDecision | undefined =
                       isBlockingFailure
                         ? failureOutput.decision === 'deny'

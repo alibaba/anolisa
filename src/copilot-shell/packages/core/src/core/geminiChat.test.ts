@@ -21,6 +21,7 @@ import {
 import type { Config } from '../config/config.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
+import { AfterModelHookOutput } from '../hooks/types.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -134,6 +135,48 @@ describe('GeminiChat', () => {
   });
 
   describe('sendMessageStream', () => {
+    it('should queue AfterModel systemMessage fallback when notifications are absent', async () => {
+      const stream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [{ text: 'Hello from model' }],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        stream,
+      );
+
+      const mockHookSystem = {
+        fireAfterModelEvent: vi
+          .fn()
+          .mockResolvedValue(
+            new AfterModelHookOutput({ systemMessage: 'fallback notice' }),
+          ),
+      };
+      vi.mocked(mockConfig.getEnableHooks).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue(
+        mockHookSystem as unknown as ReturnType<Config['getHookSystem']>,
+      );
+
+      const responseStream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test message' },
+        'prompt-id-after-model-fallback',
+      );
+      for await (const _ of responseStream) {
+        /* consume stream */
+      }
+
+      expect(chat.drainHookSystemMessages()).toEqual(['fallback notice']);
+    });
+
     it('should succeed if a tool call is followed by an empty part', async () => {
       // 1. Mock a stream that contains a tool call, then an invalid (empty) part.
       const streamWithToolCall = (async function* () {
