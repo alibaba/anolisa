@@ -16,6 +16,8 @@ pub struct DaemonConfig {
     pub daemon: DaemonSection,
     /// Backend name → binary path mapping (e.g. `firecracker = "/usr/bin/firecracker"`).
     #[serde(default)]
+    pub listen: ListenSection,
+    #[serde(default)]
     pub backends: HashMap<String, PathBuf>,
     #[serde(default)]
     pub policy: PolicySection,
@@ -47,6 +49,15 @@ impl Default for DaemonSection {
             socket: default_socket(),
         }
     }
+}
+
+/// Remote API listener configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ListenSection {
+    /// TCP address for remote HTTP API (e.g. "0.0.0.0:14159").
+    /// Empty string or absent means remote API is disabled.
+    #[serde(default)]
+    pub http_addr: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

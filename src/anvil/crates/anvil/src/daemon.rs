@@ -15,7 +15,7 @@ use hyper::body::Bytes;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use tokio::net::UnixListener;
+use tokio::net::{TcpListener, UnixListener};
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::api;
@@ -37,6 +37,7 @@ pub async fn run(config_path: &Path) -> Result<()> {
     let spawner = build_spawner(&config).await;
 
     let socket_path = config.daemon.socket.clone();
+    let http_addr = config.listen.http_addr.clone();
     let state = Arc::new(ServerState::build(
         config, policy, pool, template, hook, spawner,
     ));
@@ -48,9 +49,20 @@ pub async fn run(config_path: &Path) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let listener = UnixListener::bind(&socket_path)?;
-    tracing::info!(socket = %socket_path.display(), "anvil API listening");
+    tracing::info!(socket = %socket_path.display(), "anvil UDS API listening");
 
-    serve(listener, state).await
+    // Optional TCP listener for remote platform API
+    let tcp_listener = if !http_addr.is_empty() {
+        let tcp = TcpListener::bind(&http_addr).await.map_err(|e| {
+            AnvilDaemonError::Internal(format!("bind TCP {http_addr}: {e}"))
+        })?;
+        tracing::info!(addr = %http_addr, "anvil HTTP API listening");
+        Some(tcp)
+    } else {
+        None
+    };
+
+    serve(listener, tcp_listener, state).await
 }
 
 fn ensure_dirs(cfg: &DaemonConfig) -> Result<()> {
@@ -133,7 +145,7 @@ fn load_policy_engine(cfg: &DaemonConfig) -> Result<PolicyEngine> {
     }
 }
 
-async fn serve(listener: UnixListener, state: Arc<ServerState>) -> Result<()> {
+async fn serve(uds: UnixListener, tcp: Option<TcpListener>, state: Arc<ServerState>) -> Result<()> {
     let mut sighup = signal(SignalKind::hangup())
         .map_err(|e| AnvilDaemonError::Internal(format!("install SIGHUP handler: {e}")))?;
     let mut sigterm = signal(SignalKind::terminate())
@@ -143,33 +155,26 @@ async fn serve(listener: UnixListener, state: Arc<ServerState>) -> Result<()> {
 
     loop {
         tokio::select! {
-            res = listener.accept() => {
+            res = uds.accept() => {
                 let (stream, _peer) = match res {
                     Ok(s) => s,
                     Err(e) => {
-                        tracing::error!(error = %e, "accept failed");
+                        tracing::error!(error = %e, "UDS accept failed");
                         continue;
                     }
                 };
-                let state_clone = state.clone();
-                tokio::spawn(async move {
-                    let io = TokioIo::new(stream);
-                    let svc = service_fn(move |req| {
-                        let state = state_clone.clone();
-                        async move {
-                            api::handle(req, state).await
-                        }
-                    });
-                    if let Err(err) = http1::Builder::new()
-                        .serve_connection::<_, _>(io, svc)
-                        .await
-                    {
-                        tracing::debug!(?err, "connection closed with error");
+                spawn_conn(TokioIo::new(stream), state.clone());
+            }
+            res = async { match &tcp { Some(l) => l.accept().await, None => std::future::pending().await }}, if tcp.is_some() => {
+                let (stream, peer) = match res {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::error!(error = %e, "TCP accept failed");
+                        continue;
                     }
-                    // Make the unused-type-parameter inference cooperate
-                    // with hyper 1.x's response body bound.
-                    let _: Option<Full<Bytes>> = None;
-                });
+                };
+                tracing::debug!(?peer, "TCP connection");
+                spawn_conn(TokioIo::new(stream), state.clone());
             }
             _ = sighup.recv() => {
                 tracing::info!("SIGHUP received: reloading policies");
@@ -190,6 +195,25 @@ async fn serve(listener: UnixListener, state: Arc<ServerState>) -> Result<()> {
 
     tracing::info!("anvil daemon stopped");
     Ok(())
+}
+
+fn spawn_conn<I>(io: TokioIo<I>, state: Arc<ServerState>)
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let svc = service_fn(move |req| {
+            let state = state.clone();
+            async move { api::handle(req, state).await }
+        });
+        if let Err(err) = http1::Builder::new()
+            .serve_connection(io, svc)
+            .await
+        {
+            tracing::debug!(?err, "connection closed with error");
+        }
+        let _: Option<Full<Bytes>> = None;
+    });
 }
 
 fn reload_policies(state: &Arc<ServerState>) -> Result<()> {

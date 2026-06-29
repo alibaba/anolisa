@@ -17,6 +17,14 @@ rust = ">=1.88.0"
 
 # Binary installation handled by dist/anvil.spec (RPM). Not in main build system while in Labs.
 
+[packaging]
+rpm_name = "anvil"
+service_name = "anvil.service"
+config_dir = "/etc/anolisa/anvil"
+state_dir = "/var/lib/anvil"
+runtime_dir = "/run/anvil"
+tcp_port = 14159
+
 [environment]
 requires_os = "linux"
 requires_arch = ["x86_64", "aarch64"]
