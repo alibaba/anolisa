@@ -196,6 +196,10 @@ mod tests {
         path
     }
 
+    fn missing_config_path(dir: &TempDir) -> PathBuf {
+        dir.path().join("missing").join("config.toml")
+    }
+
     #[test]
     fn bundled_default_has_expected_values() {
         let c = RegistryConfig::bundled_default();
@@ -206,8 +210,9 @@ mod tests {
 
     #[test]
     fn missing_file_no_env_yields_defaults() {
-        let path = Path::new("/nonexistent/anolisa/config.toml");
-        let c = RegistryConfig::load(path, None).expect("missing file is not an error");
+        let dir = TempDir::new().unwrap();
+        let path = missing_config_path(&dir);
+        let c = RegistryConfig::load(&path, None).expect("missing file is not an error");
         assert_eq!(c.index_url, DEFAULT_INDEX_URL);
         assert!(c.offline_fallback);
     }
@@ -271,15 +276,16 @@ mod tests {
 
     #[test]
     fn load_if_configured_none_when_nothing_opts_in() {
-        let path = Path::new("/nonexistent/anolisa/config.toml");
+        let dir = TempDir::new().unwrap();
+        let path = missing_config_path(&dir);
         assert!(
-            RegistryConfig::load_if_configured(path, None)
+            RegistryConfig::load_if_configured(&path, None)
                 .expect("missing everything is not an error")
                 .is_none()
         );
         // Empty env value must not count as opting in.
         assert!(
-            RegistryConfig::load_if_configured(path, Some("  "))
+            RegistryConfig::load_if_configured(&path, Some("  "))
                 .expect("blank env is not an error")
                 .is_none()
         );
@@ -287,8 +293,9 @@ mod tests {
 
     #[test]
     fn load_if_configured_env_opts_in() {
-        let path = Path::new("/nonexistent/anolisa/config.toml");
-        let c = RegistryConfig::load_if_configured(path, Some("http://r.test/i.toml"))
+        let dir = TempDir::new().unwrap();
+        let path = missing_config_path(&dir);
+        let c = RegistryConfig::load_if_configured(&path, Some("http://r.test/i.toml"))
             .expect("valid")
             .expect("env opts in");
         assert_eq!(c.index_url, "http://r.test/i.toml");

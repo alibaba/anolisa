@@ -59,7 +59,7 @@ offline_fallback = true
 
 # rpm — resolution/install delegated to dnf against this repo.
 [backends.rpm]
-base_url = "http://mirrors.cloud.aliyuncs.com/alinux/$releasever/os/$basearch/os/"
+base_url = "http://mirrors.cloud.aliyuncs.com/alinux/$releasever/agentic-os/$basearch/os/"
 insecure = true
 gpgcheck = true
 
