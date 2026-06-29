@@ -3,7 +3,7 @@
 #        just setup-rtk   (clone + patch rtk only)
 #        just build-toon  (install toon binary)
 
-rtk_tag   := "v0.42.3"
+rtk_tag   := "v0.43.0"
 toon_ver  := "0.5.0"
 rtk_dir   := "third_party/rtk"
 patch_dir := "third_party/patches"
@@ -21,12 +21,6 @@ setup-rtk:
         echo "Applying tokenless stats patch..."; \
         patch --forward -p1 --no-backup-if-mismatch \
             -d {{rtk_dir}} < {{patch_dir}}/rtk-tokenless-stats.patch && \
-        echo "Applying grep fallback pattern fix patch..."; \
-        patch --forward -p1 --no-backup-if-mismatch \
-            -d {{rtk_dir}} < {{patch_dir}}/rtk-grep-fallback-fix.patch && \
-        echo "Applying preflight skip python patch..."; \
-        patch --forward -p1 --no-backup-if-mismatch \
-            -d {{rtk_dir}} < {{patch_dir}}/rtk-preflight-skip-python.patch && \
         echo "Applying pytest error report patch..."; \
         patch --forward -p1 --no-backup-if-mismatch \
             -d {{rtk_dir}} < {{patch_dir}}/rtk-pytest-error-report.patch && \

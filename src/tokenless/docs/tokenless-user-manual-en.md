@@ -327,7 +327,7 @@ ls -la /usr/lib
 rtk rewrite "ls -la /usr/lib"
 ```
 
-RTK source is cloned from GitHub (`v0.42.3`) by the justfile, with tokenless-specific patches applied, then built. Supports 70+ commands (cargo/npm/go/pytest, etc.); typical savings 60–90%.
+RTK source is cloned from GitHub (`v0.43.0`) by the justfile, with tokenless-specific patches applied, then built. Supports 70+ commands (cargo/npm/go/pytest, etc.); typical savings 60–90%.
 
 ### Tool-readiness check (Tool Ready)
 
@@ -554,5 +554,5 @@ All hooks receive `TOKENLESS_AGENT_ID=copilot-shell`. Auxiliary files: `hook_uti
 ---
 
 **License**: MIT (tokenless core) + Apache-2.0 (vendored rtk)
-**Version**: 0.5.1
+**Version**: 0.6.0
 **Document version**: 2.1 (aligned with ANOLISA-design user-guide structure)

@@ -2,7 +2,23 @@
 
 ## Unreleased
 
+## 0.6.0
+
+- add absolute saved values + schema version to JSON output
+- use import.meta.dirname instead of __dirname in openclaw plugin
+- add qwencode adapter for Qwen Code extension
+- fix rtk pytest 'No tests collected' regression
+- add trusted FHS fallback paths for hook_utils import in codex scripts
+- add SLS JSONL data collection with config toggle
+- add tokenless RPM component contract (publishing metadata)
 - add compression toggle with dry-run compare mode (`TOKENLESS_COMPRESSION_ENABLED`, `stats summary --compare`)
+- enable SLS recording by default and document usage
+- align compression mode serde/db form and dedup config load
+- expand RPM component contract (bundle.entry + hermes)
+- make SLS writer append-only and skip when log file absent
+- prefer tool_call_id over internal tool_use_id for qwencode hooks
+- bump vendored rtk to v0.43.0; rework pytest stderr-surfacing patch for the refactored runner; drop grep-fallback-fix (root cause fixed upstream) and preflight-skip-python (reversed upstream)
+- sync toon-format to 0.5.0 in Makefile and spec (was stale at 0.4.6)
 
 ## 0.5.1
 

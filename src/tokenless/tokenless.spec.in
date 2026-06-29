@@ -82,7 +82,7 @@ cargo build --release --manifest-path third_party/rtk/Cargo.toml
 if test -x "%{_bindir}/toon"; then
     echo "toon (system) already available, skipping cargo install"
 else
-    cargo install toon-format --version 0.4.6 --root %{_builddir}/toon-root --locked
+    cargo install toon-format --version 0.5.0 --root %{_builddir}/toon-root --locked
 fi
 
 # Compile the OpenClaw TS plugin via the project Makefile.
@@ -448,6 +448,23 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Mon Jun 29 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.6.0-1
+- fix(tokenless): add absolute saved values + schema version to JSON output
+- fix(tokenless): use import.meta.dirname instead of __dirname in openclaw plugin
+- feat(tokenless): add qwencode adapter for Qwen Code extension
+- fix(tokenless): fix rtk pytest 'No tests collected' regression
+- fix(tokenless): add trusted FHS fallback paths for hook_utils import in codex scripts
+- feat(tokenless): add SLS JSONL data collection with config toggle
+- feat(adapter): add tokenless RPM component contract (publishing metadata)
+- feat(tokenless): add compression toggle with dry-run compare mode
+- feat(tokenless): enable SLS recording by default and document usage
+- fix(tokenless): align compression mode serde/db form and dedup config load
+- feat(tokenless): expand RPM component contract (bundle.entry + hermes)
+- fix(tokenless): make SLS writer append-only and skip when log file absent
+- fix(tokenless): prefer tool_call_id over internal tool_use_id for qwencode hooks
+- chore(tokenless): bump vendored rtk to v0.43.0; rework pytest stderr-surfacing patch for the refactored runner; drop grep-fallback-fix (root cause fixed upstream) and preflight-skip-python (reversed upstream)
+- chore(tokenless): sync toon-format to 0.5.0 in Makefile and spec (was stale at 0.4.6)
+
 * Thu Jun 11 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.5.1-1
 - feat(tokenless): add --json output to stats summary
 - fix(tokenless): implement unified tool categorization and 3-layer compression strategy

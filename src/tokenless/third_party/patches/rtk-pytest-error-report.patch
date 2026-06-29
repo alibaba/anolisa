@@ -347,31 +347,24 @@ index 2febb2e..1fb1b40 100644
 +    }
  }
 diff --git a/src/core/runner.rs b/src/core/runner.rs
-index 571c763..d8515e0 100644
 --- a/src/core/runner.rs
 +++ b/src/core/runner.rs
-@@ -113,12 +113,49 @@ where
+@@ -129,6 +129,36 @@
      };
      let filtered = filter_fn(text_to_filter, exit_code);
  
-+    // When filtering stdout only, if the filter produced a "no tests" result
-+    // (e.g. pytest stderr had the actual error but stdout was empty), include
-+    // stderr content so the LLM can see what went wrong instead of retrying
-+    // with different parameters.
-+    //
-+    // NOTE: The "No tests collected" substring check is coupled to
-+    // pytest_cmd::filter_pytest_output which returns messages containing
-+    // that exact phrase. Keep these in sync if the message wording changes.
-+    //
-+    // Use Option<String> for stderr output to avoid cloning filtered in the
-+    // normal case — timer.track takes &str, so filtered stays borrowed.
++    // [tokenless] When filtering stdout only, if the filter produced a "no
++    // tests" result (e.g. pytest stderr had the actual error but stdout was
++    // empty), surface stderr content so the agent sees what went wrong instead
++    // of retrying with different parameters. Coupled to
++    // pytest_cmd::filter_pytest_output which emits "No tests collected".
++    // Bypasses never_worse below: the stderr content is intentionally absent
++    // from raw_stdout, so the guard would otherwise revert to an empty
++    // display and hide the error.
 +    let stderr_output: Option<String> = if opts.filter_stdout_only
 +        && (filtered.contains("No tests collected") || filtered.trim().is_empty())
 +        && !result.raw_stderr.trim().is_empty()
 +    {
-+        // Replace the misleading "No tests collected" message entirely with
-+        // stderr content — the LLM should see the actual error, not the
-+        // filter's inability to parse the output.
 +        let mut preview = String::from("[stderr output]\n");
 +        let max_lines = 40;
 +        let stderr_lines: Vec<&str> = result.raw_stderr.lines().collect();
@@ -389,17 +382,22 @@ index 571c763..d8515e0 100644
 +    } else {
 +        None
 +    };
-+    let display: &str = stderr_output.as_deref().unwrap_or(&filtered);
 +
-     if let Some(label) = opts.tee_label {
--        print_with_hint(&filtered, raw, label, exit_code);
-+        print_with_hint(display, raw, label, exit_code);
-     } else if opts.no_trailing_newline {
--        print!("{}", filtered);
-+        print!("{}", display);
-     } else {
--        println!("{}", filtered);
-+        println!("{}", display);
-     }
- 
      let raw_for_tracking = if opts.filter_stdout_only {
+         raw_stdout
+     } else {
+@@ -138,7 +168,13 @@
+     let shown = if let Some(label) = opts.tee_label {
+         print_with_hint(&filtered, raw, raw_for_tracking, label, exit_code)
+     } else {
+-        let guarded = crate::core::guard::never_worse(raw_for_tracking, &filtered).to_string();
++        let guarded = match &stderr_output {
++            // Bypass never_worse: stderr surfacing is intentional, not a
++            // compression regression. The guard would revert to empty
++            // raw_stdout and hide the error from the agent.
++            Some(d) => d.clone(),
++            None => crate::core::guard::never_worse(raw_for_tracking, &filtered).to_string(),
++        };
+         if opts.no_trailing_newline {
+             print!("{}", guarded);
+         } else {

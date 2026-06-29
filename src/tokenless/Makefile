@@ -33,7 +33,7 @@ ADAPTER_TEMPLATES := \
 # adapter payload tree so the contract is not mixed with adapter resources.
 # Shipped to %{_datadir}/anolisa/components/tokenless/component.toml.
 COMPONENT_CONTRACT := .anolisa/component.toml
-TOON_VER := 0.4.6
+TOON_VER := 0.5.0
 VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 
 .PHONY: build build-tokenless build-toon build-openclaw-plugin \

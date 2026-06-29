@@ -327,7 +327,7 @@ ls -la /usr/lib
 rtk rewrite "ls -la /usr/lib"
 ```
 
-RTK 源码由 justfile 从 GitHub 克隆（`v0.42.3`）并应用 tokenless 专属补丁后构建，支持 70+ 命令（cargo/npm/go/pytest 等），典型节省 60–90%。
+RTK 源码由 justfile 从 GitHub 克隆（`v0.43.0`）并应用 tokenless 专属补丁后构建，支持 70+ 命令（cargo/npm/go/pytest 等），典型节省 60–90%。
 
 ### 工具就绪检查（Tool Ready)
 
@@ -554,5 +554,5 @@ make adapter-scan         # 查看已注册适配器能力
 ---
 
 **许可证**：MIT（tokenless core）+ Apache-2.0（vendored rtk）
-**版本**：0.5.1
+**版本**：0.6.0
 **文档版本**：2.1（对齐 ANOLISA-design user-guide 结构）
