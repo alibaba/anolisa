@@ -329,6 +329,11 @@ build_agentic_os_skills() {
         cp "${ROOT_DIR}/LICENSE" "$pkg_dir/"
     fi
 
+    # component.toml — spec %install installs it to %{_datadir}/anolisa/components/os-skills/
+    [ -f "${SKILLS_DIR}/component.toml" ] && cp "${SKILLS_DIR}/component.toml" "$pkg_dir/"
+    # adapters/ — spec %install installs adapter-manifest.json + openclaw/hermes scripts
+    [ -d "${SKILLS_DIR}/adapters" ] && cp -rp "${SKILLS_DIR}/adapters" "$pkg_dir/"
+
     tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
     rm -rf "$tmp_dir"
 
@@ -409,6 +414,9 @@ build_agentsight() {
     [ -f "${SIGHT_DIR}/README.md" ] && cp "${SIGHT_DIR}/README.md" "$pkg_dir/"
     [ -f "${SIGHT_DIR}/README_CN.md" ] && cp "${SIGHT_DIR}/README_CN.md" "$pkg_dir/"
     [ -f "${SIGHT_DIR}/LICENSE" ] && cp "${SIGHT_DIR}/LICENSE" "$pkg_dir/"
+
+    # component.toml — spec %install installs it to %{_datadir}/anolisa/components/agentsight/
+    [ -f "${SIGHT_DIR}/component.toml" ] && cp "${SIGHT_DIR}/component.toml" "$pkg_dir/"
 
     tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
     rm -rf "$tmp_dir"
