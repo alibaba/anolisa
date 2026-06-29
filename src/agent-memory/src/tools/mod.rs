@@ -52,3 +52,4 @@ pub use session_log::session_log;
 pub use write::write;
 pub mod memory_index;
 pub mod memory_summary_tool;
+pub mod session_context;

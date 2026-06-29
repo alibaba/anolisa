@@ -303,6 +303,14 @@ impl MemoryMcpServer {
         Ok(format!("refreshed MEMORY.md with {n} entries"))
     }
 
+    #[tool(
+        description = "Build session-start context from recent summaries and high-confidence memories."
+    )]
+    async fn memory_session_context(&self, #[tool(param)] limit: Option<u32>) -> ToolResult {
+        crate::tools::session_context::memory_session_context(&self.svc, limit.map(|l| l as usize))
+            .map_err(|e| fmt_err("session_context failed", e))
+    }
+
     // ---- Tier C: governance (snapshots) ----
 
     #[tool(
@@ -565,6 +573,7 @@ rmcp::tool_box!(MemoryMcpServer {
     memory_sessions,
     memory_timeline,
     memory_summary,
+    memory_session_context,
     mem_index_refresh,
     mem_snapshot,
     mem_snapshot_list,
