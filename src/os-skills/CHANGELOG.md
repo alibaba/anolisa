@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.0
+
+- Added anolisa component contract (component.toml, Makefile, RPM spec). (#1159)
+- Added OpenClaw bootstrap guidance to `install-openclaw` skill. (#1051)
+- Added model endpoint preflight before gateway startup in `install-openclaw` skill. (#1031)
+- Added static knowledge base update script for `anolisa-guide` skill. (#1010)
+- Added `anolisa-guide` skill. (#849)
+- Fixed Aliyun mirror fallback for uv and qwenpaw install. (#968)
+- Fixed dashscope proxy URL to new Anthropic endpoint in `install-claude-code` skill. (#858)
+- Renamed `copaw` to `qwenpaw` across os-skills. (#968)
+
 ## 0.5.0
 
 - Added `anolisa-register` skill. (#829)
