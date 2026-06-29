@@ -285,6 +285,17 @@ impl MemoryMcpServer {
         )
         .map_err(|e| fmt_err("memory_timeline failed", e))
     }
+    #[tool(description = "Build a memory store overview with statistics.")]
+    async fn memory_summary(&self, #[tool(param)] recent_limit: Option<u32>) -> ToolResult {
+        let summary = crate::tools::memory_summary_tool::memory_summary(
+            &self.svc,
+            recent_limit.unwrap_or(10) as usize,
+        )
+        .map_err(|e| fmt_err("memory_summary failed", e))?;
+        serde_json::to_string_pretty(&summary)
+            .map_err(|e| fmt_err("memory_summary serialize failed", e))
+    }
+
     #[tool(description = "Refresh the MEMORY.md index file from all memory entries.")]
     async fn mem_index_refresh(&self) -> ToolResult {
         let n = crate::tools::memory_index::refresh_index(&self.svc)
@@ -553,6 +564,7 @@ rmcp::tool_box!(MemoryMcpServer {
     memory_get_context,
     memory_sessions,
     memory_timeline,
+    memory_summary,
     mem_index_refresh,
     mem_snapshot,
     mem_snapshot_list,
