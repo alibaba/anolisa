@@ -22,6 +22,7 @@ on:
           - ws-ckpt
           - agent-memory
           - skillfs
+          - anolisa
       version:
         description: 'Version (e.g. 2.1.0, without v prefix)'
         required: true

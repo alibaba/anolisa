@@ -11,6 +11,7 @@ on:
       - 'ckpt/v*'
       - 'memory/v*'
       - 'skillfs/v*'
+      - 'anolisa/v*'
 
 permissions:
   contents: write
@@ -51,6 +52,7 @@ jobs:
             ckpt)     COMPONENT="ws-ckpt" ;;
             memory)   COMPONENT="agent-memory" ;;
             skillfs)  COMPONENT="skillfs" ;;
+            anolisa)  COMPONENT="anolisa" ;;
             *)
               echo "Unknown scope: $SCOPE"
               exit 1
@@ -149,6 +151,7 @@ jobs:
             ws-ckpt)        PREFIX="ckpt/v" ;;
             agent-memory)   PREFIX="memory/v" ;;
             skillfs)        PREFIX="skillfs/v" ;;
+            anolisa)        PREFIX="anolisa/v" ;;
           esac
 
           PREV_TAG=$(git tag --list "${PREFIX}*" --sort=-version:refname | grep -v "^${TAG}$" | head -1)
