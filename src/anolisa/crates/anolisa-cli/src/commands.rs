@@ -226,19 +226,9 @@ pub fn dispatch(cli: Cli, ctx: &CliContext) -> Result<(), CliError> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CommandScope {
     ReadOnly,
-    ModeScopedMutation {
-        dry_run_without_root: bool,
-    },
-    SystemOnlyMutation {
-        dry_run_without_root: bool,
-        privilege_gate: PrivilegeGate,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PrivilegeGate {
-    Dispatcher,
-    Handler,
+    ModeScopedMutation { dry_run_without_root: bool },
+    SystemOnlyMutation { dry_run_without_root: bool },
+    HelperGatedSystemOperation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -284,14 +274,16 @@ fn validate_global_args_with_euid(
         });
     }
 
-    if let CommandScope::SystemOnlyMutation { privilege_gate, .. } = policy.scope
-        && ctx.install_mode != InstallMode::System
-    {
-        let omitted_helper_gated_system_command =
-            !install_mode_explicit && privilege_gate == PrivilegeGate::Handler;
-        if !omitted_helper_gated_system_command {
+    match policy.scope {
+        CommandScope::SystemOnlyMutation { .. } if ctx.install_mode != InstallMode::System => {
             return Err(system_scope_error(policy.label, install_mode_explicit));
         }
+        CommandScope::HelperGatedSystemOperation
+            if install_mode_explicit && ctx.install_mode != InstallMode::System =>
+        {
+            return Err(system_scope_error(policy.label, true));
+        }
+        _ => {}
     }
 
     match policy.scope {
@@ -306,14 +298,13 @@ fn validate_global_args_with_euid(
         }
         CommandScope::SystemOnlyMutation {
             dry_run_without_root,
-            privilege_gate,
         } => {
             let dry_run_preview = ctx.dry_run && dry_run_without_root;
-            if privilege_gate == PrivilegeGate::Dispatcher && effective_uid != 0 && !dry_run_preview
-            {
+            if effective_uid != 0 && !dry_run_preview {
                 return Err(system_permission_error(ctx, policy.label, false));
             }
         }
+        CommandScope::HelperGatedSystemOperation => {}
     }
 
     if ctx.install_mode == InstallMode::User && effective_uid == 0 {
@@ -365,7 +356,6 @@ const fn system_only(label: &'static str, dry_run_without_root: bool) -> Command
         label,
         CommandScope::SystemOnlyMutation {
             dry_run_without_root,
-            privilege_gate: PrivilegeGate::Dispatcher,
         },
     )
 }
@@ -460,7 +450,7 @@ fn osbase_command_scope(args: &osbase::OsbaseArgs) -> CommandScope {
         osbase::OsbaseCommands::Kernel(kernel) => match &kernel.command {
             osbase::KernelCommands::Status => CommandScope::ReadOnly,
             osbase::KernelCommands::Install { .. } | osbase::KernelCommands::Remove => {
-                helper_gated_system_only_scope()
+                helper_gated_system_operation_scope()
             }
         },
         osbase::OsbaseCommands::Sandbox(sandbox) => match &sandbox.command {
@@ -469,12 +459,12 @@ fn osbase_command_scope(args: &osbase::OsbaseArgs) -> CommandScope {
             }
             osbase::SandboxCommands::Install { .. }
             | osbase::SandboxCommands::Uninstall { .. }
-            | osbase::SandboxCommands::Remove { .. } => helper_gated_system_only_scope(),
+            | osbase::SandboxCommands::Remove { .. } => helper_gated_system_operation_scope(),
         },
         osbase::OsbaseCommands::Security(security) => match &security.command {
             osbase::SecurityCommands::Status { .. } => CommandScope::ReadOnly,
             osbase::SecurityCommands::Install { .. } | osbase::SecurityCommands::Remove { .. } => {
-                helper_gated_system_only_scope()
+                helper_gated_system_operation_scope()
             }
         },
     }
@@ -483,15 +473,11 @@ fn osbase_command_scope(args: &osbase::OsbaseArgs) -> CommandScope {
 const fn system_only_scope(dry_run_without_root: bool) -> CommandScope {
     CommandScope::SystemOnlyMutation {
         dry_run_without_root,
-        privilege_gate: PrivilegeGate::Dispatcher,
     }
 }
 
-const fn helper_gated_system_only_scope() -> CommandScope {
-    CommandScope::SystemOnlyMutation {
-        dry_run_without_root: false,
-        privilege_gate: PrivilegeGate::Handler,
-    }
+const fn helper_gated_system_operation_scope() -> CommandScope {
+    CommandScope::HelperGatedSystemOperation
 }
 
 fn is_safe_absolute_path(path: &Path) -> bool {
@@ -616,18 +602,18 @@ mod tests {
     }
 
     #[test]
-    fn helper_gated_system_only_mutation_reaches_handler_without_root_in_explicit_system_mode() {
+    fn helper_gated_system_operation_reaches_handler_without_root_in_explicit_system_mode() {
         validate_global_args_with_euid(
             &ctx_with_prefix(PathBuf::from("/")),
-            CommandPolicy::new("osbase", helper_gated_system_only_scope()),
+            CommandPolicy::new("osbase", helper_gated_system_operation_scope()),
             1000,
             true,
         )
-        .expect("helper-gated system mutations should reach their handler preflight");
+        .expect("helper-gated system operations should reach their handler preflight");
     }
 
     #[test]
-    fn helper_gated_system_only_mutation_reaches_handler_when_mode_is_omitted() {
+    fn helper_gated_system_operation_reaches_handler_when_mode_is_omitted() {
         let command = Commands::Management(ManagementCommands::Osbase(osbase::OsbaseArgs {
             command: osbase::OsbaseCommands::Sandbox(osbase::SandboxArgs {
                 command: osbase::SandboxCommands::Install {
@@ -640,18 +626,18 @@ mod tests {
         }));
 
         validate_global_args_with_euid(&user_ctx(), command_policy(&command), 1000, false)
-            .expect("omitted install mode should not block helper-gated system mutations");
+            .expect("omitted install mode should not block helper-gated system operations");
     }
 
     #[test]
-    fn helper_gated_system_only_mutation_still_rejects_explicit_user_mode() {
+    fn helper_gated_system_operation_rejects_explicit_user_mode() {
         let err = validate_global_args_with_euid(
             &user_ctx(),
-            CommandPolicy::new("osbase", helper_gated_system_only_scope()),
+            CommandPolicy::new("osbase", helper_gated_system_operation_scope()),
             1000,
             true,
         )
-        .expect_err("explicit user mode is invalid for helper-gated system commands");
+        .expect_err("explicit user mode is invalid for helper-gated system operations");
 
         assert_eq!(err.code(), "INVALID_ARGUMENT");
         assert!(err.reason().contains("system scope"));
