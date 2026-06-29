@@ -540,7 +540,52 @@ h1 span{color:var(--accent-light)}
 
       <div class="release-list" id="release-list">
         <!-- ANOLISA_CLI_CHANGELOG_START -->
-        <article class="release reveal reveal-d1" id="anolisa-cli-0-1-15">
+        <article class="release reveal reveal-d1" id="anolisa-cli-0-1-16">
+          <div class="release-meta">
+            <div class="release-version">0.1.16</div>
+            <div class="release-date">2026-06-29</div>
+          </div>
+          <div class="release-body">
+          <div class="release-body-section">
+            <h3>Added</h3>
+            <ul>
+              <li><code>anolisa osbase sandbox install runc</code> now installs runc, containerd, Docker, and Docker client.</li>
+              <li><code>anolisa osbase sandbox install</code> now enables services declared by sandbox scenarios.</li>
+              <li><code>anolisa osbase sandbox install</code> now runs scenario verification commands after installation.</li>
+              <li><code>anolisa osbase sandbox install</code> now records sandbox scenarios in <code>installed.toml</code>.</li>
+              <li><code>anolisa osbase sandbox install</code> now reports optional scenario packages as hints.</li>
+              <li><code>rund</code>, <code>firecracker</code>, and <code>gvisor</code> sandbox scenarios now define post-install checks.</li>
+              <li><code>anolisa adapter enable</code> now supports <code>adapter_type = &quot;skill_bundle&quot;</code> for OpenClaw and Hermes skills.</li>
+              <li>The RPM package now installs default <code>repo.toml</code> to <code>/etc/anolisa/repo.toml</code>.</li>
+              <li>ANOLISA telemetry setup now installs log rotation for ops <code>.jsonl</code> files.</li>
+            </ul>
+          </div>
+          <div class="release-body-section">
+            <h3>Changed</h3>
+            <ul>
+              <li><code>anolisa osbase sandbox install --dry-run</code> now shows preflight, package, service, verify, and state phases.</li>
+              <li><code>anolisa osbase sandbox install runc</code> now requires Linux kernel 4.18 or newer.</li>
+              <li><code>anolisa osbase sandbox install</code> now reports verification failures as warnings when other phases succeed.</li>
+              <li><code>repo.toml</code> now points RPM installs to the agentic-os repository path.</li>
+              <li><code>anolisa update self --json</code> now reports apply mode, RPM package, and RPM version observations.</li>
+              <li><code>anolisa adapter status</code> now treats skill bundles as healthy without plugin registration.</li>
+              <li><code>anolisa adapter enable</code> now rejects skill bundles that declare framework config entries.</li>
+            </ul>
+          </div>
+          <div class="release-body-section">
+            <h3>Fixed</h3>
+            <ul>
+              <li>RPM-backed commands now use the component name as the default package name.</li>
+              <li><code>anolisa update self</code> now delegates RPM-owned CLI updates to <code>dnf</code>.</li>
+              <li>Non-root sandbox installs now show package, service, verify, and state phases.</li>
+              <li>Telemetry setup now runs the ilogtail installer with bash-compatible script handling.</li>
+              <li><code>anolisa adapter disable</code> now cleans skill bundles without plugin unregister errors.</li>
+            </ul>
+          </div>
+          </div>
+        </article>
+
+        <article class="release reveal reveal-d2" id="anolisa-cli-0-1-15">
           <div class="release-meta">
             <div class="release-version">0.1.15</div>
             <div class="release-date">2026-06-25</div>
@@ -572,7 +617,7 @@ h1 span{color:var(--accent-light)}
           </div>
         </article>
 
-        <article class="release reveal reveal-d2" id="anolisa-cli-0-1-14">
+        <article class="release reveal reveal-d3" id="anolisa-cli-0-1-14">
           <div class="release-meta">
             <div class="release-version">0.1.14</div>
             <div class="release-date">2026-06-24</div>
@@ -606,7 +651,7 @@ h1 span{color:var(--accent-light)}
           </div>
         </article>
 
-        <article class="release reveal reveal-d3" id="anolisa-cli-0-1-13">
+        <article class="release reveal reveal-d4" id="anolisa-cli-0-1-13">
           <div class="release-meta">
             <div class="release-version">0.1.13</div>
             <div class="release-date">2026-06-23</div>
@@ -649,7 +694,7 @@ h1 span{color:var(--accent-light)}
           </div>
         </article>
 
-        <article class="release reveal reveal-d4" id="anolisa-cli-0-1-12">
+        <article class="release reveal reveal-d5" id="anolisa-cli-0-1-12">
           <div class="release-meta">
             <div class="release-version">0.1.12</div>
             <div class="release-date">2026-06-22</div>
@@ -686,31 +731,6 @@ h1 span{color:var(--accent-light)}
           </div>
           </div>
         </article>
-
-        <article class="release reveal reveal-d5" id="anolisa-cli-0-1-11">
-          <div class="release-meta">
-            <div class="release-version">0.1.11</div>
-            <div class="release-date">2026-06-18</div>
-          </div>
-          <div class="release-body">
-          <div class="release-body-section">
-            <h3>Added</h3>
-            <ul>
-              <li><code>anolisa adopt &lt;component&gt;</code> can track a pre-installed system RPM without installing it.</li>
-              <li><code>anolisa repair &lt;component&gt;</code> can refresh RPM component state after package details change.</li>
-              <li><code>anolisa forget &lt;component&gt;</code> can stop tracking a component without removing packages or files.</li>
-            </ul>
-          </div>
-          <div class="release-body-section">
-            <h3>Changed</h3>
-            <ul>
-              <li><code>anolisa status &lt;component&gt;</code> now reports drifted RPM components when system package details change.</li>
-              <li><code>anolisa uninstall</code> now keeps observed system RPMs unless <code>--remove-system-package</code> is used.</li>
-              <li><code>anolisa install</code> now preserves adapter package resources when adopting RPM components.</li>
-            </ul>
-          </div>
-          </div>
-        </article>
         <!-- ANOLISA_CLI_CHANGELOG_END -->
       </div>
 
@@ -721,7 +741,7 @@ h1 span{color:var(--accent-light)}
         <!-- ANOLISA_CHANGELOG_DATA_START -->
         <script type="application/json" id="changelog-data">{
   "limit": 5,
-  "latestVersion": "0.1.15",
+  "latestVersion": "0.1.16",
   "components": [
     {
       "id": "anolisa",
@@ -732,6 +752,48 @@ h1 span{color:var(--accent-light)}
         "en": {
           "label": "EN",
           "releases": [
+            {
+              "version": "0.1.16",
+              "date": "2026-06-29",
+              "sections": [
+                {
+                  "title": "Added",
+                  "items": [
+                    "`anolisa osbase sandbox install runc` now installs runc, containerd, Docker, and Docker client.",
+                    "`anolisa osbase sandbox install` now enables services declared by sandbox scenarios.",
+                    "`anolisa osbase sandbox install` now runs scenario verification commands after installation.",
+                    "`anolisa osbase sandbox install` now records sandbox scenarios in `installed.toml`.",
+                    "`anolisa osbase sandbox install` now reports optional scenario packages as hints.",
+                    "`rund`, `firecracker`, and `gvisor` sandbox scenarios now define post-install checks.",
+                    "`anolisa adapter enable` now supports `adapter_type = \"skill_bundle\"` for OpenClaw and Hermes skills.",
+                    "The RPM package now installs default `repo.toml` to `/etc/anolisa/repo.toml`.",
+                    "ANOLISA telemetry setup now installs log rotation for ops `.jsonl` files."
+                  ]
+                },
+                {
+                  "title": "Changed",
+                  "items": [
+                    "`anolisa osbase sandbox install --dry-run` now shows preflight, package, service, verify, and state phases.",
+                    "`anolisa osbase sandbox install runc` now requires Linux kernel 4.18 or newer.",
+                    "`anolisa osbase sandbox install` now reports verification failures as warnings when other phases succeed.",
+                    "`repo.toml` now points RPM installs to the agentic-os repository path.",
+                    "`anolisa update self --json` now reports apply mode, RPM package, and RPM version observations.",
+                    "`anolisa adapter status` now treats skill bundles as healthy without plugin registration.",
+                    "`anolisa adapter enable` now rejects skill bundles that declare framework config entries."
+                  ]
+                },
+                {
+                  "title": "Fixed",
+                  "items": [
+                    "RPM-backed commands now use the component name as the default package name.",
+                    "`anolisa update self` now delegates RPM-owned CLI updates to `dnf`.",
+                    "Non-root sandbox installs now show package, service, verify, and state phases.",
+                    "Telemetry setup now runs the ilogtail installer with bash-compatible script handling.",
+                    "`anolisa adapter disable` now cleans skill bundles without plugin unregister errors."
+                  ]
+                }
+              ]
+            },
             {
               "version": "0.1.15",
               "date": "2026-06-25",
@@ -866,34 +928,54 @@ h1 span{color:var(--accent-light)}
                   ]
                 }
               ]
-            },
-            {
-              "version": "0.1.11",
-              "date": "2026-06-18",
-              "sections": [
-                {
-                  "title": "Added",
-                  "items": [
-                    "`anolisa adopt \u003ccomponent>` can track a pre-installed system RPM without installing it.",
-                    "`anolisa repair \u003ccomponent>` can refresh RPM component state after package details change.",
-                    "`anolisa forget \u003ccomponent>` can stop tracking a component without removing packages or files."
-                  ]
-                },
-                {
-                  "title": "Changed",
-                  "items": [
-                    "`anolisa status \u003ccomponent>` now reports drifted RPM components when system package details change.",
-                    "`anolisa uninstall` now keeps observed system RPMs unless `--remove-system-package` is used.",
-                    "`anolisa install` now preserves adapter package resources when adopting RPM components."
-                  ]
-                }
-              ]
             }
           ]
         },
         "zh": {
           "label": "中文",
           "releases": [
+            {
+              "version": "0.1.16",
+              "date": "2026-06-29",
+              "sections": [
+                {
+                  "title": "新增",
+                  "items": [
+                    "`anolisa osbase sandbox install runc` 现安装 runc、containerd、Docker 和客户端。",
+                    "`anolisa osbase sandbox install` 现启用场景声明的服务。",
+                    "`anolisa osbase sandbox install` 现执行场景安装校验。",
+                    "`anolisa osbase sandbox install` 现记录沙箱安装状态。",
+                    "`anolisa osbase sandbox install` 现提示可选场景包。",
+                    "`rund`、`firecracker`、`gvisor` 场景现声明安装校验。",
+                    "`anolisa adapter enable` 现支持 `adapter_type = \"skill_bundle\"`。",
+                    "RPM 包现安装默认 `/etc/anolisa/repo.toml`。",
+                    "ANOLISA 遥测现为 `.jsonl` 运维日志配置轮转。"
+                  ]
+                },
+                {
+                  "title": "变更",
+                  "items": [
+                    "`anolisa osbase sandbox install --dry-run` 现显示五个安装阶段。",
+                    "`anolisa osbase sandbox install runc` 现要求 Linux 4.18 及以上。",
+                    "`anolisa osbase sandbox install` 校验失败现作为警告报告。",
+                    "`repo.toml` 默认 RPM 源现指向 agentic-os 路径。",
+                    "`anolisa update self --json` 现包含 RPM 包和版本信息。",
+                    "`anolisa adapter status` 现不要求技能包注册插件。",
+                    "`anolisa adapter enable` 现拒绝带配置的技能包。"
+                  ]
+                },
+                {
+                  "title": "修复",
+                  "items": [
+                    "RPM 相关命令现默认用组件名作为包名。",
+                    "`anolisa update self` 现通过 `dnf` 更新 RPM 安装。",
+                    "非 root 沙箱安装现显示完整阶段结果。",
+                    "ilogtail 安装脚本需 bash 时现能正常运行。",
+                    "`anolisa adapter disable` 清理技能包时不再报插件卸载错误。"
+                  ]
+                }
+              ]
+            },
             {
               "version": "0.1.15",
               "date": "2026-06-25",
@@ -1028,28 +1110,6 @@ h1 span{color:var(--accent-light)}
                   ]
                 }
               ]
-            },
-            {
-              "version": "0.1.11",
-              "date": "2026-06-18",
-              "sections": [
-                {
-                  "title": "新增",
-                  "items": [
-                    "`anolisa adopt \u003ccomponent>` 可接管预装 RPM。",
-                    "`anolisa repair \u003ccomponent>` 可刷新漂移的 RPM 状态。",
-                    "`anolisa forget \u003ccomponent>` 可停止跟踪组件。"
-                  ]
-                },
-                {
-                  "title": "变更",
-                  "items": [
-                    "`anolisa status \u003ccomponent>` 现报告 RPM 状态漂移。",
-                    "`anolisa uninstall` 默认保留观察到的系统 RPM。",
-                    "`anolisa install` 接管 RPM 时保留适配器资源。"
-                  ]
-                }
-              ]
             }
           ]
         }
@@ -1064,6 +1124,35 @@ h1 span{color:var(--accent-light)}
         "en": {
           "label": "EN",
           "releases": [
+            {
+              "version": "2.6.0",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "Added cosh-ng compatibility with cosh-switch. (#1169)",
+                    "Added instance_id to SysOM API request params. (#1160)",
+                    "Added anolisa component contract. (#1128)",
+                    "Added SLS JSONL session telemetry with expanded metrics. (#1057)",
+                    "Added authenticated models display in /model dialog. (#1030)",
+                    "Added kitty csi-u keys support with sequence timeout management. (#552)",
+                    "Added large paste placeholder and fixed placeholder id reset on esc cancel. (#312)",
+                    "Fixed SLS log write to skip when file does not exist or is not writable. (#1101)",
+                    "Fixed useless sandbox guard and failure handler hooks by removing them. (#979)",
+                    "Fixed missing keyboard shortcut hints in footer status bar. (#921)",
+                    "Fixed response language and model identity rules. (#920)",
+                    "Fixed sub-model refusal detection and byteLength display. (#895)",
+                    "Fixed webfetch sub-model output validation to avoid silent refusals. (#895)",
+                    "Fixed thinking output to be distinguished from user input with prefix and color. (#894)",
+                    "Fixed custom model configuration to be preserved. (#887)",
+                    "Fixed partial message finalization on API error. (#801)",
+                    "Fixed API error reporting in all output formats, not only text. (#801)",
+                    "Improved escape key handling by unifying it in appcontainer. (#437)"
+                  ]
+                }
+              ]
+            },
             {
               "version": "2.5.0",
               "date": "",
@@ -1130,24 +1219,6 @@ h1 span{color:var(--accent-light)}
                   ]
                 }
               ]
-            },
-            {
-              "version": "2.2.1",
-              "date": "",
-              "sections": [
-                {
-                  "title": "Release",
-                  "items": [
-                    "Fixed initial chat being blocked during skill/subagent first-load discovery. (#418)",
-                    "Fixed missing tool_use_id in PostToolUse hook event payload. (#414)",
-                    "Fixed missing skill_context in PreToolUse hook input for resolved skill path. (#409)",
-                    "Fixed missing auto-completion for `/statusline` subcommands. (#408)",
-                    "Fixed unavailable agents appearing in the key sharing prompt. (#394)",
-                    "Fixed bash option not being restored after canceling from the provider screen. (#393)",
-                    "Fixed hook systemMessages to be concatenated with a `[name]` prefix for clarity. (#387)"
-                  ]
-                }
-              ]
             }
           ]
         },
@@ -1166,6 +1237,85 @@ h1 span{color:var(--accent-light)}
         "en": {
           "label": "EN",
           "releases": [
+            {
+              "version": "0.7.0",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Codex Plugin — Full security integration for OpenAI Codex",
+                  "items": [
+                    "Added codex-plugin with code scanning, prompt scanning, skill ledger, and PII checking hooks. (#1074)",
+                    "Supported packaging codex-plugin into RPM. (#1138)",
+                    "Fixed codex-plugin paths in Makefile and CI for correct RPM install verification. (#1165)"
+                  ]
+                },
+                {
+                  "title": "Code Scanner",
+                  "items": [
+                    "Added code-scanner LLM mode for AI-assisted security analysis. (#1108)",
+                    "Added code-scanner static rules for expanded coverage. (#1033)"
+                  ]
+                },
+                {
+                  "title": "Prompt Scanner",
+                  "items": [
+                    "Added L4 multi-turn intent detection with ollama model service. (#1060)",
+                    "Routed prompt scan to daemon and added prompt model preload for reduced latency. (#786)",
+                    "Controlled prompt scan call to use daemon by env variable. (#933)"
+                  ]
+                },
+                {
+                  "title": "Skill Ledger — Activation daemon and policy engine",
+                  "items": [
+                    "Added Skill Ledger activation daemon for background integrity monitoring. (#857)",
+                    "Added runtime activation resolver for skill trust decisions. (#826)",
+                    "Added skill ledger activation policy for configurable enforcement. (#944)",
+                    "Updated skill ledger activation and event contracts. (#983)",
+                    "Updated Skill Ledger hook defaults and reconcile notify behavior. (#1086)",
+                    "Aligned skill ledger hooks across all agent platforms. (#1135)",
+                    "Resolved Skill Ledger FUSE and unmanaged roots handling. (#1141)",
+                    "Fail-open unsupported Hermes skill ledger scenarios. (#1155)"
+                  ]
+                },
+                {
+                  "title": "Daemon & Telemetry",
+                  "items": [
+                    "Added daemon service with systemd integration and RPM build support. (#1090)",
+                    "Exposed SQL query endpoint at daemon for observability queries. (#1042)",
+                    "Enhanced daemon logging including requests and jobs. (#871)",
+                    "Added telemetry schema definition and SLS JSONL writer. (#977, #1008)",
+                    "Passed agent_name to telemetry data for multi-agent identification. (#1032)",
+                    "Added logging system for structured agent-sec-cli output. (#651)",
+                    "Added security daemon socket fallback under `/run/user/\u003cuid>` for user-scoped deployments. (#1129)"
+                  ]
+                },
+                {
+                  "title": "PII Scanner",
+                  "items": [
+                    "Extended PII scanning coverage with additional pattern detectors. (#925)"
+                  ]
+                },
+                {
+                  "title": "Security Observability",
+                  "items": [
+                    "Added session report command for post-session security summaries. (#703)"
+                  ]
+                },
+                {
+                  "title": "Sandbox",
+                  "items": [
+                    "Converged sandbox trigger rules for consistent enforcement. (#979)"
+                  ]
+                },
+                {
+                  "title": "Adapter & Build",
+                  "items": [
+                    "Added ANOLISA CLI component.toml for adapter manifest integration. (#1067)",
+                    "Added systemd-rpm-macros as RPM build dependency. (#1156)"
+                  ]
+                }
+              ]
+            },
             {
               "version": "0.6.0",
               "date": "",
@@ -1440,22 +1590,6 @@ h1 span{color:var(--accent-light)}
                     "Improved missing loongshield guidance. (#289)",
                     "Fixed build errors. (#288)",
                     "Removed openclaw hook examples and fixed documentation. (#282)"
-                  ]
-                }
-              ]
-            },
-            {
-              "version": "0.2.0",
-              "date": "",
-              "sections": [
-                {
-                  "title": "Release",
-                  "items": [
-                    "Added Hardened skill signing pipeline and added `.skill-meta` layout. (#129)",
-                    "Added `Cargo.lock` to version control. (#149)",
-                    "Added `make install-sandbox` target. (#68)",
-                    "Fixed bubblewrap version compatibility for `--argv0` option. (#112)",
-                    "Changed Refactor SKILL.md to executable protocol and align sub-skills. (#130)"
                   ]
                 }
               ]
