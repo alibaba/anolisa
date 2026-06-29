@@ -572,7 +572,7 @@ build_agent_memory() {
     # captures it via the default include.
     tar -cf - -C "$MEM_DIR" \
         --exclude='target' \
-        --exclude='dist' \
+        --exclude='./dist' \
         --exclude='.git' \
         --exclude='vendor' \
         --exclude='.cargo' \
