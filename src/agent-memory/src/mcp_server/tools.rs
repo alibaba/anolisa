@@ -285,6 +285,12 @@ impl MemoryMcpServer {
         )
         .map_err(|e| fmt_err("memory_timeline failed", e))
     }
+    #[tool(description = "Refresh the MEMORY.md index file from all memory entries.")]
+    async fn mem_index_refresh(&self) -> ToolResult {
+        let n = crate::tools::memory_index::refresh_index(&self.svc)
+            .map_err(|e| fmt_err("index_refresh failed", e))?;
+        Ok(format!("refreshed MEMORY.md with {n} entries"))
+    }
 
     // ---- Tier C: governance (snapshots) ----
 
@@ -547,6 +553,7 @@ rmcp::tool_box!(MemoryMcpServer {
     memory_get_context,
     memory_sessions,
     memory_timeline,
+    mem_index_refresh,
     mem_snapshot,
     mem_snapshot_list,
     mem_snapshot_restore,

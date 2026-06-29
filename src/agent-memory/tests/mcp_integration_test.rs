@@ -28,6 +28,7 @@ const EXPECTED_TOOLS: &[&str] = &[
     "memory_get_context",
     "memory_sessions",
     "memory_timeline",
+    "mem_index_refresh",
     "mem_snapshot",
     "mem_snapshot_list",
     "mem_snapshot_restore",
