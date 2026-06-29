@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.16] - 2026-06-29
+
+### Added
+
+- `anolisa osbase sandbox install runc` now installs runc, containerd, Docker, and Docker client.
+- `anolisa osbase sandbox install` now enables services declared by sandbox scenarios.
+- `anolisa osbase sandbox install` now runs scenario verification commands after installation.
+- `anolisa osbase sandbox install` now records sandbox scenarios in `installed.toml`.
+- `anolisa osbase sandbox install` now reports optional scenario packages as hints.
+- `rund`, `firecracker`, and `gvisor` sandbox scenarios now define post-install checks.
+- `anolisa adapter enable` now supports `adapter_type = "skill_bundle"` for OpenClaw and Hermes skills.
+- The RPM package now installs default `repo.toml` to `/etc/anolisa/repo.toml`.
+- ANOLISA telemetry setup now installs log rotation for ops `.jsonl` files.
+
+### Changed
+
+- `anolisa osbase sandbox install --dry-run` now shows preflight, package, service, verify, and state phases.
+- `anolisa osbase sandbox install runc` now requires Linux kernel 4.18 or newer.
+- `anolisa osbase sandbox install` now reports verification failures as warnings when other phases succeed.
+- `repo.toml` now points RPM installs to the agentic-os repository path.
+- `anolisa update self --json` now reports apply mode, RPM package, and RPM version observations.
+- `anolisa adapter status` now treats skill bundles as healthy without plugin registration.
+- `anolisa adapter enable` now rejects skill bundles that declare framework config entries.
+
+### Fixed
+
+- RPM-backed commands now use the component name as the default package name.
+- `anolisa update self` now delegates RPM-owned CLI updates to `dnf`.
+- Non-root sandbox installs now show package, service, verify, and state phases.
+- Telemetry setup now runs the ilogtail installer with bash-compatible script handling.
+- `anolisa adapter disable` now cleans skill bundles without plugin unregister errors.
+
 ## [0.1.15] - 2026-06-25
 
 ### Added
@@ -303,6 +335,38 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.1.16] - 2026-06-29
+
+### 新增
+
+- `anolisa osbase sandbox install runc` 现安装 runc、containerd、Docker 和客户端。
+- `anolisa osbase sandbox install` 现启用场景声明的服务。
+- `anolisa osbase sandbox install` 现执行场景安装校验。
+- `anolisa osbase sandbox install` 现记录沙箱安装状态。
+- `anolisa osbase sandbox install` 现提示可选场景包。
+- `rund`、`firecracker`、`gvisor` 场景现声明安装校验。
+- `anolisa adapter enable` 现支持 `adapter_type = "skill_bundle"`。
+- RPM 包现安装默认 `/etc/anolisa/repo.toml`。
+- ANOLISA 遥测现为 `.jsonl` 运维日志配置轮转。
+
+### 变更
+
+- `anolisa osbase sandbox install --dry-run` 现显示五个安装阶段。
+- `anolisa osbase sandbox install runc` 现要求 Linux 4.18 及以上。
+- `anolisa osbase sandbox install` 校验失败现作为警告报告。
+- `repo.toml` 默认 RPM 源现指向 agentic-os 路径。
+- `anolisa update self --json` 现包含 RPM 包和版本信息。
+- `anolisa adapter status` 现不要求技能包注册插件。
+- `anolisa adapter enable` 现拒绝带配置的技能包。
+
+### 修复
+
+- RPM 相关命令现默认用组件名作为包名。
+- `anolisa update self` 现通过 `dnf` 更新 RPM 安装。
+- 非 root 沙箱安装现显示完整阶段结果。
+- ilogtail 安装脚本需 bash 时现能正常运行。
+- `anolisa adapter disable` 清理技能包时不再报插件卸载错误。
 
 ## [0.1.15] - 2026-06-25
 
