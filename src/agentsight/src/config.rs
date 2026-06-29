@@ -1829,4 +1829,22 @@ mod tests {
         assert!(config.features.token_consumption_enabled);
         assert!(config.features.sls_logtail_enabled);
     }
+
+    #[test]
+    fn test_load_reactive_config() {
+        let dir = std::env::temp_dir().join(format!("test_reactive_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("agentsight.json");
+        std::fs::write(
+            &path,
+            r#"{"reactive": {"enabled": true, "debounce_secs": 10, "workspace": "/home/test"}}"#,
+        )
+        .unwrap();
+        let mut config = AgentsightConfig::default();
+        config.load_from_file(&path).unwrap();
+        assert_eq!(config.reactive_enabled, Some(true));
+        assert_eq!(config.reactive_debounce_secs, Some(10));
+        assert_eq!(config.reactive_workspace, Some("/home/test".to_string()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

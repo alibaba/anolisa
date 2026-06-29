@@ -8,6 +8,89 @@ use std::time::{Duration, Instant};
 use super::exporter::GenAIExporter;
 use super::semantic::GenAISemanticEvent;
 
+fn should_attempt_checkpoint(
+    last_ckpt: &Instant,
+    debounce: Duration,
+    ws_ckpt_available: bool,
+) -> CheckpointDecision {
+    if last_ckpt.elapsed() < debounce {
+        return CheckpointDecision::Debounced;
+    }
+    if !ws_ckpt_available {
+        return CheckpointDecision::Unavailable;
+    }
+    CheckpointDecision::Proceed
+}
+
+#[derive(Debug, PartialEq)]
+enum CheckpointDecision {
+    Proceed,
+    Debounced,
+    Unavailable,
+}
+
+fn make_snapshot_id(reason: &str) -> String {
+    format!(
+        "auto-{}-{reason}",
+        chrono::Utc::now().format("%Y%m%dT%H%M%S")
+    )
+}
+
+fn make_checkpoint_message(reason: &str, conversation_id: Option<&str>) -> String {
+    format!(
+        "reactive: {reason} (conv={})",
+        conversation_id.unwrap_or("unknown")
+    )
+}
+
+fn run_checkpoint_command(workspace: &str, snapshot_id: &str, msg_text: &str) -> bool {
+    match Command::new("ws-ckpt")
+        .args([
+            "checkpoint",
+            "-w",
+            workspace,
+            "-i",
+            snapshot_id,
+            "-m",
+            msg_text,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(mut child) => {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(s)) if s.success() => {
+                        log::info!("[reactive] checkpoint created: {snapshot_id}");
+                        return true;
+                    }
+                    Ok(Some(s)) => {
+                        log::warn!("[reactive] ws-ckpt exited {s}");
+                        return false;
+                    }
+                    Ok(None) if Instant::now() >= deadline => {
+                        log::warn!("[reactive] ws-ckpt timed out, killing");
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return false;
+                    }
+                    Ok(None) => thread::sleep(Duration::from_millis(100)),
+                    Err(e) => {
+                        log::warn!("[reactive] ws-ckpt wait error: {e}");
+                        return false;
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            log::warn!("[reactive] ws-ckpt spawn failed: {e}");
+            false
+        }
+    }
+}
+
 pub struct ReactiveConfig {
     pub enabled: bool,
     pub debounce_secs: u64,
@@ -127,52 +210,21 @@ impl ReactiveExporter {
                             interruption_type,
                             conversation_id,
                         } => {
-                            if last_ckpt.elapsed() < debounce {
-                                log::debug!("[reactive] debounced interruption alert ({interruption_type})");
-                                continue;
-                            }
-                            if !ws_ckpt_available {
-                                log::info!("[reactive] would checkpoint for {interruption_type} but ws-ckpt unavailable");
-                                continue;
-                            }
-                            let snapshot_id = format!(
-                                "auto-{}-{}",
-                                chrono::Utc::now().format("%Y%m%dT%H%M%S"),
-                                &interruption_type
-                            );
-                            let msg_text = format!(
-                                "reactive: {} (conv={})",
-                                interruption_type,
-                                conversation_id.as_deref().unwrap_or("unknown")
-                            );
-                            match Command::new("ws-ckpt")
-                                .args(["checkpoint", "-w", &workspace, "-i", &snapshot_id, "-m", &msg_text])
-                                .stdout(Stdio::null())
-                                .stderr(Stdio::null())
-                                .spawn()
-                            {
-                                Ok(mut child) => {
-                                    let deadline = Instant::now() + Duration::from_secs(10);
-                                    loop {
-                                        match child.try_wait() {
-                                            Ok(Some(s)) if s.success() => {
-                                                log::info!("[reactive] checkpoint created: {snapshot_id}");
-                                                last_ckpt = Instant::now();
-                                                break;
-                                            }
-                                            Ok(Some(s)) => { log::warn!("[reactive] ws-ckpt exited {s}"); break; }
-                                            Ok(None) if Instant::now() >= deadline => {
-                                                log::warn!("[reactive] ws-ckpt timed out, killing");
-                                                let _ = child.kill();
-                                                let _ = child.wait();
-                                                break;
-                                            }
-                                            Ok(None) => thread::sleep(Duration::from_millis(100)),
-                                            Err(e) => { log::warn!("[reactive] ws-ckpt wait error: {e}"); break; }
-                                        }
-                                    }
+                            match should_attempt_checkpoint(&last_ckpt, debounce, ws_ckpt_available) {
+                                CheckpointDecision::Debounced => {
+                                    log::debug!("[reactive] debounced interruption alert ({interruption_type})");
+                                    continue;
                                 }
-                                Err(e) => log::warn!("[reactive] ws-ckpt spawn failed: {e}"),
+                                CheckpointDecision::Unavailable => {
+                                    log::info!("[reactive] would checkpoint for {interruption_type} but ws-ckpt unavailable");
+                                    continue;
+                                }
+                                CheckpointDecision::Proceed => {}
+                            }
+                            let snapshot_id = make_snapshot_id(&interruption_type);
+                            let msg_text = make_checkpoint_message(&interruption_type, conversation_id.as_deref());
+                            if run_checkpoint_command(&workspace, &snapshot_id, &msg_text) {
+                                last_ckpt = Instant::now();
                             }
                         }
                         Msg::TokenAccum {
@@ -214,64 +266,21 @@ impl ReactiveExporter {
                             reason,
                             conversation_id,
                         } => {
-                            if last_ckpt.elapsed() < debounce {
-                                log::debug!("[reactive] debounced checkpoint ({reason})");
-                                continue;
-                            }
-                            if !ws_ckpt_available {
-                                log::info!(
-                                    "[reactive] would checkpoint for {reason} but ws-ckpt unavailable"
-                                );
-                                continue;
-                            }
-                            let snapshot_id = format!(
-                                "auto-{}-{}",
-                                chrono::Utc::now().format("%Y%m%dT%H%M%S"),
-                                &reason
-                            );
-                            let msg_text = format!(
-                                "reactive: {} (conv={})",
-                                reason,
-                                conversation_id.as_deref().unwrap_or("unknown")
-                            );
-                            match Command::new("ws-ckpt")
-                                .args(["checkpoint", "-w", &workspace, "-i", &snapshot_id, "-m", &msg_text])
-                                .stdout(Stdio::null())
-                                .stderr(Stdio::null())
-                                .spawn()
-                            {
-                                Ok(mut child) => {
-                                    // Poll with timeout: try_wait in a loop up to 10s.
-                                    // Avoids blocking indefinitely if ws-ckpt hangs.
-                                    let deadline = Instant::now() + Duration::from_secs(10);
-                                    loop {
-                                        match child.try_wait() {
-                                            Ok(Some(status)) if status.success() => {
-                                                log::info!("[reactive] checkpoint created: {snapshot_id}");
-                                                last_ckpt = Instant::now();
-                                                break;
-                                            }
-                                            Ok(Some(status)) => {
-                                                log::warn!("[reactive] ws-ckpt exited {status}");
-                                                break;
-                                            }
-                                            Ok(None) if Instant::now() >= deadline => {
-                                                log::warn!("[reactive] ws-ckpt timed out, killing");
-                                                let _ = child.kill();
-                                                let _ = child.wait();
-                                                break;
-                                            }
-                                            Ok(None) => {
-                                                thread::sleep(Duration::from_millis(100));
-                                            }
-                                            Err(e) => {
-                                                log::warn!("[reactive] ws-ckpt wait error: {e}");
-                                                break;
-                                            }
-                                        }
-                                    }
+                            match should_attempt_checkpoint(&last_ckpt, debounce, ws_ckpt_available) {
+                                CheckpointDecision::Debounced => {
+                                    log::debug!("[reactive] debounced checkpoint ({reason})");
+                                    continue;
                                 }
-                                Err(e) => log::warn!("[reactive] ws-ckpt spawn failed: {e}"),
+                                CheckpointDecision::Unavailable => {
+                                    log::info!("[reactive] would checkpoint for {reason} but ws-ckpt unavailable");
+                                    continue;
+                                }
+                                CheckpointDecision::Proceed => {}
+                            }
+                            let snapshot_id = make_snapshot_id(&reason);
+                            let msg_text = make_checkpoint_message(&reason, conversation_id.as_deref());
+                            if run_checkpoint_command(&workspace, &snapshot_id, &msg_text) {
+                                last_ckpt = Instant::now();
                             }
                         }
                     }
@@ -424,6 +433,118 @@ mod tests {
     }
 
     #[test]
+    fn should_attempt_checkpoint_proceed() {
+        let old = Instant::now() - Duration::from_secs(60);
+        assert_eq!(
+            should_attempt_checkpoint(&old, Duration::from_secs(30), true),
+            CheckpointDecision::Proceed
+        );
+    }
+
+    #[test]
+    fn should_attempt_checkpoint_debounced() {
+        let recent = Instant::now();
+        assert_eq!(
+            should_attempt_checkpoint(&recent, Duration::from_secs(30), true),
+            CheckpointDecision::Debounced
+        );
+    }
+
+    #[test]
+    fn should_attempt_checkpoint_unavailable() {
+        let old = Instant::now() - Duration::from_secs(60);
+        assert_eq!(
+            should_attempt_checkpoint(&old, Duration::from_secs(30), false),
+            CheckpointDecision::Unavailable
+        );
+    }
+
+    #[test]
+    fn make_snapshot_id_contains_reason() {
+        let id = make_snapshot_id("agent_crash");
+        assert!(id.starts_with("auto-"));
+        assert!(id.ends_with("-agent_crash"));
+    }
+
+    #[test]
+    fn make_checkpoint_message_with_conv() {
+        let msg = make_checkpoint_message("retry_storm", Some("conv-42"));
+        assert_eq!(msg, "reactive: retry_storm (conv=conv-42)");
+    }
+
+    #[test]
+    fn make_checkpoint_message_without_conv() {
+        let msg = make_checkpoint_message("crash", None);
+        assert_eq!(msg, "reactive: crash (conv=unknown)");
+    }
+
+    #[test]
+    fn detect_critical_finds_sigkill() {
+        let events = vec![make_call(Some("killed by signal 9"), 1000, None)];
+        let (reason, _) = ReactiveExporter::detect_critical(&events).unwrap();
+        assert_eq!(reason, "agent_crash");
+    }
+
+    #[test]
+    fn detect_critical_finds_sigkill_keyword() {
+        let events = vec![make_call(Some("SIGKILL received"), 1000, None)];
+        let (reason, _) = ReactiveExporter::detect_critical(&events).unwrap();
+        assert_eq!(reason, "agent_crash");
+    }
+
+    #[test]
+    fn detect_critical_finds_context_window() {
+        let events = vec![make_call(
+            Some("context_window exceeded for this request"),
+            1000,
+            None,
+        )];
+        let (reason, _) = ReactiveExporter::detect_critical(&events).unwrap();
+        assert_eq!(reason, "context_overflow");
+    }
+
+    #[test]
+    fn reactive_notifier_sends_alert() {
+        let config = ReactiveConfig {
+            enabled: true,
+            debounce_secs: 60,
+            workspace_path: Some("/tmp".to_string()),
+        };
+        let (exporter, notifier) = ReactiveExporter::new(config).unwrap();
+        notifier.notify_interruption("retry_storm", Some("conv-99".into()));
+        std::thread::sleep(Duration::from_millis(200));
+        drop(exporter);
+    }
+
+    #[test]
+    fn exporter_name_is_reactive() {
+        use crate::genai::exporter::GenAIExporter;
+        let config = ReactiveConfig {
+            enabled: true,
+            debounce_secs: 60,
+            workspace_path: Some("/tmp".to_string()),
+        };
+        let (exporter, _) = ReactiveExporter::new(config).unwrap();
+        assert_eq!(exporter.name(), "reactive");
+        drop(exporter);
+    }
+
+    #[test]
+    fn export_token_accum_no_cache() {
+        use crate::genai::exporter::GenAIExporter;
+        let config = ReactiveConfig {
+            enabled: true,
+            debounce_secs: 60,
+            workspace_path: Some("/tmp".to_string()),
+        };
+        let (exporter, _) = ReactiveExporter::new(config).unwrap();
+        let event = make_call(None, 10_000, None);
+        exporter.export(&[event]);
+        std::thread::sleep(Duration::from_millis(200));
+        drop(exporter);
+    }
+
+    #[test]
     fn detect_critical_finds_crash() {
         let events = vec![make_call(
             Some("process crashed with OOM killer"),
@@ -510,14 +631,7 @@ mod tests {
             workspace_path: Some("/tmp".to_string()),
         };
 
-        // new() probes for ws-ckpt binary. If not installed, skip gracefully.
-        let exporter = match ReactiveExporter::new(config) {
-            Some((e, _)) => e,
-            None => {
-                eprintln!("ws-ckpt not installed, skipping integration test");
-                return;
-            }
-        };
+        let (exporter, _) = ReactiveExporter::new(config).unwrap();
 
         let crash_event = make_call(Some("Process killed by OOM killer"), 1000, None);
         let events = vec![crash_event];
