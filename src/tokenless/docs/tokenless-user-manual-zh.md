@@ -1,932 +1,558 @@
-# Token-Less 用户使用手册
+# Token 优化（tokenless）
 
-> LLM token optimization toolkit — Schema/Response 压缩 + 命令重写 + TOON 格式
+tokenless 是 ANOLISA 的 Token 节省工具包，通过 Schema 压缩、响应压缩、TOON 编码、命令重写和工具就绪检查五条互补策略，在工具定义、API 返回和命令输出进入 LLM 上下文窗口之前削减冗余，从而降低 Agent 运行时的 Token 消耗和重试成本。
 
-**版本**：0.5.0  
-**源码**：https://code.alibaba-inc.com/Agentic-OS/Token-Less  
-**RPM 源码**：https://code.alibaba-inc.com/alinux/tokenless  
-**系统要求**：Rust 1.89+ (edition 2024), Linux (推荐 Alinux 4)
-
----
-
-## 目录
-
-1. [产品概述](#1-产品概述)
-2. [核心功能](#2-核心功能)
-3. [系统要求](#3-系统要求)
-4. [安装部署](#4-安装部署)
-   - [RPM 包安装](#41-方法一-rpm-包安装推荐用于-alinux-4)
-   - [源码一键安装](#42-方法二源码一键安装)
-   - [安装脚本](#43-方法三使用安装脚本)
-   - [分步安装](#44-方法四分步安装)
-5. [配置使用](#5-配置使用)
-   - [CLI 使用](#51-cli-使用)
-   - [RPM 安装后的自动化配置](#52-rpm-安装后的自动化配置)
-   - [Copilot Shell 配置](#53-copilot-shell-配置)
-   - [OpenClaw 插件配置](#54-openclaw-插件配置)
-6. [验证测试](#6-验证测试)
-7. [故障排查](#7-故障排查)
-8. [附录](#8-附录)
-   - [Makefile 命令汇总](#81-makefile-命令汇总)
-   - [关键文件路径](#82-关键文件路径)
-   - [Fail-Open 设计](#83-fail-open-设计)
-   - [默认配置汇总](#84-默认配置汇总)
-   - [源码仓库](#85-源码仓库)
+- **Schema 与响应压缩**：压缩 OpenAI Function Calling 工具定义和 API 返回结果，分别减少约 57% 和 26–78% 的 Token。
+- **TOON 编码**：将 JSON 响应编码为 Token 导向的紧凑格式，结构化数据可再省 15–40%。
+- **命令重写**：集成 RTK 对 70+ 常见 CLI 命令输出做过滤和重写，消除 60–90% 的无用噪声。
+- **工具就绪检查**：执行前检查二进制、配置、权限和网络依赖，自动修复缺失项并标记环境类失败，避免无效重试浪费 Token。
+- **统计与可观测**：每次压缩记录字符/Token 节省度量，支持 SQLite 汇总与 SLS JSONL 采集，可双跑对比真实节省。
 
 ---
 
-## 1. 产品概述
+## 能力概览
 
-**Token-Less** 是一款 LLM token 优化工具包，通过 **Schema/响应压缩**、**命令重写**和 **TOON 格式**三种策略，显著降低 LLM token 消耗。
-
-### 1.1 核心价值
-
-| 功能 | 节省比例 | 说明 |
-|------|---------|------|
+| 策略 | Token 节省 | 说明 |
+|------|----------|------|
 | Schema 压缩 | ~57% | 压缩 OpenAI Function Calling 工具定义 |
-| 响应压缩 | ~26–78% | 压缩 API/工具响应（因内容而异） |
-| 命令重写 | 60–90% | 通过 RTK 过滤 CLI 命令输出 |
-| TOON 格式 | 30–60% | 无损 JSON→二进制格式压缩，适合结构化/表格数据 |
+| 响应压缩 | 26–78% | 压缩 API / 工具返回结果（移除 debug/null/空值，截断长内容） |
+| TOON 编码 | 15–40% | JSON 编码为无损紧凑格式，链在响应压缩之后 |
+| 命令重写 | 60–90% | 通过 RTK 过滤 70+ 种 CLI 命令输出 |
+| 工具就绪检查 | 减少重试浪费 | 执行前检查环境依赖，自动修复，失败归因 |
 
-### 1.2 支持的集成方式
+---
 
-| 集成方式 | 命令重写 | 响应压缩 | Schema 压缩 |
-|---------|---------|---------|------------|
-| OpenClaw 插件 | ✅ | ✅ | ✅ |
-| Copilot Shell Hook | ✅ | ✅ | ✅ |
+## 安装
 
-### 1.3 架构概览
+### 通过 anolisa CLI（推荐）
 
+```bash
+anolisa install tokenless
 ```
-Token-Less/
-├── crates/tokenless-schema/   # 核心库：SchemaCompressor + ResponseCompressor
-├── crates/tokenless-cli/      # CLI 二进制：tokenless 命令
-├── crates/tokenless-stats/    # 统计记录库（SQLite）
-├── adapters/tokenless/        # FHS 适配器包（manifest, common, openclaw, hermes）
-├── third_party/rtk/           # RTK 外部源码（justfile clone+patch）
-├── third_party/patches/      # 外部源码补丁
-├── Makefile                   # 统一构建系统
-└── docs/                      # 文档
+
+安装产物：`tokenless`、`rtk`、`toon` 三个二进制，以及适配器资源（hooks、插件、tool-ready-spec、env-fix 脚本）。
+
+### RPM 包（Alinux 4）
+
+```bash
+sudo dnf install tokenless
+```
+
+RPM 安装到系统级 FHS 路径：`/usr/bin/tokenless`、`/usr/libexec/anolisa/tokenless/{rtk,toon}`、`/usr/share/anolisa/adapters/tokenless/`、`/usr/share/anolisa/extensions/tokenless/`。`%post` 会清理旧版残留（pre-FHS 布局、旧 `tokenless-openclaw` 插件 id 等），cosh extension 由 copilot-shell 自动发现，无需手动改 `settings.json`。
+
+### 源码构建（开发者）
+
+```bash
+git clone https://github.com/alibaba/anolisa
+cd anolisa/src/tokenless
+
+make setup    # 编译 + 安装二进制 + 注册全部适配器
+```
+
+构建依赖：Rust ≥ 1.89（edition 2024）、just、Git、nodejs+npm（编译 OpenClaw TS 插件）。运行时依赖：python3、jq、bash（RPM Requires）。详见 [附录 · 安装路径](#安装路径)。
+
+---
+
+## CLI 使用
+
+所有子命令支持 `-f <path>` 从文件读取或从 stdin 读取（管道），输入上限 64 MiB。
+
+### 压缩工具 Schema
+
+```bash
+# 从文件压缩单个 schema
+tokenless compress-schema -f tool.json
+
+# 从 stdin 批量压缩（JSON 数组）
+cat tools.json | tokenless compress-schema --batch
+
+# 附带统计追踪
+tokenless compress-schema -f tools.json --batch \
+  --agent-id copilot-shell --session-id sess-001
+```
+
+| 参数 | 说明 |
+|------|------|
+| `-f, --file <path>` | 输入文件，省略则读 stdin |
+| `--batch` | 压缩 JSON 数组（输入是数组时自动启用） |
+| `--agent-id` / `--session-id` / `--tool-use-id` | 统计追踪字段 |
+
+### 压缩 API 响应
+
+```bash
+tokenless compress-response -f response.json
+
+# 或管道
+curl -s https://api.example.com/data | tokenless compress-response
+
+# 覆盖默认阈值
+tokenless compress-response -f resp.json \
+  --truncate-strings-at 2048 --truncate-arrays-at 16 --max-depth 6
+```
+
+| 参数 | 说明 |
+|------|------|
+| `-f, --file <path>` | 输入文件，省略则读 stdin |
+| `--truncate-strings-at <usize>` | 字符串截断阈值（默认 4096） |
+| `--truncate-arrays-at <usize>` | 数组截断阈值（默认 32） |
+| `--max-depth <usize>` | 嵌套深度上限（默认 8） |
+
+### TOON 编解码
+
+```bash
+# JSON → TOON（紧凑格式）
+echo '{"name":"Alice","age":30}' | tokenless compress-toon
+
+# TOON → JSON
+echo 'name: Alice
+age: 30' | tokenless decompress-toon
+
+# 往返验证
+echo '{"name":"test","value":42}' | tokenless compress-toon | tokenless decompress-toon
+```
+
+`compress-toon` 另支持 `--agent-id`/`--session-id`/`--tool-use-id` 统计追踪。若编码后无收益，CLI 输出原文并 stderr 提示，不记录统计。
+
+### 环境就绪检查
+
+```bash
+# 检查指定工具（支持 alias、大小写不敏感）
+tokenless env-check --tool Shell
+
+# 检查全部
+tokenless env-check --all
+
+# 输出完整两级清单
+tokenless env-check --checklist
+
+# 自动修复缺失依赖
+tokenless env-check --tool Shell --fix
+
+# 机器可读 JSON（供 hook/插件消费）
+tokenless env-check --all --json
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--tool <name>` | 检查单个工具（精确 key → alias → 大小写不敏感） |
+| `--all` | 检查 spec 中所有工具 |
+| `--fix` | 自动安装缺失/版本过低的依赖（调 `tokenless-env-fix.sh fix-all`） |
+| `--checklist` | 输出两级清单（工具类别 → 依赖项） |
+| `--json` | 机器可读 JSON |
+
+**状态值**：`READY`（全部满足）/ `PARTIAL`（推荐项缺失，可用）/ `NOT_READY`（必需项缺失，工具不可用）/ `UNKNOWN`（spec 无此工具）。`NOT_READY` 的 JSON 含 `diagnostic` 字段，格式 `[tokenless:ready] <tool>: NOT_READY — required dependency missing: <bin>. Skip retry.`，供 hook 传给 LLM 作为 skip-retry 指引。
+
+### 统计与效果度量
+
+```bash
+# 汇总（按操作类型分组）
+tokenless stats summary
+tokenless stats summary --json
+
+# 列出最近记录
+tokenless stats list                  # 默认 20 条
+tokenless stats list -l 50
+
+# 查看某条记录的压缩前后文本
+tokenless stats show 42
+
+# 清空统计
+tokenless stats clear --yes
+
+# 查看开关状态与来源
+tokenless stats status
+
+# 启用/禁用统计记录（写 config.json）
+tokenless stats enable
+tokenless stats disable
+```
+
+#### 双跑对比（dry-run baseline vs active）
+
+通过 `TOKENLESS_COMPRESSION_ENABLED` 控制是否真正压缩：
+
+- `1`（默认）：正常压缩，结果进入 LLM 上下文，记录 `mode=active`
+- `0`（dry-run）：计算预测节省并记录（`mode=dryrun`），但**输出原文**，上下文不变
+
+对同一任务跑两次即可对照真实节省：
+
+```bash
+# 跑 1：dry-run 基线
+TOKENLESS_COMPRESSION_ENABLED=0  <跑同一任务>   # session A
+# 跑 2：真实压缩
+TOKENLESS_COMPRESSION_ENABLED=1  <跑同一任务>   # session B
+
+# 对照
+tokenless stats summary --compare <session-A> <session-B>
+tokenless stats summary --compare <session-A> <session-B> --json
+```
+
+`--compare` 接受恰好两个 session ID；模式不匹配会 stderr 告警但不阻断。无 token 节省的记录不入库。
+
+> 注：tokenless 仅度量它经手的可压缩内容；模型推理 token / 真实计费 token 不在其内。
+
+#### SLS 日志采集
+
+除 SQLite 外，每次压缩可追加 **SLS JSONL 记录**，供 ilogtail/SLS Logtail 摄取。
+
+- **默认开启**（`sls_enabled=true`）。开关：`~/.tokenless/config.json` 的 `sls_enabled` 或 `TOKENLESS_SLS_ENABLED`。
+- **输出路径**：默认 `/var/log/anolisa/sls/ops/tokenless.jsonl`，可用 `TOKENLESS_SLS_PATH` 覆盖（必须位于 `/var/log/` 或 `/tmp/` 前缀下，否则回退默认并告警）。
+- **文件归属**：SLS JSONL 文件由 **anolisa SLS 组件统一管理**（创建、轮转、删除）。tokenless **不主动管理**——写日志前先判断文件是否存在，**存在才追加，不存在则静默跳过**。tokenless 永不创建/截断/删除该文件。
+- **记录字段**：`component.*`、`tokenless.operation`、`tokenless.session_id`/`tool_use_id`/`source_pid`、`tokenless.compression.{before,after}_{chars,tokens}`、`chars_saved`/`tokens_saved` 及百分比。**仅记录度量，不记录压缩原文**，无敏感数据。
+
+```bash
+# 快速验证：先由 anolisa SLS 组件或手动建好文件，tokenless 才会写入
+mkdir -p /tmp && touch /tmp/tokenless-sls.jsonl
+TOKENLESS_SLS_ENABLED=1 TOKENLESS_SLS_PATH=/tmp/tokenless-sls.jsonl \
+  tokenless compress-response -f resp.json
+tail -n1 /tmp/tokenless-sls.jsonl | jq .
 ```
 
 ---
 
-## 2. 核心功能
+## Agent 框架集成
 
-### 2.1 Schema 压缩器 (SchemaCompressor)
+tokenless 安装后可透明集成到多种 Agent 框架，用户无感知：
 
-压缩 OpenAI Function Calling 工具定义，减少进入上下文窗口的结构性开销。
+| 框架 | 集成方式 | 覆盖策略 |
+|------|----------|----------|
+| **cosh**（copilot-shell） | PreToolUse/PostToolUse 钩子 | 工具就绪 + 命令重写 + 响应压缩 + TOON + Schema 压缩 |
+| **OpenClaw** | 插件 | 命令重写 + 响应压缩 + Schema 压缩 |
+| **Hermes** | 插件 | 工具就绪 + 命令重写 + 响应压缩 + TOON |
+| **Qoder** | 插件 | 工具就绪 + 命令重写 + 响应压缩 |
+| **Claude Code** | Marketplace 插件 | 工具就绪 + 命令重写 + 响应压缩 + TOON |
+| **Codex** | 插件 | 工具就绪 + 命令重写 + 响应压缩 + TOON |
+| **Qwen Code** | Extension 插件 | 工具就绪 + 命令重写 + 响应压缩 + Schema 压缩 |
 
-**源码位置**：`crates/tokenless-schema/src/schema_compressor.rs`
+### 启用适配器
 
-### 2.2 响应压缩器 (ResponseCompressor)
+```bash
+# 查看可用框架
+anolisa adapter scan
 
-递归遍历 JSON 值，应用 **7 条压缩规则** 缩减 token 消耗。
+# 按需启用
+anolisa adapter enable tokenless cosh         # cosh 钩子
+anolisa adapter enable tokenless openclaw     # OpenClaw 插件
+anolisa adapter enable tokenless hermes       # Hermes 插件
+anolisa adapter enable tokenless qoder        # Qoder 插件
+anolisa adapter enable tokenless claude-code  # Claude Code 插件
+anolisa adapter enable tokenless codex        # Codex 插件
+anolisa adapter enable tokenless qwencode     # Qwen Code 插件
 
-**源码位置**：`crates/tokenless-schema/src/response_compressor.rs`
+# 查看状态
+anolisa adapter status tokenless
 
-#### 7 条压缩规则
+# 禁用
+anolisa adapter disable tokenless openclaw
+```
+
+也可在 tokenless 源码目录手动注册（等效于 `anolisa adapter enable`）：
+
+```bash
+make cosh-extension-install    # cosh 钩子
+make openclaw-install          # OpenClaw 插件
+make hermes-install            # Hermes 插件
+make qoder-install             # Qoder 插件
+make claude-code-install       # Claude Code 插件
+make codex-install             # Codex 插件
+make qwencode-install          # Qwen Code 插件
+```
+
+---
+
+## 工作原理
+
+### Schema 压缩
+
+压缩 OpenAI Function Calling 工具定义，去除冗余描述与 markdown 语法。源码：`crates/tokenless-schema/src/schema_compressor.rs`。
+
+默认阈值：
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `func_desc_max_len` | 256 | 函数描述最大字符数 |
+| `param_desc_max_len` | 160 | 参数描述最大字符数 |
+| `drop_examples` | true | 删除 `examples` 字段 |
+| `drop_titles` | true | 删除 `title` 字段 |
+| `drop_markdown` | true | 去除描述中的 markdown 语法 |
+| `max_depth` | 32 | 递归深度上限（schema 容忍更深嵌套） |
+
+### 响应压缩（7 条规则）
+
+递归遍历 JSON 值，应用 7 条规则。源码：`crates/tokenless-schema/src/response_compressor.rs`。
 
 | 规则 | 名称 | 判断条件 | 处理方式 | 默认阈值 |
 |------|------|---------|---------|---------|
-| R1 | 字符串截断 | 长度 > 4096 字节 | 在 UTF-8 安全边界截断，追加 `… (truncated)` | 4096 字节 |
-| R2 | 数组截断 | 元素 > 32 个 | 保留前 32 个，追加 `<... N more items truncated>` | 32 个 |
+| R1 | 字符串截断 | 长度 > 4096 字符 | UTF-8 安全边界截断，追加 `… (truncated)` | 4096 字符 |
+| R2 | 数组截断 | 元素 > 32 | 保留前 32 个，追加 `<... N more items truncated>` | 32 个 |
 | R3 | 字段删除 | key 匹配黑名单 | 整个字段移除 | 7 个字段 |
-| R4 | null 移除 | 值为 `null` | 从对象/数组中删除 | 启用 |
-| R5 | 空值移除 | 值为 `""`/`[]`/`{}` | 从对象/数组中删除 | 启用 |
+| R4 | null 移除 | 值为 `null` | 从对象/数组删除 | 启用 |
+| R5 | 空值移除 | 值为 `""`/`[]`/`{}` | 从对象/数组删除 | 启用 |
 | R6 | 深度截断 | 嵌套深度 > 8 | 替换为 `<{type} truncated at depth {N}>` | 8 层 |
 | R7 | 原始类型保留 | bool/number | 直接保留 | — |
 
 **R3 默认黑名单字段**：`debug`, `trace`, `traces`, `stack`, `stacktrace`, `logs`, `logging`
 
-#### 压缩前后示例
+示例（R3 + R4 + R5）：
 
-**示例 1 — 字段删除 + null 移除 + 空值移除（R3 + R4 + R5）**
-
-输入：
 ```json
-{
-  "status": "success",
-  "data": { "name": "test", "count": 42 },
-  "debug": { "request_id": "abc123", "timing": 0.05 },
-  "trace": "GET /api/data 200 OK",
-  "metadata": null,
-  "tags": [],
-  "extra": ""
-}
+// 输入
+{"status":"success","data":{"name":"test","count":42},
+ "debug":{"request_id":"abc123"},"trace":"GET /api 200","metadata":null,"tags":[],"extra":""}
+
+// 输出
+{"status":"success","data":{"name":"test","count":42}}
 ```
 
-输出：
-```json
-{
-  "status": "success",
-  "data": { "name": "test", "count": 42 }
-}
-```
+### TOON 编码
 
-**示例 2 — 数组截断（R2）**
+TOON（Token-Oriented Object Notation）是无损 JSON 编解码器，消除 JSON 语法开销（引号、逗号、冒号、花括号），完整保留数据。CLI 通过 `toon-format` crate（v0.5）作为库直接调用；Python hook 通过独立 `toon` 二进制子进程调用。
 
-输入：
-```json
-[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-```
-
-输出：
-```json
-[1, 2, 3, "<... 7 more items truncated>"]
-```
-
-### 2.3 命令重写 (RTK)
-
-集成 [RTK](https://github.com/rtk-ai/rtk) 过滤和重写 CLI 命令输出，支持 70+ 命令。
-
-| 原始命令 | 重写后 | 典型节省 |
-|---------|--------|---------|
-| `cargo build` | `rtk build` | ~70% |
-| `cargo test` | `rtk test` | ~80% |
-| `npm run build` | `rtk build` | ~65% |
-| `go test ./...` | `rtk test` | ~75% |
-| `python -m pytest` | `rtk test` | ~85% |
-
-### 2.4 TOON 压缩 (TOON 格式)
-
-TOON（Token-Oriented Object Notation）是一种**无损二进制 JSON 编解码器**，通过消除 JSON 语法开销（引号、逗号、冒号、花括号）来减少 token 消耗，同时完整保留所有数据。对于结构化数据和表格数据效果尤为显著。
-
-**源码位置**：通过 `toon-format` crate（crates.io v0.4.6）集成，由 CLI 作为库直接调用。独立 `toon` 二进制用于 Python hooks 子进程调用。
-
-#### TOON 工作原理
-
-TOON 将 JSON 的文本语法替换为紧凑的二进制编码：
-
-| JSON 元素 | JSON 语法 | TOON 编码 | 节省效果 |
+| JSON 元素 | JSON 语法 | TOON 编码 | 节省 |
 |-----------|-----------|----------|---------|
-| 对象键名 | `"name":`（引号+冒号） | 长度前缀的原始字节 | 键名密集对象约 60-80% |
-| 字符串值 | `"value"`（引号） | 长度前缀的原始字节 | 约 10-20% |
-| 数组分隔符 | `, `（逗号+空格） | 隐式元素边界 | 100% |
-| 结构花括号 | `{}`, `[]` | 通过类型标记隐式表示 | 100% |
-| 数字/布尔 | 文本表示 | 紧凑的二进制编码 | 约 30-50% |
+| 对象键名 | `"name":` | 长度前缀原始字节 | 60-80% |
+| 字符串值 | `"value"` | 长度前缀原始字节 | 10-20% |
+| 数组分隔符 | `, ` | 隐式边界 | 100% |
+| 结构花括号 | `{}`, `[]` | 类型标记隐式 | 100% |
 
-#### 不同数据类型的压缩效果
+### 命令重写（RTK）
 
-| 数据类型 | 典型 TOON 节省 | 示例 |
-|---------|---------------|------|
-| 表格/数组数据 | 40-60% | `[{"id":1,"name":"A"},...]`（实测 44%） |
-| 简单扁平对象 | 10-20% | `{"name":"Alice","age":30}`（实测 15%） |
-| 嵌套 schema 定义 | 5-15% | 函数调用工具 schema |
+RTK 拦截 Shell 命令，重写为仅输出 Agent 需要的关键信息：
 
-#### TOON vs 响应压缩
+```bash
+# 原始命令（浪费大量 Token）
+ls -la /usr/lib
 
-| 方面 | 响应压缩 | TOON 压缩 |
-|------|---------|----------|
-| 策略 | 有损（截断、字段删除） | 无损（完整数据保留） |
-| 最佳场景 | 冗长的 API 响应、含 debug 字段的输出 | 结构化表格数据、API 结果 |
-| 数据完整性 | 可能删除字段或截断字符串 | 完全可往返（编码→解码） |
-| 链式使用 | 流水线中先执行 | 流水线中后执行（响应压缩之后） |
+# RTK 重写后（仅保留关键信息）
+rtk rewrite "ls -la /usr/lib"
+```
 
-#### 链式压缩流水线
+RTK 源码由 justfile 从 GitHub 克隆（`v0.42.3`）并应用 tokenless 专属补丁后构建，支持 70+ 命令（cargo/npm/go/pytest 等），典型节省 60–90%。
 
-在 Copilot Shell PostToolUse hook 中，响应压缩和 TOON 压缩**顺序执行**：
+### 工具就绪检查（Tool Ready)
+
+每次工具调用前检查依赖（二进制、配置、权限、网络）。若依赖缺失，返回 `NOT_READY` + "Skip retry" 引导，避免 LLM 无谓重试。依赖声明位于 `tool-ready-spec.json`：
+
+```json
+{
+  "Shell": {
+    "required": [{ "binary": "jq", "package": "jq", "manager": "apt" }],
+    "recommended": [
+      { "binary": "rtk", "version": ">=0.35", "package": "rtk", "manager": "cargo",
+        "fallback": [
+          { "method": "symlink", "binary": "rtk", "source": "/usr/libexec/anolisa/tokenless/rtk" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+字符串格式 `"jq"` 也支持（自动转为对象）。`--fix` 调用 `tokenless-env-fix.sh fix-all`，stdin 传入缺失依赖的 JSON 数组，自动安装后复检。
+
+### 链式压缩流水线
+
+在 PostToolUse hook 中，响应压缩和 TOON 编码顺序执行，两阶段最大化节省：
 
 ```
 工具响应 → ResponseCompressor（有损） → TOON 编码（无损） → 最终输出
 ```
 
-这种两阶段流水线最大化节省效果：响应压缩先剥离冗余内容和调试字段，TOON 再消除剩余的 JSON 语法开销。
+每步 fail-open（失败透传原文）。
 
 ---
 
-## 3. 系统要求
+## 配置
 
-| 依赖 | 版本要求 | 用途 | 必需 |
-|------|---------|------|------|
-| Rust | >= 1.89 (edition 2024) | 编译 tokenless 和 rtk | 构建时需要 |
-| Git | 任意 | rtk 源码下载（justfile） | 构建时需要 |
-| just | 任意 | 构建编排（rtk clone+patch） | 构建时需要 |
-| jq | 任意 | Hook 脚本 JSON 处理 | 是 |
-| rtk | >= 0.35.0 | 命令重写 | 可选 |
-| toon | >= 0.4.0 | TOON 格式压缩 | 可选 |
-| tokenless | >= 0.1.0 | Schema/响应压缩 | 可选 |
-| sqlite3 | 任意 | 统计数据库 | 可选 |
+### 配置文件
 
-**注意**：Rust 和 Git 仅在源码编译时需要，使用 RPM 包安装无需这些依赖。
+`~/.tokenless/config.json`（owner-only 0600），字段：
 
----
-
-## 4. 安装部署
-
-### 4.1 方法一：RPM 包安装（推荐用于 Alinux 4）
-
-#### 4.1.1 构建 RPM 包
-
-```bash
-# 准备 RPM 构建环境
-rpmdev-setuptree
-
-# 复制源码到 RPM 构建目录
-cp tokenless-0.1.0.tar.gz ~/rpmbuild/SOURCES/
-
-# 使用 spec 文件构建 RPM
-rpmbuild -ba tokenless.spec
-
-# 生成的 RPM 包位置
-~/rpmbuild/RPMS/x86_64/tokenless-0.1.0-3.alnx4.x86_64.rpm
-```
-
-#### 4.1.2 安装 RPM 包
-
-```bash
-# 使用 yum 安装（推荐，自动解决依赖）
-sudo yum install ./tokenless-0.1.0-3.alnx4.x86_64.rpm
-
-# 或使用 rpm 直接安装
-sudo rpm -ivh tokenless-0.1.0-3.alnx4.x86_64.rpm
-```
-
-#### 4.1.3 RPM 包自动配置
-
-RPM 包安装后会自动执行以下配置：
-
-1. **二进制文件**：安装到 `/usr/bin/tokenless` 和 `/usr/bin/rtk`
-2. **Hook 脚本**：RPM 安装到 `/usr/share/anolisa/adapters/tokenless/common/hooks/`，源码安装到 `~/.local/share/anolisa/adapters/tokenless/common/hooks/`
-3. **OpenClaw 插件**：自动检测并配置（如果已安装 OpenClaw）
-4. **Copilot Shell**：自动检测并配置（如果已安装 Copilot Shell）
-
-**验证 RPM 安装**：
-```bash
-# 检查二进制文件
-which tokenless
-# 输出：/usr/bin/tokenless
-
-tokenless --version
-
-# 检查 Hook 脚本（RPM 安装位置）
-ls -la /usr/share/anolisa/adapters/tokenless/common/hooks/
-
-# 检查 OpenClaw 插件配置
-cat ~/.openclaw/openclaw.json | jq '.plugins.allow'
-```
-
-### 4.2 方法二：源码一键安装
-
-```bash
-# 克隆仓库（无需子模块，rtk 构建时由 justfile 下载）
-git clone https://code.alibaba-inc.com/Agentic-OS/Token-Less
-cd Token-Less
-
-# 完整安装：编译 + 安装二进制 + 部署 OpenClaw 插件 + Copilot Shell Hook
-make setup
-```
-
-### 4.3 方法三：使用安装脚本
-
-```bash
-# 完整安装：构建 + 安装 + 所有适配器
-make setup
-
-# 仅安装 OpenClaw 插件（需要 openclaw CLI）
-make openclaw-install
-
-# 仅安装 copilot-shell hooks
-make cosh-extension-install
-```
-
-### 4.4 方法四：分步安装
-
-#### 4.4.1 编译
-
-```bash
-# 编译 tokenless + rtk（release 模式，rtk 通过 justfile clone+patch）
-make build
-
-# 仅编译 tokenless + rtk
-make build-tokenless
-```
-
-#### 4.4.2 安装二进制文件
-
-```bash
-# 安装到 ~/.local/bin（默认）
-make install
-
-# 自定义安装路径
-make install BIN_DIR=/usr/local/bin
-```
-
-#### 4.4.3 部署 OpenClaw 插件
-
-```bash
-# 使用 Makefile
-make openclaw-install
-
-# 自定义插件路径
-make openclaw-install OPENCLAW_DIR=/usr/share/anolisa/adapters/tokenless/openclaw
-
-# 手动安装
-cp -r adapters/tokenless/openclaw/ /usr/share/anolisa/adapters/tokenless/openclaw/
-```
-
-#### 4.4.4 部署 Copilot Shell Hook
-
-```bash
-# 使用 Makefile
-make cosh-extension-install
-
-# 手动安装
-mkdir -p ~/.local/share/anolisa/adapters/tokenless/common/hooks
-cp adapters/tokenless/common/hooks/*_hook.py ~/.local/share/anolisa/adapters/tokenless/common/hooks/
-chmod +x ~/.local/share/anolisa/adapters/tokenless/common/hooks/*_hook.py
-```
-
----
-
-## 5. 配置使用
-
-### 5.1 CLI 使用
-
-#### compress-schema
-
-```bash
-# 从文件压缩单个工具 schema
-tokenless compress-schema -f tool.json
-
-# 从 stdin 压缩
-cat tool.json | tokenless compress-schema
-
-# 批量压缩工具数组
-tokenless compress-schema -f tools.json --batch
-```
-
-#### compress-response
-
-```bash
-# 从文件压缩 API 响应
-tokenless compress-response -f response.json
-
-# 从 stdin 压缩
-curl -s https://api.example.com/data | tokenless compress-response
-```
-
-#### compress-toon
-
-```bash
-# 将 JSON 编码为 TOON 格式（从文件）
-tokenless compress-toon -f data.json
-
-# 从 stdin 编码
-cat data.json | tokenless compress-toon
-
-# 附带统计追踪信息
-tokenless compress-toon -f data.json --agent-id my-agent --session-id sess-001
-```
-
-#### decompress-toon
-
-```bash
-# 将 TOON 格式解码回 JSON（从文件）
-tokenless decompress-toon -f data.toon
-
-# 从 stdin 解码
-cat data.toon | tokenless decompress-toon
-
-# 往返验证
-tokenless compress-toon -f data.json | tokenless decompress-toon | jq .
-```
-
-### 5.2 RPM 安装后的自动化配置 {#52-rpm-安装后的自动化配置}
-
-RPM 包安装后，安装脚本会自动检测并配置已安装的平台。
-
-#### 5.2.1 自动检测的平台
-
-| 平台 | 检测条件 | 自动配置内容 |
-|------|---------|-------------|
-| OpenClaw | `~/.openclaw/openclaw.json` 存在 | 插件部署 + plugins.allow 配置 |
-| Copilot Shell | `~/.copilot-shell/settings.json` 或 `~/.qwen-code/settings.json` 存在 | Hook 脚本部署 + settings.json 配置 |
-
-#### 5.2.2 手动触发配置
-
-如果 RPM 安装后需要配置 OpenClaw 插件，运行：
-
-```bash
-# 安装 OpenClaw 插件（需要 openclaw CLI）
-/usr/share/anolisa/adapters/tokenless/openclaw/scripts/install.sh
-```
-
-#### 5.2.3 验证自动配置
-
-```bash
-# 检查 OpenClaw 插件配置
-cat ~/.openclaw/openclaw.json | jq '.plugins.allow'
-# 应包含 "tokenless"
-
-# 检查 Copilot Shell Hook 配置
-cat ~/.copilot-shell/settings.json | jq '.hooks | keys'
-# 应包含 PreToolUse, PostToolUse, BeforeModel
-
-# 检查 Hook 脚本
-ls -la /usr/share/anolisa/adapters/tokenless/common/hooks/
-```
-
-### 5.3 Copilot Shell 配置
-
-#### 5.3.1 Hook 脚本位置
-
-安装后 Hook 脚本位置取决于安装方式：
-
-| 安装方式 | Hook 脚本位置 |
-|---------|--------------|
-| RPM 安装 | `/usr/share/anolisa/adapters/tokenless/common/hooks/` |
-| 源码安装 | `~/.local/share/anolisa/adapters/tokenless/common/hooks/` |
-
-| 脚本 | 功能 | Hook 事件 |
-|------|------|----------|
-| `rewrite_hook.py` | 命令重写 | PreToolUse |
-| `compress_response_hook.py` | 响应压缩 + TOON 压缩流水线 | PostToolUse |
-| `compress_schema_hook.py` | Schema 压缩 | BeforeModel |
-
-#### 5.3.2 配置 settings.json
-
-编辑 `~/.copilot-shell/settings.json`（或 `~/.qwen-code/settings.json`）：
-
-**RPM 安装配置**：
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Shell",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/usr/share/anolisa/adapters/tokenless/common/hooks/rewrite_hook.py",
-            "name": "tokenless-rewrite",
-            "timeout": 5000
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/usr/share/anolisa/adapters/tokenless/common/hooks/compress_response_hook.py",
-            "name": "tokenless-compress-response",
-            "timeout": 10000
-          }
-        ]
-      }
-    ],
-    "BeforeModel": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/usr/share/anolisa/adapters/tokenless/common/hooks/compress_schema_hook.py",
-            "name": "tokenless-compress-schema",
-            "timeout": 10000
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-**源码安装配置**：
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Shell",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.local/share/anolisa/adapters/tokenless/common/hooks/rewrite_hook.py",
-            "name": "tokenless-rewrite",
-            "timeout": 5000
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.local/share/anolisa/adapters/tokenless/common/hooks/compress_response_hook.py",
-            "name": "tokenless-compress-response",
-            "timeout": 10000
-          }
-        ]
-      }
-    ],
-    "BeforeModel": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.local/share/anolisa/adapters/tokenless/common/hooks/compress_schema_hook.py",
-            "name": "tokenless-compress-schema",
-            "timeout": 10000
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-> **提示**：RPM 安装会自动配置 settings.json，无需手动编辑。
-
-#### 5.3.3 Hook 工作流程
-
-**命令重写 (PreToolUse)**：
-```
-copilot-shell 触发 PreToolUse 
-  → Hook 读取 stdin JSON 
-  → 调用 rtk rewrite 
-  → 返回重写后的命令
-```
-
-**响应压缩 (PostToolUse)**：
-```
-copilot-shell 触发 PostToolUse 
-  → Hook 读取 tool_response 
-  → 第 1 步：tokenless compress-response（有损 — 移除 debug、null 字段，截断过长内容）
-  → 第 2 步：tokenless compress-toon（无损 — 消除 JSON 语法开销）
-  → 两步均采用 fail-open 策略：任何一步失败都会透传原始内容
-  → 返回压缩后的内容作为 additionalContext
-```
-
-**Schema 压缩 (BeforeModel)**：
-```
-copilot-shell 触发 BeforeModel 
-  → Hook 读取 llm_request.tools 
-  → 调用 tokenless compress-schema --batch 
-  → 返回压缩后的 tools 数组
-```
-
-> **注意**：Schema 压缩目前为功能占位，等待 anolisa 协议扩展将 `tools` 包含在 LLMRequest 中。
-
-### 5.4 OpenClaw 插件配置
-
-#### 5.4.1 配置文件
-
-编辑 `openclaw.plugin.json`：
-
-```json
-{
-  "rtk_enabled": true,
-  "schema_compression_enabled": true,
-  "response_compression_enabled": true,
-  "toon_compression_enabled": false,
-  "skip_tools": [],
-  "verbose": false
-}
-```
-
-| 选项 | 默认值 | 说明 |
-|------|-------|------|
-| `rtk_enabled` | `true` | 启用 RTK 命令重写 |
-| `schema_compression_enabled` | `true` | 启用工具 Schema 压缩 |
-| `response_compression_enabled` | `true` | 启用工具响应压缩 |
-| `toon_compression_enabled` | `false` | 启用 TOON 格式压缩（在响应压缩之后顺序执行） |
-| `skip_tools` | `[]` | 压缩时跳过的工具名称列表（如 `["Read","Glob"]`） |
-| `verbose` | `false` | 输出详细日志 |
-
-#### 5.4.2 集成细节
-
-**响应压缩跳过逻辑**：
-- 当 RTK 启用且 `toolName === "exec"` 时，跳过压缩（避免双重优化）
-- 自动压缩所有其他工具类型的结果（`web_search`, `web_fetch`, `read_file` 等）
-- 实测节省：`web_fetch` 约 **~78%**
-
-**Hook 事件**：
-| Hook | 事件 | 功能 |
+| 字段 | 默认 | 说明 |
 |------|------|------|
-| Command rewriting | `before_tool_call` | 重写 `exec` 命令为 RTK 等效命令 |
-| Schema compression | `before_tool_register` | 压缩工具 Schema |
-| Response compression | `tool_result_persist` | 压缩工具响应 |
-| TOON compression | `tool_result_persist` | 顺序执行 TOON 编码（需启用） |
+| `stats_enabled` | `true` | 是否记录压缩统计到 SQLite |
+| `sls_enabled` | `true` | 是否追加 SLS JSONL 记录 |
+| `compression_enabled` | `true` | 是否真正应用压缩。`false` = dry-run：计算并记录预测节省，但输出原文 |
+
+也可用 CLI 修改：`tokenless stats enable` / `disable` / `status`。
+
+### 环境变量
+
+优先级：**env > config.json > default**（每个开关独立）。空字符串视为未设置。布尔值：`1`/`true`/`yes`（大小写不敏感）为真。
+
+| 变量 | 用途 | 约束 |
+|---------|------|------|
+| `TOKENLESS_STATS_ENABLED` | 覆盖 `stats_enabled` | — |
+| `TOKENLESS_SLS_ENABLED` | 覆盖 `sls_enabled` | — |
+| `TOKENLESS_COMPRESSION_ENABLED` | 覆盖 `compression_enabled`（dry-run 开关） | — |
+| `TOKENLESS_STATS_DB` | 自定义统计数据库路径 | 须位于用户 home 下，否则忽略并告警 |
+| `TOKENLESS_SLS_PATH` | 自定义 SLS JSONL 路径 | 须位于 `/var/log/` 或 `/tmp/` 下，否则回退默认 |
+| `TOKENLESS_TOOL_READY_SPEC` | 自定义 tool-ready-spec 路径 | 须通过信任路径校验 |
+| `TOKENLESS_ENV_FIX_SCRIPT` | 自定义 env-fix 脚本路径 | 须通过信任路径校验 |
+| `TOKENLESS_PACKAGE_MANAGER` | 覆盖包管理器探测（dnf/yum/apt/apk） | 测试用 |
+| `TOKENLESS_AGENT_ID` | hook 注入的 agent 标识 | 由 cosh-extension.json 自动设置 |
+
+### OpenClaw 插件配置（`openclaw.plugin.json`）
+
+| 选项 | 默认 | 说明 |
+|------|------|------|
+| `rtk_enabled` | `true` | 启用 RTK 命令重写 |
+| `response_compression_enabled` | `true` | 启用响应压缩 |
+| `schema_compression_enabled` | `true` | 启用 Schema 压缩 |
+| `verbose` | `true` | 输出详细日志 |
+
+**响应压缩跳过逻辑**：当 RTK 启用且 `toolName === "exec"` 时跳过压缩（避免双重优化）；自动压缩其他工具，实测 `web_fetch` 节省 ~78%。
+
+### 降级行为
+
+每个钩子/插件独立降级——若对应二进制（`rtk` 或 `tokenless`）未安装，该钩子静默跳过，不影响其他功能：
+
+- **cosh Hook**：任何失败点 `exit 0` 且不输出 → 原始结果透传
+- **OpenClaw / Hermes / Qoder / Claude Code / Codex / Qwen Code 插件**：try-catch 返回 null → 原始结果透传
+- **CLI**：错误输出到 stderr，调用方检查退出码决定是否回退
+- **统计记录**：fail-silent，数据库错误不阻塞压缩输出
+- **SLS 写入**：fail-silent，仅 stderr 告警
 
 ---
 
-## 6. 验证测试
+## 故障排查
 
-### 6.0 实测效果展示
-
-#### 6.0.1 测试方法
-
-**响应压缩测试脚本：**
+### 诊断工具
 
 ```bash
-#!/usr/bin/bash
-# 测试 tokenless-compress-response 的 mock 输入
+# 组件级诊断 + 自动修复
+anolisa doctor tokenless --fix
 
-# 构建长工具响应（>200 字节阈值）
-LONG_STDOUT=""
-for i in $(seq 1 50); do
-  LONG_STDOUT="${LONG_STDOUT}This is line $i of verbose output from a tool execution with lots of text to compress.\n"
-done
+# 查看详细安装计划
+anolisa install tokenless --verbose
+anolisa install tokenless --dry-run
 
-MOCK_RESPONSE="{\"stdout\":\"${LONG_STDOUT}\",\"stderr\":\"\",\"exit_code\":0}"
-INPUT="{\"tool_name\":\"run_shell_command\",\"tool_response\":${MOCK_RESPONSE}}"
+# 适配器状态
+anolisa adapter status tokenless
 
-echo "=== 原始响应大小：${#INPUT} 字节 ==="
-
-RESULT=$(echo "$INPUT" | bash /root/.copilot-shell/hooks/tokenless/compress_response_hook.py 2>/dev/null)
-
-echo "=== 结果 ==="
-echo "$RESULT" | jq '.'
-
-echo ""
-echo "=== 压缩后上下文大小：$(echo "$RESULT" | jq -r '.hookSpecificOutput.additionalContext // empty' | wc -c) 字节 ==="
-echo "=== suppressOutput: $(echo "$RESULT" | jq '.suppressOutput') ==="
+# 工具就绪清单
+tokenless env-check --all --checklist
 ```
 
-**测试设置：**
-- 生成 50 行长命令输出
-- 模拟 run_shell_command 工具响应
-- 测量原始大小与压缩后大小
-- 验证 hook 输出格式
-
-#### 6.0.2 测试结果
-
-| 指标 | 数值 |
-|------|------|
-| 原始响应大小 | 4480 字节 |
-| 压缩后大小 | 625 字节 |
-| **节省比例** | **~86%** |
-| suppressOutput | true (原始输出被抑制) |
-
-#### 6.0.3 生产环境验证
-
-**Hook 执行日志检查：**
-```bash
-# 检查 compress-response hook 触发
-grep "tokenless-compress-response\|compress-response\|compressed response" ~/.copilot-shell/debug/*.log | head -10
-
-# 输出：找到 3 处匹配 - hook 正确触发
-```
-
-**PostToolUse Hook 执行次数：**
-```bash
-# 检查 PostToolUse hook 执行
-grep "firePostToolUseEvent\|PostToolUse.*completed" ~/.copilot-shell/debug/*.log | head -20
-
-# 输出：16 处匹配 - PostToolUse hook 正常触发
-# 注意：compress-response 仅触发 3 次，因为 hook 跳过 < 200 字节的响应
-```
-
-**验证结论：**
-- ✅ tokenless-compress-response hook 完全可用
-- ✅ Hook 按设计跳过短响应（< 200 字节）（fail-open 优化）
-- ✅ 实际压缩比符合预期的 ~86% 节省
-
----
-
-### 6.1 手动测试 Hook
-
-```bash
-# 测试命令重写（源码目录）
-echo '{"tool_input":{"command":"cargo test"}}' | bash adapters/tokenless/common/hooks/rewrite_hook.py
-
-# 测试响应压缩（源码目录）
-echo '{"tool_name":"Shell","tool_response":"{\"stdout\":\"lots of verbose output here...\"}"}' | bash adapters/tokenless/common/hooks/compress_response_hook.py
-
-# 测试 Schema 压缩（源码目录）
-echo '{"llm_request":{"tools":[{"name":"test","description":"A test tool","parameters":{}}]}}' | bash adapters/tokenless/common/hooks/compress_schema_hook.py
-
-# 测试已安装的 Hook（RPM 安装）
-echo '{"tool_input":{"command":"cargo test"}}' | bash /usr/share/anolisa/adapters/tokenless/common/hooks/rewrite_hook.py
-```
-
-### 6.2 测试 CLI
-
-```bash
-# 创建测试文件
-echo '{"status":"success","data":{"items":[1,2,3]},"debug":{"id":"abc"}}' > test.json
-
-# 压缩响应
-tokenless compress-response -f test.json
-
-# 压缩 Schema
-echo '[{"name":"Shell","description":"Run shell commands","parameters":{"type":"object"}}]' | tokenless compress-schema
-
-# TOON 编码
-echo '{"users":[{"id":1,"name":"Alice"},{"id":2,"name":"Bob"}]}' | tokenless compress-toon
-
-# TOON 往返验证
-echo '{"name":"test","value":42}' | tokenless compress-toon | tokenless decompress-toon
-
-# 通过统计数据库验证压缩效果
-tokenless compress-toon -f large_data.json --agent-id test
-tokenless stats list              # 列出最近的压缩记录
-tokenless stats show <记录ID>     # 查看某条记录的压缩前后文本
-tokenless stats summary           # 查看所有操作的汇总节省数据
-```
-
-#### 压缩开关与 dry-run 对照（双跑对比）
-
-通过环境变量 `TOKENLESS_COMPRESSION_ENABLED`（或 `~/.tokenless/config.json` 的 `compression_enabled`）控制压缩是否真正生效：
-
-- `1`（默认）：正常压缩，压缩结果进入 LLM 上下文，记录 `mode=active`。
-- `0`（**dry-run 模式**）：算出压缩效果并记录预测值（`mode=dryrun`），但**原样输出原文**，不改变 LLM 上下文。
-
-对同一任务跑两次（一次关闭、一次开启），即可输出对照图，准确评估 tokenless 的真实节省效果：
-
-```bash
-# 跑 1：关闭压缩（dry-run 基线，输出原文）
-TOKENLESS_COMPRESSION_ENABLED=0  <跑同一任务>   # 记录于 session A
-# 跑 2：开启压缩（真实压缩）
-TOKENLESS_COMPRESSION_ENABLED=1  <跑同一任务>   # 记录于 session B
-
-# 对照图：baseline=context 上下文（原文），tokenless=压缩后
-tokenless stats summary --compare <session-A> <session-B>
-tokenless stats summary --compare <session-A> <session-B> --json   # 机器可读
-```
-
-> 注：tokenless 仅度量它经手的可压缩内容；模型推理 token / 真实计费 token 不在其内。
-
-#### SLS 日志记录（JSONL）{#sls-日志记录}
-
-除 SQLite 统计外，tokenless 还可将每次压缩以 **SLS（Simple Log Service）JSONL 记录**追加到文件，供日志采集器（如 ilogtail/SLS Logtail）摄取。
-
-> **文件归属**：SLS JSONL 文件由 **anolisa SLS 组件统一管理**（创建、轮转、删除）。tokenless **不主动管理日志文件**——每次写日志时先判断文件是否存在，**存在才追加，不存在则静默跳过**（视为「SLS 采集未就绪」）。tokenless 永不创建、截断或删除该文件及其目录。
-
-- **默认开启**。开关字段：`~/.tokenless/config.json` 的 `sls_enabled`（默认 `true`）；环境变量 `TOKENLESS_SLS_ENABLED` 优先级最高，`1`/`true`/`yes` 为开，其余为关。
-- **输出路径**：默认 `/var/log/anolisa/sls/ops/tokenless.jsonl`，可用 `TOKENLESS_SLS_PATH` 覆盖。路径必须位于 `/var/log/` 或 `/tmp/` 前缀下且不含 `..`，否则回退默认路径并告警。生产优先用 `/var/log/`（`/tmp/` 世界可写）。
-- **记录字段**（点分命名空间，匹配 SLS 入库 schema）：
-  - `component.name` / `component.version` / `component.agent_name`（agent 标识，非用户身份）
-  - `tokenless.operation`（如 `compress-schema` / `compress-response` / `compress-toon` / `rewrite-command`）
-  - `tokenless.session_id` / `tokenless.tool_use_id` / `tokenless.source_pid`（可选，为空时省略）
-  - `tokenless.compression.{before,after}_{chars,tokens}`、`chars_saved`、`tokens_saved` 及两者百分比
-
-  > 仅记录度量（字符数/token 数），**不记录压缩原文**，无敏感数据；记录本身不含时间戳/主机名/用户身份。
-
-```bash
-# 查看当前开关与来源（默认 / config file / env override）
-tokenless stats status
-
-# 快速验证：先由「anolisa SLS 组件」或手动建好文件，tokenless 才会写入
-mkdir -p /tmp && touch /tmp/tokenless-sls.jsonl
-TOKENLESS_STATS_ENABLED=1 TOKENLESS_SLS_ENABLED=1 \
-TOKENLESS_SLS_PATH=/tmp/tokenless-sls.jsonl \
-tokenless compress-response -f resp.json
-tail -n1 /tmp/tokenless-sls.jsonl | jq .
-```
-
-**关闭 SLS**：`TOKENLESS_SLS_ENABLED=0`，或在 `~/.tokenless/config.json` 设 `"sls_enabled": false`。
-
-**生产注意**：
-- tokenless 不创建日志文件或目录 —— 文件须由 anolisa SLS 组件预先创建；若文件不存在，tokenless 直接跳过写入。
-- 日志轮转由 anolisa SLS 组件负责，tokenless 不干预文件生命周期。
-- 写入失败 fail-silent（仅 stderr 告警，不影响主流程）。
-
-### 6.3 验证安装
-
-```bash
-# 检查二进制文件
-which tokenless
-which rtk
-
-# 检查版本
-tokenless --version
-rtk --version
-
-# 检查 Hook 脚本（RPM 安装）
-ls -la /usr/share/anolisa/adapters/tokenless/common/hooks/
-
-# 检查 Hook 脚本（源码安装）
-ls -la ~/.local/share/anolisa/adapters/tokenless/common/hooks/
-```
-
----
-
-## 7. 故障排查
-
-### 7.1 Copilot Shell Hook
+### 常见问题
 
 | 问题 | 解决方案 |
 |------|---------|
-| Hook 不触发 | 检查 `settings.json` 路径，重启 Copilot Shell |
-| `jq not installed` | 安装 jq：`apt install jq` (Linux) 或 `brew install jq` (macOS) |
-| `rtk too old` | 升级：`cargo install rtk` |
-| 命令未重写 | 不是所有命令都有 RTK 等效命令，直接运行 `rtk rewrite "cmd"` 测试 |
-| `tokenless not installed` | 运行 `make install` 安装 |
-| 响应未压缩 | 响应 < 200 字节时跳过压缩（不值得） |
-| Schema 压缩未激活 | 等待 anolisa 协议添加 `tools` 到 LLMRequest |
-| JSON 解析错误 | 使用 `jq . < settings.json` 验证 JSON 格式 |
-| TOON 编码失败 | 确认 `toon` 二进制在 PATH 中；仅支持 JSON 输入 |
-| TOON 统计未记录 | 确认 `TOKENLESS_STATS_ENABLED` 未设置为 `0` 或 `false` |
-| SLS JSONL 未生成 | 确认 `TOKENLESS_SLS_ENABLED` 未设为 `0`/`false`（默认开）；检查 `TOKENLESS_SLS_PATH` 是否在 `/var/log/` 或 `/tmp/` 下；查看 stderr 的 `tokenless-sls:` 告警；目录需可写 |
+| `No input provided` | stdin 是终端且未传 `-f`；用 `echo '...' \| tokenless <cmd>` 或 `-f <path>` |
+| `Input exceeds 64 MiB limit` | 输入超 64 MiB 上限；拆分或截断 |
+| `JSON parse error` | 输入非合法 JSON；先用 `jq . < input.json` 校验 |
+| 压缩后输出原文 + stderr 提示 | 压缩无收益（`after >= before`），属正常；该次不记录统计 |
+| dry-run 模式提示 | `TOKENLESS_COMPRESSION_ENABLED=0` 或 config `compression_enabled=false`；输出原文但记录预测值 |
+| `Failed to open database` | `~/.tokenless/` 不可写或 `TOKENLESS_STATS_DB` 路径在 home 之外被拒 |
+| SLS JSONL 未生成 | 确认 `TOKENLESS_SLS_ENABLED` 未设为 `0`；`TOKENLESS_SLS_PATH` 须在 `/var/log/` 或 `/tmp/` 下；文件须由 anolisa SLS 组件预建 |
+| cosh Hook 不触发 | 确认 `COSH_EXTENSION_DIR` 存在 `cosh-extension.json`；重启 copilot-shell |
+| `jq not installed` | `dnf install jq` / `apt install jq` |
+| 命令未重写 | 非所有命令都有 RTK 等效；直接 `rtk rewrite "cmd"` 测试 |
+| Tool Ready 误报 NOT_READY | 检查 `tool-ready-spec.json`；运行 `tokenless env-check --tool <name> --fix` |
+| 适配器 enable 失败 | `anolisa adapter scan` 确认框架已安装；`anolisa adapter status tokenless` 查看详情 |
+| 手动 dnf 操作后状态不同步 | `anolisa repair tokenless` 修复；或 `anolisa forget tokenless` 清记录后 `anolisa adopt tokenless` 重新纳管 |
 
-### 7.2 OpenClaw 插件
+### 状态不一致修复
 
-| 问题 | 解决方案 |
-|------|---------|
-| 插件未加载 | 检查插件路径：`~/.openclaw/plugins/tokenless/` |
-| RTK 未生效 | 确认 `rtk` 在 `$PATH` 中，检查 `rtk_enabled` 配置 |
-| 压缩未生效 | 检查 `response_compression_enabled` 配置 |
-| TOON 压缩未生效 | 检查 `toon_compression_enabled` 配置，确认 `toon` 二进制在 PATH 中 |
-| 超时 | 插件超时设置为 2-3 秒，复杂操作可能超时跳过 |
-
-### 7.3 通用问题
+若通过 `dnf remove` / `rpm -e` 直接操作了 ANOLISA 管理的包：
 
 ```bash
-# 重新编译安装
-make clean && make build && make install
-
-# 检查依赖
-cargo --version
-git --version
-jq --version
-
-# 查看日志
-# OpenClaw: 设置 verbose: true 查看详细日志
-# Copilot Shell: 查看 ~/.copilot-shell/logs/
+anolisa repair tokenless         # 修复状态
+anolisa forget tokenless         # 仅清除 ANOLISA 记录（不动包）
+anolisa adopt tokenless          # 重新纳管
 ```
 
 ---
 
-## 8. 附录
+## 附录
 
-### 8.1 Makefile 命令汇总
+### 安装路径
+
+`INSTALL_PROFILE` 控制安装前缀：`user`（默认，`~/.local`）或 `system`（`/usr`，RPM 使用）。
+
+| Makefile 变量 | user (默认) | system / RPM |
+|------|-------------|-------------|
+| `PREFIX` | `~/.local` | `/usr` |
+| `BINDIR`（tokenless） | `~/.local/bin` | `/usr/bin` |
+| `LIBEXECDIR`（rtk, toon） | `~/.local/libexec/anolisa/tokenless` | `/usr/libexec/anolisa/tokenless` |
+| `SHARE_DIR`（适配器资源） | `~/.local/share/anolisa/adapters/tokenless` | `/usr/share/anolisa/adapters/tokenless` |
+| `COSH_EXTENSION_DIR` | `~/.copilot-shell/extensions/tokenless` | `/usr/share/anolisa/extensions/tokenless` |
+
+`rtk`/`toon` 实际位于 `LIBEXECDIR`，并在 `BINDIR` 建符号链接以便 PATH 发现。源码构建可覆盖：
+
+```bash
+make install INSTALL_PROFILE=system DESTDIR=/staging
+make setup                # build + install + 注册全部适配器
+make adapter-scan         # 查看已注册适配器能力
+```
+
+### cosh Hook 清单
+
+| Hook 事件 | 脚本 | 功能 | matcher | timeout |
+|----------|------|------|---------|---------|
+| PreToolUse | `tool_ready_hook.sh`（bash） | Tool Ready 预检 + 自动修复 + skip-retry | `""`（all，sequential） | 10000ms |
+| PreToolUse | `rewrite_hook.py`（python3） | RTK 命令重写 | `^(Bash\|run_shell_command\|terminal\|Shell\|exec\|process)$` | 5000ms |
+| PostToolUse | `compress_response_hook.py` | 响应压缩 + TOON + 失败归因 | — | 10000ms |
+| BeforeModel | `compress_schema_hook.py` | Schema 压缩 | — | 10000ms |
+
+所有 hook 通过 `TOKENLESS_AGENT_ID=copilot-shell` 标识来源。辅助文件：`hook_utils.py`、`compress_toon_hook.py`、`run-hook.sh`、`tool_categories.json`。
+
+### 关键文件路径
+
+| 用途 | 路径 |
+|------|---------|
+| 响应压缩算法 | `crates/tokenless-schema/src/response_compressor.rs` |
+| Schema 压缩算法 | `crates/tokenless-schema/src/schema_compressor.rs` |
+| CLI 入口 | `crates/tokenless-cli/src/main.rs` |
+| env-check 实现 | `crates/tokenless-cli/src/env_check.rs` |
+| 统计记录器 | `crates/tokenless-stats/src/recorder.rs` |
+| 配置加载 | `crates/tokenless-stats/src/config.rs` |
+| SLS JSONL writer | `crates/tokenless-stats/src/sls.rs` |
+| home 目录解析 | `crates/tokenless-stats/src/home.rs` |
+| 适配器 manifest | `adapters/tokenless/manifest.json.in` |
+| cosh extension manifest | `adapters/tokenless/common/cosh-extension.json` |
+| Tool Ready 依赖 spec | `adapters/tokenless/common/tool-ready-spec.json` |
+| 自动修复脚本 | `adapters/tokenless/common/tokenless-env-fix.sh` |
+| 统计数据库（默认） | `~/.tokenless/stats.db` |
+| 配置文件 | `~/.tokenless/config.json` |
+| SLS JSONL（默认） | `/var/log/anolisa/sls/ops/tokenless.jsonl` |
+| RPM spec | `tokenless.spec.in` |
+| 构建编排 | `justfile` |
+
+### 安全模型
+
+- **不可伪造的身份源**：home 目录通过 `getpwuid_r(getuid())` 查询 passwd，**不信任** `$HOME`/`dirs::home_dir()`（可被任意改写）。
+- **数据库路径校验**：`TOKENLESS_STATS_DB` 必须规范解析后位于用户真实 home 下，否则忽略并告警；home 为空时写入 `/dev/null/.tokenless/stats.db`（安全失败）。
+- **SLS 路径校验**：`TOKENLESS_SLS_PATH` 必须位于 `/var/log/` 或 `/tmp/` 前缀下且不含 `..`；canonicalize 后校验防符号链接逃逸。
+- **Tool Ready 信任路径**：系统前缀（`/usr/share`、`/usr/libexec`、`/usr/lib/anolisa`、`/usr/local/share`）直接信任；其他路径校验文件/父目录 owner（须为 current_uid 或 root）且非 world-writable。`tool_ready_hook.sh` 中的 shell 实现保持同步。
+- **配置文件权限**：`~/.tokenless/config.json` 写入后 chmod 0600。
+- **输入上限**：stdin/file 读取上限 64 MiB，防 OOM。
+
+### Makefile 命令汇总
 
 | 命令 | 功能 |
 |------|------|
-| `make build` | 编译 tokenless + rtk |
-| `make build-tokenless` | 编译 tokenless + rtk（通过 justfile） |
-| `make build-toon` | 安装 TOON 二进制（cargo install toon-format） |
-| `make install` | 安装二进制到 BIN_DIR（默认 ~/.local/bin） |
-| `make test` | 运行测试 |
-| `make lint` | 运行 clippy 检查 |
-| `make fmt` | 格式化代码 |
-| `make clean` | 清理构建产物 |
-| `make openclaw-install` | 安装 OpenClaw 插件 |
-| `make openclaw-uninstall` | 卸载 OpenClaw 插件 |
-| `make hermes-install` | 安装 Hermes Agent 插件 |
-| `make hermes-uninstall` | 卸载 Hermes Agent 插件 |
-| `make cosh-extension-install` | 安装 Copilot Shell Hook |
-| `make cosh-extension-uninstall` | 卸载 Copilot Shell Hook |
-| `make setup` | 完整安装：编译 + 安装 + 适配器部署 |
-
-### 8.2 关键文件路径
-
-| 用途 | 文件路径 |
-|------|---------|
-| 核心压缩算法 | `crates/tokenless-schema/src/response_compressor.rs` |
-| Schema 压缩 | `crates/tokenless-schema/src/schema_compressor.rs` |
-| CLI 子命令 | `crates/tokenless-cli/src/main.rs` |
-| 统计记录器（SQLite） | `crates/tokenless-stats/src/recorder.rs` |
-| 统计记录类型 | `crates/tokenless-stats/src/record.rs` |
-| OpenClaw 插件 | `adapters/tokenless/openclaw/index.ts` |
-| OpenClaw 插件配置 | `adapters/tokenless/openclaw/openclaw.plugin.json` |
-| Copilot Hook — 命令重写 | `adapters/tokenless/common/hooks/rewrite_hook.py` |
-| Copilot Hook — 响应压缩 | `adapters/tokenless/common/hooks/compress_response_hook.py` |
-| Copilot Hook — Schema 压缩 | `adapters/tokenless/common/hooks/compress_schema_hook.py` |
-| Tool Ready hook | `adapters/tokenless/common/hooks/tool_ready_hook.sh` |
-| 工具依赖 spec | `adapters/tokenless/common/tool-ready-spec.json` |
-| 自动修复脚本 | `adapters/tokenless/common/tokenless-env-fix.sh` |
-| TOON 编解码器（crates.io toon-format） | `toon-format` crate v0.4.6 |
-| 统计数据库（默认） | `~/.tokenless/stats.db` |
-| 配置文件（统计/SLS/压缩开关） | `~/.tokenless/config.json` |
-| SLS JSONL 输出（默认） | `/var/log/anolisa/sls/ops/tokenless.jsonl` |
-| 集成测试 | `crates/tokenless-schema/tests/integration_test.rs` |
-| TOON 端到端测试 | `tests/test-toon-full.sh` |
-| 全量测试套件 | `tests/run-all-tests.sh` |
-
-### 8.3 Fail-Open 设计
-
-所有集成路径均采用 **fail-open** 策略：
-
-- **OpenClaw 插件**：try-catch 返回 null → 原始结果透传
-- **Copilot Shell Hook**：任何失败点均 `exit 0` 且不输出 → 原始结果透传
-- **CLI**：错误输出到 stderr，调用方检查退出码决定是否回退
-
-### 8.4 默认配置汇总
-
-| 参数 | 默认值 | Builder 方法 |
-|------|-------|-------------|
-| `truncate_strings_at` | 4096 | `with_truncate_strings_at(len)` |
-| `truncate_arrays_at` | 32 | `with_truncate_arrays_at(len)` |
-| `drop_nulls` | true | `with_drop_nulls(bool)` |
-| `drop_empty_fields` | true | `with_drop_empty_fields(bool)` |
-| `max_depth` | 8 | `with_max_depth(depth)` |
-| `add_truncation_marker` | true | `with_add_truncation_marker(bool)` |
-| `drop_fields` | 7 个 | `add_drop_field(field)` |
-
-### 8.5 源码仓库
-
-| 项目 | 地址 |
-|------|------|
-| Token-Less 源码 | https://code.alibaba-inc.com/Agentic-OS/Token-Less |
-| RPM 构建源码 | https://code.alibaba-inc.com/alinux/tokenless |
+| `make build` | 编译 tokenless + rtk + toon + OpenClaw 插件 |
+| `make build-tokenless` | 编译 tokenless + rtk（via justfile） |
+| `make build-toon` | 安装 toon 二进制 |
+| `make build-openclaw-plugin` | 编译 OpenClaw TS 插件 → `dist/index.js` |
+| `make install` | build + 安装二进制 + 适配器资源 + cosh extension |
+| `make setup` | 完整安装：`install` + `adapter-install` |
+| `make test` | 全部测试（Rust + hooks） |
+| `make lint` / `make fmt` / `make clean` | clippy / fmt / 清理 |
+| `make dist` | 生成源码 tarball（含预补丁 rtk） |
+| `make adapter-scan` | 列出已注册适配器能力 |
+| `make adapter-install` / `-uninstall` | 注册/注销全部 7 个平台 |
+| `make cosh-extension-install` / `-uninstall` | cosh extension |
+| `make openclaw-install` / `-uninstall` | OpenClaw 插件 |
+| `make hermes-install` / `-uninstall` | Hermes 插件 |
+| `make qoder-install` / `-uninstall` | Qoder 插件 |
+| `make claude-code-install` / `-uninstall` | Claude Code 插件 |
+| `make codex-install` / `-uninstall` | Codex 插件 |
+| `make qwencode-install` / `-uninstall` | Qwen Code 插件 |
 
 ---
 
-**许可证**：MIT
-**文档版本**：1.3
-**最后更新**：2026-06-24
+**许可证**：MIT（tokenless core）+ Apache-2.0（vendored rtk）
+**版本**：0.5.1
+**文档版本**：2.1（对齐 ANOLISA-design user-guide 结构）

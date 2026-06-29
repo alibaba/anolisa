@@ -1,1014 +1,558 @@
-# Token-Less User Manual
+# Token Optimization (tokenless)
 
-> LLM token optimization toolkit — Schema/Response Compression + Command Rewriting + TOON Format
+tokenless is ANOLISA's token-saving toolkit. Through five complementary strategies — Schema compression, response compression, TOON encoding, command rewriting, and tool-readiness checks — it cuts redundancy from tool definitions, API responses, and command output *before* they enter the LLM context window, reducing both runtime token consumption and retry cost.
 
-**Version**: 0.5.0  
-**Source**: https://code.alibaba-inc.com/Agentic-OS/Token-Less  
-**RPM Source**: https://code.alibaba-inc.com/alinux/tokenless  
-**System Requirements**: Rust 1.89+ (edition 2024), Linux (Alinux 4 recommended), just (build runner)
-
----
-
-## Table of Contents
-
-1. [Overview](#1-overview)
-2. [Core Features](#2-core-features)
-3. [System Requirements](#3-system-requirements)
-4. [Installation](#4-installation)
-   - [RPM Package Installation](#41-method-1-rpm-package-installation-recommended-for-alinux-4)
-   - [One-Click Source Installation](#42-method-2-one-click-source-installation)
-   - [Installation Script](#43-method-3-installation-script)
-   - [Step-by-Step Installation](#44-method-4-step-by-step-installation)
-5. [Configuration](#5-configuration)
-   - [CLI Usage](#51-cli-usage)
-   - [Post-Installation Auto-Configuration (RPM)](#52-post-installation-auto-configuration-rpm)
-   - [Copilot Shell Configuration](#53-copilot-shell-configuration)
-   - [OpenClaw Plugin Configuration](#54-openclaw-plugin-configuration)
-6. [Verification & Testing](#6-verification--testing)
-7. [Troubleshooting](#7-troubleshooting)
-8. [Appendix](#8-appendix)
-   - [Makefile Commands](#81-makefile-commands)
-   - [Key File Paths](#82-key-file-paths)
-   - [Fail-Open Design](#83-fail-open-design)
-   - [Default Configuration](#84-default-configuration)
-   - [Source Repositories](#85-source-repositories)
+- **Schema & response compression**: compresses OpenAI Function Calling tool definitions and API responses, saving ~57% and 26–78% of tokens respectively.
+- **TOON encoding**: encodes JSON responses into a token-oriented compact format; structured data saves another 15–40%.
+- **Command rewriting**: integrates RTK to filter and rewrite 70+ common CLI outputs, eliminating 60–90% of noise.
+- **Tool-readiness check**: checks binary/config/permission/network dependencies before execution, auto-fixes missing ones, and attributes environment-class failures to avoid wasted retries.
+- **Statistics & observability**: every compression records char/token savings metrics; supports SQLite aggregation and SLS JSONL ingestion, with dual-run comparison of real savings.
 
 ---
 
-## 1. Overview
+## Capability overview
 
-**Token-Less** is an LLM token optimization toolkit that significantly reduces token consumption through **Schema/Response Compression**, **Command Rewriting**, and **TOON Format** strategies.
-
-### 1.1 Core Value Proposition
-
-| Feature | Savings | Description |
-|---------|---------|-------------|
-| Schema Compression | ~57% | Compresses OpenAI Function Calling tool definitions |
-| Response Compression | ~26–78% | Compresses API/tool responses (varies by content) |
-| Command Rewriting | 60–90% | Filters CLI command output via RTK |
-| TOON Format | 30–60% | Lossless JSON→binary format, best for structured/tabular data |
-
-### 1.2 Supported Integrations
-
-| Integration | Command Rewriting | Response Compression | Schema Compression | TOON | Tool Ready |
-|-------------|-------------------|---------------------|-------------------|------|-----------|
-| OpenClaw Plugin | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Copilot Shell Hook | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Hermes Agent Plugin | ✅ | ✅ | ⏳ | ✅ | ✅ |
-| Qoder CLI Plugin | ✅ | ✅ | — | — | ✅ |
-| Claude Code Plugin | ✅ | ✅ | — | ✅ | ✅ |
-| Codex Plugin | ✅ | ✅ | — | ✅ | ✅ |
-
-### 1.3 Architecture Overview
-
-```
-Token-Less/
-├── crates/tokenless-schema/   # Core library: SchemaCompressor + ResponseCompressor
-├── crates/tokenless-cli/      # CLI binary: tokenless command
-├── crates/tokenless-stats/    # Stats recording library (SQLite)
-├── adapters/tokenless/        # FHS adapter bundle (cosh, openclaw, hermes, qoder, claude-code, codex)
-├── third_party/rtk/           # RTK vendored source (justfile clone+patch)
-├── third_party/patches/      # Patches for vendored third_party sources
-├── Makefile                   # Unified build system
-└── docs/                      # Documentation
-```
+| Strategy | Token savings | Description |
+|------|----------|------|
+| Schema compression | ~57% | Compresses OpenAI Function Calling tool definitions |
+| Response compression | 26–78% | Compresses API / tool responses (drops debug/null/empty, truncates long content) |
+| TOON encoding | 15–40% | Lossless compact JSON format, chained after response compression |
+| Command rewriting | 60–90% | Filters 70+ CLI outputs via RTK |
+| Tool-readiness check | reduces retry waste | Pre-execution env check, auto-fix, failure attribution |
 
 ---
 
-## 2. Core Features
+## Installation
 
-### 2.1 Schema Compressor (SchemaCompressor)
+### Via anolisa CLI (recommended)
 
-Compresses OpenAI Function Calling tool definitions to reduce structural overhead entering the context window.
-
-**Source Location**: `crates/tokenless-schema/src/schema_compressor.rs`
-
-### 2.2 Response Compressor (ResponseCompressor)
-
-Recursively traverses JSON values and applies **7 compression rules** to reduce token consumption.
-
-**Source Location**: `crates/tokenless-schema/src/response_compressor.rs`
-
-#### 7 Compression Rules
-
-| Rule | Name | Condition | Action | Default Threshold |
-|------|------|-----------|--------|-------------------|
-| R1 | String Truncation | Length > 4096 bytes | Truncate at UTF-8 boundary, append `… (truncated)` | 4096 bytes |
-| R2 | Array Truncation | Elements > 32 | Keep first 32, append `<... N more items truncated>` | 32 elements |
-| R3 | Field Deletion | Key matches blacklist | Remove entire field | 7 fields |
-| R4 | Null Removal | Value is `null` | Delete from object/array | Enabled |
-| R5 | Empty Removal | Value is `""`/`[]`/`{}` | Delete from object/array | Enabled |
-| R6 | Depth Truncation | Nesting depth > 8 | Replace with `<{type} truncated at depth {N}>` | 8 levels |
-| R7 | Primitive Retention | bool/number | Keep as-is | — |
-
-**R3 Default Blacklist**: `debug`, `trace`, `traces`, `stack`, `stacktrace`, `logs`, `logging`
-
-#### Compression Examples
-
-**Example 1 — Field Deletion + Null Removal + Empty Removal (R3 + R4 + R5)**
-
-Input:
-```json
-{
-  "status": "success",
-  "data": { "name": "test", "count": 42 },
-  "debug": { "request_id": "abc123", "timing": 0.05 },
-  "trace": "GET /api/data 200 OK",
-  "metadata": null,
-  "tags": [],
-  "extra": ""
-}
+```bash
+anolisa install tokenless
 ```
 
-Output:
-```json
-{
-  "status": "success",
-  "data": { "name": "test", "count": 42 }
-}
+Produces three binaries — `tokenless`, `rtk`, `toon` — plus adapter resources (hooks, plugins, tool-ready-spec, env-fix script).
+
+### RPM package (Alinux 4)
+
+```bash
+sudo dnf install tokenless
 ```
 
-**Example 2 — Array Truncation (R2)**
+The RPM installs to system-level FHS paths: `/usr/bin/tokenless`, `/usr/libexec/anolisa/tokenless/{rtk,toon}`, `/usr/share/anolisa/adapters/tokenless/`, `/usr/share/anolisa/extensions/tokenless/`. `%post` cleans up stale artifacts (pre-FHS layout, legacy `tokenless-openclaw` plugin id, etc.); the cosh extension is auto-discovered by copilot-shell — no manual `settings.json` edit needed.
 
-Input:
-```json
-[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+### Source build (developers)
+
+```bash
+git clone https://github.com/alibaba/anolisa
+cd anolisa/src/tokenless
+
+make setup    # build + install binaries + register all adapters
 ```
 
-Output:
-```json
-[1, 2, 3, "<... 7 more items truncated>"]
-```
-
-### 2.3 Command Rewriting (RTK)
-
-Integrates [RTK](https://github.com/rtk-ai/rtk) to filter and rewrite CLI command output, supporting 70+ commands.
-
-| Original Command | Rewritten | Typical Savings |
-|-----------------|-----------|-----------------|
-| `cargo build` | `rtk build` | ~70% |
-| `cargo test` | `rtk test` | ~80% |
-| `npm run build` | `rtk build` | ~65% |
-| `go test ./...` | `rtk test` | ~75% |
-| `python -m pytest` | `rtk test` | ~85% |
-
-### 2.4 TOON Compression (TOON Format)
-
-TOON (Token-Oriented Object Notation) is a **lossless binary JSON codec** that eliminates JSON syntax overhead — quotes, commas, colons, and braces — while preserving all data intact. It is particularly effective for structured and tabular data where syntax overhead dominates content.
-
-**Source Location**: Integrated via `toon-format` crate (crates.io v0.4.6), called directly as a Rust library by the CLI. The standalone `toon` binary is used by Python hooks as a subprocess.
-
-#### How TOON Works
-
-TOON replaces JSON's text-based syntax with a compact binary encoding:
-
-| JSON Element | JSON Syntax | TOON Encoding | Savings |
-|-------------|-------------|---------------|---------|
-| Object keys | `"name":` (quotes + colon) | Length-prefixed bytes | ~60-80% on key-heavy objects |
-| String values | `"value"` (quotes) | Length-prefixed raw bytes | ~10-20% |
-| Array separators | `, ` (commas + spaces) | Implicit element boundaries | 100% |
-| Structural braces | `{}`, `[]` | Implicit from type tags | 100% |
-| Numbers/booleans | Text representation | Compact binary encoding | ~30-50% |
-
-#### Compression Effectiveness by Data Type
-
-| Data Type | Typical TOON Savings | Example |
-|-----------|---------------------|---------|
-| Tabular/array data | 40-60% | `[{"id":1,"name":"A"},...]` (44% observed) |
-| Simple flat objects | 10-20% | `{"name":"Alice","age":30}` (15% observed) |
-| Nested schema definitions | 5-15% | Function calling tool schemas |
-
-#### TOON vs Response Compression
-
-| Aspect | Response Compression | TOON Compression |
-|--------|---------------------|-----------------|
-| Strategy | Lossy (truncation, field deletion) | Lossless (full data preservation) |
-| Best for | Verbose API responses, debug-heavy output | Structured tabular data, API results |
-| Data integrity | May drop fields/truncate strings | Round-trip safe (encode→decode) |
-| Sequential use | Applied first in the pipeline | Applied second (after response compression) |
-
-#### Sequential Compression Pipeline
-
-In the Copilot Shell PostToolUse hook, response compression and TOON are applied **sequentially**:
-
-```
-Tool Response → ResponseCompressor (lossy) → TOON Encode (lossless) → Final Output
-```
-
-This two-stage pipeline maximizes savings: response compression strips verbose/debug content, then TOON eliminates the remaining JSON syntax overhead.
+Build deps: Rust ≥ 1.89 (edition 2024), just, Git, nodejs+npm (to compile the OpenClaw TS plugin). Runtime deps: python3, jq, bash (RPM Requires). See [Appendix · Install paths](#install-paths).
 
 ---
 
-## 3. System Requirements
+## CLI usage
 
-| Dependency | Version | Purpose | Required |
-|------------|---------|---------|----------|
-| Rust | >= 1.89 (edition 2024) | Compile tokenless and rtk | Build time only |
-| Git | Any | rtk source download (justfile) | Build time only |
-| just | Any | Build orchestration (rtk clone+patch) | Build time only |
-| jq | Any | Hook script JSON processing | Yes |
-| rtk | >= 0.35.0 | Command rewriting | Optional |
-| toon | >= 0.4.0 | TOON format compression | Optional |
-| tokenless | >= 0.1.0 | Schema/Response compression | Optional |
-| sqlite3 | Any | Stats database | Optional |
+All subcommands accept `-f <path>` (file) or stdin (pipe). Input cap is 64 MiB.
 
-**Note**: Rust and Git are only required for source compilation. RPM package installation does not require these dependencies.
-
----
-
-## 4. Installation
-
-### 4.1 Method 1: RPM Package Installation (Recommended for Alinux 4)
-
-#### 4.1.1 Build RPM Package
+### Compress tool schema
 
 ```bash
-# Prepare RPM build environment
-rpmdev-setuptree
-
-# Copy source to RPM build directory
-cp tokenless-0.1.0.tar.gz ~/rpmbuild/SOURCES/
-
-# Build RPM using spec file
-rpmbuild -ba tokenless.spec
-
-# Generated RPM package location
-~/rpmbuild/RPMS/x86_64/tokenless-0.1.0-3.alnx4.x86_64.rpm
-```
-
-#### 4.1.2 Install RPM Package
-
-```bash
-# Install with yum (recommended, auto-resolves dependencies)
-sudo yum install ./tokenless-0.1.0-3.alnx4.x86_64.rpm
-
-# Or install directly with rpm
-sudo rpm -ivh tokenless-0.1.0-3.alnx4.x86_64.rpm
-```
-
-#### 4.1.3 RPM Auto-Configuration
-
-After RPM installation, the following configurations are performed automatically:
-
-1. **Binaries**: Installed to `/usr/bin/tokenless` and `/usr/bin/rtk`
-2. **Hook Scripts**: RPM installs to `/usr/share/anolisa/adapters/tokenless/common/hooks/`, source installs to `~/.local/share/anolisa/adapters/tokenless/common/hooks/`
-3. **OpenClaw Plugin**: Auto-detected and configured (if OpenClaw is installed)
-4. **Copilot Shell**: Auto-detected and configured (if Copilot Shell is installed)
-
-**Verify RPM Installation**:
-```bash
-# Check binaries
-which tokenless
-# Output: /usr/bin/tokenless
-
-tokenless --version
-
-# Check hook scripts (RPM installation path)
-ls -la /usr/share/anolisa/adapters/tokenless/common/hooks/
-
-# Check OpenClaw plugin configuration
-cat ~/.openclaw/openclaw.json | jq '.plugins.allow'
-```
-
-### 4.2 Method 2: One-Click Source Installation
-
-```bash
-# Clone repository (no submodules needed, rtk is downloaded at build time via justfile)
-git clone https://code.alibaba-inc.com/Agentic-OS/Token-Less
-cd Token-Less
-
-# Full installation: build + install binaries + deploy OpenClaw plugin + Copilot Shell Hook
-make setup
-```
-
-### 4.3 Method 3: Installation Script
-
-```bash
-# Full setup: build + install + all adapters
-make setup
-
-# Install OpenClaw plugin only (requires openclaw CLI)
-make openclaw-install
-
-# Install copilot-shell hooks only
-make cosh-extension-install
-```
-
-### 4.4 Method 4: Step-by-Step Installation
-
-#### 4.4.1 Build
-
-```bash
-# Build tokenless + rtk (release mode, rtk cloned+patched via justfile)
-make build
-
-# Build tokenless + rtk only
-make build-tokenless
-```
-
-#### 4.4.2 Install Binaries
-
-```bash
-# Install to ~/.local/bin (default)
-make install
-
-# Custom installation path
-make install BIN_DIR=/usr/local/bin
-```
-
-#### 4.4.3 Deploy OpenClaw Plugin
-
-```bash
-# Using Makefile
-make openclaw-install
-
-# Custom plugin path
-make adapter-install
-
-# Manual installation
-cp -r adapters/tokenless/openclaw/ /usr/share/anolisa/adapters/tokenless/openclaw/
-```
-
-#### 4.4.4 Deploy Copilot Shell Hook
-
-```bash
-# Using Makefile
-make cosh-extension-install
-
-# Manual installation
-mkdir -p ~/.local/share/anolisa/adapters/tokenless/common/hooks
-cp adapters/tokenless/common/hooks/*_hook.py ~/.local/share/anolisa/adapters/tokenless/common/hooks/
-chmod +x ~/.local/share/anolisa/adapters/tokenless/common/hooks/*_hook.py
-```
-
----
-
-## 5. Configuration
-
-### 5.1 CLI Usage
-
-#### compress-schema
-
-```bash
-# Compress single tool schema from file
+# Single schema from file
 tokenless compress-schema -f tool.json
 
-# Compress from stdin
-cat tool.json | tokenless compress-schema
+# Batch from stdin (JSON array)
+cat tools.json | tokenless compress-schema --batch
 
-# Batch compress tools array
-tokenless compress-schema -f tools.json --batch
+# With stats tracking
+tokenless compress-schema -f tools.json --batch \
+  --agent-id copilot-shell --session-id sess-001
 ```
 
-#### compress-response
+| Argument | Description |
+|------|------|
+| `-f, --file <path>` | Input file; omit to read stdin |
+| `--batch` | Compress a JSON array (auto-enabled when input is an array) |
+| `--agent-id` / `--session-id` / `--tool-use-id` | Stats tracking fields |
+
+### Compress API response
 
 ```bash
-# Compress API response from file
 tokenless compress-response -f response.json
 
-# Compress from stdin
+# Or pipe
 curl -s https://api.example.com/data | tokenless compress-response
+
+# Override defaults
+tokenless compress-response -f resp.json \
+  --truncate-strings-at 2048 --truncate-arrays-at 16 --max-depth 6
 ```
 
-#### compress-toon
+| Argument | Description |
+|------|------|
+| `-f, --file <path>` | Input file; omit to read stdin |
+| `--truncate-strings-at <usize>` | String truncation threshold (default 4096) |
+| `--truncate-arrays-at <usize>` | Array truncation threshold (default 32) |
+| `--max-depth <usize>` | Nesting depth cap (default 8) |
+
+### TOON encode/decode
 
 ```bash
-# Encode JSON to TOON format from file
-tokenless compress-toon -f data.json
+# JSON → TOON (compact format)
+echo '{"name":"Alice","age":30}' | tokenless compress-toon
 
-# Encode from stdin
-cat data.json | tokenless compress-toon
+# TOON → JSON
+echo 'name: Alice
+age: 30' | tokenless decompress-toon
 
-# With stats tracking metadata
-tokenless compress-toon -f data.json --agent-id my-agent --session-id sess-001
-```
-
-#### decompress-toon
-
-```bash
-# Decode TOON format back to JSON from file
-tokenless decompress-toon -f data.toon
-
-# Decode from stdin
-cat data.toon | tokenless decompress-toon
-
-# Round-trip verification
-tokenless compress-toon -f data.json | tokenless decompress-toon | jq .
-```
-
-### 5.2 Post-Installation Auto-Configuration (RPM)
-
-After RPM installation, the installation script automatically detects and configures installed platforms.
-
-#### 5.2.1 Auto-Detected Platforms
-
-| Platform | Detection Condition | Auto-Configuration |
-|----------|---------------------|-------------------|
-| OpenClaw | `~/.openclaw/openclaw.json` exists | Plugin deployment + plugins.allow configuration |
-| Copilot Shell | `~/.copilot-shell/settings.json` or `~/.qwen-code/settings.json` exists | Hook script deployment + settings.json configuration |
-
-#### 5.2.2 Manual Configuration Trigger
-
-If OpenClaw plugin installation is needed after RPM installation, run:
-
-```bash
-# Install OpenClaw plugin (requires openclaw CLI)
-/usr/share/anolisa/adapters/tokenless/openclaw/scripts/install.sh
-```
-
-#### 5.2.3 Verify Auto-Configuration
-
-```bash
-# Check OpenClaw plugin configuration
-cat ~/.openclaw/openclaw.json | jq '.plugins.allow'
-# Should contain "tokenless"
-
-# Check Copilot Shell Hook configuration
-cat ~/.copilot-shell/settings.json | jq '.hooks | keys'
-# Should contain PreToolUse, PostToolUse, BeforeModel
-
-# Check hook scripts
-ls -la /usr/share/anolisa/adapters/tokenless/common/hooks/
-```
-
-### 5.3 Copilot Shell Configuration
-
-#### 5.3.1 Hook Script Locations
-
-Hook script locations depend on the installation method:
-
-| Installation Method | Hook Script Location |
-|---------------------|---------------------|
-| RPM Installation | `/usr/share/anolisa/adapters/tokenless/common/hooks/` |
-| Source Installation | `~/.local/share/anolisa/adapters/tokenless/common/hooks/` |
-
-| Script | Function | Hook Event |
-|--------|----------|------------|
-| `rewrite_hook.py` | Command rewriting | PreToolUse |
-| `compress_response_hook.py` | Response + TOON compression pipeline | PostToolUse |
-| `compress_schema_hook.py` | Schema compression | BeforeModel |
-
-#### 5.3.2 Configure settings.json
-
-Edit `~/.copilot-shell/settings.json` (or `~/.qwen-code/settings.json`):
-
-**RPM Installation Configuration**:
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Shell",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/usr/share/anolisa/adapters/tokenless/common/hooks/rewrite_hook.py",
-            "name": "tokenless-rewrite",
-            "timeout": 5000
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/usr/share/anolisa/adapters/tokenless/common/hooks/compress_response_hook.py",
-            "name": "tokenless-compress-response",
-            "timeout": 10000
-          }
-        ]
-      }
-    ],
-    "BeforeModel": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/usr/share/anolisa/adapters/tokenless/common/hooks/compress_schema_hook.py",
-            "name": "tokenless-compress-schema",
-            "timeout": 10000
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-**Source Installation Configuration**:
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Shell",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.local/share/anolisa/adapters/tokenless/common/hooks/rewrite_hook.py",
-            "name": "tokenless-rewrite",
-            "timeout": 5000
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.local/share/anolisa/adapters/tokenless/common/hooks/compress_response_hook.py",
-            "name": "tokenless-compress-response",
-            "timeout": 10000
-          }
-        ]
-      }
-    ],
-    "BeforeModel": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.local/share/anolisa/adapters/tokenless/common/hooks/compress_schema_hook.py",
-            "name": "tokenless-compress-schema",
-            "timeout": 10000
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-> **Tip**: RPM installation automatically configures settings.json, no manual editing required.
-
-#### 5.3.3 Hook Workflows
-
-**Command Rewriting (PreToolUse)**:
-```
-copilot-shell triggers PreToolUse 
-  → Hook reads stdin JSON 
-  → Calls rtk rewrite 
-  → Returns rewritten command
-```
-
-**Response Compression (PostToolUse)**:
-```
-copilot-shell triggers PostToolUse 
-  → Hook reads tool_response 
-  → Step 1: tokenless compress-response (lossy — removes debug, nulls, truncates)
-  → Step 2: tokenless compress-toon (lossless — eliminates JSON syntax overhead)
-  → Both steps are fail-open: failures at any stage pass original content through
-  → Returns compressed content as additionalContext
-```
-
-**Schema Compression (BeforeModel)**:
-```
-copilot-shell triggers BeforeModel 
-  → Hook reads llm_request.tools 
-  → Calls tokenless compress-schema --batch 
-  → Returns compressed tools array
-```
-
-> **Note**: Schema compression is currently a functional placeholder, waiting for anolisa protocol extension to include `tools` in LLMRequest.
-
-### 5.4 OpenClaw Plugin Configuration
-
-#### 5.4.1 Configuration File
-
-Edit `openclaw.plugin.json`:
-
-```json
-{
-  "rtk_enabled": true,
-  "schema_compression_enabled": true,
-  "response_compression_enabled": true,
-  "toon_compression_enabled": false,
-  "skip_tools": [],
-  "verbose": false
-}
-```
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `rtk_enabled` | `true` | Enable RTK command rewriting |
-| `schema_compression_enabled` | `true` | Enable tool schema compression |
-| `response_compression_enabled` | `true` | Enable tool response compression |
-| `toon_compression_enabled` | `false` | Enable TOON format compression (sequential after response compression) |
-| `skip_tools` | `[]` | Tool names to skip during compression (e.g. `["Read","Glob"]`) |
-| `verbose` | `false` | Output detailed logs |
-
-#### 5.4.2 Integration Details
-
-**Response Compression Skip Logic**:
-- When RTK is enabled and `toolName === "exec"`, skip compression (avoid double optimization)
-- Automatically compress results from all other tool types (`web_search`, `web_fetch`, `read_file`, etc.)
-- Observed savings: `web_fetch` approximately **~78%**
-
-**Hook Events**:
-| Hook | Event | Function |
-|------|-------|----------|
-| Command rewriting | `before_tool_call` | Rewrite `exec` commands to RTK equivalents |
-| Schema compression | `before_tool_register` | Compress tool schemas |
-| Response compression | `tool_result_persist` | Compress tool responses |
-| TOON compression | `tool_result_persist` | Sequential TOON encoding (if enabled) |
-
-### 5.5 Hermes Agent Plugin Configuration
-
-The Hermes plugin activates automatically when listed in `~/.hermes/config.yaml`:
-
-```yaml
-plugins:
-  enabled:
-    - tokenless
-```
-
-Or enable via CLI:
-
-```bash
-hermes plugins enable tokenless
-```
-
-The plugin hooks into three Hermes events:
-
-| Strategy | Event | Action |
-|---|---|---|
-| Tool Ready | `pre_tool_call` | Environment readiness pre-check with auto-fix and skip-retry feedback |
-| Command rewriting | `pre_tool_call` | Blocks original command, suggests RTK-rewritten version |
-| Response compression | `transform_tool_result` | Compresses tool results via `tokenless compress-response` |
-| TOON encoding | `transform_tool_result` | Pipeline step after response compression |
-
-> **Note**: Hermes's `pre_tool_call` hook can only block tool execution (not modify arguments), so command rewriting adds one extra round-trip.
-
-### 5.6 Qoder CLI Plugin Configuration
-
-Install via Makefile:
-
-```bash
-make qoder-install
-```
-
-Hooks are merged into `~/.qoder/settings.json` automatically. The plugin uses shared hook scripts from the common/hooks directory, referenced via the `${QODER_TOKENLESS_HOOKS}` variable.
-
-### 5.7 Claude Code Plugin Configuration
-
-Install via Makefile or the official `claude plugin` CLI:
-
-```bash
-make claude-code-install
-```
-
-The adapter exposes a local `anolisa` marketplace containing the `tokenless@anolisa` plugin. Claude Code v2 requires marketplace registration before plugin installation. The `run-hook.sh` dispatcher locates shared hook scripts via FHS paths.
-
-### 5.8 Codex Plugin Configuration
-
-Install via Makefile:
-
-```bash
-make codex-install
-```
-
-The plugin registers four Codex hooks:
-
-| Event | Action |
-|---|---|
-| `SessionStart` | Verifies tokenless CLI is installed (non-blocking) |
-| `PreToolUse` (tool-ready) | Environment readiness pre-check with auto-fix |
-| `PreToolUse` (rewrite) | Shell command rewriting via RTK |
-| `PostToolUse` | Response compression + TOON encoding + env error classification |
-
-> **Codex Protocol Constraint**: PostToolUse hooks cannot suppress the original tool output. The plugin injects a compressed summary as `additionalContext`.
-
----
-
-## 6. Verification & Testing
-
-### 6.0 Real-World Test Results
-
-#### 6.0.1 Test Methodology
-
-**Response Compression Test Script:**
-
-```bash
-#!/usr/bin/bash
-# Test tokenless-compress-response with mock input
-
-# Build a long tool response (>200 bytes threshold)
-LONG_STDOUT=""
-for i in $(seq 1 50); do
-  LONG_STDOUT="${LONG_STDOUT}This is line $i of verbose output from a tool execution with lots of text to compress.\n"
-done
-
-MOCK_RESPONSE="{\"stdout\":\"${LONG_STDOUT}\",\"stderr\":\"\",\"exit_code\":0}"
-INPUT="{\"tool_name\":\"run_shell_command\",\"tool_response\":${MOCK_RESPONSE}}"
-
-echo "=== Original response size: ${#INPUT} bytes ==="
-
-RESULT=$(echo "$INPUT" | bash /root/.copilot-shell/hooks/tokenless/compress_response_hook.py 2>/dev/null)
-
-echo "=== Result ==="
-echo "$RESULT" | jq '.'
-
-echo ""
-echo "=== Compressed context size: $(echo "$RESULT" | jq -r '.hookSpecificOutput.additionalContext // empty' | wc -c) bytes ==="
-echo "=== suppressOutput: $(echo "$RESULT" | jq '.suppressOutput') ==="
-```
-
-**Test Setup:**
-- Generated 50 lines of verbose command output
-- Simulated run_shell_command tool response
-- Measured original vs compressed size
-- Verified hook output format
-
-#### 6.0.2 Test Results
-
-| Metric | Value |
-|--------|-------|
-| Original Response Size | 4480 bytes |
-| Compressed Size | 625 bytes |
-| **Savings Ratio** | **~86%** |
-| suppressOutput | true (original output suppressed) |
-
-#### 6.0.3 Production Verification
-
-**Hook Execution Logs:**
-```bash
-# Check compress-response hook triggers
-grep "tokenless-compress-response\|compress-response\|compressed response" ~/.copilot-shell/debug/*.log | head -10
-
-# Output: 3 matches found - hook is being triggered correctly
-```
-
-**PostToolUse Hook Execution Count:**
-```bash
-# Check PostToolUse hook execution
-grep "firePostToolUseEvent\|PostToolUse.*completed" ~/.copilot-shell/debug/*.log | head -20
-
-# Output: 16 matches - PostToolUse hook firing correctly
-# Note: compress-response only triggered 3 times because hook skips responses < 200 bytes
-```
-
-**Verification Conclusion:**
-- ✅ tokenless-compress-response hook is fully functional
-- ✅ Hook skips short responses (< 200 bytes) as designed (fail-open optimization)
-- ✅ Actual compression ratio matches expected ~86% savings
-
----
-
-### 6.1 Manual Hook Testing
-
-```bash
-# Test command rewriting (source directory)
-echo '{"tool_input":{"command":"cargo test"}}' | bash adapters/tokenless/common/hooks/rewrite_hook.py
-
-# Test response compression (source directory)
-echo '{"tool_name":"Shell","tool_response":"{\"stdout\":\"lots of verbose output here...\"}"}' | bash adapters/tokenless/common/hooks/compress_response_hook.py
-
-# Test schema compression (source directory)
-echo '{"llm_request":{"tools":[{"name":"test","description":"A test tool","parameters":{}}]}}' | bash adapters/tokenless/common/hooks/compress_schema_hook.py
-
-# Test installed hook (RPM installation)
-echo '{"tool_input":{"command":"cargo test"}}' | python3 /usr/share/anolisa/adapters/tokenless/common/hooks/rewrite_hook.py
-```
-
-### 6.2 CLI Testing
-
-```bash
-# Create test file
-echo '{"status":"success","data":{"items":[1,2,3]},"debug":{"id":"abc"}}' > test.json
-
-# Compress response
-tokenless compress-response -f test.json
-
-# Compress schema
-echo '[{"name":"Shell","description":"Run shell commands","parameters":{"type":"object"}}]' | tokenless compress-schema
-
-# TOON encode
-echo '{"users":[{"id":1,"name":"Alice"},{"id":2,"name":"Bob"}]}' | tokenless compress-toon
-
-# TOON round-trip verification
+# Round-trip
 echo '{"name":"test","value":42}' | tokenless compress-toon | tokenless decompress-toon
-
-# Verify compression via stats database
-tokenless compress-toon -f large_data.json --agent-id test
-tokenless stats list              # List recent compression records
-tokenless stats show <record-id>  # Show before/after text for a record
-tokenless stats summary           # Aggregate savings across all operations
 ```
 
-#### Compression toggle and dry-run comparison (dual-run)
+`compress-toon` also supports `--agent-id`/`--session-id`/`--tool-use-id` for stats. If encoding yields no savings, the CLI emits the original and prints a stderr notice; no stats are recorded.
 
-Control whether compression is actually applied via `TOKENLESS_COMPRESSION_ENABLED` (or `compression_enabled` in `~/.tokenless/config.json`):
-
-- `1` (default): normal compression; the compressed output reaches the LLM context, recorded with `mode=active`.
-- `0` (**dry-run mode**): compression is computed and the predicted savings are recorded (`mode=dryrun`), but the **original text is emitted**, leaving the LLM context uncompressed.
-
-Run the same task twice (once with compression off, once on) to produce a comparison chart that accurately reflects tokenless savings:
+### Environment readiness check
 
 ```bash
-# Run 1: compression off (dry-run baseline, emits original)
-TOKENLESS_COMPRESSION_ENABLED=0  <run the same task>   # recorded under session A
-# Run 2: compression on (real compression)
-TOKENLESS_COMPRESSION_ENABLED=1  <run the same task>   # recorded under session B
+# Check a specific tool (alias + case-insensitive)
+tokenless env-check --tool Shell
 
-# Comparison chart: baseline = context reached (raw), tokenless = compressed
-tokenless stats summary --compare <session-A> <session-B>
-tokenless stats summary --compare <session-A> <session-B> --json   # machine-readable
+# Check all
+tokenless env-check --all
+
+# Full two-level checklist
+tokenless env-check --checklist
+
+# Auto-fix missing deps
+tokenless env-check --tool Shell --fix
+
+# Machine-readable JSON (for hooks/plugins)
+tokenless env-check --all --json
 ```
 
-> Note: tokenless only measures the compressible content it processes; model reasoning tokens / real billed tokens are out of scope.
+| Argument | Description |
+|------|------|
+| `--tool <name>` | Check one tool (exact key → alias → case-insensitive) |
+| `--all` | Check all tools in the spec |
+| `--fix` | Auto-install missing/outdated deps (calls `tokenless-env-fix.sh fix-all`) |
+| `--checklist` | Print the two-level checklist (tool category → deps) |
+| `--json` | Machine-readable JSON |
 
-#### SLS Log Recording (JSONL) {#sls-log-recording}
+**Status values**: `READY` (all satisfied) / `PARTIAL` (recommended missing, usable) / `NOT_READY` (required missing, tool unusable) / `UNKNOWN` (not in spec). `NOT_READY` JSON includes a `diagnostic` field formatted `[tokenless:ready] <tool>: NOT_READY — required dependency missing: <bin>. Skip retry.` for hooks to pass to the LLM.
 
-In addition to SQLite stats, tokenless can append each compression as an **SLS (Simple Log Service) JSONL record** to a file, for ingestion by a log collector (e.g. ilogtail / SLS Logtail).
-
-> **File ownership**: the SLS JSONL file is owned and lifecycle-managed by the **anolisa SLS component** (it creates, rotates, and removes it). tokenless **does not manage the log file** — on each write it first checks whether the file exists, and **appends only if it exists, silently skipping otherwise** (treated as "SLS collection not ready"). tokenless never creates, truncates, or deletes the file or its directory.
-
-- **Enabled by default.** Toggle field: `sls_enabled` in `~/.tokenless/config.json` (default `true`); the `TOKENLESS_SLS_ENABLED` env var takes precedence — `1`/`true`/`yes` turns it on, anything else turns it off.
-- **Output path**: defaults to `/var/log/anolisa/sls/ops/tokenless.jsonl`, overridable via `TOKENLESS_SLS_PATH`. The path must live under `/var/log/` or `/tmp/` and must not contain `..`, otherwise it falls back to the default with a warning. Prefer `/var/log/` in production (`/tmp/` is world-writable).
-- **Recorded fields** (dot-namespaced keys matching the SLS ingestion schema):
-  - `component.name` / `component.version` / `component.agent_name` (agent identity, not user identity)
-  - `tokenless.operation` (e.g. `compress-schema` / `compress-response` / `compress-toon` / `rewrite-command`)
-  - `tokenless.session_id` / `tokenless.tool_use_id` / `tokenless.source_pid` (optional, omitted when empty)
-  - `tokenless.compression.{before,after}_{chars,tokens}`, `chars_saved`, `tokens_saved`, and both percentages
-
-  > Only metrics (char/token counts) are recorded — **no compressed payload** and no sensitive data; records carry no timestamp / hostname / user identity.
+### Statistics & measurement
 
 ```bash
-# Show current toggle state and source (default / config file / env override)
+# Summary (grouped by operation)
+tokenless stats summary
+tokenless stats summary --json
+
+# List recent records
+tokenless stats list                  # default 20
+tokenless stats list -l 50
+
+# Show before/after text for a record
+tokenless stats show 42
+
+# Clear all stats
+tokenless stats clear --yes
+
+# Show toggle states and their source
 tokenless stats status
 
-# Quick check: the file must first exist (created by the anolisa SLS component)
-# before tokenless will write to it.
+# Enable/disable stats recording (writes config.json)
+tokenless stats enable
+tokenless stats disable
+```
+
+#### Dual-run comparison (dry-run baseline vs active)
+
+`TOKENLESS_COMPRESSION_ENABLED` controls whether compression is actually applied:
+
+- `1` (default): normal compression; result enters LLM context; recorded as `mode=active`
+- `0` (dry-run): compute & record predicted savings (`mode=dryrun`) but **emit original**; context unchanged
+
+Run the same task twice to measure real savings:
+
+```bash
+# Run 1: dry-run baseline
+TOKENLESS_COMPRESSION_ENABLED=0  <run same task>   # session A
+# Run 2: real compression
+TOKENLESS_COMPRESSION_ENABLED=1  <run same task>   # session B
+
+# Compare
+tokenless stats summary --compare <session-A> <session-B>
+tokenless stats summary --compare <session-A> <session-B> --json
+```
+
+`--compare` takes exactly two session IDs; mode mismatch emits a stderr warning but comparison proceeds. Records with no token savings are not stored.
+
+> Note: tokenless only measures the compressible content it handles; model inference tokens / real billing tokens are out of scope.
+
+#### SLS log ingestion
+
+In addition to SQLite, each compression can append an **SLS JSONL record** for ilogtail/SLS Logtail.
+
+- **Default on** (`sls_enabled=true`). Toggle via `~/.tokenless/config.json` `sls_enabled` or `TOKENLESS_SLS_ENABLED`.
+- **Output path**: default `/var/log/anolisa/sls/ops/tokenless.jsonl`; override via `TOKENLESS_SLS_PATH` (must be under `/var/log/` or `/tmp/`, else fallback + warn).
+- **File ownership**: the JSONL file is **owned and lifecycle-managed by the anolisa SLS component** (creation, rotation, deletion). tokenless **does not manage it** — before writing, it checks whether the file exists; **if it exists, append; if not, silently skip**. tokenless never creates, truncates, or deletes the file.
+- **Recorded fields**: `component.*`, `tokenless.operation`, `tokenless.session_id`/`tool_use_id`/`source_pid`, `tokenless.compression.{before,after}_{chars,tokens}`, `chars_saved`/`tokens_saved` and percentages. **Metrics only — no original compression text**, no sensitive data.
+
+```bash
+# Quick verify: anolisa SLS component or manual file must exist first
 mkdir -p /tmp && touch /tmp/tokenless-sls.jsonl
-TOKENLESS_STATS_ENABLED=1 TOKENLESS_SLS_ENABLED=1 \
-TOKENLESS_SLS_PATH=/tmp/tokenless-sls.jsonl \
-tokenless compress-response -f resp.json
+TOKENLESS_SLS_ENABLED=1 TOKENLESS_SLS_PATH=/tmp/tokenless-sls.jsonl \
+  tokenless compress-response -f resp.json
 tail -n1 /tmp/tokenless-sls.jsonl | jq .
 ```
 
-**Disabling SLS**: set `TOKENLESS_SLS_ENABLED=0`, or `"sls_enabled": false` in `~/.tokenless/config.json`.
+---
 
-**Production notes**:
-- tokenless does not create the log file or directory — the file must be pre-created by the anolisa SLS component; if it is absent, tokenless skips the write.
-- Log rotation is handled by the anolisa SLS component; tokenless does not touch the file lifecycle.
-- Writes are fail-silent (stderr-only warning, never affects the main flow).
+## Agent framework integration
 
-### 6.3 Verify Installation
+Once installed, tokenless integrates transparently into multiple Agent frameworks:
+
+| Framework | Integration | Strategies covered |
+|------|----------|----------|
+| **cosh** (copilot-shell) | PreToolUse/PostToolUse hooks | Tool-ready + rewrite + response + TOON + Schema |
+| **OpenClaw** | plugin | rewrite + response + Schema |
+| **Hermes** | plugin | Tool-ready + rewrite + response + TOON |
+| **Qoder** | plugin | Tool-ready + rewrite + response |
+| **Claude Code** | marketplace plugin | Tool-ready + rewrite + response + TOON |
+| **Codex** | plugin | Tool-ready + rewrite + response + TOON |
+| **Qwen Code** | extension plugin | Tool-ready + rewrite + response + Schema |
+
+### Enable adapters
 
 ```bash
-# Check binaries
-which tokenless
-which rtk
+# List available frameworks
+anolisa adapter scan
 
-# Check versions
-tokenless --version
-rtk --version
+# Enable as needed
+anolisa adapter enable tokenless cosh         # cosh hooks
+anolisa adapter enable tokenless openclaw     # OpenClaw plugin
+anolisa adapter enable tokenless hermes       # Hermes plugin
+anolisa adapter enable tokenless qoder        # Qoder plugin
+anolisa adapter enable tokenless claude-code  # Claude Code plugin
+anolisa adapter enable tokenless codex        # Codex plugin
+anolisa adapter enable tokenless qwencode     # Qwen Code plugin
 
-# Check hook scripts (RPM installation)
-ls -la /usr/share/anolisa/adapters/tokenless/common/hooks/
+# Status
+anolisa adapter status tokenless
 
-# Check hook scripts (Source installation)
-ls -la ~/.local/share/anolisa/adapters/tokenless/common/hooks/
+# Disable
+anolisa adapter disable tokenless openclaw
+```
+
+Equivalent manual registration in the tokenless source directory:
+
+```bash
+make cosh-extension-install    # cosh hooks
+make openclaw-install          # OpenClaw plugin
+make hermes-install            # Hermes plugin
+make qoder-install             # Qoder plugin
+make claude-code-install       # Claude Code plugin
+make codex-install             # Codex plugin
+make qwencode-install          # Qwen Code plugin
 ```
 
 ---
 
-## 7. Troubleshooting
+## How it works
 
-### 7.1 Copilot Shell Hook
+### Schema compression
 
-| Problem | Solution |
-|---------|----------|
-| Hook not firing | Check `settings.json` path, restart Copilot Shell |
-| `jq not installed` | Install jq: `apt install jq` (Linux) or `brew install jq` (macOS) |
-| `rtk too old` | Upgrade: `cargo install rtk` |
-| Command not rewritten | Not all commands have RTK equivalents, test with `rtk rewrite "cmd"` directly |
-| `tokenless not installed` | Run `make install` |
-| Response not compressed | Responses < 200 bytes are skipped (not worth compressing) |
-| Schema compression not active | Waiting for anolisa protocol to add `tools` to LLMRequest |
-| JSON parse error | Validate JSON format with `jq . < settings.json` |
-| TOON encode fails | Ensure `toon` binary is in PATH; only JSON input is supported |
-| TOON stats not recorded | Verify `TOKENLESS_STATS_ENABLED` is not set to `0` or `false` |
-| SLS JSONL not generated | Verify `TOKENLESS_SLS_ENABLED` is not `0`/`false` (on by default); confirm `TOKENLESS_SLS_PATH` is under `/var/log/` or `/tmp/`; check stderr `tokenless-sls:` warnings; ensure the directory is writable |
+Compresses OpenAI Function Calling tool definitions, stripping redundant descriptions and markdown syntax. Source: `crates/tokenless-schema/src/schema_compressor.rs`.
 
-### 7.2 OpenClaw Plugin
+Defaults:
 
-| Problem | Solution |
-|---------|----------|
-| Plugin not loaded | Check plugin path: `~/.openclaw/plugins/tokenless/` |
-| RTK not working | Ensure `rtk` is in `$PATH`, check `rtk_enabled` configuration |
-| Compression not working | Check `response_compression_enabled` configuration |
-| TOON compression not working | Check `toon_compression_enabled` configuration, ensure `toon` binary in PATH |
-| Timeout | Plugin timeout is 2-3 seconds, complex operations may timeout and skip |
+| Parameter | Default | Description |
+|------|------|------|
+| `func_desc_max_len` | 256 | Max characters for function descriptions |
+| `param_desc_max_len` | 160 | Max characters for parameter descriptions |
+| `drop_examples` | true | Drop `examples` fields |
+| `drop_titles` | true | Drop `title` fields |
+| `drop_markdown` | true | Strip markdown syntax |
+| `max_depth` | 32 | Recursion depth cap (schemas tolerate deeper nesting) |
 
-### 7.3 General Issues
+### Response compression (7 rules)
+
+Recursively traverses JSON values applying 7 rules. Source: `crates/tokenless-schema/src/response_compressor.rs`.
+
+| Rule | Name | Condition | Handling | Default threshold |
+|------|------|---------|---------|---------|
+| R1 | String truncation | length > 4096 chars | UTF-8 safe truncation, append `… (truncated)` | 4096 chars |
+| R2 | Array truncation | elements > 32 | Keep first 32, append `<... N more items truncated>` | 32 items |
+| R3 | Field drop | key matches blacklist | Remove field entirely | 7 fields |
+| R4 | null removal | value is `null` | Delete from object/array | enabled |
+| R5 | Empty removal | value is `""`/`[]`/`{}` | Delete from object/array | enabled |
+| R6 | Depth truncation | nesting depth > 8 | Replace with `<{type} truncated at depth {N}>` | 8 levels |
+| R7 | Primitive preservation | bool/number | Keep as-is | — |
+
+**R3 default blacklist**: `debug`, `trace`, `traces`, `stack`, `stacktrace`, `logs`, `logging`
+
+Example (R3 + R4 + R5):
+
+```json
+// Input
+{"status":"success","data":{"name":"test","count":42},
+ "debug":{"request_id":"abc123"},"trace":"GET /api 200","metadata":null,"tags":[],"extra":""}
+
+// Output
+{"status":"success","data":{"name":"test","count":42}}
+```
+
+### TOON encoding
+
+TOON (Token-Oriented Object Notation) is a lossless JSON codec that eliminates JSON syntax overhead (quotes, commas, colons, braces) while preserving all data. The CLI links `toon-format` (v0.5) as a library; Python hooks invoke the standalone `toon` binary as a subprocess.
+
+| JSON element | JSON syntax | TOON encoding | Savings |
+|-----------|-----------|----------|---------|
+| Object keys | `"name":` | length-prefixed raw bytes | 60-80% |
+| String values | `"value"` | length-prefixed raw bytes | 10-20% |
+| Array separators | `, ` | implicit boundaries | 100% |
+| Structural braces | `{}`, `[]` | implicit type markers | 100% |
+
+### Command rewriting (RTK)
+
+RTK intercepts shell commands and rewrites them to output only the key information the Agent needs:
 
 ```bash
-# Rebuild and reinstall
-make clean && make build && make install
+# Original (wastes many tokens)
+ls -la /usr/lib
 
-# Check dependencies
-cargo --version
-git --version
-jq --version
+# RTK rewrite (key info only)
+rtk rewrite "ls -la /usr/lib"
+```
 
-# View logs
-# OpenClaw: Set verbose: true for detailed logs
-# Copilot Shell: Check ~/.copilot-shell/logs/
+RTK source is cloned from GitHub (`v0.42.3`) by the justfile, with tokenless-specific patches applied, then built. Supports 70+ commands (cargo/npm/go/pytest, etc.); typical savings 60–90%.
+
+### Tool-readiness check (Tool Ready)
+
+Before each tool call, checks dependencies (binaries, configs, permissions, network). If missing, returns `NOT_READY` + a "Skip retry" hint so the LLM stops retrying. Dependencies are declared in `tool-ready-spec.json`:
+
+```json
+{
+  "Shell": {
+    "required": [{ "binary": "jq", "package": "jq", "manager": "apt" }],
+    "recommended": [
+      { "binary": "rtk", "version": ">=0.35", "package": "rtk", "manager": "cargo",
+        "fallback": [
+          { "method": "symlink", "binary": "rtk", "source": "/usr/libexec/anolisa/tokenless/rtk" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+String format `"jq"` is also supported (auto-converted to object). `--fix` calls `tokenless-env-fix.sh fix-all` with the missing-deps JSON array on stdin, then re-checks.
+
+### Chained compression pipeline
+
+In the PostToolUse hook, response compression and TOON encoding run sequentially, maximizing savings in two stages:
+
+```
+tool response → ResponseCompressor (lossy) → TOON encode (lossless) → final output
+```
+
+Each stage is fail-open (passes through original on failure).
+
+---
+
+## Configuration
+
+### Config file
+
+`~/.tokenless/config.json` (owner-only 0600), fields:
+
+| Field | Default | Description |
+|------|------|------|
+| `stats_enabled` | `true` | Record compression stats to SQLite |
+| `sls_enabled` | `true` | Append SLS JSONL records |
+| `compression_enabled` | `true` | Actually apply compression. `false` = dry-run: compute & record predicted savings but emit original |
+
+Manage via CLI: `tokenless stats enable` / `disable` / `status`.
+
+### Environment variables
+
+Priority: **env > config.json > default** (per toggle, independent). Empty values are treated as unset. Booleans: `1`/`true`/`yes` (case-insensitive) → true.
+
+| Variable | Purpose | Constraint |
+|---------|------|------|
+| `TOKENLESS_STATS_ENABLED` | Override `stats_enabled` | — |
+| `TOKENLESS_SLS_ENABLED` | Override `sls_enabled` | — |
+| `TOKENLESS_COMPRESSION_ENABLED` | Override `compression_enabled` (dry-run toggle) | — |
+| `TOKENLESS_STATS_DB` | Custom stats DB path | Must be under the user's home dir, else ignored + warned |
+| `TOKENLESS_SLS_PATH` | Custom SLS JSONL path | Must be under `/var/log/` or `/tmp/`, else fallback |
+| `TOKENLESS_TOOL_READY_SPEC` | Custom tool-ready-spec path | Must pass trust-path check |
+| `TOKENLESS_ENV_FIX_SCRIPT` | Custom env-fix script path | Must pass trust-path check |
+| `TOKENLESS_PACKAGE_MANAGER` | Override package-manager detection (dnf/yum/apt/apk) | Testing |
+| `TOKENLESS_AGENT_ID` | Agent identity injected by hooks | Set automatically by cosh-extension.json |
+
+### OpenClaw plugin config (`openclaw.plugin.json`)
+
+| Option | Default | Description |
+|------|------|------|
+| `rtk_enabled` | `true` | Enable RTK command rewriting |
+| `response_compression_enabled` | `true` | Enable response compression |
+| `schema_compression_enabled` | `true` | Enable Schema compression |
+| `verbose` | `true` | Verbose logging |
+
+**Skip logic**: when RTK is enabled and `toolName === "exec"`, response compression is skipped (avoid double optimization); other tools are compressed automatically — observed ~78% savings on `web_fetch`.
+
+### Degradation behavior
+
+Each hook/plugin degrades independently — if the corresponding binary (`rtk` or `tokenless`) is not installed, that hook is silently skipped without affecting other features:
+
+- **cosh hooks**: any failure point does `exit 0` with no output → original result passes through
+- **OpenClaw / Hermes / Qoder / Claude Code / Codex / Qwen Code plugins**: try-catch returns null → original result passes through
+- **CLI**: errors go to stderr; callers check exit codes to decide fallback
+- **Stats recording**: fail-silent; DB errors never block compression output
+- **SLS writes**: fail-silent; stderr warning only
+
+---
+
+## Troubleshooting
+
+### Diagnostic tools
+
+```bash
+# Component-level diagnosis + auto-fix
+anolisa doctor tokenless --fix
+
+# View detailed install plan
+anolisa install tokenless --verbose
+anolisa install tokenless --dry-run
+
+# Adapter status
+anolisa adapter status tokenless
+
+# Tool-ready checklist
+tokenless env-check --all --checklist
+```
+
+### Common issues
+
+| Problem | Solution |
+|------|---------|
+| `No input provided` | stdin is a terminal and no `-f` given; use `echo '...' \| tokenless <cmd>` or `-f <path>` |
+| `Input exceeds 64 MiB limit` | Input over the 64 MiB cap; split or truncate |
+| `JSON parse error` | Invalid JSON; validate with `jq . < input.json` |
+| Original emitted + stderr notice | No compression savings (`after >= before`); normal; not recorded |
+| dry-run notice | `TOKENLESS_COMPRESSION_ENABLED=0` or config `compression_enabled=false`; original emitted, prediction recorded |
+| `Failed to open database` | `~/.tokenless/` not writable, or `TOKENLESS_STATS_DB` rejected as outside home |
+| SLS JSONL not generated | Confirm `TOKENLESS_SLS_ENABLED` is not `0`; `TOKENLESS_SLS_PATH` must be under `/var/log/` or `/tmp/`; file must be pre-created by the anolisa SLS component |
+| cosh hook not firing | Confirm `cosh-extension.json` exists in `COSH_EXTENSION_DIR`; restart copilot-shell |
+| `jq not installed` | `dnf install jq` / `apt install jq` |
+| Command not rewritten | Not all commands have RTK equivalents; test with `rtk rewrite "cmd"` |
+| Tool Ready false NOT_READY | Inspect `tool-ready-spec.json`; run `tokenless env-check --tool <name> --fix` |
+| adapter enable failed | `anolisa adapter scan` to confirm framework installed; `anolisa adapter status tokenless` for details |
+| State out of sync after manual dnf | `anolisa repair tokenless`; or `anolisa forget tokenless` then `anolisa adopt tokenless` |
+
+### State-inconsistency repair
+
+If `dnf remove` / `rpm -e` was used to directly modify an ANOLISA-managed package:
+
+```bash
+anolisa repair tokenless         # repair state
+anolisa forget tokenless         # clear ANOLISA records only (leave package)
+anolisa adopt tokenless          # re-adopt
 ```
 
 ---
 
-## 8. Appendix
+## Appendix
 
-### 8.1 Makefile Commands
+### Install paths
 
-| Command | Function |
-|---------|----------|
-| `make build` | Build tokenless + rtk |
-| `make build-tokenless` | Build tokenless + rtk (via justfile) |
-| `make build-toon` | Install TOON binary via `cargo install toon-format` |
-| `make install` | Install binaries to BIN_DIR (default: ~/.local/bin) |
-| `make test` | Run tests |
-| `make lint` | Run clippy checks |
-| `make fmt` | Format code |
-| `make clean` | Clean build artifacts |
-| `make adapter-install` | Install all adapters (cosh+openclaw+hermes+qoder+claude-code+codex) |
-| `make openclaw-install` | Install OpenClaw plugin |
-| `make openclaw-uninstall` | Uninstall OpenClaw plugin |
-| `make hermes-install` | Install Hermes Agent plugin |
-| `make hermes-uninstall` | Uninstall Hermes Agent plugin |
-| `make qoder-install` | Install Qoder CLI plugin |
-| `make qoder-uninstall` | Uninstall Qoder CLI plugin |
-| `make claude-code-install` | Install Claude Code plugin |
-| `make claude-code-uninstall` | Uninstall Claude Code plugin |
-| `make codex-install` | Install Codex plugin |
-| `make codex-uninstall` | Uninstall Codex plugin |
-| `make cosh-extension-install` | Install Copilot Shell Hook |
-| `make cosh-extension-uninstall` | Uninstall Copilot Shell Hook |
-| `make setup` | Full installation: build + install + adapter deployment |
+`INSTALL_PROFILE` selects the prefix: `user` (default, `~/.local`) or `system` (`/usr`, used by RPM).
 
-### 8.2 Key File Paths
+| Makefile variable | user (default) | system / RPM |
+|------|-------------|-------------|
+| `PREFIX` | `~/.local` | `/usr` |
+| `BINDIR` (tokenless) | `~/.local/bin` | `/usr/bin` |
+| `LIBEXECDIR` (rtk, toon) | `~/.local/libexec/anolisa/tokenless` | `/usr/libexec/anolisa/tokenless` |
+| `SHARE_DIR` (adapter resources) | `~/.local/share/anolisa/adapters/tokenless` | `/usr/share/anolisa/adapters/tokenless` |
+| `COSH_EXTENSION_DIR` | `~/.copilot-shell/extensions/tokenless` | `/usr/share/anolisa/extensions/tokenless` |
 
-| Purpose | File Path |
-|---------|-----------|
-| Core compression algorithm | `crates/tokenless-schema/src/response_compressor.rs` |
-| Schema compression | `crates/tokenless-schema/src/schema_compressor.rs` |
-| CLI subcommand | `crates/tokenless-cli/src/main.rs` |
-| Stats recorder (SQLite) | `crates/tokenless-stats/src/recorder.rs` |
-| Stats record types | `crates/tokenless-stats/src/record.rs` |
-| OpenClaw plugin | `adapters/tokenless/openclaw/dist/index.js` |
-| OpenClaw plugin config | `adapters/tokenless/openclaw/openclaw.plugin.json` |
-| Copilot Hook — rewrite | `adapters/tokenless/common/hooks/rewrite_hook.py` |
-| Copilot Hook — compress response | `adapters/tokenless/common/hooks/compress_response_hook.py` |
-| Copilot Hook — compress schema | `adapters/tokenless/common/hooks/compress_schema_hook.py` |
-| Tool Ready hook | `adapters/tokenless/common/hooks/tool_ready_hook.sh` |
-| Hermes plugin | `adapters/tokenless/hermes/__init__.py` |
-| Qoder plugin hooks | `adapters/tokenless/qoder/hooks.json` |
-| Claude Code plugin | `adapters/tokenless/claude-code/hooks/run-hook.sh` |
-| Codex compression hook | `adapters/tokenless/codex/scripts/compress-response` |
-| Tool dependency spec | `adapters/tokenless/common/tool-ready-spec.json` |
+`rtk`/`toon` live in `LIBEXECDIR` and are symlinked into `BINDIR` for PATH discovery. Source build overrides:
+
+```bash
+make install INSTALL_PROFILE=system DESTDIR=/staging
+make setup                # build + install + register all adapters
+make adapter-scan         # list registered adapter capabilities
+```
+
+### cosh hook inventory
+
+| Hook event | Script | Function | matcher | timeout |
+|----------|------|------|---------|---------|
+| PreToolUse | `tool_ready_hook.sh` (bash) | Tool Ready pre-check + auto-fix + skip-retry | `""` (all, sequential) | 10000ms |
+| PreToolUse | `rewrite_hook.py` (python3) | RTK command rewriting | `^(Bash\|run_shell_command\|terminal\|Shell\|exec\|process)$` | 5000ms |
+| PostToolUse | `compress_response_hook.py` | Response compression + TOON + failure attribution | — | 10000ms |
+| BeforeModel | `compress_schema_hook.py` | Schema compression | — | 10000ms |
+
+All hooks receive `TOKENLESS_AGENT_ID=copilot-shell`. Auxiliary files: `hook_utils.py`, `compress_toon_hook.py`, `run-hook.sh`, `tool_categories.json`.
+
+### Key file paths
+
+| Purpose | Path |
+|------|---------|
+| Response compression algorithm | `crates/tokenless-schema/src/response_compressor.rs` |
+| Schema compression algorithm | `crates/tokenless-schema/src/schema_compressor.rs` |
+| CLI entry | `crates/tokenless-cli/src/main.rs` |
+| env-check implementation | `crates/tokenless-cli/src/env_check.rs` |
+| Stats recorder | `crates/tokenless-stats/src/recorder.rs` |
+| Config loading | `crates/tokenless-stats/src/config.rs` |
+| SLS JSONL writer | `crates/tokenless-stats/src/sls.rs` |
+| Home dir resolution | `crates/tokenless-stats/src/home.rs` |
+| Adapter manifest | `adapters/tokenless/manifest.json.in` |
+| cosh extension manifest | `adapters/tokenless/common/cosh-extension.json` |
+| Tool Ready dependency spec | `adapters/tokenless/common/tool-ready-spec.json` |
 | Auto-fix script | `adapters/tokenless/common/tokenless-env-fix.sh` |
-| TOON codec (crates.io toon-format) | `toon-format` crate v0.4.6 |
 | Stats database (default) | `~/.tokenless/stats.db` |
-| Config file (stats/SLS/compression toggles) | `~/.tokenless/config.json` |
-| SLS JSONL output (default) | `/var/log/anolisa/sls/ops/tokenless.jsonl` |
-| Integration tests | `crates/tokenless-schema/tests/integration_test.rs` |
-| TOON E2E tests | `tests/test-toon-full.sh` |
-| Full test suite | `tests/run-all-tests.sh` |
+| Config file | `~/.tokenless/config.json` |
+| SLS JSONL (default) | `/var/log/anolisa/sls/ops/tokenless.jsonl` |
+| RPM spec | `tokenless.spec.in` |
+| Build orchestration | `justfile` |
 
-### 8.3 Fail-Open Design
+### Security model
 
-All integration paths use **fail-open** strategy:
+- **Unforgeable identity source**: home dir resolved via `getpwuid_r(getuid())` (passwd), **not** `$HOME`/`dirs::home_dir()` (user-controllable).
+- **Database path validation**: `TOKENLESS_STATS_DB` must canonicalize under the user's real home dir, else ignored + warned; empty home → `/dev/null/.tokenless/stats.db` (safe failure).
+- **SLS path validation**: `TOKENLESS_SLS_PATH` must be under `/var/log/` or `/tmp/` with no `..`; canonicalized check prevents symlink escape.
+- **Tool Ready trust path**: system prefixes (`/usr/share`, `/usr/libexec`, `/usr/lib/anolisa`, `/usr/local/share`) trusted unconditionally; other paths validate file/parent-dir ownership (current_uid or root) and reject world-writable bits. The shell equivalent in `tool_ready_hook.sh` is kept in sync.
+- **Config file permissions**: `~/.tokenless/config.json` is chmod 0600 after write.
+- **Input cap**: stdin/file reads capped at 64 MiB to prevent OOM.
 
-- **OpenClaw Plugin**: try-catch returns null → original result passes through
-- **Copilot Shell Hook**: Any failure point exits with `exit 0` and no output → original result passes through
-- **CLI**: Errors output to stderr, caller checks exit code to decide fallback
+### Makefile targets
 
-### 8.4 Default Configuration
-
-| Parameter | Default | Builder Method |
-|-----------|---------|----------------|
-| `truncate_strings_at` | 4096 | `with_truncate_strings_at(len)` |
-| `truncate_arrays_at` | 32 | `with_truncate_arrays_at(len)` |
-| `drop_nulls` | true | `with_drop_nulls(bool)` |
-| `drop_empty_fields` | true | `with_drop_empty_fields(bool)` |
-| `max_depth` | 8 | `with_max_depth(depth)` |
-| `add_truncation_marker` | true | `with_add_truncation_marker(bool)` |
-| `drop_fields` | 7 fields | `add_drop_field(field)` |
-
-### 8.5 Source Repositories
-
-| Project | URL |
-|---------|-----|
-| Token-Less Source | https://code.alibaba-inc.com/Agentic-OS/Token-Less |
-| RPM Build Source | https://code.alibaba-inc.com/alinux/tokenless |
+| Target | Description |
+|------|------|
+| `make build` | Build tokenless + rtk + toon + OpenClaw plugin |
+| `make build-tokenless` | Build tokenless + rtk (via justfile) |
+| `make build-toon` | Install toon binary |
+| `make build-openclaw-plugin` | Compile OpenClaw TS plugin → `dist/index.js` |
+| `make install` | build + install binaries + adapter resources + cosh extension |
+| `make setup` | Full setup: `install` + `adapter-install` |
+| `make test` | All tests (Rust + hooks) |
+| `make lint` / `make fmt` / `make clean` | clippy / fmt / clean |
+| `make dist` | Produce source tarball (with pre-patched rtk) |
+| `make adapter-scan` | List registered adapter capabilities |
+| `make adapter-install` / `-uninstall` | Register/unregister all 7 platforms |
+| `make cosh-extension-install` / `-uninstall` | cosh extension |
+| `make openclaw-install` / `-uninstall` | OpenClaw plugin |
+| `make hermes-install` / `-uninstall` | Hermes plugin |
+| `make qoder-install` / `-uninstall` | Qoder plugin |
+| `make claude-code-install` / `-uninstall` | Claude Code plugin |
+| `make codex-install` / `-uninstall` | Codex plugin |
+| `make qwencode-install` / `-uninstall` | Qwen Code plugin |
 
 ---
 
-**License**: MIT
-**Document Version**: 1.3
-**Last Updated**: 2026-06-24
+**License**: MIT (tokenless core) + Apache-2.0 (vendored rtk)
+**Version**: 0.5.1
+**Document version**: 2.1 (aligned with ANOLISA-design user-guide structure)
