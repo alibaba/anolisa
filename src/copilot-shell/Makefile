@@ -11,7 +11,7 @@ PREFIX   ?= $(HOME)/.local
 BINDIR   ?= $(PREFIX)/bin
 else
 PREFIX   ?= /usr
-BINDIR   ?= /usr/local/bin
+BINDIR   ?= $(PREFIX)/bin
 endif
 LIBDIR    = $(PREFIX)/lib/copilot-shell
 DATADIR   = $(PREFIX)/share/copilot-shell
