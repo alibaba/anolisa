@@ -311,6 +311,13 @@ impl MemoryMcpServer {
             .map_err(|e| fmt_err("session_context failed", e))
     }
 
+    #[tool(description = "Synthesize user profile from memories.")]
+    async fn mem_dream(&self) -> ToolResult {
+        let profile = crate::tools::user_profile::synthesize_profile(&self.svc)
+            .map_err(|e| fmt_err("mem_dream failed", e))?;
+        serde_json::to_string_pretty(&profile).map_err(|e| fmt_err("mem_dream serialize failed", e))
+    }
+
     // ---- Tier C: governance (snapshots) ----
 
     #[tool(
@@ -574,6 +581,7 @@ rmcp::tool_box!(MemoryMcpServer {
     memory_timeline,
     memory_summary,
     memory_session_context,
+    mem_dream,
     mem_index_refresh,
     mem_snapshot,
     mem_snapshot_list,
