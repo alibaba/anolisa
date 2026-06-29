@@ -611,15 +611,15 @@ describe('CoreToolScheduler', () => {
       expect(completedCalls).toHaveLength(1);
       const completedCall = completedCalls[0];
       expect(completedCall.status).toBe('error');
-
-      if (completedCall.status === 'error') {
-        const errorMessage = completedCall.response.error?.message;
-        expect(errorMessage).toBe(
-          'copilot-shell requires permission to use write_file, but that permission was declined.',
-        );
-        // Should NOT contain "not found in registry"
-        expect(errorMessage).not.toContain('not found in registry');
+      if (completedCall.status !== 'error') {
+        throw new Error(`Expected error status, got ${completedCall.status}`);
       }
+      const errorMessage = completedCall.response.error?.message;
+      expect(errorMessage).toBe(
+        'copilot-shell requires permission to use write_file, but that permission was declined.',
+      );
+      // Should NOT contain "not found in registry"
+      expect(errorMessage).not.toContain('not found in registry');
     });
 
     it('should return "not found" message for truly missing tools (not excluded)', async () => {
@@ -700,14 +700,14 @@ describe('CoreToolScheduler', () => {
       expect(completedCalls).toHaveLength(1);
       const completedCall = completedCalls[0];
       expect(completedCall.status).toBe('error');
-
-      if (completedCall.status === 'error') {
-        const errorMessage = completedCall.response.error?.message;
-        // Should contain "not found in registry"
-        expect(errorMessage).toContain('not found in registry');
-        // Should NOT contain permission message
-        expect(errorMessage).not.toContain('requires permission');
+      if (completedCall.status !== 'error') {
+        throw new Error(`Expected error status, got ${completedCall.status}`);
       }
+      const errorMessage = completedCall.response.error?.message;
+      // Should contain "not found in registry"
+      expect(errorMessage).toContain('not found in registry');
+      // Should NOT contain permission message
+      expect(errorMessage).not.toContain('requires permission');
     });
   });
 });
@@ -1254,9 +1254,10 @@ describe('CoreToolScheduler YOLO mode', () => {
     expect(completedCalls).toHaveLength(1);
     const completedCall = completedCalls[0];
     expect(completedCall.status).toBe('success');
-    if (completedCall.status === 'success') {
-      expect(completedCall.response.resultDisplay).toBe('Tool executed');
+    if (completedCall.status !== 'success') {
+      throw new Error(`Expected success status, got ${completedCall.status}`);
     }
+    expect(completedCall.response.resultDisplay).toBe('Tool executed');
   });
 });
 
@@ -1636,9 +1637,10 @@ describe('CoreToolScheduler request queueing', () => {
     expect(completedCalls).toHaveLength(1);
     const completedCall = completedCalls[0];
     expect(completedCall.status).toBe('success');
-    if (completedCall.status === 'success') {
-      expect(completedCall.response.resultDisplay).toBe('Tool executed');
+    if (completedCall.status !== 'success') {
+      throw new Error(`Expected success status, got ${completedCall.status}`);
     }
+    expect(completedCall.response.resultDisplay).toBe('Tool executed');
   });
 
   it('should handle two synchronous calls to schedule', async () => {
@@ -3135,6 +3137,249 @@ describe('CoreToolScheduler Sequential Execution', () => {
     await vi.waitFor(() => {
       expect(onAllToolCallsCompleteExecCmd).toHaveBeenCalled();
     });
+  });
+});
+
+describe('CoreToolScheduler PostToolUseFailure notifications', () => {
+  it('should emit notifications via outputUpdateHandler when PostToolUseFailure hook returns allow+reason', async () => {
+    const failingTool = new MockTool({
+      name: 'run_shell_command',
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'error output',
+        returnDisplay: 'error output',
+        error: { message: 'Permission denied', type: 'SANDBOX_ERROR' },
+      }),
+      shouldConfirmExecute: vi.fn().mockResolvedValue(false),
+    });
+
+    const failureHookOutput = {
+      decision: 'allow' as const,
+      isBlockingDecision: () => false,
+      shouldStopExecution: () => false,
+      isAskDecision: () => false,
+      systemMessage: undefined,
+      reason: 'Sandbox violation logged',
+      getSandboxBypassRequest: () => undefined,
+      notifications: [
+        {
+          hookName: 'sandbox-guard',
+          message: 'Sandbox violation logged',
+          decision: 'allow' as const,
+        },
+      ],
+    };
+    const mockHookSystem = {
+      firePreToolUseEvent: vi.fn().mockResolvedValue(undefined),
+      firePostToolUseEvent: vi.fn().mockResolvedValue(undefined),
+      firePostToolUseFailureEvent: vi.fn().mockResolvedValue(failureHookOutput),
+      setHookEnabled: vi.fn(),
+    };
+
+    const toolRegistry = {
+      getTool: () => failingTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => failingTool,
+      getToolByDisplayName: () => failingTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsComplete = vi.fn();
+    const outputUpdateHandlerMock = vi.fn();
+
+    const mockConfig = {
+      getSessionId: () => 'test-session-failure-notif',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getAllowedTools: () => [],
+      getToolRegistry: () => toolRegistry,
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getUseSmartEdit: () => false,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+      isInteractive: () => true,
+      getExperimentalZedIntegration: () => false,
+      getEnableHooks: () => true,
+      getHookSystem: () => mockHookSystem,
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate: vi.fn(),
+      outputUpdateHandler: outputUpdateHandlerMock,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+      onSandboxBypassRequested: vi.fn().mockResolvedValue(false),
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'fail-notif-1',
+          name: 'run_shell_command',
+          args: { command: 'dangerous-cmd' },
+          isClientInitiated: false,
+          prompt_id: 'p-fail',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    expect(outputUpdateHandlerMock).toHaveBeenCalledWith('fail-notif-1', {
+      hookName: 'sandbox-guard',
+      hookMessage: 'Sandbox violation logged',
+      decision: 'allow',
+      mergedDecision: 'allow',
+    });
+  });
+
+  it('should emit notifications for non-shell tool failures without onSandboxBypassRequested', async () => {
+    const failingEditTool = new MockTool({
+      name: 'edit',
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'error output',
+        returnDisplay: 'error output',
+        error: { message: 'File not found' },
+      }),
+      shouldConfirmExecute: vi.fn().mockResolvedValue(false),
+    });
+
+    const failureHookOutput = {
+      decision: 'allow' as const,
+      isBlockingDecision: () => false,
+      shouldStopExecution: () => false,
+      isAskDecision: () => false,
+      systemMessage: undefined,
+      reason: 'Edit failure logged',
+      getSandboxBypassRequest: () => undefined,
+      notifications: [
+        {
+          hookName: 'audit-hook',
+          message: 'Edit failure logged',
+          decision: 'allow' as const,
+        },
+      ],
+    };
+    const mockHookSystem = {
+      firePreToolUseEvent: vi.fn().mockResolvedValue(undefined),
+      firePostToolUseEvent: vi.fn().mockResolvedValue(undefined),
+      firePostToolUseFailureEvent: vi.fn().mockResolvedValue(failureHookOutput),
+    };
+
+    const toolRegistry = {
+      getTool: () => failingEditTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => failingEditTool,
+      getToolByDisplayName: () => failingEditTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsComplete = vi.fn();
+    const outputUpdateHandlerMock = vi.fn();
+
+    const mockConfig = {
+      getSessionId: () => 'test-session-edit-failure',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getAllowedTools: () => [],
+      getToolRegistry: () => toolRegistry,
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getUseSmartEdit: () => false,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+      isInteractive: () => true,
+      getExperimentalZedIntegration: () => false,
+      getEnableHooks: () => true,
+      getHookSystem: () => mockHookSystem,
+    } as unknown as Config;
+
+    // No onSandboxBypassRequested provided
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate: vi.fn(),
+      outputUpdateHandler: outputUpdateHandlerMock,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'edit-fail-1',
+          name: 'edit',
+          args: { file: '/missing.ts' },
+          isClientInitiated: false,
+          prompt_id: 'p-edit-fail',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    expect(mockHookSystem.firePostToolUseFailureEvent).toHaveBeenCalledWith(
+      'edit-fail-1',
+      'edit',
+      { file: '/missing.ts' },
+      'File not found',
+      undefined,
+    );
+
+    expect(outputUpdateHandlerMock).toHaveBeenCalledWith('edit-fail-1', {
+      hookName: 'audit-hook',
+      hookMessage: 'Edit failure logged',
+      decision: 'allow',
+      mergedDecision: 'allow',
+    });
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls[0].status).toBe('error');
   });
 });
 

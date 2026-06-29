@@ -224,6 +224,8 @@ export class GeminiChat {
   // model.
   private sendPromise: Promise<void> = Promise.resolve();
 
+  private pendingHookSystemMessages: string[] = [];
+
   /**
    * Creates a new GeminiChat instance.
    *
@@ -240,6 +242,12 @@ export class GeminiChat {
     private readonly chatRecordingService?: ChatRecordingService,
   ) {
     validateHistory(history);
+  }
+
+  drainHookSystemMessages(): string[] {
+    const msgs = this.pendingHookSystemMessages;
+    this.pendingHookSystemMessages = [];
+    return msgs;
   }
 
   setSystemInstruction(sysInstr: string) {
@@ -831,6 +839,23 @@ export class GeminiChat {
                   ...this.history[this.history.length - 1],
                   parts: modifiedParts,
                 };
+              }
+            }
+
+            // Queue non-blocking notifications for the UI (rendered as
+            // HookSystemMessage after the stream completes in Turn.run()).
+            if (
+              !afterResult.isBlockingDecision() &&
+              !afterResult.shouldStopExecution()
+            ) {
+              if (afterResult.notifications?.length) {
+                for (const n of afterResult.notifications) {
+                  this.pendingHookSystemMessages.push(n.message);
+                }
+              } else if (afterResult.systemMessage || afterResult.reason) {
+                this.pendingHookSystemMessages.push(
+                  afterResult.systemMessage ?? afterResult.reason!,
+                );
               }
             }
 

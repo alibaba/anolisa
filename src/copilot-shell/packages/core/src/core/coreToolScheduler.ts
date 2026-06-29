@@ -1620,92 +1620,131 @@ export class CoreToolScheduler {
             // It is a failure
             const error = new Error(toolResult.error.message);
 
-            // Attempt sandbox bypass if hooks are enabled and a bypass callback is registered
+            // Fire PostToolUseFailure hook for all tool failures (not
+            // just shell/sandbox) so that allow+reason notifications are
+            // always surfaced to the UI.
             let handledBySandboxBypass = false;
-            if (
-              this.config.getEnableHooks() &&
-              this.onSandboxBypassRequested &&
-              toolName === ShellTool.Name
-            ) {
+            let failureOutput:
+              | Awaited<
+                  ReturnType<
+                    NonNullable<
+                      ReturnType<Config['getHookSystem']>
+                    >['firePostToolUseFailureEvent']
+                  >
+                >
+              | undefined;
+            if (this.config.getEnableHooks()) {
               const hookSystem = this.config.getHookSystem();
               if (hookSystem) {
                 try {
-                  const failureOutput =
-                    await hookSystem.firePostToolUseFailureEvent(
-                      callId,
-                      toolName,
-                      scheduledCall.request.args,
-                      toolResult.error.message,
-                      toolResult.error.type,
-                    );
-                  const bypassRequest =
-                    failureOutput?.getSandboxBypassRequest?.();
-                  if (bypassRequest) {
-                    const approved =
-                      await this.onSandboxBypassRequested(bypassRequest);
-                    if (approved) {
-                      hookSystem.setHookEnabled('sandbox-guard', false);
-                      try {
-                        const originalArgs = {
-                          ...scheduledCall.request.args,
-                          command: bypassRequest.original_command,
-                        };
-                        const originalInvocation = this.buildInvocation(
-                          scheduledCall.tool,
-                          originalArgs,
-                        );
-                        if (!(originalInvocation instanceof Error)) {
-                          let retryPromise: Promise<ToolResult>;
-                          if (
-                            originalInvocation instanceof ShellToolInvocation
-                          ) {
-                            // Provide a setPidCallback so the bypass process pid
-                            // is tracked in tool call state. Without this, the
-                            // ShellInputPrompt would keep referencing the dead
-                            // linux-sandbox PTY and sudo password input would fail.
-                            const bypassSetPidCallback = (pid: number) => {
-                              this.toolCalls = this.toolCalls.map((tc) =>
-                                tc.request.callId === callId &&
-                                tc.status === 'executing'
-                                  ? { ...tc, pid }
-                                  : tc,
+                  failureOutput = await hookSystem.firePostToolUseFailureEvent(
+                    callId,
+                    toolName,
+                    scheduledCall.request.args,
+                    toolResult.error.message,
+                    toolResult.error.type,
+                  );
+                  if (
+                    this.outputUpdateHandler &&
+                    failureOutput?.notifications?.length
+                  ) {
+                    const isBlockingFailure =
+                      failureOutput.isBlockingDecision() ||
+                      failureOutput.shouldStopExecution();
+                    const isAskFailure =
+                      failureOutput.isAskDecision?.() ?? false;
+                    const mergedDecisionFailure: HookDecision | undefined =
+                      isBlockingFailure
+                        ? failureOutput.decision === 'deny'
+                          ? 'deny'
+                          : 'block'
+                        : isAskFailure
+                          ? 'ask'
+                          : failureOutput.decision;
+                    for (const n of failureOutput.notifications) {
+                      this.outputUpdateHandler(callId, {
+                        hookName: n.hookName,
+                        hookMessage: n.message,
+                        decision: n.decision,
+                        mergedDecision: mergedDecisionFailure,
+                      });
+                    }
+                  }
+
+                  // Sandbox bypass: only for shell tools with a registered bypass callback
+                  if (
+                    this.onSandboxBypassRequested &&
+                    toolName === ShellTool.Name
+                  ) {
+                    const bypassRequest =
+                      failureOutput?.getSandboxBypassRequest?.();
+                    if (bypassRequest) {
+                      const approved =
+                        await this.onSandboxBypassRequested(bypassRequest);
+                      if (approved) {
+                        hookSystem.setHookEnabled('sandbox-guard', false);
+                        try {
+                          const originalArgs = {
+                            ...scheduledCall.request.args,
+                            command: bypassRequest.original_command,
+                          };
+                          const originalInvocation = this.buildInvocation(
+                            scheduledCall.tool,
+                            originalArgs,
+                          );
+                          if (!(originalInvocation instanceof Error)) {
+                            let retryPromise: Promise<ToolResult>;
+                            if (
+                              originalInvocation instanceof ShellToolInvocation
+                            ) {
+                              // Provide a setPidCallback so the bypass process pid
+                              // is tracked in tool call state. Without this, the
+                              // ShellInputPrompt would keep referencing the dead
+                              // linux-sandbox PTY and sudo password input would fail.
+                              const bypassSetPidCallback = (pid: number) => {
+                                this.toolCalls = this.toolCalls.map((tc) =>
+                                  tc.request.callId === callId &&
+                                  tc.status === 'executing'
+                                    ? { ...tc, pid }
+                                    : tc,
+                                );
+                                this.notifyToolCallsUpdate();
+                              };
+                              retryPromise = originalInvocation.execute(
+                                signal,
+                                liveOutputCallback,
+                                shellExecutionConfig,
+                                bypassSetPidCallback,
+                                this.onPasswordPrompt,
                               );
-                              this.notifyToolCallsUpdate();
-                            };
-                            retryPromise = originalInvocation.execute(
-                              signal,
-                              liveOutputCallback,
-                              shellExecutionConfig,
-                              bypassSetPidCallback,
-                              this.onPasswordPrompt,
-                            );
-                          } else {
-                            retryPromise = originalInvocation.execute(
-                              signal,
-                              liveOutputCallback,
-                              shellExecutionConfig,
-                            );
+                            } else {
+                              retryPromise = originalInvocation.execute(
+                                signal,
+                                liveOutputCallback,
+                                shellExecutionConfig,
+                              );
+                            }
+                            const retryResult = await retryPromise;
+                            if (retryResult.error === undefined) {
+                              const retryContent = retryResult.llmContent;
+                              const retryResponse = convertToFunctionResponse(
+                                toolName,
+                                callId,
+                                retryContent,
+                              );
+                              this.setStatusInternal(callId, 'success', {
+                                callId,
+                                responseParts: retryResponse,
+                                resultDisplay: retryResult.returnDisplay,
+                                error: undefined,
+                                errorType: undefined,
+                              });
+                              handledBySandboxBypass = true;
+                            }
                           }
-                          const retryResult = await retryPromise;
-                          if (retryResult.error === undefined) {
-                            const retryContent = retryResult.llmContent;
-                            const retryResponse = convertToFunctionResponse(
-                              toolName,
-                              callId,
-                              retryContent,
-                            );
-                            this.setStatusInternal(callId, 'success', {
-                              callId,
-                              responseParts: retryResponse,
-                              resultDisplay: retryResult.returnDisplay,
-                              error: undefined,
-                              errorType: undefined,
-                            });
-                            handledBySandboxBypass = true;
-                          }
+                        } finally {
+                          hookSystem.setHookEnabled('sandbox-guard', true);
                         }
-                      } finally {
-                        hookSystem.setHookEnabled('sandbox-guard', true);
                       }
                     }
                   }

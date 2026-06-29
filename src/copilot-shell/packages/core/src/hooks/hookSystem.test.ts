@@ -5,6 +5,10 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type {
+  GenerateContentParameters,
+  GenerateContentResponse,
+} from '@google/genai';
 import { HookSystem } from './hookSystem.js';
 import { HookRegistry } from './hookRegistry.js';
 import { HookRunner } from './hookRunner.js';
@@ -65,6 +69,8 @@ describe('HookSystem', () => {
       firePreToolUseEvent: vi.fn(),
       fireStopEvent: vi.fn(),
       firePostToolUseEvent: vi.fn(),
+      fireAfterModelEvent: vi.fn(),
+      firePostToolUseFailureEvent: vi.fn(),
     } as unknown as HookEventHandler;
 
     vi.mocked(HookRegistry).mockImplementation(() => mockHookRegistry);
@@ -443,6 +449,156 @@ describe('HookSystem', () => {
       );
 
       expect(result).toBeUndefined();
+    });
+  });
+
+  describe('fireAfterModelEvent', () => {
+    const dummyRequest = { model: 'test' } as GenerateContentParameters;
+    const dummyResponse = {
+      candidates: [],
+    } as unknown as GenerateContentResponse;
+
+    it('should attach aggregator notifications to the returned output', async () => {
+      const notifications = [
+        {
+          hookName: 'pii-hook',
+          message: 'PII detected in model response',
+          decision: 'allow' as HookDecision,
+        },
+      ];
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 5,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+          reason: 'PII detected in model response',
+        },
+        notifications,
+      };
+      vi.mocked(mockHookEventHandler.fireAfterModelEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.fireAfterModelEvent(
+        dummyRequest,
+        dummyResponse,
+      );
+
+      expect(result).toBeDefined();
+      expect(result?.notifications).toEqual(notifications);
+    });
+
+    it('should leave notifications undefined when aggregator emits none', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 5,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(mockHookEventHandler.fireAfterModelEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.fireAfterModelEvent(
+        dummyRequest,
+        dummyResponse,
+      );
+
+      expect(result).toBeDefined();
+      expect(result?.notifications).toBeUndefined();
+    });
+
+    it('should return undefined when no final output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: undefined,
+        notifications: [
+          {
+            hookName: 'pii-hook',
+            message: 'discarded when no output',
+            decision: 'allow' as HookDecision,
+          },
+        ],
+      };
+      vi.mocked(mockHookEventHandler.fireAfterModelEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const result = await hookSystem.fireAfterModelEvent(
+        dummyRequest,
+        dummyResponse,
+      );
+
+      expect(result).toBeUndefined();
+    });
+  });
+
+  describe('firePostToolUseFailureEvent', () => {
+    it('should attach aggregator notifications to the returned output', async () => {
+      const notifications = [
+        {
+          hookName: 'sandbox-guard',
+          message: 'Command blocked by sandbox',
+          decision: 'allow' as HookDecision,
+        },
+      ];
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 3,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+          reason: 'Command blocked by sandbox',
+        },
+        notifications,
+      };
+      vi.mocked(
+        mockHookEventHandler.firePostToolUseFailureEvent,
+      ).mockResolvedValue(mockResult);
+
+      const result = await hookSystem.firePostToolUseFailureEvent(
+        'call-1',
+        'shell',
+        { command: 'rm -rf /' },
+        'Permission denied',
+      );
+
+      expect(result).toBeDefined();
+      expect(result?.notifications).toEqual(notifications);
+    });
+
+    it('should leave notifications undefined when aggregator emits none', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 3,
+        finalOutput: {
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(
+        mockHookEventHandler.firePostToolUseFailureEvent,
+      ).mockResolvedValue(mockResult);
+
+      const result = await hookSystem.firePostToolUseFailureEvent(
+        'call-1',
+        'shell',
+        { command: 'ls' },
+        'error',
+      );
+
+      expect(result).toBeDefined();
+      expect(result?.notifications).toBeUndefined();
     });
   });
 });

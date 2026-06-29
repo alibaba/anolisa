@@ -166,12 +166,16 @@ export class HookSystem {
       error,
       errorType,
     );
-    return result.finalOutput
+    const output = result.finalOutput
       ? (createHookOutput(
           'PostToolUseFailure',
           result.finalOutput,
         ) as PostToolUseFailureHookOutput)
       : undefined;
+    if (output && result.notifications?.length) {
+      output.notifications = result.notifications;
+    }
+    return output;
   }
 
   async firePostToolUseEvent(
@@ -302,6 +306,11 @@ export class HookSystem {
           result.finalOutput,
         ) as AfterModelHookOutput)
       : undefined;
+    // Carry per-hook notifications from the aggregator so the caller can
+    // surface non-blocking AfterModel messages to the UI (mirrors PreToolUse/PostToolUse).
+    if (output && result.notifications?.length) {
+      output.notifications = result.notifications;
+    }
     debugLogger.info(
       `[Hook Debug] hookSystem.fireAfterModelEvent: facade returning, hasOutput=${!!output}`,
     );

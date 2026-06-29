@@ -347,6 +347,12 @@ export class Turn {
           };
         }
       }
+
+      // Drain any non-blocking AfterModel hook messages that were buffered
+      // during processStreamResponse() and surface them as HookSystemMessage.
+      for (const msg of this.chat.drainHookSystemMessages()) {
+        yield { type: GeminiEventType.HookSystemMessage, value: msg };
+      }
     } catch (e) {
       if (signal.aborted) {
         yield { type: GeminiEventType.UserCancelled };

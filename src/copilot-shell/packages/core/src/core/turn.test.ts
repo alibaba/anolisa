@@ -18,6 +18,7 @@ import { StreamEventType } from './geminiChat.js';
 const mockSendMessageStream = vi.fn();
 const mockGetHistory = vi.fn();
 const mockMaybeIncludeSchemaDepthContext = vi.fn();
+const mockDrainHookSystemMessages = vi.fn();
 
 vi.mock('@google/genai', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@google/genai')>();
@@ -43,6 +44,7 @@ describe('Turn', () => {
     sendMessageStream: typeof mockSendMessageStream;
     getHistory: typeof mockGetHistory;
     maybeIncludeSchemaDepthContext: typeof mockMaybeIncludeSchemaDepthContext;
+    drainHookSystemMessages: typeof mockDrainHookSystemMessages;
   };
   let mockChatInstance: MockedChatInstance;
 
@@ -52,9 +54,11 @@ describe('Turn', () => {
       sendMessageStream: mockSendMessageStream,
       getHistory: mockGetHistory,
       maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
+      drainHookSystemMessages: mockDrainHookSystemMessages,
     };
     turn = new Turn(mockChatInstance as unknown as GeminiChat, 'prompt-id-1');
     mockGetHistory.mockReturnValue([]);
+    mockDrainHookSystemMessages.mockReturnValue([]);
     mockSendMessageStream.mockResolvedValue((async function* () {})());
   });
 
@@ -871,6 +875,125 @@ describe('Turn', () => {
         // consume stream
       }
       expect(turn.getDebugResponses()).toEqual([resp1, resp2]);
+    });
+  });
+
+  describe('AfterModel hook non-blocking notifications', () => {
+    it('should yield HookSystemMessage events from drainHookSystemMessages after stream completes', async () => {
+      const mockResponseStream = (async function* () {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [
+              {
+                content: { parts: [{ text: 'Hello from model' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as GenerateContentResponse,
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+      mockDrainHookSystemMessages.mockReturnValue([
+        'PII detected: email redacted',
+        'Content flagged for review',
+      ]);
+
+      const events = [];
+      const reqParts: Part[] = [{ text: 'Hi' }];
+      for await (const event of turn.run(
+        'test-model',
+        reqParts,
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      const hookMessages = events.filter(
+        (e) => e.type === GeminiEventType.HookSystemMessage,
+      );
+      expect(hookMessages).toHaveLength(2);
+      expect(hookMessages[0].value).toBe('PII detected: email redacted');
+      expect(hookMessages[1].value).toBe('Content flagged for review');
+
+      const contentEvents = events.filter(
+        (e) => e.type === GeminiEventType.Content,
+      );
+      expect(contentEvents).toHaveLength(1);
+      expect(contentEvents[0].value).toBe('Hello from model');
+
+      const finishedEvents = events.filter(
+        (e) => e.type === GeminiEventType.Finished,
+      );
+      expect(finishedEvents).toHaveLength(1);
+    });
+
+    it('should yield no HookSystemMessage when drainHookSystemMessages returns empty', async () => {
+      const mockResponseStream = (async function* () {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [
+              {
+                content: { parts: [{ text: 'OK' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as GenerateContentResponse,
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+      mockDrainHookSystemMessages.mockReturnValue([]);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        [{ text: 'Hi' }],
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      const hookMessages = events.filter(
+        (e) => e.type === GeminiEventType.HookSystemMessage,
+      );
+      expect(hookMessages).toHaveLength(0);
+    });
+
+    it('should emit HookSystemMessage after Finished event', async () => {
+      const mockResponseStream = (async function* () {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [
+              {
+                content: { parts: [{ text: 'Done' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as GenerateContentResponse,
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+      mockDrainHookSystemMessages.mockReturnValue(['systemMessage from hook']);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        [{ text: 'Hi' }],
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      const finishedIdx = events.findIndex(
+        (e) => e.type === GeminiEventType.Finished,
+      );
+      const hookMsgIdx = events.findIndex(
+        (e) => e.type === GeminiEventType.HookSystemMessage,
+      );
+      expect(finishedIdx).toBeGreaterThanOrEqual(0);
+      expect(hookMsgIdx).toBeGreaterThan(finishedIdx);
     });
   });
 });
