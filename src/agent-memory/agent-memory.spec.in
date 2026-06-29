@@ -1,4 +1,4 @@
-%define anolis_release 3
+%define anolis_release 1
 %global debug_package %{nil}
 
 Name:           agent-memory
@@ -196,6 +196,25 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Mon Jun 29 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.2.0-1
+- Add semantic search (BM25/vector/hybrid via RRF) with OpenAI and Ollama
+  embedding providers; graceful fallback to BM25 when unconfigured
+- Add memory safety module: prompt-injection detection, secret detection
+  and PII redaction, with relevant-memories safety wrapper
+- Add auto-recall (before_prompt_build) and auto-capture (agent_end) hooks
+- Add memory sovereignty tools (memory_about/forget/auto_created/consent)
+  with consent.toml preferences
+- Add mem_export/mem_import (AMA archive) for cross-agent memory migration
+- Add memory_summary, memory_session_context, memory_sessions and
+  memory_timeline tools; MEMORY.md index with mem_index_refresh
+- Add 4-type closed memory classification (user/feedback/project/reference)
+- Add per-agent memory isolation via [memory].agent_scope (schema v5)
+- Add memory consolidation (L1 atomic facts, episodic extraction,
+  cross-session persistence, quality filters) with mem_consolidate tool
+- Add time-decay ranking, cold archival (mem_compact), conflict detection
+  and category subdirectories with memory_search category filter
+- Add user profile synthesis (Dreaming V3 mem_dream)
+
 * Thu May 28 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.1.0-3
 - Fix OPENCLAW_HOME double-nesting; normalize OPENCLAW_STATE_DIR across
   lifecycle scripts (env -u OPENCLAW_HOME, trailing slash, state paths)
