@@ -10,13 +10,13 @@
 # base_url rules:
 #
 #   * It is a directory root, not a file. What lives under it is a
-#     per-backend convention: raw → the v1 distribution root containing
-#     `index.toml`; rpm → handed to dnf as-is (must contain `repodata/`);
-#     npm → the registry API root.
+#     per-backend convention: raw -> the v1 distribution root containing
+#     `index.toml`; rpm -> handed to dnf as-is (must contain `repodata/`);
+#     npm -> the registry API root.
 #   * It may reference `$os`, `$arch`, `$basearch`, `$releasever`,
 #     `$channel`. Values come from host detection, overridable in
 #     `[vars]`. Referencing an unknown or unset variable is a hard
-#     error — never a silent pass-through.
+#     error -- never a silent pass-through.
 #   * Schemes: `file://` and `https://` are always allowed. `http://`
 #     requires `insecure = true` on the backend entry. No query string
 #     or fragment.
@@ -34,7 +34,7 @@ default_backend = "raw"
 channel = "stable"
 releasever = "4"
 
-# raw — tar.gz/binary artifacts resolved through the ANOLISA
+# raw -- tar.gz/binary artifacts resolved through the ANOLISA
 # distribution index.
 #
 # base_url is the raw v1 distribution root. `index.toml` lives directly
@@ -48,22 +48,22 @@ releasever = "4"
 # derived from artifact_type.
 #
 # Rows may still carry a repo-relative `url` (joined onto the static
-# prefix) or an absolute `url` as an escape hatch — an explicit url
+# prefix) or an absolute `url` as an escape hatch -- an explicit url
 # always wins over the derived layout. The index itself stays mandatory
-# either way: it is the version list and sha256 manifest — resolution
+# either way: it is the version list and sha256 manifest -- resolution
 # and verification never run on URL guessing.
 [backends.raw]
 base_url = "https://anolisa.oss-cn-hangzhou.aliyuncs.com/anolisa-releases/anolisa/v1/"
 cache_ttl_secs = 3600
 offline_fallback = true
 
-# rpm — resolution/install delegated to dnf against this repo.
+# rpm -- resolution/install delegated to dnf against this repo.
 [backends.rpm]
 base_url = "http://mirrors.cloud.aliyuncs.com/alinux/$releasever/agentic-os/$basearch/os/"
 insecure = true
 gpgcheck = true
 
-# npm — Node-ecosystem components.
+# npm -- Node-ecosystem components.
 #
 # [backends.npm]
 # base_url = "https://registry.npmjs.org"

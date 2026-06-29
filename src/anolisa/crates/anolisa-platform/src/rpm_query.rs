@@ -223,6 +223,87 @@ impl<R: CommandRunner> PackageQuery for RpmPackageQuery<R> {
             stderr: out.stderr,
         })
     }
+
+    fn what_provides_available(&self, capability: &str) -> Result<Vec<String>, PackageQueryError> {
+        let out = self
+            .runner
+            .run(
+                DNF,
+                &[
+                    "repoquery",
+                    "--quiet",
+                    "--qf",
+                    PROVIDES_NAME_QF,
+                    "--whatprovides",
+                    capability,
+                ],
+            )
+            .map_err(|e| map_spawn_error(e, DNF))?;
+
+        if out.code != Some(0) {
+            return Err(PackageQueryError::QueryFailed {
+                command: DNF.to_string(),
+                code: out.code,
+                stderr: out.stderr,
+            });
+        }
+
+        Ok(dedup_nonempty_lines(&out.stdout))
+    }
+
+    fn provided_capabilities_installed(
+        &self,
+        package: &str,
+    ) -> Result<Vec<String>, PackageQueryError> {
+        let out = self
+            .runner
+            .run(RPM, &["-q", "--provides", package])
+            .map_err(|e| map_spawn_error(e, RPM))?;
+
+        if out.code == Some(0) {
+            return Ok(dedup_nonempty_lines(&out.stdout));
+        }
+
+        if out.stdout.contains("is not installed") {
+            return Ok(Vec::new());
+        }
+
+        Err(PackageQueryError::QueryFailed {
+            command: RPM.to_string(),
+            code: out.code,
+            stderr: out.stderr,
+        })
+    }
+
+    fn provided_capabilities_available(
+        &self,
+        package: &str,
+    ) -> Result<Vec<String>, PackageQueryError> {
+        let out = self
+            .runner
+            .run(DNF, &["repoquery", "--quiet", "--provides", package])
+            .map_err(|e| map_spawn_error(e, DNF))?;
+
+        if out.code != Some(0) {
+            return Err(PackageQueryError::QueryFailed {
+                command: DNF.to_string(),
+                code: out.code,
+                stderr: out.stderr,
+            });
+        }
+
+        Ok(dedup_nonempty_lines(&out.stdout))
+    }
+}
+
+fn dedup_nonempty_lines(stdout: &str) -> Vec<String> {
+    let mut values: Vec<String> = Vec::new();
+    for value in stdout.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if !values.iter().any(|seen| seen == value) {
+            values.push(value.to_string());
+        }
+    }
+    values
 }
 
 /// Map a spawn-phase [`std::io::Error`] to a query error by [`std::io::ErrorKind`].
@@ -407,6 +488,19 @@ mod tests {
                     "rpm capability argument must be last: {args:?}"
                 );
             }
+            // `rpm -q --provides <pkg>` (provided_capabilities_installed)
+            RPM if args.get(1) == Some(&"--provides") => {
+                assert_eq!(
+                    args.len(),
+                    3,
+                    "rpm package-provides needs [-q, --provides, <pkg>]: {args:?}"
+                );
+                assert_eq!(args[0], "-q");
+                assert_eq!(
+                    args[2], expected_package,
+                    "rpm package argument must be last: {args:?}"
+                );
+            }
             // `rpm -q --list <pkg>` (list_files)
             RPM if args.get(1) == Some(&"--list") => {
                 assert_eq!(
@@ -453,6 +547,41 @@ mod tests {
                 );
                 assert_eq!(
                     args[4], expected_package,
+                    "dnf package argument must be last: {args:?}"
+                );
+            }
+            // `dnf repoquery --quiet --qf <fmt> --whatprovides <cap>`
+            // (what_provides_available)
+            DNF if args.get(4) == Some(&"--whatprovides") => {
+                assert_eq!(
+                    args.len(),
+                    6,
+                    "dnf available-whatprovides needs [repoquery, --quiet, --qf, <fmt>, --whatprovides, <cap>]: {args:?}"
+                );
+                assert_eq!(args[0], "repoquery");
+                assert_eq!(args[1], "--quiet");
+                assert_eq!(args[2], "--qf");
+                assert_eq!(
+                    args[3], PROVIDES_NAME_QF,
+                    "dnf whatprovides --qf drifted from PROVIDES_NAME_QF: {args:?}"
+                );
+                assert_eq!(
+                    args[5], expected_package,
+                    "dnf capability argument must be last: {args:?}"
+                );
+            }
+            // `dnf repoquery --quiet --provides <pkg>`
+            // (provided_capabilities_available)
+            DNF if args.get(2) == Some(&"--provides") => {
+                assert_eq!(
+                    args.len(),
+                    4,
+                    "dnf available-provides needs [repoquery, --quiet, --provides, <pkg>]: {args:?}"
+                );
+                assert_eq!(args[0], "repoquery");
+                assert_eq!(args[1], "--quiet");
+                assert_eq!(
+                    args[3], expected_package,
                     "dnf package argument must be last: {args:?}"
                 );
             }
@@ -784,6 +913,96 @@ mod tests {
         assert!(matches!(
             err,
             PackageQueryError::QueryFailed { command, .. } if command == RPM
+        ));
+    }
+
+    #[test]
+    fn available_what_provides_returns_package_names() {
+        let q = query_with_dnf(
+            "anolisa-component(tokenless)",
+            ok_out(Some(0), "tokenless\nvendor-tokenless\n", ""),
+        );
+        let names = q
+            .what_provides_available("anolisa-component(tokenless)")
+            .unwrap();
+        assert_eq!(
+            names,
+            vec!["tokenless".to_string(), "vendor-tokenless".to_string()]
+        );
+    }
+
+    #[test]
+    fn available_what_provides_empty_is_empty_vec() {
+        let q = query_with_dnf("anolisa-component(absent)", ok_out(Some(0), "", ""));
+        let names = q
+            .what_provides_available("anolisa-component(absent)")
+            .unwrap();
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn available_what_provides_failure_maps_to_error() {
+        let q = query_with_dnf("x", ok_out(Some(1), "", "error: repo not found"));
+        let err = q.what_provides_available("x").unwrap_err();
+        assert!(matches!(
+            err,
+            PackageQueryError::QueryFailed { command, .. } if command == DNF
+        ));
+    }
+
+    #[test]
+    fn installed_package_provides_returns_capabilities() {
+        let q = query_with_rpm(
+            "tokenless",
+            ok_out(
+                Some(0),
+                "tokenless = 2.0.1\nanolisa-component(cosh)\nanolisa-component(cosh)\n",
+                "",
+            ),
+        );
+        let capabilities = q.provided_capabilities_installed("tokenless").unwrap();
+        assert_eq!(
+            capabilities,
+            vec![
+                "tokenless = 2.0.1".to_string(),
+                "anolisa-component(cosh)".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn installed_package_provides_missing_package_is_empty() {
+        let q = query_with_rpm(
+            "ghost",
+            ok_out(Some(1), "package ghost is not installed", ""),
+        );
+        let capabilities = q.provided_capabilities_installed("ghost").unwrap();
+        assert!(capabilities.is_empty());
+    }
+
+    #[test]
+    fn available_package_provides_returns_capabilities() {
+        let q = query_with_dnf(
+            "tokenless",
+            ok_out(Some(0), "tokenless = 2.0.1\nanolisa-component(cosh)\n", ""),
+        );
+        let capabilities = q.provided_capabilities_available("tokenless").unwrap();
+        assert_eq!(
+            capabilities,
+            vec![
+                "tokenless = 2.0.1".to_string(),
+                "anolisa-component(cosh)".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn available_package_provides_failure_maps_to_error() {
+        let q = query_with_dnf("x", ok_out(Some(1), "", "error: repo not found"));
+        let err = q.provided_capabilities_available("x").unwrap_err();
+        assert!(matches!(
+            err,
+            PackageQueryError::QueryFailed { command, .. } if command == DNF
         ));
     }
 

@@ -3,6 +3,7 @@ mod commands;
 mod context;
 mod packaged;
 mod repo_config;
+mod resolution;
 mod response;
 
 use std::process::ExitCode;

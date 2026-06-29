@@ -100,8 +100,22 @@ impl PackageQuery for RpmWorld {
     fn installed_origin(&self, package: &str) -> Result<Option<String>, PackageQueryError> {
         Ok((package == self.package).then(|| self.origin.clone()))
     }
-    fn what_provides_installed(&self, _capability: &str) -> Result<Vec<String>, PackageQueryError> {
-        Ok(Vec::new())
+    fn what_provides_installed(&self, capability: &str) -> Result<Vec<String>, PackageQueryError> {
+        if capability.starts_with("anolisa-component(") && self.installed.borrow().is_some() {
+            Ok(vec![self.package.clone()])
+        } else {
+            Ok(Vec::new())
+        }
+    }
+    fn provided_capabilities_installed(
+        &self,
+        package: &str,
+    ) -> Result<Vec<String>, PackageQueryError> {
+        if package == self.package && self.installed.borrow().is_some() {
+            Ok(vec!["anolisa-component(cosh)".to_string()])
+        } else {
+            Ok(Vec::new())
+        }
     }
 }
 

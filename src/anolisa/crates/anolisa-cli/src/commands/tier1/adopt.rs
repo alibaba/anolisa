@@ -18,6 +18,7 @@ use crate::commands::common;
 use crate::commands::tier1::install::{RpmSituation, execute_adopt, probe_rpm_situation};
 use crate::context::CliContext;
 use crate::repo_config::RepoConfig;
+use crate::resolution::{ResolutionUse, load_optional_component_index};
 use crate::response::CliError;
 
 /// Command label for JSON envelopes and error routing.
@@ -98,41 +99,73 @@ pub(crate) fn adopt_with_query(
     }
 
     let layout = common::resolve_layout(ctx);
-    // repo.toml only feeds the package-name map (`[backends.rpm].package_map`).
-    // It is supplementary: --package, the provides contract, and the default
-    // name still resolve a candidate without it, so a missing/unreadable config
-    // degrades to "no rpm backend config" rather than failing the adopt.
+    // repo.toml locates the RPM backend and raw-hosted component index. Both
+    // are supplementary to the explicit --package input, installed Provides
+    // contract, and default name candidate, so unreadable config degrades to
+    // "no rpm backend config" rather than failing the adopt.
     let repo_config = RepoConfig::load(&layout).ok();
     let rpm_backend = repo_config.as_ref().and_then(|c| c.backends.get("rpm"));
+    let env = anolisa_env::EnvService::detect();
+    let component_index = repo_config
+        .as_ref()
+        .and_then(|cfg| load_optional_component_index(&layout, &env, cfg));
 
-    match probe_rpm_situation(target, cli_override, rpm_backend, ctx, query, &command)? {
+    match probe_rpm_situation(
+        target,
+        cli_override,
+        rpm_backend,
+        component_index.as_ref(),
+        ResolutionUse::Adopt,
+        query,
+        &command,
+    )? {
         // Exactly one installed RPM: record it (or preview on --dry-run). reused
         // verbatim from the install path, including the lock-held re-validation.
-        RpmSituation::Adoptable { package, info } => {
-            execute_adopt(ctx, &layout, &command, target, package, info, query)?;
+        RpmSituation::Adoptable { target, info } => {
+            execute_adopt(
+                ctx,
+                &layout,
+                &command,
+                &target.component,
+                target.package,
+                info,
+                query,
+            )?;
             Ok(())
         }
         // Nothing installed under this name: adopt never installs, so point at
         // install for the delegated `dnf install` path.
-        RpmSituation::Absent { package } => Err(CliError::InvalidArgument {
+        RpmSituation::Absent { target: resolved } => Err(CliError::InvalidArgument {
             command,
             reason: format!(
-                "no installed RPM '{package}' found for component '{target}'; adopt only records an already-installed system RPM — run `sudo anolisa install {target}` to install it"
+                "no installed RPM '{}' found for component '{}'; adopt only records an already-installed system RPM — run `sudo anolisa install {}` to install it",
+                resolved.package, resolved.component, resolved.component
+            ),
+        }),
+        RpmSituation::NotAnolisaComponent => Err(CliError::InvalidArgument {
+            command,
+            reason: format!(
+                "component '{target}' is not an ANOLISA RPM component; configure the repo-side component index or publish Provides: anolisa-component({target})"
             ),
         }),
         // Several provider packages: the user must disambiguate.
-        RpmSituation::Ambiguous(names) => Err(CliError::InvalidArgument {
+        RpmSituation::Ambiguous(targets) => Err(CliError::InvalidArgument {
             command,
             reason: format!(
-                "multiple installed RPMs provide component '{target}': {}; cannot adopt unambiguously — pin one with `--package <name>`",
-                names.join(", ")
+                "multiple RPM candidates match '{target}': {}; cannot adopt unambiguously — pin one with `--package <name>`",
+                targets
+                    .iter()
+                    .map(|target| target.package.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         }),
         // One name, several installed versions: a drift the user must resolve.
-        RpmSituation::MultiVersion(package) => Err(CliError::InvalidArgument {
+        RpmSituation::MultiVersion(resolved) => Err(CliError::InvalidArgument {
             command,
             reason: format!(
-                "RPM package '{package}' has multiple installed versions; refusing to adopt a single version automatically — resolve the duplicate first"
+                "RPM package '{}' has multiple installed versions; refusing to adopt a single version automatically — resolve the duplicate first",
+                resolved.package
             ),
         }),
     }
@@ -160,6 +193,10 @@ mod tests {
         multi_version: Vec<String>,
         /// capability → provider package names for `what_provides_installed`.
         provides: Vec<(String, Vec<String>)>,
+        /// capability → provider package names for `what_provides_available`.
+        available_provides: Vec<(String, Vec<String>)>,
+        /// package → declared provides capabilities.
+        package_provides: Vec<(String, Vec<String>)>,
         /// package → source repo for `installed_origin`.
         origins: Vec<(String, String)>,
     }
@@ -199,6 +236,28 @@ mod tests {
                 .map(|(_, v)| v.clone())
                 .unwrap_or_default())
         }
+        fn what_provides_available(
+            &self,
+            capability: &str,
+        ) -> Result<Vec<String>, PackageQueryError> {
+            Ok(self
+                .available_provides
+                .iter()
+                .find(|(c, _)| c == capability)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default())
+        }
+        fn provided_capabilities_installed(
+            &self,
+            package: &str,
+        ) -> Result<Vec<String>, PackageQueryError> {
+            Ok(self
+                .package_provides
+                .iter()
+                .find(|(p, _)| p == package)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default())
+        }
     }
 
     fn pkg_info(name: &str, version: &str, release: Option<&str>, arch: &str) -> PackageInfo {
@@ -212,6 +271,20 @@ mod tests {
             arch: arch.to_string(),
             origin: None,
         }
+    }
+
+    fn component_provider(component: &str, package: &str) -> (String, Vec<String>) {
+        (
+            format!("anolisa-component({component})"),
+            vec![package.to_string()],
+        )
+    }
+
+    fn package_component_provide(package: &str, component: &str) -> (String, Vec<String>) {
+        (
+            package.to_string(),
+            vec![format!("anolisa-component({component})")],
+        )
     }
 
     fn ctx(prefix: PathBuf, install_mode: InstallMode, dry_run: bool) -> CliContext {
@@ -293,6 +366,7 @@ mod tests {
                 "copilot-shell".to_string(),
                 pkg_info("copilot-shell", "2.2.0", Some("1.al8"), "x86_64"),
             )],
+            package_provides: vec![package_component_provide("copilot-shell", "copilot-shell")],
             origins: vec![("copilot-shell".to_string(), "@System".to_string())],
             ..Default::default()
         };
@@ -335,6 +409,7 @@ mod tests {
                 "copilot-shell".to_string(),
                 pkg_info("copilot-shell", "2.0.0", Some("1.al8"), "x86_64"),
             )],
+            package_provides: vec![package_component_provide("copilot-shell", "copilot-shell")],
             ..Default::default()
         };
         adopt_with_query("copilot-shell", None, &c, &q).expect("refresh ok");
@@ -374,6 +449,7 @@ mod tests {
                 "anolisa-other".to_string(),
                 pkg_info("anolisa-other", "9.9.9", Some("1.al8"), "x86_64"),
             )],
+            provides: vec![component_provider("copilot-shell", "anolisa-other")],
             ..Default::default()
         };
         let err = adopt_with_query("copilot-shell", Some("anolisa-other"), &c, &q)
@@ -421,6 +497,7 @@ mod tests {
                 "anolisa-other".to_string(),
                 pkg_info("anolisa-other", "9.9.9", Some("1.al8"), "x86_64"),
             )],
+            provides: vec![component_provider("copilot-shell", "anolisa-other")],
             ..Default::default()
         };
         let err = adopt_with_query("copilot-shell", Some("anolisa-other"), &c, &q)
@@ -511,7 +588,11 @@ mod tests {
     fn adopt_refuses_absent_package() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
-        let err = adopt_with_query("copilot-shell", None, &c, &FakeQuery::default())
+        let q = FakeQuery {
+            available_provides: vec![component_provider("copilot-shell", "copilot-shell")],
+            ..Default::default()
+        };
+        let err = adopt_with_query("copilot-shell", None, &c, &q)
             .expect_err("absent package must be refused");
         assert_eq!(err.code(), "INVALID_ARGUMENT");
         assert!(
@@ -553,6 +634,7 @@ mod tests {
                 "copilot-shell".to_string(),
                 pkg_info("copilot-shell", "2.2.0", Some("1.al8"), "x86_64"),
             )],
+            available_provides: vec![component_provider("copilot-shell", "copilot-shell")],
             multi_version: vec!["copilot-shell".to_string()],
             ..Default::default()
         };
@@ -572,6 +654,7 @@ mod tests {
                 "copilot-shell".to_string(),
                 pkg_info("copilot-shell", "2.2.0", Some("1.al8"), "x86_64"),
             )],
+            package_provides: vec![package_component_provide("copilot-shell", "copilot-shell")],
             ..Default::default()
         };
         adopt_with_query("copilot-shell", None, &c, &q).expect("dry-run ok");
@@ -593,6 +676,7 @@ mod tests {
                 "custom-pkg".to_string(),
                 pkg_info("custom-pkg", "3.0.0", Some("1"), "x86_64"),
             )],
+            provides: vec![component_provider("copilot-shell", "custom-pkg")],
             ..Default::default()
         };
         adopt_with_query("copilot-shell", Some("custom-pkg"), &c, &q).expect("adopt ok");

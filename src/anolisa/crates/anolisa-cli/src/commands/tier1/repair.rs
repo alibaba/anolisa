@@ -17,15 +17,16 @@ use serde::Serialize;
 
 use anolisa_core::central_log::{CentralLog, LogKind, LogRecord, LogStatus, Severity};
 use anolisa_core::lock::InstallLock;
-use anolisa_core::state::{ObjectKind, OperationRecord, Ownership, RpmMetadata};
+use anolisa_core::state::{InstalledState, ObjectKind, OperationRecord, Ownership, RpmMetadata};
 use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError};
 use anolisa_platform::rpm_query::RpmPackageQuery;
 
 use crate::color::Palette;
 use crate::commands::common;
-use crate::commands::tier1::install::rpm_package_candidates;
+use crate::commands::tier1::install::rpm_package_candidates_with_index;
 use crate::context::CliContext;
 use crate::repo_config::RepoConfig;
+use crate::resolution::{ResolutionUse, load_optional_component_index, resolve_rpm_component_name};
 use crate::response::{CliError, render_json};
 
 /// Command label for JSON envelopes and error routing.
@@ -96,8 +97,10 @@ fn repair_with_query(
 
     let installed = common::load_installed_state(ctx, COMMAND)?;
 
+    let component = resolve_repair_component_name(target, &installed, ctx, query);
+
     let obj = installed
-        .find_object(ObjectKind::Component, target)
+        .find_object(ObjectKind::Component, &component)
         .ok_or_else(|| CliError::InvalidArgument {
             command: command.clone(),
             reason: format!(
@@ -119,7 +122,8 @@ fn repair_with_query(
     // identity to confirm; when absent (a legacy row with no rpm_metadata), fall
     // back to the adopt candidate chain so repair can backfill the metadata the
     // update path refuses to run without.
-    let package = resolve_repair_package(target, obj.rpm_metadata.as_ref(), ctx, query, &command)?;
+    let package =
+        resolve_repair_package(&component, obj.rpm_metadata.as_ref(), ctx, query, &command)?;
     let recorded_evr = obj.rpm_metadata.as_ref().and_then(|m| m.evr.clone());
     let ownership_label = ownership.label();
 
@@ -132,7 +136,7 @@ fn repair_with_query(
             return Err(CliError::Runtime {
                 command,
                 reason: format!(
-                    "RPM package '{package}' for component '{target}' is recorded in ANOLISA state but is not present in rpmdb — it may have been removed with `rpm -e`; run `anolisa forget {target}` to drop the stale state, or reinstall"
+                    "RPM package '{package}' for component '{component}' is recorded in ANOLISA state but is not present in rpmdb — it may have been removed with `rpm -e`; run `anolisa forget {component}` to drop the stale state, or reinstall"
                 ),
             });
         }
@@ -172,7 +176,7 @@ fn repair_with_query(
 
     if ctx.dry_run {
         let payload = RepairPayload {
-            component: target.to_string(),
+            component,
             package,
             backend: "rpm",
             ownership: ownership_label,
@@ -191,7 +195,7 @@ fn repair_with_query(
 
     let operation_id = persist_repair(
         ctx,
-        target,
+        &component,
         &package,
         ownership,
         &info,
@@ -202,7 +206,7 @@ fn repair_with_query(
     )?;
 
     let payload = RepairPayload {
-        component: target.to_string(),
+        component,
         package,
         backend: "rpm",
         ownership: ownership_label,
@@ -219,12 +223,49 @@ fn repair_with_query(
     Ok(())
 }
 
+/// Resolve a repair target to the state key used for the component.
+///
+/// Exact state names win because repair is fundamentally a state reconciliation
+/// command. If the state has no exact match, fall back to the same RPM component
+/// resolver used by install/adopt/status so package-name aliases such as
+/// `copilot-shell` can address the canonical `cosh` row.
+fn resolve_repair_component_name(
+    target: &str,
+    installed: &InstalledState,
+    ctx: &CliContext,
+    query: &dyn PackageQuery,
+) -> String {
+    if installed
+        .find_object(ObjectKind::Component, target)
+        .is_some()
+    {
+        return target.to_string();
+    }
+
+    let layout = common::resolve_layout(ctx);
+    let repo_config = RepoConfig::load(&layout).ok();
+    let rpm_backend = repo_config.as_ref().and_then(|c| c.backends.get("rpm"));
+    let env = anolisa_env::EnvService::detect();
+    let component_index = repo_config
+        .as_ref()
+        .and_then(|cfg| load_optional_component_index(&layout, &env, cfg));
+
+    resolve_rpm_component_name(
+        target,
+        rpm_backend,
+        component_index.as_ref(),
+        query,
+        ResolutionUse::RepairLegacy,
+    )
+    .unwrap_or_else(|| target.to_string())
+}
+
 /// Resolve the RPM package name `repair` should reconcile against.
 ///
 /// A recorded, non-empty package name is the identity to confirm. When it is
 /// absent — a legacy row written before `rpm_metadata` existed — fall back to
-/// the adopt candidate chain ([`rpm_package_candidates`]) so repair can backfill
-/// the metadata that `update` refuses to run without.
+/// the shared component resolver so repair can backfill the metadata that
+/// `update` refuses to run without.
 fn resolve_repair_package(
     component: &str,
     meta: Option<&RpmMetadata>,
@@ -239,38 +280,49 @@ fn resolve_repair_package(
         return Ok(name.to_string());
     }
 
-    // Legacy row with no recorded package name: resolve via the same candidate
-    // chain adopt uses. repo.toml / catalog are best-effort inputs (mirrors
-    // status::observed_record): a load failure just drops that precedence tier.
+    // Legacy row with no recorded package name: resolve via the same component
+    // identity resolver adopt uses. repo.toml / components.toml are best-effort
+    // inputs (mirrors status::observed_record): a load failure just drops that
+    // precedence tier.
     let layout = common::resolve_layout(ctx);
     let repo_config = RepoConfig::load(&layout).ok();
     let rpm_backend = repo_config.as_ref().and_then(|c| c.backends.get("rpm"));
-    let manifest = common::load_bundled_catalog(ctx, COMMAND)
-        .ok()
-        .and_then(|cat| cat.component(component).cloned());
+    let env = anolisa_env::EnvService::detect();
+    let component_index = repo_config
+        .as_ref()
+        .and_then(|cfg| load_optional_component_index(&layout, &env, cfg));
 
-    let candidates =
-        match rpm_package_candidates(None, manifest.as_ref(), rpm_backend, query, component) {
-            Ok(candidates) => candidates,
-            Err(PackageQueryError::CommandMissing { .. }) => {
-                return Err(rpm_tooling_missing_error(command));
-            }
-            Err(err) => return Err(rpm_query_err(err, command)),
-        };
+    let candidates = match rpm_package_candidates_with_index(
+        None,
+        rpm_backend,
+        component_index.as_ref(),
+        query,
+        component,
+        ResolutionUse::RepairLegacy,
+    ) {
+        Ok(candidates) => candidates,
+        Err(PackageQueryError::CommandMissing { .. }) => {
+            return Err(rpm_tooling_missing_error(command));
+        }
+        Err(err) => return Err(rpm_query_err(err, command)),
+    };
     if candidates.len() >= 2 {
         return Err(CliError::InvalidArgument {
             command: command.to_string(),
             reason: format!(
-                "multiple candidate RPMs for component '{component}': {}; cannot repair unambiguously — reinstall to pin one, or fix the manifest/package_map mapping",
-                candidates.join(", ")
+                "multiple candidate RPMs for component '{component}': {}; cannot repair unambiguously — reinstall to pin one, or fix the component index / package metadata",
+                candidates
+                    .iter()
+                    .map(|target| target.package.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         });
     }
-    // `rpm_package_candidates` always backfills the default name, so this is the
-    // single-candidate case.
     candidates
         .into_iter()
         .next()
+        .map(|target| target.package)
         .ok_or_else(|| CliError::Runtime {
             command: command.to_string(),
             reason: format!("could not resolve an RPM package name for component '{component}'"),
@@ -514,7 +566,7 @@ mod tests {
     use super::*;
     use crate::context::InstallMode;
 
-    use std::path::PathBuf;
+    use std::{fs, path::PathBuf};
 
     use anolisa_core::state::{
         InstallMode as StateInstallMode, InstalledObject, InstalledState, ObjectStatus,
@@ -583,6 +635,16 @@ mod tests {
                 Ok(None)
             }
         }
+        fn provided_capabilities_installed(
+            &self,
+            package: &str,
+        ) -> Result<Vec<String>, PackageQueryError> {
+            if package == self.package && self.installed.is_some() {
+                Ok(vec![format!("anolisa-component({package})")])
+            } else {
+                Ok(Vec::new())
+            }
+        }
     }
 
     fn pkg_info(name: &str, version: &str, release: Option<&str>, arch: &str) -> PackageInfo {
@@ -608,6 +670,26 @@ mod tests {
             quiet: true,
             no_color: true,
         }
+    }
+
+    fn seed_component_index(ctx: &CliContext, index: &str) {
+        let layout = common::resolve_layout(ctx);
+        let repo_v1 = layout.prefix.join("repo").join("v1");
+        fs::create_dir_all(&repo_v1).expect("mkdir repo");
+        fs::write(repo_v1.join("components.toml"), index).expect("write components.toml");
+        fs::create_dir_all(&layout.etc_dir).expect("mkdir etc");
+        fs::write(
+            layout.etc_dir.join("repo.toml"),
+            format!(
+                "schema_version = 1\n\
+                 default_backend = \"raw\"\n\
+                 \n\
+                 [backends.raw]\n\
+                 base_url = \"file://{}\"\n",
+                repo_v1.display()
+            ),
+        )
+        .expect("write repo.toml");
     }
 
     /// An RPM-backed component object (observed or managed).
@@ -738,6 +820,66 @@ mod tests {
         assert_eq!(meta.evr.as_deref(), Some("2.3.0-1.al8"));
         assert_eq!(meta.source_repo.as_deref(), Some("alinux-updates"));
         assert_ne!(obj.last_operation_id.as_deref(), Some("op-prior"));
+    }
+
+    #[test]
+    fn repair_resolves_package_alias_to_canonical_state_component() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed_component_index(
+            &c,
+            r#"
+schema_version = 1
+
+[[components]]
+name = "cosh"
+
+[[components.backends]]
+kind = "rpm"
+package = "copilot-shell"
+legacy_adopt = true
+
+[[components.aliases]]
+kind = "rpm-package"
+name = "copilot-shell"
+"#,
+        );
+        seed(
+            &c,
+            rpm_object(
+                "cosh",
+                "copilot-shell",
+                "2.2.0-1.al8",
+                Ownership::RpmObserved,
+                ObjectStatus::Adopted,
+            ),
+        );
+        let rpm = FakeQuery::new(
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64")),
+        )
+        .with_origin("alinux-updates");
+
+        repair_with_query("copilot-shell", &c, &rpm).expect("repair via package alias");
+
+        let state = load_state(&c);
+        let obj = state
+            .find_object(ObjectKind::Component, "cosh")
+            .cloned()
+            .expect("canonical component repaired");
+        assert_eq!(obj.version, "2.3.0-1.al8");
+        assert_eq!(
+            obj.rpm_metadata
+                .as_ref()
+                .map(|meta| meta.package_name.as_str()),
+            Some("copilot-shell")
+        );
+        assert!(
+            state
+                .find_object(ObjectKind::Component, "copilot-shell")
+                .is_none(),
+            "repair must refresh the canonical state row, not create a package-name row"
+        );
     }
 
     /// The "keeping ownership / does not switch backend" criterion holds for the
@@ -994,8 +1136,8 @@ mod tests {
         );
         obj.rpm_metadata = None;
         seed(&c, obj);
-        // No recorded package_name, so the candidate chain falls through to the
-        // bare component name `<component>`.
+        // No recorded package_name, so the shared resolver recovers it from the
+        // installed package's ANOLISA provides metadata.
         let rpm = FakeQuery::new(
             "legacy-rpm",
             Some(pkg_info("legacy-rpm", "1.0.0", Some("1.al8"), "x86_64")),

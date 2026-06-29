@@ -41,9 +41,8 @@ pub const DATA_DIR_ENV: &str = "ANOLISA_DATA_DIR";
 ///
 /// Returns `None` when none of the three lookup steps point at an
 /// existing directory. Callers must fall back to whatever non-packaged
-/// source they care about (dev-tree manifests / embedded execution
-/// policy) — this helper deliberately does NOT consult those because
-/// it lives in a separate concern.
+/// source they care about, such as dev-tree manifests. This helper
+/// deliberately does NOT consult those because it lives in a separate concern.
 pub fn packaged_datadir_root(layout: &FsLayout) -> Option<PathBuf> {
     if let Some(env_dir) = std::env::var_os(DATA_DIR_ENV) {
         let candidate = PathBuf::from(env_dir);

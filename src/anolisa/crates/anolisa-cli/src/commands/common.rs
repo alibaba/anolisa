@@ -209,8 +209,8 @@ fn dev_tree_manifests() -> Option<PathBuf> {
 ///   1. `$ANOLISA_CATALOG_URL` env var
 ///   2. `[backends.raw].base_url` in `repo.toml`, plus `/catalog.json`
 ///
-/// `repo.toml` follows its own discovery chain, including the embedded
-/// default, so upgraded hosts do not need a pre-existing local config file.
+/// `repo.toml` follows its own discovery chain across user/site, packaged,
+/// and dev-tree disk locations.
 pub fn resolve_catalog_url(ctx: &CliContext, command: &str) -> Result<Option<String>, CliError> {
     if let Ok(url) = std::env::var("ANOLISA_CATALOG_URL") {
         let trimmed = url.trim();

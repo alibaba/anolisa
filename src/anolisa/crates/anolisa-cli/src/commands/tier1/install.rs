@@ -66,6 +66,10 @@ use crate::repo_config::{
     BackendConfig, HostVars, RepoConfig, RepoConfigError, normalize_override_url, raw_artifact_url,
     raw_index_url, raw_relative_root,
 };
+use crate::resolution::{
+    BackendKind, ComponentIndex, ComponentResolver, ResolutionSet, ResolutionSource, ResolutionUse,
+    ResolveOptions, ResolvedTarget, load_optional_component_index, rpm_component_provide,
+};
 use crate::response::{CliError, render_json, render_json_with_status};
 
 const COMMAND: &str = "install";
@@ -431,6 +435,7 @@ pub(crate) fn handle_one_with_exec(
     let env = anolisa_env::EnvService::detect();
     let repo_config = RepoConfig::load(&layout).map_err(|err| repo_config_err(err, false))?;
     let installed = common::load_installed_state(ctx, COMMAND)?;
+    let mut rpm_component_index: Option<ComponentIndex> = None;
 
     // ── Layer 1: pick the backend name + its source (§4). ──
     //
@@ -461,20 +466,26 @@ pub(crate) fn handle_one_with_exec(
             // layer 2, rather than being rejected by the raw trunk.
             (label.to_string(), BackendSource::ExistingState)
         } else if ctx.install_mode == InstallMode::System {
+            rpm_component_index = load_optional_component_index(&layout, &env, &repo_config);
             let situation = probe_rpm_situation(
                 &component,
                 args.package.as_deref(),
                 repo_config.backends.get("rpm"),
-                ctx,
+                rpm_component_index.as_ref(),
+                ResolutionUse::Install,
                 exec.query,
                 &command,
             )?;
-            if matches!(situation, RpmSituation::Absent { .. }) {
-                // Absent + no `--backend`: fall through to the default backend.
-                // If that is `rpm`, layer 2 re-probes and delegates a `dnf
-                // install`; if it is `raw`, the raw trunk installs. Either way
-                // the probe's `adopt_situation` is dropped — the package is not
-                // present to adopt.
+            if matches!(
+                situation,
+                RpmSituation::Absent { .. } | RpmSituation::NotAnolisaComponent
+            ) {
+                // Absent or not an ANOLISA RPM component + no `--backend`: fall
+                // through to the default backend. If that is `rpm`, layer 2
+                // re-probes and either delegates a `dnf install` or rejects the
+                // non-component; if it is `raw`, the raw trunk installs. Either
+                // way the probe's `adopt_situation` is dropped — there is no
+                // installed system RPM to adopt.
                 (repo_config.default_backend.clone(), BackendSource::Default)
             } else {
                 adopt_situation = Some(situation);
@@ -486,6 +497,9 @@ pub(crate) fn handle_one_with_exec(
 
     // ── Layer 2: pick the action by (backend, rpmdb, mode) (§7.1). ──
     if backend_name == "rpm" {
+        if rpm_component_index.is_none() {
+            rpm_component_index = load_optional_component_index(&layout, &env, &repo_config);
+        }
         return route_rpm_adopt(
             &component,
             &args,
@@ -496,6 +510,7 @@ pub(crate) fn handle_one_with_exec(
             &installed,
             source,
             adopt_situation,
+            rpm_component_index.as_ref(),
             exec,
         );
     }
@@ -571,7 +586,14 @@ fn handle_raw_install(
                 .map_err(|err| repo_config_err(err, true))?
         }
     };
-    let package = repo_config.package_name(backend, &component, args.package.as_deref());
+    let (component, package) = resolve_raw_identity(
+        layout,
+        env,
+        repo_config,
+        backend,
+        component,
+        args.package.as_deref(),
+    );
 
     let resolved = resolve_raw(
         ctx,
@@ -598,14 +620,87 @@ fn handle_raw_install(
     Ok(InstallOutcome::Installed)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn resolve_raw_identity(
+    layout: &FsLayout,
+    env: &anolisa_env::EnvFacts,
+    repo_config: &RepoConfig,
+    backend: &BackendConfig,
+    component: String,
+    cli_override: Option<&str>,
+) -> (String, String) {
+    if cli_override.is_some() || backend.package_map.contains_key(&component) {
+        let package = repo_config.package_name(backend, &component, cli_override);
+        return (component, package);
+    }
+
+    let component_index = load_optional_component_index(layout, env, repo_config);
+    let resolver = ComponentResolver::new(component_index.as_ref(), None, None);
+    match resolver.resolve(
+        &component,
+        BackendKind::Raw,
+        ResolutionUse::Install,
+        ResolveOptions::default(),
+    ) {
+        Ok(ResolutionSet::Unique(target)) => (target.component, target.package),
+        _ => {
+            let package = repo_config.package_name(backend, &component, cli_override);
+            (component, package)
+        }
+    }
+}
+
 // ── rpm adopt path (#958) ───────────────────────────────────────────
 
-/// Result of probing whether `component` is present as a system RPM (§5/§7.1).
+/// Resolved RPM component/package pair.
+#[derive(Debug, Clone)]
+pub(crate) struct RpmTarget {
+    pub(crate) component: String,
+    pub(crate) package: String,
+    source: ResolutionSource,
+    legacy_adopt: bool,
+}
+
+impl RpmTarget {
+    fn new(component: impl Into<String>, package: impl Into<String>) -> Self {
+        Self {
+            component: component.into(),
+            package: package.into(),
+            source: ResolutionSource::InstalledRpmProvides,
+            legacy_adopt: true,
+        }
+    }
+
+    fn from_resolved(target: ResolvedTarget) -> Self {
+        Self {
+            component: target.component,
+            package: target.package,
+            source: target.source,
+            legacy_adopt: target.legacy_adopt,
+        }
+    }
+
+    fn label(&self) -> String {
+        if self.component == self.package {
+            self.package.clone()
+        } else {
+            format!("{} -> {}", self.component, self.package)
+        }
+    }
+}
+
+impl PartialEq for RpmTarget {
+    fn eq(&self, other: &Self) -> bool {
+        self.component == other.component && self.package == other.package
+    }
+}
+
+/// Result of probing whether a target is present as a system RPM (§5/§7.1).
 pub(crate) enum RpmSituation {
     /// Exactly one candidate package name, installed once — ready to adopt.
     Adoptable {
-        /// Resolved package name (the candidate that hit rpmdb).
-        package: String,
+        /// Resolved component/package identity.
+        target: RpmTarget,
         /// rpmdb query result carrying EVR/arch for the state record.
         info: PackageInfo,
     },
@@ -616,18 +711,20 @@ pub(crate) enum RpmSituation {
     /// `rpm-managed`. A *missing* rpm/dnf binary is a different case —
     /// it is a hard warn-and-exit, not `Absent`.
     Absent {
-        /// Resolved package name to hand to `dnf install`.
-        package: String,
+        /// Resolved component/package identity to hand to `dnf install`.
+        target: RpmTarget,
     },
+    /// No ANOLISA component identity could be proven for the input.
+    NotAnolisaComponent,
     /// `provides` reverse-lookup matched several distinct installed packages
     /// (§5.5). Reported, never silently adopted.
-    Ambiguous(Vec<String>),
+    Ambiguous(Vec<RpmTarget>),
     /// The candidate resolved but rpmdb holds several installed versions of it
     /// (`UnexpectedOutput`, §5.5) — a drift state, not a clean adopt target.
-    MultiVersion(String),
+    MultiVersion(RpmTarget),
 }
 
-/// Resolve the candidate RPM package name(s) for `component` and probe rpmdb.
+/// Resolve the candidate RPM component/package pair(s) and probe rpmdb.
 ///
 /// Errors when a query hard-fails. A missing `rpm`/`dnf` binary is a
 /// warn-and-exit ([`rpm_tooling_missing_error`]): the probe cannot prove the
@@ -639,17 +736,18 @@ pub(crate) fn probe_rpm_situation(
     component: &str,
     cli_override: Option<&str>,
     rpm_backend: Option<&BackendConfig>,
-    ctx: &CliContext,
+    component_index: Option<&ComponentIndex>,
+    use_case: ResolutionUse,
     query: &dyn PackageQuery,
     command: &str,
 ) -> Result<RpmSituation, CliError> {
-    let manifest = load_optional_manifest(ctx, component);
-    let candidates = match rpm_package_candidates(
+    let candidates = match rpm_package_candidates_with_index(
         cli_override,
-        manifest.as_ref(),
         rpm_backend,
+        component_index,
         query,
         component,
+        use_case,
     ) {
         Ok(candidates) => candidates,
         // No rpm/dnf on this host: refuse to silently fall back to raw (§7.1).
@@ -659,77 +757,123 @@ pub(crate) fn probe_rpm_situation(
         Err(err) => return Err(pkg_query_err(err, command)),
     };
 
+    if candidates.is_empty() {
+        return Ok(RpmSituation::NotAnolisaComponent);
+    }
     if candidates.len() >= 2 {
         return Ok(RpmSituation::Ambiguous(candidates));
     }
-    // `rpm_package_candidates` always backfills the default name, so exactly
-    // one candidate remains here.
-    let package = candidates
+    // Empty and ambiguous candidate sets were handled above, so exactly one
+    // package remains here.
+    let target = candidates
         .into_iter()
         .next()
-        .unwrap_or_else(|| component.to_string());
+        .unwrap_or_else(|| RpmTarget::new(component, component));
 
-    match query.query_installed(&package) {
-        Ok(Some(info)) => Ok(RpmSituation::Adoptable { package, info }),
-        Ok(None) => Ok(RpmSituation::Absent { package }),
+    match query.query_installed(&target.package) {
+        Ok(Some(info)) => {
+            if rpm_installed_target_allowed(&target, query)
+                .map_err(|err| pkg_query_err(err, command))?
+            {
+                Ok(RpmSituation::Adoptable { target, info })
+            } else {
+                Ok(RpmSituation::NotAnolisaComponent)
+            }
+        }
+        Ok(None) => Ok(RpmSituation::Absent { target }),
         // Same name, several installed versions: a drift the caller reports.
-        Err(PackageQueryError::UnexpectedOutput { .. }) => Ok(RpmSituation::MultiVersion(package)),
+        Err(PackageQueryError::UnexpectedOutput { .. }) => Ok(RpmSituation::MultiVersion(target)),
         // No rpm/dnf on this host: refuse to silently fall back to raw (§7.1).
         Err(PackageQueryError::CommandMissing { .. }) => Err(rpm_tooling_missing_error(command)),
         Err(err) => Err(pkg_query_err(err, command)),
     }
 }
 
-/// Resolve candidate RPM package names for `component`, highest precedence
-/// first (§5): CLI `--package` > manifest `[backends.rpm].package` > repo.toml
-/// `package_map` > RPM `provides` reverse-lookup > the bare component name.
+/// Resolve candidate RPM component/package pairs for `input`.
 ///
-/// The first four levels short-circuit to a single candidate; only the
-/// `provides` level can yield several (the ambiguous case, §5.5). The bare
-/// component name backfills whenever `provides` is empty, so the result is
-/// never empty. The component name matches the RPM spec `Name:` (e.g.
-/// `tokenless`), which carries no `anolisa-` prefix.
+/// Precedence, in order: CLI `--package`, repo-side component index,
+/// repo.toml `package_map`, installed/available
+/// `anolisa-component(<name>)` providers, then the input package's own
+/// `Provides: anolisa-component(<component>)` metadata.
+///
+/// Ordinary RPM packages without ANOLISA metadata return an empty vector:
+/// `install --backend rpm <arg>` installs ANOLISA components, not arbitrary
+/// `dnf install <arg>` targets.
 ///
 /// # Errors
-/// Propagates a hard [`PackageQueryError`] from the `provides` query; an empty
-/// `provides` result is the normal "no contract / no match" branch and falls
-/// through to default naming.
+/// Propagates a hard [`PackageQueryError`] from the package query; empty
+/// query results are the normal "no explicit component identity" branch.
+#[cfg(test)]
 pub(crate) fn rpm_package_candidates(
     cli_override: Option<&str>,
-    manifest: Option<&ComponentManifest>,
     rpm_backend: Option<&BackendConfig>,
     query: &dyn PackageQuery,
-    component: &str,
-) -> Result<Vec<String>, PackageQueryError> {
-    if let Some(name) = cli_override {
-        return Ok(vec![name.to_string()]);
-    }
-    if let Some(name) = manifest.and_then(ComponentManifest::rpm_package) {
-        return Ok(vec![name.to_string()]);
-    }
-    if let Some(mapped) = rpm_backend.and_then(|b| b.package_map.get(component)) {
-        return Ok(vec![mapped.clone()]);
-    }
-    // Virtual-provides contract (`anolisa-component(<name>)`). It does not yet
-    // exist on the packaging side, so this returns empty today and the chain
-    // falls through to default naming — by design, not an error (§5.3).
-    let provides = query.what_provides_installed(&format!("anolisa-component({component})"))?;
-    if !provides.is_empty() {
-        return Ok(provides);
-    }
-    // Default to the bare component name: it matches the published RPM spec
-    // `Name:` (no `anolisa-` prefix) and mirrors the raw backend's default in
-    // `RepoConfig::package_name`.
-    Ok(vec![component.to_string()])
+    input: &str,
+) -> Result<Vec<RpmTarget>, PackageQueryError> {
+    rpm_package_candidates_with_index(
+        cli_override,
+        rpm_backend,
+        None,
+        query,
+        input,
+        ResolutionUse::Install,
+    )
 }
 
-/// Best-effort lookup of a component's manifest from the bundled catalog, for
-/// the `[backends.rpm].package` mapping level. Adopt does not require a local
-/// manifest (§5.1): any failure or miss yields `None` and the package-name
-/// chain falls through to the lower tiers.
-fn load_optional_manifest(ctx: &CliContext, component: &str) -> Option<ComponentManifest> {
-    let catalog = common::load_bundled_catalog(ctx, COMMAND).ok()?;
-    catalog.component(component).cloned()
+pub(crate) fn rpm_package_candidates_with_index(
+    cli_override: Option<&str>,
+    rpm_backend: Option<&BackendConfig>,
+    component_index: Option<&ComponentIndex>,
+    query: &dyn PackageQuery,
+    input: &str,
+    use_case: ResolutionUse,
+) -> Result<Vec<RpmTarget>, PackageQueryError> {
+    let resolver = ComponentResolver::new(component_index, rpm_backend, Some(query));
+    let resolved = resolver.resolve(
+        input,
+        BackendKind::Rpm,
+        use_case,
+        ResolveOptions {
+            package_override: cli_override,
+        },
+    )?;
+    Ok(match resolved {
+        ResolutionSet::None => Vec::new(),
+        ResolutionSet::Unique(target) => vec![RpmTarget::from_resolved(target)],
+        ResolutionSet::Ambiguous(targets) => {
+            targets.into_iter().map(RpmTarget::from_resolved).collect()
+        }
+    })
+}
+
+fn rpm_installed_target_allowed(
+    target: &RpmTarget,
+    query: &dyn PackageQuery,
+) -> Result<bool, PackageQueryError> {
+    if matches!(
+        target.source,
+        ResolutionSource::RepoPackageMap
+            | ResolutionSource::InstalledRpmProvides
+            | ResolutionSource::AvailableRpmProvides
+    ) || target.legacy_adopt
+    {
+        return Ok(true);
+    }
+    let expected = rpm_component_provide(&target.component);
+    Ok(query
+        .provided_capabilities_installed(&target.package)?
+        .iter()
+        .any(|capability| rpm_capability_matches_component(capability, &expected)))
+}
+
+fn rpm_capability_matches_component(capability: &str, expected: &str) -> bool {
+    let capability = capability.trim();
+    if capability == expected {
+        return true;
+    }
+    capability
+        .strip_prefix(expected)
+        .is_some_and(|rest| rest.trim_start().starts_with('='))
 }
 
 /// Layer 2 for the `rpm` backend: reject in user mode, otherwise adopt an
@@ -748,6 +892,7 @@ fn route_rpm_adopt(
     installed: &InstalledState,
     source: BackendSource,
     situation: Option<RpmSituation>,
+    component_index: Option<&ComponentIndex>,
     exec: &RpmExec,
 ) -> Result<InstallOutcome, CliError> {
     common::require_system_mode(
@@ -769,30 +914,63 @@ fn route_rpm_adopt(
             component,
             args.package.as_deref(),
             repo_config.backends.get("rpm"),
-            ctx,
+            component_index,
+            ResolutionUse::Install,
             exec.query,
             command,
         )?,
     };
 
     match situation {
-        RpmSituation::Adoptable { package, info } => {
-            execute_adopt(ctx, layout, command, component, package, info, exec.query)
+        RpmSituation::Adoptable { target, info } => {
+            if source == BackendSource::Explicit {
+                ensure_component_backend_compatible(installed, &target.component, "rpm", command)?;
+            }
+            execute_adopt(
+                ctx,
+                layout,
+                command,
+                &target.component,
+                target.package,
+                info,
+                exec.query,
+            )
         }
-        RpmSituation::Absent { package } => {
-            execute_delegated_install(exec, ctx, layout, command, component, &package)
+        RpmSituation::Absent { target } => {
+            if source == BackendSource::Explicit {
+                ensure_component_backend_compatible(installed, &target.component, "rpm", command)?;
+            }
+            execute_delegated_install(
+                exec,
+                ctx,
+                layout,
+                command,
+                &target.component,
+                &target.package,
+            )
         }
-        RpmSituation::Ambiguous(names) => Err(CliError::InvalidArgument {
+        RpmSituation::NotAnolisaComponent => Err(CliError::InvalidArgument {
             command: command.to_string(),
             reason: format!(
-                "multiple installed RPMs provide component '{component}': {}; cannot adopt unambiguously — pin one with `--package <name>` or fix the manifest/package_map mapping",
-                names.join(", ")
+                "component '{component}' is not an ANOLISA RPM component; use the ANOLISA component name and configure the repo-side component index or publish Provides: anolisa-component({component})"
             ),
         }),
-        RpmSituation::MultiVersion(package) => Err(CliError::InvalidArgument {
+        RpmSituation::Ambiguous(targets) => Err(CliError::InvalidArgument {
             command: command.to_string(),
             reason: format!(
-                "RPM package '{package}' has multiple installed versions; refusing to adopt a single version automatically — resolve the duplicate first",
+                "multiple RPM candidates match '{component}': {}; cannot resolve unambiguously — pin one with `--package <name>` or fix the component index / package metadata",
+                targets
+                    .iter()
+                    .map(RpmTarget::label)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }),
+        RpmSituation::MultiVersion(target) => Err(CliError::InvalidArgument {
+            command: command.to_string(),
+            reason: format!(
+                "RPM package '{}' has multiple installed versions; refusing to adopt a single version automatically — resolve the duplicate first",
+                target.package
             ),
         }),
     }
@@ -5516,6 +5694,10 @@ scope = "@anolisa"
             self.install_succeeds = false;
             self
         }
+
+        fn component_capability(&self) -> String {
+            rpm_component_provide(&self.package)
+        }
     }
 
     impl PackageQuery for FakeInstaller {
@@ -5542,10 +5724,46 @@ scope = "@anolisa"
 
         fn what_provides_installed(
             &self,
-            _capability: &str,
+            capability: &str,
         ) -> Result<Vec<String>, PackageQueryError> {
-            // Default-naming path: the probe falls through to the bare component name.
-            Ok(Vec::new())
+            if capability == self.component_capability() && self.installed.borrow().is_some() {
+                Ok(vec![self.package.clone()])
+            } else {
+                Ok(Vec::new())
+            }
+        }
+
+        fn what_provides_available(
+            &self,
+            capability: &str,
+        ) -> Result<Vec<String>, PackageQueryError> {
+            if capability == self.component_capability() {
+                Ok(vec![self.package.clone()])
+            } else {
+                Ok(Vec::new())
+            }
+        }
+
+        fn provided_capabilities_installed(
+            &self,
+            package: &str,
+        ) -> Result<Vec<String>, PackageQueryError> {
+            if package == self.package && self.installed.borrow().is_some() {
+                Ok(vec![self.component_capability()])
+            } else {
+                Ok(Vec::new())
+            }
+        }
+
+        fn provided_capabilities_available(
+            &self,
+            package: &str,
+        ) -> Result<Vec<String>, PackageQueryError> {
+            if package == self.package {
+                Ok(vec![self.component_capability()])
+            } else {
+                Ok(Vec::new())
+            }
         }
     }
 
@@ -5580,6 +5798,9 @@ scope = "@anolisa"
         installed: Vec<(String, PackageInfo)>,
         origins: Vec<(String, String)>,
         provides: Vec<(String, Vec<String>)>,
+        available_provides: Vec<(String, Vec<String>)>,
+        package_provides: Vec<(String, Vec<String>)>,
+        available_package_provides: Vec<(String, Vec<String>)>,
         multi_version: Vec<String>,
         origin_fails: bool,
         /// Simulate a host with no rpm/dnf: every rpmdb-touching query returns
@@ -5643,6 +5864,63 @@ scope = "@anolisa"
                 .map(|(_, names)| names.clone())
                 .unwrap_or_default())
         }
+
+        fn what_provides_available(
+            &self,
+            capability: &str,
+        ) -> Result<Vec<String>, PackageQueryError> {
+            if self.command_missing {
+                return Err(PackageQueryError::CommandMissing {
+                    command: "dnf".to_string(),
+                });
+            }
+            Ok(self
+                .available_provides
+                .iter()
+                .find(|(cap, _)| cap == capability)
+                .map(|(_, names)| names.clone())
+                .unwrap_or_default())
+        }
+
+        fn provided_capabilities_installed(
+            &self,
+            package: &str,
+        ) -> Result<Vec<String>, PackageQueryError> {
+            if self.command_missing {
+                return Err(PackageQueryError::CommandMissing {
+                    command: "rpm".to_string(),
+                });
+            }
+            Ok(self
+                .package_provides
+                .iter()
+                .find(|(pkg, _)| pkg == package)
+                .map(|(_, capabilities)| capabilities.clone())
+                .or_else(|| {
+                    self.installed
+                        .iter()
+                        .any(|(name, _)| name == package)
+                        .then(|| vec![rpm_component_provide(package)])
+                })
+                .unwrap_or_default())
+        }
+
+        fn provided_capabilities_available(
+            &self,
+            package: &str,
+        ) -> Result<Vec<String>, PackageQueryError> {
+            if self.command_missing {
+                return Err(PackageQueryError::CommandMissing {
+                    command: "dnf".to_string(),
+                });
+            }
+            Ok(self
+                .available_package_provides
+                .iter()
+                .find(|(pkg, _)| pkg == package)
+                .map(|(_, capabilities)| capabilities.clone())
+                .unwrap_or_default())
+        }
     }
 
     fn pkg_info(name: &str, version: &str, release: Option<&str>, arch: &str) -> PackageInfo {
@@ -5693,67 +5971,114 @@ scope = "@anolisa"
         .expect("parse repo")
     }
 
+    fn available_component_provider(component: &str, package: &str) -> (String, Vec<String>) {
+        (rpm_component_provide(component), vec![package.to_string()])
+    }
+
+    fn package_component_provide(package: &str, component: &str) -> (String, Vec<String>) {
+        (
+            package.to_string(),
+            vec![
+                format!("{package} = 1.0.0"),
+                rpm_component_provide(component),
+            ],
+        )
+    }
+
+    fn target(component: &str, package: &str) -> RpmTarget {
+        RpmTarget::new(component, package)
+    }
+
     // ── §5 package-name mapping ──
 
     #[test]
-    fn candidates_cli_override_wins() {
-        let q = FakeQuery::default();
-        let got =
-            rpm_package_candidates(Some("explicit-pkg"), None, None, &q, "copilot-shell").unwrap();
-        assert_eq!(got, vec!["explicit-pkg".to_string()]);
-    }
-
-    #[test]
-    fn candidates_manifest_package_wins_over_default() {
-        let manifest = ComponentManifest::from_toml_str(
-            "[component]\nname = \"copilot-shell\"\nversion = \"1.0.0\"\nlayer = \"runtime\"\n\n[backends.rpm]\npackage = \"vendor-copilot\"\n",
-        )
-        .expect("parse manifest");
-        let q = FakeQuery::default();
-        let got = rpm_package_candidates(None, Some(&manifest), None, &q, "copilot-shell").unwrap();
-        assert_eq!(got, vec!["vendor-copilot".to_string()]);
-    }
-
-    #[test]
-    fn candidates_package_map_wins_over_default() {
-        let repo = repo_with_rpm_map(&[("copilot-shell", "site-copilot")]);
+    fn candidates_cli_override_matching_package_map_is_accepted() {
+        let repo = repo_with_rpm_map(&[("cosh", "site-copilot")]);
         let backend = repo.backends.get("rpm");
         let q = FakeQuery::default();
-        let got = rpm_package_candidates(None, None, backend, &q, "copilot-shell").unwrap();
-        assert_eq!(got, vec!["site-copilot".to_string()]);
+        let got = rpm_package_candidates(Some("site-copilot"), backend, &q, "cosh").unwrap();
+        assert_eq!(got, vec![target("cosh", "site-copilot")]);
+    }
+
+    #[test]
+    fn candidates_cli_override_uses_override_package_provides() {
+        let q = FakeQuery {
+            available_provides: vec![available_component_provider("cosh", "explicit-pkg")],
+            ..Default::default()
+        };
+        let got = rpm_package_candidates(Some("explicit-pkg"), None, &q, "cosh").unwrap();
+        assert_eq!(got, vec![target("cosh", "explicit-pkg")]);
+    }
+
+    #[test]
+    fn candidates_cli_override_without_component_identity_returns_empty() {
+        let q = FakeQuery::default();
+        let got = rpm_package_candidates(Some("explicit-pkg"), None, &q, "cosh").unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn candidates_package_map_wins() {
+        let repo = repo_with_rpm_map(&[("cosh", "site-copilot")]);
+        let backend = repo.backends.get("rpm");
+        let q = FakeQuery::default();
+        let got = rpm_package_candidates(None, backend, &q, "cosh").unwrap();
+        assert_eq!(got, vec![target("cosh", "site-copilot")]);
     }
 
     #[test]
     fn candidates_provides_single_match() {
         let q = FakeQuery {
             provides: vec![(
-                "anolisa-component(copilot-shell)".to_string(),
+                "anolisa-component(cosh)".to_string(),
                 vec!["copilot-shell".to_string()],
             )],
             ..Default::default()
         };
-        let got = rpm_package_candidates(None, None, None, &q, "copilot-shell").unwrap();
-        assert_eq!(got, vec!["copilot-shell".to_string()]);
+        let got = rpm_package_candidates(None, None, &q, "cosh").unwrap();
+        assert_eq!(got, vec![target("cosh", "copilot-shell")]);
     }
 
     #[test]
     fn candidates_provides_multiple_is_ambiguous() {
         let q = FakeQuery {
             provides: vec![(
-                "anolisa-component(copilot-shell)".to_string(),
+                "anolisa-component(cosh)".to_string(),
                 vec!["pkg-a".to_string(), "pkg-b".to_string()],
             )],
             ..Default::default()
         };
-        let got = rpm_package_candidates(None, None, None, &q, "copilot-shell").unwrap();
-        assert_eq!(got, vec!["pkg-a".to_string(), "pkg-b".to_string()]);
+        let got = rpm_package_candidates(None, None, &q, "cosh").unwrap();
+        assert_eq!(got, vec![target("cosh", "pkg-a"), target("cosh", "pkg-b")]);
     }
 
     #[test]
-    fn candidates_falls_back_to_default_naming() {
+    fn candidates_package_name_uses_package_own_provides() {
+        let q = FakeQuery {
+            available_package_provides: vec![package_component_provide("copilot-shell", "cosh")],
+            ..Default::default()
+        };
+        let got = rpm_package_candidates(None, None, &q, "copilot-shell").unwrap();
+        assert_eq!(got, vec![target("cosh", "copilot-shell")]);
+    }
+
+    #[test]
+    fn candidates_plain_package_without_metadata_returns_empty() {
         let q = FakeQuery::default();
-        let got = rpm_package_candidates(None, None, None, &q, "copilot-shell").unwrap();
-        assert_eq!(got, vec!["copilot-shell".to_string()]);
+        let got = rpm_package_candidates(None, None, &q, "copilot-shell").unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn rpm_component_capability_accepts_versioned_provides() {
+        assert!(rpm_capability_matches_component(
+            "anolisa-component(cosh) = 1.0.0",
+            "anolisa-component(cosh)"
+        ));
+        assert!(!rpm_capability_matches_component(
+            "anolisa-component(cosh-extra) = 1.0.0",
+            "anolisa-component(cosh)"
+        ));
     }
 
     // ── §5/§7.1 situation probe ──
@@ -5767,20 +6092,22 @@ scope = "@anolisa"
                 "copilot-shell".to_string(),
                 pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
             )],
+            package_provides: vec![package_component_provide("copilot-shell", "copilot-shell")],
             ..Default::default()
         };
         let situation = probe_rpm_situation(
             "copilot-shell",
             None,
             repo.backends.get("rpm"),
-            &ctx,
+            None,
+            ResolutionUse::Install,
             &q,
             "install",
         )
         .expect("probe");
         match situation {
-            RpmSituation::Adoptable { package, info } => {
-                assert_eq!(package, "copilot-shell");
+            RpmSituation::Adoptable { target, info } => {
+                assert_eq!(target.package, "copilot-shell");
                 assert_eq!(info.version.to_string(), "2.3.0-1.al8");
             }
             other => panic!(
@@ -5794,12 +6121,19 @@ scope = "@anolisa"
     fn probe_reports_absent_when_not_installed() {
         let (_tmp, ctx) = system_ctx_with_raw_repo(false);
         let repo = RepoConfig::load(&common::resolve_layout(&ctx)).expect("repo");
-        let q = FakeQuery::default();
+        let q = FakeQuery {
+            available_provides: vec![available_component_provider(
+                "copilot-shell",
+                "copilot-shell",
+            )],
+            ..Default::default()
+        };
         let situation = probe_rpm_situation(
             "copilot-shell",
             None,
             repo.backends.get("rpm"),
-            &ctx,
+            None,
+            ResolutionUse::Install,
             &q,
             "install",
         )
@@ -5822,7 +6156,8 @@ scope = "@anolisa"
             "copilot-shell",
             None,
             repo.backends.get("rpm"),
-            &ctx,
+            None,
+            ResolutionUse::Install,
             &q,
             "install",
         )
@@ -5832,8 +6167,8 @@ scope = "@anolisa"
 
     #[test]
     fn probe_reports_multi_version_drift() {
-        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
-        let repo = RepoConfig::load(&common::resolve_layout(&ctx)).expect("repo");
+        let (_tmp, _ctx) = system_ctx_with_raw_repo(false);
+        let repo = repo_with_rpm_map(&[("copilot-shell", "copilot-shell")]);
         let q = FakeQuery {
             multi_version: vec!["copilot-shell".to_string()],
             ..Default::default()
@@ -5842,7 +6177,8 @@ scope = "@anolisa"
             "copilot-shell",
             None,
             repo.backends.get("rpm"),
-            &ctx,
+            None,
+            ResolutionUse::Install,
             &q,
             "install",
         )
@@ -5854,6 +6190,7 @@ scope = "@anolisa"
         match s {
             RpmSituation::Adoptable { .. } => "Adoptable",
             RpmSituation::Absent { .. } => "Absent",
+            RpmSituation::NotAnolisaComponent => "NotAnolisaComponent",
             RpmSituation::Ambiguous(_) => "Ambiguous",
             RpmSituation::MultiVersion(_) => "MultiVersion",
         }
@@ -6498,6 +6835,7 @@ scope = "@anolisa"
             &repo,
             &installed,
             BackendSource::Explicit,
+            None,
             None,
             &exec,
         )

@@ -76,7 +76,7 @@ install -m 0755 target/release/anolisa %{buildroot}%{_bindir}/anolisa
 
 # -- default repo config --
 install -d %{buildroot}%{_sysconfdir}/anolisa
-install -m 0644 templates/repo.toml %{buildroot}%{_sysconfdir}/anolisa/repo.toml
+install -m 0644 manifests/repo.toml %{buildroot}%{_sysconfdir}/anolisa/repo.toml
 
 # -- manifests (capabilities, osbase, runtime) --
 # NOTE: data files under %{_datadir_anolisa} are intentionally NOT installed.

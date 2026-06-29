@@ -37,9 +37,6 @@
 //!   2. **Packaged** — `<datadir>/templates/repo.toml`.
 //!   3. **Dev-tree** — `<workspace>/templates/repo.toml` via
 //!      `CARGO_MANIFEST_DIR` (what `cargo run` / `cargo test` see).
-//!   4. **Embedded** — the same template baked in with `include_str!`,
-//!      so a standalone binary always boots with the bundled default
-//!      (raw backend → public OSS mirror).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -53,9 +50,6 @@ use crate::packaged;
 const REPO_FILE: &str = "repo.toml";
 /// Subdirectory under `datadir` for the packaged copy.
 const REPO_SUBDIR: &str = "templates";
-
-/// Bundled baseline baked into the binary; final discovery fallback.
-const EMBEDDED_REPO_CONFIG: &str = include_str!("../../../templates/repo.toml");
 
 /// Wire-format schema version of `repo.toml`.
 pub const REPO_CONFIG_SCHEMA_VERSION: u32 = 1;
@@ -88,9 +82,8 @@ const LEGACY_RPM_BACKEND_NAME_WARNING: &str =
 /// Errors surfaced while loading, parsing, or resolving `repo.toml`.
 #[derive(Debug, thiserror::Error)]
 pub enum RepoConfigError {
-    /// No config found in any discovery location and no embedded copy —
-    /// reachable only in synthetic tests that disable every source.
-    #[error("repo config not found (searched etc dir, packaged datadir, dev-tree, embedded copy)")]
+    /// No config found in any discovery location.
+    #[error("repo config not found (searched etc dir, packaged datadir, dev-tree)")]
     NotFound,
 
     /// Disk read failed (e.g. permission denied).
@@ -219,9 +212,12 @@ pub struct BackendConfig {
     #[serde(default)]
     #[allow(dead_code)]
     pub offline_fallback: Option<bool>,
-    /// Site-local component → package-name deviations. The normal
-    /// mapping belongs in the component manifest; this only covers
-    /// renamed mirrors, experimental builds, etc.
+    /// Site-local component -> package-name fallback.
+    ///
+    /// Normal repository mappings belong in the repo-side component index and
+    /// take precedence during component resolution. This map is for
+    /// deployments that need local names before, or outside, the published
+    /// index contract.
     #[serde(default)]
     pub package_map: BTreeMap<String, String>,
 }
@@ -252,11 +248,6 @@ impl RepoConfig {
                 config.emit_deprecation_warnings(path);
                 return Ok(config);
             }
-        }
-        if let Some(embedded) = sources.embedded {
-            let config = Self::parse_with_path(embedded, Path::new("<embedded>"))?;
-            config.emit_deprecation_warnings(Path::new("<embedded>"));
-            return Ok(config);
         }
         Err(RepoConfigError::NotFound)
     }
@@ -549,6 +540,15 @@ pub fn raw_index_url(base_url: &str) -> String {
     format!("{}/index.toml", raw_root(base_url))
 }
 
+/// Component identity index location under the raw repository root.
+///
+/// `components.toml` is separate from raw `index.toml`: the former resolves a
+/// stable ANOLISA component identity to backend-native package names, while the
+/// latter selects raw artifact versions and hashes.
+pub fn component_index_url(base_url: &str) -> String {
+    format!("{}/components.toml", raw_root(base_url))
+}
+
 /// Root that repo-relative index-row `url`s join onto. Same prefix the
 /// index itself lives under, so a mirrored tree stays self-contained.
 pub fn raw_relative_root(base_url: &str) -> String {
@@ -622,8 +622,6 @@ pub(crate) struct RepoConfigSources {
     pub packaged: Option<PathBuf>,
     /// Dev-tree copy resolved from `CARGO_MANIFEST_DIR`.
     pub dev_tree: Option<PathBuf>,
-    /// Embedded TOML body; `None` only in synthetic tests.
-    pub embedded: Option<&'static str>,
 }
 
 impl RepoConfigSources {
@@ -640,7 +638,6 @@ impl RepoConfigSources {
                     .join(REPO_SUBDIR)
                     .join(REPO_FILE),
             ),
-            embedded: Some(EMBEDDED_REPO_CONFIG),
         }
     }
 }
@@ -656,11 +653,14 @@ mod tests {
         }
     }
 
-    /// The bundled template must parse, default to raw, and resolve a
-    /// clean base_url — this is the boot contract of every shipped binary.
+    /// The packaged template must parse, default to raw, and resolve a
+    /// clean base_url.
     #[test]
-    fn bundled_template_parses_and_defaults_to_raw() {
-        let cfg = RepoConfig::from_toml_str(EMBEDDED_REPO_CONFIG).expect("bundled template");
+    fn packaged_template_parses_and_defaults_to_raw() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo_path = manifest_dir.join("../../templates/repo.toml");
+        let content = std::fs::read_to_string(&repo_path).expect("read packaged template");
+        let cfg = RepoConfig::from_toml_str(&content).expect("packaged template");
         assert_eq!(cfg.schema_version, REPO_CONFIG_SCHEMA_VERSION);
         assert_eq!(cfg.default_backend, "raw");
         let (name, backend) = cfg.select_backend(None).expect("default backend");
@@ -673,22 +673,30 @@ mod tests {
     }
 
     #[test]
-    fn embedded_fallback_loads_when_disk_sources_missing() {
+    fn repository_manifest_parses() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo_path = manifest_dir.join("../../manifests/repo.toml");
+        let content = std::fs::read_to_string(&repo_path).expect("read repo manifest");
+        let cfg = RepoConfig::from_toml_str(&content).expect("repo manifest");
+        cfg.select_backend(Some("rpm")).expect("rpm backend");
+    }
+
+    #[test]
+    fn missing_disk_sources_returns_not_found() {
         let tmp = tempfile::tempdir().expect("tmp");
         let sources = RepoConfigSources {
             etc: Some(tmp.path().join("nope.toml")),
             packaged: Some(tmp.path().join("nope2.toml")),
             dev_tree: Some(tmp.path().join("nope3.toml")),
-            embedded: Some(EMBEDDED_REPO_CONFIG),
         };
-        let cfg = RepoConfig::load_with_sources(sources).expect("embedded fallback");
-        assert_eq!(cfg.default_backend, "raw");
+        let err = RepoConfig::load_with_sources(sources).expect_err("no fallback");
+        assert!(matches!(err, RepoConfigError::NotFound));
     }
 
     /// Etc-dir config wins over every other source — that is the
     /// user-editable override point.
     #[test]
-    fn etc_config_wins_over_embedded() {
+    fn etc_config_wins_over_other_disk_sources() {
         let tmp = tempfile::tempdir().expect("tmp");
         let path = tmp.path().join("repo.toml");
         std::fs::write(
@@ -704,7 +712,6 @@ base_url = "file:///srv/local-repo"
             etc: Some(path),
             packaged: None,
             dev_tree: None,
-            embedded: Some(EMBEDDED_REPO_CONFIG),
         };
         let cfg = RepoConfig::load_with_sources(sources).expect("load");
         assert_eq!(cfg.backends["raw"].base_url, "file:///srv/local-repo");
@@ -933,6 +940,14 @@ base_url = "https://example.com/$typo_var/repo"
         assert_eq!(
             url,
             "https://mirror.example.com/anolisa-releases/anolisa/v1/tokenless/0.5.0/linux/x86_64/tokenless-0.5.0-linux-x86_64.tar.gz"
+        );
+    }
+
+    #[test]
+    fn component_index_url_uses_raw_repository_root() {
+        assert_eq!(
+            component_index_url("file:///srv/repo"),
+            "file:///srv/repo/v1/components.toml"
         );
     }
 

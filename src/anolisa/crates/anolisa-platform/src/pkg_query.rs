@@ -148,4 +148,49 @@ pub trait PackageQuery {
     fn what_provides_installed(&self, _capability: &str) -> Result<Vec<String>, PackageQueryError> {
         Ok(Vec::new())
     }
+
+    /// Names of *available* repository packages that provide `capability`,
+    /// de-duplicated by name.
+    ///
+    /// This is the repository-side counterpart to
+    /// [`what_provides_installed`](Self::what_provides_installed). It lets
+    /// callers resolve a component capability before install/adopt without
+    /// requiring the package to be installed yet.
+    ///
+    /// # Errors
+    /// See [`PackageQueryError`]; "nothing provides it" is `Ok(vec![])`.
+    fn what_provides_available(&self, _capability: &str) -> Result<Vec<String>, PackageQueryError> {
+        Ok(Vec::new())
+    }
+
+    /// Provides capabilities declared by an installed package.
+    ///
+    /// Used when user input may be a backend-native package name: the caller can
+    /// inspect the package's own metadata and recover the ANOLISA component
+    /// identity only if it declares `anolisa-component(<name>)`.
+    ///
+    /// # Errors
+    /// See [`PackageQueryError`]; a missing package is represented as an empty
+    /// capability list by backends that can distinguish that branch.
+    fn provided_capabilities_installed(
+        &self,
+        _package: &str,
+    ) -> Result<Vec<String>, PackageQueryError> {
+        Ok(Vec::new())
+    }
+
+    /// Provides capabilities declared by an available repository package.
+    ///
+    /// This mirrors
+    /// [`provided_capabilities_installed`](Self::provided_capabilities_installed)
+    /// for packages not yet present on the host.
+    ///
+    /// # Errors
+    /// See [`PackageQueryError`]; no available package yields `Ok(vec![])`.
+    fn provided_capabilities_available(
+        &self,
+        _package: &str,
+    ) -> Result<Vec<String>, PackageQueryError> {
+        Ok(Vec::new())
+    }
 }

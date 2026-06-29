@@ -6,10 +6,10 @@
 //! an empty result; an unknown component name surfaces a synthetic
 //! `not_installed` record rather than an error (launch spec §7.1).
 //!
-//! This handler does NOT consult the resolver — it reports state-on-disk
-//! plus live read-only probes. Every persisted field in [`ComponentRecord`]
-//! is projected straight from [`InstalledObject`]; the only synthesized data
-//! are the integrity and manifest health entries layered on top.
+//! This handler reports state-on-disk plus live read-only probes. Every
+//! persisted field in [`ComponentRecord`] is projected straight from
+//! [`InstalledObject`]; synthesized data is limited to read-only rpmdb,
+//! integrity, adapter, and manifest health observations.
 
 use chrono::{SecondsFormat, Utc};
 use clap::Parser;
@@ -22,9 +22,8 @@ use anolisa_core::adapter::claim::ClaimStatus;
 use anolisa_core::adapter::manager::ScanEntry;
 use anolisa_core::path_safety::{PathBoundaryError, validate_owned_path};
 use anolisa_core::{
-    Catalog, ComponentManifest, HealthEntry, HealthSpec, InstalledObject, InstalledState,
-    IntegrityStatus, ObjectKind, RpmMetadata, ServiceState, check_owned_file,
-    service_for_install_mode as service_factory,
+    Catalog, HealthEntry, HealthSpec, InstalledObject, InstalledState, IntegrityStatus, ObjectKind,
+    RpmMetadata, ServiceState, check_owned_file, service_for_install_mode as service_factory,
 };
 
 /// Wall-clock ceiling for a single manifest command-kind probe. `status`
@@ -53,9 +52,12 @@ use anolisa_platform::rpm_query::RpmPackageQuery;
 
 use crate::color::{Palette, pad_right};
 use crate::commands::common;
-use crate::commands::tier1::install::rpm_package_candidates;
+use crate::commands::tier1::install::rpm_package_candidates_with_index;
 use crate::context::{CliContext, InstallMode};
 use crate::repo_config::{BackendConfig, RepoConfig};
+use crate::resolution::{
+    ComponentIndex, ResolutionUse, load_optional_component_index, resolve_rpm_component_name,
+};
 use crate::response::{CliError, render_json};
 
 const COMMAND: &str = "status";
@@ -134,12 +136,29 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
 
     let adapter_scan = common::build_adapter_manager(ctx).scan().ok();
 
+    let query = RpmPackageQuery::system();
+    let repo_config = (ctx.install_mode == InstallMode::System && args.component.is_some())
+        .then(|| RepoConfig::load(&layout).ok())
+        .flatten();
+    let rpm_backend = repo_config.as_ref().and_then(|c| c.backends.get("rpm"));
+    let env = EnvService::detect();
+    let component_index = repo_config
+        .as_ref()
+        .and_then(|cfg| load_optional_component_index(&layout, &env, cfg));
+    let selected_component = args.component.as_deref().map(|target| {
+        if ctx.install_mode == InstallMode::System {
+            status_lookup_name(target, rpm_backend, component_index.as_ref(), &query)
+        } else {
+            target.to_string()
+        }
+    });
+
     let mut records = select_components(
         &state,
         &layout,
         catalog.as_ref(),
         install_mode,
-        args.component.as_deref(),
+        selected_component.as_deref(),
         adapter_scan.as_ref().map(|r| r.entries.as_slice()),
     );
 
@@ -147,16 +166,14 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
     // ANOLISA state but present in rpmdb (system mode), upgrade the synthetic
     // `not_installed` row to `observed` with the package/EVR/repo. This never
     // writes state — adopting is `install`'s job.
-    if let Some(target) = args.component.as_deref()
+    if let Some(target) = selected_component.as_deref()
         && ctx.install_mode == InstallMode::System
         && records.len() == 1
         && records[0].status == "not_installed"
     {
-        let repo_config = RepoConfig::load(&layout).ok();
-        let rpm_backend = repo_config.as_ref().and_then(|c| c.backends.get("rpm"));
-        let manifest = catalog.as_ref().and_then(|c| c.component(target).cloned());
-        let query = RpmPackageQuery::system();
-        if let Some(observed) = observed_record(target, rpm_backend, manifest.as_ref(), &query) {
+        if let Some(observed) =
+            observed_record(target, rpm_backend, component_index.as_ref(), &query)
+        {
             records = vec![observed];
         }
     }
@@ -165,8 +182,7 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
     // and override the wire status with `drifted` / `missing` on divergence.
     // Like the observed report above this stays strictly read-only — it adjusts
     // only the wire records, never `installed.toml`.
-    let drift_query = RpmPackageQuery::system();
-    apply_rpm_drift(&mut records, &state, &drift_query);
+    apply_rpm_drift(&mut records, &state, &query);
 
     if ctx.json {
         let data = serde_json::json!({ "components": records });
@@ -177,6 +193,26 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
         render_human(&records, ctx.verbose, ctx.no_color);
     }
     Ok(())
+}
+
+/// Resolve a user-supplied status target to the stable component name before
+/// looking in ANOLISA state. RPM package aliases such as `copilot-shell` should
+/// display the tracked `cosh` row when one exists, not synthesize a separate
+/// read-only observed row.
+fn status_lookup_name(
+    input: &str,
+    rpm_backend: Option<&BackendConfig>,
+    component_index: Option<&ComponentIndex>,
+    query: &dyn PackageQuery,
+) -> String {
+    resolve_rpm_component_name(
+        input,
+        rpm_backend,
+        component_index,
+        query,
+        ResolutionUse::StatusObserved,
+    )
+    .unwrap_or_else(|| input.to_string())
 }
 
 /// Pure selector: project [`InstalledState`] down to component records,
@@ -239,22 +275,30 @@ pub(crate) fn select_components(
 fn observed_record(
     component: &str,
     rpm_backend: Option<&BackendConfig>,
-    manifest: Option<&ComponentManifest>,
+    component_index: Option<&ComponentIndex>,
     query: &dyn PackageQuery,
 ) -> Option<ComponentRecord> {
-    // Same candidate chain as adopt (§5), minus the CLI `--package` override
-    // (status takes no such flag).
-    let candidates = rpm_package_candidates(None, manifest, rpm_backend, query, component).ok()?;
-    for package in candidates {
-        let Ok(Some(info)) = query.query_installed(&package) else {
+    // Same resolver as adopt (§5), minus the CLI `--package` override (status
+    // takes no such flag).
+    let candidates = rpm_package_candidates_with_index(
+        None,
+        rpm_backend,
+        component_index,
+        query,
+        component,
+        ResolutionUse::StatusObserved,
+    )
+    .ok()?;
+    for target in candidates {
+        let Ok(Some(info)) = query.query_installed(&target.package) else {
             // Not this candidate (absent), or a hard error / multi-version
             // drift: status does not adjudicate drift, so move on.
             continue;
         };
         let evr = info.version.to_string();
-        let source_repo = query.installed_origin(&package).ok().flatten();
+        let source_repo = query.installed_origin(&target.package).ok().flatten();
         return Some(ComponentRecord {
-            name: component.to_string(),
+            name: target.component,
             status: "observed".to_string(),
             version: Some(evr.clone()),
             installed_at: None,
@@ -2451,6 +2495,16 @@ mod tests {
                 .find(|(n, _)| n == package)
                 .map(|(_, r)| r.clone()))
         }
+        fn provided_capabilities_installed(
+            &self,
+            package: &str,
+        ) -> Result<Vec<String>, PackageQueryError> {
+            if self.installed.iter().any(|(n, _)| n == package) {
+                Ok(vec![format!("anolisa-component({package})")])
+            } else {
+                Ok(Vec::new())
+            }
+        }
     }
 
     fn pkg_info(name: &str, version: &str, release: &str) -> PackageInfo {
@@ -2464,6 +2518,53 @@ mod tests {
             arch: "x86_64".to_string(),
             origin: None,
         }
+    }
+
+    #[test]
+    fn status_lookup_name_uses_component_index_alias_before_state_selection() {
+        let idx = ComponentIndex::from_toml_str(
+            r#"
+schema_version = 1
+
+[[components]]
+name = "cosh"
+
+[[components.backends]]
+kind = "rpm"
+package = "copilot-shell"
+legacy_adopt = true
+
+[[components.aliases]]
+kind = "rpm-package"
+name = "copilot-shell"
+"#,
+            "components.toml",
+        )
+        .expect("component index");
+        let q = FakeQuery::default();
+
+        assert_eq!(
+            status_lookup_name("copilot-shell", None, Some(&idx), &q),
+            "cosh"
+        );
+
+        let mut state = InstalledState::default();
+        state.upsert_object(component_object(
+            "cosh",
+            "2.6.0-1.alnx4",
+            ObjectStatus::Installed,
+        ));
+        let records = select_components(
+            &state,
+            &dummy_layout(),
+            None,
+            "system",
+            Some(&status_lookup_name("copilot-shell", None, Some(&idx), &q)),
+            None,
+        );
+
+        assert_eq!(records[0].name, "cosh");
+        assert_eq!(records[0].status, "installed");
     }
 
     #[test]
