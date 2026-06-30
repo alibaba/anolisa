@@ -17,14 +17,19 @@
 //!     A forged `installed.toml` claiming `owner = anolisa` for
 //!     `/etc/shadow` (or `<bin_dir>/escape -> /etc/shadow`) is therefore
 //!     refused with `OutOfBounds` rather than read.
-//!   * Symlinks are refused via [`std::fs::symlink_metadata`] +
-//!     `O_NOFOLLOW` on the open call so a symlink planted at the
-//!     destination cannot redirect the read to a third-party file.
+//!   * Managed symlinks (`kind == Symlink`) are verified via
+//!     [`std::fs::read_link`] against the recorded referent path,
+//!     bypassing content hashing entirely.
+//!   * Legacy symlinks (`kind == File` but symlink on disk) are refused
+//!     with `IntegrityStatus::Symlink`. Pre-v4 entries are migrated to
+//!     `kind = Symlink` by `migrate_v3_symlinks` before the probe runs.
+//!   * Regular files are opened with `O_NOFOLLOW` so a symlink planted
+//!     at the destination cannot redirect the read to a third-party file.
 //!   * Special files (directories, fifos, sockets, devices) are refused
 //!     via the regular-file guard so `status` cannot hang on a fifo or
 //!     mis-hash a directory.
 //!
-//! All three guards report through dedicated [`IntegrityStatus`] variants
+//! All guards report through dedicated [`IntegrityStatus`] variants
 //! so the wire surface tells operators *why* the probe refused, not just
 //! that it failed.
 
@@ -35,7 +40,7 @@ use sha2::{Digest, Sha256};
 use anolisa_platform::fs_layout::FsLayout;
 
 use crate::path_safety::{PathBoundaryError, validate_owned_path};
-use crate::state::{FileOwner, OwnedFile};
+use crate::state::{FileOwner, OwnedFile, OwnedFileKind};
 
 /// Maximum bytes the integrity probe will read for one file. Owned
 /// artifacts in ANOLISA's catalogue are binaries / small data files; a
@@ -73,6 +78,15 @@ pub enum IntegrityStatus {
     MissingFile,
     /// File exists but cannot be read (permissions, broken symlink, etc).
     ReadError(String),
+    /// Managed symlink referent mismatch: the link either does not exist
+    /// as a symlink, or points at a different target than recorded.
+    ReferentMismatch {
+        /// Referent path recorded in `installed.toml`.
+        expected: String,
+        /// Actual `readlink` result, or `"(not a symlink)"` when the path
+        /// is not a symlink at all.
+        actual: String,
+    },
     /// File exists, sha256 was recorded, and bytes diverged.
     ShaMismatch {
         /// Lowercase sha256 recorded in `installed.toml`.
@@ -94,6 +108,7 @@ impl IntegrityStatus {
             Self::NotRegularFile => "not_regular_file",
             Self::MissingFile => "missing_file",
             Self::ReadError(_) => "read_error",
+            Self::ReferentMismatch { .. } => "referent_mismatch",
             Self::ShaMismatch { .. } => "sha256_mismatch",
         }
     }
@@ -111,6 +126,7 @@ impl IntegrityStatus {
                 | Self::NotRegularFile
                 | Self::MissingFile
                 | Self::ReadError(_)
+                | Self::ReferentMismatch { .. }
                 | Self::ShaMismatch { .. }
         )
     }
@@ -141,6 +157,12 @@ pub fn check_owned_file(layout: &FsLayout, file: &OwnedFile) -> IntegrityStatus 
         // either way the probe refuses to touch the path.
         let _: PathBoundaryError = err;
         return IntegrityStatus::OutOfBounds;
+    }
+
+    // Managed symlinks are verified against their recorded referent
+    // instead of hashing content through the link.
+    if file.kind == OwnedFileKind::Symlink {
+        return check_owned_symlink(layout, file);
     }
 
     // symlink_metadata does NOT follow — required so a planted symlink
@@ -174,6 +196,61 @@ pub fn check_owned_file(layout: &FsLayout, file: &OwnedFile) -> IntegrityStatus 
         Err(err) => IntegrityStatus::ReadError(err.to_string()),
         Ok(actual) if actual != expected => IntegrityStatus::ShaMismatch { expected, actual },
         Ok(_) => IntegrityStatus::Ok,
+    }
+}
+
+/// Verify a managed symlink entry: the path must be a symlink whose
+/// `readlink` result matches the recorded referent, and the referent
+/// must remain within ANOLISA-owned roots.
+fn check_owned_symlink(layout: &FsLayout, file: &OwnedFile) -> IntegrityStatus {
+    let expected_referent = match &file.referent {
+        Some(r) => r,
+        None => return IntegrityStatus::Unverified,
+    };
+
+    let meta = match fs::symlink_metadata(&file.path) {
+        Ok(m) => m,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return IntegrityStatus::MissingFile;
+        }
+        Err(err) => return IntegrityStatus::ReadError(err.to_string()),
+    };
+
+    if !meta.file_type().is_symlink() {
+        return IntegrityStatus::ReferentMismatch {
+            expected: expected_referent.display().to_string(),
+            actual: "(not a symlink)".to_string(),
+        };
+    }
+
+    let actual_referent = match fs::read_link(&file.path) {
+        Ok(r) => r,
+        Err(err) => return IntegrityStatus::ReadError(err.to_string()),
+    };
+
+    if actual_referent != *expected_referent {
+        return IntegrityStatus::ReferentMismatch {
+            expected: expected_referent.display().to_string(),
+            actual: actual_referent.display().to_string(),
+        };
+    }
+
+    if validate_owned_path(layout, &actual_referent).is_err() {
+        return IntegrityStatus::OutOfBounds;
+    }
+
+    // Verify the referent target actually exists and is a regular file.
+    // A dangling symlink whose readlink matches is still broken.
+    match fs::metadata(&file.path) {
+        Ok(m) if m.is_file() => IntegrityStatus::Ok,
+        Ok(_) => IntegrityStatus::NotRegularFile,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            IntegrityStatus::ReadError(format!(
+                "dangling symlink: referent {} does not exist",
+                expected_referent.display()
+            ))
+        }
+        Err(err) => IntegrityStatus::ReadError(err.to_string()),
     }
 }
 
@@ -247,6 +324,8 @@ mod tests {
             path,
             owner: FileOwner::Anolisa,
             sha256,
+            kind: OwnedFileKind::File,
+            referent: None,
         }
     }
 
@@ -261,6 +340,8 @@ mod tests {
             path: PathBuf::from("/definitely/not/here"),
             owner: FileOwner::External,
             sha256: Some("deadbeef".to_string()),
+            kind: OwnedFileKind::File,
+            referent: None,
         };
         assert_eq!(check_owned_file(&layout, &owned), IntegrityStatus::Skipped);
     }
@@ -361,13 +442,10 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn symlink_under_owned_root_is_refused_without_following() {
-        // A symlink planted under bin_dir must NOT be followed even when
-        // its target is itself an ANOLISA-owned file. We park the decoy
-        // under `datadir/` (also an owned root) so path-safety passes and
-        // the symlink-specific guard is what fires. If integrity followed
-        // the symlink it would hash the decoy bytes and the assertion
-        // would be Ok or ShaMismatch instead.
+    fn old_state_symlink_under_kind_file_is_refused() {
+        // kind=File (pre-v4 default) + symlink on disk → Symlink refused,
+        // regardless of whether the hash matches. The probe does NOT
+        // follow the symlink; migration to kind=Symlink happens upstream.
         let tmp = tempdir().expect("tempdir");
         let layout = layout_under(tmp.path());
         fs::create_dir_all(&layout.datadir).expect("mkdir datadir");
@@ -376,7 +454,7 @@ mod tests {
         let link = layout.bin_dir.join("hello");
         std::os::unix::fs::symlink(&target, &link).expect("symlink");
         let owned = anolisa_owned(link, Some("deadbeef".to_string()));
-        assert_eq!(check_owned_file(&layout, &owned), IntegrityStatus::Symlink);
+        assert_eq!(check_owned_file(&layout, &owned), IntegrityStatus::Symlink,);
     }
 
     #[test]
@@ -408,6 +486,13 @@ mod tests {
         assert!(IntegrityStatus::MissingFile.is_failure());
         assert!(IntegrityStatus::ReadError("permission denied".into()).is_failure());
         assert!(
+            IntegrityStatus::ReferentMismatch {
+                expected: "a".into(),
+                actual: "b".into()
+            }
+            .is_failure()
+        );
+        assert!(
             IntegrityStatus::ShaMismatch {
                 expected: "a".into(),
                 actual: "b".into()
@@ -424,6 +509,14 @@ mod tests {
         assert_eq!(IntegrityStatus::MissingFile.label(), "missing_file");
         assert_eq!(IntegrityStatus::ReadError("x".into()).label(), "read_error");
         assert_eq!(
+            IntegrityStatus::ReferentMismatch {
+                expected: "a".into(),
+                actual: "b".into()
+            }
+            .label(),
+            "referent_mismatch"
+        );
+        assert_eq!(
             IntegrityStatus::ShaMismatch {
                 expected: "a".into(),
                 actual: "b".into()
@@ -431,5 +524,74 @@ mod tests {
             .label(),
             "sha256_mismatch"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn managed_symlink_ok_reports_ok() {
+        let tmp = tempdir().expect("tempdir");
+        let layout = layout_under(tmp.path());
+        let target = layout.bin_dir.join("real-bin");
+        fs::write(&target, b"binary-content").expect("write target");
+        let link = layout.bin_dir.join("alias");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        let owned = OwnedFile {
+            path: link,
+            owner: FileOwner::Anolisa,
+            sha256: None,
+            kind: OwnedFileKind::Symlink,
+            referent: Some(target),
+        };
+        assert_eq!(check_owned_file(&layout, &owned), IntegrityStatus::Ok);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn managed_symlink_referent_mismatch() {
+        let tmp = tempdir().expect("tempdir");
+        let layout = layout_under(tmp.path());
+        let real_target = layout.bin_dir.join("real-bin");
+        fs::write(&real_target, b"real").expect("write real");
+        let recorded_target = layout.bin_dir.join("expected-bin");
+        fs::write(&recorded_target, b"expected").expect("write expected");
+        let link = layout.bin_dir.join("alias");
+        std::os::unix::fs::symlink(&real_target, &link).expect("symlink");
+        let owned = OwnedFile {
+            path: link,
+            owner: FileOwner::Anolisa,
+            sha256: None,
+            kind: OwnedFileKind::Symlink,
+            referent: Some(recorded_target.clone()),
+        };
+        match check_owned_file(&layout, &owned) {
+            IntegrityStatus::ReferentMismatch { expected, actual } => {
+                assert_eq!(expected, recorded_target.display().to_string());
+                assert_eq!(actual, real_target.display().to_string());
+            }
+            other => panic!("expected ReferentMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn managed_symlink_dangling_referent_reports_error() {
+        let tmp = tempdir().expect("tempdir");
+        let layout = layout_under(tmp.path());
+        let target = layout.bin_dir.join("gone");
+        let link = layout.bin_dir.join("alias");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        let owned = OwnedFile {
+            path: link,
+            owner: FileOwner::Anolisa,
+            sha256: None,
+            kind: OwnedFileKind::Symlink,
+            referent: Some(target),
+        };
+        match check_owned_file(&layout, &owned) {
+            IntegrityStatus::ReadError(msg) => {
+                assert!(msg.contains("dangling"), "msg: {msg}");
+            }
+            other => panic!("expected ReadError(dangling), got {other:?}"),
+        }
     }
 }

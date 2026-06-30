@@ -1970,7 +1970,7 @@ mod tests {
 
     use crate::state::{
         ExternalModifiedFile, FileOwner as StateFileOwner, InstalledObject, InstalledState,
-        ObjectKind, ObjectStatus, OwnedFile, ServiceRef,
+        ObjectKind, ObjectStatus, OwnedFile, OwnedFileKind, ServiceRef,
     };
     use std::fs as std_fs;
     use std::path::Path;
@@ -2010,6 +2010,8 @@ mod tests {
                 path: owned_path.to_path_buf(),
                 owner: StateFileOwner::Anolisa,
                 sha256: Some("0".repeat(64)),
+                kind: OwnedFileKind::File,
+                referent: None,
             }],
             external_modified_files: vec![ExternalModifiedFile {
                 path: external_path.to_path_buf(),
@@ -2181,6 +2183,8 @@ mod tests {
                 path: owned_path.clone(),
                 owner: StateFileOwner::Anolisa,
                 sha256: Some("0".repeat(64)),
+                kind: OwnedFileKind::File,
+                referent: None,
             }],
             external_modified_files: Vec::new(),
             services: Vec::new(),
@@ -2271,6 +2275,8 @@ mod tests {
                 path: owned_path.clone(),
                 owner: StateFileOwner::Anolisa,
                 sha256: Some("0".repeat(64)),
+                kind: OwnedFileKind::File,
+                referent: None,
             }],
             external_modified_files: Vec::new(),
             services: vec![ServiceRef {
@@ -3025,6 +3031,8 @@ mod tests {
                 path: victim.clone(),
                 owner: StateFileOwner::Anolisa,
                 sha256: Some("0".repeat(64)),
+                kind: OwnedFileKind::File,
+                referent: None,
             }],
             external_modified_files: Vec::new(),
             services: Vec::new(),

@@ -42,8 +42,12 @@ pub const SUPPORTED_ARTIFACT_TYPES: &[&str] = &["binary", "tar_gz"];
 pub struct InstalledFile {
     /// Absolute destination path actually written.
     pub path: PathBuf,
-    /// Lowercase-hex sha256 of the installed bytes.
+    /// Lowercase-hex sha256 of the installed bytes. Empty for symlink
+    /// entries (they record a [`referent`](Self::referent) instead).
     pub sha256: String,
+    /// For managed symlinks: the absolute referent path the link points at.
+    /// `None` for regular files.
+    pub referent: Option<PathBuf>,
 }
 
 /// Source-to-destination mapping after manifest layout substitution.
@@ -638,12 +642,12 @@ fn archive_key_from_path(path: &Path) -> Result<Option<String>, InstallError> {
     }
 }
 
-/// Create one validated symlink entry and hash what it resolves to.
+/// Create one validated symlink entry and record the referent path.
 ///
-/// The recorded sha256 is the *referent's* content (a `fs::read` of the
-/// link follows it), so integrity checks that re-hash owned paths see the
-/// same digest whether they visit the link or the file it points at. A
-/// referent that does not exist fails here: installing a dangling
+/// Returns `sha256 = ""` with `referent = Some(target_path)` — the
+/// integrity probe verifies symlinks by checking `readlink` against
+/// the recorded referent rather than hashing content through the link.
+/// A referent that does not exist fails here: installing a dangling
 /// convenience link would be a manifest defect, not a usable install.
 fn create_symlink(link: &ResolvedInstallFile) -> Result<InstalledFile, InstallError> {
     // Validated in validate_symlink_entries; unreachable here.
@@ -653,6 +657,16 @@ fn create_symlink(link: &ResolvedInstallFile) -> Result<InstalledFile, InstallEr
         .ok_or_else(|| InstallError::SymlinkMissingSource {
             path: link.dest.clone(),
         })?;
+    let referent_path = Path::new(referent);
+    if !referent_path.exists() {
+        return Err(InstallError::Io {
+            path: referent_path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "symlink referent does not exist",
+            ),
+        });
+    }
     if let Some(parent) = link.dest.parent() {
         fs::create_dir_all(parent).map_err(|source| InstallError::Io {
             path: parent.to_path_buf(),
@@ -663,20 +677,10 @@ fn create_symlink(link: &ResolvedInstallFile) -> Result<InstalledFile, InstallEr
         path: link.dest.clone(),
         source,
     })?;
-    let bytes = match fs::read(&link.dest) {
-        Ok(b) => b,
-        Err(source) => {
-            // Don't leave a dangling link behind the error.
-            let _ = fs::remove_file(&link.dest);
-            return Err(InstallError::Io {
-                path: PathBuf::from(referent),
-                source,
-            });
-        }
-    };
     Ok(InstalledFile {
         path: link.dest.clone(),
-        sha256: format!("{:x}", Sha256::digest(&bytes)),
+        sha256: String::new(),
+        referent: Some(PathBuf::from(referent)),
     })
 }
 
@@ -730,6 +734,7 @@ fn write_dest_atomic(
     Ok(InstalledFile {
         path: dest.to_path_buf(),
         sha256: sha,
+        referent: None,
     })
 }
 
@@ -1492,14 +1497,14 @@ mod tests {
 
         assert!(fs::symlink_metadata(&link_dest).unwrap().is_symlink());
         assert_eq!(fs::read_link(&link_dest).unwrap(), referent);
-        // Both entries are recorded and the link's digest is the referent's
-        // content, matching what an integrity re-hash of the path would see.
+        // Symlinks carry the referent path instead of a content hash.
         let link_file = outcome
             .files
             .iter()
             .find(|f| f.path == link_dest)
             .expect("link recorded in outcome");
-        assert_eq!(link_file.sha256, sha256_of(payload));
+        assert!(link_file.sha256.is_empty());
+        assert_eq!(link_file.referent.as_deref(), Some(referent.as_path()));
     }
 
     #[test]

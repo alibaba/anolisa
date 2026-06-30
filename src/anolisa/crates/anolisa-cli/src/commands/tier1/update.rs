@@ -41,7 +41,8 @@ use anolisa_core::lock::InstallLock;
 use anolisa_core::path_safety::validate_owned_path;
 use anolisa_core::self_update::{self, ProgressFn, SelfUpdateOutcome};
 use anolisa_core::state::{
-    FileOwner, ObjectKind, ObjectStatus, OperationRecord, OwnedFile, Ownership, ServiceRef,
+    FileOwner, ObjectKind, ObjectStatus, OperationRecord, OwnedFile, OwnedFileKind, Ownership,
+    ServiceRef,
 };
 use anolisa_core::transaction::{
     RollbackAction, RollbackActionKind, Transaction, TransactionOutcomeStatus, TransactionStep,
@@ -778,13 +779,34 @@ fn execute_raw_update(
         .map(|f| OwnedFile {
             path: f.path.clone(),
             owner: FileOwner::Anolisa,
-            sha256: Some(f.sha256.clone()),
+            sha256: if f.referent.is_some() {
+                None
+            } else {
+                Some(f.sha256.clone())
+            },
+            kind: if f.referent.is_some() {
+                OwnedFileKind::Symlink
+            } else {
+                OwnedFileKind::File
+            },
+            referent: f.referent.clone(),
         })
         .collect();
+    let manifest_sha256 = {
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(manifest_toml.as_bytes());
+        Some(hash.iter().fold(String::new(), |mut s, b| {
+            use std::fmt::Write;
+            let _ = write!(s, "{b:02x}");
+            s
+        }))
+    };
     owned_files.push(OwnedFile {
         path: manifest_path.clone(),
         owner: FileOwner::Anolisa,
-        sha256: None,
+        sha256: manifest_sha256,
+        kind: OwnedFileKind::File,
+        referent: None,
     });
 
     let obj = match state.find_object_mut(ObjectKind::Component, component) {
@@ -823,6 +845,7 @@ fn execute_raw_update(
         finished_at: Some(now_iso8601()),
     });
 
+    common::migrate_v3_symlinks(&mut state, layout);
     if let Err(err) = state.save(&state_path) {
         let _ = tx.mark_failed(persist_idx, &err.to_string());
         return Err(raw_update_rollback(
@@ -3130,11 +3153,15 @@ sha256 = "{sha}"
                 path: bin,
                 owner: FileOwner::Anolisa,
                 sha256: Some(bin_sha),
+                kind: OwnedFileKind::File,
+                referent: None,
             },
             OwnedFile {
                 path: manifest_path,
                 owner: FileOwner::Anolisa,
                 sha256: None,
+                kind: OwnedFileKind::File,
+                referent: None,
             },
         ];
         let mut obj = raw_object(component, version);

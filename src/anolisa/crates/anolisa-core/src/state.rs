@@ -32,7 +32,14 @@ use crate::manifest::ServiceScope;
 /// v3 added `ownership` (provenance model) and `rpm_metadata` to
 /// [`InstalledObject`]. Both fields default-deserialize (`None`), so
 /// older files load unchanged and gain the new fields on next save.
-pub const STATE_SCHEMA_VERSION: u32 = 3;
+///
+/// v4 added `kind` ([`OwnedFileKind`]) and `referent` to [`OwnedFile`]
+/// so the integrity probe can distinguish managed symlinks from regular
+/// files. Both default-deserialize (`File` / `None`); pre-v4 symlink
+/// entries remain `kind = File` until migrated by
+/// `commands::common::migrate_v3_symlinks`, which uses the installed
+/// component manifest as the migration authority.
+pub const STATE_SCHEMA_VERSION: u32 = 4;
 
 fn is_legacy_rpm_backend(backend: Option<&str>) -> bool {
     matches!(backend, Some("rpm" | "yum"))
@@ -186,6 +193,28 @@ pub enum FileOwner {
     External,
 }
 
+/// Whether an [`OwnedFile`] is a regular file or a managed symlink.
+///
+/// Older `installed.toml` files (schema ≤ 3) lack this field; serde
+/// defaults to `File` so they load unchanged. New installs of symlink
+/// entries record `Symlink` together with a `referent` path so the
+/// integrity probe can verify the link target instead of refusing it.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnedFileKind {
+    /// Regular file (data, executable, config, library).
+    #[default]
+    File,
+    /// Symbolic link created by the install runner. The integrity probe
+    /// verifies `readlink` against the recorded [`OwnedFile::referent`]
+    /// instead of hashing content through the link.
+    Symlink,
+}
+
+fn is_default_owned_file_kind(kind: &OwnedFileKind) -> bool {
+    *kind == OwnedFileKind::File
+}
+
 /// File installed and owned by ANOLISA.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OwnedFile {
@@ -196,8 +225,19 @@ pub struct OwnedFile {
     pub owner: FileOwner,
     /// Recorded content digest. Older state or externally adopted files may
     /// omit it, so integrity checks surface `unverified` instead of guessing.
+    /// Symlink entries omit this field — they record a [`referent`](Self::referent)
+    /// instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    /// Regular file vs. managed symlink. Defaults to `File` for backward
+    /// compatibility with state written before schema v4.
+    #[serde(default, skip_serializing_if = "is_default_owned_file_kind")]
+    pub kind: OwnedFileKind,
+    /// Expected symlink target (only meaningful when `kind == Symlink`).
+    /// The integrity probe verifies `readlink` matches this path and that
+    /// the referent stays within ANOLISA-owned roots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub referent: Option<PathBuf>,
 }
 
 /// External (non-ANOLISA) file that an operation modified. Linked back to
@@ -769,6 +809,8 @@ mod tests {
                 path: PathBuf::from("/tmp/anolisa/bin/foo"),
                 owner: FileOwner::Anolisa,
                 sha256: Some("deadbeef".to_string()),
+                kind: OwnedFileKind::File,
+                referent: None,
             }],
             external_modified_files: Vec::new(),
             services: vec![ServiceRef {
@@ -836,7 +878,7 @@ mod tests {
         let state: InstalledState =
             toml::from_str(&content).expect("template parses into InstalledState");
 
-        assert_eq!(state.schema_version, 1);
+        assert_eq!(state.schema_version, STATE_SCHEMA_VERSION);
         assert_eq!(state.install_mode, InstallMode::User);
         assert!(!state.objects.is_empty(), "expected at least one object");
         assert!(!state.backups.is_empty(), "expected at least one backup");

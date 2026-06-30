@@ -125,8 +125,9 @@ pub(crate) struct ComponentRecord {
 }
 
 pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
-    let state = common::load_installed_state(ctx, COMMAND)?;
+    let mut state = common::load_installed_state(ctx, COMMAND)?;
     let layout = common::resolve_layout(ctx);
+    common::migrate_v3_symlinks(&mut state, &layout);
     // Catalog is best-effort: if manifests are missing or malformed, status
     // still reports state-on-disk plus the integrity probe. The manifest
     // health checks layer is purely additive — never an error path that
@@ -1109,7 +1110,7 @@ mod tests {
     use super::*;
     use anolisa_core::{
         FileOwner, HealthEntry, InstalledObject, InstalledState, ObjectKind, ObjectStatus,
-        OwnedFile, SubscriptionScope,
+        OwnedFile, OwnedFileKind, SubscriptionScope,
     };
     use std::path::{Path, PathBuf};
 
@@ -1280,6 +1281,8 @@ mod tests {
             sha256: Some(
                 "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5".to_string(),
             ),
+            kind: OwnedFileKind::File,
+            referent: None,
         }];
         state.upsert_object(comp);
 
@@ -1313,6 +1316,8 @@ mod tests {
             path: missing_path,
             owner: FileOwner::Anolisa,
             sha256: Some("deadbeef".to_string()),
+            kind: OwnedFileKind::File,
+            referent: None,
         }];
         state.upsert_object(comp);
 
@@ -1345,6 +1350,8 @@ mod tests {
             sha256: Some(
                 "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
             ),
+            kind: OwnedFileKind::File,
+            referent: None,
         }];
         state.upsert_object(comp);
 
@@ -1376,6 +1383,8 @@ mod tests {
             path: file_path,
             owner: FileOwner::Anolisa,
             sha256: None,
+            kind: OwnedFileKind::File,
+            referent: None,
         }];
         state.upsert_object(comp);
 
@@ -1405,6 +1414,8 @@ mod tests {
             path: missing_path,
             owner: FileOwner::Anolisa,
             sha256: Some("deadbeef".to_string()),
+            kind: OwnedFileKind::File,
+            referent: None,
         }];
         state.upsert_object(comp);
 
@@ -1439,6 +1450,8 @@ mod tests {
             path: PathBuf::from("/etc/shadow"),
             owner: FileOwner::Anolisa,
             sha256: Some("deadbeef".to_string()),
+            kind: OwnedFileKind::File,
+            referent: None,
         }];
         state.upsert_object(comp);
 
@@ -2148,6 +2161,8 @@ mod tests {
             path: missing_owned,
             owner: FileOwner::Anolisa,
             sha256: Some("deadbeef".to_string()),
+            kind: OwnedFileKind::File,
+            referent: None,
         }];
         state.upsert_object(comp);
 

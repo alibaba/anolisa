@@ -41,7 +41,7 @@ use anolisa_core::lock::InstallLock;
 use anolisa_core::path_safety::validate_owned_path;
 use anolisa_core::state::{
     FileOwner, InstallMode as StateInstallMode, InstalledObject, InstalledState, ObjectKind,
-    ObjectStatus, OperationRecord, OwnedFile, Ownership, RpmMetadata, ServiceRef,
+    ObjectStatus, OperationRecord, OwnedFile, OwnedFileKind, Ownership, RpmMetadata, ServiceRef,
 };
 use anolisa_core::{
     ArtifactType, CapabilityRequest, ComponentManifest, DependencyKind, DependencyResolution,
@@ -3102,13 +3102,34 @@ fn execute_raw(
         .map(|f| OwnedFile {
             path: f.path.clone(),
             owner: FileOwner::Anolisa,
-            sha256: Some(f.sha256.clone()),
+            sha256: if f.referent.is_some() {
+                None
+            } else {
+                Some(f.sha256.clone())
+            },
+            kind: if f.referent.is_some() {
+                OwnedFileKind::Symlink
+            } else {
+                OwnedFileKind::File
+            },
+            referent: f.referent.clone(),
         })
         .collect();
+    let manifest_sha256 = {
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(manifest_toml.as_bytes());
+        Some(hash.iter().fold(String::new(), |mut s, b| {
+            use std::fmt::Write;
+            let _ = write!(s, "{b:02x}");
+            s
+        }))
+    };
     owned_files.push(OwnedFile {
         path: manifest_path.clone(),
         owner: FileOwner::Anolisa,
-        sha256: None,
+        sha256: manifest_sha256,
+        kind: OwnedFileKind::File,
+        referent: None,
     });
     let mut installed_paths: Vec<String> = outcome
         .files
@@ -3181,6 +3202,7 @@ fn execute_raw(
         finished_at: Some(now_iso8601()),
     });
 
+    common::migrate_v3_symlinks(&mut state, layout);
     let state_path = layout.state_dir.join("installed.toml");
     if let Err(err) = state.save(&state_path) {
         let cleanup_warnings = rollback_activated_services(

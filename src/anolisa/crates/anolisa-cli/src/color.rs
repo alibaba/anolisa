@@ -71,7 +71,9 @@ impl Palette {
         match key.as_str() {
             "adopted" | "installed" | "ok" | "ready" | "succeeded" | "true" => self.ok(raw),
             "degraded" | "disabled" | "partial" | "warn" | "warning" => self.warn(raw),
-            "blocked" | "error" | "fail" | "failed" | "false" => self.err(raw),
+            "blocked" | "error" | "fail" | "failed" | "false" | "referent_mismatch" => {
+                self.err(raw)
+            }
             "-" | "not_installed" | "unknown" => self.muted(raw),
             _ => self.paint(raw, Style::new().cyan()),
         }

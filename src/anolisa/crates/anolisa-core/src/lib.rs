@@ -108,8 +108,8 @@ pub use service::{
 };
 pub use state::{
     BackupRecord, ExternalModifiedFile, FileOwner, HealthEntry, InstallMode, InstalledObject,
-    InstalledState, ObjectKind, ObjectStatus, OperationRecord, OwnedFile, Ownership, RpmMetadata,
-    STATE_SCHEMA_VERSION, ServiceRef, StateError, SubscriptionScope,
+    InstalledState, ObjectKind, ObjectStatus, OperationRecord, OwnedFile, OwnedFileKind, Ownership,
+    RpmMetadata, STATE_SCHEMA_VERSION, ServiceRef, StateError, SubscriptionScope,
 };
 pub use telemetry::{TelemetryConfig, TelemetryError, TelemetryStarter, validate_sls_account_id};
 pub use transaction::{

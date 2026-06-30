@@ -3,7 +3,7 @@
 #   user-mode:   $XDG_STATE_HOME/anolisa/installed.toml
 #   system-mode: /var/lib/anolisa/installed.toml
 
-schema_version = 1
+schema_version = 4
 updated_at = "2026-06-01T10:00:00Z"
 install_mode = "user" # user | system
 prefix = "~/.local"
@@ -28,6 +28,14 @@ subscription_scope = "none" # none | registered | entitled | reporting
 path = "~/.local/bin/agentsight"
 owner = "anolisa" # anolisa | external
 sha256 = "replace-with-sha256"
+kind = "file" # file | symlink (v4+; defaults to "file" for pre-v4 state)
+
+# Example: managed symlink entry (v4+)
+[[objects.files]]
+path = "~/.local/bin/rtk"
+owner = "anolisa"
+kind = "symlink"
+referent = "~/.local/libexec/tokenless/rtk"
 
 [[objects.external_modified_files]]
 path = "~/.openclaw/config.toml"

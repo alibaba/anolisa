@@ -1236,6 +1236,7 @@ mod tests {
     fn uninstall_execute_on_installed_component_removes_owned_files_and_succeeds() {
         use anolisa_core::{
             FileOwner, InstalledObject, InstalledState, ObjectKind, ObjectStatus, OwnedFile,
+            OwnedFileKind,
         };
         use anolisa_platform::fs_layout::FsLayout;
 
@@ -1270,6 +1271,8 @@ mod tests {
                 path: owned.clone(),
                 owner: FileOwner::Anolisa,
                 sha256: Some("0".repeat(64)),
+                kind: OwnedFileKind::File,
+                referent: None,
             }],
             external_modified_files: Vec::new(),
             services: Vec::new(),
@@ -1318,6 +1321,7 @@ mod tests {
     fn uninstall_runs_contract_declared_pre_uninstall_hook() {
         use anolisa_core::{
             FileOwner, InstalledObject, InstalledState, ObjectKind, ObjectStatus, OwnedFile,
+            OwnedFileKind,
         };
         use anolisa_platform::fs_layout::FsLayout;
         use std::os::unix::fs::PermissionsExt;
@@ -1391,6 +1395,8 @@ mod tests {
                 path: owned.clone(),
                 owner: FileOwner::Anolisa,
                 sha256: Some("0".repeat(64)),
+                kind: OwnedFileKind::File,
+                referent: None,
             }],
             external_modified_files: Vec::new(),
             services: Vec::new(),
@@ -1426,6 +1432,7 @@ mod tests {
     fn purge_execute_is_still_gated_with_clear_hint() {
         use anolisa_core::{
             FileOwner, InstalledObject, InstalledState, ObjectKind, ObjectStatus, OwnedFile,
+            OwnedFileKind,
         };
         use anolisa_platform::fs_layout::FsLayout;
 
@@ -1459,6 +1466,8 @@ mod tests {
                 path: owned.clone(),
                 owner: FileOwner::Anolisa,
                 sha256: Some("0".repeat(64)),
+                kind: OwnedFileKind::File,
+                referent: None,
             }],
             external_modified_files: Vec::new(),
             services: Vec::new(),
@@ -2189,7 +2198,7 @@ mod tests {
     /// runs the unchanged raw teardown: owned files removed, state dropped.
     #[test]
     fn uninstall_raw_with_remove_system_package_flag_warns_but_succeeds() {
-        use anolisa_core::{FileOwner, OwnedFile};
+        use anolisa_core::{FileOwner, OwnedFile, OwnedFileKind};
         use anolisa_platform::fs_layout::FsLayout;
 
         let tmp = tempdir().expect("tmpdir");
@@ -2222,6 +2231,8 @@ mod tests {
                 path: owned.clone(),
                 owner: FileOwner::Anolisa,
                 sha256: Some("0".repeat(64)),
+                kind: OwnedFileKind::File,
+                referent: None,
             }],
             external_modified_files: Vec::new(),
             services: Vec::new(),
