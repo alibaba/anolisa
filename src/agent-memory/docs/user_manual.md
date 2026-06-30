@@ -155,7 +155,7 @@ All tools are invoked via MCP `tools/call` with JSON object arguments. Errors re
 | `memory_observe` | `content` | `hint`, `type` | `observed at notes/observed/<ulid>.md` |
 | `memory_get_context` | — | `max_tokens` (default 2048) | markdown preview of recently modified files; each entry has `suspicious` |
 | `memory_sessions` | — | `limit` (default 10) | historical session list |
-| `memory_timeline` | — | — | cross-session timeline |
+| `memory_timeline` | `session_id` | `limit` (default 50) | tool-call timeline for a specific session |
 | `mem_index_refresh` | — | — | force-rebuild the FTS5 index |
 
 ### Tier C — governance & versioning (7)
@@ -172,21 +172,21 @@ All tools are invoked via MCP `tools/call` with JSON object arguments. Errors re
 
 ### Sovereignty & import/export (13)
 
-| Tool | Description |
-|------|------|
-| `memory_about` | memory store metadata |
-| `memory_auto_created` | query auto-extracted facts |
-| `memory_consent` | grant/revoke memory operations |
-| `memory_forget` | delete specific memory entries |
-| `mem_export` | export the memory store to an archive |
-| `mem_import` | import memory from an archive |
-| `memory_task_save` | save task context |
-| `memory_task_list` | list saved tasks |
-| `memory_task_resume` | resume task context |
-| `memory_task_close` | close a task |
-| `memory_summary` | memory store statistics overview |
-| `memory_session_context` | session-start context injection |
-| `mem_dream` | user profile synthesis |
+| Tool | Required | Optional | Returns / notes |
+|------|------|------|------|
+| `memory_about` | `topic` | `limit` (default 10) | matching memory paths and snippets for a topic |
+| `memory_auto_created` | — | `limit` (default 20) | JSON array of auto-extracted facts |
+| `memory_consent` | — | `action` (query/allow/deny), `scope` (all/consolidation/capture) | grant/revoke memory operations |
+| `memory_forget` | `topic` | `confirm` (default `false`=preview, `true`=delete) | delete memory entries about a topic |
+| `mem_export` | — | `category`, `source` | export the store as an AMA JSON string (does not write a file) |
+| `mem_import` | `json_data` | `strategy` (skip-existing/overwrite, default skip-existing), `dry_run` (default false) | import memory from an AMA JSON string |
+| `memory_task_save` | `title` | `status`, `progress`, `next_steps`, `blockers`, `files_modified`, `decisions`, `context`, `id` | save/update a task; returns the task id (pass `id` to update an existing task) |
+| `memory_task_list` | — | `status` (in-progress/blocked/done/cancelled) | JSON array of task summaries |
+| `memory_task_resume` | `id` | — | resume task context (formatted for continuing in a new session) |
+| `memory_task_close` | `id` | `reason` | close a task (mark done) |
+| `memory_summary` | — | `recent_limit` (default 10) | memory store statistics overview JSON |
+| `memory_session_context` | — | `limit` | session-start context injection |
+| `mem_dream` | — | — | user profile synthesis JSON |
 
 ### Error code semantics
 

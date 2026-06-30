@@ -155,7 +155,7 @@ anolisa adapter status agent-memory
 | `memory_observe` | `content` | `hint`、`type` | `observed at notes/observed/<ulid>.md` |
 | `memory_get_context` | — | `max_tokens`（默认 2048） | 最近修改文件的 markdown 预览，每条含 `suspicious` |
 | `memory_sessions` | — | `limit`（默认 10） | 历史会话列表 |
-| `memory_timeline` | — | — | 跨会话时间线 |
+| `memory_timeline` | `session_id` | `limit`（默认 50） | 指定会话的工具调用时间线 |
 | `mem_index_refresh` | — | — | 强制重建 FTS5 索引 |
 
 ### Tier C — 治理与版本（7 个）
@@ -172,21 +172,21 @@ anolisa adapter status agent-memory
 
 ### 主权与导入导出（13 个）
 
-| 工具 | 说明 |
-|------|------|
-| `memory_about` | 记忆仓元信息 |
-| `memory_auto_created` | 查询自动提取的事实 |
-| `memory_consent` | 同意/撤回记忆操作 |
-| `memory_forget` | 删除指定记忆条目 |
-| `mem_export` | 导出记忆仓到归档 |
-| `mem_import` | 从归档导入记忆 |
-| `memory_task_save` | 保存任务上下文 |
-| `memory_task_list` | 列出已保存任务 |
-| `memory_task_resume` | 恢复任务上下文 |
-| `memory_task_close` | 关闭任务 |
-| `memory_summary` | 记忆仓统计概览 |
-| `memory_session_context` | 会话启动上下文注入 |
-| `mem_dream` | 用户画像合成 |
+| 工具 | 必填 | 可选 | 返回/说明 |
+|------|------|------|------|
+| `memory_about` | `topic` | `limit`（默认 10） | 按 topic 检索匹配记忆路径与 snippet |
+| `memory_auto_created` | — | `limit`（默认 20） | 自动提取事实列表（JSON 数组） |
+| `memory_consent` | — | `action`（query/allow/deny）、`scope`（all/consolidation/capture） | 同意/撤回记忆操作 |
+| `memory_forget` | `topic` | `confirm`（默认 `false`=预览，`true`=删除） | 删除指定 topic 的记忆条目 |
+| `mem_export` | — | `category`、`source` | 导出记忆仓为 AMA JSON 字符串（不写文件） |
+| `mem_import` | `json_data` | `strategy`（skip-existing/overwrite，默认 skip-existing）、`dry_run`（默认 false） | 从 AMA JSON 字符串导入记忆 |
+| `memory_task_save` | `title` | `status`、`progress`、`next_steps`、`blockers`、`files_modified`、`decisions`、`context`、`id` | 保存/更新任务，返回 task id（传 `id` 更新已有任务） |
+| `memory_task_list` | — | `status`（in-progress/blocked/done/cancelled） | 任务摘要 JSON 数组 |
+| `memory_task_resume` | `id` | — | 恢复任务上下文（格式化为新会话续作用） |
+| `memory_task_close` | `id` | `reason` | 关闭任务（标记 done） |
+| `memory_summary` | — | `recent_limit`（默认 10） | 记忆仓统计概览 JSON |
+| `memory_session_context` | — | `limit` | 会话启动上下文注入 |
+| `mem_dream` | — | — | 用户画像合成 JSON |
 
 ### 错误码语义
 
