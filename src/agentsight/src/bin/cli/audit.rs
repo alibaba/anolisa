@@ -78,14 +78,20 @@ impl AuditCommand {
 
         match store.query_since(since_ns, event_type) {
             Ok(records) => self.output_records(&records, &format!("Last {hours} hours")),
-            Err(e) => eprintln!("Query failed: {e}"),
+            Err(e) => {
+                eprintln!("Query failed: {e}");
+                std::process::exit(1);
+            }
         }
     }
 
     fn query_by_pid(&self, store: &AuditStore, pid: u32, event_type: Option<AuditEventType>) {
         match store.query_by_pid(pid, event_type) {
             Ok(records) => self.output_records(&records, &format!("PID {pid}")),
-            Err(e) => eprintln!("Query failed: {e}"),
+            Err(e) => {
+                eprintln!("Query failed: {e}");
+                std::process::exit(1);
+            }
         }
     }
 
@@ -198,7 +204,10 @@ impl AuditCommand {
                     }
                 }
             }
-            Err(e) => eprintln!("Summary query failed: {e}"),
+            Err(e) => {
+                eprintln!("Summary query failed: {e}");
+                std::process::exit(1);
+            }
         }
     }
 }

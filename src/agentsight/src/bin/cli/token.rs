@@ -44,7 +44,10 @@ impl TokenCommand {
     }
 
     fn execute_summary(&self, data_path: &std::path::Path) {
-        // Open token store
+        if self.data_file.is_some() && !data_path.exists() {
+            eprintln!("Database not found: {}", data_path.display());
+            std::process::exit(1);
+        }
         let store = TokenStore::new(data_path);
         let query = agentsight::TokenQuery::new(&store);
 
