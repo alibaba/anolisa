@@ -20,6 +20,7 @@ uses `sudo env NPM_CONFIG_REGISTRY=... npm install -g openclaw@latest`.
 ```bash
 openclaw --version
 openclaw models list
+openclaw agent --message "hello" --agent main
 openclaw gateway health
 openclaw status
 openclaw plugins list
@@ -27,11 +28,11 @@ openclaw channels status --probe
 openclaw logs --follow
 ```
 
-If an agent shell appears stuck during gateway startup, use `scripts/install_openclaw.py`. It starts OpenClaw through `openclaw gateway install` and `openclaw gateway restart`, then polls `openclaw gateway health`. Do not run `openclaw gateway --force` as a long-lived foreground command from an agent shell.
+If an agent shell appears stuck during gateway startup, use `scripts/install_openclaw.py`. It starts OpenClaw through `openclaw gateway install` and `openclaw gateway restart`, waits for the gateway port, then runs an agent message smoke test. Do not run `openclaw gateway --force` as a long-lived foreground command from an agent shell.
 
 If the script stops because the gateway port is used by a non-OpenClaw process, ask the user whether to stop that process or choose another port with `--gateway-port`.
 
-If `openclaw agent --message ...` prints `EMBEDDED FALLBACK`, do not count the model smoke test as healthy. First check whether the gateway itself is healthy:
+If `openclaw agent --message ...` prints `EMBEDDED FALLBACK`, do not count the model smoke test as healthy. Rerun the installer first so it can reset stale read-only local operator device state, then check whether the gateway itself is healthy:
 
 ```bash
 openclaw gateway health
@@ -39,11 +40,12 @@ openclaw status
 journalctl --user -u openclaw-gateway.service -n 200 --no-pager
 ```
 
-If the fallback says `pairing required` or `scope upgrade pending approval`, the gateway is up but the local CLI device needs approval. Approve the latest pending device request non-interactively:
+If the fallback says `pairing required` or `scope upgrade pending approval`, rerun the installer instead of manually approving devices. The script clears stale read-only local operator pairing state and retries the message smoke test:
 
 ```bash
-openclaw devices list
-openclaw devices approve --latest
+python3 scripts/install_openclaw.py \
+  --billing payg \
+  --api-key "$BAILIAN_API_KEY"
 ```
 
 Check the config:
@@ -164,10 +166,10 @@ If schema validation says `must NOT have additional properties`, remove unsuppor
 
 ## Device Identity Required
 
-If the dashboard/browser reports `device identity required`, approve or reset devices:
+If the dashboard/browser reports `device identity required`, reset pending devices before opening the dashboard again:
 
 ```bash
-openclaw devices approve --latest
+openclaw devices clear --pending --yes
 openclaw dashboard --no-open
 ```
 

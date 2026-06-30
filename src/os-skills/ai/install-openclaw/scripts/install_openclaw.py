@@ -946,22 +946,18 @@ def wait_gateway_ready(args):
     last_output = ""
     while time.monotonic() < deadline:
         try:
-            result = run_command(
-                ["openclaw", "gateway", "health"],
-                check=False,
-                timeout=args.gateway_status_timeout,
-                capture_output=True,
-            )
-            last_output = (result.stdout or "") + (result.stderr or "")
-            if result.returncode == 0 and "OK" in last_output:
-                print("Gateway health check passed.")
+            with socket.create_connection(
+                ("127.0.0.1", args.gateway_port),
+                timeout=min(2, args.gateway_status_timeout),
+            ):
+                print("Gateway port is listening.")
                 return
-        except subprocess.TimeoutExpired:
-            last_output = "openclaw gateway health timed out"
+        except OSError as exc:
+            last_output = str(exc)
 
         time.sleep(2)
 
-    print("Gateway health check did not pass before timeout. Recent health output:")
+    print("Gateway port did not listen before timeout. Recent socket output:")
     print(last_output.strip() or "(no status output)")
     try:
         result = run_command(
@@ -978,6 +974,207 @@ def wait_gateway_ready(args):
         print("openclaw gateway status --deep timed out")
     print("Recent gateway service logs:")
     print_gateway_logs(args)
+
+
+def completed_output(result):
+    return (result.stdout or "") + (result.stderr or "")
+
+
+def gateway_smoke_succeeded(result):
+    output = completed_output(result).lower()
+    blocked_markers = [
+        "embedded fallback",
+        "missing scope",
+        "pairing required",
+        "scope upgrade pending approval",
+        "gateway disconnected",
+    ]
+    return result.returncode == 0 and not any(marker in output for marker in blocked_markers)
+
+
+def gateway_scope_blocked(result):
+    output = completed_output(result).lower()
+    return any(
+        marker in output
+        for marker in [
+            "missing scope: operator.write",
+            "pairing required",
+            "scope upgrade pending approval",
+        ]
+    )
+
+
+def device_auth_path(args):
+    return Path(args.config).expanduser().parent / "identity" / "device-auth.json"
+
+
+def paired_devices_path(args):
+    return Path(args.config).expanduser().parent / "devices" / "paired.json"
+
+
+def has_write_scope(scopes):
+    return "operator.write" in scopes or "operator.admin" in scopes
+
+
+def device_operator_scopes(device):
+    scopes = []
+    for key in ("scopes", "approvedScopes"):
+        value = device.get(key)
+        if isinstance(value, list):
+            scopes.extend(value)
+    tokens = device.get("tokens")
+    if isinstance(tokens, dict):
+        operator = tokens.get("operator")
+        if isinstance(operator, dict) and isinstance(operator.get("scopes"), list):
+            scopes.extend(operator["scopes"])
+    return scopes
+
+
+def clear_read_only_operator_pairings(args):
+    path = paired_devices_path(args)
+    if not path.exists():
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(data, dict):
+        return
+
+    changed = False
+    for device_id, device in list(data.items()):
+        if not isinstance(device, dict):
+            continue
+        roles = device.get("roles") if isinstance(device.get("roles"), list) else []
+        is_operator = device.get("role") == "operator" or "operator" in roles
+        if is_operator and not has_write_scope(device_operator_scopes(device)):
+            del data[device_id]
+            changed = True
+
+    if changed:
+        tmp_path = path.with_name(path.name + ".tmp")
+        with tmp_path.open("w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2, ensure_ascii=False)
+            fh.write("\n")
+        os.replace(tmp_path, path)
+        print(f"  cleared read-only operator pairing: {path}")
+
+
+def cached_operator_has_write_scope(args):
+    path = device_auth_path(args)
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    scopes = []
+    if isinstance(data.get("tokens"), dict):
+        operator = data["tokens"].get("operator")
+        if isinstance(operator, dict) and isinstance(operator.get("scopes"), list):
+            scopes = operator["scopes"]
+    elif data.get("role") == "operator" and isinstance(data.get("scopes"), list):
+        scopes = data["scopes"]
+    return has_write_scope(scopes)
+
+
+def clear_cached_operator_device_auth(args):
+    path = device_auth_path(args)
+    if not path.exists():
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        backup = path.with_name(path.name + ".bak")
+        backup.write_bytes(path.read_bytes())
+        path.unlink()
+        print(f"  cleared unreadable cached device auth: {path}")
+        return
+
+    changed = False
+    if isinstance(data.get("tokens"), dict) and "operator" in data["tokens"]:
+        del data["tokens"]["operator"]
+        changed = True
+    elif data.get("role") == "operator":
+        path.unlink()
+        print(f"  cleared cached operator device auth: {path}")
+        return
+
+    if changed:
+        tmp_path = path.with_name(path.name + ".tmp")
+        with tmp_path.open("w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2, ensure_ascii=False)
+            fh.write("\n")
+        os.replace(tmp_path, path)
+        print(f"  cleared cached operator device auth: {path}")
+
+
+def run_gateway_write_smoke(args, timeout):
+    cmd = ["openclaw", "agent", "--message", "hello", "--agent", "main"]
+    try:
+        return run_command(
+            cmd,
+            check=False,
+            timeout=timeout,
+            capture_output=True,
+        )
+    except subprocess.TimeoutExpired as exc:
+        output = exc.output or ""
+        stderr = exc.stderr or f"Gateway write-scope smoke test timed out after {timeout}s"
+        if isinstance(output, bytes):
+            output = output.decode(errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        return subprocess.CompletedProcess(cmd, 124, stdout=output, stderr=stderr)
+
+
+def print_smoke_output(result):
+    output = completed_output(result).strip()
+    if output:
+        print(output)
+
+
+def ensure_gateway_write_scope(args):
+    if args.dry_run:
+        return
+    if args.skip_gateway_write_check:
+        print("\n--- Skipping gateway write-scope check (--skip-gateway-write-check) ---\n")
+        return
+
+    print("\n--- Verifying Gateway operator write scope ---\n")
+
+    if not cached_operator_has_write_scope(args):
+        clear_cached_operator_device_auth(args)
+        clear_read_only_operator_pairings(args)
+
+    deadline = time.monotonic() + args.gateway_write_check_timeout
+    result = subprocess.CompletedProcess([], 1, stdout="", stderr="smoke test not run")
+    pairing_reset = False
+
+    while time.monotonic() < deadline:
+        remaining = max(1, int(deadline - time.monotonic()))
+        result = run_gateway_write_smoke(args, timeout=min(30, remaining))
+        if gateway_smoke_succeeded(result):
+            print("Gateway write-scope smoke test passed.")
+            return
+
+        if gateway_scope_blocked(result) and not pairing_reset:
+            print("Gateway write scope is blocked by stale local operator pairing; resetting it.")
+            clear_cached_operator_device_auth(args)
+            clear_read_only_operator_pairings(args)
+            pairing_reset = True
+
+        if time.monotonic() + 2 >= deadline:
+            break
+        time.sleep(2)
+
+    print("Gateway write-scope smoke test failed. Recent output:")
+    print_smoke_output(result)
+    raise SystemExit(
+        "OpenClaw Gateway port is listening, but the local operator device cannot "
+        "send messages before the write-scope check timeout."
+    )
 
 
 def install_openclaw(args):
@@ -1082,6 +1279,7 @@ def start_gateway(args):
         timeout=args.gateway_command_timeout,
     )
     wait_gateway_ready(args)
+    ensure_gateway_write_scope(args)
 
 
 def print_summary(metadata, args):
@@ -1097,10 +1295,10 @@ def print_summary(metadata, args):
 
     print("\nUseful checks:")
     print("  openclaw models list")
+    print('  openclaw agent --message "hello" --agent main')
     print("  openclaw gateway health")
     print("  openclaw status")
-    print('  openclaw agent --message "hello" --agent main')
-    print("  # If agent output says EMBEDDED FALLBACK, approve the local device or fix gateway.")
+    print("  # If agent output says EMBEDDED FALLBACK, rerun the installer or fix gateway.")
     print("\nFirst real task tip:")
     print("  openclaw onboard --skip-bootstrap")
     print(
@@ -1172,6 +1370,12 @@ def parse_args():
     parser.add_argument("--gateway-command-timeout", type=int, default=30)
     parser.add_argument("--gateway-ready-timeout", type=int, default=30)
     parser.add_argument("--gateway-status-timeout", type=int, default=8)
+    parser.add_argument("--gateway-write-check-timeout", type=int, default=60)
+    parser.add_argument(
+        "--skip-gateway-write-check",
+        action="store_true",
+        help="Skip the post-start local operator write-scope smoke test.",
+    )
     parser.add_argument(
         "--gateway-log",
         default=str(Path("~/.openclaw/setup-gateway-start.log").expanduser()),

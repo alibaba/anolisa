@@ -5,7 +5,7 @@ description: Install and configure OpenClaw non-interactively with Alibaba Cloud
 
 # OpenClaw Non-Interactive Setup
 
-Use this skill to turn a user's one-sentence request into a complete local OpenClaw setup. The normal path is one script command: resolve the Alibaba Cloud Model Studio plan, validate the API key/Base URL/model combination with the official `anthropic-messages` endpoint shape, install Node.js/npm/OpenClaw when needed, write config, install/restart the local gateway service, and verify `openclaw gateway health`.
+Use this skill to turn a user's one-sentence request into a complete local OpenClaw setup. The normal path is one script command: resolve the Alibaba Cloud Model Studio plan, validate the API key/Base URL/model combination with the official `anthropic-messages` endpoint shape, install Node.js/npm/OpenClaw when needed, write config, install/restart the local gateway service, and verify a real local `openclaw agent` message through Gateway.
 
 Do not execute `openclaw onboard` unless the user explicitly asks for interactive setup or asks to skip first-run BOOTSTRAP onboarding. After setup, always tell the user they can run `openclaw onboard --skip-bootstrap` if they want the first real task to run without the introductory BOOTSTRAP flow. Do not configure DingTalk unless the user provides DingTalk credentials or asks for DingTalk access.
 
@@ -132,6 +132,7 @@ python3 /home/ecs-user/.copilot-shell/skills/install-openclaw/scripts/install_op
 - Writes Alibaba Cloud Model Studio config with `api = anthropic-messages`.
 - Sets `gateway.mode = local`, `gateway.bind = loopback`, and `gateway.auth.mode = none` for local single-machine setup.
 - Starts OpenClaw through `openclaw gateway install` and `openclaw gateway restart` unless `--skip-gateway` is passed.
+- After the Gateway port is listening, runs a bounded local message smoke test to verify the local operator device has `operator.write`. If stale read-only local operator device state exists, the script clears it and retries the message smoke test.
 - If the gateway port is occupied by OpenClaw, it clears that stale listener. If the port is occupied by another process, it stops and prints the process details for the user to decide.
 - **Auto-installs the tokenless OpenClaw plugin** after OpenClaw is installed, for token usage tracking and response compression. Pass `--skip-tokenless` to opt out.
 - Prints first-run BOOTSTRAP guidance by default. Tell the user `openclaw onboard --skip-bootstrap` keeps the first real task from being interrupted by OpenClaw's introductory `BOOTSTRAP.md` flow, and that they can still adjust `IDENTITY.md`, `USER.md`, and `SOUL.md` later under the OpenClaw workspace.
@@ -142,11 +143,12 @@ The script prints useful checks. Prefer:
 
 ```bash
 openclaw models list
+openclaw agent --message "hello" --agent main
 openclaw gateway health
 openclaw status
 ```
 
-Only run `openclaw agent --message "hello" --agent main` as an optional model smoke test after gateway health passes. Do not treat `EMBEDDED FALLBACK` as success; if it mentions `pairing required` or `scope upgrade pending approval`, read `references/troubleshooting.md`.
+The script already runs the message smoke test unless `--skip-gateway-write-check` is passed. Do not treat `EMBEDDED FALLBACK` as success; if it mentions `pairing required`, `scope upgrade pending approval`, or `missing scope: operator.write`, read `references/troubleshooting.md`.
 
 ## References
 
