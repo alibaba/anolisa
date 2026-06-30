@@ -1,0 +1,21 @@
+[Unit]
+Description=ANOLISA Anvil - Per-Host Sandbox Daemon
+Documentation=https://github.com/alibaba/anolisa
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/anolisa/anvil daemon start --config /etc/anolisa/anvil/config.toml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
