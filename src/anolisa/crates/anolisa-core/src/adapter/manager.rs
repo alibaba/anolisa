@@ -989,12 +989,12 @@ impl AdapterManager {
         }
 
         for (component, vr) in &component_vr {
-            let manifest = match super::contract::resolve_component_contract(
+            let resolved = match super::contract::resolve_component_contract_with_source(
                 component,
                 std::slice::from_ref(&vr.state_dir),
                 &vr.contract_datadir_roots,
             ) {
-                Ok(m) => m,
+                Ok(r) => r,
                 Err(super::contract::ContractError::Unavailable { .. }) => {
                     let other_scope_exists = self.visible_roots.iter().any(|other| {
                         other.state_dir != vr.state_dir
@@ -1023,6 +1023,7 @@ impl AdapterManager {
                     continue;
                 }
             };
+            let manifest = resolved.manifest;
             if manifest.component.name != component.as_str() {
                 warnings.push(format!(
                     "component contract for '{component}' declares component '{}', expected '{component}'",
@@ -1030,6 +1031,14 @@ impl AdapterManager {
                 ));
                 continue;
             }
+
+            let contract_origin = contract_datadir_root_from_source(
+                component,
+                &resolved.path,
+                &vr.contract_datadir_roots,
+            );
+            let scoped_roots =
+                prioritize_datadir_root(&vr.contract_datadir_roots, contract_origin.as_deref());
 
             for adapter in &manifest.adapters {
                 if let Some(framework) = adapter.framework.as_deref().map(str::trim)
@@ -1045,7 +1054,7 @@ impl AdapterManager {
                             .map(str::trim)
                             .filter(|d| !d.is_empty())
                             .map(str::to_string),
-                        scoped_datadir_roots: vr.contract_datadir_roots.clone(),
+                        scoped_datadir_roots: scoped_roots.clone(),
                     });
                 }
             }
@@ -1109,8 +1118,13 @@ impl AdapterManager {
         match dest_template {
             Some(template) => {
                 let dest_uses_datadir = template.contains("{datadir}");
+                let ordered_roots = if dest_uses_datadir {
+                    prioritize_datadir_root(scoped_datadir_roots, contract_datadir_root)
+                } else {
+                    scoped_datadir_roots.to_vec()
+                };
                 let mut last_expanded = None;
-                for datadir in scoped_datadir_roots {
+                for datadir in &ordered_roots {
                     match self.expand_dest_template(&template, component, datadir) {
                         Ok(path) if path.is_dir() => {
                             let effective = if dest_uses_datadir {
@@ -1899,6 +1913,25 @@ fn unverified_report(reason: &str) -> AdapterStatusReport {
             resource: None,
         }],
     }
+}
+
+/// Reorder datadir roots so `preferred` is tried first, then the remaining
+/// roots in their original order. No-op when `preferred` is `None` or
+/// absent from `roots`.
+fn prioritize_datadir_root(roots: &[PathBuf], preferred: Option<&Path>) -> Vec<PathBuf> {
+    let Some(preferred) = preferred else {
+        return roots.to_vec();
+    };
+    let mut out = Vec::with_capacity(roots.len());
+    if roots.iter().any(|r| r.as_path() == preferred) {
+        out.push(preferred.to_path_buf());
+    }
+    for r in roots {
+        if r.as_path() != preferred {
+            out.push(r.clone());
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -3800,6 +3833,250 @@ source = "{{datadir}}/skills/code-scanner/"
             contract_datadir_root.as_ref(),
             Some(&pkg_datadir),
             "content matching must find pkg_datadir"
+        );
+    }
+
+    // -- contract-scoped datadir priority -------------------------------------
+
+    /// Regression: when a contract from the package datadir
+    /// (`/usr/share/…`) declares `dest = "{datadir}/skills"`, `{datadir}`
+    /// must bind to the package datadir — not to a local datadir
+    /// (`/usr/local/share/…`) whose expanded path exists but is empty.
+    #[test]
+    fn contract_scoped_datadir_takes_priority_over_empty_local_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let local_datadir = tmp.path().join("usr/local/share/anolisa");
+        let package_datadir = tmp.path().join("usr/share/anolisa");
+        let state_dir = tmp.path().join("var/lib/anolisa");
+
+        seed_installed_state(&state_dir, "os-skills", ObjectStatus::Adopted);
+
+        let contract = r#"
+[component]
+name = "os-skills"
+version = "0.1.0"
+layer = "runtime"
+
+[[adapters]]
+framework = "openclaw"
+adapter_type = "skill_bundle"
+plugin_id = "os-skills"
+dest = "{datadir}/skills"
+"#;
+        write_contract_with_content(&package_datadir, "os-skills", contract);
+
+        // Local skills dir exists but is empty — used to win incorrectly.
+        let local_skills = local_datadir.join("skills");
+        std::fs::create_dir_all(&local_skills).expect("mkdir local skills");
+
+        // Package skills dir has real resources.
+        let package_skills = package_datadir.join("skills");
+        std::fs::create_dir_all(&package_skills).expect("mkdir package skills");
+        std::fs::write(package_skills.join("manifest.json"), b"{}").expect("write resource");
+
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let mut manager = AdapterManager::new(
+            layout.clone(),
+            Some(tmp.path().to_path_buf()),
+            "test".into(),
+        );
+        manager.state_path = state_dir.join("installed.toml");
+        manager.visible_roots = vec![VisibleRoot {
+            state_dir: state_dir.clone(),
+            contract_datadir_roots: vec![local_datadir.clone(), package_datadir.clone()],
+        }];
+        manager.all_datadir_roots = vec![local_datadir.clone(), package_datadir.clone()];
+
+        // scan must resolve to the package datadir, not the local one.
+        let report = manager.scan().expect("scan");
+        let entry = report
+            .entries
+            .iter()
+            .find(|e| e.component == "os-skills" && e.framework == "openclaw")
+            .expect("os-skills/openclaw should be in scan");
+        assert!(entry.declared);
+        assert_eq!(
+            entry.resource_root.as_ref(),
+            Some(&package_skills),
+            "scan must resolve {{datadir}}/skills to the package datadir, \
+             not the empty local datadir"
+        );
+
+        // enable path: resolve_resource_root must also prefer the package
+        // datadir.
+        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let (manifest, scoped_roots, contract_datadir_root) = manager
+            .load_visible_component_manifest("os-skills", &state)
+            .expect("load manifest");
+        let (resource_root, effective_datadir) = manager
+            .resolve_resource_root(
+                "os-skills",
+                "openclaw",
+                &manifest,
+                &scoped_roots,
+                contract_datadir_root.as_deref(),
+            )
+            .expect("resolve resource root");
+        assert_eq!(
+            resource_root, package_skills,
+            "enable must resolve to package datadir skills, not empty local"
+        );
+        assert_eq!(
+            effective_datadir, package_datadir,
+            "effective datadir must be the package datadir"
+        );
+    }
+
+    /// When the contract's own datadir root lacks the target resource,
+    /// `{datadir}` falls back to other roots in the scope.
+    #[test]
+    fn contract_scoped_datadir_falls_back_when_own_root_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let local_datadir = tmp.path().join("usr/local/share/anolisa");
+        let package_datadir = tmp.path().join("usr/share/anolisa");
+        let state_dir = tmp.path().join("var/lib/anolisa");
+
+        seed_installed_state(&state_dir, "os-skills", ObjectStatus::Adopted);
+
+        let contract = r#"
+[component]
+name = "os-skills"
+version = "0.1.0"
+layer = "runtime"
+
+[[adapters]]
+framework = "openclaw"
+adapter_type = "skill_bundle"
+plugin_id = "os-skills"
+dest = "{datadir}/skills"
+"#;
+        write_contract_with_content(&package_datadir, "os-skills", contract);
+
+        // Package datadir does NOT have the skills dir.
+        // Local datadir DOES have the skills dir with resources.
+        let local_skills = local_datadir.join("skills");
+        std::fs::create_dir_all(&local_skills).expect("mkdir local skills");
+        std::fs::write(local_skills.join("manifest.json"), b"{}").expect("write resource");
+
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let mut manager = AdapterManager::new(
+            layout.clone(),
+            Some(tmp.path().to_path_buf()),
+            "test".into(),
+        );
+        manager.state_path = state_dir.join("installed.toml");
+        manager.visible_roots = vec![VisibleRoot {
+            state_dir: state_dir.clone(),
+            contract_datadir_roots: vec![local_datadir.clone(), package_datadir.clone()],
+        }];
+        manager.all_datadir_roots = vec![local_datadir.clone(), package_datadir.clone()];
+
+        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let (manifest, scoped_roots, contract_datadir_root) = manager
+            .load_visible_component_manifest("os-skills", &state)
+            .expect("load manifest");
+        let (resource_root, effective_datadir) = manager
+            .resolve_resource_root(
+                "os-skills",
+                "openclaw",
+                &manifest,
+                &scoped_roots,
+                contract_datadir_root.as_deref(),
+            )
+            .expect("resolve resource root");
+        assert_eq!(
+            resource_root, local_skills,
+            "must fall back to local datadir when package datadir lacks the resource"
+        );
+        assert_eq!(
+            effective_datadir, local_datadir,
+            "effective datadir must be the fallback local datadir"
+        );
+    }
+
+    /// When the contract is resolved from a state snapshot whose
+    /// provenance points to the package datadir, scan must still
+    /// prioritize the package datadir for `{datadir}` expansion —
+    /// the same behavior as a direct datadir hit.
+    #[test]
+    fn snapshot_with_provenance_prioritizes_package_datadir_in_scan() {
+        use crate::adapter::contract::{
+            ContractProvenance, ContractSourceKind, write_snapshot_provenance,
+        };
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let local_datadir = tmp.path().join("usr/local/share/anolisa");
+        let package_datadir = tmp.path().join("usr/share/anolisa");
+        let state_dir = tmp.path().join("var/lib/anolisa");
+
+        seed_installed_state(&state_dir, "os-skills", ObjectStatus::Adopted);
+
+        let contract = r#"
+[component]
+name = "os-skills"
+version = "0.1.0"
+layer = "runtime"
+
+[[adapters]]
+framework = "openclaw"
+adapter_type = "skill_bundle"
+plugin_id = "os-skills"
+dest = "{datadir}/skills"
+"#;
+        // Both datadirs have the contract on disk (simulates RPM upgrade
+        // that left a copy in both trees).
+        write_contract_with_content(&local_datadir, "os-skills", contract);
+        write_contract_with_content(&package_datadir, "os-skills", contract);
+
+        // State snapshot + provenance pointing to the package datadir.
+        let snapshot = FsLayout::component_manifest_snapshot_path(&state_dir, "os-skills");
+        std::fs::create_dir_all(snapshot.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&snapshot, contract).expect("write snapshot");
+
+        let prov = ContractProvenance {
+            schema_version: 1,
+            source_kind: ContractSourceKind::Datadir,
+            source_path: FsLayout::component_contract_path(&package_datadir, "os-skills"),
+            datadir_root: package_datadir.clone(),
+        };
+        write_snapshot_provenance(&snapshot, &prov).expect("write provenance");
+
+        // Local skills dir exists but is empty (the decoy).
+        let local_skills = local_datadir.join("skills");
+        std::fs::create_dir_all(&local_skills).expect("mkdir local skills");
+
+        // Package skills dir has real resources.
+        let package_skills = package_datadir.join("skills");
+        std::fs::create_dir_all(&package_skills).expect("mkdir package skills");
+        std::fs::write(package_skills.join("manifest.json"), b"{}").expect("write resource");
+
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let mut manager = AdapterManager::new(
+            layout.clone(),
+            Some(tmp.path().to_path_buf()),
+            "test".into(),
+        );
+        manager.state_path = state_dir.join("installed.toml");
+        manager.visible_roots = vec![VisibleRoot {
+            state_dir: state_dir.clone(),
+            contract_datadir_roots: vec![local_datadir.clone(), package_datadir.clone()],
+        }];
+        manager.all_datadir_roots = vec![local_datadir.clone(), package_datadir.clone()];
+
+        // scan: provenance directs {datadir} to the package datadir even
+        // though the contract was loaded from the state snapshot.
+        let report = manager.scan().expect("scan");
+        let entry = report
+            .entries
+            .iter()
+            .find(|e| e.component == "os-skills" && e.framework == "openclaw")
+            .expect("os-skills/openclaw should be in scan");
+        assert!(entry.declared);
+        assert_eq!(
+            entry.resource_root.as_ref(),
+            Some(&package_skills),
+            "scan via snapshot+provenance must resolve {{datadir}}/skills \
+             to the package datadir, not the empty local datadir"
         );
     }
 }
