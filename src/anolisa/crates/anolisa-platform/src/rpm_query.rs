@@ -210,10 +210,13 @@ impl<R: CommandRunner> PackageQuery for RpmPackageQuery<R> {
             return Ok(names);
         }
 
-        // "nothing provides it" is a normal empty result, mirroring the
-        // not-installed branch: rpm writes the notice to stdout, pinned to
-        // English by LC_ALL=C.
-        if out.stdout.contains("no package provides") {
+        // "Nothing provides it" is a normal empty result, but only for rpm's
+        // expected miss exit. File path lookups use a separate unowned-file
+        // marker from virtual capabilities.
+        let expected_miss = out.code == Some(1)
+            && (out.stdout.contains("no package provides")
+                || out.stdout.contains("is not owned by any package"));
+        if expected_miss {
             return Ok(Vec::new());
         }
 
@@ -903,6 +906,43 @@ mod tests {
             .what_provides_installed("anolisa-component(absent)")
             .unwrap();
         assert!(names.is_empty());
+    }
+
+    #[test]
+    fn what_provides_unowned_file_is_empty() {
+        let path = "/home/user/.local/bin/anolisa";
+        let q = query_with_rpm(
+            path,
+            ok_out(
+                Some(1),
+                "file /home/user/.local/bin/anolisa is not owned by any package\n",
+                "",
+            ),
+        );
+        let names = q.what_provides_installed(path).unwrap();
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn what_provides_unowned_file_with_unexpected_code_is_error() {
+        let path = "/home/user/.local/bin/anolisa";
+        let q = query_with_rpm(
+            path,
+            ok_out(
+                Some(2),
+                "file /home/user/.local/bin/anolisa is not owned by any package\n",
+                "",
+            ),
+        );
+        let err = q.what_provides_installed(path).unwrap_err();
+        assert!(matches!(
+            err,
+            PackageQueryError::QueryFailed {
+                command,
+                code: Some(2),
+                ..
+            } if command == RPM
+        ));
     }
 
     #[test]
