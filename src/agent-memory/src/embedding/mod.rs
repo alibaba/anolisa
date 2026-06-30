@@ -98,7 +98,7 @@ pub fn build_provider(config: &EmbeddingConfig) -> Result<Option<Arc<dyn Embeddi
             }
             let provider = openai::OpenAiEmbedding::new(&key, model, base_url.as_deref())?;
             tracing::info!(
-                "OpenAI embedding provider ready (model={}, dims={})",
+                "OpenAI embedding provider ready (model={}, dims={} estimated; resolves on first embed)",
                 model,
                 provider.dimensions()
             );

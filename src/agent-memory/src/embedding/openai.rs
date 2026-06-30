@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use async_trait::async_trait;
 use serde::Deserialize;
 
@@ -12,7 +14,13 @@ pub struct OpenAiEmbedding {
     base_url: String,
     api_key: String,
     model: String,
-    dimensions: usize,
+    /// Best-effort dimensionality. Seeded from a small model→dim table at
+    /// construction (an estimate for unknown models, e.g. DashScope
+    /// text-embedding-v3 is 1024, not the 1536 fallback) and overwritten
+    /// with the true value observed on the first successful embed. Uses
+    /// atomic storage so the shared provider can be updated from the
+    /// worker thread without a lock.
+    dimensions: AtomicUsize,
 }
 
 impl OpenAiEmbedding {
@@ -23,14 +31,15 @@ impl OpenAiEmbedding {
             .trim_end_matches('/')
             .to_string();
 
-        let dimensions = match model {
+        let estimate = match model {
             "text-embedding-3-small" => 1536,
             "text-embedding-3-large" => 3072,
             "text-embedding-ada-002" => 1536,
             _ => {
-                // Unknown model — guess from common dimensionalities.
-                // The first embed call will tell us the real value; this
-                // is just a pre-flight estimate.
+                // Unknown model — 1536 is just a pre-flight estimate used
+                // only for the startup log and the empty-input zero vector.
+                // The first real embed response carries the true length and
+                // overwrites this value.
                 1536
             }
         };
@@ -43,8 +52,16 @@ impl OpenAiEmbedding {
             base_url,
             api_key: api_key.to_string(),
             model: model.to_string(),
-            dimensions,
+            dimensions: AtomicUsize::new(estimate),
         })
+    }
+
+    /// Record the true dimensionality observed in a response so subsequent
+    /// empty-input zero vectors and the dimensions() accessor are accurate.
+    fn observe_dim(&self, len: usize) {
+        if len != 0 {
+            self.dimensions.store(len, Ordering::Relaxed);
+        }
     }
 }
 
@@ -64,7 +81,7 @@ impl EmbeddingProvider for OpenAiEmbedding {
         let trimmed = text.trim();
         if trimmed.is_empty() {
             return Ok(Embedding {
-                vector: vec![0.0_f32; self.dimensions],
+                vector: vec![0.0_f32; self.dimensions.load(Ordering::Relaxed)],
             });
         }
 
@@ -104,12 +121,17 @@ impl EmbeddingProvider for OpenAiEmbedding {
             .into_iter()
             .next()
             .map(|d| d.embedding)
-            .unwrap_or_else(|| vec![0.0_f32; self.dimensions]);
+            .unwrap_or_else(|| vec![0.0_f32; self.dimensions.load(Ordering::Relaxed)]);
+
+        // Lock in the true dimensionality from the response so the
+        // startup estimate doesn't mislabel the provider (e.g. DashScope
+        // text-embedding-v3 = 1024, not the 1536 fallback).
+        self.observe_dim(vector.len());
 
         Ok(Embedding { vector })
     }
 
     fn dimensions(&self) -> usize {
-        self.dimensions
+        self.dimensions.load(Ordering::Relaxed)
     }
 }
