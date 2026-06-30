@@ -251,7 +251,20 @@ impl SkillFs {
                     self.source_base().join(&skill_name)
                 } else {
                     match self.skill_read_dir(&skill_name) {
-                        Some(d) => d,
+                        Some(d) => {
+                            // I4: grace bypass — if the skill is on a
+                            // fallback snapshot but the path matches the
+                            // post-publish grace whitelist, resolve against
+                            // physical source so the installer can
+                            // create/stat files that don't exist in the
+                            // snapshot.
+                            if self.is_post_publish_grace_allowed(&skill_name, Some(&relative_path))
+                            {
+                                self.source_base().join(&skill_name)
+                            } else {
+                                d
+                            }
+                        }
                         None => {
                             // I4: grace bypass — if the skill is hidden but
                             // the path matches the post-publish grace
@@ -529,7 +542,14 @@ impl SkillFs {
                     self.source_base().join(&skill_name)
                 } else {
                     match self.skill_read_dir(&skill_name) {
-                        Some(d) => d,
+                        Some(d) => {
+                            if self.is_post_publish_grace_allowed(&skill_name, Some(&relative_path))
+                            {
+                                self.source_base().join(&skill_name)
+                            } else {
+                                d
+                            }
+                        }
                         None => {
                             // I4: grace bypass for getattr on passthrough path.
                             if self.is_post_publish_grace_allowed(&skill_name, Some(&relative_path))

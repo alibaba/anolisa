@@ -2420,3 +2420,292 @@ fn post_publish_grace_direct_pending_complete_triggers_session() {
         .args(["-u", &mountpoint.path().to_string_lossy()])
         .output();
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// I4: Post-publish grace fallback snapshot tests
+//
+// When the active resolver maps a skill to a Snapshot (fallback) that does NOT
+// contain `.clawhub`, and a post-publish grace session is active with pattern
+// `.clawhub/**`, exact-path writes to `.clawhub/**` must route to the physical
+// source instead of failing with ENOENT from the snapshot view.
+// ─────────────────────────────────────────────────────────────────────────────
+
+use skillfs_fuse::security::PostPublishSessionKind;
+
+struct FallbackGraceFixture {
+    #[allow(dead_code)]
+    source: tempfile::TempDir,
+    mountpoint: tempfile::TempDir,
+    handle: Option<MountHandle>,
+    #[allow(dead_code)]
+    notify_client: Arc<InMemoryNotifyClient>,
+    notify_controller: Arc<NotifyController>,
+    post_publish_controller: Arc<PostPublishGraceController>,
+}
+
+impl FallbackGraceFixture {
+    fn new(grace_ms: u64, seed: impl FnOnce(&Path, &Path)) -> Self {
+        let source = tempfile::tempdir().unwrap();
+        let snapshot_dir = source.path().join("fallback-skill/.skill-meta/versions/v1");
+        std::fs::create_dir_all(&snapshot_dir).unwrap();
+        seed(source.path(), &snapshot_dir);
+
+        let mut store = SkillStore::new();
+        store.load_from_directory(source.path(), &ParseConfig::default());
+        let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+        let mountpoint = tempfile::tempdir().unwrap();
+        let notify_client = Arc::new(InMemoryNotifyClient::new());
+
+        let notify_ctrl = NotifyController::new(
+            notify_client.clone(),
+            source.path().to_path_buf(),
+            Duration::from_millis(50),
+            5000,
+        );
+
+        let resolver = Arc::new(ActiveSkillResolver::new(source.path()));
+        resolver.set(
+            "fallback-skill".to_string(),
+            ActiveTarget::Snapshot {
+                snapshot_dir: snapshot_dir.clone(),
+                version: "v1".to_string(),
+            },
+        );
+
+        let pp_patterns = vec![PostPublishWritePattern::PrefixRecursive(
+            ".clawhub".to_string(),
+        )];
+        let pp_ctrl = PostPublishGraceController::new(Duration::from_millis(grace_ms), pp_patterns);
+
+        let config = MountConfig {
+            notify_controller: Some(notify_ctrl.clone()),
+            active_resolver: Some(resolver),
+            post_publish_controller: Some(pp_ctrl.clone()),
+            ..MountConfig::default()
+        };
+
+        let handle = mount_background_configured(
+            mountpoint.path(),
+            source.path(),
+            shared,
+            MountOptions::default(),
+            false,
+            config,
+        )
+        .unwrap();
+
+        std::thread::sleep(Duration::from_millis(300));
+
+        Self {
+            source,
+            mountpoint,
+            handle: Some(handle),
+            notify_client,
+            notify_controller: notify_ctrl,
+            post_publish_controller: pp_ctrl,
+        }
+    }
+
+    fn skill_path(&self) -> PathBuf {
+        self.mountpoint.path().join("skills/fallback-skill")
+    }
+}
+
+impl Drop for FallbackGraceFixture {
+    fn drop(&mut self) {
+        self.post_publish_controller.shutdown();
+        self.notify_controller.shutdown();
+        if let Some(handle) = self.handle.take() {
+            drop(handle);
+        }
+        let mp = self.mountpoint.path().to_path_buf();
+        std::thread::sleep(Duration::from_millis(150));
+        let _ = std::process::Command::new("fusermount3")
+            .args(["-u", &mp.to_string_lossy()])
+            .output();
+    }
+}
+
+#[test]
+fn post_publish_grace_fallback_snapshot_create_and_rename_to_source() {
+    skip_if_no_fuse!();
+
+    let fixture = FallbackGraceFixture::new(5000, |src, snapshot| {
+        // Physical source has the skill with .clawhub
+        let skill = src.join("fallback-skill");
+        std::fs::create_dir_all(skill.join(".clawhub")).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: fallback-skill\ndescription: test\n---\n",
+        )
+        .unwrap();
+
+        // Snapshot does NOT contain .clawhub — only SKILL.md
+        std::fs::write(
+            snapshot.join("SKILL.md"),
+            "---\nname: fallback-skill\ndescription: snapshot\n---\n",
+        )
+        .unwrap();
+    });
+
+    // Start grace session
+    fixture
+        .post_publish_controller
+        .start_session("fallback-skill", PostPublishSessionKind::StagingRename);
+
+    let skill_via_fuse = fixture.skill_path();
+
+    // Create a temp file inside .clawhub via FUSE
+    let tmp_path = skill_via_fuse.join(".clawhub/.fs-safe-replace-001.tmp");
+    let result = std::fs::write(&tmp_path, r#"{"origin":"test"}"#);
+    assert!(
+        result.is_ok(),
+        "create .clawhub/.fs-safe-replace-*.tmp must succeed during grace on fallback: {:?}",
+        result.err()
+    );
+
+    // Rename to final path
+    let final_path = skill_via_fuse.join(".clawhub/origin.json");
+    let result = std::fs::rename(&tmp_path, &final_path);
+    assert!(
+        result.is_ok(),
+        "rename within .clawhub/** must succeed during grace on fallback: {:?}",
+        result.err()
+    );
+
+    // Verify the file is readable via FUSE
+    let content = std::fs::read_to_string(&final_path).unwrap();
+    assert_eq!(content, r#"{"origin":"test"}"#);
+
+    // Verify it landed in physical source
+    let phys_final = fixture
+        .source
+        .path()
+        .join("fallback-skill/.clawhub/origin.json");
+    assert!(
+        phys_final.exists(),
+        "final file must exist in physical source"
+    );
+}
+
+#[test]
+fn post_publish_grace_fallback_non_whitelisted_write_rejected() {
+    skip_if_no_fuse!();
+
+    let fixture = FallbackGraceFixture::new(5000, |src, snapshot| {
+        let skill = src.join("fallback-skill");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: fallback-skill\ndescription: test\n---\n",
+        )
+        .unwrap();
+        // Put a non-whitelisted file in physical source only
+        std::fs::create_dir_all(skill.join("data")).unwrap();
+        std::fs::write(skill.join("data/secret.txt"), "secret").unwrap();
+
+        std::fs::write(
+            snapshot.join("SKILL.md"),
+            "---\nname: fallback-skill\ndescription: snapshot\n---\n",
+        )
+        .unwrap();
+    });
+
+    fixture
+        .post_publish_controller
+        .start_session("fallback-skill", PostPublishSessionKind::StagingRename);
+
+    let skill_via_fuse = fixture.skill_path();
+
+    // Non-whitelisted write must fail (data/ is not in .clawhub/**)
+    let result = std::fs::write(skill_via_fuse.join("data/injected.txt"), "bad");
+    assert!(
+        result.is_err(),
+        "non-whitelisted write must fail during grace on fallback snapshot"
+    );
+}
+
+#[test]
+fn post_publish_grace_fallback_readdir_does_not_leak_source() {
+    skip_if_no_fuse!();
+
+    let fixture = FallbackGraceFixture::new(5000, |src, snapshot| {
+        let skill = src.join("fallback-skill");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: fallback-skill\ndescription: test\n---\n",
+        )
+        .unwrap();
+        // Physical source has .clawhub and other dirs
+        std::fs::create_dir_all(skill.join(".clawhub")).unwrap();
+        std::fs::write(skill.join(".clawhub/origin.json"), "{}").unwrap();
+        std::fs::create_dir_all(skill.join("extra")).unwrap();
+
+        // Snapshot only has SKILL.md
+        std::fs::write(
+            snapshot.join("SKILL.md"),
+            "---\nname: fallback-skill\ndescription: snapshot\n---\n",
+        )
+        .unwrap();
+    });
+
+    fixture
+        .post_publish_controller
+        .start_session("fallback-skill", PostPublishSessionKind::StagingRename);
+
+    let skill_via_fuse = fixture.skill_path();
+
+    // readdir on the skill directory should show snapshot contents,
+    // NOT physical source contents — grace must not leak directory listing.
+    let entries = common::list_dir_names(&skill_via_fuse);
+    assert!(
+        !entries.contains(&".clawhub".to_string()),
+        "readdir must not expose .clawhub from physical source during grace: {:?}",
+        entries
+    );
+    assert!(
+        !entries.contains(&"extra".to_string()),
+        "readdir must not expose extra/ from physical source during grace: {:?}",
+        entries
+    );
+}
+
+#[test]
+fn post_publish_grace_fallback_skill_md_not_opened_via_grace() {
+    skip_if_no_fuse!();
+
+    let fixture = FallbackGraceFixture::new(5000, |src, snapshot| {
+        let skill = src.join("fallback-skill");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: fallback-skill\ndescription: live\n---\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(skill.join(".clawhub")).unwrap();
+
+        // Snapshot SKILL.md has different content
+        std::fs::write(
+            snapshot.join("SKILL.md"),
+            "---\nname: fallback-skill\ndescription: snapshot\n---\n",
+        )
+        .unwrap();
+    });
+
+    fixture
+        .post_publish_controller
+        .start_session("fallback-skill", PostPublishSessionKind::StagingRename);
+
+    let skill_via_fuse = fixture.skill_path();
+
+    // SKILL.md must be served from the snapshot (compiled), not physical source.
+    // The .clawhub/** pattern must NOT grant access to SKILL.md.
+    let content = std::fs::read_to_string(skill_via_fuse.join("SKILL.md")).unwrap();
+    assert!(
+        content.contains("snapshot"),
+        "SKILL.md must come from snapshot, not physical source: {}",
+        content
+    );
+}

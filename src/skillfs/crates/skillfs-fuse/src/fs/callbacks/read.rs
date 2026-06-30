@@ -375,7 +375,15 @@ impl SkillFs {
                         }
                         ReadResolution::Snapshot { dir, .. } if !is_mutating_open => {
                             if let PathType::Passthrough { relative_path, .. } = &path_type {
-                                physical = dir.join(relative_path);
+                                // I4: grace bypass — if the path matches the
+                                // post-publish whitelist, open from physical
+                                // source instead of the snapshot.
+                                if !self.is_post_publish_grace_allowed(
+                                    skill_name,
+                                    Some(relative_path.as_path()),
+                                ) {
+                                    physical = dir.join(relative_path);
+                                }
                             }
                         }
                         _ => {}
