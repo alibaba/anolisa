@@ -11,13 +11,14 @@ Entry points:
 
 Preconditions
 -------------
-* Hook must be ``before_tool_call`` or ``before_agent_run``; anything else
-  returns ``[]``.
+* Hook must be ``before_tool_call``, ``before_agent_run``, or
+  ``after_tool_call``; anything else returns ``[]``.
 * ``session_id`` must be present; otherwise no query is issued.
 * Candidate categories are constrained by ``SUPPORTED_SECURITY_EVENT_CATEGORIES``:
 
-  - ``before_tool_call`` → ``(code_scan, skill_ledger)``
+  - ``before_tool_call`` → ``(code_scan, skill_ledger, pii_scan)``
   - ``before_agent_run`` → ``(prompt_scan, pii_scan)``
+  - ``after_tool_call`` → ``(pii_scan,)``
 
 * At most one event per category is returned, in the order listed above.
 
@@ -106,8 +107,9 @@ FALLBACK_TIME_WINDOW_SECONDS = 10.0
 MAX_FALLBACK_BATCH_WINDOW_SECONDS = 60.0
 
 SUPPORTED_SECURITY_EVENT_CATEGORIES: dict[str, tuple[str, ...]] = {
-    "before_tool_call": ("code_scan", "skill_ledger"),
+    "before_tool_call": ("code_scan", "skill_ledger", "pii_scan"),
     "before_agent_run": ("prompt_scan", "pii_scan"),
+    "after_tool_call": ("pii_scan",),
 }
 
 MatchReason = Literal["tool_call_id", "run_id", "field+time"]

@@ -85,7 +85,6 @@ def _result_signatures(results: list[list[Any]]) -> list[list[tuple[str, str]]]:
     [
         "before_llm_call",
         "after_llm_call",
-        "after_tool_call",
         "after_agent_run",
     ],
 )
@@ -139,7 +138,7 @@ def test_exact_mode_uses_tool_call_id_without_time_window_and_orders_categories(
     assert reader.calls == [
         {
             "session_id": "session-1",
-            "categories": ("code_scan", "skill_ledger"),
+            "categories": ("code_scan", "skill_ledger", "pii_scan"),
             "run_id": "run-1",
             "tool_call_id": "tool-1",
             "since_epoch": None,
@@ -164,13 +163,47 @@ def test_exact_mode_does_not_fallback_when_no_exact_candidates() -> None:
     assert reader.calls == [
         {
             "session_id": "session-1",
-            "categories": ("code_scan", "skill_ledger"),
+            "categories": ("code_scan", "skill_ledger", "pii_scan"),
             "run_id": "run-1",
             "tool_call_id": "tool-1",
             "since_epoch": None,
             "until_epoch": None,
         }
     ]
+
+
+def test_after_tool_call_exact_mode_queries_pii_scan_category() -> None:
+    reader = _FakeReader(
+        [
+            _Candidate(
+                _event(event_id="pii-tool-output", category="pii_scan"),
+                timestamp_epoch=101.0,
+            ),
+            _Candidate(
+                _event(event_id="code-disallowed", category="code_scan"),
+                timestamp_epoch=101.0,
+            ),
+        ]
+    )
+    service = SecurityCorrelationService(reader)
+
+    result = service.find_correlated(
+        _record(hook="after_tool_call", observed_at_epoch=100.0)
+    )
+
+    assert reader.calls == [
+        {
+            "session_id": "session-1",
+            "categories": ("pii_scan",),
+            "run_id": "run-1",
+            "tool_call_id": "tool-1",
+            "since_epoch": None,
+            "until_epoch": None,
+        }
+    ]
+    assert [item.event.event_id for item in result] == ["pii-tool-output"]
+    assert [item.match_reason for item in result] == ["tool_call_id"]
+    assert [item.time_delta_seconds for item in result] == [1.0]
 
 
 def test_batch_exact_mode_queries_tool_call_ids_once_without_changing_results() -> None:
@@ -210,7 +243,7 @@ def test_batch_exact_mode_queries_tool_call_ids_once_without_changing_results() 
     assert reader.calls == [
         {
             "session_id": "session-1",
-            "categories": ("code_scan", "skill_ledger"),
+            "categories": ("code_scan", "skill_ledger", "pii_scan"),
             "run_id": "run-1",
             "tool_call_id": None,
             "tool_call_ids": ("tool-1", "tool-2"),
@@ -602,7 +635,7 @@ def test_fallback_mode_uses_session_only_when_run_id_is_missing(
     assert reader.calls == [
         {
             "session_id": "session-1",
-            "categories": ("code_scan", "skill_ledger"),
+            "categories": ("code_scan", "skill_ledger", "pii_scan"),
             "run_id": None,
             "tool_call_id": None,
             "since_epoch": 90.0,
@@ -713,7 +746,7 @@ def test_batch_fallback_keeps_long_run_time_windows_bounded() -> None:
     assert reader.calls == [
         {
             "session_id": "session-1",
-            "categories": ("code_scan", "skill_ledger"),
+            "categories": ("code_scan", "skill_ledger", "pii_scan"),
             "run_id": "run-1",
             "tool_call_id": None,
             "since_epoch": 0.0,
@@ -721,7 +754,7 @@ def test_batch_fallback_keeps_long_run_time_windows_bounded() -> None:
         },
         {
             "session_id": "session-1",
-            "categories": ("code_scan", "skill_ledger"),
+            "categories": ("code_scan", "skill_ledger", "pii_scan"),
             "run_id": "run-1",
             "tool_call_id": None,
             "since_epoch": 3490.0,
