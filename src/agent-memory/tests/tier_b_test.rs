@@ -3,12 +3,16 @@
 //! These tests need the inotify/FSEvents watcher; they sleep briefly to give
 //! events time to land. Time budgets are conservative (≤ 2s per case).
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use tempfile::tempdir;
 
 use agent_memory::config::AppConfig;
+use agent_memory::embedding::{Embedding, EmbeddingProvider};
 use agent_memory::error::MemoryError;
+use agent_memory::index::IndexHandle;
 use agent_memory::service::MemoryService;
 
 fn setup() -> (tempfile::TempDir, MemoryService) {
@@ -407,4 +411,83 @@ fn search_category_filter_works() {
         .memory_search("rust", 10, None, Some("nonexistent"), None)
         .unwrap();
     assert!(hits.is_empty(), "expected no hits for unknown category");
+}
+
+// ---------- vector / hybrid search with an embedding provider ----------
+//
+// Regression for the "Cannot start a runtime from within a runtime" panic
+// (memory_search.rs) and the silent files_vec skip (worker.rs). Before the
+// fix, `mode=vector|hybrid` panicked because the sync tool handler called
+// `Handle::block_on` from a tokio worker, and the index worker never wrote
+// any vectors because `Handle::try_current()` is None on its dedicated
+// std::thread. This test configures a mock provider and asserts both that
+// vectors land in the store and that search returns hits without panicking.
+
+/// Deterministic embedding: maps a keyword to a basis vector so cosine
+/// similarity cleanly separates "rust" docs from "python" docs.
+struct KeywordEmbedding {
+    dim: usize,
+}
+
+#[async_trait]
+impl EmbeddingProvider for KeywordEmbedding {
+    async fn embed(&self, text: &str) -> agent_memory::Result<Embedding> {
+        let mut v = vec![0.0_f32; self.dim];
+        let t = text.to_lowercase();
+        if t.contains("rust") {
+            v[0] = 1.0;
+        } else if t.contains("python") {
+            v[1] = 1.0;
+        } else {
+            v[2] = 1.0;
+        }
+        Ok(Embedding { vector: v })
+    }
+
+    fn dimensions(&self) -> usize {
+        self.dim
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vector_and_hybrid_search_with_provider_hit_without_panic() {
+    let tmp = tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.global.user_id = "tester".into();
+    cfg.memory.paths.base_dir = tmp.path().to_string_lossy().into();
+    cfg.memory.session.base_dir = tmp.path().join("__sessions__").to_string_lossy().into();
+    cfg.memory.mount.strategy = agent_memory::mount::MountStrategyKind::Userland;
+    let mut svc = MemoryService::new(cfg).unwrap();
+
+    // Inject the mock provider into the service and rebuild the index so
+    // the worker holds both the provider and a runtime handle captured on
+    // this thread (we are inside a multi-thread tokio runtime here).
+    let mock = Arc::new(KeywordEmbedding { dim: 8 });
+    svc.embedding = Some(mock.clone());
+    let new_index = IndexHandle::open(&svc.mount, Some(mock), 0.01, 0.3, true).unwrap();
+    svc.index = Some(Arc::new(new_index));
+
+    svc.write("notes/a.md", "rust ownership system", false)
+        .unwrap();
+    svc.write("notes/b.md", "python garbage collector", false)
+        .unwrap();
+
+    // README + 2 notes = 3 BM25 rows; then give the worker a debounce
+    // window to compute and flush embeddings.
+    assert!(wait_for_index(&svc, 3), "BM25 index did not reach 3 rows");
+    std::thread::sleep(Duration::from_millis(800));
+
+    // vector: must not panic; the "rust" query vector aligns with a.md.
+    let hits = svc
+        .memory_search("rust", 5, Some("vector"), None, None)
+        .unwrap();
+    assert!(!hits.is_empty(), "vector search returned no hits");
+    assert_eq!(hits[0].path, "notes/a.md");
+
+    // hybrid: must not panic either.
+    let hits = svc
+        .memory_search("rust", 5, Some("hybrid"), None, None)
+        .unwrap();
+    assert!(!hits.is_empty(), "hybrid search returned no hits");
+    assert_eq!(hits[0].path, "notes/a.md");
 }

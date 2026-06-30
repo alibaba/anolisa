@@ -35,6 +35,15 @@ impl IndexWorker {
         store: Arc<Mutex<BM25Store>>,
         embedding: Option<Arc<dyn EmbeddingProvider>>,
     ) -> Result<Self> {
+        // Capture the tokio runtime handle from the spawning thread (which
+        // runs inside the server's runtime) so the worker's dedicated
+        // std::thread can drive async embedding calls via `handle.block_on`.
+        // `Handle::try_current()` returns None on a plain std::thread with no
+        // runtime context — which is exactly why the worker previously never
+        // produced any vectors. Capturing here (on the runtime thread) is the
+        // fix; the worker thread itself has no current runtime.
+        let rt_handle = tokio::runtime::Handle::try_current().ok();
+
         // 1. Sync full scan so the caller can safely read svc.index.count()
         full_scan(&mount, &store)?;
 
@@ -45,13 +54,19 @@ impl IndexWorker {
         let mount_clone = mount.clone();
         let store_clone = Arc::clone(&store);
         let emb_clone = embedding.clone();
+        let rt_clone = rt_handle.clone();
 
         let handle = thread::Builder::new()
             .name("agentmem-index".into())
             .spawn(move || {
-                if let Err(e) =
-                    run_watcher(mount_clone, store_clone, emb_clone, cancel_rx, ready_tx)
-                {
+                if let Err(e) = run_watcher(
+                    mount_clone,
+                    store_clone,
+                    emb_clone,
+                    rt_clone,
+                    cancel_rx,
+                    ready_tx,
+                ) {
                     tracing::warn!("index watcher exited: {e}");
                 }
             })
@@ -117,6 +132,7 @@ fn run_watcher(
     mount: MountPointLite,
     store: Arc<Mutex<BM25Store>>,
     embedding: Option<Arc<dyn EmbeddingProvider>>,
+    rt_handle: Option<tokio::runtime::Handle>,
     cancel_rx: stdmpsc::Receiver<()>,
     ready_tx: stdmpsc::SyncSender<Result<()>>,
 ) -> Result<()> {
@@ -188,6 +204,7 @@ fn run_watcher(
                 &mount,
                 &store,
                 embedding.as_deref(),
+                rt_handle.as_ref(),
                 &mut pending_modify,
                 &mut pending_remove,
             )?;
@@ -225,6 +242,7 @@ fn flush(
     mount: &MountPointLite,
     store: &Arc<Mutex<BM25Store>>,
     embedding: Option<&dyn EmbeddingProvider>,
+    rt_handle: Option<&tokio::runtime::Handle>,
     pending_modify: &mut HashSet<PathBuf>,
     pending_remove: &mut HashSet<PathBuf>,
 ) -> Result<()> {
@@ -264,10 +282,13 @@ fn flush(
     let mut to_upsert: Vec<(String, i64, u64, String)> = Vec::new();
     let mut to_upsert_vec: Vec<(String, Vec<f32>)> = Vec::new();
 
-    // If we have an embedding provider, grab the tokio handle so
-    // we can block_on from this dedicated std::thread. If there
-    // is no tokio runtime (unit tests), embedding is skipped.
-    let rt_handle = embedding.and_then(|_| tokio::runtime::Handle::try_current().ok());
+    // If we have an embedding provider, use the tokio handle captured at
+    // spawn time (the worker runs on a dedicated std::thread that has no
+    // current runtime of its own). `handle.block_on` from a non-runtime
+    // thread is the supported way to drive async work from sync context.
+    // When no handle is available (e.g. tests without a runtime), embedding
+    // is skipped — vector search then degrades to BM25, matching the
+    // no-provider fallback.
 
     for path in pending_modify.drain() {
         let rel = match relative(mount, &path) {
@@ -297,7 +318,7 @@ fn flush(
         to_upsert.push((rel.clone(), mtime, meta.len(), body.clone()));
 
         // Compute embedding for this file if provider is available.
-        if let (Some(emb), Some(rt)) = (embedding, rt_handle.as_ref()) {
+        if let (Some(emb), Some(rt)) = (embedding, rt_handle) {
             if let Ok(embedding_vec) = rt.block_on(emb.embed(&body)) {
                 to_upsert_vec.push((rel, embedding_vec.vector));
             }

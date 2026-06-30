@@ -126,20 +126,25 @@ pub fn memory_search(
                 }
             };
 
-            // FIXME: this blocks the tokio worker. In production the
-            // embedding call should be spawned on a dedicated blocking
-            // thread or use a channel-based async bridge. For now, the
-            // MCP server is single-client stdio so the block_on cost is
-            // bounded by the embedding provider's HTTP timeout.
-            //
-            // Use try_current() so tests (which run outside a tokio
-            // runtime) get a clean error instead of a panic.
-            let rt = tokio::runtime::Handle::try_current().map_err(|_| {
-                MemoryError::NotImplemented(
-                    "embedding requires a tokio runtime; tests should use #[tokio::test]",
-                )
-            })?;
-            let embedding = rt.block_on(emb.embed(query)).map_err(|e| {
+            // Drive the async embedding call from this sync tool handler.
+            // We are on a tokio worker thread (the MCP handler is async),
+            // so `Handle::block_on` on the *current* runtime would panic
+            // ("Cannot start a runtime from within a runtime").
+            // `block_in_place` moves this thread out of the scheduler,
+            // making a nested `Handle::current().block_on` legal. Requires
+            // a multi-thread runtime (the server uses one; tests covering
+            // this path must use `#[tokio::test(flavor = "multi_thread")]`).
+            // Outside any runtime, fall back to a clean NotImplemented.
+            let embedding = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::try_current()
+                    .map_err(|_| {
+                        MemoryError::NotImplemented(
+                            "embedding requires a tokio runtime; tests should use #[tokio::test]",
+                        )
+                    })?
+                    .block_on(emb.embed(query))
+            })
+            .map_err(|e| {
                 svc.audit_log(
                     AuditEntry::new(TOOL)
                         .path(format!("embed:{:.120}", query))
