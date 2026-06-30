@@ -25,6 +25,10 @@ SHARE_DIR ?= $(DATADIR)/adapters/agent-memory
 # Adapter directories
 ADAPTER_SRC_DIR := adapters/agent-memory
 OPENCLAW_PLUGIN_SRC_DIR := $(ADAPTER_SRC_DIR)/openclaw
+# Component contract (publishing/plugin metadata) — kept separate from the
+# adapter payload tree so the contract is not mixed with adapter resources.
+# Shipped to %{_datadir}/anolisa/components/agent-memory/component.toml.
+COMPONENT_CONTRACT := .anolisa/component.toml
 
 # RPM build paths
 RPMBUILD_DIR ?= $(HOME)/rpmbuild
@@ -87,7 +91,11 @@ sync-versions: ## Sync $(VERSION) (from Cargo.toml) into all derived JSON files
 		echo "==> Synced derived files to $(VERSION)"; \
 	fi
 
-build-openclaw-plugin: sync-versions ## Build openclaw TS plugin (dist/index.js)
+$(COMPONENT_CONTRACT): $(COMPONENT_CONTRACT).in Cargo.toml
+	@echo "==> Generating component contract (version=$(VERSION))..."
+	@sed 's/@VERSION@/$(VERSION)/g' $< > $@
+
+build-openclaw-plugin: sync-versions $(COMPONENT_CONTRACT) ## Build openclaw TS plugin (dist/index.js)
 	@echo "==> Building $(NAME) OpenClaw plugin..."
 	# --legacy-peer-deps: the plugin declares `openclaw: "*"` as a peer
 	# but the dev openclaw resolves to CalVer 2026.5.7, which npm 7+'s
@@ -207,7 +215,7 @@ dist: clean build-openclaw-plugin ## Create source + vendor tarballs for RPM bui
 	@rm -rf dist/$(NAME)-$(VERSION) && mkdir -p dist/$(NAME)-$(VERSION)
 	@cp -R Cargo.toml Cargo.lock src config tests docs \
 		Makefile agent-memory.spec.in CHANGELOG.md LICENSE \
-		.gitignore dist/$(NAME)-$(VERSION)/
+		.gitignore .anolisa dist/$(NAME)-$(VERSION)/
 	@mkdir -p dist/$(NAME)-$(VERSION)/.cargo
 	@cp .cargo/config.toml dist/$(NAME)-$(VERSION)/.cargo/config.toml
 	# Adapter: include source + pre-built dist/index.js, exclude
@@ -261,7 +269,7 @@ clean: ## Clean build artifacts
 	cargo clean
 	rm -rf dist/ vendor/ .cargo/
 	rm -rf $(OPENCLAW_PLUGIN_SRC_DIR)/dist/ $(OPENCLAW_PLUGIN_SRC_DIR)/node_modules/
-	rm -f $(SPEC_FILE)
+	rm -f $(SPEC_FILE) $(COMPONENT_CONTRACT)
 	rm -rf $(OPENCLAW_PLUGIN_SRC_DIR)/dist $(OPENCLAW_PLUGIN_SRC_DIR)/node_modules
 
 version: ## Show current version
