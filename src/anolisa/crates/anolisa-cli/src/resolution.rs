@@ -110,6 +110,9 @@ pub(crate) enum ComponentIndexError {
     /// Invalid component row.
     #[error("invalid component index entry: {reason}")]
     Invalid { reason: String },
+    /// Backend resolution or download failure.
+    #[error("failed to fetch component index: {reason}")]
+    Fetch { reason: String },
 }
 
 /// Backend selected for identity resolution.
@@ -614,36 +617,55 @@ pub(crate) fn rpm_components_from_capabilities(capabilities: &[String]) -> Vec<S
     components
 }
 
+/// Load repo-side `components.toml`, returning a structured error on failure.
+///
+/// Used by commands (`ls`, `install --all`) that require the component index
+/// to function. For best-effort usage where a missing index is acceptable,
+/// use [`load_optional_component_index`] instead.
+pub(crate) fn load_component_index(
+    layout: &FsLayout,
+    env: &anolisa_env::EnvFacts,
+    repo_config: &RepoConfig,
+) -> Result<ComponentIndex, ComponentIndexError> {
+    let host = HostVars {
+        os: env.os.clone(),
+        arch: env.arch.clone(),
+    };
+    let (name, backend) =
+        repo_config
+            .select_backend(Some("raw"))
+            .map_err(|err| ComponentIndexError::Fetch {
+                reason: format!("cannot resolve raw backend in repo.toml: {err}"),
+            })?;
+    let base_url = repo_config
+        .resolved_base_url(name, backend, &host)
+        .map_err(|err| ComponentIndexError::Fetch {
+            reason: format!("cannot resolve base_url for raw backend: {err}"),
+        })?;
+    let url = component_index_url(&base_url);
+
+    let cache = DownloadCache::new(layout.cache_dir.clone());
+    #[cfg(test)]
+    if !url.starts_with("file://") {
+        return Err(ComponentIndexError::Fetch {
+            reason: format!("test mode: refusing non-file URL {url}"),
+        });
+    }
+    let downloaded = cache
+        .fetch(&url, None)
+        .map_err(|err| ComponentIndexError::Fetch {
+            reason: format!("failed to fetch {url}: {err}"),
+        })?;
+    ComponentIndex::load(&downloaded.cached_path)
+}
+
 /// Best-effort load of repo-side `components.toml`.
 pub(crate) fn load_optional_component_index(
     layout: &FsLayout,
     env: &anolisa_env::EnvFacts,
     repo_config: &RepoConfig,
 ) -> Option<ComponentIndex> {
-    let host = HostVars {
-        os: env.os.clone(),
-        arch: env.arch.clone(),
-    };
-    let Ok((name, backend)) = repo_config.select_backend(Some("raw")) else {
-        return None;
-    };
-    let Ok(base_url) = repo_config.resolved_base_url(name, backend, &host) else {
-        return None;
-    };
-    let url = component_index_url(&base_url);
-
-    let cache = DownloadCache::new(layout.cache_dir.clone());
-    #[cfg(test)]
-    if !url.starts_with("file://") {
-        return None;
-    }
-    let Ok(downloaded) = cache.fetch(&url, None) else {
-        return None;
-    };
-    if let Ok(index) = ComponentIndex::load(&downloaded.cached_path) {
-        return Some(index);
-    }
-    None
+    load_component_index(layout, env, repo_config).ok()
 }
 
 #[cfg(test)]

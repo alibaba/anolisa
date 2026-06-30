@@ -7,14 +7,11 @@
 use std::path::{Path, PathBuf};
 
 use anolisa_core::adapter::manager::AdapterManager;
-use anolisa_core::{
-    Catalog, CatalogLayers, FetchFailure, HttpFetch, InstalledState, ObjectStatus, UreqFetch,
-};
+use anolisa_core::{Catalog, CatalogLayers, InstalledState, ObjectStatus};
 use anolisa_platform::fs_layout::FsLayout;
 
 use crate::context::{CliContext, InstallMode};
 use crate::packaged;
-use crate::repo_config::{HostVars, RepoConfig, raw_relative_root};
 use crate::response::CliError;
 
 /// Subdirectory under `datadir` and `etc_dir` where component
@@ -199,79 +196,6 @@ fn dev_tree_manifests() -> Option<PathBuf> {
         .join("..")
         .join("manifests");
     candidate.is_dir().then_some(candidate)
-}
-
-// ── Component catalog URL resolution ────────────────────────────────
-
-/// Resolve the component catalog URL.
-///
-/// Resolution order (first non-empty wins):
-///   1. `$ANOLISA_CATALOG_URL` env var
-///   2. `[backends.raw].base_url` in `repo.toml`, plus `/catalog.json`
-///
-/// `repo.toml` follows its own discovery chain across user/site, packaged,
-/// and dev-tree disk locations.
-pub fn resolve_catalog_url(ctx: &CliContext, command: &str) -> Result<Option<String>, CliError> {
-    if let Ok(url) = std::env::var("ANOLISA_CATALOG_URL") {
-        let trimmed = url.trim();
-        if !trimmed.is_empty() {
-            return Ok(Some(trimmed.to_string()));
-        }
-    }
-
-    let layout = resolve_layout(ctx);
-    let repo_config = RepoConfig::load(&layout).map_err(|err| CliError::InvalidArgument {
-        command: command.to_string(),
-        reason: format!("failed to resolve component catalog from repo.toml: {err}"),
-    })?;
-    let (backend_name, backend) =
-        repo_config
-            .select_backend(Some("raw"))
-            .map_err(|err| CliError::InvalidArgument {
-                command: command.to_string(),
-                reason: format!("failed to resolve component catalog from repo.toml: {err}"),
-            })?;
-    let env = anolisa_env::EnvService::detect();
-    let host = HostVars {
-        os: env.os,
-        arch: env.arch,
-    };
-    let base_url = repo_config
-        .resolved_base_url(backend_name, backend, &host)
-        .map_err(|err| CliError::InvalidArgument {
-            command: command.to_string(),
-            reason: format!("failed to resolve component catalog from repo.toml: {err}"),
-        })?;
-    Ok(Some(format!(
-        "{}/catalog.json",
-        raw_relative_root(&base_url)
-    )))
-}
-
-/// Fetch raw bytes from a catalog URL.
-///
-/// Supports `file://` (local filesystem) and `http(s)://` (via `UreqFetch`).
-pub fn fetch_catalog_bytes(url: &str, command: &str) -> Result<Vec<u8>, CliError> {
-    if let Some(path) = url.strip_prefix("file://") {
-        return std::fs::read(path).map_err(|err| CliError::Runtime {
-            command: command.to_string(),
-            reason: format!("failed to read catalog from {url}: {err}"),
-        });
-    }
-
-    if url.starts_with("http://") || url.starts_with("https://") {
-        return UreqFetch::default()
-            .get(url)
-            .map_err(|err: FetchFailure| CliError::Runtime {
-                command: command.to_string(),
-                reason: format!("failed to fetch catalog from {url}: {err}"),
-            });
-    }
-
-    Err(CliError::InvalidArgument {
-        command: command.to_string(),
-        reason: format!("unsupported catalog URL scheme: {url}"),
-    })
 }
 
 /// Wire-friendly label for an [`ObjectStatus`] value. Shared between the

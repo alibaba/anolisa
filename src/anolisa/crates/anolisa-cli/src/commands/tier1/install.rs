@@ -25,7 +25,7 @@
 //! health checks.
 
 use clap::Parser;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::BTreeSet;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -88,7 +88,7 @@ pub struct InstallArgs {
     /// Component name to install
     #[arg(value_name = "COMPONENT")]
     pub component: Option<String>,
-    /// Install every component listed in the catalog (mutually exclusive with COMPONENT)
+    /// Install every component in the component index (mutually exclusive with COMPONENT)
     #[arg(long, conflicts_with_all = ["component", "version", "package"])]
     pub all: bool,
     /// With --all, stop on the first failure instead of continuing
@@ -1672,24 +1672,6 @@ fn rpm_tooling_missing_error(command: &str) -> CliError {
 
 // ── --all support ───────────────────────────────────────────────────
 
-/// Minimal catalog shape used by `--all`. We only need the component name
-/// and (optionally) the `available` status, so this is a thin parse rather
-/// than a re-use of `list.rs`'s richer types. Keeping it local avoids a
-/// cross-module type dependency for one entry point.
-#[derive(Debug, Deserialize)]
-struct AllCatalogV1 {
-    schema_version: u32,
-    #[serde(default)]
-    components: Vec<AllCatalogEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AllCatalogEntry {
-    name: String,
-    #[serde(default)]
-    status: Option<String>,
-}
-
 /// Wire shape for a batch entry.  `status` is one of:
 /// `installed` | `planned` (dry-run) | `adopted` | `adopt-planned` (dry-run) |
 /// `failed` | `skipped`.
@@ -1716,13 +1698,13 @@ struct AllSummaryPayload {
 }
 
 fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
-    let names = resolve_all_components(ctx)?;
+    let names = resolve_all_components(ctx, args.backend.as_deref())?;
     if names.is_empty() {
         if !ctx.quiet && !ctx.json {
             let color = Palette::new(ctx.no_color);
             println!(
                 "{}",
-                color.muted("no available components in catalog; nothing to install")
+                color.muted("no available components in component index; nothing to install")
             );
         }
         if ctx.json {
@@ -1926,45 +1908,40 @@ fn batch_status(outcome: InstallOutcome, dry_run: bool) -> &'static str {
     }
 }
 
-/// Fetch and parse the component catalog, returning the names of components
-/// whose `status` is `available`. Returns an error if the catalog URL is not
-/// configured or the catalog cannot be fetched/parsed.
-fn resolve_all_components(ctx: &CliContext) -> Result<Vec<String>, CliError> {
-    let url = common::resolve_catalog_url(ctx, "install --all")?.ok_or_else(|| {
-        CliError::InvalidArgument {
-            command: "install --all".to_string(),
-            reason: "component catalog is not configured; set ANOLISA_CATALOG_URL or \
-                 configure [backends.raw].base_url in repo.toml"
-                .to_string(),
-        }
+/// Load the component index and return names of components that support
+/// the given backend. When `backend` is `None`, the repo's default
+/// backend is used.
+fn resolve_all_components(
+    ctx: &CliContext,
+    backend: Option<&str>,
+) -> Result<Vec<String>, CliError> {
+    let layout = common::resolve_layout(ctx);
+    let env = anolisa_env::EnvService::detect();
+    let repo_config = RepoConfig::load(&layout).map_err(|err| CliError::InvalidArgument {
+        command: "install --all".to_string(),
+        reason: format!("failed to load repo.toml: {err}"),
     })?;
-    let bytes = common::fetch_catalog_bytes(&url, "install --all")?;
-    let catalog: AllCatalogV1 =
-        serde_json::from_slice(&bytes).map_err(|err| CliError::InvalidArgument {
-            command: "install --all".to_string(),
-            reason: format!("failed to parse component catalog JSON: {err}"),
-        })?;
-    if catalog.schema_version != 1 {
-        return Err(CliError::InvalidArgument {
-            command: "install --all".to_string(),
-            reason: format!(
-                "unsupported component catalog schema_version {}; expected 1",
-                catalog.schema_version
-            ),
-        });
-    }
-    let mut names: Vec<String> = Vec::new();
-    for entry in catalog.components {
-        if entry.name.trim().is_empty() {
-            if !ctx.quiet {
-                eprintln!("warning: catalog contains an entry with an empty name; skipping");
+    let index =
+        crate::resolution::load_component_index(&layout, &env, &repo_config).map_err(|err| {
+            CliError::Runtime {
+                command: "install --all".to_string(),
+                reason: format!("failed to load component index: {err}"),
             }
-            continue;
-        }
-        if entry.status.as_deref() == Some("available") {
-            names.push(entry.name);
-        }
-    }
+        })?;
+    let (selected_backend, _) =
+        repo_config
+            .select_backend(backend)
+            .map_err(|err| CliError::InvalidArgument {
+                command: "install --all".to_string(),
+                reason: format!("{err}"),
+            })?;
+    let selected_backend = selected_backend.to_string();
+    let names: Vec<String> = index
+        .components
+        .iter()
+        .filter(|entry| entry.backends.iter().any(|b| b.kind == selected_backend))
+        .map(|entry| entry.name.clone())
+        .collect();
     Ok(names)
 }
 
@@ -5563,59 +5540,6 @@ scope = "@anolisa"
             InstallArgs::try_parse_from(["install", "--all", "--fail-fast"]).expect("should parse");
         assert!(a.all);
         assert!(a.fail_fast);
-    }
-
-    // ── catalog parsing tests ────────────────────────────────────────
-
-    #[test]
-    fn all_catalog_filters_available_components() {
-        let json = r#"{
-            "schema_version": 1,
-            "components": [
-                {"name": "a", "status": "available"},
-                {"name": "b", "status": "planned"},
-                {"name": "c", "status": "available"},
-                {"name": "d"}
-            ]
-        }"#;
-        let catalog: AllCatalogV1 = serde_json::from_str(json).expect("parse");
-        assert_eq!(catalog.schema_version, 1);
-        let names: Vec<String> = catalog
-            .components
-            .into_iter()
-            .filter(|c| c.status.as_deref() == Some("available"))
-            .map(|c| c.name)
-            .filter(|n| !n.trim().is_empty())
-            .collect();
-        assert_eq!(names, vec!["a", "c"]);
-    }
-
-    #[test]
-    fn all_catalog_rejects_unsupported_schema_version() {
-        let json = r#"{"schema_version": 2, "components": []}"#;
-        let catalog: AllCatalogV1 = serde_json::from_str(json).expect("parse");
-        assert_ne!(catalog.schema_version, 1);
-    }
-
-    #[test]
-    fn all_catalog_skips_empty_names() {
-        let json = r#"{
-            "schema_version": 1,
-            "components": [
-                {"name": "", "status": "available"},
-                {"name": "  ", "status": "available"},
-                {"name": "valid", "status": "available"}
-            ]
-        }"#;
-        let catalog: AllCatalogV1 = serde_json::from_str(json).expect("parse");
-        let names: Vec<String> = catalog
-            .components
-            .into_iter()
-            .filter(|c| c.status.as_deref() == Some("available"))
-            .map(|c| c.name)
-            .filter(|n| !n.trim().is_empty())
-            .collect();
-        assert_eq!(names, vec!["valid"]);
     }
 
     // ── rpm adopt path (#958) ───────────────────────────────────────

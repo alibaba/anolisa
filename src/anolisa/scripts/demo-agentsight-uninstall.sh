@@ -26,8 +26,8 @@
 #        * the binary under `$PREFIX/usr/local/bin/agentsight` is gone,
 #        * `installed.toml` no longer carries the component,
 #        * `status --json` reports an empty `.data.components` array,
-#        * `list --json` (against a local catalog) does not report
-#          agentsight as installed,
+#        * `list --json` (against the local component index) does not
+#          report agentsight as installed,
 #        * a second `uninstall` fails with INVALID_ARGUMENT (exit 2).
 #
 # Scope / non-goals:
@@ -183,28 +183,23 @@ base_url = "file://$REPO_V1"
 EOF
 echo "[demo-uninstall] repo.toml at $PREFIX/etc/anolisa/repo.toml"
 
-# --- local component catalog for `list` ---------------------------------------
-# `list` fetches a JSON component catalog from $ANOLISA_CATALOG_URL (or
-# [catalog].url in <etc_dir>/config.toml). Provide a local one so the
-# final list assertion exercises a real catalog row for agentsight.
-CATALOG_PATH="$DEMO_ROOT/catalog.json"
-cat >"$CATALOG_PATH" <<EOF
-{
-  "schema_version": 1,
-  "components": [
-    {
-      "name": "agentsight",
-      "display_name": "AgentSight",
-      "summary": "Agent observability demo entry",
-      "category": "observability",
-      "version": "0.2.0",
-      "status": "available"
-    }
-  ]
-}
+# --- component index for `list` -----------------------------------------------
+# `list` reads `components.toml` from the raw backend's base_url. Provide
+# one so the final list assertion exercises a real component index entry
+# for agentsight.
+cat >"$REPO_V1/components.toml" <<'EOF'
+schema_version = 1
+
+[[components]]
+name = "agentsight"
+display_name = "AgentSight"
+summary = "Agent observability demo entry"
+
+[[components.backends]]
+kind = "raw"
+package = "agentsight"
 EOF
-export ANOLISA_CATALOG_URL="file://$CATALOG_PATH"
-echo "[demo-uninstall] catalog at $CATALOG_PATH"
+echo "[demo-uninstall] components.toml at $REPO_V1/components.toml"
 
 # Build once so the per-step `cargo run` invocations don't each pay
 # the compile cost.
@@ -337,14 +332,14 @@ if [ "$STATUS_LEN" != "0" ]; then
   fail "expected .data.components to be an empty array after uninstall, got length $STATUS_LEN"
 fi
 
-# --- list: catalog row for agentsight must not read installed -------------------
+# --- list: component index entry for agentsight must not read installed --------
 step "list --json"
 capture_cli "list" list --json
 LIST_OUT="$OUT"
 LIST_AGENTSIGHT="$(printf '%s' "$LIST_OUT" | jq -r \
   '[.data.components[] | select(.name == "agentsight")] | length')"
 if [ "$LIST_AGENTSIGHT" -lt 1 ]; then
-  fail "local catalog row for agentsight missing from 'list' output"
+  fail "agentsight missing from component index in 'list' output"
 fi
 LIST_INSTALLED="$(printf '%s' "$LIST_OUT" | jq -r \
   '[.data.components[] | select(.name == "agentsight" and .status == "installed")] | length')"

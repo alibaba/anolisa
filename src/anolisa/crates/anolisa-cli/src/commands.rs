@@ -82,7 +82,7 @@ pub enum Commands {
 /// Primary commands — component lifecycle and operations.
 #[derive(Subcommand)]
 pub enum ComponentCommands {
-    /// List available components from remote catalog
+    /// List available components from the component index
     #[command(visible_alias = "ls")]
     List(tier1::list::ListArgs),
     /// Install a component from a configured backend (raw today; rpm/npm planned)
