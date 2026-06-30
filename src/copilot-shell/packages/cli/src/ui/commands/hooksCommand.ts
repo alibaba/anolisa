@@ -12,7 +12,93 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
-import type { HookRegistryEntry } from '@copilot-shell/core';
+import type { HookRegistryEntry, HookRegistry } from '@copilot-shell/core';
+
+function getHookName(hook: HookRegistryEntry): string {
+  return hook.config.name || hook.config.command || '';
+}
+
+function getKnownHookNames(registry: HookRegistry): Set<string> {
+  return new Set(registry.getAllHooks().map(getHookName).filter(Boolean));
+}
+
+function resolveHookNames(args: string, registry: HookRegistry): string[] {
+  const trimmed = args.trim();
+  if (!trimmed) return [];
+
+  const knownNames = getKnownHookNames(registry);
+
+  // Full args matches a known name (preserves names with spaces, e.g. "echo test")
+  if (knownNames.has(trimmed)) {
+    return [trimmed];
+  }
+
+  // Split on commas; for each segment, use as-is if it matches a known name,
+  // otherwise split on whitespace to support "hook-a hook-b"
+  const result: string[] = [];
+  for (const segment of trimmed.split(',')) {
+    const part = segment.trim();
+    if (!part) continue;
+    if (knownNames.has(part)) {
+      result.push(part);
+    } else {
+      for (const token of part.split(/\s+/)) {
+        if (token) result.push(token);
+      }
+    }
+  }
+
+  return [...new Set(result)];
+}
+
+function toggleHooks(
+  registry: HookRegistry,
+  names: string[],
+  enabled: boolean,
+): MessageActionReturn {
+  const verb = enabled ? t('Enabled') : t('Disabled');
+  const pastParticiple = enabled ? t('enabled') : t('disabled');
+  const knownNames = getKnownHookNames(registry);
+  const foundNames = names.filter((name) => knownNames.has(name));
+  const unknownNames = names.filter((name) => !knownNames.has(name));
+
+  if (foundNames.length === 0) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: t('No matching hooks found: {{names}}', {
+        names: unknownNames.join(', '),
+      }),
+    };
+  }
+
+  for (const name of foundNames) {
+    registry.setHookEnabled(name, enabled);
+  }
+
+  const successMessage =
+    foundNames.length === 1
+      ? t('Hook "{{name}}" has been {{action}} for this session.', {
+          name: foundNames[0]!,
+          action: pastParticiple,
+        })
+      : t('{{verb}} {{count}} hooks for this session: {{names}}', {
+          verb,
+          count: String(foundNames.length),
+          names: foundNames.join(', '),
+        });
+
+  const unknownMessage =
+    unknownNames.length > 0
+      ? ` ${t('Unknown hooks: {{names}}', { names: unknownNames.join(', ') })}`
+      : '';
+
+  return {
+    type: 'message',
+    messageType: 'info',
+    content: `${successMessage}${unknownMessage}`,
+  };
+}
 
 /**
  * Format hook source for display
@@ -97,7 +183,7 @@ const listCommand: SlashCommand = {
     for (const [eventName, hooks] of hooksByEvent) {
       output += `### ${eventName}\n`;
       for (const hook of hooks) {
-        const name = hook.config.name || hook.config.command || 'unnamed';
+        const name = getHookName(hook) || 'unnamed';
         const source = formatHookSource(hook.source);
         const status = formatHookStatus(hook.enabled);
         const matcher = hook.matcher ? ` (matcher: ${hook.matcher})` : '';
@@ -117,24 +203,13 @@ const listCommand: SlashCommand = {
 const enableCommand: SlashCommand = {
   name: 'enable',
   get description() {
-    return t('Enable a disabled hook');
+    return t('Enable disabled hooks');
   },
   kind: CommandKind.BUILT_IN,
   action: async (
     context: CommandContext,
     args: string,
-  ): Promise<MessageActionReturn> => {
-    const hookName = args.trim();
-    if (!hookName) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t(
-          'Please specify a hook name. Usage: /hooks enable <hook-name>',
-        ),
-      };
-    }
-
+  ): Promise<SlashCommandActionReturn> => {
     const { config } = context.services;
     if (!config) {
       return {
@@ -154,15 +229,33 @@ const enableCommand: SlashCommand = {
     }
 
     const registry = hookSystem.getRegistry();
-    registry.setHookEnabled(hookName, true);
+    const names = resolveHookNames(args, registry);
+    if (names.length === 0) {
+      const disabledNames = [
+        ...new Set(
+          registry
+            .getAllHooks()
+            .filter((h) => !h.enabled)
+            .map(getHookName)
+            .filter(Boolean),
+        ),
+      ];
+      if (disabledNames.length === 0) {
+        return {
+          type: 'message',
+          messageType: 'info',
+          content: t('No disabled hooks to enable.'),
+        };
+      }
+      return {
+        type: 'multi_select_hooks',
+        hookNames: disabledNames,
+        title: t('Select hooks to enable'),
+        onSelected: (selected) => toggleHooks(registry, selected, true),
+      };
+    }
 
-    return {
-      type: 'message',
-      messageType: 'info',
-      content: t('Hook "{{name}}" has been enabled for this session.', {
-        name: hookName,
-      }),
-    };
+    return toggleHooks(registry, names, true);
   },
   completion: async (context: CommandContext, partialArg: string) => {
     const { config } = context.services;
@@ -173,12 +266,17 @@ const enableCommand: SlashCommand = {
 
     const registry = hookSystem.getRegistry();
     const allHooks = registry.getAllHooks();
+    const parts = partialArg.split(/\s+/);
+    const currentPartial = parts[parts.length - 1] ?? '';
+    const alreadyTyped = new Set(parts.slice(0, -1));
 
-    // Return disabled hooks for enable command (deduplicated by name)
     const disabledHookNames = allHooks
       .filter((hook) => !hook.enabled)
-      .map((hook) => hook.config.name || hook.config.command || '')
-      .filter((name) => name && name.startsWith(partialArg));
+      .map((hook) => getHookName(hook))
+      .filter(
+        (name) =>
+          name && name.startsWith(currentPartial) && !alreadyTyped.has(name),
+      );
     return [...new Set(disabledHookNames)];
   },
 };
@@ -186,24 +284,13 @@ const enableCommand: SlashCommand = {
 const disableCommand: SlashCommand = {
   name: 'disable',
   get description() {
-    return t('Disable an active hook');
+    return t('Disable active hooks');
   },
   kind: CommandKind.BUILT_IN,
   action: async (
     context: CommandContext,
     args: string,
-  ): Promise<MessageActionReturn> => {
-    const hookName = args.trim();
-    if (!hookName) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t(
-          'Please specify a hook name. Usage: /hooks disable <hook-name>',
-        ),
-      };
-    }
-
+  ): Promise<SlashCommandActionReturn> => {
     const { config } = context.services;
     if (!config) {
       return {
@@ -223,15 +310,33 @@ const disableCommand: SlashCommand = {
     }
 
     const registry = hookSystem.getRegistry();
-    registry.setHookEnabled(hookName, false);
+    const names = resolveHookNames(args, registry);
+    if (names.length === 0) {
+      const enabledNames = [
+        ...new Set(
+          registry
+            .getAllHooks()
+            .filter((h) => h.enabled)
+            .map(getHookName)
+            .filter(Boolean),
+        ),
+      ];
+      if (enabledNames.length === 0) {
+        return {
+          type: 'message',
+          messageType: 'info',
+          content: t('No enabled hooks to disable.'),
+        };
+      }
+      return {
+        type: 'multi_select_hooks',
+        hookNames: enabledNames,
+        title: t('Select hooks to disable'),
+        onSelected: (selected) => toggleHooks(registry, selected, false),
+      };
+    }
 
-    return {
-      type: 'message',
-      messageType: 'info',
-      content: t('Hook "{{name}}" has been disabled for this session.', {
-        name: hookName,
-      }),
-    };
+    return toggleHooks(registry, names, false);
   },
   completion: async (context: CommandContext, partialArg: string) => {
     const { config } = context.services;
@@ -242,12 +347,17 @@ const disableCommand: SlashCommand = {
 
     const registry = hookSystem.getRegistry();
     const allHooks = registry.getAllHooks();
+    const parts = partialArg.split(/\s+/);
+    const currentPartial = parts[parts.length - 1] ?? '';
+    const alreadyTyped = new Set(parts.slice(0, -1));
 
-    // Return enabled hooks for disable command (deduplicated by name)
     const enabledHookNames = allHooks
       .filter((hook) => hook.enabled)
-      .map((hook) => hook.config.name || hook.config.command || '')
-      .filter((name) => name && name.startsWith(partialArg));
+      .map((hook) => getHookName(hook))
+      .filter(
+        (name) =>
+          name && name.startsWith(currentPartial) && !alreadyTyped.has(name),
+      );
     return [...new Set(enabledHookNames)];
   },
 };
@@ -255,8 +365,8 @@ const disableCommand: SlashCommand = {
 function buildHelpMessage(): string {
   const subcommands = [
     { name: 'list', description: t('List all configured hooks') },
-    { name: 'enable', description: t('Enable a disabled hook') },
-    { name: 'disable', description: t('Disable an active hook') },
+    { name: 'enable', description: t('Enable disabled hooks') },
+    { name: 'disable', description: t('Disable active hooks') },
   ];
 
   let output = `**${t('Manage Cosh hooks')}**\n\n`;

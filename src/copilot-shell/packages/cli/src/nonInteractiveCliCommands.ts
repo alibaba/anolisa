@@ -171,6 +171,14 @@ function handleCommandResult(
         originalType: 'spawn_shell',
       };
 
+    case 'multi_select_hooks':
+      return {
+        type: 'unsupported',
+        reason:
+          'Hook multi-select is not supported in non-interactive mode. Use /hooks disable <hook-name...> with explicit names.',
+        originalType: 'multi_select_hooks',
+      };
+
     default: {
       // Exhaustiveness check
       const _exhaustive: never = result;

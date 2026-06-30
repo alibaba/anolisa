@@ -60,6 +60,7 @@ const createMockUIState = (): UIState => ({
   commandContext: {} as never,
   shellConfirmationRequest: null,
   confirmationRequest: null,
+  hookMultiSelectRequest: null,
   confirmUpdateExtensionRequests: [],
   settingInputRequests: [],
   pluginChoiceRequests: [],

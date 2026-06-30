@@ -2,6 +2,7 @@
 
 ## 2.6.0
 
+- Added multi-hook enable and disable support to `/hooks`. (#1200)
 - Added cosh-ng compatibility with cosh-switch. (#1169)
 - Added instance_id to SysOM API request params. (#1160)
 - Added anolisa component contract. (#1128)

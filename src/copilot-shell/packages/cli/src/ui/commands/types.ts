@@ -207,6 +207,16 @@ export interface SpawnShellActionReturn {
   shell?: string;
 }
 
+export interface MultiSelectHooksActionReturn {
+  type: 'multi_select_hooks';
+  /** The hook names to present for selection. */
+  hookNames: string[];
+  /** Title displayed in the multi-select prompt. */
+  title: string;
+  /** Called with the selected hook names; returns the result to display. */
+  onSelected: (selectedNames: string[]) => MessageActionReturn;
+}
+
 export type SlashCommandActionReturn =
   | ToolActionReturn
   | MessageActionReturn
@@ -217,7 +227,8 @@ export type SlashCommandActionReturn =
   | SubmitPromptActionReturn
   | ConfirmShellCommandsActionReturn
   | ConfirmActionReturn
-  | SpawnShellActionReturn;
+  | SpawnShellActionReturn
+  | MultiSelectHooksActionReturn;
 
 export enum CommandKind {
   BUILT_IN = 'built-in',

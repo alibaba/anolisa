@@ -13,6 +13,7 @@ import { ShellConfirmationDialog } from './ShellConfirmationDialog.js';
 import { ConsentPrompt } from './ConsentPrompt.js';
 import { SettingInputPrompt } from './SettingInputPrompt.js';
 import { PluginChoicePrompt } from './PluginChoicePrompt.js';
+import { HookMultiSelectPrompt } from './HookMultiSelectPrompt.js';
 import { ThemeDialog } from './ThemeDialog.js';
 import { SettingsDialog } from './SettingsDialog.js';
 import { AuthDialog } from '../auth/AuthDialog.js';
@@ -251,6 +252,17 @@ export const DialogManager = ({
       <ConsentPrompt
         prompt={uiState.confirmationRequest.prompt}
         onConfirm={uiState.confirmationRequest.onConfirm}
+        terminalWidth={terminalWidth}
+      />
+    );
+  }
+  if (uiState.hookMultiSelectRequest) {
+    return (
+      <HookMultiSelectPrompt
+        hookNames={uiState.hookMultiSelectRequest.hookNames}
+        title={uiState.hookMultiSelectRequest.title}
+        onSelect={uiState.hookMultiSelectRequest.onSelect}
+        onCancel={uiState.hookMultiSelectRequest.onCancel}
         terminalWidth={terminalWidth}
       />
     );

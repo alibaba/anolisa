@@ -1613,6 +1613,25 @@ export default {
   // ============================================================================
   // Hook dialogs
   // ============================================================================
+  'Hook "{{name}}" has been {{action}} for this session.':
+    'Hook "{{name}}" has been {{action}} for this session.',
+  '{{verb}} {{count}} hooks for this session: {{names}}':
+    '{{verb}} {{count}} hooks for this session: {{names}}',
+  'No matching hooks found: {{names}}': 'No matching hooks found: {{names}}',
+  'Unknown hooks: {{names}}': 'Unknown hooks: {{names}}',
+  'No disabled hooks to enable.': 'No disabled hooks to enable.',
+  'No enabled hooks to disable.': 'No enabled hooks to disable.',
+  'Select hooks to enable': 'Select hooks to enable',
+  'Select hooks to disable': 'Select hooks to disable',
+  'Enable disabled hooks': 'Enable disabled hooks',
+  'Disable active hooks': 'Disable active hooks',
+  '{{count}} selected': '{{count}} selected',
+  '↑↓/jk navigate, Space toggle, a select all, Enter confirm, Esc cancel':
+    '↑↓/jk navigate, Space toggle, a select all, Enter confirm, Esc cancel',
+  Enabled: 'Enabled',
+  Disabled: 'Disabled',
+  enabled: 'enabled',
+  disabled: 'disabled',
   '⚠️  **Hook Safety Check**': '⚠️  **Hook Safety Check**',
   'Send this prompt or cancel?': 'Send this prompt or cancel?',
   'A hook requires your confirmation to proceed.':

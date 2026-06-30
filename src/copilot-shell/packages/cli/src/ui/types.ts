@@ -458,6 +458,13 @@ export interface UserPromptConfirmationRequest {
   resolve: (confirmed: boolean) => void;
 }
 
+export interface HookMultiSelectRequest {
+  hookNames: string[];
+  title: string;
+  onSelect: (selectedNames: string[]) => void;
+  onCancel: () => void;
+}
+
 export interface SandboxBypassRequest {
   /** The command that failed inside the sandbox */
   original_command: string;

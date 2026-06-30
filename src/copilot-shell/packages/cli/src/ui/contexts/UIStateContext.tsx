@@ -11,6 +11,7 @@ import type {
   ConsoleMessageItem,
   ShellConfirmationRequest,
   ConfirmationRequest,
+  HookMultiSelectRequest,
   LoopDetectionConfirmationRequest,
   UserPromptConfirmationRequest,
   SandboxBypassRequest,
@@ -62,6 +63,7 @@ export interface UIState {
   commandContext: CommandContext;
   shellConfirmationRequest: ShellConfirmationRequest | null;
   confirmationRequest: ConfirmationRequest | null;
+  hookMultiSelectRequest: HookMultiSelectRequest | null;
   confirmUpdateExtensionRequests: ConfirmationRequest[];
   settingInputRequests: SettingInputRequest[];
   pluginChoiceRequests: PluginChoiceRequest[];

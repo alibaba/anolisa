@@ -32,6 +32,7 @@ import type {
   SlashCommandProcessorResult,
   HistoryItem,
   ConfirmationRequest,
+  HookMultiSelectRequest,
 } from '../types.js';
 import { MessageType } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -132,6 +133,8 @@ export const useSlashCommandProcessor = (
     prompt: React.ReactNode;
     onConfirm: (confirmed: boolean) => void;
   }>(null);
+  const [hookMultiSelectRequest, setHookMultiSelectRequest] =
+    useState<HookMultiSelectRequest | null>(null);
 
   const [sessionShellAllowlist, setSessionShellAllowlist] = useState(
     new Set<string>(),
@@ -592,6 +595,48 @@ export const useSlashCommandProcessor = (
                     true,
                   );
                 }
+                case 'multi_select_hooks': {
+                  const { selected } = await new Promise<{
+                    selected: string[];
+                  }>((resolve) => {
+                    setHookMultiSelectRequest({
+                      hookNames: result.hookNames,
+                      title: result.title,
+                      onSelect: (selectedNames) => {
+                        setHookMultiSelectRequest(null);
+                        resolve({ selected: selectedNames });
+                      },
+                      onCancel: () => {
+                        setHookMultiSelectRequest(null);
+                        resolve({ selected: [] });
+                      },
+                    });
+                  });
+
+                  if (selected.length === 0) {
+                    addItemWithRecording(
+                      {
+                        type: MessageType.INFO,
+                        text: 'Operation cancelled.',
+                      },
+                      Date.now(),
+                    );
+                    return { type: 'handled' };
+                  }
+
+                  const actionResult = result.onSelected(selected);
+                  addItemWithRecording(
+                    {
+                      type:
+                        actionResult.messageType === 'error'
+                          ? MessageType.ERROR
+                          : MessageType.INFO,
+                      text: actionResult.content,
+                    },
+                    Date.now(),
+                  );
+                  return { type: 'handled' };
+                }
                 case 'spawn_shell': {
                   appEvents.emit(AppEvent.SpawnShell, result.shell ?? 'bash');
                   return { type: 'handled' };
@@ -725,5 +770,6 @@ export const useSlashCommandProcessor = (
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,
+    hookMultiSelectRequest,
   };
 };

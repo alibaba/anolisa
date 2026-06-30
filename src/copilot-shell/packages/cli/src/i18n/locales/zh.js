@@ -1429,6 +1429,25 @@ export default {
   // ============================================================================
   // Hook dialogs
   // ============================================================================
+  'Hook "{{name}}" has been {{action}} for this session.':
+    'Hook "{{name}}" 已在本次会话中{{action}}。',
+  '{{verb}} {{count}} hooks for this session: {{names}}':
+    '已在本次会话中{{verb}} {{count}} 个 Hook：{{names}}',
+  'No matching hooks found: {{names}}': '未找到匹配的 Hook：{{names}}',
+  'Unknown hooks: {{names}}': '未知 Hook：{{names}}',
+  'No disabled hooks to enable.': '没有可启用的已禁用 Hook。',
+  'No enabled hooks to disable.': '没有可禁用的已启用 Hook。',
+  'Select hooks to enable': '选择要启用的 Hook',
+  'Select hooks to disable': '选择要禁用的 Hook',
+  'Enable disabled hooks': '启用已禁用的 Hook',
+  'Disable active hooks': '禁用已启用的 Hook',
+  '{{count}} selected': '已选择 {{count}} 个',
+  '↑↓/jk navigate, Space toggle, a select all, Enter confirm, Esc cancel':
+    '↑↓/jk 导航，Space 切换，a 全选，Enter 确认，Esc 取消',
+  Enabled: '启用',
+  Disabled: '禁用',
+  enabled: '启用',
+  disabled: '禁用',
   '⚠️  **Hook Safety Check**': '⚠️  **Hook 安全检查提示**',
   'Send this prompt or cancel?': '是否继续发送这条 prompt？',
   'A hook requires your confirmation to proceed.':
