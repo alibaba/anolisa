@@ -97,5 +97,28 @@ export function createKeyMatchers(
  */
 export const keyMatchers: KeyMatchers = createKeyMatchers(defaultKeyBindings);
 
+/**
+ * Resolves which action Ctrl+O should trigger given the current error state.
+ * Returns 'showErrorDetails' when errors are present or the details panel is
+ * already open (so it can be closed), 'toggleCompactMode' otherwise.
+ */
+export function resolveCtrlOAction(
+  key: Key,
+  errorCount: number,
+  showErrorDetails: boolean,
+  matchers: KeyMatchers = keyMatchers,
+): 'showErrorDetails' | 'toggleCompactMode' | null {
+  if (
+    matchers[Command.SHOW_ERROR_DETAILS](key) &&
+    (errorCount > 0 || showErrorDetails)
+  ) {
+    return 'showErrorDetails';
+  }
+  if (matchers[Command.TOGGLE_COMPACT_MODE]?.(key)) {
+    return 'toggleCompactMode';
+  }
+  return null;
+}
+
 // Re-export Command for convenience
 export { Command };

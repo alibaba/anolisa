@@ -5,7 +5,12 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { keyMatchers, Command, createKeyMatchers } from './keyMatchers.js';
+import {
+  keyMatchers,
+  Command,
+  createKeyMatchers,
+  resolveCtrlOAction,
+} from './keyMatchers.js';
 import type { KeyBindingConfig } from '../config/keyBindings.js';
 import { defaultKeyBindings } from '../config/keyBindings.js';
 import type { Key } from './hooks/useKeypress.js';
@@ -377,6 +382,27 @@ describe('keyMatchers', () => {
       expect(matchers[Command.HOME](createKey('a', { ctrl: true }))).toBe(
         false,
       );
+    });
+  });
+
+  describe('resolveCtrlOAction', () => {
+    const ctrlO = createKey('o', { ctrl: true });
+    const otherKey = createKey('t', { ctrl: true });
+
+    it('returns showErrorDetails when errors exist', () => {
+      expect(resolveCtrlOAction(ctrlO, 1, false)).toBe('showErrorDetails');
+    });
+
+    it('returns showErrorDetails when details panel is open (allows closing)', () => {
+      expect(resolveCtrlOAction(ctrlO, 0, true)).toBe('showErrorDetails');
+    });
+
+    it('returns toggleCompactMode when no errors and details closed', () => {
+      expect(resolveCtrlOAction(ctrlO, 0, false)).toBe('toggleCompactMode');
+    });
+
+    it('returns null for non-Ctrl+O keys', () => {
+      expect(resolveCtrlOAction(otherKey, 1, false)).toBe(null);
     });
   });
 });

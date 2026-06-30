@@ -72,7 +72,7 @@ import { type InitializationResult } from '../core/initializer.js';
 import { useFocus } from './hooks/useFocus.js';
 import { useBracketedPaste } from './hooks/useBracketedPaste.js';
 import { useKeypress, type Key } from './hooks/useKeypress.js';
-import { keyMatchers, Command } from './keyMatchers.js';
+import { keyMatchers, Command, resolveCtrlOAction } from './keyMatchers.js';
 import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
 import { useFolderTrust } from './hooks/useFolderTrust.js';
 import { useIdeTrustListener } from './hooks/useIdeTrustListener.js';
@@ -1300,6 +1300,21 @@ export const AppContainer = (props: AppContainerProps) => {
     [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
   );
 
+  const filteredConsoleMessages = useMemo(() => {
+    if (config.getDebugMode()) {
+      return consoleMessages;
+    }
+    return consoleMessages.filter((msg) => msg.type !== 'debug');
+  }, [consoleMessages, config]);
+
+  const errorCount = useMemo(
+    () =>
+      filteredConsoleMessages
+        .filter((msg) => msg.type === 'error')
+        .reduce((total, msg) => total + msg.count, 0),
+    [filteredConsoleMessages],
+  );
+
   const handleGlobalKeypress = useCallback(
     (key: Key) => {
       // Debug log keystrokes if enabled
@@ -1414,7 +1429,10 @@ export const AppContainer = (props: AppContainerProps) => {
         setConstrainHeight(true);
       }
 
-      if (keyMatchers[Command.TOGGLE_COMPACT_MODE]?.(key)) {
+      const ctrlOAction = resolveCtrlOAction(key, errorCount, showErrorDetails);
+      if (ctrlOAction === 'showErrorDetails') {
+        setShowErrorDetails((prev) => !prev);
+      } else if (ctrlOAction === 'toggleCompactMode') {
         const newValue = !compactMode;
         setCompactMode(newValue);
         void settings.setValue(SettingScope.User, 'ui.compactMode', newValue);
@@ -1424,8 +1442,6 @@ export const AppContainer = (props: AppContainerProps) => {
         } else {
           setFrozenSnapshot(null);
         }
-      } else if (keyMatchers[Command.SHOW_ERROR_DETAILS](key)) {
-        setShowErrorDetails((prev) => !prev);
       } else if (keyMatchers[Command.TOGGLE_TOOL_DESCRIPTIONS](key)) {
         const newValue = !showToolDescriptions;
         setShowToolDescriptions(newValue);
@@ -1454,6 +1470,8 @@ export const AppContainer = (props: AppContainerProps) => {
     [
       constrainHeight,
       setConstrainHeight,
+      errorCount,
+      showErrorDetails,
       setShowErrorDetails,
       showToolDescriptions,
       setShowToolDescriptions,
@@ -1534,22 +1552,6 @@ export const AppContainer = (props: AppContainerProps) => {
     settings.merged.ui?.hideWindowTitle,
     stdout,
   ]);
-
-  const filteredConsoleMessages = useMemo(() => {
-    if (config.getDebugMode()) {
-      return consoleMessages;
-    }
-    return consoleMessages.filter((msg) => msg.type !== 'debug');
-  }, [consoleMessages, config]);
-
-  // Computed values
-  const errorCount = useMemo(
-    () =>
-      filteredConsoleMessages
-        .filter((msg) => msg.type === 'error')
-        .reduce((total, msg) => total + msg.count, 0),
-    [filteredConsoleMessages],
-  );
 
   const nightly = props.version.includes('nightly');
 
