@@ -218,6 +218,12 @@ pub(crate) fn run_provider_process_loop(
                     }));
                     return ProviderRunOutcome::Cancelled;
                 }
+                if let Err(err) =
+                    drain_pending_stdout_lines(&stdout_rx, &mut on_stdout_line, sender)
+                {
+                    let _ = sender.send(Err(err));
+                    return ProviderRunOutcome::Failed;
+                }
                 return ProviderRunOutcome::Exited {
                     status,
                     stderr_tail: stderr_tail.snapshot(),
@@ -325,6 +331,36 @@ fn record_cancellation_stdout_line(
         kind: ProviderCancellationArtifactKind::StdoutLine,
         text: line.to_string(),
     });
+}
+
+fn drain_pending_stdout_lines(
+    stdout_rx: &mpsc::Receiver<ProviderIoEvent>,
+    on_stdout_line: &mut impl FnMut(String) -> Result<ProviderLineProgress, AdapterError>,
+    sender: &mpsc::Sender<Result<AgentEvent, AdapterError>>,
+) -> Result<(), AdapterError> {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(());
+        }
+        let remaining = deadline - now;
+        let wait = remaining.min(Duration::from_millis(50));
+        match stdout_rx.recv_timeout(wait) {
+            Ok(ProviderIoEvent::Line(line)) => {
+                on_stdout_line(line)?;
+            }
+            Ok(ProviderIoEvent::Closed) => return Ok(()),
+            Ok(ProviderIoEvent::ReadError(message)) => {
+                let _ = sender.send(Err(AdapterError {
+                    message: message.clone(),
+                }));
+                return Err(AdapterError { message });
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
 }
 
 fn drain_cancellation_stdout_artifacts(

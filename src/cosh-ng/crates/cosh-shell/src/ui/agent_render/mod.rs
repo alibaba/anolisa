@@ -69,9 +69,10 @@ pub struct RatatuiInlineRenderer {
 
 impl RatatuiInlineRenderer {
     pub fn for_terminal() -> Self {
+        let stdout_is_tty = std::io::stdout().is_terminal() && !running_under_cargo_test();
         let width = if let Some(width) = configured_terminal_width() {
             width
-        } else if std::io::stdout().is_terminal() {
+        } else if stdout_is_tty {
             ratatui::crossterm::terminal::size()
                 .map(|(cols, _)| cols)
                 .unwrap_or(DEFAULT_WIDTH)
@@ -82,7 +83,7 @@ impl RatatuiInlineRenderer {
         Self {
             width,
             plain: plain_output_requested(),
-            styled: std::io::stdout().is_terminal(),
+            styled: stdout_is_tty,
             language: crate::Language::EnUs,
         }
     }
@@ -401,7 +402,7 @@ impl RatatuiInlineRenderer {
         match std::env::var("COSH_SHELL_ANIMATION") {
             Ok(value) if value.eq_ignore_ascii_case("always") => true,
             Ok(value) if value.eq_ignore_ascii_case("never") => false,
-            _ => std::io::stdout().is_terminal(),
+            _ => std::io::stdout().is_terminal() && !running_under_cargo_test(),
         }
     }
 }
@@ -589,6 +590,10 @@ fn agent_cancelled_reason_label(reason: &str, i18n: &crate::I18n) -> String {
             .to_string();
     }
     reason.to_string()
+}
+
+fn running_under_cargo_test() -> bool {
+    cfg!(test)
 }
 
 fn plain_output_requested() -> bool {
