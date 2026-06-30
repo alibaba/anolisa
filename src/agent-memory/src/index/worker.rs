@@ -45,7 +45,7 @@ impl IndexWorker {
         let rt_handle = tokio::runtime::Handle::try_current().ok();
 
         // 1. Sync full scan so the caller can safely read svc.index.count()
-        full_scan(&mount, &store)?;
+        full_scan(&mount, &store, embedding.as_deref(), rt_handle.as_ref())?;
 
         // 2. Spawn watcher thread. Use a oneshot mpsc to know when the
         //    watcher has been wired up.
@@ -182,7 +182,7 @@ fn run_watcher(
                 Ok(Err(e)) => {
                     if is_overflow(&e) {
                         tracing::warn!("inotify overflow detected; triggering full rescan");
-                        full_scan(&mount, &store)?;
+                        full_scan(&mount, &store, embedding.as_deref(), rt_handle.as_ref())?;
                         pending_modify.clear();
                         pending_remove.clear();
                     } else {
@@ -318,10 +318,8 @@ fn flush(
         to_upsert.push((rel.clone(), mtime, meta.len(), body.clone()));
 
         // Compute embedding for this file if provider is available.
-        if let (Some(emb), Some(rt)) = (embedding, rt_handle) {
-            if let Ok(embedding_vec) = rt.block_on(emb.embed(&body)) {
-                to_upsert_vec.push((rel, embedding_vec.vector));
-            }
+        if let Some(v) = embed_sync(embedding, rt_handle, &body) {
+            to_upsert_vec.push((rel, v));
         }
     }
 
@@ -350,70 +348,161 @@ fn flush(
     Ok(())
 }
 
-fn full_scan(mount: &MountPointLite, store: &Arc<Mutex<BM25Store>>) -> Result<()> {
+fn full_scan(
+    mount: &MountPointLite,
+    store: &Arc<Mutex<BM25Store>>,
+    embedding: Option<&dyn EmbeddingProvider>,
+    rt_handle: Option<&tokio::runtime::Handle>,
+) -> Result<()> {
     use walkdir::WalkDir;
 
-    let mut store = store.lock().expect("index store poisoned");
-    let mut seen: HashSet<String> = HashSet::new();
-    let agent_id = std::env::var("MCP_CLIENT_NAME").ok();
-
-    for entry in WalkDir::new(&mount.root)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| !is_under_meta(mount, e.path()))
     {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        if !entry.file_type().is_file() {
-            continue;
+        let mut store = store.lock().expect("index store poisoned");
+        let mut seen: HashSet<String> = HashSet::new();
+        let agent_id = std::env::var("MCP_CLIENT_NAME").ok();
+
+        for entry in WalkDir::new(&mount.root)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| !is_under_meta(mount, e.path()))
+        {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path();
+            let rel = match relative(mount, path) {
+                Some(r) => r,
+                None => continue,
+            };
+            let rel_path = Path::new(&rel);
+            let meta = match crate::safe_fs::metadata(mount.root_fd.as_fd(), rel_path) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            if !is_indexable(rel_path, meta.len()) {
+                continue;
+            }
+            let body = match extract_text(mount.root_fd.as_fd(), rel_path) {
+                Some(b) => b,
+                None => continue,
+            };
+            let mtime = super::store::mtime_ms_of(&meta);
+            // Skip if already indexed with same mtime
+            if let Some(known) = store.mtime_for(&rel) {
+                if known == mtime {
+                    seen.insert(rel.clone());
+                    continue;
+                }
+            }
+            if let Err(e) = store.upsert(&rel, mtime, meta.len(), &body, agent_id.as_deref()) {
+                tracing::warn!("index full-scan upsert failed for {rel}: {e}");
+            }
+            seen.insert(rel);
         }
-        let path = entry.path();
-        let rel = match relative(mount, path) {
-            Some(r) => r,
-            None => continue,
-        };
+
+        // Remove entries no longer on disk
+        let known = store.known_paths()?;
+        for p in known {
+            if !seen.contains(&p) {
+                if let Err(e) = store.remove(&p) {
+                    tracing::warn!("index full-scan remove failed for {p}: {e}");
+                }
+            }
+        }
+    } // store lock released before the (potentially slow) embedding backfill
+
+    // Backfill dense embeddings for files that are BM25-indexed but have no
+    // vector — e.g. pre-existing files at startup, or files recovered after
+    // an inotify overflow. Without this, vector/hybrid search would miss any
+    // file that never received a modify event after the provider was enabled.
+    backfill_vectors(mount, store, embedding, rt_handle)?;
+
+    Ok(())
+}
+
+/// Compute and store embeddings for every indexed file that lacks one.
+/// The embedding HTTP call happens outside the store mutex so concurrent
+/// searches are not blocked; only the brief path-query and final vec-write
+/// hold the lock. No-op when no provider is configured.
+fn backfill_vectors(
+    mount: &MountPointLite,
+    store: &Arc<Mutex<BM25Store>>,
+    embedding: Option<&dyn EmbeddingProvider>,
+    rt_handle: Option<&tokio::runtime::Handle>,
+) -> Result<()> {
+    if embedding.is_none() {
+        return Ok(());
+    }
+    // Phase 1 (locked, brief): which indexed paths lack a vector?
+    let missing: Vec<String> = {
+        let store = store.lock().expect("index store poisoned");
+        store.paths_without_vec()?
+    };
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    // Phase 2 (lock-free): read body + embed. Holding the mutex across an
+    // embedding HTTP call would block every concurrent search.
+    let mut to_upsert: Vec<(String, Vec<f32>)> = Vec::new();
+    for rel in missing {
         let rel_path = Path::new(&rel);
-        let meta = match crate::safe_fs::metadata(mount.root_fd.as_fd(), rel_path) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        if !meta.is_file() {
-            continue;
-        }
-        if !is_indexable(rel_path, meta.len()) {
-            continue;
-        }
         let body = match extract_text(mount.root_fd.as_fd(), rel_path) {
             Some(b) => b,
             None => continue,
         };
-        let mtime = super::store::mtime_ms_of(&meta);
-        // Skip if already indexed with same mtime
-        if let Some(known) = store.mtime_for(&rel) {
-            if known == mtime {
-                seen.insert(rel.clone());
-                continue;
-            }
-        }
-        if let Err(e) = store.upsert(&rel, mtime, meta.len(), &body, agent_id.as_deref()) {
-            tracing::warn!("index full-scan upsert failed for {rel}: {e}");
-        }
-        seen.insert(rel);
-    }
-
-    // Remove entries no longer on disk
-    let known = store.known_paths()?;
-    for p in known {
-        if !seen.contains(&p) {
-            if let Err(e) = store.remove(&p) {
-                tracing::warn!("index full-scan remove failed for {p}: {e}");
-            }
+        if let Some(v) = embed_sync(embedding, rt_handle, &body) {
+            to_upsert.push((rel, v));
         }
     }
 
+    // Phase 3 (locked): write vectors.
+    if !to_upsert.is_empty() {
+        let mut store = store.lock().expect("index store poisoned");
+        for (rel, v) in to_upsert {
+            if let Err(e) = store.upsert_vec(&rel, &v) {
+                tracing::warn!("index full-scan vec upsert failed for {rel}: {e}");
+            }
+        }
+    }
     Ok(())
+}
+
+/// Drive an async embedding call from sync context, picking the blocking
+/// strategy for the current thread.
+///
+/// On a tokio runtime thread (the startup full_scan, called from within
+/// the server's `block_on`), `block_in_place` makes a nested
+/// `Handle::current().block_on` legal instead of panicking with
+/// "Cannot start a runtime from within a runtime". On the index worker's
+/// plain std::thread, drive via the runtime handle captured at spawn time
+/// (`block_on` from a non-runtime thread).
+///
+/// Returns `None` when no provider is configured or no runtime is available
+/// (tests outside a runtime); vector search then degrades to BM25, matching
+/// the no-provider fallback.
+fn embed_sync(
+    embedding: Option<&dyn EmbeddingProvider>,
+    rt_handle: Option<&tokio::runtime::Handle>,
+    text: &str,
+) -> Option<Vec<f32>> {
+    let emb = embedding?;
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        tokio::task::block_in_place(|| handle.block_on(emb.embed(text)))
+            .ok()
+            .map(|e| e.vector)
+    } else if let Some(handle) = rt_handle {
+        handle.block_on(emb.embed(text)).ok().map(|e| e.vector)
+    } else {
+        None
+    }
 }
 
 fn is_under_meta(mount: &MountPointLite, path: &Path) -> bool {

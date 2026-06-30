@@ -523,3 +523,48 @@ fn get_context_skips_git_dir() {
         "real note missing from context:\n{ctx}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn full_scan_backfills_vectors_for_preexisting_files() {
+    // Regression for the full_scan vector gap: files that exist on disk and
+    // are BM25-indexed but were never embedded (e.g. written before an
+    // embedding provider was configured) must get vectors on the next
+    // full_scan — otherwise vector/hybrid search silently misses them.
+    let tmp = tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.global.user_id = "tester".into();
+    cfg.memory.paths.base_dir = tmp.path().to_string_lossy().into();
+    cfg.memory.session.base_dir = tmp.path().join("__sessions__").to_string_lossy().into();
+    cfg.memory.mount.strategy = agent_memory::mount::MountStrategyKind::Userland;
+
+    // Phase 1: write two files with NO embedding provider → BM25 only.
+    {
+        let svc = MemoryService::new(cfg.clone()).unwrap();
+        svc.write("notes/a.md", "rust ownership system", false)
+            .unwrap();
+        svc.write("notes/b.md", "python garbage collector", false)
+            .unwrap();
+        assert!(wait_for_index(&svc, 3), "BM25 index did not reach 3 rows");
+    } // drop → worker joined, bm25.db persists on disk
+
+    // Phase 2: reopen on the same base_dir and inject a mock provider.
+    // IndexHandle::open's startup full_scan must backfill vectors for the
+    // pre-existing files without any new modify events.
+    let mut svc = MemoryService::new(cfg).unwrap();
+    let mock = Arc::new(KeywordEmbedding { dim: 8 });
+    svc.embedding = Some(mock.clone());
+    let new_index = IndexHandle::open(&svc.mount, Some(mock), 0.01, 0.3, true).unwrap();
+    svc.index = Some(Arc::new(new_index));
+
+    // full_scan ran synchronously inside open(); give the BM25 side a beat
+    // to settle, then vector search must find a.md (no new write happened).
+    std::thread::sleep(Duration::from_millis(300));
+    let hits = svc
+        .memory_search("rust", 5, Some("vector"), None, None)
+        .unwrap();
+    assert!(
+        !hits.is_empty(),
+        "vector search found no hits after backfill"
+    );
+    assert_eq!(hits[0].path, "notes/a.md");
+}

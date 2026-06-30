@@ -752,6 +752,22 @@ impl BM25Store {
         Ok(out)
     }
 
+    /// Paths present in the `files` (BM25) table that have no matching row
+    /// in `files_vec`. Used by full_scan's backfill pass to compute vectors
+    /// for files that exist on disk and are BM25-indexed but were never
+    /// embedded — e.g. written before an embedding provider was configured,
+    /// or recovered after an inotify overflow.
+    pub fn paths_without_vec(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.path FROM files f \
+             LEFT JOIN files_vec v ON v.path = f.path \
+             WHERE v.path IS NULL",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let out: Vec<String> = rows.flatten().collect();
+        Ok(out)
+    }
+
     pub fn mtime_for(&self, rel_path: &str) -> Option<i64> {
         self.conn
             .query_row(
