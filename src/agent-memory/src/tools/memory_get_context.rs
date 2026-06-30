@@ -30,10 +30,18 @@ pub fn memory_get_context(svc: &MemoryService, max_tokens: usize) -> Result<Stri
     // closing the symlink-swap TOCTOU window that std::fs::read_to_string
     // would leave open.
     let mut entries: Vec<(std::time::SystemTime, String, u64)> = Vec::new();
+    let root = svc.mount.root.clone();
     for entry in WalkDir::new(&svc.mount.root)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|e| !e.path().starts_with(&meta_dir))
+        // Skip the OS-managed meta dir (.anolisa/) and the git mirror
+        // (.git/) — neither is user memory. `.git/` was previously
+        // leaked here (only the index worker excluded it), surfacing
+        // git internals like `.git/logs/HEAD` as context. Share the
+        // predicate with the worker via safe_fs::is_under_git.
+        .filter_entry(|e| {
+            !e.path().starts_with(&meta_dir) && !crate::safe_fs::is_under_git(e.path(), &root)
+        })
     {
         let entry = match entry {
             Ok(e) => e,

@@ -491,3 +491,35 @@ async fn vector_and_hybrid_search_with_provider_hit_without_panic() {
     assert!(!hits.is_empty(), "hybrid search returned no hits");
     assert_eq!(hits[0].path, "notes/a.md");
 }
+
+#[test]
+fn get_context_skips_git_dir() {
+    // Regression: memory_get_context used to only filter .anolisa/ and
+    // leaked .git/logs/HEAD (and other git internals) into the agent's
+    // context when git versioning was enabled. It must now exclude .git/
+    // the same way the index worker does, while still surfacing real notes.
+    let tmp = tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.global.user_id = "tester".into();
+    cfg.memory.paths.base_dir = tmp.path().to_string_lossy().into();
+    cfg.memory.session.base_dir = tmp.path().join("__sessions__").to_string_lossy().into();
+    cfg.memory.mount.strategy = agent_memory::mount::MountStrategyKind::Userland;
+    cfg.memory.git.enabled = true;
+    cfg.memory.git.auto_commit = true;
+    let svc = MemoryService::new(cfg).unwrap();
+
+    svc.write("note.md", "real note body", false).unwrap();
+    // Let git auto-commit land so .git/logs/HEAD exists on disk.
+    std::thread::sleep(Duration::from_millis(400));
+
+    let ctx = svc.memory_get_context(4096).unwrap();
+    assert!(
+        !ctx.contains("## .git/"),
+        "context leaks git internals:\n{ctx}"
+    );
+    assert!(!ctx.contains("logs/HEAD"), "context leaks git log:\n{ctx}");
+    assert!(
+        ctx.contains("note.md"),
+        "real note missing from context:\n{ctx}"
+    );
+}

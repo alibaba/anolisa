@@ -150,6 +150,19 @@ pub fn exists(root: BorrowedFd<'_>, rel: &Path) -> bool {
     metadata(root, rel).is_ok()
 }
 
+/// Reject paths under a `.git/` directory at the mount root. Git internal
+/// files (HEAD, refs, COMMIT_EDITMSG, logs/) are OS-managed, not user
+/// memory, and must be excluded from indexing and context assembly just
+/// like the `.anolisa/` meta dir. Shared by the index worker and
+/// `memory_get_context` so the reserved-path set stays consistent.
+pub fn is_under_git(path: &Path, root: &Path) -> bool {
+    path.strip_prefix(root)
+        .ok()
+        .and_then(|rel| rel.components().next())
+        .map(|c| c.as_os_str() == ".git")
+        .unwrap_or(false)
+}
+
 /// Probe a path to confirm no symlink lies anywhere on the resolution
 /// path. Used by `mkdir` / `remove` (which still go through `std::fs`
 /// because openat2 has no recursive-rm primitive) to short-circuit

@@ -422,18 +422,7 @@ fn is_under_meta(mount: &MountPointLite, path: &Path) -> bool {
     // Canonicalize before comparing so .anolisa/ events don't leak into
     // the index just because of a path-form mismatch.
     let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    canon.starts_with(&mount.meta_dir) || is_under_git(&canon, &mount.root)
-}
-
-/// Reject paths under .git/ — git internal files (HEAD, refs, COMMIT_EDITMSG)
-/// are not user memory content and pollute the FTS index when auto_commit
-/// triggers hundreds of inotify events per commit.
-fn is_under_git(path: &Path, root: &Path) -> bool {
-    path.strip_prefix(root)
-        .ok()
-        .and_then(|rel| rel.components().next())
-        .map(|c| c.as_os_str() == ".git")
-        .unwrap_or(false)
+    canon.starts_with(&mount.meta_dir) || crate::safe_fs::is_under_git(&canon, &mount.root)
 }
 
 fn relative(mount: &MountPointLite, path: &Path) -> Option<String> {
