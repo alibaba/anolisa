@@ -14,9 +14,9 @@ use crate::error::Result;
 pub struct DaemonConfig {
     #[serde(default)]
     pub daemon: DaemonSection,
-    /// Backend name → binary path mapping (e.g. `firecracker = "/usr/bin/firecracker"`).
     #[serde(default)]
     pub listen: ListenSection,
+    /// Backend name → binary path mapping (e.g. `firecracker = "/usr/bin/firecracker"`).
     #[serde(default)]
     pub backends: HashMap<String, PathBuf>,
     #[serde(default)]

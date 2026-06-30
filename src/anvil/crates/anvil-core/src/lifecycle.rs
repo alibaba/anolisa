@@ -152,7 +152,7 @@ impl SandboxInstance {
 fn is_valid_transition(from: SandboxState, to: SandboxState) -> bool {
     use SandboxState::{Checkpointed, Creating, Destroyed, Paused, Pending, Reset, Running, Warm};
     if to == Destroyed {
-                // `* → destroyed` is always valid (terminal sink).
+        // `* → destroyed` is always valid (terminal sink).
         return from != Destroyed;
     }
     match (from, to) {

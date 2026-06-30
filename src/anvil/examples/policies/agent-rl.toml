@@ -36,8 +36,8 @@ workload_class = "agent-rl"
 # Ordered list of backends to try. Daemon picks the first one whose binary
 # is available (configured in [backends] of config.toml).
 # Options: firecracker, gvisor, gvisor-substrate, rund, kata-fc, kata-clh,
-#          kata-qemu, runc, linux-sandbox, landlock.
-backend_priority = ["firecracker", "linux-sandbox"]
+#          kata-qemu, runc, bubblewrap.
+backend_priority = ["firecracker", "bubblewrap"]
 
 # Kernel hooks to activate for this workload class.
 # Available hooks (Phase 2+): "mm-template", "uffd-wp".

@@ -6,7 +6,7 @@ Per-host sandbox daemon that manages sandbox instance lifecycles via HTTP API.
 
 Anvil is an API-only daemon that allocates, monitors, and destroys
 sandboxed execution environments on a single host. It supports multiple backends
-(Firecracker microVM, linux-sandbox/bwrap) with policy-driven selection, and is
+(Firecracker microVM, bubblewrap/bwrap) with policy-driven selection, and is
 designed to be called by upper-layer platforms such as Substrate or E2B-style
 orchestrators.
 
@@ -19,7 +19,7 @@ orchestrators.
 - **Template registry** — in-memory template tracking with idle eviction
 - **Kernel hook registry** — state tracking for pre/post hooks
 - **Prometheus metrics** — request counts, instance gauges, pool sizes
-- **Spawners** — FirecrackerSpawner, LinuxSandboxSpawner, MockSpawner
+- **Spawners** — FirecrackerSpawner, BubblewrapSpawner, MockSpawner
 
 ## Quick Start
 

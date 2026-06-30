@@ -32,8 +32,8 @@ workload_class = "agent-tool"
 [select]
 # Ordered list of backends to try. Daemon picks the first available.
 # Options: firecracker, gvisor, gvisor-substrate, rund, kata-fc, kata-clh,
-#          kata-qemu, runc, linux-sandbox, landlock.
-backend_priority = ["firecracker", "linux-sandbox"]
+#          kata-qemu, runc, bubblewrap.
+backend_priority = ["firecracker", "bubblewrap"]
 
 # Kernel hooks to activate. Empty means none.  Default: [].
 kernel_hooks = []

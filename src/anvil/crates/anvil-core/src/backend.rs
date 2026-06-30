@@ -21,8 +21,7 @@ pub enum BackendKind {
     KataClh,
     KataQemu,
     Runc,
-    LinuxSandbox,
-    Landlock,
+    Bubblewrap,
 }
 
 impl BackendKind {
@@ -37,8 +36,7 @@ impl BackendKind {
             BackendKind::KataClh => "kata-clh",
             BackendKind::KataQemu => "kata-qemu",
             BackendKind::Runc => "runc",
-            BackendKind::LinuxSandbox => "linux-sandbox",
-            BackendKind::Landlock => "landlock",
+            BackendKind::Bubblewrap => "bubblewrap",
         }
     }
 }
@@ -62,8 +60,7 @@ impl FromStr for BackendKind {
             "kata-clh" => Ok(BackendKind::KataClh),
             "kata-qemu" => Ok(BackendKind::KataQemu),
             "runc" => Ok(BackendKind::Runc),
-            "linux-sandbox" => Ok(BackendKind::LinuxSandbox),
-            "landlock" => Ok(BackendKind::Landlock),
+            "bubblewrap" => Ok(BackendKind::Bubblewrap),
             other => Err(AnvilError::PolicyEvalError {
                 reason: format!("unknown backend kind: {other}"),
             }),
@@ -125,8 +122,7 @@ mod tests {
             BackendKind::KataClh,
             BackendKind::KataQemu,
             BackendKind::Runc,
-            BackendKind::LinuxSandbox,
-            BackendKind::Landlock,
+            BackendKind::Bubblewrap,
         ] {
             let s = kind.as_str();
             let parsed: BackendKind = s.parse().expect("round-trip");
@@ -136,7 +132,11 @@ mod tests {
 
     #[test]
     fn select_picks_first_available() {
-        let priority = vec![BackendKind::Firecracker, BackendKind::Gvisor, BackendKind::LinuxSandbox];
+        let priority = vec![
+            BackendKind::Firecracker,
+            BackendKind::Gvisor,
+            BackendKind::Bubblewrap,
+        ];
         let available = vec![
             BackendStatus {
                 kind: BackendKind::Firecracker,
@@ -149,7 +149,7 @@ mod tests {
                 version: Some("20260601".into()),
             },
             BackendStatus {
-                kind: BackendKind::LinuxSandbox,
+                kind: BackendKind::Bubblewrap,
                 available: true,
                 version: None,
             },

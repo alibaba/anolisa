@@ -20,7 +20,9 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use crate::api;
 use crate::error::{AnvilDaemonError, Result};
-use crate::spawner::{BackendSpawner, DynSpawner, LinuxSandboxSpawner, MockSpawner};
+use crate::spawner::{
+    BackendSpawner, BubblewrapSpawner, DynSpawner, FirecrackerSpawner, MockSpawner,
+};
 use crate::state::ServerState;
 
 /// Boot the daemon: load config + policies, prepare state directories,
@@ -53,9 +55,9 @@ pub async fn run(config_path: &Path) -> Result<()> {
 
     // Optional TCP listener for remote platform API
     let tcp_listener = if !http_addr.is_empty() {
-        let tcp = TcpListener::bind(&http_addr).await.map_err(|e| {
-            AnvilDaemonError::Internal(format!("bind TCP {http_addr}: {e}"))
-        })?;
+        let tcp = TcpListener::bind(&http_addr)
+            .await
+            .map_err(|e| AnvilDaemonError::Internal(format!("bind TCP {http_addr}: {e}")))?;
         tracing::info!(addr = %http_addr, "anvil HTTP API listening");
         Some(tcp)
     } else {
@@ -74,51 +76,74 @@ fn ensure_dirs(cfg: &DaemonConfig) -> Result<()> {
     Ok(())
 }
 
-/// Build the [`BackendSpawner`] used by API handlers. Probes the
-/// `linux-sandbox` backend path declared in `[backends]`; uses
-/// the real spawner when the binary exists, otherwise warns and falls
-/// back to the mock implementation so the daemon stays functional on
-/// macOS dev hosts and in CI without a real backend.
+/// Build the [`BackendSpawner`] used by API handlers. Probes
+/// `[backends]` for known backends in priority order:
+///   1. `firecracker` → [`FirecrackerSpawner`]
+///   2. `bubblewrap` → [`BubblewrapSpawner`]
+///   3. fallback → [`MockSpawner`]
 async fn build_spawner(cfg: &DaemonConfig) -> DynSpawner {
-    let shim = cfg
-        .backends
-        .get(BackendKind::LinuxSandbox.as_str())
-        .cloned();
-    match shim {
-        Some(path) => {
-            let probe = LinuxSandboxSpawner;
-            match probe.probe(&path).await {
-                Ok(true) => {
-                    tracing::info!(
-                        binary = %path.display(),
-                        "data plane: using LinuxSandboxSpawner",
-                    );
-                    Arc::new(LinuxSandboxSpawner)
-                }
-                Ok(false) => {
-                    tracing::warn!(
-                        binary = %path.display(),
-                        "linux-sandbox binary missing, falling back to MockSpawner",
-                    );
-                    Arc::new(MockSpawner)
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        ?err,
-                        binary = %path.display(),
-                        "linux-sandbox probe failed, falling back to MockSpawner",
-                    );
-                    Arc::new(MockSpawner)
-                }
+    // --- Firecracker --------------------------------------------------------
+    if let Some(fc_path) = cfg.backends.get(BackendKind::Firecracker.as_str()).cloned() {
+        let fc = FirecrackerSpawner {
+            images_dir: cfg.storage.images_dir.clone(),
+        };
+        match fc.probe(&fc_path).await {
+            Ok(true) => {
+                tracing::info!(
+                    binary = %fc_path.display(),
+                    images_dir = %cfg.storage.images_dir.display(),
+                    "data plane: using FirecrackerSpawner",
+                );
+                return Arc::new(fc);
+            }
+            Ok(false) => {
+                tracing::warn!(
+                    binary = %fc_path.display(),
+                    "firecracker binary probe failed, trying next backend",
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    binary = %fc_path.display(),
+                    "firecracker probe error, trying next backend",
+                );
             }
         }
-        None => {
-            tracing::warn!(
-                "no [backends].linux-sandbox configured, using MockSpawner (data plane is simulated)",
-            );
-            Arc::new(MockSpawner)
+    }
+
+    // --- Bubblewrap (bwrap) --------------------------------------------------
+    if let Some(path) = cfg.backends.get(BackendKind::Bubblewrap.as_str()).cloned() {
+        let probe = BubblewrapSpawner;
+        match probe.probe(&path).await {
+            Ok(true) => {
+                tracing::info!(
+                    binary = %path.display(),
+                    "data plane: using BubblewrapSpawner",
+                );
+                return Arc::new(BubblewrapSpawner);
+            }
+            Ok(false) => {
+                tracing::warn!(
+                    binary = %path.display(),
+                    "bubblewrap binary missing, falling back to MockSpawner",
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    binary = %path.display(),
+                    "bubblewrap probe failed, falling back to MockSpawner",
+                );
+            }
         }
     }
+
+    // --- Fallback: MockSpawner -----------------------------------------------
+    tracing::warn!(
+        "no usable backend found in [backends], using MockSpawner (data plane is simulated)",
+    );
+    Arc::new(MockSpawner)
 }
 
 fn load_policy_engine(cfg: &DaemonConfig) -> Result<PolicyEngine> {
@@ -206,10 +231,7 @@ where
             let state = state.clone();
             async move { api::handle(req, state).await }
         });
-        if let Err(err) = http1::Builder::new()
-            .serve_connection(io, svc)
-            .await
-        {
+        if let Err(err) = http1::Builder::new().serve_connection(io, svc).await {
             tracing::debug!(?err, "connection closed with error");
         }
         let _: Option<Full<Bytes>> = None;

@@ -43,9 +43,9 @@ http_addr = ""
 [backends]
 # Supported backend names (kebab-case):
 #   firecracker, gvisor, gvisor-substrate, rund, kata-fc, kata-clh,
-#   kata-qemu, runc, linux-sandbox, landlock.
+#   kata-qemu, runc, bubblewrap.
 firecracker = "/usr/bin/firecracker"
-linux-sandbox = "/usr/bin/anolisa-linux-sandbox"
+bubblewrap = "/usr/bin/bwrap"
 # Phase 2+ backends (uncomment when spawner implementations land):
 # gvisor = "/usr/bin/runsc"
 # rund = "/usr/bin/rund"

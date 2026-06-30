@@ -4,15 +4,15 @@
 //! The data-plane lifecycle of a sandbox process is hidden behind the
 //! [`BackendSpawner`] trait so that:
 //!
-//! - [`LinuxSandboxSpawner`] drives a real `linux-sandbox` binary on
-//!   Linux production hosts (via [`tokio::process::Command`]).
+//! - [`BubblewrapSpawner`] drives `bwrap` (bubblewrap) on Linux
+//!   production hosts (via [`tokio::process::Command`]).
 //! - [`MockSpawner`] simulates the same lifecycle on macOS dev machines
 //!   or whenever the backend binary is missing — keeping the daemon
 //!   functional for API/integration tests without a real backend.
 //!
 //! Selection happens at daemon boot in `daemon::build_spawner`: when
-//! `[backends].linux-sandbox` points at an existing path we
-//! pick [`LinuxSandboxSpawner`]; otherwise we warn and fall back to
+//! `[backends].bubblewrap` points at an existing path we
+//! pick [`BubblewrapSpawner`]; otherwise we warn and fall back to
 //! `MockSpawner`. The `wait()` method and the `backend` field on
 //! [`SpawnHandle`] are part of the v0.1 contract but only consumed
 //! by the v0.2 supervisor — they are intentionally allowed to be
@@ -52,7 +52,7 @@ pub struct SpawnResult {
 }
 
 /// Backend Spawner trait — uniform process-management surface for every
-/// backend. v0.1 implementations: [`LinuxSandboxSpawner`] and
+/// backend. v0.1 implementations: [`BubblewrapSpawner`] and
 /// [`MockSpawner`].
 #[async_trait]
 pub trait BackendSpawner: Send + Sync {
@@ -80,20 +80,16 @@ pub trait BackendSpawner: Send + Sync {
 pub type DynSpawner = Arc<dyn BackendSpawner>;
 
 // ---------------------------------------------------------------------------
-// LinuxSandboxSpawner
+// BubblewrapSpawner
 // ---------------------------------------------------------------------------
 
 /// Production spawner: invokes `bwrap` (bubblewrap) directly with a
 /// minimal namespace-isolation profile. v0.1 only fires-and-forgets the
 /// child; `wait()` is a placeholder until the supervisor lands in v0.2.
-///
-/// The OCI bundle interface (`linux-sandbox run --bundle <dir>`) is
-/// deferred — bwrap gives us a real, runnable isolation primitive on
-/// any modern Linux host without needing a custom shim binary.
-pub struct LinuxSandboxSpawner;
+pub struct BubblewrapSpawner;
 
 #[async_trait]
-impl BackendSpawner for LinuxSandboxSpawner {
+impl BackendSpawner for BubblewrapSpawner {
     async fn spawn(
         &self,
         instance: &SandboxInstance,
@@ -144,7 +140,7 @@ impl BackendSpawner for LinuxSandboxSpawner {
         );
         Ok(SpawnHandle {
             pid,
-            backend: BackendKind::LinuxSandbox,
+            backend: BackendKind::Bubblewrap,
             instance_id: instance.id,
         })
     }
@@ -154,7 +150,7 @@ impl BackendSpawner for LinuxSandboxSpawner {
         // drives `wait()` lands in v0.2 (TODO).
         tracing::debug!(
             instance_id = %handle.instance_id,
-            "linux-sandbox wait (v0.1 placeholder, returns 0)",
+            "bubblewrap wait (v0.1 placeholder, returns 0)",
         );
         Ok(SpawnResult {
             instance_id: handle.instance_id,
@@ -180,7 +176,7 @@ impl BackendSpawner for LinuxSandboxSpawner {
             instance_id = %handle.instance_id,
             pid,
             success = status.success(),
-            "sent SIGTERM to linux-sandbox",
+            "sent SIGTERM to bubblewrap sandbox",
         );
         Ok(())
     }
@@ -232,8 +228,7 @@ impl BackendSpawner for FirecrackerSpawner {
 
         // Create per-instance runtime directory
         let instance_dir = work_dir.join(instance.id.to_string());
-        std::fs::create_dir_all(&instance_dir)
-            .map_err(|source| AnvilError::IoError { source })?;
+        std::fs::create_dir_all(&instance_dir).map_err(|source| AnvilError::IoError { source })?;
 
         let api_socket = instance_dir.join("api.sock");
         let log_file = instance_dir.join("firecracker.log");
@@ -257,8 +252,11 @@ impl BackendSpawner for FirecrackerSpawner {
         });
 
         let config_path = instance_dir.join("vmconfig.json");
-        std::fs::write(&config_path, serde_json::to_string_pretty(&vmconfig).unwrap())
-            .map_err(|source| AnvilError::IoError { source })?;
+        std::fs::write(
+            &config_path,
+            serde_json::to_string_pretty(&vmconfig).unwrap(),
+        )
+        .map_err(|source| AnvilError::IoError { source })?;
 
         // Spawn firecracker process
         let child = tokio::process::Command::new(binary_path)
@@ -413,14 +411,14 @@ mod tests {
     #[tokio::test]
     async fn mock_spawner_lifecycle() {
         let spawner = MockSpawner;
-        let instance = fixture_instance(BackendKind::LinuxSandbox);
+        let instance = fixture_instance(BackendKind::Bubblewrap);
         let handle = spawner
             .spawn(&instance, &PathBuf::from("/fake"), &PathBuf::from("/tmp"))
             .await
             .expect("mock spawn never fails");
         assert!(handle.pid.is_none(), "mock must not produce real PIDs");
         assert_eq!(handle.instance_id, instance.id);
-        assert_eq!(handle.backend, BackendKind::LinuxSandbox);
+        assert_eq!(handle.backend, BackendKind::Bubblewrap);
 
         let result = spawner.wait(&handle).await.expect("mock wait");
         assert_eq!(result.exit_code, Some(0));
@@ -436,21 +434,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn linux_sandbox_probe_missing_binary() {
-        let spawner = LinuxSandboxSpawner;
+    async fn bubblewrap_probe_missing_binary() {
+        let spawner = BubblewrapSpawner;
         let exists = spawner
-            .probe(&PathBuf::from("/nonexistent/anolisa-linux-sandbox"))
+            .probe(&PathBuf::from("/nonexistent/bwrap"))
             .await
             .expect("probe never errors on missing path");
         assert!(!exists);
     }
 
     #[tokio::test]
-    async fn linux_sandbox_kill_with_no_pid_is_noop() {
-        let spawner = LinuxSandboxSpawner;
+    async fn bubblewrap_kill_with_no_pid_is_noop() {
+        let spawner = BubblewrapSpawner;
         let handle = SpawnHandle {
             pid: None,
-            backend: BackendKind::LinuxSandbox,
+            backend: BackendKind::Bubblewrap,
             instance_id: Uuid::new_v4(),
         };
         // Should be a clean no-op rather than an io error.
