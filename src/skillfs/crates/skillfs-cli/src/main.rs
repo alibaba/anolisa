@@ -2131,7 +2131,6 @@ async fn cmd_validate(
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!(source = %source.display(), "validating skills");
 
-    // Validate source directory
     if !source.exists() {
         return Err(format!("Source directory does not exist: {}", source.display()).into());
     }
@@ -2139,30 +2138,63 @@ async fn cmd_validate(
         return Err(format!("Source is not a directory: {}", source.display()).into());
     }
 
-    // Load skills
     let mut store = SkillStore::new();
     let config = ParseConfig::default();
-    let errors = store.load_from_directory(&source, &config);
+    let load_errors = store.load_from_directory(&source, &config);
 
-    // Output results
+    let mut success: usize = 0;
+    let mut degraded: usize = 0;
+    let mut parse_error_count: usize = 0;
+
+    let names = store.list();
+    for name in &names {
+        if let Some(entry) = store.get(name) {
+            match &entry.parse_status {
+                skillfs_core::ParseStatus::Ok => success += 1,
+                skillfs_core::ParseStatus::Degraded(_) => degraded += 1,
+                skillfs_core::ParseStatus::Error(_) => parse_error_count += 1,
+            }
+        }
+    }
+
+    let failed = parse_error_count + load_errors.len();
+    let total = success + degraded + failed;
+
     match format {
         OutputFormat::Text => {
-            println!("Validated {} skills from {}", store.len(), source.display());
+            println!("Validated {} skills from {}", total, source.display());
 
-            if errors.is_empty() {
+            if failed == 0 && degraded == 0 {
                 println!("✓ All skills loaded successfully");
             } else {
-                println!("✗ {} skills failed to load:", errors.len());
-                for err in &errors {
-                    println!("  - {}: {}", err.path.display(), err.error);
+                if failed > 0 {
+                    println!("✗ {} skill(s) failed:", failed);
+                    for err in &load_errors {
+                        println!("  - {}: {}", err.path.display(), err.error);
+                    }
+                    for name in &names {
+                        if let Some(entry) = store.get(name) {
+                            if entry.parse_status.is_error() {
+                                println!("  - {}: {}", name, entry.parse_status.message());
+                            }
+                        }
+                    }
+                }
+                if degraded > 0 {
+                    println!("⚠ {} skill(s) degraded:", degraded);
+                    for name in &names {
+                        if let Some(entry) = store.get(name) {
+                            if entry.parse_status.is_degraded() {
+                                println!("  - {}: {}", name, entry.parse_status.message());
+                            }
+                        }
+                    }
                 }
             }
 
-            // Show skill summary
             if !store.is_empty() {
                 println!("\nSkills:");
-                let names = store.list();
-                for name in names {
+                for name in &names {
                     if let Some(entry) = store.get(name) {
                         let status = match &entry.parse_status {
                             skillfs_core::ParseStatus::Ok => "✓",
@@ -2190,17 +2222,49 @@ async fn cmd_validate(
             }
         }
         OutputFormat::Json => {
-            let result = serde_json::json!({
-                "total": store.len() + errors.len(),
-                "success": store.len(),
-                "failed": errors.len(),
-                "errors": errors.iter().map(|e| {
+            let mut error_entries: Vec<serde_json::Value> = load_errors
+                .iter()
+                .map(|e| {
                     serde_json::json!({
                         "path": e.path.to_string_lossy().to_string(),
-                        "error": e.error
+                        "status": "load_error",
+                        "message": e.error
                     })
-                }).collect::<Vec<_>>(),
-                "skills": store.list().iter().map(|name| {
+                })
+                .collect();
+            for name in &names {
+                if let Some(entry) = store.get(name) {
+                    if entry.parse_status.is_error() {
+                        error_entries.push(serde_json::json!({
+                            "name": name,
+                            "status": "error",
+                            "message": entry.parse_status.message()
+                        }));
+                    }
+                }
+            }
+
+            let mut warning_entries: Vec<serde_json::Value> = Vec::new();
+            for name in &names {
+                if let Some(entry) = store.get(name) {
+                    if entry.parse_status.is_degraded() {
+                        warning_entries.push(serde_json::json!({
+                            "name": name,
+                            "status": "degraded",
+                            "message": entry.parse_status.message()
+                        }));
+                    }
+                }
+            }
+
+            let result = serde_json::json!({
+                "total": total,
+                "success": success,
+                "degraded": degraded,
+                "failed": failed,
+                "errors": error_entries,
+                "warnings": warning_entries,
+                "skills": names.iter().map(|name| {
                     if let Some(entry) = store.get(name) {
                         serde_json::json!({
                             "name": name,
@@ -2217,8 +2281,7 @@ async fn cmd_validate(
         }
     }
 
-    // Exit with error code if there were failures
-    if !errors.is_empty() {
+    if failed > 0 {
         std::process::exit(1);
     }
 
