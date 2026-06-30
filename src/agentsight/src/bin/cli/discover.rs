@@ -16,6 +16,10 @@ pub struct DiscoverCommand {
     /// List all known agents without scanning
     #[structopt(long)]
     pub list_known: bool,
+
+    /// Output as JSON
+    #[structopt(long)]
+    pub json: bool,
 }
 
 impl DiscoverCommand {
@@ -31,22 +35,27 @@ impl DiscoverCommand {
     /// List all known agents that can be detected
     fn list_known_agents(&self) {
         let rules = agentsight::default_cmdline_rules();
+        let infos: Vec<_> = rules
+            .iter()
+            .filter_map(CmdlineGlobMatcher::from_config)
+            .map(|m| m.info().clone())
+            .collect();
+
+        if self.json {
+            println!("{}", serde_json::to_string_pretty(&infos).unwrap());
+            return;
+        }
+
         let scanner = AgentScanner::from_rules(&rules, &[]);
         let count = scanner.matcher_count();
-
         println!("Known AI Agents ({count} total):");
         println!("{}", "=".repeat(60));
         println!();
 
-        // Use CmdlineGlobMatcher to list agent info
-        for matcher in agentsight::default_cmdline_rules()
-            .iter()
-            .filter_map(CmdlineGlobMatcher::from_config)
-        {
-            let agent = matcher.info();
-            println!("  {} ({})", agent.name, agent.category);
-            println!("    Process names: {}", agent.process_names.join(", "));
-            println!("    {}", agent.description);
+        for info in &infos {
+            println!("  {} ({})", info.name, info.category);
+            println!("    Process names: {}", info.process_names.join(", "));
+            println!("    {}", info.description);
             println!();
         }
     }
@@ -55,6 +64,11 @@ impl DiscoverCommand {
     fn scan_agents(&self) {
         let mut scanner = AgentScanner::from_rules(&agentsight::default_cmdline_rules(), &[]);
         let agents = scanner.scan();
+
+        if self.json {
+            println!("{}", serde_json::to_string_pretty(&agents).unwrap());
+            return;
+        }
 
         if agents.is_empty() {
             println!("No AI agents found running on this system.");
@@ -71,7 +85,6 @@ impl DiscoverCommand {
             println!("  {} [PID: {}]", agent.agent_info.name, agent.pid);
             println!("    Category: {}", agent.agent_info.category);
 
-            // Truncate long command lines
             let cmdline_str = agent.cmdline_args.join(" ");
             let cmdline = if cmdline_str.len() > 80 && !self.verbose {
                 format!("{}...", &cmdline_str[..77])
