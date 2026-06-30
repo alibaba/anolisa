@@ -124,7 +124,24 @@ install -m 0644 manifests/repo.toml %{buildroot}%{_sysconfdir}/anolisa/repo.toml
 #%%doc %%{_docdir}/%%{name}/README.md
 
 %changelog
-* Mon Jun 29 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Tue Jun 30 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Repository components.toml can now define component names, package aliases, and raw/RPM package mappings.
+- `anolisa list --installed` now filters installed components.
+- `anolisa list` and `install --all` now read components from components.toml instead of catalog.json.
+- `anolisa list` now shows NAME, SUMMARY, BACKENDS, and STATUS.
+- `anolisa list --enabled` is now a hidden alias for `--installed`.
+- ANOLISA_CATALOG_URL no longer changes list sources; configure repo.toml instead.
+- `anolisa install`, `status`, `adopt`, and `repair` now resolve RPM package aliases from components.toml.
+- `anolisa status` now suggests `sudo anolisa adopt <component>` for untracked RPM components.
+- `anolisa status <RPM package>` now reports the canonical component row when an alias is installed.
+- `anolisa repair <RPM package>` now refreshes the canonical component row when an alias is used.
+- Non-root `anolisa osbase` mutations now reach the system helper instead of failing install-mode checks.
+- Commands now reject root `--install-mode user` before writing ambiguous user-mode state.
+- System-mode write commands now fail before changes when sudo is missing.
+- Existing installs with managed symlinks no longer show false symlink integrity failures after upgrade.
+- `anolisa status` now reports `referent_mismatch` when managed symlinks point elsewhere.
+
+* Mon Jun 29 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.1.16-1
 - `anolisa osbase sandbox install runc` now installs runc, containerd, Docker, and Docker client.
 - `anolisa osbase sandbox install` now enables services declared by sandbox scenarios.
 - `anolisa osbase sandbox install` now runs scenario verification commands after installation.

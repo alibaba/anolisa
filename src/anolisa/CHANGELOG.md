@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.17] - 2026-06-30
+
+### Added
+
+- Repository `components.toml` can now define component names, package aliases, and raw/RPM package mappings.
+- `anolisa list --installed` now filters installed components.
+
+### Changed
+
+- `anolisa list` and `install --all` now read components from `components.toml` instead of `catalog.json`.
+- `anolisa list` now shows `NAME`, `SUMMARY`, `BACKENDS`, and `STATUS`.
+- `anolisa list --enabled` is now a hidden alias for `--installed`.
+- `ANOLISA_CATALOG_URL` no longer changes list sources; configure `repo.toml` instead.
+- `anolisa install`, `status`, `adopt`, and `repair` now resolve RPM package aliases from `components.toml`.
+- `anolisa status` now suggests `sudo anolisa adopt <component>` for untracked RPM components.
+
+### Fixed
+
+- `anolisa status <RPM package>` now reports the canonical component row when an alias is installed.
+- `anolisa repair <RPM package>` now refreshes the canonical component row when an alias is used.
+- Non-root `anolisa osbase` mutations now reach the system helper instead of failing install-mode checks.
+- Commands now reject root `--install-mode user` before writing ambiguous user-mode state.
+- System-mode write commands now fail before changes when sudo is missing.
+- Existing installs with managed symlinks no longer show false symlink integrity failures after upgrade.
+- `anolisa status` now reports `referent_mismatch` when managed symlinks point elsewhere.
+
 ## [0.1.16] - 2026-06-29
 
 ### Added
@@ -335,6 +361,32 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.1.17] - 2026-06-30
+
+### 新增
+
+- 仓库 `components.toml` 现可声明组件与包名映射。
+- `anolisa list --installed` 现过滤已安装组件。
+
+### 变更
+
+- `anolisa list` 和 `install --all` 现读取 `components.toml`。
+- `anolisa list` 现显示 NAME、SUMMARY、BACKENDS、STATUS。
+- `anolisa list --enabled` 现作为隐藏别名保留。
+- `ANOLISA_CATALOG_URL` 不再控制列表来源。
+- `install`、`status`、`adopt`、`repair` 现解析 RPM 包别名。
+- `anolisa status` 现提示用 `sudo anolisa adopt` 收编 RPM。
+
+### 修复
+
+- `status <RPM 包>` 现显示规范组件行。
+- `repair <RPM 包>` 现刷新规范组件行。
+- 非 root `osbase` 变更命令现可进入系统 helper。
+- root 用户模式现会在写入前被拒绝。
+- 缺少 sudo 的系统模式写入现提前失败。
+- 旧符号链接安装不再误报完整性失败。
+- `status` 现报告符号链接目标不匹配。
 
 ## [0.1.16] - 2026-06-29
 
