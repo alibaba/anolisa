@@ -124,7 +124,24 @@ install -m 0644 manifests/repo.toml %{buildroot}%{_sysconfdir}/anolisa/repo.toml
 #%%doc %%{_docdir}/%%{name}/README.md
 
 %changelog
-* Tue Jun 30 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Wed Jul 01 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- `anolisa install` now auto-installs missing system packages for raw components in system mode.
+- `anolisa install --dry-run` now labels unresolved dependencies as auto-install or manual.
+- `anolisa install` now reports packages auto-installed during raw component installs.
+- `anolisa status --verbose` now shows packages auto-installed for each component.
+- Commands that need repo access now download and validate `repo.toml` on first use.
+- Repo config dry-runs now fetch and validate without writing `repo.toml`.
+- RPM install and update now use only the `repo.toml` RPM repository.
+- User-mode raw installs now report missing dependencies with install commands before changing files.
+- Failed raw installs now list any auto-installed packages left on the system.
+- `anolisa update self` no longer fetches repo config before checking CLI updates.
+- `anolisa list --installed` now includes adopted RPM components.
+- `anolisa list` now shows adopted, failed, and disabled component statuses.
+- Adapter commands now prefer resources from the datadir that supplied the component contract.
+- RPM installs now fail before `dnf` when `[backends.rpm]` is missing.
+- RPM updates now explain missing `[backends.rpm]` instead of using host repositories.
+
+* Tue Jun 30 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.1.17-1
 - Repository components.toml can now define component names, package aliases, and raw/RPM package mappings.
 - `anolisa list --installed` now filters installed components.
 - `anolisa list` and `install --all` now read components from components.toml instead of catalog.json.

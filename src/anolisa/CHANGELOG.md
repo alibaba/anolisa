@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.18] - 2026-07-01
+
+### Added
+
+- `anolisa install` now auto-installs missing system packages for raw components in system mode.
+- `anolisa install --dry-run` now labels unresolved dependencies as auto-install or manual.
+- `anolisa install` now reports packages auto-installed during raw component installs.
+- `anolisa status --verbose` now shows packages auto-installed for each component.
+
+### Changed
+
+- Commands that need repo access now download and validate `repo.toml` on first use.
+- Repo config dry-runs now fetch and validate without writing `repo.toml`.
+- RPM install and update now use only the `repo.toml` RPM repository.
+- User-mode raw installs now report missing dependencies with install commands before changing files.
+- Failed raw installs now list any auto-installed packages left on the system.
+- `anolisa update self` no longer fetches repo config before checking CLI updates.
+
+### Fixed
+
+- `anolisa list --installed` now includes adopted RPM components.
+- `anolisa list` now shows adopted, failed, and disabled component statuses.
+- Adapter commands now prefer resources from the datadir that supplied the component contract.
+- RPM installs now fail before `dnf` when `[backends.rpm]` is missing.
+- RPM updates now explain missing `[backends.rpm]` instead of using host repositories.
+
 ## [0.1.17] - 2026-06-30
 
 ### Added
@@ -361,6 +387,32 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.1.18] - 2026-07-01
+
+### 新增
+
+- `anolisa install` 系统模式现自动安装缺失系统包。
+- `anolisa install --dry-run` 现标出依赖处理方式。
+- `anolisa install` 现显示自动安装的系统包。
+- `anolisa status --verbose` 现显示组件自动安装包。
+
+### 变更
+
+- 需要仓库的命令现首次使用会下载 `repo.toml`。
+- 仓库配置 dry-run 现只校验不写入。
+- RPM 安装和更新现只使用 `repo.toml` 源。
+- 用户模式 raw 安装现先提示缺失依赖。
+- raw 安装失败现提示已保留的自动安装包。
+- `anolisa update self` 不再预先获取仓库配置。
+
+### 修复
+
+- `anolisa list --installed` 现包含已收编 RPM。
+- `anolisa list` 现显示 adopted、failed、disabled 状态。
+- Adapter 命令现优先使用契约所在数据目录资源。
+- 缺少 `[backends.rpm]` 时 RPM 安装不再调用 `dnf`。
+- RPM 更新缺少 `[backends.rpm]` 时不再使用主机源。
 
 ## [0.1.17] - 2026-06-30
 
