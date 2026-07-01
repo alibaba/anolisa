@@ -56,6 +56,20 @@ _TRUSTED_CURRENT_STATUSES = {"pass", "warn", "deny"}
 _ALLOWING_DECISIONS = {"allow", "always_allow", "rollback"}
 _ROOT_COPY_EXCLUDED = {SKILL_META_DIR, ".git"}
 _DECISION_LOCK = "decision.lock"
+_FINDING_SUMMARY_LIMIT = 3
+_FINDING_TEXT_LIMIT = 160
+_FINDING_LEVEL_RANK = {
+    "deny": 0,
+    "critical": 0,
+    "high": 0,
+    "warn": 1,
+    "warning": 1,
+    "medium": 1,
+    "low": 1,
+    "pass": 2,
+    "info": 2,
+    "informational": 2,
+}
 logger = logging.getLogger(__name__)
 
 
@@ -236,16 +250,19 @@ def show_skill(
         root_matches_active=root_matches_active,
         policy=resolved_policy,
     )
-    warnings = [summary["message"]] if summary["message"] is not None else []
+    findings = status_result.get("findings", [])
+    display_message = _message_with_findings(summary, findings)
+    warnings = [display_message] if display_message is not None else []
     return {
         **summary,
+        "message": display_message,
         "skillName": Path(skill_dir).name,
         "activationPolicy": resolved_policy,
         "latest": _manifest_summary(latest_manifest, status_result),
         "active": _manifest_summary(active_manifest, None),
         "rootMatchesActive": root_matches_active,
         "consistencyReason": consistency_reason,
-        "findings": status_result.get("findings", []),
+        "findings": findings,
         "warnings": warnings,
     }
 
@@ -502,6 +519,128 @@ def _show_consistency_reason(
             f"{active_version or 'none'}"
         )
     return None
+
+
+def _message_with_findings(
+    summary: dict[str, Any],
+    findings: Any,
+) -> str | None:
+    message = summary.get("message")
+    if not isinstance(message, str) or not message:
+        return None
+
+    reason_code = summary.get("reasonCode")
+    if reason_code not in {
+        "latest_risk_fallback_to_previous",
+        "latest_risk_pending_decision",
+    }:
+        findings_summary = _summarize_findings(findings)
+        if findings_summary:
+            return f"{message} Latest findings: {findings_summary}."
+        return message
+
+    latest_version = _display_value(summary.get("latestVersionId"))
+    latest_status = _display_value(summary.get("latestStatus"), default="unknown")
+    active_version = summary.get("activeVersionId")
+    if isinstance(active_version, str) and active_version:
+        active_clause = f"current active version is {active_version}"
+        action_clause = (
+            "Review hidden latest with export --version latest, then decide: "
+            f"block, rollback --version {active_version}, or allow after review."
+        )
+    else:
+        active_clause = "no active safe version is exposed yet"
+        action_clause = (
+            "Review hidden latest with export --version latest, then decide: "
+            "block or allow after review."
+        )
+
+    parts = [
+        f"Latest version {latest_version} is {latest_status} and is not exposed; "
+        f"{active_clause}."
+    ]
+    findings_summary = _summarize_findings(findings)
+    if findings_summary:
+        parts.append(f"Latest findings: {findings_summary}.")
+    parts.append(action_clause)
+    return " ".join(parts)
+
+
+def _summarize_findings(findings: Any) -> str | None:
+    if not isinstance(findings, list):
+        return None
+    displayable = [finding for finding in findings if isinstance(finding, dict)]
+    if not displayable:
+        return None
+
+    ranked = sorted(
+        enumerate(displayable),
+        key=lambda item: (_finding_level_rank(item[1]), item[0]),
+    )
+    selected = [finding for _, finding in ranked[:_FINDING_SUMMARY_LIMIT]]
+    entries = [_format_finding_summary(finding) for finding in selected]
+    entries = [entry for entry in entries if entry]
+    if not entries:
+        return None
+    remaining = len(displayable) - len(selected)
+    if remaining > 0:
+        entries.append(f"+{remaining} more findings")
+    return "; ".join(entries)
+
+
+def _finding_level_rank(finding: dict[str, Any]) -> int:
+    level = _finding_field(finding, "level") or _finding_field(finding, "severity")
+    return _FINDING_LEVEL_RANK.get(level.lower(), 3) if level else 3
+
+
+def _format_finding_summary(finding: dict[str, Any]) -> str | None:
+    level = _finding_field(finding, "level") or _finding_field(finding, "severity")
+    if not level:
+        level = "unknown"
+    location = _finding_field(finding, "file") or _finding_field(finding, "path")
+    rule = (
+        _finding_field(finding, "rule")
+        or _finding_field(finding, "rule_id")
+        or _finding_field(finding, "title")
+    )
+    message = _finding_field(finding, "message") or _finding_field(
+        finding, "description"
+    )
+
+    prefix_parts = [f"[{level}]"]
+    if location:
+        prefix_parts.append(location)
+    if rule:
+        prefix_parts.append(rule)
+    text = " ".join(prefix_parts)
+    if message:
+        text = f"{text}: {message}"
+    return _truncate_finding_part(text)
+
+
+def _finding_field(finding: dict[str, Any], key: str) -> str | None:
+    value = finding.get(key)
+    if value is None:
+        metadata = finding.get("metadata")
+        if isinstance(metadata, dict):
+            value = metadata.get(key)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _truncate_finding_part(text: str) -> str:
+    if len(text) <= _FINDING_TEXT_LIMIT:
+        return text
+    return text[: _FINDING_TEXT_LIMIT - 3].rstrip() + "..."
+
+
+def _display_value(value: Any, *, default: str = "none") -> str:
+    if value is None:
+        return default
+    text = str(value).strip()
+    return text or default
 
 
 def _newest_trusted_decision(
