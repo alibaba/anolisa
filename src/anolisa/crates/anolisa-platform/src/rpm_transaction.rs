@@ -1,12 +1,13 @@
 //! RPM/DNF backend for [`PackageTransaction`].
 //!
-//! Runs `dnf <verb> -y <package>` (`install`/`update`/`remove`) through the
-//! injectable [`CommandRunner`] so the transaction can be tested with a fake
-//! runner instead of a live `dnf`. Only the spawn/exit classification lives
-//! here; privilege checks and state refresh stay in the CLI consumer.
+//! Runs `dnf` transactions (`install`/`update`/`remove`) through the injectable
+//! [`CommandRunner`] so the transaction can be tested with a fake runner
+//! instead of a live `dnf`. Only the spawn/exit classification lives here;
+//! privilege checks and state refresh stay in the CLI consumer.
 
 use crate::command::{CommandRunner, SystemCommandRunner};
 use crate::pkg_transaction::{PackageTransaction, PackageTransactionError};
+use crate::rpm_repo::DnfRepoSource;
 
 const DNF: &str = "dnf";
 
@@ -17,6 +18,7 @@ const DNF: &str = "dnf";
 /// production call sites parameter-free while staying zero-cost.
 pub struct RpmTransaction<R: CommandRunner = SystemCommandRunner> {
     runner: R,
+    repo: Option<DnfRepoSource>,
 }
 
 impl RpmTransaction<SystemCommandRunner> {
@@ -24,6 +26,15 @@ impl RpmTransaction<SystemCommandRunner> {
     pub fn system() -> Self {
         Self {
             runner: SystemCommandRunner,
+            repo: None,
+        }
+    }
+
+    /// Build a transaction that runs real `dnf` against an explicit repo.
+    pub fn system_with_repo(repo: DnfRepoSource) -> Self {
+        Self {
+            runner: SystemCommandRunner,
+            repo: Some(repo),
         }
     }
 }
@@ -31,10 +42,18 @@ impl RpmTransaction<SystemCommandRunner> {
 impl<R: CommandRunner> RpmTransaction<R> {
     /// Build a transaction backed by a custom runner (primarily for tests).
     pub fn with_runner(runner: R) -> Self {
-        Self { runner }
+        Self { runner, repo: None }
     }
 
-    /// Run `dnf <verb> -y <package>` and classify the outcome.
+    /// Build a transaction backed by a custom runner and explicit repo.
+    pub fn with_runner_and_repo(runner: R, repo: DnfRepoSource) -> Self {
+        Self {
+            runner,
+            repo: Some(repo),
+        }
+    }
+
+    /// Run a non-interactive `dnf` transaction and classify the outcome.
     ///
     /// Shared by [`install`](PackageTransaction::install),
     /// [`update`](PackageTransaction::update), and
@@ -44,9 +63,11 @@ impl<R: CommandRunner> RpmTransaction<R> {
     fn run_dnf(&self, verb: &str, package: &str) -> Result<(), PackageTransactionError> {
         // `-y` is required: ANOLISA orchestrates the lifecycle non-interactively,
         // so there is no TTY to answer dnf's confirmation prompt.
+        let args = self.dnf_args(verb, package);
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let out = self
             .runner
-            .run(DNF, &[verb, "-y", package])
+            .run(DNF, &arg_refs)
             .map_err(|e| map_spawn_error(e, DNF, verb))?;
 
         if out.code == Some(0) {
@@ -67,6 +88,18 @@ impl<R: CommandRunner> RpmTransaction<R> {
             code: out.code,
             stderr: detail,
         })
+    }
+
+    fn dnf_args(&self, verb: &str, package: &str) -> Vec<String> {
+        let Some(repo) = &self.repo else {
+            return vec![verb.to_string(), "-y".to_string(), package.to_string()];
+        };
+
+        let mut args = vec!["-y".to_string()];
+        repo.append_dnf_options(&mut args);
+        args.push(verb.to_string());
+        args.push(package.to_string());
+        args
     }
 }
 
@@ -125,6 +158,7 @@ mod tests {
         dnf: Option<FakeOutcome>,
         expected_verb: String,
         expected_package: String,
+        expected_args: Option<Vec<String>>,
     }
 
     impl CommandRunner for FakeCommandRunner {
@@ -133,15 +167,22 @@ mod tests {
             // verb, or misplaces the package argument must fail loudly rather
             // than pass on the canned output alone.
             assert_eq!(program, DNF, "transaction must shell out to dnf: {program}");
-            assert_eq!(
-                args,
-                [
-                    self.expected_verb.as_str(),
-                    "-y",
-                    self.expected_package.as_str()
-                ],
-                "dnf args drifted: {args:?}"
-            );
+            if let Some(expected_args) = &self.expected_args {
+                assert_eq!(
+                    args, expected_args,
+                    "dnf args drifted from configured repo contract: {args:?}"
+                );
+            } else {
+                assert_eq!(
+                    args,
+                    [
+                        self.expected_verb.as_str(),
+                        "-y",
+                        self.expected_package.as_str()
+                    ],
+                    "dnf args drifted: {args:?}"
+                );
+            }
             match &self.dnf {
                 Some(FakeOutcome::Ok(o)) => Ok(o.clone()),
                 Some(FakeOutcome::Err(kind)) => {
@@ -164,7 +205,29 @@ mod tests {
             dnf: Some(outcome),
             expected_verb: expected_verb.to_string(),
             expected_package: expected_package.to_string(),
+            expected_args: None,
         })
+    }
+
+    fn txn_with_repo(
+        expected_verb: &str,
+        expected_package: &str,
+        expected_args: &[&str],
+        outcome: FakeOutcome,
+    ) -> RpmTransaction<FakeCommandRunner> {
+        RpmTransaction::with_runner_and_repo(
+            FakeCommandRunner {
+                dnf: Some(outcome),
+                expected_verb: expected_verb.to_string(),
+                expected_package: expected_package.to_string(),
+                expected_args: Some(expected_args.iter().map(|s| s.to_string()).collect()),
+            },
+            DnfRepoSource::new(
+                "anolisa-configured",
+                "http://repo.example/alinux/4/agentic-os/x86_64/os",
+                Some(true),
+            ),
+        )
     }
 
     fn ok_out(code: Option<i32>, stdout: &str, stderr: &str) -> FakeOutcome {
@@ -190,6 +253,25 @@ mod tests {
         let t = txn(
             "install",
             "copilot-shell",
+            ok_out(Some(0), "Installed:\n  copilot-shell\n", ""),
+        );
+        t.install("copilot-shell").expect("install ok");
+    }
+
+    #[test]
+    fn install_with_repo_uses_configured_repo_only() {
+        let t = txn_with_repo(
+            "install",
+            "copilot-shell",
+            &[
+                "-y",
+                "--disablerepo=*",
+                "--repofrompath=anolisa-configured,http://repo.example/alinux/4/agentic-os/x86_64/os",
+                "--enablerepo=anolisa-configured",
+                "--setopt=anolisa-configured.gpgcheck=1",
+                "install",
+                "copilot-shell",
+            ],
             ok_out(Some(0), "Installed:\n  copilot-shell\n", ""),
         );
         t.install("copilot-shell").expect("install ok");

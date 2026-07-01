@@ -56,6 +56,7 @@ use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError};
 use anolisa_platform::pkg_transaction::{PackageTransaction, PackageTransactionError};
 use anolisa_platform::privilege;
 use anolisa_platform::rpm_query::RpmPackageQuery;
+use anolisa_platform::rpm_repo::DnfRepoSource;
 use anolisa_platform::rpm_transaction::RpmTransaction;
 use chrono::{SecondsFormat, Utc};
 
@@ -73,6 +74,7 @@ use crate::resolution::{
 use crate::response::{CliError, render_json, render_json_with_status};
 
 const COMMAND: &str = "install";
+const ANOLISA_RPM_REPO_ID: &str = "anolisa-configured";
 
 #[derive(Debug, Parser)]
 // `--version` here means the *component* version (the `cargo install`
@@ -409,31 +411,58 @@ fn handle_one(
     args: InstallArgs,
     ctx: &CliContext,
 ) -> Result<InstallOutcome, CliError> {
+    let layout = common::resolve_layout(ctx);
+    let env = anolisa_env::EnvService::detect();
+    let repo_config = RepoConfig::load(&layout).map_err(|err| repo_config_err(err, false))?;
+    let rpm_repo = if rpm_repo_required(&component, &args, ctx, &repo_config)? {
+        configured_rpm_repo_source(&repo_config, &env)?
+    } else {
+        None
+    };
+
     // Production uses the real rpm/dnf-backed query and transaction; tests
-    // inject fakes via `handle_one_with_exec`. Both constructors are
-    // side-effect-free (they only hold a command runner), so building them on
-    // the raw path costs nothing.
-    let query = RpmPackageQuery::system();
-    let txn = RpmTransaction::system();
+    // inject fakes via `handle_one_with_exec`. The real backends receive the
+    // repo.toml RPM source so availability probes and install transactions do
+    // not silently fall back to the host's enabled system repos.
+    let query = match rpm_repo.clone() {
+        Some(repo) => RpmPackageQuery::system_with_repo(repo),
+        None => RpmPackageQuery::system(),
+    };
+    let txn = match rpm_repo {
+        Some(repo) => RpmTransaction::system_with_repo(repo),
+        None => RpmTransaction::system(),
+    };
     let exec = RpmExec::new(&query, &txn, privilege::is_root());
-    handle_one_with_exec(component, args, ctx, &exec)
+    handle_one_with_config(component, args, ctx, &exec, layout, env, repo_config)
 }
 
 /// Core of [`handle_one`] with the RPM execution dependencies injected, so
 /// tests can drive the adopt and delegated-install paths without a live
 /// rpmdb/dnf or real privileges.
 // pub(crate): driven by the cross-command MVP lifecycle test (#963).
+#[cfg(test)]
 pub(crate) fn handle_one_with_exec(
     component: String,
     args: InstallArgs,
     ctx: &CliContext,
     exec: &RpmExec,
 ) -> Result<InstallOutcome, CliError> {
-    let command = format!("install {component}");
-
     let layout = common::resolve_layout(ctx);
     let env = anolisa_env::EnvService::detect();
     let repo_config = RepoConfig::load(&layout).map_err(|err| repo_config_err(err, false))?;
+    handle_one_with_config(component, args, ctx, exec, layout, env, repo_config)
+}
+
+fn handle_one_with_config(
+    component: String,
+    args: InstallArgs,
+    ctx: &CliContext,
+    exec: &RpmExec,
+    layout: FsLayout,
+    env: anolisa_env::EnvFacts,
+    repo_config: RepoConfig,
+) -> Result<InstallOutcome, CliError> {
+    let command = format!("install {component}");
     let installed = common::load_installed_state(ctx, COMMAND)?;
     let mut rpm_component_index: Option<ComponentIndex> = None;
 
@@ -526,6 +555,65 @@ pub(crate) fn handle_one_with_exec(
         &installed,
         &backend_name,
     )
+}
+
+fn configured_rpm_repo_source(
+    repo_config: &RepoConfig,
+    env: &anolisa_env::EnvFacts,
+) -> Result<Option<DnfRepoSource>, CliError> {
+    let Some(backend) = repo_config.backends.get("rpm") else {
+        return Ok(None);
+    };
+    let host = HostVars {
+        os: env.os.clone(),
+        arch: env.arch.clone(),
+    };
+    let base_url = repo_config
+        .resolved_base_url("rpm", backend, &host)
+        .map_err(|err| repo_config_err(err, true))?;
+    Ok(Some(DnfRepoSource::new(
+        ANOLISA_RPM_REPO_ID,
+        base_url,
+        backend.gpgcheck,
+    )))
+}
+
+fn require_configured_rpm_backend(repo_config: &RepoConfig, command: &str) -> Result<(), CliError> {
+    if repo_config.backends.contains_key("rpm") {
+        Ok(())
+    } else {
+        Err(repo_config_err(
+            RepoConfigError::BackendNotConfigured {
+                name: "rpm".to_string(),
+            },
+            true,
+        )
+        .with_command(command))
+    }
+}
+
+fn rpm_repo_required(
+    component: &str,
+    args: &InstallArgs,
+    ctx: &CliContext,
+    repo_config: &RepoConfig,
+) -> Result<bool, CliError> {
+    if args
+        .backend
+        .as_deref()
+        .map(RepoConfig::canonical_backend_name)
+        == Some("rpm")
+    {
+        return Ok(true);
+    }
+    if args.backend.is_none() && repo_config.default_backend == "rpm" {
+        return Ok(true);
+    }
+    let installed = common::load_installed_state(ctx, COMMAND)?;
+    Ok(installed
+        .find_object(ObjectKind::Component, component)
+        .and_then(installed_backend_label)
+        == Some("rpm"))
 }
 
 /// Existing raw-backend trunk: repo.toml → base_url → package → resolve →
@@ -937,6 +1025,7 @@ fn route_rpm_adopt(
             )
         }
         RpmSituation::Absent { target } => {
+            require_configured_rpm_backend(repo_config, command)?;
             if source == BackendSource::Explicit {
                 ensure_component_backend_compatible(installed, &target.component, "rpm", command)?;
             }
@@ -5901,6 +5990,33 @@ scope = "@anolisa"
         (tmp, ctx)
     }
 
+    /// System-mode ctx over a tempdir whose `repo.toml` keeps raw as the
+    /// default while also configuring an RPM backend for delegated installs.
+    fn system_ctx_with_configured_rpm_repo(dry_run: bool) -> (tempfile::TempDir, CliContext) {
+        let tmp = tempdir().expect("tmpdir");
+        let prefix = tmp.path().to_path_buf();
+        let layout = FsLayout::system(Some(prefix.clone()));
+        std::fs::create_dir_all(&layout.etc_dir).expect("etc dir");
+        std::fs::create_dir_all(&layout.state_dir).expect("state dir");
+        std::fs::write(
+            layout.etc_dir.join("repo.toml"),
+            r#"schema_version = 1
+default_backend = "raw"
+
+[backends.raw]
+base_url = "https://example.com/anolisa"
+
+[backends.rpm]
+base_url = "https://repo.example/anolisa"
+gpgcheck = false
+"#,
+        )
+        .expect("write repo.toml");
+        let mut ctx = ctx_with_prefix(false, Some(prefix));
+        ctx.dry_run = dry_run;
+        (tmp, ctx)
+    }
+
     fn load_state(ctx: &CliContext) -> InstalledState {
         let layout = common::resolve_layout(ctx);
         InstalledState::load(&layout.state_dir.join("installed.toml")).expect("load state")
@@ -5915,6 +6031,69 @@ scope = "@anolisa"
             "schema_version = 1\ndefault_backend = \"rpm\"\n[backends.rpm]\nbase_url = \"https://e/x\"\n[backends.rpm.package_map]\n{map}"
         ))
         .expect("parse repo")
+    }
+
+    fn linux_env() -> anolisa_env::EnvFacts {
+        anolisa_env::EnvFacts {
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+            libc: Some("glibc".to_string()),
+            kernel: Some("5.10.0".to_string()),
+            pkg_base: Some("alinux4".to_string()),
+            os_id: Some("alinux".to_string()),
+            os_version: Some("4".to_string()),
+            btf: Some(true),
+            cap_bpf: Some(true),
+            container: None,
+            user: "root".to_string(),
+            uid: 0,
+            home: PathBuf::from("/root"),
+        }
+    }
+
+    #[test]
+    fn configured_rpm_repo_source_uses_repo_toml_backend() {
+        let repo = RepoConfig::from_toml_str(
+            r#"schema_version = 1
+default_backend = "rpm"
+[vars]
+releasever = "4"
+[backends.rpm]
+base_url = "http://repo.example/alinux/$releasever/agentic-os/$basearch/os/"
+insecure = true
+gpgcheck = false
+"#,
+        )
+        .expect("parse repo");
+        let source = configured_rpm_repo_source(&repo, &linux_env())
+            .expect("resolve rpm repo")
+            .expect("rpm repo exists");
+        assert_eq!(source.id(), ANOLISA_RPM_REPO_ID);
+        assert_eq!(
+            source.base_url(),
+            "http://repo.example/alinux/4/agentic-os/x86_64/os"
+        );
+        assert_eq!(source.gpgcheck(), Some(false));
+    }
+
+    #[test]
+    fn raw_default_does_not_require_rpm_repo_resolution() {
+        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        let repo = RepoConfig::from_toml_str(
+            r#"schema_version = 1
+default_backend = "raw"
+[backends.raw]
+base_url = "https://example.com/anolisa"
+[backends.rpm]
+base_url = "https://repo.example/alinux/$releasever/agentic-os/$basearch/os/"
+"#,
+        )
+        .expect("parse repo without resolving rpm variables");
+        let a = args("copilot-shell");
+        assert!(
+            !rpm_repo_required("copilot-shell", &a, &ctx, &repo).expect("check requirement"),
+            "raw default with no rpm state must not resolve the rpm backend"
+        );
     }
 
     fn available_component_provider(component: &str, package: &str) -> (String, Vec<String>) {
@@ -6548,7 +6727,7 @@ scope = "@anolisa"
     /// the EVR is read back from rpmdb, and ownership/backend are rpm.
     #[test]
     fn delegated_install_writes_rpm_managed_state() {
-        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
         let fake = FakeInstaller::new(
             "copilot-shell",
             pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
@@ -6590,7 +6769,7 @@ scope = "@anolisa"
     /// runs and no state is written.
     #[test]
     fn delegated_install_non_root_is_refused() {
-        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
         let fake = FakeInstaller::new(
             "copilot-shell",
             pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
@@ -6624,7 +6803,7 @@ scope = "@anolisa"
     /// writing state — even for a non-root caller.
     #[test]
     fn delegated_install_dry_run_previews_without_txn_or_state() {
-        let (_tmp, ctx) = system_ctx_with_raw_repo(true);
+        let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(true);
         let fake = FakeInstaller::new(
             "copilot-shell",
             pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
@@ -6652,7 +6831,7 @@ scope = "@anolisa"
     /// A `dnf install` failure surfaces as EXECUTION_FAILED and writes no state.
     #[test]
     fn delegated_install_dnf_failure_surfaces() {
-        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
         let fake = FakeInstaller::new(
             "copilot-shell",
             pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
@@ -6680,6 +6859,42 @@ scope = "@anolisa"
                 .find_object(ObjectKind::Component, "copilot-shell")
                 .is_none(),
             "failed install must not write state"
+        );
+    }
+
+    #[test]
+    fn delegated_install_requires_configured_rpm_backend() {
+        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        let fake = FakeInstaller::new(
+            "copilot-shell",
+            pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+        );
+        let exec = RpmExec {
+            query: &fake,
+            txn: &fake,
+            is_root: true,
+        };
+        let mut a = args("copilot-shell");
+        a.backend = Some("rpm".to_string());
+
+        let err = handle_one_with_exec("copilot-shell".to_string(), a, &ctx, &exec)
+            .expect_err("missing rpm backend config must block dnf install");
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert!(
+            err.reason().contains("backend 'rpm' is not configured"),
+            "got: {}",
+            err.reason()
+        );
+        assert_eq!(
+            fake.install_calls.get(),
+            0,
+            "dnf must not run without a configured RPM source"
+        );
+        assert!(
+            load_state(&ctx)
+                .find_object(ObjectKind::Component, "copilot-shell")
+                .is_none(),
+            "refused install must not write state"
         );
     }
 
@@ -6929,7 +7144,7 @@ scope = "@anolisa"
     #[test]
     fn delegated_install_snapshots_datadir_contract() {
         let _env_guard = crate::packaged::DataDirEnvGuard::clear();
-        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
         let layout = common::resolve_layout(&ctx);
         let contract = component_manifest_toml("copilot-shell", "2.3.0", &["system"]);
         seed_datadir_contract(&layout, "copilot-shell", &contract);
@@ -6964,7 +7179,7 @@ scope = "@anolisa"
     #[test]
     fn delegated_install_without_datadir_contract_succeeds() {
         let _env_guard = crate::packaged::DataDirEnvGuard::clear();
-        let (_tmp, ctx) = system_ctx_with_raw_repo(false);
+        let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
         let layout = common::resolve_layout(&ctx);
         // No datadir contract seeded.
 

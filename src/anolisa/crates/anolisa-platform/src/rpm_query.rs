@@ -9,6 +9,7 @@
 
 use crate::command::{CommandOutput, CommandRunner, SystemCommandRunner};
 use crate::pkg_query::{PackageInfo, PackageQuery, PackageQueryError, PackageVersion};
+use crate::rpm_repo::DnfRepoSource;
 
 /// Pipe-delimited query format for `rpm -q` (installed packages).
 ///
@@ -46,6 +47,7 @@ const DNF: &str = "dnf";
 /// call sites in production code parameter-free while staying zero-cost.
 pub struct RpmPackageQuery<R: CommandRunner = SystemCommandRunner> {
     runner: R,
+    repo: Option<DnfRepoSource>,
 }
 
 impl RpmPackageQuery<SystemCommandRunner> {
@@ -53,6 +55,15 @@ impl RpmPackageQuery<SystemCommandRunner> {
     pub fn system() -> Self {
         Self {
             runner: SystemCommandRunner,
+            repo: None,
+        }
+    }
+
+    /// Build a query that runs real `rpm`/`dnf` against an explicit repo.
+    pub fn system_with_repo(repo: DnfRepoSource) -> Self {
+        Self {
+            runner: SystemCommandRunner,
+            repo: Some(repo),
         }
     }
 }
@@ -60,7 +71,15 @@ impl RpmPackageQuery<SystemCommandRunner> {
 impl<R: CommandRunner> RpmPackageQuery<R> {
     /// Build a query backed by a custom runner (primarily for tests).
     pub fn with_runner(runner: R) -> Self {
-        Self { runner }
+        Self { runner, repo: None }
+    }
+
+    /// Build a query backed by a custom runner and explicit repo.
+    pub fn with_runner_and_repo(runner: R, repo: DnfRepoSource) -> Self {
+        Self {
+            runner,
+            repo: Some(repo),
+        }
     }
 
     /// List the absolute file paths an installed package owns (`rpm -q --list`).
@@ -108,6 +127,21 @@ impl<R: CommandRunner> RpmPackageQuery<R> {
             .map(str::to_string)
             .collect())
     }
+
+    fn run_dnf(&self, args: &[&str]) -> std::io::Result<CommandOutput> {
+        let args = self.dnf_args(args);
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.runner.run(DNF, &arg_refs)
+    }
+
+    fn dnf_args(&self, command_args: &[&str]) -> Vec<String> {
+        let mut args = Vec::new();
+        if let Some(repo) = &self.repo {
+            repo.append_dnf_options(&mut args);
+        }
+        args.extend(command_args.iter().map(|arg| (*arg).to_string()));
+        args
+    }
 }
 
 impl<R: CommandRunner> PackageQuery for RpmPackageQuery<R> {
@@ -138,11 +172,7 @@ impl<R: CommandRunner> PackageQuery for RpmPackageQuery<R> {
 
     fn query_available(&self, package: &str) -> Result<Vec<PackageInfo>, PackageQueryError> {
         let out = self
-            .runner
-            .run(
-                DNF,
-                &["repoquery", "--quiet", "--qf", AVAILABLE_QF, package],
-            )
+            .run_dnf(&["repoquery", "--quiet", "--qf", AVAILABLE_QF, package])
             .map_err(|e| map_spawn_error(e, DNF))?;
 
         if out.code != Some(0) {
@@ -162,11 +192,7 @@ impl<R: CommandRunner> PackageQuery for RpmPackageQuery<R> {
 
     fn installed_origin(&self, package: &str) -> Result<Option<String>, PackageQueryError> {
         let out = self
-            .runner
-            .run(
-                DNF,
-                &["repoquery", "--installed", "--qf", REPONAME_QF, package],
-            )
+            .run_dnf(&["repoquery", "--installed", "--qf", REPONAME_QF, package])
             .map_err(|e| map_spawn_error(e, DNF))?;
 
         if out.code != Some(0) {
@@ -229,18 +255,14 @@ impl<R: CommandRunner> PackageQuery for RpmPackageQuery<R> {
 
     fn what_provides_available(&self, capability: &str) -> Result<Vec<String>, PackageQueryError> {
         let out = self
-            .runner
-            .run(
-                DNF,
-                &[
-                    "repoquery",
-                    "--quiet",
-                    "--qf",
-                    PROVIDES_NAME_QF,
-                    "--whatprovides",
-                    capability,
-                ],
-            )
+            .run_dnf(&[
+                "repoquery",
+                "--quiet",
+                "--qf",
+                PROVIDES_NAME_QF,
+                "--whatprovides",
+                capability,
+            ])
             .map_err(|e| map_spawn_error(e, DNF))?;
 
         if out.code != Some(0) {
@@ -283,8 +305,7 @@ impl<R: CommandRunner> PackageQuery for RpmPackageQuery<R> {
         package: &str,
     ) -> Result<Vec<String>, PackageQueryError> {
         let out = self
-            .runner
-            .run(DNF, &["repoquery", "--quiet", "--provides", package])
+            .run_dnf(&["repoquery", "--quiet", "--provides", package])
             .map_err(|e| map_spawn_error(e, DNF))?;
 
         if out.code != Some(0) {
@@ -442,11 +463,19 @@ mod tests {
         rpm: Option<FakeOutcome>,
         dnf: Option<FakeOutcome>,
         expected_package: String,
+        expected_args: Option<Vec<String>>,
     }
 
     impl CommandRunner for FakeCommandRunner {
         fn run(&self, program: &str, args: &[&str]) -> io::Result<CommandOutput> {
-            assert_call_contract(program, args, &self.expected_package);
+            if let Some(expected_args) = &self.expected_args {
+                assert_eq!(
+                    args, expected_args,
+                    "{program} args drifted from configured repo contract: {args:?}"
+                );
+            } else {
+                assert_call_contract(program, args, &self.expected_package);
+            }
             let outcome = match program {
                 RPM => self.rpm.as_ref(),
                 DNF => self.dnf.as_ref(),
@@ -619,6 +648,46 @@ mod tests {
         })
     }
 
+    #[test]
+    fn available_query_with_repo_uses_configured_repo_only() {
+        let q = RpmPackageQuery::with_runner_and_repo(
+            FakeCommandRunner {
+                rpm: None,
+                dnf: Some(ok_out(
+                    Some(0),
+                    "copilot-shell|0|2.3.0|1.al8|x86_64|anolisa-configured\n",
+                    "",
+                )),
+                expected_package: "copilot-shell".to_string(),
+                expected_args: Some(
+                    [
+                        "--disablerepo=*",
+                        "--repofrompath=anolisa-configured,http://repo.example/alinux/4/agentic-os/x86_64/os",
+                        "--enablerepo=anolisa-configured",
+                        "--setopt=anolisa-configured.gpgcheck=1",
+                        "repoquery",
+                        "--quiet",
+                        "--qf",
+                        AVAILABLE_QF,
+                        "copilot-shell",
+                    ]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+                ),
+            },
+            DnfRepoSource::new(
+                "anolisa-configured",
+                "http://repo.example/alinux/4/agentic-os/x86_64/os",
+                Some(true),
+            ),
+        );
+        let infos = q
+            .query_available("copilot-shell")
+            .expect("available query ok");
+        assert_eq!(infos[0].origin.as_deref(), Some("anolisa-configured"));
+    }
+
     fn query_with_rpm(
         expected_package: &str,
         outcome: FakeOutcome,
@@ -627,6 +696,7 @@ mod tests {
             rpm: Some(outcome),
             dnf: None,
             expected_package: expected_package.to_string(),
+            expected_args: None,
         })
     }
 
@@ -638,6 +708,7 @@ mod tests {
             rpm: None,
             dnf: Some(outcome),
             expected_package: expected_package.to_string(),
+            expected_args: None,
         })
     }
 

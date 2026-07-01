@@ -12,5 +12,6 @@ pub mod pkg_query;
 pub mod pkg_transaction;
 pub mod privilege;
 pub mod rpm_query;
+pub mod rpm_repo;
 pub mod rpm_transaction;
 pub mod systemd;
