@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..cli_runner import call_agent_sec_cli, trace_context
+from ..pii_text import extract_user_text, value_to_text
 from .base import AgentSecCoreCapability
 
 logger = logging.getLogger("agent-sec-core")
@@ -68,7 +69,7 @@ class PiiScanCapability(AgentSecCoreCapability):
         """Scan the current user input before the LLM turn starts."""
         self._cleanup_expired()
 
-        user_text = self._extract_user_text(messages, kwargs)
+        user_text = extract_user_text(messages, kwargs)
         if not user_text.strip():
             return None
 
@@ -291,55 +292,9 @@ class PiiScanCapability(AgentSecCoreCapability):
             f"[agent-sec-core] {self.id} {verdict.upper()} warning cached key={cache_key} source={source}"
         )
 
-    def _extract_user_text(self, messages, kwargs: dict[str, Any]) -> str:
-        """Extract only the current user input from Hermes hook payloads."""
-        for key in ("user_message", "user_input", "prompt"):
-            value = kwargs.get(key)
-            if isinstance(value, str) and value.strip():
-                return value
-
-        if not isinstance(messages, list):
-            return ""
-
-        for message in reversed(messages):
-            role = self._message_value(message, "role")
-            if role != "user":
-                continue
-            return self._content_to_text(self._message_value(message, "content"))
-        return ""
-
-    def _content_to_text(self, content) -> str:
-        """Convert common message content shapes to text."""
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            parts: list[str] = []
-            for item in content:
-                if isinstance(item, str):
-                    parts.append(item)
-                    continue
-                text = self._message_value(item, "text")
-                if isinstance(text, str):
-                    parts.append(text)
-            return "\n".join(parts)
-        return ""
-
     def _value_to_text(self, value: Any) -> str:
         """Convert arbitrary hook values into scan text."""
-        if value is None:
-            return ""
-        if isinstance(value, str):
-            return value
-        try:
-            return json.dumps(
-                value,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-                default=str,
-            )
-        except (TypeError, ValueError):
-            return str(value)
+        return value_to_text(value)
 
     def _cache_key(self, values: dict[str, Any]) -> str | None:
         """Return the best available Hermes turn/session correlation key."""
@@ -442,12 +397,6 @@ class PiiScanCapability(AgentSecCoreCapability):
         if len(normalized) <= limit:
             return normalized
         return normalized[: limit - 1] + "…"
-
-    def _message_value(self, message, key: str):
-        """Read a key from dict-like or object-like messages."""
-        if isinstance(message, dict):
-            return message.get(key)
-        return getattr(message, key, None)
 
     def _as_list(self, value) -> list[Any]:
         return value if isinstance(value, list) else []

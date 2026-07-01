@@ -50,8 +50,9 @@ Matching modes (highest priority first)
                             ``skill_dir``, obs stores the unresolved logical name;
                             the two live at different abstraction layers, so
                             fallback similarity matching would be misleading.
-      ``pii_scan``          Hash-only — ``sha256(obs.metrics.prompt) ==
-                            event.request.text_sha256``.
+      ``pii_scan``          Hash-only — ``sha256(obs prompt text)`` or
+                            ``obs.metrics.pii_scan_input_sha256`` equals
+                            ``event.request.text_sha256``.
       ``prompt_scan``       String similarity between obs
                             ``metrics.{prompt,user_input,text,input}`` and event
                             ``request.{text,prompt,user_input,input}``.
@@ -110,6 +111,10 @@ SUPPORTED_SECURITY_EVENT_CATEGORIES: dict[str, tuple[str, ...]] = {
     "before_tool_call": ("code_scan", "skill_ledger", "pii_scan"),
     "before_agent_run": ("prompt_scan", "pii_scan"),
     "after_tool_call": ("pii_scan",),
+}
+EXPECTED_PII_SOURCE_BY_HOOK: dict[str, str] = {
+    "before_tool_call": "tool_input",
+    "after_tool_call": "tool_output",
 }
 
 MatchReason = Literal["tool_call_id", "run_id", "field+time"]
@@ -395,12 +400,12 @@ def _candidate_match_rank(
             and not _missing(event.tool_call_id)
             and event.tool_call_id == record.tool_call_id
         ):
-            return 0
+            return _exact_match_rank(record, event)
         return None
 
     if match_reason == "run_id":
         if not _missing_run_id(event.run_id) and event.run_id == record.run_id:
-            return 0
+            return _exact_match_rank(record, event)
         return None
 
     if not _missing_run_id(record.run_id) and event.run_id != record.run_id:
@@ -411,6 +416,35 @@ def _candidate_match_rank(
     ):
         return None
     return _field_match_rank(record, event)
+
+
+def _exact_match_rank(
+    record: ObservabilityRecordFields,
+    event: SecurityEvent,
+) -> int | None:
+    if event.category != "pii_scan":
+        return 0
+    return _pii_exact_match_rank(record, event)
+
+
+def _pii_exact_match_rank(
+    record: ObservabilityRecordFields,
+    event: SecurityEvent,
+) -> int | None:
+    expected_source = EXPECTED_PII_SOURCE_BY_HOOK.get(record.hook)
+    if expected_source is None:
+        return 0
+
+    request = event.details.get("request")
+    if not isinstance(request, Mapping):
+        return None
+
+    source = request.get("source")
+    if isinstance(source, str) and source.strip():
+        return 0 if source == expected_source else None
+
+    record_values = _observability_match_values(record, event.category)
+    return _pii_hash_match_rank(record_values, event)
 
 
 def _has_tool_call_correlation(record: ObservabilityRecordFields) -> bool:
@@ -506,8 +540,14 @@ def _observability_match_values(
     if record.hook == "before_agent_run":
         return _strings_from_mapping(
             metrics,
-            ("prompt", "user_input", "text", "input"),
+            ("pii_scan_input_sha256", "prompt", "user_input", "text", "input"),
         )
+
+    if (
+        record.hook in {"before_tool_call", "after_tool_call"}
+        and category == "pii_scan"
+    ):
+        return _strings_from_mapping(metrics, ("pii_scan_input_sha256",))
 
     if record.hook != "before_tool_call":
         return []
@@ -593,10 +633,16 @@ def _pii_hash_match_rank(record_values: list[str], event: SecurityEvent) -> int 
         return None
 
     for value in record_values:
+        if _is_sha256_hex(value) and value == expected_hash:
+            return 0
         actual_hash = hashlib.sha256(value.encode("utf-8")).hexdigest()
         if actual_hash == expected_hash:
             return 0
     return None
+
+
+def _is_sha256_hex(value: str) -> bool:
+    return len(value) == 64 and all(char in "0123456789abcdef" for char in value)
 
 
 def _rank(correlation: CorrelatedSecurityEvent) -> tuple[int, float, float, str]:

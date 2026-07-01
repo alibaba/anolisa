@@ -1,4 +1,9 @@
 import type { SecurityCapability } from "../types.js";
+import {
+  afterToolCallPiiScanText,
+  inboundPiiScanText,
+  valueToText,
+} from "../helpers/pii-text.js";
 import { buildTraceContext, callAgentSecCli } from "../utils.js";
 
 const CLI_TIMEOUT_MS = 10_000;
@@ -95,25 +100,7 @@ function buildScanArgs(source: string, includeLowConfidence: boolean): string[] 
 }
 
 function getInboundText(event: any): string {
-  const content = typeof event?.content === "string" ? event.content : "";
-  if (content.trim()) {
-    return content;
-  }
-  return typeof event?.body === "string" ? event.body : "";
-}
-
-function valueToText(value: unknown): string {
-  if (value === undefined || value === null) {
-    return "";
-  }
-  if (typeof value === "string") {
-    return value;
-  }
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
+  return inboundPiiScanText(event);
 }
 
 function getModelOutputText(event: any): string {
@@ -134,11 +121,7 @@ function getModelOutputText(event: any): string {
 }
 
 function getToolOutputText(event: any): string {
-  const result = valueToText(event?.result);
-  if (result.trim()) {
-    return result;
-  }
-  return safeString(event?.error);
+  return afterToolCallPiiScanText(event);
 }
 
 async function scanPiiText(

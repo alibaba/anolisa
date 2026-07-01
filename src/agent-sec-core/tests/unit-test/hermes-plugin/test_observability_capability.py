@@ -13,6 +13,7 @@ sys.path.insert(0, str(_HERMES_PLUGIN_DIR))
 from src.capabilities import ALL_CAPABILITIES  # noqa: E402
 from src.capabilities.observability import ObservabilityCapability  # noqa: E402
 from src.cli_runner import CliResult  # noqa: E402
+from src.pii_text import text_sha256  # noqa: E402
 
 
 class InlineThread:
@@ -140,6 +141,7 @@ def test_pre_llm_call_accepts_positional_messages():
     assert payload["metrics"] == {
         "prompt": None,
         "user_input": None,
+        "pii_scan_input_sha256": text_sha256("hello"),
         "model_id": "gpt-test",
         "model_provider": None,
     }

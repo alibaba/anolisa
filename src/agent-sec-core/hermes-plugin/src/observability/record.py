@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..pii_text import extract_user_text, text_sha256, value_to_text
 from .helpers import non_empty_string, now_iso
 
 ZERO_RUN_ID = "00000000-0000-0000-0000-000000000000"
@@ -87,16 +88,22 @@ def _build_pre_llm_call(
     observed_at: str,
 ) -> dict[str, Any] | None:
     user_message = data.get("user_message")
+    pii_hash = _pii_scan_input_sha256(
+        extract_user_text(data.get("conversation_history"), data)
+    )
+    metrics = {
+        "prompt": user_message,
+        "user_input": user_message,
+        "model_id": data.get("model"),
+        "model_provider": data.get("platform"),
+    }
+    if pii_hash is not None:
+        metrics["pii_scan_input_sha256"] = pii_hash
     return _base_record(
         "before_agent_run",
         observed_at,
         _metadata(data),
-        {
-            "prompt": user_message,
-            "user_input": user_message,
-            "model_id": data.get("model"),
-            "model_provider": data.get("platform"),
-        },
+        metrics,
     )
 
 
@@ -138,14 +145,19 @@ def _build_pre_tool_call(
     data: dict[str, Any],
     observed_at: str,
 ) -> dict[str, Any] | None:
+    args = data.get("args")
+    metrics = {
+        "tool_name": data.get("tool_name"),
+        "parameters": args,
+    }
+    pii_hash = _pii_scan_input_sha256(args)
+    if pii_hash is not None:
+        metrics["pii_scan_input_sha256"] = pii_hash
     return _base_record(
         "before_tool_call",
         observed_at,
         _metadata(data, require_tool_call_id=True),
-        {
-            "tool_name": data.get("tool_name"),
-            "parameters": data.get("args"),
-        },
+        metrics,
     )
 
 
@@ -158,21 +170,32 @@ def _extract_exit_code(result: Any) -> Any:
     return None
 
 
+def _pii_scan_input_sha256(value: Any) -> str | None:
+    text = value_to_text(value)
+    if not text.strip():
+        return None
+    return text_sha256(text)
+
+
 def _build_post_tool_call(
     data: dict[str, Any],
     observed_at: str,
 ) -> dict[str, Any] | None:
     result = data.get("result")
+    metrics = {
+        "result": result,
+        "duration_ms": data.get("duration_ms"),
+        "exit_code": _extract_exit_code(result),
+        "error": data.get("error"),
+    }
+    pii_hash = _pii_scan_input_sha256(result)
+    if pii_hash is not None:
+        metrics["pii_scan_input_sha256"] = pii_hash
     return _base_record(
         "after_tool_call",
         observed_at,
         _metadata(data, require_tool_call_id=True),
-        {
-            "result": result,
-            "duration_ms": data.get("duration_ms"),
-            "exit_code": _extract_exit_code(result),
-            "error": data.get("error"),
-        },
+        metrics,
     )
 
 

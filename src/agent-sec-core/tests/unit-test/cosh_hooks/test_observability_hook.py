@@ -12,6 +12,7 @@ import pytest
 
 _COSH_EXTENSION_DIR = Path(__file__).resolve().parents[2] / ".." / "cosh-extension"
 _COSH_HOOK = _COSH_EXTENSION_DIR / "hooks" / "observability_hook.py"
+sys.path.insert(0, str(_COSH_HOOK.parent))
 
 
 def _load_observability_hook():
@@ -79,6 +80,9 @@ def test_user_prompt_submit_maps_prompt_and_uses_synthetic_run_id():
     assert record["metrics"] == {
         "prompt": "Summarize this repository.",
         "user_input": "Summarize this repository.",
+        "pii_scan_input_sha256": observability_hook.text_sha256(
+            "Summarize this repository."
+        ),
     }
     _assert_no_metrics(
         record,
@@ -206,6 +210,9 @@ def test_post_tool_use_maps_result_status_size_and_exit_code():
     assert record["metrics"] == {
         "result": tool_response,
         "status": "success",
+        "pii_scan_input_sha256": observability_hook.text_sha256(
+            observability_hook.value_to_text(tool_response)
+        ),
         "result_size_bytes": _json_size_bytes(tool_response),
         "exit_code": 0,
     }
@@ -236,6 +243,7 @@ def test_post_tool_use_failure_maps_error_and_interrupt_status(
     assert record["metrics"] == {
         "error": "sandbox denied",
         "status": expected_status,
+        "pii_scan_input_sha256": observability_hook.text_sha256("sandbox denied"),
     }
     _assert_no_metrics(record, {"duration_ms", "result_size_bytes"})
 

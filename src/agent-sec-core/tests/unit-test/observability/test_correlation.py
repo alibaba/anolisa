@@ -176,7 +176,11 @@ def test_after_tool_call_exact_mode_queries_pii_scan_category() -> None:
     reader = _FakeReader(
         [
             _Candidate(
-                _event(event_id="pii-tool-output", category="pii_scan"),
+                _event(
+                    event_id="pii-tool-output",
+                    category="pii_scan",
+                    details={"request": {"source": "tool_output"}},
+                ),
                 timestamp_epoch=101.0,
             ),
             _Candidate(
@@ -204,6 +208,102 @@ def test_after_tool_call_exact_mode_queries_pii_scan_category() -> None:
     assert [item.event.event_id for item in result] == ["pii-tool-output"]
     assert [item.match_reason for item in result] == ["tool_call_id"]
     assert [item.time_delta_seconds for item in result] == [1.0]
+
+
+def test_before_tool_call_exact_mode_ignores_tool_output_pii_scan() -> None:
+    reader = _FakeReader(
+        [
+            _Candidate(
+                _event(
+                    event_id="pii-tool-output",
+                    category="pii_scan",
+                    details={"request": {"source": "tool_output"}},
+                ),
+                timestamp_epoch=100.1,
+            ),
+            _Candidate(
+                _event(
+                    event_id="pii-tool-input",
+                    category="pii_scan",
+                    details={"request": {"source": "tool_input"}},
+                ),
+                timestamp_epoch=100.5,
+            ),
+        ]
+    )
+    service = SecurityCorrelationService(reader)
+
+    result = service.find_correlated(
+        _record(hook="before_tool_call", observed_at_epoch=100.0)
+    )
+
+    assert [item.event.event_id for item in result] == ["pii-tool-input"]
+
+
+def test_after_tool_call_exact_mode_ignores_tool_input_pii_scan() -> None:
+    reader = _FakeReader(
+        [
+            _Candidate(
+                _event(
+                    event_id="pii-tool-input",
+                    category="pii_scan",
+                    details={"request": {"source": "tool_input"}},
+                ),
+                timestamp_epoch=100.1,
+            ),
+            _Candidate(
+                _event(
+                    event_id="pii-tool-output",
+                    category="pii_scan",
+                    details={"request": {"source": "tool_output"}},
+                ),
+                timestamp_epoch=100.5,
+            ),
+        ]
+    )
+    service = SecurityCorrelationService(reader)
+
+    result = service.find_correlated(
+        _record(hook="after_tool_call", observed_at_epoch=100.0)
+    )
+
+    assert [item.event.event_id for item in result] == ["pii-tool-output"]
+
+
+def test_tool_call_exact_mode_falls_back_to_pii_hash_when_source_is_missing() -> None:
+    tool_input = '{"content":"用户邮箱 alice@example.com"}'
+    text_sha256 = hashlib.sha256(tool_input.encode("utf-8")).hexdigest()
+    reader = _FakeReader(
+        [
+            _Candidate(
+                _event(
+                    event_id="pii-wrong-hash",
+                    category="pii_scan",
+                    details={"request": {"text_sha256": "0" * 64}},
+                ),
+                timestamp_epoch=100.1,
+            ),
+            _Candidate(
+                _event(
+                    event_id="pii-matching-hash",
+                    category="pii_scan",
+                    details={"request": {"text_sha256": text_sha256}},
+                ),
+                timestamp_epoch=100.5,
+            ),
+        ]
+    )
+    service = SecurityCorrelationService(reader)
+
+    result = service.find_correlated(
+        _record(
+            hook="before_tool_call",
+            observed_at_epoch=100.0,
+            metrics={"pii_scan_input_sha256": text_sha256},
+        )
+    )
+
+    assert [item.event.event_id for item in result] == ["pii-matching-hash"]
 
 
 def test_batch_exact_mode_queries_tool_call_ids_once_without_changing_results() -> None:
@@ -600,6 +700,105 @@ def test_fallback_mode_matches_pii_scan_by_request_text_hash() -> None:
     )
 
     assert [item.event.event_id for item in result] == ["pii-hash"]
+    assert result[0].match_reason == "field+time"
+
+
+def test_before_agent_run_fallback_matches_pii_scan_by_input_hash() -> None:
+    prompt = "联系我 alice@example.com"
+    text_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    reader = _FakeReader(
+        [
+            _Candidate(
+                _event(
+                    event_id="before-agent-pii-hash",
+                    category="pii_scan",
+                    run_id=None,
+                    tool_call_id=None,
+                    details={"request": {"text_sha256": text_sha256}},
+                ),
+                timestamp_epoch=99.5,
+            ),
+        ]
+    )
+    service = SecurityCorrelationService(reader)
+
+    result = service.find_correlated(
+        _record(
+            hook="before_agent_run",
+            run_id=ZERO_RUN_ID,
+            tool_call_id=None,
+            observed_at_epoch=100.0,
+            metrics={"pii_scan_input_sha256": text_sha256},
+        )
+    )
+
+    assert [item.event.event_id for item in result] == ["before-agent-pii-hash"]
+    assert result[0].match_reason == "field+time"
+
+
+def test_after_tool_call_fallback_matches_pii_scan_by_input_hash() -> None:
+    tool_output = "用户邮箱 alice@example.com"
+    text_sha256 = hashlib.sha256(tool_output.encode("utf-8")).hexdigest()
+    reader = _FakeReader(
+        [
+            _Candidate(
+                _event(
+                    event_id="tool-output-pii",
+                    category="pii_scan",
+                    run_id=None,
+                    tool_call_id=None,
+                    details={"request": {"text_sha256": text_sha256}},
+                ),
+                timestamp_epoch=100.5,
+            )
+        ]
+    )
+    service = SecurityCorrelationService(reader)
+
+    result = service.find_correlated(
+        _record(
+            hook="after_tool_call",
+            run_id=ZERO_RUN_ID,
+            tool_call_id=None,
+            observed_at_epoch=100.0,
+            metrics={"pii_scan_input_sha256": text_sha256},
+        )
+    )
+
+    assert [item.event.event_id for item in result] == ["tool-output-pii"]
+    assert result[0].match_reason == "field+time"
+
+
+def test_before_tool_call_fallback_matches_pii_scan_by_input_hash() -> None:
+    tool_input = '{"content":"用户邮箱 alice@example.com"}'
+    text_sha256 = hashlib.sha256(tool_input.encode("utf-8")).hexdigest()
+    reader = _FakeReader(
+        [
+            _Candidate(
+                _event(
+                    event_id="tool-input-pii",
+                    category="pii_scan",
+                    run_id=None,
+                    tool_call_id="tool-1",
+                    details={"request": {"text_sha256": text_sha256}},
+                ),
+                timestamp_epoch=100.5,
+            )
+        ]
+    )
+    service = SecurityCorrelationService(reader)
+
+    result = service.find_correlated(
+        _record(
+            hook="before_tool_call",
+            run_id=ZERO_RUN_ID,
+            tool_call_id="tool-1",
+            observed_at_epoch=100.0,
+            metrics={"pii_scan_input_sha256": text_sha256},
+        )
+    )
+
+    assert [item.event.event_id for item in result] == ["tool-input-pii"]
     assert result[0].match_reason == "field+time"
 
 

@@ -97,6 +97,7 @@ class BeforeAgentRunMetrics(ObservabilityMetrics):
     prompt: Any = None
     system_prompt: Any = None
     user_input: Any = None
+    pii_scan_input_sha256: Any = None
     history_messages_count: Any = None
     images_count: Any = None
     context_window_utilization: Any = None
@@ -137,11 +138,13 @@ class AfterLlmCallMetrics(ObservabilityMetrics):
 class BeforeToolCallMetrics(ObservabilityMetrics):
     tool_name: Any = None
     parameters: Any = None
+    pii_scan_input_sha256: Any = None
 
 
 class AfterToolCallMetrics(ObservabilityMetrics):
     result: Any = None
     error: Any = None
+    pii_scan_input_sha256: Any = None
     duration_ms: Any = None
     status: Any = None
     exit_code: Any = None

@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import {
   buildOpenClawObservabilityRecord,
   observability,
@@ -33,6 +34,7 @@ const AGENT_SEC_METRIC_ALLOWLIST: Record<string, readonly string[]> = {
     "context_window_utilization",
     "model_id",
     "model_provider",
+    "pii_scan_input_sha256",
     "prompt",
     "system_prompt",
     "user_input",
@@ -66,7 +68,15 @@ const AGENT_SEC_METRIC_ALLOWLIST: Record<string, readonly string[]> = {
     "upstream_request_id_hash",
   ],
   before_tool_call: ["parameters", "tool_name"],
-  after_tool_call: ["duration_ms", "error", "exit_code", "result", "result_size_bytes", "status"],
+  after_tool_call: [
+    "duration_ms",
+    "error",
+    "exit_code",
+    "pii_scan_input_sha256",
+    "result",
+    "result_size_bytes",
+    "status",
+  ],
   after_agent_run: [
     "duration_ms",
     "error",
@@ -290,7 +300,11 @@ describe("observability", () => {
     assert.equal(payload.hook, "before_agent_run");
     assert.equal("callId" in payload.metadata, false);
     assert.equal(payload.metrics.prompt, "帮我创建testfolder，在里面创建a.txt");
-    assert.equal(payload.metrics.user_input, "帮我创建testfolder，在里面创建a.txt");
+    assert.equal(payload.metrics.user_input, undefined);
+    assert.equal(
+      payload.metrics.pii_scan_input_sha256,
+      createHash("sha256").update("帮我创建testfolder，在里面创建a.txt", "utf8").digest("hex"),
+    );
     assert.equal(payload.metrics.system_prompt, "System after prompt-build hooks");
     assert.equal(payload.metrics.history_messages_count, 22);
     assert.equal(payload.metrics.images_count, 1);
@@ -326,6 +340,7 @@ describe("observability", () => {
     assert.deepEqual(inputPayload.metrics, {
       model_id: "gpt-5.4",
       model_provider: "openai",
+      pii_scan_input_sha256: createHash("sha256").update("Original user input", "utf8").digest("hex"),
       prompt: "Effective LLM prompt",
       system_prompt: "System after prompt-build hooks",
       user_input: "Original user input",
@@ -516,10 +531,17 @@ describe("observability", () => {
     assert.deepEqual(payload.metrics.result, { content: "token=secret-value-1234567890" });
     assert.equal(payload.metrics.error, "failed with password=hunter2");
     assert.equal(payload.metrics.duration_ms, 50);
+    assert.equal(
+      payload.metrics.pii_scan_input_sha256,
+      createHash("sha256")
+        .update(JSON.stringify({ content: "token=secret-value-1234567890" }), "utf8")
+        .digest("hex"),
+    );
     assert.equal(typeof payload.metrics.result_size_bytes, "number");
     assert.deepEqual(Object.keys(payload.metrics).sort(), [
       "duration_ms",
       "error",
+      "pii_scan_input_sha256",
       "result",
       "result_size_bytes",
     ]);

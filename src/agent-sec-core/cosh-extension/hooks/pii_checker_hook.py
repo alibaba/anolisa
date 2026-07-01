@@ -15,6 +15,7 @@ import subprocess
 import sys
 from typing import Any
 
+from pii_text import value_to_text
 from trace_context import with_trace_context
 
 _USER_INPUT_SOURCE = "user_input"
@@ -36,16 +37,6 @@ def _as_list(value: Any) -> list[Any]:
 
 def _safe_text(value: Any) -> str:
     return value if isinstance(value, str) else ""
-
-
-def _json_dumps(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-        default=str,
-    )
 
 
 def _shorten(value: str, limit: int = _MAX_EVIDENCE_CHARS) -> str:
@@ -179,18 +170,12 @@ def _extract_scan_target(input_data: dict[str, Any]) -> tuple[str, str]:
     if event_name == "PreToolUse":
         if "tool_input" not in input_data:
             return "", _TOOL_INPUT_SOURCE
-        value = input_data.get("tool_input")
-        return (
-            value if isinstance(value, str) else _json_dumps(value)
-        ), _TOOL_INPUT_SOURCE
+        return value_to_text(input_data.get("tool_input")), _TOOL_INPUT_SOURCE
 
     if event_name == "PostToolUse":
         if "tool_response" not in input_data:
             return "", _TOOL_OUTPUT_SOURCE
-        value = input_data.get("tool_response")
-        return (
-            value if isinstance(value, str) else _json_dumps(value)
-        ), _TOOL_OUTPUT_SOURCE
+        return value_to_text(input_data.get("tool_response")), _TOOL_OUTPUT_SOURCE
 
     if event_name == "PostToolUseFailure":
         return _safe_text(input_data.get("error")), _TOOL_OUTPUT_SOURCE

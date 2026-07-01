@@ -12,6 +12,7 @@ sys.path.insert(0, str(_HERMES_PLUGIN_DIR))
 
 from agent_sec_cli.observability import schema  # noqa: E402
 from src.observability.record import ZERO_RUN_ID, build_record  # noqa: E402
+from src.pii_text import text_sha256, value_to_text  # noqa: E402
 
 
 def _assert_schema_valid(record: dict) -> None:
@@ -40,10 +41,33 @@ def test_pre_llm_call_builds_before_agent_record_from_current_input_only():
     assert record["metrics"] == {
         "prompt": "hello",
         "user_input": "hello",
+        "pii_scan_input_sha256": text_sha256("hello"),
         "model_id": "gpt-test",
         "model_provider": "hermes",
     }
     assert "history_messages_count" not in record["metrics"]
+    _assert_schema_valid(record)
+
+
+def test_pre_llm_call_hashes_history_without_changing_prompt_fields():
+    record = build_record(
+        "pre_llm_call",
+        {
+            "session_id": "session-1",
+            "conversation_history": [
+                {"role": "user", "content": "old request"},
+                {"role": "assistant", "content": "old response"},
+                {"role": "user", "content": [{"type": "text", "text": "latest input"}]},
+            ],
+            "model": "gpt-test",
+            "platform": "hermes",
+        },
+        observed_at="2026-05-18T00:00:00Z",
+    )
+
+    assert record["metrics"]["prompt"] is None
+    assert record["metrics"]["user_input"] is None
+    assert record["metrics"]["pii_scan_input_sha256"] == text_sha256("latest input")
     _assert_schema_valid(record)
 
 
@@ -126,6 +150,7 @@ def test_pre_tool_call_requires_current_tool_call_id():
     assert record["metrics"] == {
         "tool_name": "terminal",
         "parameters": {"command": "ls"},
+        "pii_scan_input_sha256": text_sha256(value_to_text({"command": "ls"})),
     }
     _assert_schema_valid(record)
 
@@ -165,6 +190,9 @@ def test_post_tool_call_builds_after_tool_record_without_result_size_stats():
         "duration_ms": 5,
         "exit_code": 0,
         "error": None,
+        "pii_scan_input_sha256": text_sha256(
+            value_to_text({"stdout": "ok", "exit_code": 0})
+        ),
     }
     assert "result_size_bytes" not in record["metrics"]
     assert "status" not in record["metrics"]

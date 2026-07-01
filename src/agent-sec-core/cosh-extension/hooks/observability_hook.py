@@ -15,6 +15,9 @@ import sys
 from datetime import datetime, timezone
 from typing import Any
 
+from pii_text import json_dumps as _json_dumps
+from pii_text import text_sha256, value_to_text
+
 _CLI_TIMEOUT_SECONDS = 3
 _OBSERVABILITY_COMMAND = [
     "agent-sec-cli",
@@ -53,22 +56,19 @@ def _noop() -> str:
     return json.dumps({})
 
 
-def _json_dumps(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-        default=str,
-    )
-
-
 def _json_loads(value: str) -> Any:
     return json.loads(value)
 
 
 def _json_size_bytes(value: Any) -> int:
     return len(_json_dumps(value).encode("utf-8"))
+
+
+def _pii_scan_input_sha256(value: Any) -> str | None:
+    text = value_to_text(value)
+    if not text.strip():
+        return None
+    return text_sha256(text)
 
 
 def _now_iso() -> str:
@@ -275,8 +275,12 @@ def _redact_observability_record(record: dict[str, Any]) -> dict[str, Any]:
 def _build_user_prompt_submit(input_data: dict[str, Any]) -> dict[str, Any] | None:
     metrics: dict[str, Any] = {}
     if "prompt" in input_data:
-        metrics["prompt"] = input_data["prompt"]
-        metrics["user_input"] = input_data["prompt"]
+        prompt = input_data["prompt"]
+        metrics["prompt"] = prompt
+        metrics["user_input"] = prompt
+        pii_hash = _pii_scan_input_sha256(prompt) if isinstance(prompt, str) else None
+        if pii_hash is not None:
+            metrics["pii_scan_input_sha256"] = pii_hash
     return _base_record(input_data, hook="before_agent_run", metrics=metrics)
 
 
@@ -342,6 +346,9 @@ def _build_post_tool_use(input_data: dict[str, Any]) -> dict[str, Any] | None:
     if "tool_response" in input_data:
         tool_response = input_data["tool_response"]
         metrics["result"] = tool_response
+        pii_hash = _pii_scan_input_sha256(tool_response)
+        if pii_hash is not None:
+            metrics["pii_scan_input_sha256"] = pii_hash
         metrics["result_size_bytes"] = _json_size_bytes(tool_response)
         if isinstance(tool_response, dict):
             if "exit_code" in tool_response:
@@ -362,6 +369,9 @@ def _build_post_tool_use_failure(input_data: dict[str, Any]) -> dict[str, Any] |
     }
     if "error" in input_data:
         metrics["error"] = input_data["error"]
+        pii_hash = _pii_scan_input_sha256(input_data["error"])
+        if pii_hash is not None:
+            metrics["pii_scan_input_sha256"] = pii_hash
     return _base_record(
         input_data,
         hook="after_tool_call",

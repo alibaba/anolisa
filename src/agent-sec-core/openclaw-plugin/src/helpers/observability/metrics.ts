@@ -1,6 +1,11 @@
 import type { ObservabilityHookName } from "./schema.js";
 import type { UnknownRecord } from "./types.js";
 import {
+  afterToolCallPiiScanText,
+  inboundPiiScanText,
+  piiScanInputSha256,
+} from "../pii-text.js";
+import {
   asRecord,
   compactRecord,
   countHistoryMessages,
@@ -54,7 +59,8 @@ function buildLlmInputMetrics(event: unknown, ctx: unknown): UnknownRecord {
   return compactRecord({
     prompt,
     system_prompt: systemPrompt,
-    user_input: userInput ?? prompt,
+    user_input: userInput,
+    pii_scan_input_sha256: piiScanInputSha256(inboundPiiScanText(event)),
     history_messages_count:
       getNumber(record, "historyMessagesCount") ??
       getNumber(record, "history_messages_count") ??
@@ -174,6 +180,7 @@ function buildAfterToolCallMetrics(event: unknown): UnknownRecord {
   return compactRecord({
     result: record?.result,
     error,
+    pii_scan_input_sha256: piiScanInputSha256(afterToolCallPiiScanText(event)),
     duration_ms:
       getNumber(record, "durationMs") ??
       getNumber(record, "duration_ms") ??

@@ -138,6 +138,7 @@ def test_before_agent_run_accepts_input_context_metrics():
         "prompt": [{"role": "user", "content": "Summarize ./README.md"}],
         "system_prompt": "You are a concise assistant.",
         "user_input": "Summarize ./README.md",
+        "pii_scan_input_sha256": "b" * 64,
         "history_messages_count": 3,
         "images_count": 1,
         "context_window_utilization": 0.25,
@@ -316,10 +317,26 @@ def test_tool_call_records_dump_tool_call_id():
     assert record.to_record()["metadata"]["toolCallId"] == "tool-call-1"
 
 
+def test_before_tool_call_accepts_pii_input_hash_metric():
+    metrics = {
+        "tool_name": "write_file",
+        "parameters": {"path": "note.txt"},
+        "pii_scan_input_sha256": "c" * 64,
+    }
+
+    record = validate_observability_record(
+        _payload(hook="before_tool_call", metrics=metrics)
+    )
+
+    assert record.to_record()["metadata"]["toolCallId"] == "tool-call-1"
+    assert record.to_record()["metrics"] == metrics
+
+
 def test_after_tool_call_accepts_query_friendly_result_metrics():
     metrics = {
         "result": {"ok": True},
         "error": "command failed",
+        "pii_scan_input_sha256": "a" * 64,
         "duration_ms": 123,
         "status": "error",
         "exit_code": 1,

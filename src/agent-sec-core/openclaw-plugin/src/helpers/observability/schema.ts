@@ -36,6 +36,7 @@ export const AGENT_SEC_METRIC_ALLOWLIST: Record<AgentSecObservabilityHookName, r
     "prompt",
     "system_prompt",
     "user_input",
+    "pii_scan_input_sha256",
     "history_messages_count",
     "images_count",
     "context_window_utilization",
@@ -77,6 +78,7 @@ export const AGENT_SEC_METRIC_ALLOWLIST: Record<AgentSecObservabilityHookName, r
   after_tool_call: [
     "result",
     "error",
+    "pii_scan_input_sha256",
     "duration_ms",
     "status",
     "exit_code",

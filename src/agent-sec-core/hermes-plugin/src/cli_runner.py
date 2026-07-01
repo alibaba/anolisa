@@ -7,6 +7,8 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any
 
+from .pii_text import json_dumps as _json_dumps
+
 _OBSERVABILITY_SENSITIVE_KEYS = {
     "prompt",
     "user_input",
@@ -82,16 +84,6 @@ def trace_context(data: dict[str, Any]) -> dict[str, str]:
                 context[output_key] = value.strip()
                 break
     return context
-
-
-def _json_dumps(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-        default=str,
-    )
 
 
 def _redact_text_for_observability(text: str, timeout: float) -> str | None:
