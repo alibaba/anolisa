@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ANOLISA — Agent Endpoint</title>
+<meta name="description" content="Machine-readable entry point for AI agents interacting with ANOLISA.">
+<style>
+body{font-family:monospace;background:#0a0a0a;color:#d4d4d4;max-width:80ch;margin:2em auto;padding:0 1em;line-height:1.6}
+a{color:#18ba9e}
+h1,h2{color:#e8eeed;border-bottom:1px solid #222;padding-bottom:0.3em}
+pre{background:#111;padding:1em;overflow-x:auto;border:1px solid #222}
+hr{border:none;border-top:1px solid #222;margin:2em 0}
+</style>
+</head>
+<body>
+<h1>ANOLISA — Agent Endpoint</h1>
+
+<p>This page is designed for AI agents. Minimal markup, structured content, no decoration.</p>
+
+<h2>Project</h2>
+<pre>
+Name:    ANOLISA
+Tagline: Agentic OS — server-side operating layer for AI agent workloads
+Version: 0.1.17
+License: Apache-2.0
+Source:  https://github.com/alibaba/anolisa
+</pre>
+
+<h2>Install</h2>
+<pre>curl -fsSL https://agentic-os.sh/install.sh | bash</pre>
+
+<h2>Quick Start</h2>
+<pre>
+anolisa install tokenless        # install a component
+anolisa --json status            # check status (JSON output)
+anolisa doctor                   # diagnose issues
+anolisa adapter scan             # discover adapters
+</pre>
+
+<h2>Agent-Recommended Flags</h2>
+<pre>
+--json       Machine-readable JSON envelope output
+--dry-run    Preview plan without executing
+--quiet      Suppress non-error output
+--no-color   Disable ANSI color codes
+</pre>
+
+<hr>
+
+<h2>Documentation Index</h2>
+<ul>
+<li><a href="cli-reference.txt">cli-reference.txt</a> — Full CLI command reference</li>
+<li><a href="changelog.txt">changelog.txt</a> — Structured changelog (Keep a Changelog format)</li>
+</ul>
+
+<hr>
+<p>Source: <a href="https://github.com/alibaba/anolisa">github.com/alibaba/anolisa</a></p>
+</body>
+</html>

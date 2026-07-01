@@ -156,6 +156,31 @@ h1 span{color:var(--accent-light)}
 }
 .copy-toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 
+/* ── agent prompt bar ── */
+.agent-bar{margin-top:28px;max-width:540px}
+.agent-label{
+  font-family:var(--mono);font-size:0.6875rem;color:var(--text-3);
+  letter-spacing:0.04em;margin-bottom:8px;display:flex;align-items:center;gap:6px;
+}
+.agent-label::before{content:'>';color:var(--accent-light);font-weight:600}
+.agent-prompt{
+  display:flex;align-items:center;gap:10px;position:relative;
+}
+.agent-prompt-cmd{
+  flex:1;min-width:0;display:flex;align-items:center;
+  background:rgba(0,0,0,0.5);border:1px solid var(--border);
+  border-radius:8px;padding:12px 16px;cursor:pointer;
+  border-left:3px solid var(--accent-dim);
+  transition:border-color .15s,background .15s;
+}
+.agent-prompt-cmd:hover{background:rgba(10,110,92,0.04);border-color:var(--border-hover)}
+.agent-prompt-cmd code{
+  flex:1;min-width:0;font-family:var(--mono);font-size:0.75rem;
+  color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  user-select:all;-webkit-user-select:all;
+}
+.agent-prompt-cmd code .hl{color:var(--accent-light);font-weight:500}
+
 /* ── scroll cue ── */
 .scroll-cue{
   margin-top:64px;padding-bottom:32px;
@@ -464,6 +489,20 @@ h1 span{color:var(--accent-light)}
         <svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
       </button>
       <div class="copy-toast" id="copy-toast">Copied to clipboard</div>
+    </div>
+
+    <div class="agent-bar">
+      <div class="agent-label">TALK TO YOUR AGENT</div>
+      <div class="agent-prompt">
+        <div class="agent-prompt-cmd" id="agent-block" tabindex="0" role="button" aria-label="Copy agent prompt">
+          <code>Read <span class="hl">https://agentic-os.sh/agents/</span> to learn how to use ANOLISA, then help me set it up.</code>
+        </div>
+        <button class="copy-btn" id="agent-copy-btn" type="button" aria-label="Copy">
+          <svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          <svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </button>
+        <div class="copy-toast" id="agent-toast">Copied to clipboard</div>
+      </div>
     </div>
 
     <div class="scroll-cue" id="scroll-cue" role="button" tabindex="0" aria-label="Scroll to capabilities">
@@ -2380,6 +2419,22 @@ async function doCopy(){
 btn.addEventListener('click',e=>{e.stopPropagation();doCopy()});
 block.addEventListener('click',doCopy);
 block.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();doCopy()}});
+
+const AGENT_PROMPT='Read https://agentic-os.sh/agents/ to learn how to use ANOLISA, then help me set it up.';
+const agentBtn=document.getElementById('agent-copy-btn');
+const agentBlock=document.getElementById('agent-block');
+const agentToast=document.getElementById('agent-toast');
+let agentToastTimer;
+async function doAgentCopy(){
+  try{navigator.clipboard?.writeText?await navigator.clipboard.writeText(AGENT_PROMPT):fallbackCopy(AGENT_PROMPT)}catch(_){fallbackCopy(AGENT_PROMPT)}
+  agentBtn.classList.add('copied');
+  agentToast.classList.add('show');
+  clearTimeout(agentToastTimer);
+  agentToastTimer=setTimeout(()=>{agentBtn.classList.remove('copied');agentToast.classList.remove('show')},1600);
+}
+agentBtn.addEventListener('click',e=>{e.stopPropagation();doAgentCopy()});
+agentBlock.addEventListener('click',doAgentCopy);
+agentBlock.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();doAgentCopy()}});
 
 document.getElementById('scroll-cue').addEventListener('click',()=>scrollToSection(capabilities));
 document.getElementById('scroll-cue').addEventListener('keydown',e=>{

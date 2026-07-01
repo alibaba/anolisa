@@ -5,3 +5,5 @@
 !install.sh
 !scripts/
 !scripts/sync-site-changelog.mjs
+!agents/
+!agents/**

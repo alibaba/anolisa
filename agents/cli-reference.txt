@@ -1,0 +1,210 @@
+# ANOLISA CLI Quick Reference
+# Source: https://github.com/alibaba/anolisa (main branch, v0.1.17)
+# Binary: anolisa | Crate: anolisa-cli | Workspace: src/anolisa
+
+anolisa is the ANOLISA command-line management tool for component
+install, status, diagnostics, logs, updates, adapters, OS base, and
+system-helper management. Top-level about: "ANOLISA — Agentic OS helper".
+
+## Basic Format
+
+    anolisa [global-options] <command> [args]
+
+Global options:
+
+    --install-mode user|system   Install scope; root defaults to system,
+                                 non-root defaults to user
+    --prefix PATH                Custom install prefix (system mode only)
+    --json                       Machine-readable JSON envelope output
+    --dry-run                    Print plan without executing
+    -v, --verbose                More detail
+    -q, --quiet                  Suppress non-error output
+    --no-color                   Disable ANSI colors
+
+--install-mode is inferred from effective UID when omitted: root = system,
+non-root = user. User mode uses ~/.local; system mode defaults to /usr/local
+and can be overridden with --prefix.
+
+## Agent-Recommended Invocation
+
+Prefer --json and --dry-run:
+
+    anolisa --json env
+    anolisa --json list
+    anolisa --json status
+    anolisa --json status tokenless
+    anolisa --json --dry-run install tokenless
+    anolisa --json doctor tokenless
+    anolisa --json logs tokenless --severity warn --limit 20
+
+Dry-run before write operations:
+
+    anolisa --json --dry-run install tokenless
+    anolisa --json --dry-run update tokenless
+    anolisa --json --dry-run uninstall tokenless
+
+System-mode writes typically need sudo:
+
+    sudo anolisa --json install tokenless
+    sudo anolisa --json repair cosh
+    sudo anolisa system setup
+
+Most JSON output uses a unified envelope:
+
+    {
+      "ok": true|false,
+      "schema_version": 1,
+      "command": "...",
+      "data": { ... },
+      "warnings": [],
+      "error": null | { "code": "...", "reason": "...", "hint": "..." }
+    }
+
+Note: some subcommands (e.g. `osbase sandbox list --json`) return their
+own native JSON structure instead of the envelope.
+
+## Commands — Component Lifecycle (Tier 1)
+
+    list (alias: ls)           List components from the component index
+    list --installed           Only show installed components
+    install <COMP>             Install a component
+    install --all              Install all components (--fail-fast available)
+    status [COMP]              Show component health
+    doctor [COMP]              Diagnose component issues
+    logs [OBJECT]              Query central operation/audit log
+    restart <COMP>             Restart a component's service
+    update <COMP>              Update a component
+    update self                Update the anolisa CLI itself
+    uninstall <COMP>           Uninstall a component
+    forget <COMP>              Drop ANOLISA state record only (no package op)
+    adopt <COMP>               Record installed system RPM as ANOLISA-managed
+                               (COMP is the ANOLISA component name, not RPM package name;
+                                use --package to specify the RPM name if different)
+    repair <COMP>              Refresh ANOLISA state from rpmdb
+
+## Commands — Management (Tier 2)
+
+    adapter scan               Discover installed adapter declarations
+    adapter status [COMP]      Report adapter receipt health
+    adapter enable COMP [FW]   Enable adapter (framework arg optional if single)
+    adapter disable COMP [FW]  Disable adapter
+
+    env                        Show environment detection results
+    bug                        Generate local bug report markdown
+                               (--component requires the component to be installed;
+                                omit --component for a general report)
+
+    register                   Join Co-Build Program (requires sudo)
+    register status            Check registration status
+    unregister                 Leave Co-Build Program (requires sudo)
+
+    osbase sandbox list        List sandbox scenarios
+    osbase sandbox status [S]  Show sandbox scenario status
+    osbase sandbox install S   Install sandbox scenario
+    osbase sandbox uninstall S Uninstall scenario packages
+    osbase sandbox remove S    Remove scenario (--purge for configs)
+    osbase kernel status       Show kernel substrate status
+    osbase kernel install      Install kernel modules/eBPF (not implemented)
+    osbase kernel remove       Remove kernel modules (not implemented)
+    osbase security status     Show security overlay status
+    osbase security install T  Install security overlay (not implemented)
+    osbase security remove T   Remove security overlay (not implemented)
+
+    system serve               Start system-helper daemon (foreground)
+    system setup               Install system-helper (requires sudo)
+    system setup --upgrade     Upgrade existing installation
+    system teardown            Remove system-helper (requires sudo)
+    system status              Check system-helper health
+
+## Install Details
+
+    anolisa install <COMP>
+    anolisa install <COMP> --backend raw
+    anolisa install <COMP> --backend rpm
+    anolisa install <COMP> --version <VER>
+    anolisa install <COMP> --repo <URL>
+    anolisa install <COMP> --package <NAME>
+    anolisa install --all --fail-fast
+
+Backends: raw (download+sha256+contract), rpm (dnf/adopt), npm (not implemented).
+
+Note: --backend rpm only works for components with published RPM packages
+and matching component index entries (e.g. sec-core, cosh, os-skills).
+Default backend is raw; use raw for components like tokenless.
+
+## Status, Doctor, Logs
+
+    anolisa status                   All components
+    anolisa status <COMP>            Single component
+    anolisa doctor                   All components
+    anolisa doctor <COMP>            Single component
+                                     (--fix flag exists in help but returns NOT_IMPLEMENTED/64;
+                                      use doctor as diagnosis/suggestion only)
+    anolisa logs                     All logs
+    anolisa logs <COMP>              Component logs
+    anolisa logs --kind operation --severity warn --since 2026-06-01T10:00:00Z --limit 100
+
+Logs filters: --operation-id, --kind (operation|component), --source,
+--component, --severity (debug|info|warn|error), --since (RFC3339), --limit.
+Default limit: 50, max: 1000.
+
+## Adapter Management
+
+    anolisa adapter scan
+    anolisa adapter status [COMP]
+    anolisa adapter enable COMP [FRAMEWORK]
+    anolisa adapter disable COMP [FRAMEWORK]
+
+FRAMEWORK argument is optional when the component ships adapters for
+exactly one framework. enable supports global --dry-run. disable is
+idempotent (disabling something not enabled = successful no-op).
+
+## Uninstall, Forget, Repair
+
+    anolisa uninstall <COMP>
+    anolisa uninstall <COMP> --purge
+    anolisa uninstall <COMP> --remove-system-package
+
+Ownership behaviors:
+- raw-managed: deletes ANOLISA-owned files
+- rpm-managed: delegates to dnf remove
+- rpm-observed: only deletes ANOLISA state (use --remove-system-package
+  to also remove the RPM)
+
+Uninstall is blocked if the component has enabled adapter receipts.
+Run `anolisa adapter disable <COMP>` first.
+
+    anolisa forget <COMP>      Drop state record only, no file/package removal
+    sudo anolisa repair <COMP> Refresh ANOLISA state from rpmdb (RPM-backed only)
+    sudo anolisa adopt <COMP> [--package NAME]
+                               Record existing system RPM as ANOLISA-managed.
+                               COMP is the ANOLISA component name (e.g. cosh, sec-core),
+                               not the RPM package name. Use --package to specify the
+                               RPM name when it differs (e.g. --package copilot-shell).
+                               Examples:
+                                 sudo anolisa adopt cosh --package copilot-shell
+                                 sudo anolisa adopt sec-core --package agent-sec-core
+
+## Exit Codes
+
+    0   Success
+    1   Execution failed, or batch partial failure
+    2   Invalid argument, diagnostics found issues, or degraded
+    5   Permission denied
+    64  Command exists but not implemented
+
+Error JSON shape:
+
+    {
+      "ok": false,
+      "schema_version": 1,
+      "command": "install",
+      "error": {
+        "code": "PERMISSION_DENIED",
+        "reason": "...",
+        "hint": "..."
+      }
+    }
+
+Error codes: NOT_IMPLEMENTED, INVALID_ARGUMENT, EXECUTION_FAILED,
+DEGRADED, PERMISSION_DENIED, BATCH_PARTIAL, DIAGNOSTICS_FOUND.
