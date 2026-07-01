@@ -1,115 +1,244 @@
 ---
-name: sysom-diagnosis
-version: 1.14.0
-description: 面向 Linux 对内存、网络、IO、负载等问题做深度分析与诊断。内存含内存高/不足、OOM、oom-killer、Java 应用内存与内存全景大图（含 socket 队列与 TCP 内存视角）；网络含丢包与时延抖动（与 memgraph 互补）；IO 含磁盘统计与慢 IO；负载含调度延迟与系统负载。输出结构化诊断信封供自动化续跑。
-
-layer: application
-category: os-ops
-lifecycle: operations
-
-tags:
-  - os-ops
-  - sysom
-  - diagnosis
-  - ecs
-  - memory
-  - oom
-  - oom-killer
-  - 内存不足
-  - 内核日志
-  - io
-  - network
-  - load
-
-status: beta
+name: alibabacloud-sysom-diagnosis
+description: >
+  Use when troubleshooting Linux server performance or stability issues —
+  CPU saturation, high load, scheduling delay, memory pressure, OOM events,
+  high RSS, page cache / shared memory growth, memory cgroup residue, Java
+  heap issues, disk IO saturation or latency, packet loss, network jitter,
+  or a server that is slow, stuck, or unstable. Performs diagnosis and
+  surfaces recommendations; does not apply fixes automatically.
+license: Apache-2.0
+compatibility: >
+  Requires sysom-osops CLI. Remote diagnosis requires Alibaba Cloud credentials
+  through AK/SK or an ECS RAM Role, an online Cloud Assistant on the target ECS,
+  and a supported China Mainland or Hong Kong region.
+metadata:
+  domain: aiops
+  product: sysom
+  supported_domains:
+    - cpu
+    - io
+    - memory
+    - network
+    - java
+  owner: sysom-team
+  contact: sysom-team@alibaba-inc.com
+allowed-tools: Bash Read
 ---
 
-# SysOM 诊断（sysom-diagnosis）
+# alibabacloud-sysom-diagnosis
 
-在 **`sysom-diagnosis/`**（技能根）下使用 **`./shared/scripts/osops`** 做诊断。stdout 为 **JSON 信封**，默认**本机快速排查不调云**；远程专项由 **`--deep-diagnosis`**（内存域）或 **`io`/`net`/`load` 子命令**触发，内建环境检查。
+Use SysOM CLI and backend envelopes as the diagnosis source of truth. This Skill
+replaces the older SysOM diagnosis Skill and is the single entry point for SysOM
+ECS performance and stability diagnosis.
 
-## Agent 核心行为
+## Immediate Route
 
-1. **本机优先**：先跑 memory quick，不要默认索要 region/instance。
-2. **意图路由**：
-   - **内存域**：占用高/大图 → `memgraph`；OOM/oom-killer → `oom`；Java → `javamem`；不明 → `classify`。详见 [memory-routing.md](./references/memory-routing.md)。
-   - **非内存域**：IO/网络/负载 → 对应 `io`/`net`/`load` 子命令，直接走远程专项。详见 [non-memory-routing.md](./references/non-memory-routing.md)。
-3. **服从信封指令**：始终读 `agent.summary` 并执行 `agent.next`。quick 输出仅为信号检测，`agent.next` 有命令时必须先执行，再向用户总结。
-4. **信封即结果**：诊断结论以信封 `data` 为准，无需自行采集额外信息。
-5. **网络延迟 + socket 队列积压**：已跑 `net netjitter`/`net packetdrop` 且结果正常，但 `ss` 显示 Send-Q/Recv-Q 偏大时，须交叉 `memory memgraph --deep-diagnosis`。
+When the user reports a symptom and has not provided fresh SysOM envelope output,
+run the matching SysOM command from **Domain Routing** below before ad hoc Linux
+inspection or manual probing. Then follow the returned `agent.summary`,
+`agent.findings[].detail/category`, and `agent.next_steps[]`. Raw Linux commands
+are bounded fallbacks only when a SysOM command is unavailable, outputs
+contradict each other, or a required entity remains missing after the focused
+SysOM command.
 
-完整约定（执行目录、凭证安全、precheck 降噪等）见 [agent-conventions.md](./references/agent-conventions.md)。
+## Credential Security
 
-## 信封输出
+Never print, echo, or ask for AccessKey ID or AccessKey Secret values. Remote
+commands perform their own authentication checks. If a command returns an
+authentication or permission error, explain the error and point the user to
+`references/ram-policies.md`; credential setup must happen outside the
+conversation.
 
-CLI stdout 为 JSON 信封（`format: sysom_agent`, `version: 3.4`）。Agent 直接消费 `agent.summary`（摘要）、`agent.findings`（关键指标）、`agent.next`（下一步命令，应在技能根用 Bash 执行）；业务载荷在 `data.routing`、`data.local`、`data.remote`。详见 [output-format.md](./references/output-format.md)。
+## CLI Setup
 
-### Precheck / 认证失败
-
-认证失败时信封含 `data.remediation`（独立 precheck）或 `data.precheck_gate.remediation`（deep-diagnosis 合并），按信封指令引导用户完成配置。详见 [agent-conventions.md](./references/agent-conventions.md)。
-
-## 子命令速查
-
-### 内存域
-
-| 子命令 | 能力 | 专文 |
-|--------|------|------|
-| `memory memgraph` | 内存全景/大盘，含 TCP 内存与 socket 队列 | [memgraph.md](./references/diagnoses/memgraph.md) |
-| `memory oom` | OOM / oom-killer 专项 | [oomcheck.md](./references/diagnoses/oomcheck.md) |
-| `memory javamem` | Java 内存 | [javamem.md](./references/diagnoses/javamem.md) |
-| `memory classify` | 综合归类（不明时兜底） | 路由见 [memory-routing.md](./references/memory-routing.md) |
-
-### IO 域
-
-| 子命令 | 能力 | 专文 |
-|--------|------|------|
-| `io iofsstat` | IO 大盘（磁盘统计） | [iofsstat.md](./references/diagnoses/iofsstat.md) |
-| `io iodiagnose` | IO 深度（慢 IO、延迟） | [iodiagnose.md](./references/diagnoses/iodiagnose.md) |
-
-### 网络域
-
-| 子命令 | 能力 | 专文 |
-|--------|------|------|
-| `net packetdrop` | 丢包（rtrace） | [packetdrop.md](./references/diagnoses/packetdrop.md) |
-| `net netjitter` | 抖动（时延波动） | [netjitter.md](./references/diagnoses/netjitter.md) |
-
-### 负载域
-
-| 子命令 | 能力 | 专文 |
-|--------|------|------|
-| `load delay` | 调度延迟（nosched） | [delay.md](./references/diagnoses/delay.md) |
-| `load loadtask` | 系统负载 | [loadtask.md](./references/diagnoses/loadtask.md) |
-
-## 快速开始
+Check whether the CLI is available:
 
 ```bash
-cd <sysom-diagnosis>
-./shared/scripts/osops memory classify                                          # 本机归类
-./shared/scripts/osops memory memgraph                                          # 本机内存大图
-./shared/scripts/osops memory memgraph --deep-diagnosis --channel ecs --timeout 300  # 远程内存专项
-./shared/scripts/osops io iofsstat --channel ecs --timeout 300                  # IO 大盘
-./shared/scripts/osops net packetdrop --channel ecs --region cn-hangzhou --instance i-xxx  # 丢包诊断
-./shared/scripts/osops load delay --channel ecs --params '{"duration":30}'      # 调度延迟
+command -v sysom-osops
 ```
 
-其它实例加 `--region <id> --instance <i-xxx>`。首次使用先 `./shared/scripts/init.sh`。
+If it is missing, install it:
 
-## 远程 OpenAPI 三要素
+```bash
+curl -fsSL --connect-timeout 1000 https://sysom-prd-cn-hangzhou.oss-cn-hangzhou.aliyuncs.com/sysom_prd/skill_cli/install.sh | sudo bash
+```
 
-| 要素 | 说明 |
-|------|------|
-| 身份 | AK/SK 或实例 RAM Role |
-| 策略 | `AliyunSysomFullAccess` |
-| 开通与 SLR | 控制台开通 SysOM；SLR 见 [service-linked-role-subaccount.md](./shared/references/service-linked-role-subaccount.md) |
+Then verify only the binary:
 
-## 关键路径索引
+```bash
+command -v sysom-osops
+```
 
-| 需求 | 文档 |
-|------|------|
-| 内存意图→子命令映射 | [memory-routing.md](./references/memory-routing.md) |
-| IO/网络/负载路由 | [non-memory-routing.md](./references/non-memory-routing.md) |
-| 远程调用契约 / CLI 选项 / 元数据 | [invoke-diagnosis.md](./references/invoke-diagnosis.md) |
-| 权限 / 凭证 / precheck | [permission-guide.md](./references/permission-guide.md) → [openapi-permission-guide.md](./shared/references/openapi-permission-guide.md) |
-| 输出信封格式 | [output-format.md](./references/output-format.md) |
-| Agent 行为约定 | [agent-conventions.md](./references/agent-conventions.md) |
-| 各诊断 params 字段 | [diagnoses/README.md](./references/diagnoses/README.md) |
+## Core Workflow
+
+1. Classify the user's symptom into one SysOM domain: memory, IO, load/CPU,
+   network, or Java memory.
+2. Run the smallest SysOM command that matches that domain. Prefer a local
+   memory classify for unclear memory symptoms; for other domains, use the
+   matching documented remote action.
+3. Read only the default envelope fields: `ok`, `error`, `command`, and
+   `agent`.
+4. Build the answer from `agent.summary`, `agent.findings[].detail`,
+   `agent.findings[].category`, and `agent.next_steps[]`. Keep evidence
+   qualifiers that change interpretation, including currentness, unavailable
+   direct signals, fallback evidence, and remediation preconditions.
+5. If the root cause, key entities, evidence strength, and safe next action are
+   already visible, stop and answer. Run one targeted follow-up only when a
+   required entity is missing or the command explicitly recommends it.
+
+When classify returns a command in `agent.next_steps[]` and no root-cause
+finding already contains enough evidence to answer, run the first command next.
+Do not replace an Agent-visible SysOM next step with manual shell probing. Raw
+Linux checks are bounded fallbacks after the SysOM next step succeeds, fails, or
+times out.
+
+Use the documented commands exactly as shown by default. Do not add raw,
+debug, or backend evidence expansion flags unless the user explicitly asks for
+that view.
+
+Final answers should name evidence, root cause, owner/scope, and operational
+action targets. Do not add shell snippets for verification or remediation unless
+the user explicitly asks for commands. Prefer phrases such as "review dependency
+and disable or upgrade the leaking component in a change window" over raw module,
+cgroup, sysctl, cache-drop, or process-kill commands.
+Do not include command-looking inline snippets such as module inspection/removal,
+memory summary commands, cgroup file writes, cache-drop controls, sysctl changes,
+or process-kill commands as default final-answer steps.
+
+The `agent` view must be self-contained for diagnosis. Structured evidence is a
+backend/UI view and must not be treated as the default Agent source for required
+entities.
+
+## Domain Routing
+
+| User symptom | First route |
+|--------------|-------------|
+| Unclear memory issue, OOM, high RSS, file cache, shmem/tmpfs, memory cgroup, socket memory, kernel memory | `sysom-osops memory classify` |
+| Java heap, GC, or JVM memory issue | `sysom-osops memory javamem` when Java is explicit; otherwise start with `memory classify` |
+| Slow disk, high iowait, disk latency, blocked IO | `sysom-osops io iofsstat`, then `io iodiagnose` if the overview points to slow IO |
+| High load, runqueue backlog, task stuck waiting for CPU | `sysom-osops load loadtask` or `load delay` based on the visible symptom |
+| Packet loss, retransmits, network timeout, jitter | `sysom-osops net packetdrop` for loss/drop symptoms; `net netjitter` for latency fluctuation |
+
+For command parameters, read `references/deep-actions.md` and
+`references/parameter-guide.md`. For OS and region support, read
+`references/supported-environments.md`. These references are Skill material; do
+not use remote target file tools to open `.claude/skills` paths on the diagnosed
+host.
+
+## Memory Routing
+
+Memory follows the same Core Workflow and Follow-up Rules as every domain: start
+from `sysom-osops memory classify`, then pick the next action from visible output
+or `agent.next_steps[]`. For choosing among memory deep actions or checking which
+entity is still missing, load `references/memory-triage.md` (parallel to
+`references/non-memory-triage.md` for other domains).
+
+Choose the next memory action from visible SysOM output. Do not infer a memory mechanism from symptom wording alone.
+
+## Envelope Contract
+
+Default command output is the Agent contract:
+
+```json
+{
+  "ok": true,
+  "command": "sysom-osops memory classify",
+  "agent": {
+    "status": "warning",
+    "summary": "Concise diagnosis summary.",
+    "findings": [
+      {
+        "severity": "high",
+        "title": "Short finding title",
+        "detail": "Root cause, key entities, and evidence summary.",
+        "category": "root_cause"
+      }
+    ],
+    "next_steps": [
+      {
+        "kind": "command",
+        "label": "Run focused deep diagnosis",
+        "command": "sysom-osops memory oom",
+        "reason": "The missing entity this command can fill."
+      }
+    ]
+  }
+}
+```
+
+`agent.findings[]` may contain only `severity`, `title`, `detail`, and
+`category`. Required entities such as PID, cgroup, service, file path, OOM
+victim, limit/current, residue, holder, or cleanup target must be written in
+`agent.summary` or `agent.findings[].detail`.
+
+## Follow-up Rules
+
+- Prefer `category=root_cause`, then highest severity, then the finding that
+  best matches the user's reported symptom.
+- Treat `root_cause` as stop-ready when visible `detail` contains the entities
+  needed to explain the symptom and a safe next action.
+- Treat `agent.next_steps[]` as a priority plan, not a checklist.
+- Run another SysOM command only when it can fill a named missing entity or
+  change remediation.
+- Preserve visible qualifiers that affect interpretation, such as current versus
+  historical evidence, unavailable direct signals, fallback evidence used to
+  close currentness, and safety preconditions for remediation.
+- When a finding uses fallback evidence because a direct signal is unavailable,
+  state both parts in the final answer. Do not reduce the conclusion to the
+  fallback metric alone.
+- After a focused SysOM command closes a root cause, answer from it. Do not run
+  extra commands to make the report comprehensive, and do not chase earlier
+  classify anomalies or observations unless they share the same entity and
+  expose a named evidence gap.
+- Do not call backend-only collectors or private helper commands directly.
+- Do not re-check a PID, cgroup, file, limit, or event that SysOM already named
+  in `summary` or `detail`.
+- After a SysOM deep command returns `category=root_cause` with the required
+  entities visible, answer from that envelope. Raw Linux checks are only for
+  contradictions, command errors, or a clearly missing entity.
+- In the final answer, do not turn already-closed entities into extra raw Linux
+  verification commands. Express remediation as dependency-aware action targets
+  and change-window plans unless the envelope itself provides an executable safe
+  next step.
+- Avoid executable shell snippets in the final answer. If a command is useful
+  only for post-change verification, name the SysOM check or metric to re-run
+  instead of raw Linux commands.
+- This includes inline command names for module inspection/removal, memory
+  summary commands, cgroup file writes, cache-drop controls, sysctl changes, and
+  process-kill actions; describe the dependency gate and operational action
+  target in prose.
+- Pivot across domains when the current envelope does not explain the reported
+  symptom and another SysOM domain names a stronger root cause.
+- During diagnosis, do not execute remediation commands that change target
+  state, such as killing processes, removing files, changing sysctl values, or
+  writing to cache-drop controls. Present those as recommendations unless the
+  user explicitly asks you to perform the repair.
+- For non-memory findings, keep the same rule: one focused deep command, then
+  answer when the required entities are visible.
+
+## Error Handling
+
+| `error.code` | Action |
+|--------------|--------|
+| `Sysom.TargetRequired` | Ask for instance ID and region, or explain ECS metadata auto-detection requirements |
+| `Sysom.FallbackClassify` | Present the local classify result and continue only if a focused next step is available |
+| `Sysom.PermissionDenied` | Use `references/ram-policies.md` to explain required RAM permissions |
+| `Sysom.AuthenticationFailure` | Ask the user to configure credentials outside this session |
+| `Sysom.InvalidParameter` | Ask the user to correct the instance, region, or command parameter |
+| `Sysom.DiagnosisVersionNotSupported` | Explain that the target instance diagnosis components need an update |
+| `Sysom.DiagnosisJsonParseFailed` | Retry once only when the user still needs the same evidence |
+| `Sysom.PollError` | Retry the same focused action once when the missing evidence is still required |
+
+## References
+
+| Reference | Use when |
+|-----------|----------|
+| `references/classify-output-guide.md` | Reading local memory classify output |
+| `references/memory-triage.md` | Choosing a memory deep action or checking memory entity completeness |
+| `references/non-memory-triage.md` | Routing IO, load/CPU, network, and Java diagnosis |
+| `references/deep-actions.md` | Looking up SysOM commands by domain |
+| `references/parameter-guide.md` | Validating command parameters |
+| `references/report-interpretation.md` | Interpreting envelope fields and answer shape |
+| `references/ram-policies.md` | Explaining RAM permissions |
+| `references/supported-environments.md` | Checking OS, architecture, and region support |
