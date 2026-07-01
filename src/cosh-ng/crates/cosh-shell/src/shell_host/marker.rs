@@ -313,8 +313,15 @@ _cosh_preexec_marker() {
     fi
     _COSH_AT_PROMPT=0
   fi
+  shopt -u extdebug 2>/dev/null || true
   trap '_cosh_preexec_marker' DEBUG
   return 0
+}
+
+_cosh_suspend_extdebug() {
+  local s=$?
+  shopt -u extdebug 2>/dev/null || true
+  return $s
 }
 
 _cosh_precmd_marker() {
@@ -325,17 +332,18 @@ _cosh_precmd_marker() {
   unset _COSH_HANDOFF_ACTIVE 2>/dev/null || true
   _cosh_emit_marker "precmd" "" "$status"
   _COSH_AT_PROMPT=1
+  shopt -s extdebug 2>/dev/null || true
 }
 
 # ── Hook setup (re-set after user rcfile may have overridden) ──
 shopt -s extdebug 2>/dev/null || true
 _COSH_OLD_DEBUG_TRAP="$(trap -p DEBUG 2>/dev/null | sed "s/^trap -- '\\(.*\\)' DEBUG$/\\1/" || true)"
 trap '_cosh_preexec_marker' DEBUG
-# Append precmd to existing PROMPT_COMMAND
+# Prepend extdebug suspend + append precmd to existing PROMPT_COMMAND
 if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
-  PROMPT_COMMAND+=(_cosh_precmd_marker)
+  PROMPT_COMMAND=(_cosh_suspend_extdebug "${PROMPT_COMMAND[@]}" _cosh_precmd_marker)
 else
-  PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND;}_cosh_precmd_marker"
+  PROMPT_COMMAND="_cosh_suspend_extdebug;${PROMPT_COMMAND:+$PROMPT_COMMAND;}_cosh_precmd_marker"
 fi
 if [[ -n "${COSH_SHELL_ISOLATED:-}" ]]; then
   builtin history -c 2>/dev/null || true
