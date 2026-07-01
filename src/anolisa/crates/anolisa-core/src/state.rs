@@ -382,6 +382,12 @@ pub struct InstalledObject {
     /// Cached health results from the last status/probe pass.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub health: Vec<HealthEntry>,
+    /// System packages that were auto-installed by the provisioner during
+    /// this component's install (system mode only). Tracked so `status` can
+    /// report them and `uninstall` can hint at orphan cleanup. Never
+    /// auto-removed on uninstall.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provisioned_packages: Vec<String>,
 }
 
 impl InstalledObject {
@@ -826,6 +832,7 @@ mod tests {
                 checked_at: now_iso8601(),
                 reason: None,
             }],
+            provisioned_packages: Vec::new(),
         }
     }
 

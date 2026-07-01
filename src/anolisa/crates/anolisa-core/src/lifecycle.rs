@@ -1347,6 +1347,10 @@ fn execute_uninstall_or_purge(
     }
 
     // Step 7 — drop the component object from state.
+    let provisioned_pkgs: Vec<String> = state
+        .find_object(ObjectKind::Component, target_name)
+        .map(|obj| obj.provisioned_packages.clone())
+        .unwrap_or_default();
     let _ = state.remove_object(ObjectKind::Component, target_name);
 
     // Step 7.5 — migrate away legacy capability objects. Releases that
@@ -1533,6 +1537,13 @@ fn execute_uninstall_or_purge(
     );
     let mut warnings = warnings;
     warnings.extend(post_uninstall.warnings);
+    if !provisioned_pkgs.is_empty() {
+        warnings.push(format!(
+            "system packages provisioned during install are retained: {}; \
+             remove manually if no longer needed",
+            provisioned_pkgs.join(", ")
+        ));
+    }
 
     Ok(LifecycleOutcome {
         operation_id,
@@ -2028,6 +2039,7 @@ mod tests {
                 scope: ServiceScope::System,
             }],
             health: Vec::new(),
+            provisioned_packages: Vec::new(),
         });
         state
             .save(&layout.state_dir.join("installed.toml"))
@@ -2189,6 +2201,7 @@ mod tests {
             external_modified_files: Vec::new(),
             services: Vec::new(),
             health: Vec::new(),
+            provisioned_packages: Vec::new(),
         });
         state
             .save(&layout.state_dir.join("installed.toml"))
@@ -2287,6 +2300,7 @@ mod tests {
                 scope: ServiceScope::User,
             }],
             health: Vec::new(),
+            provisioned_packages: Vec::new(),
         });
         state
             .save(&layout.state_dir.join("installed.toml"))
@@ -2854,6 +2868,7 @@ mod tests {
             external_modified_files: Vec::new(),
             services: Vec::new(),
             health: Vec::new(),
+            provisioned_packages: Vec::new(),
         });
         let state_path = layout.state_dir.join("installed.toml");
         state.save(&state_path).expect("seed state save");
@@ -2925,6 +2940,7 @@ mod tests {
             external_modified_files: Vec::new(),
             services: Vec::new(),
             health: Vec::new(),
+            provisioned_packages: Vec::new(),
         });
         state.upsert_object(InstalledObject {
             kind: ObjectKind::Capability,
@@ -2948,6 +2964,7 @@ mod tests {
             external_modified_files: Vec::new(),
             services: Vec::new(),
             health: Vec::new(),
+            provisioned_packages: Vec::new(),
         });
         let state_path = layout.state_dir.join("installed.toml");
         state.save(&state_path).expect("seed state save");
@@ -3037,6 +3054,7 @@ mod tests {
             external_modified_files: Vec::new(),
             services: Vec::new(),
             health: Vec::new(),
+            provisioned_packages: Vec::new(),
         });
         let state_path = layout.state_dir.join("installed.toml");
         state.save(&state_path).expect("seed state save");

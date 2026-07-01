@@ -122,6 +122,10 @@ pub(crate) struct ComponentRecord {
     /// it could not be determined.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) rpm_source_repo: Option<String>,
+    /// System packages auto-installed by the provisioner during component
+    /// install. Empty when no packages were provisioned.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) provisioned_packages: Vec<String>,
 }
 
 pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
@@ -261,6 +265,7 @@ pub(crate) fn select_components(
                 rpm_package: None,
                 rpm_evr: None,
                 rpm_source_repo: None,
+                provisioned_packages: Vec::new(),
             }],
         },
     }
@@ -310,6 +315,7 @@ fn observed_record(
             rpm_package: Some(info.name),
             rpm_evr: Some(evr),
             rpm_source_repo: source_repo,
+            provisioned_packages: Vec::new(),
         });
     }
     None
@@ -516,6 +522,7 @@ fn record_from_object(
         rpm_package,
         rpm_evr,
         rpm_source_repo,
+        provisioned_packages: obj.provisioned_packages.clone(),
     }
 }
 
@@ -1046,6 +1053,13 @@ fn render_human(records: &[ComponentRecord], verbose: bool, no_color: bool) {
                     record.enabled_features.join(", ")
                 );
             }
+            if !record.provisioned_packages.is_empty() {
+                println!(
+                    "    {} {}",
+                    color.label("provisioned_packages:"),
+                    record.provisioned_packages.join(", ")
+                );
+            }
             for entry in &record.health {
                 println!(
                     "    {} {} @ {}",
@@ -1158,6 +1172,7 @@ mod tests {
             external_modified_files: Vec::new(),
             services: Vec::new(),
             health: Vec::new(),
+            provisioned_packages: Vec::new(),
         }
     }
 
@@ -2346,6 +2361,7 @@ mod tests {
             rpm_package: None,
             rpm_evr: None,
             rpm_source_repo: None,
+            provisioned_packages: Vec::new(),
         };
         let json = serde_json::to_value(&record).expect("serialize");
         assert!(
@@ -2421,6 +2437,7 @@ mod tests {
             external_modified_files: Vec::new(),
             services: Vec::new(),
             health: Vec::new(),
+            provisioned_packages: Vec::new(),
         }
     }
 
@@ -2845,6 +2862,7 @@ name = "copilot-shell"
             rpm_package: None,
             rpm_evr: None,
             rpm_source_repo: None,
+            provisioned_packages: Vec::new(),
         }];
         // rpmdb has drifted, but the failed status must survive untouched.
         let q = FakeQuery {

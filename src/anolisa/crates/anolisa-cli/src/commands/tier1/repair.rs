@@ -726,6 +726,7 @@ mod tests {
             external_modified_files: Vec::new(),
             services: Vec::new(),
             health: Vec::new(),
+            provisioned_packages: Vec::new(),
         }
     }
 
@@ -753,6 +754,7 @@ mod tests {
             external_modified_files: Vec::new(),
             services: Vec::new(),
             health: Vec::new(),
+            provisioned_packages: Vec::new(),
         }
     }
 

@@ -46,12 +46,14 @@ use anolisa_core::state::{
 use anolisa_core::{
     ArtifactType, CapabilityRequest, ComponentManifest, DependencyKind, DependencyResolution,
     DependencyResolver, DependencyStatus, DistributionEntry, DistributionIndex, FileKind,
-    HookPhase, HookSpec, ResolveQuery, ResolverEnv, ServiceActivation, ServiceManager,
-    ServiceRequest, ServiceRunOutcome, ServiceScope, apply_capabilities, apply_services,
-    capability_for_install_mode, deactivate_services, expand_layout_placeholders,
-    resolve_manifest_hooks, run_hooks, service_for_install_mode, user_service_for_install_mode,
+    HookPhase, HookSpec, ProvisionPlan, ProvisionStrategy, ResolveQuery, ResolverEnv,
+    ServiceActivation, ServiceManager, ServiceRequest, ServiceRunOutcome, ServiceScope,
+    apply_capabilities, apply_services, capability_for_install_mode, deactivate_services,
+    expand_layout_placeholders, resolve_manifest_hooks, run_hooks, service_for_install_mode,
+    user_service_for_install_mode,
 };
 use anolisa_platform::fs_layout::FsLayout;
+use anolisa_platform::package_manager::detect_package_manager;
 use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError};
 use anolisa_platform::pkg_transaction::{PackageTransaction, PackageTransactionError};
 use anolisa_platform::privilege;
@@ -134,6 +136,8 @@ struct InstallPreview {
     /// downloaded (file/service details unavailable) or the component declares
     /// none.
     dependencies: Vec<DependencyResolution>,
+    /// Provisioner classification for dry-run display.
+    provision_plan: Option<ProvisionPlan>,
 }
 
 /// Project detected host facts onto the slice the dependency resolver needs.
@@ -182,6 +186,208 @@ pub(crate) fn run_runtime_preflight(
         });
     }
     Ok(plan.warnings)
+}
+
+/// Provision-aware dependency handling that replaces the old fail-fast
+/// `run_runtime_preflight` in the `execute_raw` path.
+///
+/// Behavior depends on `ctx.install_mode`:
+/// - **System**: auto-install missing system packages via the host package
+///   manager, then re-verify only the provisioned deps. Manual-only deps
+///   (e.g. `language-runtime` without a `packages` mapping) remain
+///   non-blocking warnings. Unresolvable platform capabilities fail fast.
+/// - **User**: report missing deps with remediation commands and return an
+///   error (the caller should exit without modifying the host).
+///
+/// Returns the list of package names that were auto-installed (empty in user
+/// mode or when all deps were already satisfied).
+fn run_provision(
+    manifest: &ComponentManifest,
+    env: &anolisa_env::EnvFacts,
+    ctx: &CliContext,
+    command: &str,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<String>, CliError> {
+    if manifest.runtime_deps.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let resolver_env = resolver_env_from_facts(env);
+    let plan = DependencyResolver::system()
+        .resolve(&manifest.runtime_deps, &resolver_env)
+        .map_err(|err| CliError::Runtime {
+            command: command.to_string(),
+            reason: format!("invalid runtime dependency declaration: {err}"),
+        })?;
+    warnings.extend(plan.warnings.clone());
+
+    // Classify the resolver results into a provision plan.
+    let provision = ProvisionPlan::from_resolution(&plan, &manifest.runtime_deps, &resolver_env);
+
+    // Unresolvable deps (platform capabilities) are always fatal.
+    if provision.has_blockers() {
+        let lines: Vec<String> = provision
+            .unresolvable
+            .iter()
+            .map(|u| format!("  {} [unresolvable]: {}", u.name, u.reason))
+            .collect();
+        return Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "unsatisfiable platform requirements; no files were changed:\n{}",
+                lines.join("\n")
+            ),
+        });
+    }
+
+    // If everything is satisfied, nothing to do.
+    if provision.is_satisfied() {
+        return Ok(Vec::new());
+    }
+
+    // Select strategy based on install mode.
+    let strategy = select_provision_strategy(ctx);
+
+    match strategy {
+        ProvisionStrategy::ReportAndExit => {
+            // User mode: report missing deps and exit.
+            let mut lines = Vec::new();
+            for pkg in &provision.installable {
+                lines.push(format!("  {} (not installed)", pkg.name));
+            }
+            for dep in &provision.manual {
+                lines.push(format!("  {} (manual): {}", dep.name, dep.hint));
+            }
+
+            let remediation_cmds: Vec<&str> = provision
+                .installable
+                .iter()
+                .map(|p| p.remediation.as_str())
+                .collect();
+
+            let mut reason = format!(
+                "missing system dependencies in user mode; no files were changed:\n{}",
+                lines.join("\n")
+            );
+            if !remediation_cmds.is_empty() {
+                reason.push_str(&format!(
+                    "\n\nInstall them with:\n  {}\n\nThen retry:\n  anolisa install {}",
+                    remediation_cmds.join("\n  "),
+                    manifest.component.name
+                ));
+            }
+
+            Err(CliError::Runtime {
+                command: command.to_string(),
+                reason,
+            })
+        }
+        ProvisionStrategy::Auto => {
+            // System mode: auto-install missing packages.
+            if !provision.has_installable() {
+                // Only manual deps remain; warn but continue.
+                for dep in &provision.manual {
+                    warnings.push(format!(
+                        "dependency '{}' requires manual installation: {}",
+                        dep.name, dep.hint
+                    ));
+                }
+                return Ok(Vec::new());
+            }
+
+            let pkg_names = provision.installable_package_names();
+            let pkg_base = resolver_env.pkg_base.as_deref();
+
+            // Detect the host package manager.
+            let mgr = detect_package_manager(pkg_base).map_err(|err| CliError::Runtime {
+                command: command.to_string(),
+                reason: format!(
+                    "cannot auto-install dependencies: {err}; install manually:\n  {}",
+                    provision
+                        .installable
+                        .iter()
+                        .map(|p| p.remediation.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n  ")
+                ),
+            })?;
+
+            // Execute the install.
+            mgr.install(&pkg_names).map_err(|err| CliError::Runtime {
+                command: command.to_string(),
+                reason: format!("failed to install system dependencies: {err}"),
+            })?;
+
+            // Re-verify only the provisioned deps (manual deps stay as warnings).
+            let recheck = DependencyResolver::system()
+                .resolve(&manifest.runtime_deps, &resolver_env)
+                .map_err(|err| CliError::Runtime {
+                    command: command.to_string(),
+                    reason: format!("dependency re-verification failed: {err}"),
+                })?;
+            let provisioned_dep_names: std::collections::HashSet<&str> = provision
+                .installable
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect();
+            let still_failed: Vec<String> = recheck
+                .resolutions
+                .iter()
+                .filter(|r| !matches!(r.status, DependencyStatus::Resolved))
+                .filter(|r| {
+                    // Only fail on deps we actually tried to provision.
+                    provisioned_dep_names.contains(r.name.as_str())
+                })
+                .map(|r| format!("{} [{}]", r.name, r.kind.as_str()))
+                .collect();
+            if !still_failed.is_empty() {
+                let installed_names: Vec<String> =
+                    pkg_names.iter().map(|s| s.to_string()).collect();
+                let note = retained_packages_note(&installed_names);
+                return Err(CliError::Runtime {
+                    command: command.to_string(),
+                    reason: format!(
+                        "dependencies still unsatisfied after install:\n  {}{note}",
+                        still_failed.join("\n  ")
+                    ),
+                });
+            }
+
+            // Warn about manual deps.
+            for dep in &provision.manual {
+                warnings.push(format!(
+                    "dependency '{}' requires manual installation: {}",
+                    dep.name, dep.hint
+                ));
+            }
+
+            let installed: Vec<String> = pkg_names.iter().map(|s| s.to_string()).collect();
+            Ok(installed)
+        }
+    }
+}
+
+/// Build the note suffix appended to error messages when system packages were
+/// provisioned but the install did not complete. Returns an empty string when
+/// no packages were installed.
+fn retained_packages_note(provisioned: &[String]) -> String {
+    if provisioned.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nnote: system packages were installed and retained: {}",
+            provisioned.join(", ")
+        )
+    }
+}
+
+/// Select provision strategy based on install mode.
+fn select_provision_strategy(ctx: &CliContext) -> ProvisionStrategy {
+    if ctx.install_mode == InstallMode::System {
+        ProvisionStrategy::Auto
+    } else {
+        ProvisionStrategy::ReportAndExit
+    }
 }
 
 /// Execution input after the artifact has been verified and its install
@@ -279,6 +485,9 @@ struct DependencyPlanRow {
     kind: DependencyKind,
     /// Preflight outcome.
     status: DependencyPlanStatus,
+    /// Provisioner action the real install would take.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    action: Option<DependencyPlanAction>,
     /// Remediation command (`unresolved`) or reason (`unresolvable`); absent
     /// when resolved.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -286,6 +495,16 @@ struct DependencyPlanRow {
     /// Optional human note (e.g. an unverified version constraint).
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
+}
+
+/// What the provisioner would do with an unresolved dependency.
+#[derive(Serialize, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+enum DependencyPlanAction {
+    /// Will be auto-installed via system package manager.
+    AutoInstall,
+    /// Must be installed manually by the user.
+    Manual,
 }
 
 impl DependencyPlanRow {
@@ -304,9 +523,23 @@ impl DependencyPlanRow {
             name: r.name.clone(),
             kind: r.kind,
             status,
+            action: None,
             note,
             detail: r.detail.clone(),
         }
+    }
+
+    /// Annotate with the provisioner action based on the ProvisionPlan.
+    fn with_provision_action(mut self, provision: &ProvisionPlan) -> Self {
+        if matches!(self.status, DependencyPlanStatus::Resolved) {
+            return self;
+        }
+        if provision.installable.iter().any(|p| p.name == self.name) {
+            self.action = Some(DependencyPlanAction::AutoInstall);
+        } else if provision.manual.iter().any(|m| m.name == self.name) {
+            self.action = Some(DependencyPlanAction::Manual);
+        }
+        self
     }
 }
 
@@ -323,6 +556,7 @@ struct InstallResultPayload {
     artifact_url: String,
     files_installed: Vec<String>,
     services: Vec<String>,
+    provisioned_packages: Vec<String>,
     warnings: Vec<String>,
 }
 
@@ -1267,6 +1501,7 @@ pub(crate) fn execute_adopt(
         external_modified_files: Vec::new(),
         services: Vec::new(),
         health: Vec::new(),
+        provisioned_packages: Vec::new(),
     });
     state.operations.push(OperationRecord {
         id: operation_id.clone(),
@@ -1618,6 +1853,7 @@ fn persist_delegated_install(
         external_modified_files: Vec::new(),
         services: Vec::new(),
         health: Vec::new(),
+        provisioned_packages: Vec::new(),
     });
     state.operations.push(OperationRecord {
         id: operation_id.clone(),
@@ -2280,6 +2516,7 @@ fn build_install_preview(
             services: Vec::new(),
             capabilities: Vec::new(),
             dependencies: Vec::new(),
+            provision_plan: None,
         });
     };
 
@@ -2301,7 +2538,7 @@ fn build_install_preview(
         Err(err) => return Err(err),
     };
 
-    let dependencies = preview_dependencies(&contract.manifest, &mut resolution);
+    let (dependencies, provision_plan) = preview_dependencies(&contract.manifest, &mut resolution);
 
     Ok(InstallPreview {
         resolution,
@@ -2309,6 +2546,7 @@ fn build_install_preview(
         services,
         capabilities,
         dependencies,
+        provision_plan,
     })
 }
 
@@ -2319,23 +2557,24 @@ fn build_install_preview(
 fn preview_dependencies(
     manifest: &ComponentManifest,
     resolution: &mut RawResolution,
-) -> Vec<DependencyResolution> {
+) -> (Vec<DependencyResolution>, Option<ProvisionPlan>) {
     if manifest.runtime_deps.is_empty() {
-        return Vec::new();
+        return (Vec::new(), None);
     }
     let env = anolisa_env::EnvService::detect();
-    match DependencyResolver::system()
-        .resolve(&manifest.runtime_deps, &resolver_env_from_facts(&env))
-    {
+    let resolver_env = resolver_env_from_facts(&env);
+    match DependencyResolver::system().resolve(&manifest.runtime_deps, &resolver_env) {
         Ok(plan) => {
-            resolution.warnings.extend(plan.warnings);
-            plan.resolutions
+            resolution.warnings.extend(plan.warnings.clone());
+            let provision =
+                ProvisionPlan::from_resolution(&plan, &manifest.runtime_deps, &resolver_env);
+            (plan.resolutions, Some(provision))
         }
         Err(err) => {
             resolution
                 .warnings
                 .push(format!("dependency preflight skipped: {err}"));
-            Vec::new()
+            (Vec::new(), None)
         }
     }
 }
@@ -3007,18 +3246,22 @@ fn execute_raw(
             reason: format!("failed to parse component manifest for hook resolution: {err}"),
         })?;
 
-    // Runtime-dependency preflight — probe declared dependencies while the lock
-    // is held but before any filesystem mutation, so a missing dependency fails
-    // fast with a remediation instead of a service that silently dies after a
-    // "successful" install. The RPM backend never reaches here (dnf resolves its
-    // `Requires`), so a dependency is never resolved twice. Host facts are
-    // detected once and reused for the capability step below.
-    let env = anolisa_env::EnvService::detect();
-    resolution
-        .warnings
-        .extend(run_runtime_preflight(&manifest, &env, command)?);
-
+    // Validate hook declarations before any host mutation (contract authoring
+    // errors must be caught before provisioning installs system packages).
     let hooks = resolve_install_hooks(&manifest, layout, &resolution.component)?;
+
+    // Runtime-dependency provisioning — probe declared dependencies while the
+    // lock is held but before any filesystem mutation. In system mode, missing
+    // system packages are auto-installed via the host package manager. In user
+    // mode, missing deps are reported with remediation commands and the install
+    // is aborted. The RPM backend never reaches here (dnf resolves its
+    // `Requires`), so a dependency is never resolved twice.
+    let env = anolisa_env::EnvService::detect();
+    let provisioned_packages =
+        run_provision(&manifest, &env, ctx, command, &mut resolution.warnings)?;
+
+    let retained_pkg_note = retained_packages_note(&provisioned_packages);
+
     let log = CentralLog::open(layout.central_log.clone());
 
     // pre_install hook — before files land, so a strict failure aborts with
@@ -3036,7 +3279,10 @@ fn execute_raw(
     if let Some(hf) = pre_install.hard_failure.as_ref() {
         return Err(CliError::Runtime {
             command: command.to_string(),
-            reason: format!("pre_install hook failed: {}", hf.summary()),
+            reason: format!(
+                "pre_install hook failed: {}{retained_pkg_note}",
+                hf.summary()
+            ),
         });
     }
 
@@ -3049,7 +3295,7 @@ fn execute_raw(
         )
         .map_err(|err| CliError::Runtime {
             command: command.to_string(),
-            reason: format!("install failed: {err}"),
+            reason: format!("install failed: {err}{retained_pkg_note}"),
         })?;
 
     // From this point files are on disk — failures must roll them back.
@@ -3058,7 +3304,10 @@ fn execute_raw(
             Ok(path) => path,
             Err(err) => {
                 rollback_installed_files(&outcome.files);
-                return Err(err);
+                return Err(CliError::Runtime {
+                    command: command.to_string(),
+                    reason: format!("{err}{retained_pkg_note}"),
+                });
             }
         };
 
@@ -3086,7 +3335,7 @@ fn execute_raw(
         return Err(CliError::Runtime {
             command: command.to_string(),
             reason: format!(
-                "required capability application failed; rolled back installed files and manifest: {reason}"
+                "required capability application failed; rolled back installed files and manifest: {reason}{retained_pkg_note}"
             ),
         });
     }
@@ -3110,7 +3359,7 @@ fn execute_raw(
         return Err(CliError::Runtime {
             command: command.to_string(),
             reason: format!(
-                "post_install hook failed; rolled back installed files and manifest: {}",
+                "post_install hook failed; rolled back installed files and manifest: {}{retained_pkg_note}",
                 hf.summary()
             ),
         });
@@ -3177,7 +3426,7 @@ fn execute_raw(
         return Err(CliError::Runtime {
             command: command.to_string(),
             reason: format!(
-                "post_enable hook failed; stopped/disabled activated services and rolled back installed files and manifest{cleanup_suffix}: {hook_summary}",
+                "post_enable hook failed; stopped/disabled activated services and rolled back installed files and manifest{cleanup_suffix}: {hook_summary}{retained_pkg_note}",
             ),
         });
     }
@@ -3279,6 +3528,7 @@ fn execute_raw(
             })
             .collect(),
         health: Vec::new(),
+        provisioned_packages: provisioned_packages.clone(),
     });
     state.operations.push(OperationRecord {
         id: operation_id.clone(),
@@ -3305,7 +3555,7 @@ fn execute_raw(
         return Err(CliError::Runtime {
             command: command.to_string(),
             reason: format!(
-                "failed to save state; stopped/disabled activated services and attempted best-effort rollback of installed files and manifest{cleanup_suffix} (some files may remain on disk): {err}",
+                "failed to save state; stopped/disabled activated services and attempted best-effort rollback of installed files and manifest{cleanup_suffix} (some files may remain on disk): {err}{retained_pkg_note}",
             ),
         });
     }
@@ -3376,6 +3626,7 @@ fn execute_raw(
         artifact_url: resolution.artifact_url,
         files_installed: installed_paths,
         services: services.iter().map(|s| s.unit.clone()).collect(),
+        provisioned_packages,
         warnings: resolution.warnings,
     };
     if ctx.json {
@@ -3461,7 +3712,14 @@ fn render_plan(ctx: &CliContext, preview: &InstallPreview) -> Result<(), CliErro
         dependencies: preview
             .dependencies
             .iter()
-            .map(DependencyPlanRow::from_resolution)
+            .map(|r| {
+                let row = DependencyPlanRow::from_resolution(r);
+                if let Some(plan) = &preview.provision_plan {
+                    row.with_provision_action(plan)
+                } else {
+                    row
+                }
+            })
             .collect(),
         dry_run: true,
         warnings: resolved.warnings.clone(),
@@ -3518,9 +3776,16 @@ fn render_plan(ctx: &CliContext, preview: &InstallPreview) -> Result<(), CliErro
         println!("{}", color.header("dependencies (preflight):"));
         for d in &payload.dependencies {
             let (kind, status) = (d.kind.as_str(), d.status.as_str());
+            let action_tag = match d.action {
+                Some(DependencyPlanAction::AutoInstall) => " [auto-install]",
+                Some(DependencyPlanAction::Manual) => " [manual]",
+                None => "",
+            };
             match &d.note {
-                Some(note) => println!("  - {} [{kind}]: {status} — {note}", d.name),
-                None => println!("  - {} [{kind}]: {status}", d.name),
+                Some(note) => {
+                    println!("  - {} [{kind}]: {status}{action_tag} — {note}", d.name)
+                }
+                None => println!("  - {} [{kind}]: {status}{action_tag}", d.name),
             }
             if let Some(detail) = &d.detail {
                 println!("      {detail}");
@@ -3563,6 +3828,13 @@ fn render_result(payload: &InstallResultPayload, no_color: bool) {
         for s in &payload.services {
             println!("  - {s}");
         }
+    }
+    if !payload.provisioned_packages.is_empty() {
+        println!(
+            "{} {}",
+            color.label("provisioned packages:"),
+            payload.provisioned_packages.join(", ")
+        );
     }
     render_warnings(&payload.warnings, &color);
 }
@@ -3843,6 +4115,20 @@ mod tests {
 
     use crate::context::InstallMode;
     use anolisa_core::{FakeServiceManager, ServiceOp};
+
+    #[test]
+    fn retained_packages_note_empty_when_no_packages() {
+        assert_eq!(retained_packages_note(&[]), "");
+    }
+
+    #[test]
+    fn retained_packages_note_lists_provisioned_packages() {
+        let pkgs = vec!["nodejs".to_string(), "jq".to_string()];
+        let note = retained_packages_note(&pkgs);
+        assert!(note.contains("system packages were installed and retained"));
+        assert!(note.contains("nodejs"));
+        assert!(note.contains("jq"));
+    }
     use flate2::Compression;
     use flate2::write::GzEncoder;
     use sha2::{Digest, Sha256};
@@ -5475,6 +5761,7 @@ scope = "@anolisa"
             external_modified_files: Vec::new(),
             services: Vec::new(),
             health: Vec::new(),
+            provisioned_packages: Vec::new(),
         });
         state
             .save(&layout.state_dir.join("installed.toml"))
@@ -6419,6 +6706,7 @@ base_url = "https://repo.example/alinux/$releasever/agentic-os/$basearch/os/"
             external_modified_files: Vec::new(),
             services: Vec::new(),
             health: Vec::new(),
+            provisioned_packages: Vec::new(),
         });
         state
             .save(
@@ -6492,6 +6780,7 @@ base_url = "https://repo.example/alinux/$releasever/agentic-os/$basearch/os/"
             external_modified_files: Vec::new(),
             services: Vec::new(),
             health: Vec::new(),
+            provisioned_packages: Vec::new(),
         });
         state
             .save(&layout.state_dir.join("installed.toml"))
@@ -6544,6 +6833,7 @@ base_url = "https://repo.example/alinux/$releasever/agentic-os/$basearch/os/"
             external_modified_files: Vec::new(),
             services: Vec::new(),
             health: Vec::new(),
+            provisioned_packages: Vec::new(),
         };
 
         assert_eq!(installed_backend_label(&obj), Some("rpm"));
@@ -6592,6 +6882,7 @@ base_url = "https://repo.example/alinux/$releasever/agentic-os/$basearch/os/"
             external_modified_files: Vec::new(),
             services: Vec::new(),
             health: Vec::new(),
+            provisioned_packages: Vec::new(),
         });
         state
             .save(&layout.state_dir.join("installed.toml"))
@@ -6660,6 +6951,7 @@ base_url = "https://repo.example/alinux/$releasever/agentic-os/$basearch/os/"
             external_modified_files: Vec::new(),
             services: Vec::new(),
             health: Vec::new(),
+            provisioned_packages: Vec::new(),
         });
         state
             .save(&layout.state_dir.join("installed.toml"))
@@ -7043,6 +7335,7 @@ base_url = "https://repo.example/alinux/$releasever/agentic-os/$basearch/os/"
             external_modified_files: Vec::new(),
             services: Vec::new(),
             health: Vec::new(),
+            provisioned_packages: Vec::new(),
         });
         state
             .save(

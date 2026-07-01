@@ -744,6 +744,7 @@ fn run_manifest_install(
                 })
                 .collect(),
             health: vec![],
+            provisioned_packages: vec![],
         };
         state.upsert_object(obj);
         state

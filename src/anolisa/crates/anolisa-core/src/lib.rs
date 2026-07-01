@@ -27,6 +27,7 @@ pub mod metadata;
 pub mod osbase_install;
 pub mod path_safety;
 pub mod process;
+pub mod provisioner;
 pub mod register;
 pub mod registry;
 pub mod resolver;
@@ -84,6 +85,10 @@ pub use manifest::{
     PackageNames, RuntimeDependency, ServiceScope,
 };
 pub use metadata::MetadataClient;
+pub use provisioner::{
+    ManualDependency, ProvisionOutcome, ProvisionPlan, ProvisionStrategy, ProvisionablePackage,
+    UnresolvableDependency,
+};
 pub use register::{
     ConsentState, HistoryAction, HistoryEntry, ProductType, RegisterRecord, RegisterSource,
     RegisterState, RegistrationManager, SubscriptionError, current_operator, require_root,

@@ -1132,6 +1132,7 @@ mod tests {
             external_modified_files: Vec::new(),
             services: Vec::new(),
             health: Vec::new(),
+            provisioned_packages: Vec::new(),
         });
         state
             .save(&layout.state_dir.join("installed.toml"))
@@ -1277,6 +1278,7 @@ mod tests {
             external_modified_files: Vec::new(),
             services: Vec::new(),
             health: Vec::new(),
+            provisioned_packages: Vec::new(),
         });
         let state_path = layout.state_dir.join("installed.toml");
         state.save(&state_path).expect("seed state save");
@@ -1401,6 +1403,7 @@ mod tests {
             external_modified_files: Vec::new(),
             services: Vec::new(),
             health: Vec::new(),
+            provisioned_packages: Vec::new(),
         });
         state
             .save(&layout.state_dir.join("installed.toml"))
@@ -1472,6 +1475,7 @@ mod tests {
             external_modified_files: Vec::new(),
             services: Vec::new(),
             health: Vec::new(),
+            provisioned_packages: Vec::new(),
         });
         let state_path = layout.state_dir.join("installed.toml");
         state.save(&state_path).expect("seed state save");
@@ -1648,6 +1652,7 @@ mod tests {
             external_modified_files: Vec::new(),
             services: Vec::new(),
             health: Vec::new(),
+            provisioned_packages: Vec::new(),
         }
     }
 
@@ -2237,6 +2242,7 @@ mod tests {
             external_modified_files: Vec::new(),
             services: Vec::new(),
             health: Vec::new(),
+            provisioned_packages: Vec::new(),
         });
         state
             .save(&layout.state_dir.join("installed.toml"))
