@@ -26,9 +26,7 @@
 //! (backup → remove → install → refresh state, rolling back on failure).
 //! `update all` remains `NOT_IMPLEMENTED`.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use chrono::{SecondsFormat, Utc};
 use clap::{Parser, Subcommand};
@@ -58,6 +56,7 @@ use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError};
 use anolisa_platform::pkg_transaction::{PackageTransaction, PackageTransactionError};
 use anolisa_platform::privilege;
 use anolisa_platform::rpm_query::RpmPackageQuery;
+use anolisa_platform::rpm_repo::DnfRepoSource;
 use anolisa_platform::rpm_transaction::RpmTransaction;
 
 use super::install::{
@@ -68,7 +67,7 @@ use super::install::{
 use crate::color::Palette;
 use crate::commands::common;
 use crate::context::CliContext;
-use crate::repo_config::RepoConfig;
+use crate::repo_config::{HostVars, RepoConfig};
 use crate::response::{self, CliError};
 
 /// Command label for JSON envelopes and error routing.
@@ -76,19 +75,7 @@ const COMMAND: &str = "update";
 
 const CLI_CHANGELOG_URL: &str = "https://agentic-os.sh/#anolisa-cli-changelog";
 
-/// TEMPORARY bootstrap: published copy of `templates/repo.toml`.
-///
-/// Until install/register provisions the user-editable repo config,
-/// `anolisa update` downloads this copy when `<etc_dir>/repo.toml` is
-/// absent, so a host that has only the CLI binary still ends up with the
-/// production backend configuration. Remove once repo.toml provisioning
-/// moves into the install/register flow.
-const DEFAULT_REPO_CONFIG_URL: &str =
-    "https://anolisa.oss-cn-hangzhou.aliyuncs.com/anolisa-releases/anolisa/v1/repo.toml";
-
-/// Hard cap on the downloaded config size; repo.toml is a few KiB, so
-/// anything larger is a misconfigured URL, not a config.
-const MAX_REPO_CONFIG_BYTES: u64 = 256 * 1024;
+const ANOLISA_RPM_REPO_ID: &str = "anolisa-configured";
 
 /// Arguments for the unified update command surface.
 ///
@@ -131,24 +118,13 @@ pub enum UpdateCommands {
 pub fn handle(args: UpdateArgs, ctx: &CliContext) -> Result<(), CliError> {
     // `args_conflicts_with_subcommands` guarantees `command` and `component`
     // are never both set, so a present subcommand always wins.
-    //
-    // Bootstrap the repo config only inside the branches that actually run an
-    // update: with `component` now optional, a bare `anolisa update` (or a
-    // not-yet-implemented `update all`) must fail validation without first
-    // reaching out to the network or writing config.
     match (args.command, args.component) {
-        (Some(UpdateCommands::SelfBin), _) => {
-            bootstrap_repo_config(ctx);
-            handle_self_update(ctx)
-        }
+        (Some(UpdateCommands::SelfBin), _) => handle_self_update(ctx),
         (Some(UpdateCommands::All), _) => Err(CliError::not_implemented_with_hint(
             "update all",
             "update planner / distribution resolver not implemented yet",
         )),
-        (None, Some(component)) => {
-            bootstrap_repo_config(ctx);
-            handle_component_update(&component, ctx)
-        }
+        (None, Some(component)) => handle_component_update(&component, ctx),
         (None, None) => Err(CliError::InvalidArgument {
             command: COMMAND.to_string(),
             reason: "specify a component to update (e.g. `anolisa update <component>`), or use `anolisa update self` / `anolisa update all`".to_string(),
@@ -188,18 +164,54 @@ struct ComponentUpdatePayload {
     warnings: Vec<String>,
 }
 
-/// Dispatch `update <component>`: build the real rpm/dnf-backed query and
-/// transaction, then route by recorded ownership.
+/// Dispatch `update <component>` through the recorded component ownership.
 fn handle_component_update(component: &str, ctx: &CliContext) -> Result<(), CliError> {
-    let query = RpmPackageQuery::system();
-    let txn = RpmTransaction::system();
-    update_component_with_deps(component, ctx, &query, &txn, privilege::is_root())
+    let command = format!("update {component}");
+    let target = resolve_update_target(component, ctx, &command)?;
+    let layout = common::resolve_layout(ctx);
+    let repo_config = common::load_repo_config(ctx, &layout, &command)?;
+    match target {
+        UpdateTarget::Raw {
+            backend_name,
+            from_version,
+            recorded_package,
+        } => update_raw_component_with_repo(
+            component,
+            &backend_name,
+            &from_version,
+            recorded_package.as_deref(),
+            ctx,
+            &command,
+            &repo_config,
+        ),
+        UpdateTarget::Rpm { package, ownership } => {
+            let env = anolisa_env::EnvService::detect();
+            let repo = rpm_repo_source_for_update(&repo_config, &env, &command)?
+                .ok_or_else(|| CliError::InvalidArgument {
+                    command: command.clone(),
+                    reason: "repo.toml has no [backends.rpm] table; cannot update an RPM-backed component from the configured ANOLISA repository".to_string(),
+                })?;
+            let query = RpmPackageQuery::system_with_repo(repo.clone());
+            let txn = RpmTransaction::system_with_repo(repo);
+            update_rpm_component(
+                component,
+                &package,
+                ownership,
+                ctx,
+                &query,
+                &txn,
+                privilege::is_root(),
+                &command,
+            )
+        }
+    }
 }
 
 /// Core of [`handle_component_update`] with the package query, transaction, and
 /// root status injected so tests drive the RPM path without a live rpmdb/dnf or
 /// real privileges.
 // pub(crate): driven by the cross-command MVP lifecycle test (#963).
+#[cfg(test)]
 pub(crate) fn update_component_with_deps(
     target: &str,
     ctx: &CliContext,
@@ -208,61 +220,101 @@ pub(crate) fn update_component_with_deps(
     is_root: bool,
 ) -> Result<(), CliError> {
     let command = format!("update {target}");
-    let installed = common::load_installed_state(ctx, COMMAND)?;
+    match resolve_update_target(target, ctx, &command)? {
+        UpdateTarget::Raw {
+            backend_name,
+            from_version,
+            recorded_package,
+        } => update_raw_component(
+            target,
+            &backend_name,
+            &from_version,
+            recorded_package.as_deref(),
+            ctx,
+            &command,
+        ),
+        UpdateTarget::Rpm { package, ownership } => update_rpm_component(
+            target, &package, ownership, ctx, query, txn, is_root, &command,
+        ),
+    }
+}
 
+enum UpdateTarget {
+    Raw {
+        backend_name: String,
+        from_version: String,
+        recorded_package: Option<String>,
+    },
+    Rpm {
+        package: String,
+        ownership: Ownership,
+    },
+}
+
+fn resolve_update_target(
+    target: &str,
+    ctx: &CliContext,
+    command: &str,
+) -> Result<UpdateTarget, CliError> {
+    let installed = common::load_installed_state(ctx, COMMAND)?;
     let obj = installed
         .find_object(ObjectKind::Component, target)
         .ok_or_else(|| CliError::InvalidArgument {
-            command: command.clone(),
+            command: command.to_string(),
             reason: format!(
                 "component '{target}' is not installed — nothing to update (run `anolisa status` to see what is installed, or `anolisa install {target}` to install it)"
             ),
         })?;
 
     match obj.effective_ownership() {
-        Ownership::RawManaged => {
-            // Snapshot what the raw update path needs, then drop the immutable
-            // borrow so the transactional write path can reload state under the
-            // install lock.
-            let backend_name = obj
+        Ownership::RawManaged => Ok(UpdateTarget::Raw {
+            backend_name: obj
                 .install_backend
                 .clone()
-                .unwrap_or_else(|| "raw".to_string());
-            // The owned-file list is intentionally NOT snapshotted here: the
-            // write path re-reads it from state under the install lock so a
-            // concurrent update cannot be driven by a stale file list. Only the
-            // version (to re-validate under the lock) and the recorded raw
-            // package (to reuse a `--package` override) are carried.
-            let from_version = obj.version.clone();
-            let recorded_package = obj.raw_package.clone();
-            update_raw_component(
-                target,
-                &backend_name,
-                &from_version,
-                recorded_package.as_deref(),
-                ctx,
-                &command,
-            )
-        }
+                .unwrap_or_else(|| "raw".to_string()),
+            from_version: obj.version.clone(),
+            recorded_package: obj.raw_package.clone(),
+        }),
         ownership @ (Ownership::RpmManaged | Ownership::RpmObserved) => {
-            // Snapshot the package identity, then drop the immutable borrow so
-            // the write path can re-acquire the lock and reload state.
-            let package = match obj.rpm_metadata.as_ref().map(|m| m.package_name.clone()) {
-                Some(p) if !p.is_empty() => p,
-                _ => {
-                    return Err(CliError::Runtime {
-                        command,
-                        reason: format!(
-                            "component '{target}' is recorded as an RPM component but has no package metadata; run `anolisa repair {target}` to refresh it before updating"
-                        ),
-                    });
-                }
-            };
-            update_rpm_component(
-                target, &package, ownership, ctx, query, txn, is_root, &command,
-            )
+            let package = obj
+                .rpm_metadata
+                .as_ref()
+                .map(|m| m.package_name.clone())
+                .filter(|p| !p.is_empty())
+                .ok_or_else(|| CliError::Runtime {
+                    command: command.to_string(),
+                    reason: format!(
+                        "component '{target}' is recorded as an RPM component but has no package metadata; run `anolisa repair {target}` to refresh it before updating"
+                    ),
+                })?;
+            Ok(UpdateTarget::Rpm { package, ownership })
         }
     }
+}
+
+fn rpm_repo_source_for_update(
+    repo_config: &RepoConfig,
+    env: &anolisa_env::EnvFacts,
+    command: &str,
+) -> Result<Option<DnfRepoSource>, CliError> {
+    let Some(backend) = repo_config.backends.get("rpm") else {
+        return Ok(None);
+    };
+    let host = HostVars {
+        os: env.os.clone(),
+        arch: env.arch.clone(),
+    };
+    let base_url = repo_config
+        .resolved_base_url("rpm", backend, &host)
+        .map_err(|err| CliError::InvalidArgument {
+            command: command.to_string(),
+            reason: err.to_string(),
+        })?;
+    Ok(Some(DnfRepoSource::new(
+        ANOLISA_RPM_REPO_ID,
+        base_url,
+        backend.gpgcheck,
+    )))
 }
 
 // ── raw component update (#1037): backup + transactional file replacement ──
@@ -326,6 +378,7 @@ fn version_relation(installed: &str, candidate: &str) -> VersionRelation {
 /// Returns [`CliError`] when repo.toml or the index cannot resolve the
 /// component, the new artifact cannot be downloaded/verified, or the
 /// transactional replacement fails (after rolling back to the prior version).
+#[cfg(test)]
 fn update_raw_component(
     component: &str,
     backend_name: &str,
@@ -334,13 +387,30 @@ fn update_raw_component(
     ctx: &CliContext,
     command: &str,
 ) -> Result<(), CliError> {
+    let layout = common::resolve_layout(ctx);
+    let repo_config = common::load_repo_config(ctx, &layout, command)?;
+    update_raw_component_with_repo(
+        component,
+        backend_name,
+        from_version,
+        recorded_package,
+        ctx,
+        command,
+        &repo_config,
+    )
+}
+
+fn update_raw_component_with_repo(
+    component: &str,
+    backend_name: &str,
+    from_version: &str,
+    recorded_package: Option<&str>,
+    ctx: &CliContext,
+    command: &str,
+    repo_config: &RepoConfig,
+) -> Result<(), CliError> {
     let env = anolisa_env::EnvService::detect();
     let layout = common::resolve_layout(ctx);
-    let repo_config = RepoConfig::load(&layout).map_err(|err| CliError::Runtime {
-        command: command.to_string(),
-        reason: format!("failed to load repo config: {err}"),
-    })?;
-
     // Rebuild the resolve inputs from recorded state (update has no CLI args),
     // then resolve the latest published entry. base_url/package are cloned out
     // because `resolve_raw` consumes the inputs.
@@ -349,7 +419,7 @@ fn update_raw_component(
         backend_name,
         recorded_package,
         &env,
-        &repo_config,
+        repo_config,
         command,
     )?;
     let base_url = inputs.base_url.clone();
@@ -1499,84 +1569,6 @@ fn now_iso8601() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
-/// TEMPORARY: make sure the user-editable repo config exists before any
-/// update operation runs (see [`DEFAULT_REPO_CONFIG_URL`]).
-///
-/// Best-effort by design: every failure mode (network down, bad TOML,
-/// unwritable etc dir) degrades to a stderr warning — `update self` and
-/// component updates must not be blocked by config bootstrap. The
-/// download is validated as a parseable [`RepoConfig`] before anything
-/// lands on disk, and the write is tmp + rename so a crash cannot leave
-/// a half-written config behind.
-fn bootstrap_repo_config(ctx: &CliContext) {
-    let layout = common::resolve_layout(ctx);
-    let dest = layout.etc_dir.join("repo.toml");
-    if dest.exists() {
-        return;
-    }
-    let url = std::env::var("ANOLISA_REPO_CONFIG_URL")
-        .unwrap_or_else(|_| DEFAULT_REPO_CONFIG_URL.to_string());
-    if ctx.dry_run {
-        if !ctx.quiet && !ctx.json {
-            println!(
-                "would download repo config from {url} to {} (not present locally)",
-                dest.display()
-            );
-        }
-        return;
-    }
-    match fetch_and_write_repo_config(&url, &dest) {
-        Ok(()) => {
-            if !ctx.quiet && !ctx.json {
-                let color = Palette::new(ctx.no_color);
-                println!(
-                    "{} repo config was missing — downloaded {} to {}",
-                    color.ok("✓"),
-                    url,
-                    color.path(dest.display().to_string()),
-                );
-            }
-        }
-        Err(reason) => {
-            eprintln!("warning: repo config bootstrap skipped: {reason}");
-        }
-    }
-}
-
-/// Download, validate, and atomically install the repo config at `dest`.
-fn fetch_and_write_repo_config(url: &str, dest: &Path) -> Result<(), String> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(10))
-        .timeout_read(Duration::from_secs(30))
-        .build();
-    let response = agent
-        .get(url)
-        .call()
-        .map_err(|err| format!("fetch {url}: {err}"))?;
-    let mut body = String::new();
-    response
-        .into_reader()
-        .take(MAX_REPO_CONFIG_BYTES)
-        .read_to_string(&mut body)
-        .map_err(|err| format!("read {url}: {err}"))?;
-
-    // Refuse to install bytes that the CLI itself cannot parse — a bad
-    // published config must not break every subsequent command.
-    RepoConfig::from_toml_str(&body).map_err(|err| format!("downloaded config invalid: {err}"))?;
-
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|err| format!("create {}: {err}", parent.display()))?;
-    }
-    let tmp = dest.with_extension("toml.tmp");
-    std::fs::write(&tmp, &body).map_err(|err| format!("write {}: {err}", tmp.display()))?;
-    std::fs::rename(&tmp, dest).map_err(|err| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("rename to {}: {err}", dest.display())
-    })?;
-    Ok(())
-}
-
 /// Execute CLI self-update: fetch release manifest, compare versions,
 /// download and atomically replace the running binary.
 ///
@@ -1987,49 +1979,6 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use anolisa_platform::pkg_query::PackageVersion;
-
-    /// Serve one HTTP response on an ephemeral port and return its URL.
-    fn serve_once(body: &'static str) -> String {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                use std::io::Write;
-                let mut buf = [0u8; 1024];
-                let _ = stream.read(&mut buf);
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-            }
-        });
-        format!("http://{addr}/repo.toml")
-    }
-
-    #[test]
-    fn bootstrap_fetch_writes_valid_config() {
-        let body = "schema_version = 1\ndefault_backend = \"raw\"\n\n[backends.raw]\nbase_url = \"https://example.com/v1/\"\n";
-        let url = serve_once(body);
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let dest = tmp.path().join("etc/repo.toml");
-
-        fetch_and_write_repo_config(&url, &dest).expect("bootstrap ok");
-        assert_eq!(std::fs::read_to_string(&dest).expect("read dest"), body);
-        assert!(!dest.with_extension("toml.tmp").exists());
-    }
-
-    #[test]
-    fn bootstrap_fetch_refuses_unparseable_config() {
-        let url = serve_once("this is not a repo config");
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let dest = tmp.path().join("etc/repo.toml");
-
-        let err = fetch_and_write_repo_config(&url, &dest).expect_err("must refuse");
-        assert!(err.contains("invalid"), "unexpected error: {err}");
-        assert!(!dest.exists(), "invalid config must not land on disk");
-    }
 
     #[test]
     fn json_dry_run_reports_available_but_not_updated() {
@@ -2779,6 +2728,12 @@ mod tests {
             .expect("seed state");
     }
 
+    fn write_repo_toml(ctx: &CliContext, body: &str) {
+        let layout = common::resolve_layout(ctx);
+        std::fs::create_dir_all(&layout.etc_dir).expect("mkdir etc");
+        std::fs::write(layout.etc_dir.join("repo.toml"), body).expect("write repo.toml");
+    }
+
     fn load_state(ctx: &CliContext) -> InstalledState {
         let layout = common::resolve_layout(ctx);
         InstalledState::load(&layout.state_dir.join("installed.toml")).expect("load state")
@@ -2957,17 +2912,10 @@ mod tests {
     }
 
     /// Regression: a bare `anolisa update` (no component, no subcommand) fails
-    /// validation as INVALID_ARGUMENT. The positional surface lets `(None,
-    /// None)` reach `handle()`, where the old top-of-function bootstrap would
-    /// otherwise hit the network / write config before this error — so the
-    /// bootstrap now lives inside the real-update branches and this path must
-    /// short-circuit here. The fixed routing reaches no bootstrap, so the test
-    /// makes no network call.
+    /// validation as INVALID_ARGUMENT and does not provision repo config.
     #[test]
-    fn bare_update_errors_before_any_bootstrap() {
+    fn bare_update_errors_before_repo_config_provisioning() {
         let tmp = tempfile::tempdir().expect("tmpdir");
-        // Non-dry-run system ctx: an unconditional bootstrap would try to fetch
-        // and write etc_dir/repo.toml here.
         let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
         let repo_toml = common::resolve_layout(&c).etc_dir.join("repo.toml");
 
@@ -2986,6 +2934,67 @@ mod tests {
             !repo_toml.exists(),
             "no repo config must be written for an invalid invocation: {} exists",
             repo_toml.display()
+        );
+    }
+
+    #[test]
+    fn rpm_update_repo_source_uses_repo_toml_backend() {
+        let repo = RepoConfig::from_toml_str(
+            r#"schema_version = 1
+default_backend = "rpm"
+
+[backends.rpm]
+base_url = "https://repo.example/$os/$arch/os"
+gpgcheck = false
+"#,
+        )
+        .expect("repo config");
+        let env = anolisa_env::EnvService::detect_for("linux");
+
+        let source = rpm_repo_source_for_update(&repo, &env, "update copilot-shell")
+            .expect("repo source")
+            .expect("rpm backend");
+
+        assert_eq!(source.id(), ANOLISA_RPM_REPO_ID);
+        assert_eq!(
+            source.base_url(),
+            format!("https://repo.example/linux/{}/os", env.arch)
+        );
+        assert_eq!(source.gpgcheck(), Some(false));
+    }
+
+    #[test]
+    fn rpm_update_requires_configured_rpm_backend() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, true);
+        seed(
+            &c,
+            rpm_object(
+                "copilot-shell",
+                "copilot-shell",
+                "2.2.0-1.al8",
+                Ownership::RpmObserved,
+                ObjectStatus::Adopted,
+            ),
+        );
+        write_repo_toml(
+            &c,
+            r#"schema_version = 1
+default_backend = "raw"
+
+[backends.raw]
+base_url = "https://repo.example/raw/v1"
+"#,
+        );
+
+        let err = handle_component_update("copilot-shell", &c)
+            .expect_err("rpm update must require rpm backend");
+
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert!(
+            err.reason().contains("[backends.rpm]"),
+            "reason must explain the missing rpm backend: {}",
+            err.reason()
         );
     }
 
@@ -3916,8 +3925,7 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
     }
 
     /// `update` with no target is an INVALID_ARGUMENT, not a panic or a silent
-    /// no-op — the dispatcher needs a target. `dry_run` keeps the repo-config
-    /// bootstrap from reaching the network in this unit test.
+    /// no-op — the dispatcher needs a target.
     #[test]
     fn update_with_no_target_is_invalid_argument() {
         let tmp = tempfile::tempdir().expect("tmpdir");

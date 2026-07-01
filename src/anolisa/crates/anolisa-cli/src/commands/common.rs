@@ -1,8 +1,8 @@
 //! Shared helpers for tier1 / tier2 command handlers.
 //!
-//! Read-only access to the three skeleton-stable objects:
-//! [`FsLayout`], [`InstalledState`], and [`Catalog`]. Keep this module thin —
-//! handlers compose these calls; we do not introduce a service layer here.
+//! Access to the skeleton-stable command inputs: [`FsLayout`],
+//! [`InstalledState`], [`Catalog`], and repo configuration. Keep this module
+//! thin — handlers compose these calls; we do not introduce a service layer here.
 
 use std::path::{Path, PathBuf};
 
@@ -10,8 +10,10 @@ use anolisa_core::adapter::manager::AdapterManager;
 use anolisa_core::{Catalog, CatalogLayers, InstalledState, ObjectStatus};
 use anolisa_platform::fs_layout::FsLayout;
 
+use crate::color::Palette;
 use crate::context::{CliContext, InstallMode};
 use crate::packaged;
+use crate::repo_config::{RepoConfig, RepoConfigProvisioning};
 use crate::response::CliError;
 
 /// Subdirectory under `datadir` and `etc_dir` where component
@@ -79,6 +81,45 @@ pub(crate) fn package_transaction_failed_error(
             stderr.trim(),
         ),
     }
+}
+
+/// Render repo config provisioning performed by commands that need repo access.
+fn render_repo_config_provisioning(ctx: &CliContext, provisioning: &RepoConfigProvisioning) {
+    if ctx.quiet || ctx.json {
+        return;
+    }
+    let color = Palette::new(ctx.no_color);
+    match provisioning {
+        RepoConfigProvisioning::Existing => {}
+        RepoConfigProvisioning::Downloaded { url, dest } => {
+            println!(
+                "{} repo config was missing; downloaded {} to {}",
+                color.ok("✓"),
+                url,
+                color.path(dest.display().to_string()),
+            );
+        }
+        RepoConfigProvisioning::FetchedForDryRun { url, dest } => {
+            println!(
+                "fetched repo config from {url} for dry-run; would write to {}",
+                color.path(dest.display().to_string()),
+            );
+        }
+    }
+}
+
+/// Load `repo.toml`, provisioning it if every local source is missing.
+pub(crate) fn load_repo_config(
+    ctx: &CliContext,
+    layout: &FsLayout,
+    command: &str,
+) -> Result<RepoConfig, CliError> {
+    let repo_load = RepoConfig::load(layout, ctx.dry_run).map_err(|err| CliError::Runtime {
+        command: command.to_string(),
+        reason: err.to_string(),
+    })?;
+    render_repo_config_provisioning(ctx, &repo_load.provisioning);
+    Ok(repo_load.config)
 }
 
 /// Load `InstalledState` from the layout's `state_dir/installed.toml`.

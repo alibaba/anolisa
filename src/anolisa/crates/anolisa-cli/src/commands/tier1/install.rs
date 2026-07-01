@@ -413,7 +413,7 @@ fn handle_one(
 ) -> Result<InstallOutcome, CliError> {
     let layout = common::resolve_layout(ctx);
     let env = anolisa_env::EnvService::detect();
-    let repo_config = RepoConfig::load(&layout).map_err(|err| repo_config_err(err, false))?;
+    let repo_config = common::load_repo_config(ctx, &layout, COMMAND)?;
     let rpm_repo = if rpm_repo_required(&component, &args, ctx, &repo_config)? {
         configured_rpm_repo_source(&repo_config, &env)?
     } else {
@@ -449,7 +449,7 @@ pub(crate) fn handle_one_with_exec(
 ) -> Result<InstallOutcome, CliError> {
     let layout = common::resolve_layout(ctx);
     let env = anolisa_env::EnvService::detect();
-    let repo_config = RepoConfig::load(&layout).map_err(|err| repo_config_err(err, false))?;
+    let repo_config = common::load_repo_config(ctx, &layout, COMMAND)?;
     handle_one_with_config(component, args, ctx, exec, layout, env, repo_config)
 }
 
@@ -2006,10 +2006,7 @@ fn resolve_all_components(
 ) -> Result<Vec<String>, CliError> {
     let layout = common::resolve_layout(ctx);
     let env = anolisa_env::EnvService::detect();
-    let repo_config = RepoConfig::load(&layout).map_err(|err| CliError::InvalidArgument {
-        command: "install --all".to_string(),
-        reason: format!("failed to load repo.toml: {err}"),
-    })?;
+    let repo_config = common::load_repo_config(ctx, &layout, "install --all")?;
     let index =
         crate::resolution::load_component_index(&layout, &env, &repo_config).map_err(|err| {
             CliError::Runtime {
@@ -6211,7 +6208,9 @@ base_url = "https://repo.example/alinux/$releasever/agentic-os/$basearch/os/"
     #[test]
     fn probe_reports_adoptable_for_installed_default_name() {
         let (_tmp, ctx) = system_ctx_with_raw_repo(false);
-        let repo = RepoConfig::load(&common::resolve_layout(&ctx)).expect("repo");
+        let repo = RepoConfig::load(&common::resolve_layout(&ctx), false)
+            .expect("repo")
+            .config;
         let q = FakeQuery {
             installed: vec![(
                 "copilot-shell".to_string(),
@@ -6245,7 +6244,9 @@ base_url = "https://repo.example/alinux/$releasever/agentic-os/$basearch/os/"
     #[test]
     fn probe_reports_absent_when_not_installed() {
         let (_tmp, ctx) = system_ctx_with_raw_repo(false);
-        let repo = RepoConfig::load(&common::resolve_layout(&ctx)).expect("repo");
+        let repo = RepoConfig::load(&common::resolve_layout(&ctx), false)
+            .expect("repo")
+            .config;
         let q = FakeQuery {
             available_provides: vec![available_component_provider(
                 "copilot-shell",
@@ -6269,7 +6270,9 @@ base_url = "https://repo.example/alinux/$releasever/agentic-os/$basearch/os/"
     #[test]
     fn probe_reports_ambiguous_for_multiple_providers() {
         let (_tmp, ctx) = system_ctx_with_raw_repo(false);
-        let repo = RepoConfig::load(&common::resolve_layout(&ctx)).expect("repo");
+        let repo = RepoConfig::load(&common::resolve_layout(&ctx), false)
+            .expect("repo")
+            .config;
         let q = FakeQuery {
             provides: vec![(
                 "anolisa-component(copilot-shell)".to_string(),

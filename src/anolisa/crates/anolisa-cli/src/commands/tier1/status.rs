@@ -54,7 +54,7 @@ use crate::color::{Palette, pad_right};
 use crate::commands::common;
 use crate::commands::tier1::install::rpm_package_candidates_with_index;
 use crate::context::{CliContext, InstallMode};
-use crate::repo_config::{BackendConfig, RepoConfig};
+use crate::repo_config::BackendConfig;
 use crate::resolution::{
     ComponentIndex, ResolutionUse, load_optional_component_index, resolve_rpm_component_name,
 };
@@ -139,7 +139,7 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
 
     let query = RpmPackageQuery::system();
     let repo_config = (ctx.install_mode == InstallMode::System && args.component.is_some())
-        .then(|| RepoConfig::load(&layout).ok())
+        .then(|| common::load_repo_config(ctx, &layout, COMMAND).ok())
         .flatten();
     let rpm_backend = repo_config.as_ref().and_then(|c| c.backends.get("rpm"));
     let env = EnvService::detect();
@@ -1108,6 +1108,7 @@ fn adapter_state_label(adapter: &AdapterSummaryRecord) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repo_config::RepoConfig;
     use anolisa_core::{
         FileOwner, HealthEntry, InstalledObject, InstalledState, ObjectKind, ObjectStatus,
         OwnedFile, OwnedFileKind, SubscriptionScope,

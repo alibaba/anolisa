@@ -37,9 +37,15 @@
 //!   2. **Packaged** — `<datadir>/templates/repo.toml`.
 //!   3. **Dev-tree** — `<workspace>/templates/repo.toml` via
 //!      `CARGO_MANIFEST_DIR` (what `cargo run` / `cargo test` see).
+//!
+//! [`RepoConfig::load`] uses the discovery chain first and provisions a site
+//! config only when every local source is missing. Callers do not need separate
+//! first-run handling around repo config reads.
 
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anolisa_platform::fs_layout::FsLayout;
 use serde::Deserialize;
@@ -50,6 +56,13 @@ use crate::packaged;
 const REPO_FILE: &str = "repo.toml";
 /// Subdirectory under `datadir` for the packaged copy.
 const REPO_SUBDIR: &str = "templates";
+/// Published copy of `templates/repo.toml` used when no local source exists.
+const DEFAULT_REPO_CONFIG_URL: &str =
+    "https://anolisa.oss-cn-hangzhou.aliyuncs.com/anolisa-releases/anolisa/v1/repo.toml";
+/// Hard cap on bootstrap downloads; valid repo configs are only a few KiB.
+const MAX_REPO_CONFIG_BYTES: u64 = 256 * 1024;
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Wire-format schema version of `repo.toml`.
 pub const REPO_CONFIG_SCHEMA_VERSION: u32 = 1;
@@ -154,6 +167,41 @@ pub enum RepoConfigError {
     UnsetPlaceholder { backend: String, name: String },
 }
 
+/// Result of loading repo config through the source-access provisioning path.
+#[derive(Debug)]
+pub(crate) struct RepoConfigLoadResult {
+    pub config: RepoConfig,
+    pub provisioning: RepoConfigProvisioning,
+}
+
+/// Side effect, if any, performed while making repo config available.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RepoConfigProvisioning {
+    Existing,
+    Downloaded { url: String, dest: PathBuf },
+    FetchedForDryRun { url: String, dest: PathBuf },
+}
+
+/// Errors raised while provisioning a missing repo config.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RepoConfigProvisionError {
+    #[error("failed to load repo config: {0}")]
+    Load(#[from] RepoConfigError),
+
+    #[error("failed to fetch repo config from {url}: {reason}")]
+    Fetch { url: String, reason: String },
+
+    #[error("io error at {path}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("downloaded repo config is invalid: {reason}")]
+    InvalidDownloaded { reason: String },
+}
+
 /// Parsed `repo.toml`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -231,15 +279,68 @@ pub struct HostVars {
 }
 
 impl RepoConfig {
-    /// Load the repo config via the discovery chain described in the
-    /// module docs. `layout` supplies the etc-dir candidate.
-    pub fn load(layout: &FsLayout) -> Result<Self, RepoConfigError> {
-        Self::load_with_sources(RepoConfigSources::for_layout(layout))
+    /// Load repo config for commands that need a configured repository source.
+    ///
+    /// Uses the discovery chain first and provisions `<etc_dir>/repo.toml` only
+    /// when every local source is missing. `dry_run` fetches and validates the
+    /// published config without writing it.
+    pub(crate) fn load(
+        layout: &FsLayout,
+        dry_run: bool,
+    ) -> Result<RepoConfigLoadResult, RepoConfigProvisionError> {
+        let url = repo_config_url();
+        Self::load_with_sources(RepoConfigSources::for_layout(layout), dry_run, &url)
     }
 
-    /// Same as [`Self::load`] but with explicit sources so tests can pin
-    /// the fallback order without depending on the host filesystem.
-    pub(crate) fn load_with_sources(sources: RepoConfigSources) -> Result<Self, RepoConfigError> {
+    fn load_with_sources(
+        sources: RepoConfigSources,
+        dry_run: bool,
+        bootstrap_url: &str,
+    ) -> Result<RepoConfigLoadResult, RepoConfigProvisionError> {
+        match Self::load_local_with_sources(sources.clone()) {
+            Ok(config) => {
+                return Ok(RepoConfigLoadResult {
+                    config,
+                    provisioning: RepoConfigProvisioning::Existing,
+                });
+            }
+            Err(RepoConfigError::NotFound) => {}
+            Err(err) => return Err(RepoConfigProvisionError::Load(err)),
+        }
+
+        let dest = sources
+            .etc
+            .clone()
+            .ok_or(RepoConfigProvisionError::Load(RepoConfigError::NotFound))?;
+        let body = fetch_repo_config_body(bootstrap_url)?;
+        let config = Self::from_toml_str(&body).map_err(|err| {
+            RepoConfigProvisionError::InvalidDownloaded {
+                reason: err.to_string(),
+            }
+        })?;
+
+        if dry_run {
+            return Ok(RepoConfigLoadResult {
+                config,
+                provisioning: RepoConfigProvisioning::FetchedForDryRun {
+                    url: bootstrap_url.to_string(),
+                    dest,
+                },
+            });
+        }
+
+        write_repo_config(&dest, &body)?;
+        Ok(RepoConfigLoadResult {
+            config,
+            provisioning: RepoConfigProvisioning::Downloaded {
+                url: bootstrap_url.to_string(),
+                dest,
+            },
+        })
+    }
+
+    /// Local discovery helper used before the provisioning fallback.
+    fn load_local_with_sources(sources: RepoConfigSources) -> Result<Self, RepoConfigError> {
         for candidate in [&sources.etc, &sources.packaged, &sources.dev_tree] {
             if let Some(path) = candidate.as_deref()
                 && path.is_file()
@@ -614,7 +715,8 @@ fn render_placeholders(
     Ok(out)
 }
 
-/// Discovery candidates for [`RepoConfig::load_with_sources`].
+/// Discovery candidates for local repo config discovery.
+#[derive(Clone)]
 pub(crate) struct RepoConfigSources {
     /// User/site config under the active layout's etc dir.
     pub etc: Option<PathBuf>,
@@ -642,6 +744,66 @@ impl RepoConfigSources {
     }
 }
 
+fn repo_config_url() -> String {
+    std::env::var("ANOLISA_REPO_CONFIG_URL").unwrap_or_else(|_| DEFAULT_REPO_CONFIG_URL.to_string())
+}
+
+fn fetch_repo_config_body(url: &str) -> Result<String, RepoConfigProvisionError> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(HTTP_CONNECT_TIMEOUT)
+        .timeout_read(HTTP_READ_TIMEOUT)
+        .build();
+    let response = agent
+        .get(url)
+        .call()
+        .map_err(|err| RepoConfigProvisionError::Fetch {
+            url: url.to_string(),
+            reason: err.to_string(),
+        })?;
+    let mut body = String::new();
+    response
+        .into_reader()
+        .take(MAX_REPO_CONFIG_BYTES + 1)
+        .read_to_string(&mut body)
+        .map_err(|err| RepoConfigProvisionError::Fetch {
+            url: url.to_string(),
+            reason: err.to_string(),
+        })?;
+    if body.len() as u64 > MAX_REPO_CONFIG_BYTES {
+        return Err(RepoConfigProvisionError::Fetch {
+            url: url.to_string(),
+            reason: format!(
+                "download exceeded size limit: {} bytes received, limit is {} bytes",
+                body.len(),
+                MAX_REPO_CONFIG_BYTES
+            ),
+        });
+    }
+    Ok(body)
+}
+
+fn write_repo_config(dest: &Path, body: &str) -> Result<(), RepoConfigProvisionError> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| RepoConfigProvisionError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let tmp = dest.with_extension("toml.tmp");
+    std::fs::write(&tmp, body).map_err(|source| RepoConfigProvisionError::Io {
+        path: tmp.clone(),
+        source,
+    })?;
+    std::fs::rename(&tmp, dest).map_err(|source| {
+        let _ = std::fs::remove_file(&tmp);
+        RepoConfigProvisionError::Io {
+            path: dest.to_path_buf(),
+            source,
+        }
+    })?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -650,6 +812,33 @@ mod tests {
         HostVars {
             os: "linux".to_string(),
             arch: "x86_64".to_string(),
+        }
+    }
+
+    fn serve_once(body: String) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                use std::io::{Read, Write};
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+            }
+        });
+        format!("http://{addr}/repo.toml")
+    }
+
+    fn missing_sources(dest: PathBuf) -> RepoConfigSources {
+        RepoConfigSources {
+            etc: Some(dest),
+            packaged: None,
+            dev_tree: None,
         }
     }
 
@@ -689,8 +878,88 @@ mod tests {
             packaged: Some(tmp.path().join("nope2.toml")),
             dev_tree: Some(tmp.path().join("nope3.toml")),
         };
-        let err = RepoConfig::load_with_sources(sources).expect_err("no fallback");
+        let err = RepoConfig::load_local_with_sources(sources).expect_err("no fallback");
         assert!(matches!(err, RepoConfigError::NotFound));
+    }
+
+    #[test]
+    fn load_uses_existing_config_without_bootstrap() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dest = tmp.path().join("etc/repo.toml");
+        std::fs::create_dir_all(dest.parent().expect("parent")).expect("mkdir");
+        std::fs::write(
+            &dest,
+            r#"schema_version = 1
+default_backend = "raw"
+[backends.raw]
+base_url = "file:///srv/existing"
+"#,
+        )
+        .expect("write");
+        let result = RepoConfig::load_with_sources(missing_sources(dest), false, "bad://url")
+            .expect("load existing");
+
+        assert!(matches!(
+            result.provisioning,
+            RepoConfigProvisioning::Existing
+        ));
+        assert_eq!(
+            result.config.backends["raw"].base_url,
+            "file:///srv/existing"
+        );
+    }
+
+    #[test]
+    fn load_downloads_missing_config() {
+        let body = "schema_version = 1\ndefault_backend = \"raw\"\n\n[backends.raw]\nbase_url = \"https://example.com/v1/\"\n";
+        let url = serve_once(body.to_string());
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dest = tmp.path().join("etc/repo.toml");
+
+        let result = RepoConfig::load_with_sources(missing_sources(dest.clone()), false, &url)
+            .expect("download");
+
+        assert!(matches!(
+            result.provisioning,
+            RepoConfigProvisioning::Downloaded { .. }
+        ));
+        assert_eq!(std::fs::read_to_string(&dest).expect("read dest"), body);
+        assert!(!dest.with_extension("toml.tmp").exists());
+        assert_eq!(result.config.default_backend, "raw");
+    }
+
+    #[test]
+    fn load_dry_run_fetches_without_writing() {
+        let body = "schema_version = 1\ndefault_backend = \"raw\"\n\n[backends.raw]\nbase_url = \"https://example.com/v1/\"\n";
+        let url = serve_once(body.to_string());
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dest = tmp.path().join("etc/repo.toml");
+
+        let result = RepoConfig::load_with_sources(missing_sources(dest.clone()), true, &url)
+            .expect("dry-run fetch");
+
+        assert!(matches!(
+            result.provisioning,
+            RepoConfigProvisioning::FetchedForDryRun { .. }
+        ));
+        assert!(!dest.exists(), "dry-run must not write repo config");
+        assert_eq!(result.config.default_backend, "raw");
+    }
+
+    #[test]
+    fn load_refuses_invalid_download() {
+        let url = serve_once("this is not a repo config".to_string());
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dest = tmp.path().join("etc/repo.toml");
+
+        let err = RepoConfig::load_with_sources(missing_sources(dest.clone()), false, &url)
+            .expect_err("must refuse");
+
+        assert!(matches!(
+            err,
+            RepoConfigProvisionError::InvalidDownloaded { .. }
+        ));
+        assert!(!dest.exists(), "invalid config must not land on disk");
     }
 
     /// Etc-dir config wins over every other source — that is the
@@ -713,7 +982,7 @@ base_url = "file:///srv/local-repo"
             packaged: None,
             dev_tree: None,
         };
-        let cfg = RepoConfig::load_with_sources(sources).expect("load");
+        let cfg = RepoConfig::load_local_with_sources(sources).expect("load");
         assert_eq!(cfg.backends["raw"].base_url, "file:///srv/local-repo");
     }
 
