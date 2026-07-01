@@ -11,14 +11,14 @@ When AI Agents modify code, configurations, or data files, mistakes can be costl
 - Create instant snapshots before risky operations
 - Roll back to any previous checkpoint in milliseconds
 - Compare differences between checkpoints
-- Auto-checkpoint on configurable triggers
+- Auto-checkpoint via plugin integration
 
 ---
 
 ## Prerequisites
 
 - Linux (x86_64 or aarch64)
-- btrfs filesystem on the workspace volume (for COW snapshots)
+- btrfs filesystem on the workspace volume (for native COW snapshots), or any filesystem (ws-ckpt will create a btrfs loop image automatically)
 - Agent runtime: OpenClaw or Hermes (for plugin mode)
 
 ---
@@ -55,23 +55,10 @@ ws-ckpt plugin install --runtime openclaw
 
 # For Hermes
 ws-ckpt plugin install --runtime hermes
+
+# Uninstall
+ws-ckpt plugin uninstall --runtime openclaw
 ```
-
----
-
-## Skill Installation
-
-To enable natural-language-driven checkpoint operations, install the ws-ckpt skill:
-
-```bash
-# Install from GitHub
-# Skill URL: https://github.com/alibaba/anolisa/blob/main/src/ws-ckpt/src/skills/ws-ckpt/SKILL.md
-```
-
-Once installed, the Agent can interpret natural language commands like:
-- "Save current workspace state"
-- "Rollback to the last checkpoint"
-- "Show me what changed since the last save"
 
 ---
 
@@ -79,32 +66,96 @@ Once installed, the Agent can interpret natural language commands like:
 
 | Command | Description |
 |---------|-------------|
-| `ws-ckpt checkpoint [--name <name>]` | Create a new checkpoint |
-| `ws-ckpt rollback <checkpoint-id>` | Restore workspace to a checkpoint |
-| `ws-ckpt list` | List all checkpoints |
-| `ws-ckpt diff <id1> [<id2>]` | Show differences between checkpoints |
-| `ws-ckpt delete <checkpoint-id>` | Delete a specific checkpoint |
-| `ws-ckpt status` | Show current workspace status |
-| `ws-ckpt config` | View/edit configuration |
+| `ws-ckpt init -w <workspace>` | Initialize a workspace for checkpointing |
+| `ws-ckpt checkpoint -w <workspace> -s <snapshot-id> -m <message> [--metadata <json>]` | Create a new checkpoint |
+| `ws-ckpt rollback -w <workspace> -s <snapshot> [--preview]` | Restore workspace to a checkpoint |
+| `ws-ckpt rollback -w <workspace> -n <num-ancestors>` | Rollback N ancestors |
+| `ws-ckpt list [-w <workspace>] [--format table\|json]` | List all checkpoints |
+| `ws-ckpt diff -w <workspace> -f <from> [-t <to>]` | Show differences between checkpoints |
+| `ws-ckpt delete [-w <workspace>] -s <snapshot> [--force]` | Delete a specific checkpoint |
+| `ws-ckpt status [-w <workspace>] [--format table\|json]` | Show current workspace status |
+| `ws-ckpt cleanup -w <workspace> [--keep 20]` | Remove old checkpoints |
+| `ws-ckpt config [-g \| -w <workspace>] [--enable-auto-cleanup] [--auto-cleanup-keep <N\|Nd>]` | View/edit configuration |
+| `ws-ckpt plugin install --runtime openclaw\|hermes` | Install runtime plugin |
+| `ws-ckpt plugin uninstall --runtime openclaw\|hermes` | Uninstall runtime plugin |
+| `ws-ckpt recover [-w <workspace> \| --all] [--force]` | Recover from interrupted operations |
+| `ws-ckpt reload` | Reload daemon configuration |
+| `ws-ckpt daemon [--mount-path ...] [--socket ...] [--log-level ...]` | Start the daemon process |
 
 ### Examples
 
 ```bash
-# Create a named checkpoint
-ws-ckpt checkpoint --name "before-refactor"
+# Initialize a workspace
+ws-ckpt init -w /home/user/projects/my-project
 
-# List existing checkpoints
-ws-ckpt list
+# Create a checkpoint
+ws-ckpt checkpoint -w /home/user/projects/my-project -s snap-001 -m "before refactor"
 
-# Compare current state with a checkpoint
-ws-ckpt diff ckpt-3a7f
+# List checkpoints
+ws-ckpt list -w /home/user/projects/my-project
+
+# Diff between two snapshots
+ws-ckpt diff -w /home/user/projects/my-project -f snap-001 -t snap-002
 
 # Rollback to a specific checkpoint
-ws-ckpt rollback ckpt-3a7f
+ws-ckpt rollback -w /home/user/projects/my-project -s snap-001
 
-# Delete old checkpoints
-ws-ckpt delete ckpt-1b2c
+# Preview rollback without applying
+ws-ckpt rollback -w /home/user/projects/my-project -s snap-001 --preview
+
+# Cleanup old checkpoints, keep last 20
+ws-ckpt cleanup -w /home/user/projects/my-project --keep 20
+
+# Enable auto-cleanup for workspace
+ws-ckpt config -w /home/user/projects/my-project --enable-auto-cleanup --auto-cleanup-keep 7d
 ```
+
+---
+
+## Configuration
+
+### Daemon Configuration
+
+The daemon configuration file is located at `/etc/ws-ckpt/config.toml`. This is a system-level configuration for the ws-ckpt daemon process.
+
+There is no user-side global config file. Auto-checkpoint and cleanup behavior are controlled per-plugin:
+
+### OpenClaw Plugin Configuration
+
+```json
+// ~/.openclaw/ws-ckpt.json
+{
+  "autoCheckpoint": true,
+  "workspace": "/home/user/projects/my-project"
+}
+```
+
+### Hermes Plugin Configuration
+
+```bash
+hermes config set plugins.ws-ckpt.workspace /home/user/projects/my-project
+```
+
+### CLI-Based Configuration
+
+```bash
+# Enable auto-cleanup, keep checkpoints for 7 days
+ws-ckpt config -w /home/user/projects/my-project --enable-auto-cleanup --auto-cleanup-keep 7d
+
+# Global config
+ws-ckpt config -g --enable-auto-cleanup --auto-cleanup-keep 20
+```
+
+---
+
+## Important Notes
+
+> **WARNING**: The workspace path configured for ws-ckpt must NOT be:
+> - The root path (`/`)
+> - Inside the daemon's mount_path
+> - The Agent startup directory or any parent directory (validated at plugin level)
+>
+> These constraints are enforced by the daemon. Attempts to use invalid paths will be rejected.
 
 ---
 
@@ -121,71 +172,13 @@ When the ws-ckpt skill is installed, Agents can use checkpoints via natural lang
 
 ---
 
-## Auto-Checkpoint
-
-ws-ckpt supports automatic checkpoint creation:
-
-```toml
-# ~/.config/ws-ckpt/config.toml
-
-[auto_checkpoint]
-# Create checkpoint before each Agent tool invocation
-on_tool_call = true
-
-# Scheduled checkpoints (cron expression)
-schedule = "*/10 * * * *"   # every 10 minutes
-
-[cleanup]
-# Auto-remove checkpoints older than N hours
-max_age_hours = 24
-
-# Maximum number of retained checkpoints
-max_count = 50
-```
-
----
-
-## Important Notes
-
-> **WARNING**: The workspace path configured for ws-ckpt must NOT be:
-> - The Agent startup directory or any parent directory
-> - System paths (`/`, `/usr`, `/etc`, `/var`)
->
-> Setting the workspace to these paths may cause system instability or Agent malfunction.
-
----
-
-## Configuration
-
-Default config location: `~/.config/ws-ckpt/config.toml`
-
-```toml
-[workspace]
-# Path to the managed workspace
-path = "/home/user/projects/my-project"
-
-[storage]
-# Snapshot storage backend
-backend = "btrfs"
-
-[auto_checkpoint]
-on_tool_call = true
-schedule = ""
-
-[cleanup]
-max_age_hours = 24
-max_count = 50
-```
-
----
-
 ## FAQ
 
 **Q: What happens if my filesystem is not btrfs?**
-A: ws-ckpt falls back to rsync-based snapshots, which are slower but functionally equivalent.
+A: ws-ckpt creates a btrfs loop image on the host filesystem and loop-mounts it, providing full COW snapshot functionality regardless of the underlying filesystem type.
 
 **Q: Can I use ws-ckpt with multiple workspaces?**
-A: Yes. Run `ws-ckpt config` to manage multiple workspace paths.
+A: Yes. Use `-w` flag with each command to specify the workspace, or configure multiple workspaces via plugins.
 
 **Q: How much disk space do checkpoints use?**
 A: With btrfs COW, only changed blocks are stored. Typical overhead is <5% of workspace size per checkpoint.

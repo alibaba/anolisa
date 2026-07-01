@@ -10,7 +10,7 @@ AI Agents typically lose all context between sessions. Agent Memory solves this 
 
 - **Persistent Storage** — memories survive across Agent restarts and sessions
 - **File-based Architecture** — memories stored as structured files for transparency and portability
-- **MCP Interface** — standard Model Context Protocol server for seamless Agent integration
+- **MCP Interface** — standard Model Context Protocol server with 30+ tools for seamless Agent integration
 - **Sandboxed Execution** — operates safely within restricted environments
 
 ---
@@ -30,7 +30,13 @@ AI Agents typically lose all context between sessions. Agent Memory solves this 
 anolisa install agent-memory
 ```
 
-### Option 2: Source build (developers)
+### Option 2: YUM (Alinux, requires ANOLISA YUM repo)
+
+```bash
+sudo yum install agent-memory
+```
+
+### Option 3: Source build (developers)
 
 ```bash
 cd src/agent-memory && make build
@@ -72,26 +78,69 @@ The Agent can then use MCP tools to read/write memories during conversation.
 
 ---
 
+## MCP Tools
+
+Agent Memory exposes 30+ MCP tools. Key categories:
+
+### File Operations
+
+- `mem_read` / `mem_write` / `mem_append` / `mem_edit` — read, write, append, and edit memory files
+- `mem_list` / `mem_grep` / `mem_diff` — list, search, and diff memory content
+- `mem_mkdir` / `mem_remove` — manage memory directories and files
+- `mem_promote` — promote a memory entry
+
+### Session & Context
+
+- `mem_session_log` — log session activity
+- `memory_search` / `memory_observe` / `memory_get_context` — semantic search and context retrieval
+- `memory_sessions` / `memory_timeline` / `memory_summary` — session history and summaries
+
+### Maintenance
+
+- `mem_dream` / `mem_consolidate` / `mem_compact` — background consolidation and compaction
+- `mem_index_refresh` — refresh the memory index
+- `mem_snapshot` / `mem_snapshot_list` / `mem_snapshot_restore` — snapshot management
+- `mem_log` / `mem_revert` — history log and revert
+
+### Task Management
+
+- `memory_task_save` / `memory_task_resume` / `memory_task_list` / `memory_task_close` — save and resume multi-step tasks
+
+### Import/Export & Meta
+
+- `mem_export` / `mem_import` — bulk export and import
+- `memory_about` / `memory_forget` / `memory_auto_created` / `memory_consent` — metadata and controls
+
+---
+
 ## Configuration
 
-Configuration file: `~/.config/agent-memory/config.toml`
+Configuration file: `~/.anolisa/memory.toml`
+
+This file is **optional** and is not auto-generated. When absent, Agent Memory uses built-in defaults. Create it only if you need to override default behavior.
 
 ```toml
+# Example: override defaults
 [storage]
-# Directory for memory files
-path = "~/.local/share/agent-memory"
+path = "~/.anolisa/memory/"
 
 [server]
-# MCP server transport
 transport = "stdio"
 ```
+
+### Data Directory
+
+Memory files are stored in `~/.anolisa/memory/` by default.
 
 ---
 
 ## FAQ
 
 **Q: Where are memories stored?**
-A: By default in `~/.local/share/agent-memory/` as structured files.
+A: By default in `~/.anolisa/memory/` as structured files.
+
+**Q: Is a config file required?**
+A: No. Agent Memory works with built-in defaults. The optional config at `~/.anolisa/memory.toml` is only needed to override specific settings.
 
 **Q: Can Agent Memory work in sandboxed environments?**
 A: Yes. Agent Memory is designed to operate within restricted/sandboxed execution contexts.

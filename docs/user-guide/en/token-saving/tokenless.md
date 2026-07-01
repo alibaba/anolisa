@@ -19,7 +19,7 @@ AI Agent interactions typically include large volumes of tool schema definitions
 ## Prerequisites
 
 - Linux (x86_64 or aarch64)
-- One of: cosh, OpenClaw (as the host Agent framework)
+- One of: cosh, OpenClaw, Hermes, claude-code, codex, qwencode (as the host Agent framework)
 
 ---
 
@@ -47,36 +47,58 @@ cd src/tokenless && cargo build --release
 
 ## Integration
 
-Tokenless integrates with Agent frameworks through hooks or plugins.
-
-### cosh (Copilot Shell)
-
-Install the cosh hook:
-
-```bash
-/usr/share/tokenless/scripts/install.sh --cosh
-```
-
-Once installed, Tokenless automatically compresses tool schemas and CLI output within cosh sessions.
+Tokenless integrates with Agent frameworks through adapter scripts or extensions.
 
 ### OpenClaw
 
-Install the OpenClaw plugin:
+Install the OpenClaw adapter:
 
 ```bash
-/usr/share/tokenless/scripts/install.sh --openclaw
+/usr/share/anolisa/adapters/tokenless/openclaw/scripts/install.sh
 ```
 
-The plugin registers as a middleware layer in the OpenClaw tool pipeline.
+The adapter registers as a middleware layer in the OpenClaw tool pipeline.
+
+### Hermes
+
+Install the Hermes adapter:
+
+```bash
+/usr/share/anolisa/adapters/tokenless/hermes/scripts/install.sh
+```
+
+### cosh (Copilot Shell)
+
+For cosh, Tokenless is installed as an extension:
+
+```bash
+# Via Makefile target
+make install-cosh-extension
+```
+
+This installs the extension to `~/.copilot-shell/extensions/tokenless/`.
+
+### Other Adapters
+
+Tokenless also supports claude-code, codex, and qwencode adapters. See `anolisa install tokenless` for available adapter options.
 
 ---
 
-## Usage
+## CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `tokenless compress-schema` | Compress tool schema definitions |
+| `tokenless compress-response` | Compress CLI/tool response output |
+| `tokenless compress-toon` | Compress to TOON format |
+| `tokenless decompress-toon` | Decompress from TOON format |
+| `tokenless env-check` | Check environment and integration status |
+| `tokenless stats` | View compression statistics |
 
 ### View Compression Statistics
 
 ```bash
-tokenless stats list
+tokenless stats
 ```
 
 Sample output:
@@ -96,27 +118,41 @@ Total         21,392         56.1%
 
 Tokenless reports compression metrics to AgentSight when both components are installed. View Token savings on the AgentSight web dashboard under the **Token Accounting** panel.
 
-No additional configuration is needed — metrics are exported automatically.
+No additional configuration is needed — metrics are exported automatically when `sls_enabled` is true.
 
 ---
 
 ## Configuration
 
-Configuration file: `~/.config/tokenless/config.toml`
+Configuration file: `~/.tokenless/config.json`
 
-```toml
-[compression]
-# Compression level: "aggressive", "balanced", "conservative"
-level = "balanced"
+This file is optional. When absent, all features are enabled by default.
 
-[stats]
-# Enable statistics collection
-enabled = true
-
-[integration]
-# Auto-export to AgentSight
-agentsight = true
+```json
+{
+  "stats_enabled": true,
+  "sls_enabled": true,
+  "compression_enabled": true
+}
 ```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `stats_enabled` | boolean | `true` | Enable local statistics collection (stored in `~/.tokenless/stats.db`) |
+| `sls_enabled` | boolean | `true` | Enable metrics export to AgentSight/SLS |
+| `compression_enabled` | boolean | `true` | Enable compression (all-or-nothing toggle) |
+
+### Environment Variable Overrides
+
+Each config field can be overridden via environment variables:
+
+- `TOKENLESS_STATS_ENABLED` — override `stats_enabled`
+- `TOKENLESS_SLS_ENABLED` — override `sls_enabled`
+- `TOKENLESS_COMPRESSION_ENABLED` — override `compression_enabled`
+
+### Statistics Database
+
+Local statistics are stored in `~/.tokenless/stats.db`.
 
 ---
 
@@ -126,7 +162,7 @@ agentsight = true
 A: No. Tokenless only compresses the representation sent to the model. Tool execution is unchanged.
 
 **Q: Which frameworks are supported?**
-A: Currently cosh and OpenClaw. Hermes support is planned.
+A: cosh, OpenClaw, Hermes, claude-code, codex, and qwencode.
 
-**Q: Can I disable compression for specific tools?**
-A: Yes. Add tool names to the `[compression.exclude]` list in the config file.
+**Q: Can I disable compression?**
+A: Yes. Set `compression_enabled` to `false` in `~/.tokenless/config.json` or set `TOKENLESS_COMPRESSION_ENABLED=false` in the environment. Compression is an all-or-nothing toggle — there is no per-tool exclusion.
