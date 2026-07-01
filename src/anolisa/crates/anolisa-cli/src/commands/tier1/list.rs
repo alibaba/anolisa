@@ -4,7 +4,7 @@
 //! merges install status from `installed.toml`, and renders as a human
 //! table or `--json` envelope.
 
-use anolisa_core::state::{InstalledState, ObjectKind, ObjectStatus};
+use anolisa_core::state::{InstalledState, ObjectKind};
 use clap::Parser;
 use serde::Serialize;
 
@@ -74,20 +74,16 @@ fn build_rows(index: &ComponentIndex, args: &ListArgs, state: &InstalledState) -
         .components
         .iter()
         .map(|entry| entry_to_row(entry, state))
-        .filter(|row| !args.installed || row.status == "installed")
+        .filter(|row| !args.installed || common::status_is_enabled(&row.status))
         .collect()
 }
 
 fn entry_to_row(entry: &ComponentIndexEntry, state: &InstalledState) -> Row {
     let backends: Vec<String> = entry.backends.iter().map(|b| b.kind.clone()).collect();
-    let installed = state
+    let status = state
         .find_object(ObjectKind::Component, &entry.name)
-        .is_some_and(|obj| obj.status == ObjectStatus::Installed);
-    let status = if installed {
-        "installed"
-    } else {
-        "not_installed"
-    };
+        .map(|obj| common::object_status_str(obj.status))
+        .unwrap_or("not_installed");
     Row {
         name: entry.name.clone(),
         display_name: entry
@@ -163,7 +159,7 @@ fn render_human(rows: &[Row], no_color: bool) {
 mod tests {
     use super::*;
     use crate::resolution::ComponentBackendEntry;
-    use anolisa_core::state::InstalledObject;
+    use anolisa_core::state::{InstalledObject, ObjectStatus};
 
     fn sample_index() -> ComponentIndex {
         ComponentIndex {
@@ -285,6 +281,17 @@ mod tests {
     }
 
     #[test]
+    fn adopted_rpm_component_shows_adopted() {
+        let index = sample_index();
+        let args = ListArgs { installed: false };
+        let state = state_with_object(ObjectKind::Component, "agentsight", ObjectStatus::Adopted);
+        let rows = build_rows(&index, &args, &state);
+
+        let sight = rows.iter().find(|r| r.name == "agentsight").unwrap();
+        assert_eq!(sight.status, "adopted");
+    }
+
+    #[test]
     fn adapter_object_does_not_mark_component_installed() {
         let index = sample_index();
         let args = ListArgs { installed: false };
@@ -295,23 +302,23 @@ mod tests {
     }
 
     #[test]
-    fn failed_component_shows_not_installed() {
+    fn failed_component_shows_failed() {
         let index = sample_index();
         let args = ListArgs { installed: false };
         let state = state_with_object(ObjectKind::Component, "tokenless", ObjectStatus::Failed);
         let rows = build_rows(&index, &args, &state);
         let token = rows.iter().find(|r| r.name == "tokenless").unwrap();
-        assert_eq!(token.status, "not_installed");
+        assert_eq!(token.status, "failed");
     }
 
     #[test]
-    fn disabled_component_shows_not_installed() {
+    fn disabled_component_shows_disabled() {
         let index = sample_index();
         let args = ListArgs { installed: false };
         let state = state_with_object(ObjectKind::Component, "tokenless", ObjectStatus::Disabled);
         let rows = build_rows(&index, &args, &state);
         let token = rows.iter().find(|r| r.name == "tokenless").unwrap();
-        assert_eq!(token.status, "not_installed");
+        assert_eq!(token.status, "disabled");
     }
 
     #[test]
@@ -323,6 +330,17 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "tokenless");
         assert_eq!(rows[0].status, "installed");
+    }
+
+    #[test]
+    fn installed_filter_includes_adopted_rpm_components() {
+        let index = sample_index();
+        let args = ListArgs { installed: true };
+        let state = state_with_object(ObjectKind::Component, "agentsight", ObjectStatus::Adopted);
+        let rows = build_rows(&index, &args, &state);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "agentsight");
+        assert_eq!(rows[0].status, "adopted");
     }
 
     #[test]
