@@ -287,3 +287,21 @@ Agent 规则配置文件路径：`/etc/agentsight/config.json`（可通过 `--co
 - Rust >= 1.80
 - clang/llvm >= 11（eBPF 编译）
 - libbpf >= 0.8
+
+## 14. User-Facing Documentation Guidelines
+
+### Value Proposition
+- Lead with "zero-instrumentation eBPF observability" — the user installs AgentSight and gets full tracing without touching their Agent code. This is the single most important differentiator.
+
+### Gotchas to Warn About
+- root/CAP_BPF is required for `agentsight trace` — users who forget get silent "no events" behavior. Every usage section must note this.
+- Config file semantics: user-provided `config.json` **replaces** the built-in defaults entirely (no merge). Users who partially customize lose Agent discovery rules for unmentioned Agents.
+
+### Content Decisions
+- SLS export: mention the capability exists ("supports external log service export"), never include SLS-specific configuration (endpoints, access keys)
+- Interruption detection: this is a unique capability competitors lack — deserves its own section, not a buried bullet point
+- Token savings page (Tokenless integration): document as cross-component feature — "install both, savings appear in Dashboard automatically"
+
+### Terminology
+- Use "interruption" not "failure" or "error" for the detection feature (the enum is `InterruptionType`, not `ErrorType`)
+- Use "Agent auto-discovery" not "process scanning" (user-facing language)
