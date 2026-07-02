@@ -169,9 +169,16 @@ impl SkillFs {
                             (parent_ino, FileType::Directory, "..".to_string()),
                         ];
 
-                        let md_path = format!("{}/SKILL.md", path);
-                        let md_ino = self.inodes.readdir_ino(&md_path);
-                        entries.push((md_ino, FileType::RegularFile, "SKILL.md".to_string()));
+                        // Only synthesize the virtual SKILL.md when the
+                        // manifest is actually readable (physical file
+                        // present in the resolved read dir, or the always
+                        // -virtual skill-discover). A newly-created empty
+                        // skill dir has none yet and must list as empty.
+                        if self.skill_md_listable(&skill_name) {
+                            let md_path = format!("{}/SKILL.md", path);
+                            let md_ino = self.inodes.readdir_ino(&md_path);
+                            entries.push((md_ino, FileType::RegularFile, "SKILL.md".to_string()));
+                        }
 
                         if skill_name != "skill-discover" {
                             let show_meta =
@@ -549,10 +556,16 @@ impl SkillFs {
                         (skills_dir_ino, FileType::Directory, "..".to_string()),
                     ];
 
-                    // Virtual SKILL.md always present
-                    let md_path = format!("{}/SKILL.md", path);
-                    let md_ino = self.inodes.readdir_ino(&md_path);
-                    entries.push((md_ino, FileType::RegularFile, "SKILL.md".to_string()));
+                    // Virtual SKILL.md is listed only when the manifest is
+                    // readable through the current read semantics (physical
+                    // file present, or the always-virtual skill-discover).
+                    // A freshly-created empty skill dir has none yet and
+                    // must not surface a phantom, broken entry.
+                    if self.skill_md_listable(skill_name) {
+                        let md_path = format!("{}/SKILL.md", path);
+                        let md_ino = self.inodes.readdir_ino(&md_path);
+                        entries.push((md_ino, FileType::RegularFile, "SKILL.md".to_string()));
+                    }
 
                     // Physical files (non skill-discover). For ledger
                     // fallback skills the snapshot directory drives the

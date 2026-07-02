@@ -675,6 +675,221 @@ fn test_inplace_post_rename_write_does_not_resurrect_old_name() {
         .output();
 }
 // ─────────────────────────────────────────────────────────────────────────────
+// In-place mode: new-skill authoring (issue #1264)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Set atime/mtime on `path` via `utimensat`, emulating what `cp -a` does
+/// when preserving timestamps on the top-level skill directory.
+fn set_times_now(path: &std::path::Path) -> std::io::Result<()> {
+    let c_path = std::ffi::CString::new(path.to_string_lossy().into_owned())
+        .expect("CString path for utimensat");
+    let times = [
+        libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_NOW,
+        },
+        libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_NOW,
+        },
+    ];
+    let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// In-place mode: a freshly `mkdir`'d skill directory with no physical
+/// SKILL.md must list as empty — no phantom, broken SKILL.md entry.
+#[test]
+fn test_inplace_new_skill_dir_has_no_phantom_skill_md() {
+    if !fuse_available() {
+        eprintln!("SKIP test_inplace_new_skill_dir_has_no_phantom_skill_md: FUSE not available");
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    std::fs::create_dir(dir.path().join("seed-skill")).unwrap();
+    std::fs::write(
+        dir.path().join("seed-skill/SKILL.md"),
+        b"---\nname: seed-skill\ndescription: seed\n---\n",
+    )
+    .unwrap();
+
+    let handle = mount_inplace(dir.path());
+    std::thread::sleep(Duration::from_millis(300));
+
+    let new_skill = dir.path().join("test-ws");
+    std::fs::create_dir(&new_skill).expect("mkdir test-ws");
+
+    // Listing the new empty skill dir must not contain SKILL.md.
+    let entries: Vec<String> = std::fs::read_dir(&new_skill)
+        .expect("read_dir test-ws")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    assert!(
+        !entries.iter().any(|n| n == "SKILL.md"),
+        "phantom SKILL.md listed for empty new skill dir, got: {:?}",
+        entries
+    );
+    assert!(
+        entries.is_empty(),
+        "new empty skill dir should list as empty, got: {:?}",
+        entries
+    );
+
+    // Direct probe of the phantom path must be ENOENT, not a broken entry.
+    let probe = std::fs::metadata(new_skill.join("SKILL.md"));
+    assert!(
+        probe.is_err(),
+        "SKILL.md must not stat in an empty new skill dir"
+    );
+
+    // A complete existing skill must still list its SKILL.md.
+    let seed_entries: Vec<String> = std::fs::read_dir(dir.path().join("seed-skill"))
+        .expect("read_dir seed-skill")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    assert!(
+        seed_entries.iter().any(|n| n == "SKILL.md"),
+        "existing complete skill lost its SKILL.md listing, got: {:?}",
+        seed_entries
+    );
+
+    let _ = std::fs::remove_dir(&new_skill);
+    drop(handle);
+    std::thread::sleep(Duration::from_millis(200));
+    let _ = std::process::Command::new("fusermount3")
+        .args(["-u", &dir.path().to_string_lossy()])
+        .output();
+}
+
+/// In-place mode: mkdir a new skill dir then write its SKILL.md — the file
+/// must become physically present, stat/read must succeed, and the store
+/// reparse must surface the skill with compiled content.
+#[test]
+fn test_inplace_new_skill_write_skill_md() {
+    if !fuse_available() {
+        eprintln!("SKIP test_inplace_new_skill_write_skill_md: FUSE not available");
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    std::fs::create_dir(dir.path().join("seed-skill")).unwrap();
+    std::fs::write(
+        dir.path().join("seed-skill/SKILL.md"),
+        b"---\nname: seed-skill\ndescription: seed\n---\n",
+    )
+    .unwrap();
+
+    let handle = mount_inplace(dir.path());
+    std::thread::sleep(Duration::from_millis(300));
+
+    let new_skill = dir.path().join("authored");
+    std::fs::create_dir(&new_skill).expect("mkdir authored");
+
+    // Write the manifest through the mount (create + write path).
+    let skill_md = new_skill.join("SKILL.md");
+    std::fs::write(
+        &skill_md,
+        b"---\nname: authored\ndescription: authored in place\n---\n",
+    )
+    .expect("write SKILL.md");
+
+    // stat must now succeed.
+    let md = std::fs::metadata(&skill_md).expect("metadata SKILL.md after write");
+    assert!(md.is_file(), "SKILL.md exists but is not a regular file");
+
+    // read must return compiled content mentioning the skill name.
+    let content = std::fs::read_to_string(&skill_md).expect("read SKILL.md after write");
+    assert!(
+        content.contains("authored"),
+        "compiled SKILL.md does not mention skill name: {content}"
+    );
+
+    // SKILL.md must now appear in the skill dir listing.
+    let entries: Vec<String> = std::fs::read_dir(&new_skill)
+        .expect("read_dir authored")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    assert!(
+        entries.iter().any(|n| n == "SKILL.md"),
+        "SKILL.md not listed after write, got: {:?}",
+        entries
+    );
+
+    // Reparse should keep the skill visible at the root.
+    std::thread::sleep(Duration::from_millis(300));
+    let root: Vec<String> = std::fs::read_dir(dir.path())
+        .expect("read_dir root")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    assert!(
+        root.iter().any(|n| n == "authored"),
+        "authored skill not visible at root after reparse, got: {:?}",
+        root
+    );
+
+    let _ = std::fs::remove_file(&skill_md);
+    let _ = std::fs::remove_dir(&new_skill);
+    drop(handle);
+    std::thread::sleep(Duration::from_millis(200));
+    let _ = std::process::Command::new("fusermount3")
+        .args(["-u", &dir.path().to_string_lossy()])
+        .output();
+}
+
+/// In-place mode: `cp -a`-style metadata preservation (chmod + utimensat)
+/// on an ordinary top-level skill directory must succeed rather than
+/// failing with EROFS.
+#[test]
+fn test_inplace_skill_dir_metadata_preservation() {
+    if !fuse_available() {
+        eprintln!("SKIP test_inplace_skill_dir_metadata_preservation: FUSE not available");
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    std::fs::create_dir(dir.path().join("seed-skill")).unwrap();
+    std::fs::write(
+        dir.path().join("seed-skill/SKILL.md"),
+        b"---\nname: seed-skill\ndescription: seed\n---\n",
+    )
+    .unwrap();
+
+    let handle = mount_inplace(dir.path());
+    std::thread::sleep(Duration::from_millis(300));
+
+    let new_skill = dir.path().join("copied-skill");
+    std::fs::create_dir(&new_skill).expect("mkdir copied-skill");
+
+    // chmod (setattr mode) on the top-level skill dir must succeed.
+    use std::os::unix::fs::PermissionsExt as _;
+    assert_ok(
+        std::fs::set_permissions(&new_skill, std::fs::Permissions::from_mode(0o755)),
+        "chmod skill dir",
+    );
+
+    // utimensat (setattr atime/mtime) on the top-level skill dir must succeed.
+    assert_ok(set_times_now(&new_skill), "utimensat skill dir");
+
+    let _ = std::fs::remove_dir(&new_skill);
+    drop(handle);
+    std::thread::sleep(Duration::from_millis(200));
+    let _ = std::process::Command::new("fusermount3")
+        .args(["-u", &dir.path().to_string_lossy()])
+        .output();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Post-rename write: stale frontmatter name must not resurrect old entry
 // ─────────────────────────────────────────────────────────────────────────────
 

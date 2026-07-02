@@ -68,6 +68,27 @@ impl SkillFs {
         Some(compiler::compile(&raw, &self.env_profile))
     }
 
+    /// Whether a virtual `SKILL.md` entry should be listed for
+    /// `skill_name` in `readdir`/`opendir`.
+    ///
+    /// A freshly-created placeholder skill directory (via `mkdir`) has no
+    /// physical `SKILL.md` yet, so synthesizing the virtual entry
+    /// unconditionally produces a phantom listing whose `lookup`/`getattr`
+    /// then fail with `ENOENT` (broken entry with unknown attrs). Gate the
+    /// virtual entry on the manifest actually being readable through the
+    /// current read semantics: `skill-discover` is always virtual, and any
+    /// other skill lists `SKILL.md` only when the resolved read directory
+    /// (live source or snapshot) physically contains it.
+    pub(super) fn skill_md_listable(&self, skill_name: &str) -> bool {
+        if skill_name == "skill-discover" {
+            return true;
+        }
+        match self.skill_read_dir(skill_name) {
+            Some(dir) => dir.join("SKILL.md").exists(),
+            None => false,
+        }
+    }
+
     /// Physical directory to read **content from** for `skill_name`.
     ///
     /// For an unattached resolver (default) and for

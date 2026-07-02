@@ -724,14 +724,38 @@ impl SkillFs {
                 }
                 return;
             }
-            PathType::SkillDir { .. } => {
-                // All skill directories treated as virtual read-only for metadata mutations
-                if has_mutation {
-                    reply.error(libc::EROFS);
-                } else {
+            PathType::SkillDir { skill_name } => {
+                // Pure stat keeps the virtual directory façade.
+                if !has_mutation {
                     reply.attr(&Duration::from_secs(1), &self.dir_attr());
+                    return;
                 }
-                return;
+                // `cp -a` preserves mode/timestamps on the freshly-created
+                // top-level skill directory. Route those metadata mutations
+                // to the physical source dir for ordinary skills instead of
+                // rejecting with EROFS. Keep the read-only façade for the
+                // always-virtual skill-discover, staging roots, and pending
+                // installs; hide hidden skills; lifecycle reserved names are
+                // rejected by the shared gate below. `.skill-meta/**` never
+                // parses as a SkillDir, so trusted-writer policy is
+                // unaffected.
+                if is_skill_discover_path(skill_name)
+                    || self.is_staging_skill_root(skill_name)
+                    || self.is_pending_install(skill_name)
+                {
+                    reply.error(libc::EROFS);
+                    return;
+                }
+                if self.should_reject_hidden_write(skill_name, None) {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+                // A directory has no size to truncate.
+                if size.is_some() {
+                    reply.error(libc::EISDIR);
+                    return;
+                }
+                // Fall through to the shared physical setattr handling.
             }
             PathType::InboxSkillDir { skill_name } => {
                 // L1: the inbox skill candidate dir is the live source
