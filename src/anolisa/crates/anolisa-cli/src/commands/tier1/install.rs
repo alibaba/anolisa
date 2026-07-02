@@ -699,6 +699,12 @@ fn handle_one_with_config(
 ) -> Result<InstallOutcome, CliError> {
     let command = format!("install {component}");
     let installed = common::load_installed_state(ctx, COMMAND)?;
+
+    // Resolve package aliases (e.g., "copilot-shell" → "cosh") before Layer 1
+    // backend selection, so ExistingState detection and compatibility checks
+    // use the canonical component name stored in state.
+    let component = common::lookup_component_name(&component, &installed, ctx, COMMAND);
+
     let mut rpm_component_index: Option<ComponentIndex> = None;
 
     // ── Layer 1: pick the backend name + its source (§4). ──

@@ -72,13 +72,14 @@ pub fn handle(args: RestartArgs, ctx: &CliContext) -> Result<(), CliError> {
         ),
     })?;
 
+    let resolved = common::lookup_component_name(&args.component, &state, ctx, &command);
+
     let comp = state
-        .find_object(ObjectKind::Component, &args.component)
+        .find_object(ObjectKind::Component, &resolved)
         .ok_or_else(|| CliError::InvalidArgument {
             command: command.clone(),
             reason: format!(
-                "component '{}' is not installed — nothing to restart (run `anolisa status` to see what is installed)",
-                args.component
+                "component '{resolved}' is not installed — nothing to restart (run `anolisa status` to see what is installed)"
             ),
         })?;
 
@@ -86,23 +87,20 @@ pub fn handle(args: RestartArgs, ctx: &CliContext) -> Result<(), CliError> {
     // ANOLISA drove activation) or from live `rpm -ql` discovery (RPM installs,
     // which record no services). Discovery may also return notes — e.g. a
     // template unit it cannot expand in this tier — which seed `warnings`.
-    let (units, mut warnings) = collect_restart_units(comp, &args.component)?;
+    let (units, mut warnings) = collect_restart_units(comp, &resolved)?;
 
     if units.is_empty() {
         if warnings.is_empty() {
             // Ships no service units at all → nothing to restart, a usage error.
             return Err(CliError::InvalidArgument {
                 command,
-                reason: format!(
-                    "component '{}' has no restartable systemd service units",
-                    args.component
-                ),
+                reason: format!("component '{resolved}' has no restartable systemd service units"),
             });
         }
         // Ships only template units whose instances are per-user runtime state
         // restart cannot choose. Not an error: the package is fine,
         // so exit 0 and surface the per-user guidance already collected.
-        return render_guidance_only(&args.component, install_mode, warnings, ctx);
+        return render_guidance_only(&resolved, install_mode, warnings, ctx);
     }
 
     let env = EnvService::detect();
@@ -211,7 +209,7 @@ pub fn handle(args: RestartArgs, ctx: &CliContext) -> Result<(), CliError> {
 
     if ctx.json {
         let payload = RestartPayload {
-            component: args.component.clone(),
+            component: resolved.clone(),
             install_mode: install_mode.to_string(),
             manager: manager_label.clone(),
             supported,
@@ -223,7 +221,7 @@ pub fn handle(args: RestartArgs, ctx: &CliContext) -> Result<(), CliError> {
 
     if !ctx.quiet {
         render_human(
-            &args.component,
+            &resolved,
             &manager_label,
             supported,
             &results,

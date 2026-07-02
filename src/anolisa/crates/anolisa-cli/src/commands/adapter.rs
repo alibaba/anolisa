@@ -268,9 +268,11 @@ fn handle_enable(
     framework: Option<&str>,
 ) -> Result<(), CliError> {
     const COMMAND: &str = "adapter enable";
+    let installed = common::load_installed_state(ctx, COMMAND).unwrap_or_default();
+    let component = common::lookup_component_name(component, &installed, ctx, COMMAND);
     let manager = build_manager(ctx);
     let outcome = manager
-        .enable(component, framework, ctx.dry_run)
+        .enable(&component, framework, ctx.dry_run)
         .map_err(|e| map_err(COMMAND, e))?;
 
     match outcome {
@@ -327,9 +329,11 @@ fn handle_disable(
     framework: Option<&str>,
 ) -> Result<(), CliError> {
     const COMMAND: &str = "adapter disable";
+    let installed = common::load_installed_state(ctx, COMMAND).unwrap_or_default();
+    let component = common::lookup_component_name(component, &installed, ctx, COMMAND);
     let manager = build_manager(ctx);
     let outcome: DisableOutcome = manager
-        .disable(component, framework, ctx.dry_run)
+        .disable(&component, framework, ctx.dry_run)
         .map_err(|e| map_err(COMMAND, e))?;
 
     if outcome.dry_run {
@@ -407,8 +411,19 @@ fn disable_target(outcome: &DisableOutcome) -> String {
 
 fn handle_status(ctx: &CliContext, component: Option<&str>) -> Result<(), CliError> {
     const COMMAND: &str = "adapter status";
+    let component = match component {
+        Some(name) => {
+            let installed = common::load_installed_state(ctx, COMMAND).unwrap_or_default();
+            Some(common::lookup_component_name(
+                name, &installed, ctx, COMMAND,
+            ))
+        }
+        None => None,
+    };
     let manager = build_manager(ctx);
-    let report: StatusReport = manager.status(component).map_err(|e| map_err(COMMAND, e))?;
+    let report: StatusReport = manager
+        .status(component.as_deref())
+        .map_err(|e| map_err(COMMAND, e))?;
 
     if ctx.json {
         let receipts = report

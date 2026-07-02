@@ -168,7 +168,9 @@ struct ComponentUpdatePayload {
 /// Dispatch `update <component>` through the recorded component ownership.
 fn handle_component_update(component: &str, ctx: &CliContext) -> Result<(), CliError> {
     let command = format!("update {component}");
-    let target = resolve_update_target(component, ctx, &command)?;
+    let installed = common::load_installed_state(ctx, COMMAND)?;
+    let resolved = common::lookup_component_name(component, &installed, ctx, COMMAND);
+    let target = resolve_update_target(&resolved, ctx, &command)?;
     let layout = common::resolve_layout(ctx);
     let repo_config = common::load_repo_config(ctx, &layout, &command, RepoPersistPolicy::Require)?;
     match target {
@@ -177,7 +179,7 @@ fn handle_component_update(component: &str, ctx: &CliContext) -> Result<(), CliE
             from_version,
             recorded_package,
         } => update_raw_component_with_repo(
-            component,
+            &resolved,
             &backend_name,
             &from_version,
             recorded_package.as_deref(),
@@ -195,7 +197,7 @@ fn handle_component_update(component: &str, ctx: &CliContext) -> Result<(), CliE
             let query = RpmPackageQuery::system_with_repo(repo.clone());
             let txn = RpmTransaction::system_with_repo(repo);
             update_rpm_component(
-                component,
+                &resolved,
                 &package,
                 ownership,
                 ctx,

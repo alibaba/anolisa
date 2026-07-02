@@ -363,10 +363,10 @@ impl<'a> ComponentResolver<'a> {
 
 /// Resolve an RPM-oriented user input to a stable component name.
 ///
-/// This is a read-only projection used by commands that address existing state
-/// (`status`, `repair`) before they decide whether to query or mutate package
-/// metadata. Ambiguous or failed resolution returns `None` so callers can fall
-/// back to the literal input or their command-specific error.
+/// This is a read-only projection used by tests that need to exercise the full
+/// RPM resolution chain (component index + package_map + rpmdb provides).
+/// Production code uses [`lookup_component_alias`] which is in-memory only.
+#[cfg(test)]
 pub(crate) fn resolve_rpm_component_name(
     input: &str,
     rpm_backend: Option<&BackendConfig>,
@@ -378,6 +378,41 @@ pub(crate) fn resolve_rpm_component_name(
     match resolver.resolve(input, BackendKind::Rpm, use_case, ResolveOptions::default()) {
         Ok(ResolutionSet::Unique(target)) => Some(target.component),
         _ => None,
+    }
+}
+
+/// In-memory alias resolution only — no rpmdb/dnf queries.
+///
+/// Used by [`common::lookup_component_name`](crate::commands::common::lookup_component_name)
+/// for commands that address existing state. Checks the component index for
+/// component-name, backend-package, and alias matches across both RPM and Raw
+/// backends. Returns `None` when no match is found or the match is ambiguous
+/// (multiple distinct components share the same alias/package name) so the
+/// caller can fall back to the literal input.
+pub(crate) fn lookup_component_alias(
+    input: &str,
+    component_index: Option<&ComponentIndex>,
+) -> Option<String> {
+    let idx = component_index?;
+
+    // Collect unique component names from both backends. A single input
+    // may match across RPM and Raw backends (e.g., the component name plus
+    // an alias), but all matches must resolve to the same component — if two
+    // distinct components share the same alias/package name, the lookup is
+    // ambiguous and must not silently pick one.
+    let mut components: BTreeSet<String> = BTreeSet::new();
+    for target in idx.targets_for_backend(input, BackendKind::Rpm, "rpm-package") {
+        components.insert(target.component);
+    }
+    for target in idx.targets_for_backend(input, BackendKind::Raw, "raw-package") {
+        components.insert(target.component);
+    }
+
+    // Return only when the lookup resolves to exactly one unique component.
+    if components.len() == 1 {
+        components.into_iter().next()
+    } else {
+        None
     }
 }
 

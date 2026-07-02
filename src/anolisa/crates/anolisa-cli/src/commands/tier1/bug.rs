@@ -107,8 +107,13 @@ fn build_payload(
     ctx: &CliContext,
 ) -> Result<BugReportPayload, CliError> {
     let environment = collect_environment(ctx);
-    let components = collect_components(component, ctx)?;
-    let recent_logs = collect_recent_logs(component, limit, ctx)?;
+    // Resolve component alias before filtering state and logs.
+    let resolved = component.map(|name| {
+        let state = common::load_installed_state(ctx, COMMAND).unwrap_or_default();
+        common::lookup_component_name(name, &state, ctx, COMMAND)
+    });
+    let components = collect_components(resolved.as_deref(), ctx)?;
+    let recent_logs = collect_recent_logs(resolved.as_deref(), limit, ctx)?;
     let markdown = render_markdown(&environment, &components, &recent_logs);
 
     Ok(BugReportPayload {

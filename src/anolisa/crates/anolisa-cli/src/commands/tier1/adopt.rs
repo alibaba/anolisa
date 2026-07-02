@@ -69,6 +69,12 @@ pub(crate) fn adopt_with_query(
 
     let installed = common::load_installed_state(ctx, COMMAND)?;
 
+    // Resolve package aliases (e.g., "copilot-shell" → "cosh") before the
+    // tracked-component gate, so the ownership pre-check addresses the
+    // canonical state key.
+    let resolved = common::lookup_component_name(target, &installed, ctx, COMMAND);
+    let target = resolved.as_str();
+
     // Tracked-component gate (pre-lock fast-fail for a clear, early message).
     // Re-adopting a component that is already `rpm-observed` is a refresh and
     // falls through to execute_adopt, which upserts. A component owned under any

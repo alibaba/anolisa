@@ -185,18 +185,20 @@ fn diagnose(component: Option<&str>, ctx: &CliContext) -> Result<DoctorPayload, 
         }
     };
 
+    let rpm_query = RpmPackageQuery::system();
+    let component = component.map(|name| common::lookup_component_name(name, &state, ctx, COMMAND));
+
     let status_catalog = if ctx.dry_run { None } else { catalog.as_ref() };
     let records = status::select_components(
         &state,
         &layout,
         status_catalog,
         ctx.install_mode.as_str(),
-        component,
+        component.as_deref(),
         None,
     );
     let env = anolisa_env::EnvService::detect();
     let resolver_env = resolver_env_from_facts(&env);
-    let rpm_query = RpmPackageQuery::system();
     let system_service = service_for_install_mode(ctx.install_mode.as_str(), &env);
     let user_service = user_service_for_install_mode(ctx.install_mode.as_str(), &env);
     let probe_ctx = DoctorProbeContext {

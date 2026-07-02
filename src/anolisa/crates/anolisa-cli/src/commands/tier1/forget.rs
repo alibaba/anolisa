@@ -58,9 +58,11 @@ struct ForgetPayload {
 /// Returns [`CliError`] when the component is absent, still has enabled adapter
 /// receipts, or the state write fails.
 pub fn handle(args: ForgetArgs, ctx: &CliContext) -> Result<(), CliError> {
-    let target = args.component.as_str();
-    let command = format!("forget {target}");
+    let input = args.component.as_str();
+    let command = format!("forget {input}");
     let installed = common::load_installed_state(ctx, COMMAND)?;
+    let resolved = common::lookup_component_name(input, &installed, ctx, COMMAND);
+    let target = resolved.as_str();
 
     let obj = installed
         .find_object(ObjectKind::Component, target)
@@ -296,6 +298,7 @@ fn now_iso8601() -> String {
 mod tests {
     use super::*;
 
+    use std::fs;
     use std::path::PathBuf;
 
     use anolisa_core::adapter::claim::{AdapterClaim, ClaimStatus, DriverPayload, OpenClawClaim};
@@ -580,11 +583,79 @@ mod tests {
         );
     }
 
+    fn seed_component_index(ctx: &CliContext, index: &str) {
+        let layout = common::resolve_layout(ctx);
+        let repo_v1 = layout.prefix.join("repo").join("v1");
+        fs::create_dir_all(&repo_v1).expect("mkdir repo");
+        fs::write(repo_v1.join("components.toml"), index).expect("write components.toml");
+        fs::create_dir_all(&layout.etc_dir).expect("mkdir etc");
+        fs::write(
+            layout.etc_dir.join("repo.toml"),
+            format!(
+                "schema_version = 1\n\
+                 default_backend = \"raw\"\n\
+                 \n\
+                 [backends.raw]\n\
+                 base_url = \"file://{}\"\n",
+                repo_v1.display()
+            ),
+        )
+        .expect("write repo.toml");
+    }
+
     /// CLI surface: `forget <component>` parses to the positional.
     #[test]
     fn forget_parses_positional_component() {
         use clap::Parser as _;
         let a = ForgetArgs::try_parse_from(["forget", "copilot-shell"]).expect("parse");
         assert_eq!(a.component, "copilot-shell");
+    }
+
+    /// Forget by package alias (e.g., "copilot-shell") must resolve to the
+    /// canonical component name ("cosh") before addressing state.
+    #[test]
+    fn forget_via_package_alias_succeeds() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+
+        seed_component_index(
+            &c,
+            r#"
+schema_version = 1
+
+[[components]]
+name = "cosh"
+
+[[components.backends]]
+kind = "rpm"
+package = "copilot-shell"
+legacy_adopt = true
+
+[[components.aliases]]
+kind = "rpm-package"
+name = "copilot-shell"
+"#,
+        );
+
+        seed(
+            &c,
+            vec![rpm_observed_object("cosh", "copilot-shell", "2.2.0-1.al8")],
+            Vec::new(),
+        );
+        let _snapshot_dir = seed_manifest_snapshot(&c, "cosh");
+
+        handle(
+            ForgetArgs {
+                component: "copilot-shell".to_string(),
+            },
+            &c,
+        )
+        .expect("forget via alias");
+
+        let after = load_state(&c);
+        assert!(
+            after.find_object(ObjectKind::Component, "cosh").is_none(),
+            "state record for 'cosh' must be dropped",
+        );
     }
 }

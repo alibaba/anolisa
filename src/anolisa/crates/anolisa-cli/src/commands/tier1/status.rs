@@ -56,9 +56,7 @@ use crate::commands::common::RepoPersistPolicy;
 use crate::commands::tier1::install::rpm_package_candidates_with_index;
 use crate::context::{CliContext, InstallMode};
 use crate::repo_config::BackendConfig;
-use crate::resolution::{
-    ComponentIndex, ResolutionUse, load_optional_component_index, resolve_rpm_component_name,
-};
+use crate::resolution::{ComponentIndex, ResolutionUse, load_optional_component_index};
 use crate::response::{CliError, render_json};
 
 const COMMAND: &str = "status";
@@ -143,6 +141,14 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
     let adapter_scan = common::build_adapter_manager(ctx).scan().ok();
 
     let query = RpmPackageQuery::system();
+    let selected_component = args
+        .component
+        .as_deref()
+        .map(|target| common::lookup_component_name(target, &state, ctx, COMMAND));
+
+    // repo_config / component_index are still needed for the observed-record
+    // probe below (system mode only). Name resolution above is handled by
+    // common::lookup_component_name which loads its own config.
     let repo_config = (ctx.install_mode == InstallMode::System && args.component.is_some())
         .then(|| {
             common::load_repo_config(ctx, &layout, COMMAND, RepoPersistPolicy::BestEffort).ok()
@@ -153,13 +159,6 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
     let component_index = repo_config
         .as_ref()
         .and_then(|cfg| load_optional_component_index(&layout, &env, cfg));
-    let selected_component = args.component.as_deref().map(|target| {
-        if ctx.install_mode == InstallMode::System {
-            status_lookup_name(target, rpm_backend, component_index.as_ref(), &query)
-        } else {
-            target.to_string()
-        }
-    });
 
     let mut records = select_components(
         &state,
@@ -201,26 +200,6 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
         render_human(&records, ctx.verbose, ctx.no_color);
     }
     Ok(())
-}
-
-/// Resolve a user-supplied status target to the stable component name before
-/// looking in ANOLISA state. RPM package aliases such as `copilot-shell` should
-/// display the tracked `cosh` row when one exists, not synthesize a separate
-/// read-only observed row.
-fn status_lookup_name(
-    input: &str,
-    rpm_backend: Option<&BackendConfig>,
-    component_index: Option<&ComponentIndex>,
-    query: &dyn PackageQuery,
-) -> String {
-    resolve_rpm_component_name(
-        input,
-        rpm_backend,
-        component_index,
-        query,
-        ResolutionUse::StatusObserved,
-    )
-    .unwrap_or_else(|| input.to_string())
 }
 
 /// Pure selector: project [`InstalledState`] down to component records,
@@ -1126,6 +1105,7 @@ fn adapter_state_label(adapter: &AdapterSummaryRecord) -> &'static str {
 mod tests {
     use super::*;
     use crate::repo_config::RepoConfig;
+    use crate::resolution::resolve_rpm_component_name;
     use anolisa_core::{
         FileOwner, HealthEntry, InstalledObject, InstalledState, ObjectKind, ObjectStatus,
         OwnedFile, OwnedFileKind, SubscriptionScope,
@@ -2580,7 +2560,14 @@ name = "copilot-shell"
         let q = FakeQuery::default();
 
         assert_eq!(
-            status_lookup_name("copilot-shell", None, Some(&idx), &q),
+            resolve_rpm_component_name(
+                "copilot-shell",
+                None,
+                Some(&idx),
+                &q,
+                ResolutionUse::StatusObserved,
+            )
+            .unwrap_or_else(|| "copilot-shell".to_string()),
             "cosh"
         );
 
@@ -2590,12 +2577,20 @@ name = "copilot-shell"
             "2.6.0-1.alnx4",
             ObjectStatus::Installed,
         ));
+        let resolved = resolve_rpm_component_name(
+            "copilot-shell",
+            None,
+            Some(&idx),
+            &q,
+            ResolutionUse::StatusObserved,
+        )
+        .unwrap_or_else(|| "copilot-shell".to_string());
         let records = select_components(
             &state,
             &dummy_layout(),
             None,
             "system",
-            Some(&status_lookup_name("copilot-shell", None, Some(&idx), &q)),
+            Some(&resolved),
             None,
         );
 

@@ -14,7 +14,7 @@ use clap::Parser;
 use anolisa_core::{CentralLog, LogFilter, LogKind, LogRecord, Severity};
 
 use crate::color::{Palette, pad_right};
-use crate::commands::common::resolve_layout;
+use crate::commands::common;
 use crate::context::CliContext;
 use crate::response::{CliError, render_json};
 
@@ -54,9 +54,17 @@ pub struct LogsArgs {
     pub limit: Option<usize>,
 }
 
-pub fn handle(args: LogsArgs, ctx: &CliContext) -> Result<(), CliError> {
+pub fn handle(mut args: LogsArgs, ctx: &CliContext) -> Result<(), CliError> {
+    // Resolve component alias (e.g., "copilot-shell" → "cosh") before
+    // filtering — log records store the canonical component name.
+    if let Some(component) = args.component.take() {
+        let installed = common::load_installed_state(ctx, COMMAND).unwrap_or_default();
+        args.component = Some(common::lookup_component_name(
+            &component, &installed, ctx, COMMAND,
+        ));
+    }
     let filter = build_filter(&args)?;
-    let layout = resolve_layout(ctx);
+    let layout = common::resolve_layout(ctx);
     let log = CentralLog::open(layout.central_log.clone());
 
     let records = log

@@ -122,13 +122,20 @@ pub(crate) fn handle_with_deps(
     } else {
         LifecycleOperation::Uninstall
     };
-    let target = args.component.as_str();
-    let command = format!("{} {}", operation.as_str(), target);
+    let input = args.component.as_str();
+    let command = format!("{} {}", operation.as_str(), input);
 
     // Load installed state to plan against. Missing state is the same
     // as "target not installed" — surface that as INVALID_ARGUMENT so
     // the user sees the right exit code.
     let installed = common::load_installed_state(ctx, COMMAND)?;
+
+    // Resolve package aliases (e.g., "copilot-shell" → "cosh") before
+    // addressing state, matching the resolution that `install` and
+    // `status` already perform. Falls back to the literal input when
+    // resolution is ambiguous or the component index is unavailable.
+    let resolved = common::lookup_component_name(input, &installed, ctx, COMMAND);
+    let target = resolved.as_str();
 
     // A name that only matches a legacy `kind = "capability"` row written
     // by an older release is not uninstallable — say so instead of a bare
@@ -1023,6 +1030,7 @@ mod tests {
 
     use crate::context::InstallMode;
     use std::cell::{Cell, RefCell};
+    use std::fs;
     use std::path::PathBuf;
     use tempfile::tempdir;
 
@@ -1713,6 +1721,26 @@ mod tests {
             anolisa_platform::fs_layout::FsLayout::provenance_path_for_snapshot(&snapshot);
         std::fs::write(provenance, "schema_version = 1\n").expect("write provenance");
         dir
+    }
+
+    fn seed_component_index(ctx: &CliContext, index: &str) {
+        let layout = common::resolve_layout(ctx);
+        let repo_v1 = layout.prefix.join("repo").join("v1");
+        fs::create_dir_all(&repo_v1).expect("mkdir repo");
+        fs::write(repo_v1.join("components.toml"), index).expect("write components.toml");
+        fs::create_dir_all(&layout.etc_dir).expect("mkdir etc");
+        fs::write(
+            layout.etc_dir.join("repo.toml"),
+            format!(
+                "schema_version = 1\n\
+                 default_backend = \"raw\"\n\
+                 \n\
+                 [backends.raw]\n\
+                 base_url = \"file://{}\"\n",
+                repo_v1.display()
+            ),
+        )
+        .expect("write repo.toml");
     }
 
     fn args_rm(component: &str) -> UninstallArgs {
@@ -2431,6 +2459,63 @@ mod tests {
             err.reason().contains("repair"),
             "must point at repair: {}",
             err.reason(),
+        );
+    }
+
+    /// Uninstall by package alias (e.g., "copilot-shell") must resolve to the
+    /// canonical component name ("cosh") before addressing state, matching the
+    /// resolution that `install` performs when recording the component.
+    #[test]
+    fn uninstall_rpm_observed_via_package_alias_succeeds() {
+        let tmp = tempdir().expect("tmpdir");
+        let c = ctx_with_prefix(
+            false,
+            false,
+            InstallMode::System,
+            Some(tmp.path().to_path_buf()),
+        );
+
+        seed_component_index(
+            &c,
+            r#"
+schema_version = 1
+
+[[components]]
+name = "cosh"
+
+[[components.backends]]
+kind = "rpm"
+package = "copilot-shell"
+legacy_adopt = true
+
+[[components.aliases]]
+kind = "rpm-package"
+name = "copilot-shell"
+"#,
+        );
+
+        // State records the canonical name "cosh", not the package alias
+        // "copilot-shell" — this is what install writes after resolution.
+        seed(
+            &c,
+            vec![rpm_object("cosh", "copilot-shell", Ownership::RpmObserved)],
+            Vec::new(),
+        );
+        let _snapshot_dir = seed_manifest_snapshot(&c, "cosh");
+        let rpm = FakeRpm::present("copilot-shell");
+
+        // User types the alias, not the canonical name.
+        run(args("copilot-shell", false), &c, &rpm, true).expect("uninstall via alias");
+
+        assert_eq!(
+            rpm.remove_calls.get(),
+            0,
+            "rpm-observed default must not run dnf remove",
+        );
+        let after = load_state(&c);
+        assert!(
+            after.find_object(ObjectKind::Component, "cosh").is_none(),
+            "ANOLISA state record for 'cosh' must be dropped",
         );
     }
 }

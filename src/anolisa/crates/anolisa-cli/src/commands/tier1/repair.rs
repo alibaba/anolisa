@@ -17,7 +17,7 @@ use serde::Serialize;
 
 use anolisa_core::central_log::{CentralLog, LogKind, LogRecord, LogStatus, Severity};
 use anolisa_core::lock::InstallLock;
-use anolisa_core::state::{InstalledState, ObjectKind, OperationRecord, Ownership, RpmMetadata};
+use anolisa_core::state::{ObjectKind, OperationRecord, Ownership, RpmMetadata};
 use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError};
 use anolisa_platform::rpm_query::RpmPackageQuery;
 
@@ -26,7 +26,7 @@ use crate::commands::common;
 use crate::commands::common::RepoPersistPolicy;
 use crate::commands::tier1::install::rpm_package_candidates_with_index;
 use crate::context::CliContext;
-use crate::resolution::{ResolutionUse, load_optional_component_index, resolve_rpm_component_name};
+use crate::resolution::{ResolutionUse, load_optional_component_index};
 use crate::response::{CliError, render_json};
 
 /// Command label for JSON envelopes and error routing.
@@ -97,7 +97,7 @@ fn repair_with_query(
 
     let installed = common::load_installed_state(ctx, COMMAND)?;
 
-    let component = resolve_repair_component_name(target, &installed, ctx, query);
+    let component = common::lookup_component_name(target, &installed, ctx, COMMAND);
 
     let obj = installed
         .find_object(ObjectKind::Component, &component)
@@ -221,44 +221,6 @@ fn repair_with_query(
     };
     render_repair(ctx, &payload);
     Ok(())
-}
-
-/// Resolve a repair target to the state key used for the component.
-///
-/// Exact state names win because repair is fundamentally a state reconciliation
-/// command. If the state has no exact match, fall back to the same RPM component
-/// resolver used by install/adopt/status so package-name aliases such as
-/// `copilot-shell` can address the canonical `cosh` row.
-fn resolve_repair_component_name(
-    target: &str,
-    installed: &InstalledState,
-    ctx: &CliContext,
-    query: &dyn PackageQuery,
-) -> String {
-    if installed
-        .find_object(ObjectKind::Component, target)
-        .is_some()
-    {
-        return target.to_string();
-    }
-
-    let layout = common::resolve_layout(ctx);
-    let repo_config =
-        common::load_repo_config(ctx, &layout, COMMAND, RepoPersistPolicy::BestEffort).ok();
-    let rpm_backend = repo_config.as_ref().and_then(|c| c.backends.get("rpm"));
-    let env = anolisa_env::EnvService::detect();
-    let component_index = repo_config
-        .as_ref()
-        .and_then(|cfg| load_optional_component_index(&layout, &env, cfg));
-
-    resolve_rpm_component_name(
-        target,
-        rpm_backend,
-        component_index.as_ref(),
-        query,
-        ResolutionUse::RepairLegacy,
-    )
-    .unwrap_or_else(|| target.to_string())
 }
 
 /// Resolve the RPM package name `repair` should reconcile against.

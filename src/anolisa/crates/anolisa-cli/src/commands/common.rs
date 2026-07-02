@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use anolisa_core::adapter::manager::AdapterManager;
-use anolisa_core::{Catalog, CatalogLayers, InstalledState, ObjectStatus};
+use anolisa_core::{Catalog, CatalogLayers, InstalledState, ObjectKind, ObjectStatus};
 use anolisa_platform::fs_layout::FsLayout;
 
 use crate::color::Palette;
@@ -182,6 +182,44 @@ pub fn load_installed_state(ctx: &CliContext, command: &str) -> Result<Installed
             path.display()
         ),
     })
+}
+
+/// Resolve a user-supplied component name to the stable state key.
+///
+/// Commands that address existing state (uninstall, forget, update, restart,
+/// doctor, adapter, logs) should call this before `find_object`.
+///
+/// 1. Exact state match wins — a component installed under its literal name
+///    is never re-mapped.
+/// 2. Otherwise the repo-side component index is consulted for package-name
+///    aliases (e.g., `copilot-shell` → `cosh`) via in-memory lookup only —
+///    no rpmdb/dnf queries are triggered.
+/// 3. Falls back to the literal input when resolution is ambiguous or the
+///    component index is unavailable.
+pub(crate) fn lookup_component_name(
+    input: &str,
+    installed: &InstalledState,
+    ctx: &CliContext,
+    command: &str,
+) -> String {
+    // 1. Exact state match wins.
+    if installed
+        .find_object(ObjectKind::Component, input)
+        .is_some()
+    {
+        return input.to_string();
+    }
+
+    // 2. Try in-memory alias resolution via the repo-side component index.
+    let layout = resolve_layout(ctx);
+    let repo_config = load_repo_config(ctx, &layout, command, RepoPersistPolicy::BestEffort).ok();
+    let env = anolisa_env::EnvService::detect();
+    let component_index = repo_config
+        .as_ref()
+        .and_then(|cfg| crate::resolution::load_optional_component_index(&layout, &env, cfg));
+
+    crate::resolution::lookup_component_alias(input, component_index.as_ref())
+        .unwrap_or_else(|| input.to_string())
 }
 
 /// Path for the component manifest saved as part of an installed component's
