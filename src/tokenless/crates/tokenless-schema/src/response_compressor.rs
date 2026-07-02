@@ -1,5 +1,7 @@
 use serde_json::{Map, Value};
 use std::collections::HashSet;
+use std::sync::Arc;
+use tokenless_ccr::{StashStore, marker_for};
 
 /// ResponseCompressor compresses API responses by truncating strings,
 /// limiting array sizes, removing null values, and dropping debug fields.
@@ -11,6 +13,13 @@ pub struct ResponseCompressor {
     drop_empty_fields: bool,
     max_depth: usize,
     add_truncation_marker: bool,
+    /// Optional reversible stash. When present, array items dropped by
+    /// truncation are stashed under a BLAKE3 key and a `<<tokenless:KEY>>`
+    /// marker is embedded in the output so the LLM can retrieve the originals.
+    /// When `None`, truncation is lossy and non-retrievable — the original
+    /// pre-stash behavior. Keeping this optional means the stash stays off
+    /// the core compression path unless a caller explicitly enables it.
+    stash_store: Option<Arc<dyn StashStore>>,
 }
 
 impl Default for ResponseCompressor {
@@ -39,6 +48,7 @@ impl Default for ResponseCompressor {
             // `SchemaCompressor::default()`.
             max_depth: 8,
             add_truncation_marker: true,
+            stash_store: None,
         }
     }
 }
@@ -82,6 +92,14 @@ impl ResponseCompressor {
     /// Set whether to add truncation markers
     pub fn with_add_truncation_marker(mut self, add: bool) -> Self {
         self.add_truncation_marker = add;
+        self
+    }
+
+    /// Attach a reversible stash store. When set, dropped array items are
+    /// stashed and a retrievable marker is embedded in the output; when
+    /// unset (the default), truncation stays lossy.
+    pub fn with_stash_store(mut self, store: Arc<dyn StashStore>) -> Self {
+        self.stash_store = Some(store);
         self
     }
 
@@ -201,13 +219,44 @@ impl ResponseCompressor {
         // Add truncation marker if array was truncated
         if truncate && self.add_truncation_marker {
             let remaining = arr.len() - self.truncate_arrays_at;
-            result.push(Value::String(format!(
-                "<... {} more items truncated>",
-                remaining
-            )));
+            // NOTE: the dropped slice is captured BEFORE compress_value runs,
+            // so stashed items preserve fields the compressor would otherwise
+            // strip (drop_fields like `debug`/`stacktrace`, nulls, depth
+            // limits). This is intentional — retrieval must yield the
+            // original content verbatim — but it means drop_fields serves no
+            // data-hygiene purpose for stashed content; if a field must not
+            // survive in the stash DB, strip it upstream of the compressor.
+            let dropped = &arr[self.truncate_arrays_at..];
+            let marker = match self.stash_dropped(dropped) {
+                Some(key) => format!(
+                    "<... {} items truncated, retrieve with {}>",
+                    remaining,
+                    marker_for(&key)
+                ),
+                None => format!("<... {} more items truncated>", remaining),
+            };
+            result.push(Value::String(marker));
         }
 
         Value::Array(result)
+    }
+
+    /// Stash the dropped tail of a truncated array, returning the stash key.
+    /// Returns `None` when no store is attached, when the dropped slice is
+    /// empty, or when stashing fails — in all these cases the caller falls
+    /// back to the plain (lossy) truncation marker. Stashing the raw dropped
+    /// items (not their compressed forms) means retrieval yields the original
+    /// content verbatim.
+    fn stash_dropped(&self, dropped: &[Value]) -> Option<String> {
+        let stash = self.stash_store.as_ref()?;
+        if dropped.is_empty() {
+            return None;
+        }
+        let payload = serde_json::to_string(dropped).ok()?;
+        if payload.is_empty() {
+            return None;
+        }
+        stash.stash(&payload).ok()
     }
 
     /// Compress an object, removing drop_fields and recursing
@@ -499,5 +548,75 @@ mod tests {
         // Should not panic and should be valid UTF-8
         let s = result.as_str().unwrap();
         assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn test_array_truncation_without_stash_is_lossy() {
+        // No stash attached: original lossy marker, no retrievable hash.
+        let compressor = ResponseCompressor::new().with_truncate_arrays_at(3);
+        let arr: Vec<i32> = (1..=10).collect();
+        let result = compressor.compress(&json!(arr));
+        let marker = result.as_array().unwrap().last().unwrap();
+        let s = marker.as_str().unwrap();
+        assert!(s.contains("more items truncated"));
+        assert!(!s.contains("tokenless:"));
+    }
+
+    #[test]
+    fn test_array_truncation_with_stash_round_trip() {
+        use std::sync::Arc;
+        use tokenless_ccr::{InMemoryStore, StashStore, extract_hash};
+
+        let store = Arc::new(InMemoryStore::new());
+        let compressor = ResponseCompressor::new()
+            .with_truncate_arrays_at(3)
+            .with_stash_store(store.clone());
+        let arr: Vec<i32> = (1..=10).collect();
+        let result = compressor.compress(&json!(arr));
+        let arr_result = result.as_array().unwrap();
+        // 3 kept items + 1 marker
+        assert_eq!(arr_result.len(), 4);
+        let marker = arr_result[3].as_str().unwrap();
+        assert!(marker.contains("retrieve with"));
+        let hash = extract_hash(marker).expect("marker should embed a hash");
+
+        // Retrieved payload is the JSON array of the dropped items [4..=10].
+        let retrieved = store.retrieve(hash).unwrap().expect("must be retrievable");
+        let recovered: Vec<i32> = serde_json::from_str(&retrieved).unwrap();
+        assert_eq!(recovered, (4..=10).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_array_truncation_with_failing_stash_falls_back_to_lossy() {
+        // A stash that always errors must not break compression: the marker
+        // degrades to the plain lossy form.
+        use std::sync::Arc;
+        use tokenless_ccr::{StashError, StashStore};
+
+        struct AlwaysFail;
+        impl StashStore for AlwaysFail {
+            fn stash(&self, _payload: &str) -> Result<String, StashError> {
+                Err(StashError::Backend("simulated".to_string()))
+            }
+            fn retrieve(&self, _hash: &str) -> Result<Option<String>, StashError> {
+                Ok(None)
+            }
+            fn len(&self) -> usize {
+                0
+            }
+            fn evict_expired(&self) -> Result<usize, StashError> {
+                Ok(0)
+            }
+        }
+
+        let compressor = ResponseCompressor::new()
+            .with_truncate_arrays_at(3)
+            .with_stash_store(Arc::new(AlwaysFail));
+        let arr: Vec<i32> = (1..=10).collect();
+        let result = compressor.compress(&json!(arr));
+        let marker = result.as_array().unwrap().last().unwrap();
+        let s = marker.as_str().unwrap();
+        assert!(s.contains("more items truncated"));
+        assert!(!s.contains("tokenless:"));
     }
 }

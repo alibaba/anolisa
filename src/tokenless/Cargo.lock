@@ -749,6 +749,7 @@ dependencies = [
  "regex",
  "rusqlite",
  "serde_json",
+ "tokenless-ccr",
  "tokenless-schema",
  "tokenless-stats",
  "toon-format",
@@ -760,6 +761,7 @@ version = "0.6.0"
 dependencies = [
  "regex",
  "serde_json",
+ "tokenless-ccr",
 ]
 
 [[package]]

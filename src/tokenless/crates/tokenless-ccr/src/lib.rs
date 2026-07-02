@@ -28,5 +28,7 @@ pub use backends::in_memory::InMemoryStore;
 #[cfg(feature = "sqlite")]
 pub use backends::sqlite::SqliteStore;
 pub use key::compute_key;
-pub use marker::{MARKER_PREFIX, MARKER_SUFFIX, extract_hash, marker_for, parse_marker};
+pub use marker::{
+    MARKER_PREFIX, MARKER_SUFFIX, extract_hash, is_valid_hash, marker_for, parse_marker,
+};
 pub use store::{StashError, StashStore};

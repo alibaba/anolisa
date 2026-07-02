@@ -5,6 +5,8 @@ use clap::{Parser, Subcommand};
 use std::fs;
 use std::io::{self, Read};
 use std::process;
+use std::sync::Arc;
+use tokenless_ccr::{SqliteStore, StashStore, extract_hash, is_valid_hash};
 use tokenless_schema::{ResponseCompressor, SchemaCompressor};
 use tokenless_stats::{
     CompressionMode, OperationType, StatsRecord, StatsRecorder, TokenlessConfig,
@@ -66,6 +68,25 @@ enum Commands {
         /// Max nesting depth before truncation
         #[arg(long)]
         max_depth: Option<usize>,
+        /// Disable reversible stash. By default, dropped array items are
+        /// stashed so they can be retrieved via `tokenless retrieve`; this
+        /// flag makes truncation lossy (the pre-stash behavior).
+        #[arg(long)]
+        no_stash: bool,
+        /// Override the stash database path (default ~/.tokenless/stash.db).
+        /// Resolved under the trusted home directory; rejected if outside.
+        #[arg(long)]
+        stash_db: Option<String>,
+    },
+    /// Retrieve a stashed payload by its hash key. Accepts a bare 24-hex hash
+    /// or any text containing a `<<tokenless:HASH>>` marker (the marker is
+    /// extracted automatically).
+    Retrieve {
+        /// The stash hash, or a line containing a `<<tokenless:HASH>>` marker.
+        hash: String,
+        /// Override the stash database path (default ~/.tokenless/stash.db).
+        #[arg(long)]
+        stash_db: Option<String>,
     },
     /// View and export statistics
     #[command(subcommand)]
@@ -292,6 +313,70 @@ fn open_recorder() -> Result<StatsRecorder, (String, i32)> {
     StatsRecorder::new(get_db_path()).map_err(|e| (format!("Failed to open database: {}", e), 1))
 }
 
+/// Resolve the stash database path under the trusted home directory.
+///
+/// Mirrors `get_db_path`'s trust model (passwd-rooted home, validated env
+/// override) so an attacker cannot redirect the stash to a system-critical
+/// location by setting `TOKENLESS_STASH_DB` or passing `--stash-db`. Returns
+/// `None` when no trusted home anchor exists or an override is rejected —
+/// callers fail open (no stash, lossy truncation) rather than writing state
+/// to an untrusted location.
+fn get_stash_db_path(override_path: Option<&str>) -> Option<String> {
+    let home = get_home_dir();
+    if home.is_empty() {
+        eprintln!("[tokenless] no home directory available — stash disabled");
+        return None;
+    }
+    // An explicit --stash-db override is validated the same way as the
+    // TOKENLESS_STASH_DB env var: on rejection we warn AND fall back to the
+    // default under the trusted home (rather than silently disabling the
+    // stash), so a typo doesn't quietly drop reversibility.
+    if let Some(p) = override_path.filter(|s| !s.is_empty()) {
+        match validate_db_path(p, &home) {
+            Ok(valid) => return Some(valid),
+            Err(reason) => eprintln!("[tokenless] rejecting --stash-db {}: {}", p, reason),
+        }
+    }
+    match std::env::var("TOKENLESS_STASH_DB") {
+        Ok(env_path) if !env_path.is_empty() => match validate_db_path(&env_path, &home) {
+            Ok(path) => Some(path),
+            Err(reason) => {
+                eprintln!("[tokenless] ignoring TOKENLESS_STASH_DB: {}", reason);
+                Some(format!("{}/.tokenless/stash.db", home))
+            }
+        },
+        _ => Some(format!("{}/.tokenless/stash.db", home)),
+    }
+}
+
+/// Open a stash store, returning the specific failure cause. Used by
+/// user-initiated paths (`retrieve`) where a generic "unavailable" message
+/// would hide the real reason (no home, path rejected, corrupt DB, …).
+fn open_stash_store_or_err(override_path: Option<&str>) -> Result<Arc<dyn StashStore>, String> {
+    let path = get_stash_db_path(override_path)
+        .ok_or_else(|| "no trusted home directory available for stash db".to_string())?;
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create stash directory {}: {}", parent.display(), e))?;
+    }
+    SqliteStore::new(&path)
+        .map_err(|e| format!("cannot open stash db at {}: {}", path, e))
+        .map(|s| Arc::new(s) as Arc<dyn StashStore>)
+}
+
+/// Open a stash store, failing open to `None` on any error. Compression
+/// proceeds without stash (lossy truncation) when the home anchor is missing,
+/// the parent directory cannot be created, or the database cannot be opened.
+fn open_stash_store(override_path: Option<&str>) -> Option<Arc<dyn StashStore>> {
+    match open_stash_store_or_err(override_path) {
+        Ok(store) => Some(store),
+        Err(e) => {
+            eprintln!("[tokenless] stash disabled: {}", e);
+            None
+        }
+    }
+}
+
 fn run() -> Result<(), (String, i32)> {
     let cli = Cli::parse();
 
@@ -362,6 +447,8 @@ fn run() -> Result<(), (String, i32)> {
             truncate_strings_at,
             truncate_arrays_at,
             max_depth,
+            no_stash,
+            stash_db,
         } => {
             let input = read_input(&file).map_err(|e| (e, 2))?;
             let value: serde_json::Value = serde_json::from_str(&input)
@@ -377,6 +464,21 @@ fn run() -> Result<(), (String, i32)> {
             if let Some(v) = max_depth {
                 compressor = compressor.with_max_depth(v);
             }
+            // Load config before deciding on the stash so we can skip it
+            // entirely when compression is disabled (dry-run). Attaching the
+            // stash in dry-run would write entries whose `<<tokenless:KEY>>`
+            // markers never reach the LLM (the original input is emitted),
+            // orphaning them.
+            let config = TokenlessConfig::load();
+            let compression_on = config.is_compression_enabled();
+            let stash = if no_stash || !compression_on {
+                None
+            } else {
+                open_stash_store(stash_db.as_deref())
+            };
+            if let Some(ref store) = stash {
+                compressor = compressor.with_stash_store(store.clone());
+            }
             let result = compressor.compress(&value);
             let after_compact = serde_json::to_string(&result).unwrap_or_else(|_| String::new());
 
@@ -387,13 +489,16 @@ fn run() -> Result<(), (String, i32)> {
                     "tokenless: response compression did not reduce size ({} -> {} est. tokens), outputting original",
                     before_tokens, after_tokens
                 );
+                // No-savings discard edge: if a stash was attached and an
+                // array was truncated, those writes orphan (markers live in
+                // `after_compact`, which is discarded). Truncation almost
+                // always yields savings, so this is rare; orphaned entries
+                // are TTL-cleaned.
                 input.clone()
             } else {
                 after_compact.clone()
             };
 
-            let config = TokenlessConfig::load();
-            let compression_on = config.is_compression_enabled();
             let mode = resolve_mode(compression_on, before_tokens, after_tokens);
             let emit_text = if compression_on {
                 output_text.clone()
@@ -412,6 +517,43 @@ fn run() -> Result<(), (String, i32)> {
                 output_text,
                 mode,
             );
+        }
+        Commands::Retrieve { hash, stash_db } => {
+            let store = match open_stash_store_or_err(stash_db.as_deref()) {
+                Ok(s) => s,
+                Err(e) => {
+                    return Err((format!("stash unavailable: {}", e), 1));
+                }
+            };
+            // Accept either a bare 24-hex hash or text containing a marker;
+            // extract_hash validates the embedded hash. When no marker is
+            // found, validate the bare hash format before the DB round-trip
+            // so a mistaken non-hash argument (e.g. a file path) gets a clear
+            // format error instead of a misleading "no stashed payload".
+            let key = match extract_hash(&hash) {
+                Some(h) => h.to_string(),
+                None if is_valid_hash(&hash) => hash.to_string(),
+                None => {
+                    return Err((
+                        format!(
+                            "invalid stash hash: {:?} (expected 24 hex chars or a <<tokenless:HASH>> marker)",
+                            hash
+                        ),
+                        1,
+                    ));
+                }
+            };
+            match store.retrieve(&key) {
+                Ok(Some(payload)) => {
+                    println!("{}", payload);
+                }
+                Ok(None) => {
+                    return Err((format!("no stashed payload for hash: {}", key), 1));
+                }
+                Err(e) => {
+                    return Err((format!("stash retrieve failed: {}", e), 1));
+                }
+            }
         }
         Commands::Stats(stats_cmd) => {
             let recorder = open_recorder()?;

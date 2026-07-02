@@ -38,13 +38,17 @@ pub fn extract_hash(text: &str) -> Option<&str> {
     Some(hash)
 }
 
-/// A valid stash key is exactly 24 lowercase hex characters.
+/// Whether `hash` is a valid stash key: exactly 24 ASCII hex characters
+/// (case-insensitive — keys are stored lowercase, lookups normalize). Public
+/// so callers can validate a bare hash before a DB round-trip and surface a
+/// clear format error to the user.
+pub fn is_valid_hash(hash: &str) -> bool {
+    hash.len() == 24 && hash.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// A valid stash key is exactly 24 ASCII hex characters.
 fn validate_hash(hash: &str) -> Option<()> {
-    if hash.len() == 24 && hash.bytes().all(|b| b.is_ascii_hexdigit()) {
-        Some(())
-    } else {
-        None
-    }
+    if is_valid_hash(hash) { Some(()) } else { None }
 }
 
 #[cfg(test)]
@@ -57,6 +61,21 @@ mod tests {
         let marker = marker_for(hash);
         assert_eq!(marker, "<<tokenless:0123456789abcdef01234567>>");
         assert_eq!(parse_marker(&marker), Some(hash));
+    }
+
+    #[test]
+    fn is_valid_hash_accepts_24_hex_case_insensitive() {
+        assert!(is_valid_hash("0123456789abcdef01234567"));
+        assert!(is_valid_hash("ABCDEF0123456789ABCDEF01")); // uppercase ok
+    }
+
+    #[test]
+    fn is_valid_hash_rejects_malformed() {
+        assert!(!is_valid_hash("0123456789abcdef0123456")); // 23 chars
+        assert!(!is_valid_hash("0123456789abcdef0123456789")); // 26 chars
+        assert!(!is_valid_hash("ZZZZZZZZZZZZZZZZZZZZZZZZ")); // non-hex
+        assert!(!is_valid_hash(""));
+        assert!(!is_valid_hash("/some/path"));
     }
 
     #[test]
