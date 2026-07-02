@@ -11,7 +11,10 @@ from agent_sec_cli.daemon.registry import (
     MethodRegistry,
     MethodSpec,
 )
-from agent_sec_cli.daemon.runtime import DaemonRuntime
+from agent_sec_cli.daemon.runtime import (
+    DaemonRuntime,
+    PromptScanRuntimeState,
+)
 from agent_sec_cli.security_middleware.result import ActionResult
 
 _MODEL_FREE_MODES = frozenset({"fast"})
@@ -88,11 +91,7 @@ async def prompt_scan_handler(
         # back to FAST (L1 rule engine only).
         effective_mode = "fast"
         degraded = True
-        degraded_reason = (
-            f"model not ready (status={prompt_scan_state.status}), "
-            f"degraded from mode='{requested_mode}' to mode='fast' "
-            "(L1 rule-engine only)"
-        )
+        degraded_reason = _build_degraded_reason(prompt_scan_state, requested_mode)
 
     result = await asyncio.to_thread(
         _invoke_prompt_scan,
@@ -124,6 +123,33 @@ def _invoke_prompt_scan(
         mode=mode,
         source=source,
     )
+
+
+def _build_degraded_reason(state: PromptScanRuntimeState, requested_mode: str) -> str:
+    """Build the ``degraded_reason`` string for a FAST fallback.
+
+    A status of ``degraded`` is permanent — the one-shot preload job failed
+    and will not retry until the daemon restarts, so operators need an
+    explicit warmup hint plus the underlying ``last_error`` to distinguish
+    it from a transient cold-start (pending/downloading/loading).
+    """
+    parts = [
+        f"model not ready (status={state.status})",
+        (
+            f"degraded from mode='{requested_mode}' to mode='fast' "
+            "(L1 rule-engine only)"
+        ),
+    ]
+    if state.status == "degraded":
+        parts.append(
+            "preload failed, run `agent-sec-cli scan-prompt warmup` "
+            "then restart the daemon"
+        )
+    if state.model:
+        parts.append(f"model={state.model}")
+    if state.last_error:
+        parts.append(f"last_error={state.last_error}")
+    return ", ".join(parts)
 
 
 def _inject_degraded_metadata(result: ActionResult, reason: str) -> ActionResult:
