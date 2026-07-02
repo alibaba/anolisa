@@ -126,6 +126,29 @@ pub(crate) enum RepoPersistPolicy {
     BestEffort,
 }
 
+/// Enforce the persist policy against a load result.
+///
+/// Extracted so the policy branch can be unit-tested without a real
+/// network fetch or filesystem setup.
+fn enforce_repo_persist_policy(
+    provisioning: &RepoConfigProvisioning,
+    persist_policy: RepoPersistPolicy,
+    command: &str,
+) -> Result<(), CliError> {
+    if persist_policy == RepoPersistPolicy::Require
+        && let RepoConfigProvisioning::DownloadedPersistFailed { dest, reason, .. } = provisioning
+    {
+        return Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "repo config downloaded but could not be written to {}: {reason}",
+                dest.display()
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Load `repo.toml`, provisioning it if every local source is missing.
 ///
 /// `persist_policy` governs what happens when a freshly-downloaded config
@@ -142,19 +165,7 @@ pub(crate) fn load_repo_config(
         command: command.to_string(),
         reason: err.to_string(),
     })?;
-    if persist_policy == RepoPersistPolicy::Require {
-        if let RepoConfigProvisioning::DownloadedPersistFailed { dest, reason, .. } =
-            &repo_load.provisioning
-        {
-            return Err(CliError::Runtime {
-                command: command.to_string(),
-                reason: format!(
-                    "repo config downloaded but could not be written to {}: {reason}",
-                    dest.display()
-                ),
-            });
-        }
-    }
+    enforce_repo_persist_policy(&repo_load.provisioning, persist_policy, command)?;
     render_repo_config_provisioning(ctx, &repo_load.provisioning);
     Ok(repo_load.config)
 }
@@ -1000,6 +1011,72 @@ type = "symlink"
             let count = super::migrate_v3_symlinks(&mut state, &layout);
             assert_eq!(count, 0);
             assert_eq!(state.objects[0].files[0].kind, OwnedFileKind::File);
+        }
+    }
+
+    mod persist_policy {
+        use super::super::{
+            RepoConfigProvisioning, RepoPersistPolicy, enforce_repo_persist_policy,
+        };
+        use crate::response::CliError;
+        use std::path::PathBuf;
+
+        fn persist_failed() -> RepoConfigProvisioning {
+            RepoConfigProvisioning::DownloadedPersistFailed {
+                url: "https://example.com/repo.toml".to_string(),
+                dest: PathBuf::from("/etc/anolisa/repo.toml"),
+                reason: "permission denied".to_string(),
+            }
+        }
+
+        /// Require policy: DownloadedPersistFailed is escalated to CliError::Runtime
+        /// carrying the dest path and underlying reason.
+        #[test]
+        fn require_policy_rejects_persist_failure() {
+            let err =
+                enforce_repo_persist_policy(&persist_failed(), RepoPersistPolicy::Require, "list")
+                    .expect_err("Require must reject persist failure");
+            match err {
+                CliError::Runtime { command, reason } => {
+                    assert_eq!(command, "list");
+                    assert!(
+                        reason.contains("/etc/anolisa/repo.toml"),
+                        "reason should carry dest: {reason}"
+                    );
+                    assert!(
+                        reason.contains("permission denied"),
+                        "reason should carry inner cause: {reason}"
+                    );
+                }
+                other => panic!("expected Runtime, got {other:?}"),
+            }
+        }
+
+        /// BestEffort policy: DownloadedPersistFailed is tolerated (Ok).
+        #[test]
+        fn best_effort_policy_tolerates_persist_failure() {
+            enforce_repo_persist_policy(&persist_failed(), RepoPersistPolicy::BestEffort, "list")
+                .expect("BestEffort must accept persist failure");
+        }
+
+        /// Neither policy touches non-persist-failure provisioning states.
+        #[test]
+        fn non_persist_failure_states_are_always_ok() {
+            let downloaded = RepoConfigProvisioning::Downloaded {
+                url: "https://example.com/repo.toml".to_string(),
+                dest: PathBuf::from("/etc/anolisa/repo.toml"),
+            };
+            let existing = RepoConfigProvisioning::Existing;
+            let dry_run = RepoConfigProvisioning::FetchedForDryRun {
+                url: "https://example.com/repo.toml".to_string(),
+                dest: PathBuf::from("/etc/anolisa/repo.toml"),
+            };
+            for provisioning in [&downloaded, &existing, &dry_run] {
+                enforce_repo_persist_policy(provisioning, RepoPersistPolicy::Require, "install")
+                    .expect("Require must pass through non-persist-failure states");
+                enforce_repo_persist_policy(provisioning, RepoPersistPolicy::BestEffort, "list")
+                    .expect("BestEffort must pass through non-persist-failure states");
+            }
         }
     }
 }
