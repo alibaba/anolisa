@@ -320,7 +320,7 @@ fn enable_status_disable_happy_path() {
 
     // disable → removes receipt.
     let disabled = manager
-        .disable(COMPONENT, Some(FRAMEWORK))
+        .disable(COMPONENT, Some(FRAMEWORK), false)
         .expect("disable");
     assert!(disabled.claim_removed);
     assert!(disabled.report.cleanup_complete);
@@ -523,7 +523,7 @@ fn disable_keeps_receipt_when_uninstall_fails() {
     // Now force uninstall to fail.
     world.apply_env(&guard, Some("uninstall"));
     let disabled = manager
-        .disable(COMPONENT, Some(FRAMEWORK))
+        .disable(COMPONENT, Some(FRAMEWORK), false)
         .expect("disable runs");
     assert!(
         !disabled.claim_removed,
@@ -555,7 +555,7 @@ fn disable_without_cli_keeps_receipt_for_retry() {
     let missing = world._root.path().join("no-such-openclaw");
     guard.set_openclaw_bin(&missing);
     let disabled = manager
-        .disable(COMPONENT, Some(FRAMEWORK))
+        .disable(COMPONENT, Some(FRAMEWORK), false)
         .expect("disable");
     assert!(!disabled.claim_removed, "receipt kept when CLI absent");
     assert!(!disabled.report.cleanup_complete);
@@ -690,4 +690,162 @@ fn scan_lists_resource_with_detection_and_receipt_state() {
         .expect("entry");
     assert!(entry.enabled);
     assert_eq!(entry.claim_status, Some(ClaimStatus::Enabled));
+}
+
+// ---------------------------------------------------------------------------
+// dry-run disable regression tests (#1251)
+// ---------------------------------------------------------------------------
+
+/// Dry-run disable must leave `InstalledState` completely unchanged and
+/// must not invoke framework CLI operations. A following real disable
+/// must still clean up exactly once.
+#[test]
+fn dry_run_disable_leaves_state_unchanged() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+
+    // Enable the adapter for real.
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("enable");
+    let state_path = world.layout.state_dir.join("installed.toml");
+    let state_bytes_before = std::fs::read(&state_path).expect("read state file");
+    assert!(
+        world
+            .load_state()
+            .find_adapter_claim(COMPONENT, FRAMEWORK)
+            .is_some(),
+        "pre-condition: receipt must exist after enable"
+    );
+    // The fake OpenClaw CLI wrote a registry marker for the plugin —
+    // framework-side state we must prove dry-run does not touch.
+    let registry_marker = world.openclaw_home.join("registry").join(COMPONENT);
+    assert!(
+        registry_marker.exists(),
+        "pre-condition: openclaw registry marker must exist after enable"
+    );
+
+    // Dry-run disable.
+    let outcome = manager
+        .disable(COMPONENT, Some(FRAMEWORK), true)
+        .expect("dry-run disable");
+    assert!(outcome.dry_run, "outcome must be flagged dry-run");
+    assert!(
+        !outcome.claim_removed,
+        "dry-run must not remove the receipt"
+    );
+    assert!(
+        outcome.report.cleanup_complete,
+        "dry-run plan reports as complete"
+    );
+    assert!(
+        !outcome.report.messages.is_empty(),
+        "dry-run must describe planned actions"
+    );
+
+    // State file must be byte-identical — no writes at all.
+    let state_bytes_after = std::fs::read(&state_path).expect("read state file after dry-run");
+    assert_eq!(
+        state_bytes_before, state_bytes_after,
+        "installed.toml must be byte-identical after dry-run disable"
+    );
+    // Double-check: receipt still present and status unchanged.
+    let state_after = world.load_state();
+    let claim_after = state_after
+        .find_adapter_claim(COMPONENT, FRAMEWORK)
+        .expect("receipt must still exist after dry-run disable");
+    assert_eq!(
+        claim_after.status,
+        anolisa_core::adapter::claim::ClaimStatus::Enabled,
+        "receipt status must remain Enabled, not cleanup_failed"
+    );
+    // Framework state must be untouched: the plugin registry marker must
+    // still exist (a real disable would have unregistered it).
+    assert!(
+        registry_marker.exists(),
+        "openclaw registry marker must still exist after dry-run disable"
+    );
+
+    // Following real disable cleans up exactly once.
+    let real = manager
+        .disable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("real disable");
+    assert!(!real.dry_run);
+    assert!(real.claim_removed, "real disable must remove receipt");
+    assert!(
+        world
+            .load_state()
+            .find_adapter_claim(COMPONENT, FRAMEWORK)
+            .is_none(),
+        "receipt must be gone after real disable"
+    );
+}
+
+/// Dry-run disable must report meaningful planned actions for a plugin
+/// adapter (one with a `FrameworkPlugin` resource).
+#[test]
+fn dry_run_disable_reports_plugin_unregister() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("enable");
+
+    let outcome = manager
+        .disable(COMPONENT, Some(FRAMEWORK), true)
+        .expect("dry-run disable");
+    assert!(outcome.dry_run);
+
+    let has_unregister = outcome
+        .report
+        .messages
+        .iter()
+        .any(|m| m.contains("would unregister"));
+    assert!(
+        has_unregister,
+        "dry-run must describe the plugin unregister: {:?}",
+        outcome.report.messages
+    );
+
+    let has_receipt = outcome
+        .report
+        .messages
+        .iter()
+        .any(|m| m.contains("would remove adapter receipt"));
+    assert!(
+        has_receipt,
+        "dry-run must note receipt removal: {:?}",
+        outcome.report.messages
+    );
+}
+
+/// Dry-run disable of a component with no receipt is a no-op, same as
+/// a real disable, and the outcome carries the dry_run flag.
+#[test]
+fn dry_run_disable_no_receipt_is_noop() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+
+    let outcome = manager
+        .disable(COMPONENT, Some(FRAMEWORK), true)
+        .expect("dry-run disable no receipt");
+    assert!(outcome.dry_run);
+    assert!(!outcome.claim_removed);
+    assert!(outcome.report.cleanup_complete);
+    assert!(
+        outcome
+            .report
+            .messages
+            .iter()
+            .any(|m| m.contains("no receipt")),
+        "must report no receipt: {:?}",
+        outcome.report.messages
+    );
 }

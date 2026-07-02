@@ -69,11 +69,13 @@ pub struct DisableOutcome {
     /// Resolved framework, when one was determined (`None` only for the
     /// "component has no enabled adapters" no-op).
     pub framework: Option<String>,
-    /// The driver's cleanup report.
+    /// The driver's cleanup report (or the dry-run plan).
     pub report: DisableReport,
     /// True when the receipt was removed; false when it was kept and
-    /// marked `cleanup_failed` for retry.
+    /// marked `cleanup_failed` for retry. Always `false` under dry-run.
     pub claim_removed: bool,
+    /// True when the operation was a dry-run (no state mutated).
+    pub dry_run: bool,
 }
 
 /// One row of [`AdapterManager::scan`].
@@ -592,6 +594,10 @@ impl AdapterManager {
     /// receipts when `None`). Idempotent: disabling something with no
     /// receipt is a successful no-op.
     ///
+    /// When `dry_run`, resolves the receipt and validates it, then returns a
+    /// descriptive plan without mutating framework state, adapter receipts,
+    /// or `installed.toml`.
+    ///
     /// Takes the install lock for the whole operation.
     ///
     /// # Errors
@@ -604,6 +610,7 @@ impl AdapterManager {
         &self,
         component: &str,
         framework: Option<&str>,
+        dry_run: bool,
     ) -> Result<DisableOutcome, AdapterError> {
         let _lock = InstallLock::acquire(&self.layout.lock_file)?;
         let mut state = InstalledState::load(&self.state_path)?;
@@ -628,6 +635,7 @@ impl AdapterManager {
                                 )],
                             },
                             claim_removed: false,
+                            dry_run,
                         });
                     }
                     1 => claimed[0].clone(),
@@ -655,6 +663,7 @@ impl AdapterManager {
                         )],
                     },
                     claim_removed: false,
+                    dry_run,
                 });
             }
         };
@@ -694,7 +703,7 @@ impl AdapterManager {
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: None,
-            dry_run: false,
+            dry_run,
             ops: &probe_ops,
         };
         let mut allowed_roots = driver.allowed_external_roots(&probe_ctx);
@@ -721,12 +730,23 @@ impl AdapterManager {
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: None,
-            dry_run: false,
+            dry_run,
             ops: &ops,
         };
 
         // Re-validate the receipt before acting on it (forged-state guard).
         claim.validate(&self.layout, &driver.allowed_external_roots(&ctx))?;
+
+        if dry_run {
+            let report = plan_disable_report(&claim);
+            return Ok(DisableOutcome {
+                component: component.to_string(),
+                framework: Some(framework),
+                report,
+                claim_removed: false,
+                dry_run: true,
+            });
+        }
 
         let report = driver.disable(&claim, &ctx)?;
         let claim_removed = report.cleanup_complete;
@@ -753,6 +773,7 @@ impl AdapterManager {
             framework: Some(framework),
             report,
             claim_removed,
+            dry_run: false,
         })
     }
 
@@ -1898,6 +1919,83 @@ fn declared_bundle_entry(manifest: &ComponentManifest, framework: &str) -> Optio
         _ => {}
     }
     adapter.bundle.entry.clone()
+}
+
+/// Build a non-mutating [`DisableReport`] from a validated receipt,
+/// describing what a real disable would do. Uses the driver payload's
+/// resource IDs to determine which resources are actually cleaned up
+/// (skill dirs, plugin dirs), excluding the framework home/state dir
+/// which real disable never removes.
+///
+/// The returned `cleanup_complete` is always `true`: it signals that the
+/// planned cleanup description is complete, not that real cleanup ran.
+/// Callers must check [`DisableOutcome::dry_run`] to distinguish planned
+/// output from actual framework cleanup.
+fn plan_disable_report(claim: &AdapterClaim) -> DisableReport {
+    use super::claim::{ClaimResourceKind, DriverPayload};
+    let mut messages = Vec::new();
+
+    // Resource ids that a real disable actually acts on. Empty plugin ids
+    // (skill-bundle receipts carry no plugin resource) are excluded.
+    // `hermes_plugin_id` is the plugin resource id for Hermes receipts:
+    // real Hermes disable first runs `hermes plugins disable <id>` before
+    // removing the plugin directory, so its dry-run plan needs the extra
+    // CLI-disable line that OpenClaw (registry-only) does not.
+    let mut cleanup_ids: Vec<&str> = Vec::new();
+    let hermes_plugin_id: Option<&str> = match &claim.driver_payload {
+        DriverPayload::OpenClaw(oc) => {
+            cleanup_ids.extend(oc.skill_resources.iter().map(String::as_str));
+            if !oc.plugin_resource.is_empty() {
+                cleanup_ids.push(&oc.plugin_resource);
+            }
+            None
+        }
+        DriverPayload::Hermes(h) => {
+            cleanup_ids.extend(h.skill_resources.iter().map(String::as_str));
+            if h.plugin_resource.is_empty() {
+                None
+            } else {
+                cleanup_ids.push(&h.plugin_resource);
+                Some(h.plugin_resource.as_str())
+            }
+        }
+    };
+
+    for resource in &claim.resources {
+        if !cleanup_ids.contains(&resource.id.as_str()) {
+            // Not a resource that disable actually touches (e.g. the
+            // framework home/state directory).
+            if let ClaimResourceKind::FrameworkConfig { key, .. } = &resource.kind {
+                messages.push(format!("config key '{key}' left in place (not reversed)"));
+            }
+            continue;
+        }
+        match &resource.kind {
+            ClaimResourceKind::FrameworkPlugin {
+                framework,
+                plugin_id,
+            } => {
+                messages.push(format!("would unregister {framework} plugin '{plugin_id}'"));
+            }
+            ClaimResourceKind::ExternalPath { path } => {
+                // Hermes stores its plugin as a directory (ExternalPath) but
+                // disable also runs a CLI step first — surface it.
+                if Some(resource.id.as_str()) == hermes_plugin_id
+                    && let Some(plugin_id) = claim.plugin_id.as_deref()
+                {
+                    messages.push(format!("would disable hermes plugin '{plugin_id}'"));
+                }
+                messages.push(format!("would remove {}", path.display()));
+            }
+            _ => {}
+        }
+    }
+    messages.push("would remove adapter receipt".to_string());
+
+    DisableReport {
+        cleanup_complete: true,
+        messages,
+    }
 }
 
 /// A status report for a receipt that cannot be verified at all (e.g. no
@@ -4079,6 +4177,332 @@ dest = "{datadir}/skills"
             Some(&package_skills),
             "scan via snapshot+provenance must resolve {{datadir}}/skills \
              to the package datadir, not the empty local datadir"
+        );
+    }
+
+    // -- plan_disable_report --------------------------------------------------
+
+    fn make_claim_for_plan_test(
+        adapter_type: Option<&str>,
+        plugin_id: Option<&str>,
+        resources: Vec<crate::adapter::claim::ClaimResource>,
+        payload_skill_ids: Vec<String>,
+        payload_config_ids: Vec<String>,
+    ) -> crate::adapter::claim::AdapterClaim {
+        use crate::adapter::claim::{ClaimStatus, DriverPayload, OpenClawClaim};
+
+        AdapterClaim {
+            claim_schema: 1,
+            component: "test-comp".to_string(),
+            framework: "openclaw".to_string(),
+            plugin_id: plugin_id.map(str::to_string),
+            adapter_type: adapter_type.map(str::to_string),
+            enabled_at: "2026-06-30T00:00:00Z".to_string(),
+            resource_root: PathBuf::from("/fake/adapters/test-comp/openclaw"),
+            bundle_digest: None,
+            driver_schema: 1,
+            status: ClaimStatus::Enabled,
+            resources,
+            driver_payload: DriverPayload::OpenClaw(OpenClawClaim {
+                state_dir_resource: "state_dir".to_string(),
+                plugin_resource: "plugin".to_string(),
+                skill_resources: payload_skill_ids,
+                config_resources: payload_config_ids,
+            }),
+        }
+    }
+
+    #[test]
+    fn plan_disable_report_plugin_adapter() {
+        use crate::adapter::claim::{ClaimResource, ClaimResourceKind};
+
+        let claim = make_claim_for_plan_test(
+            Some("plugin"),
+            Some("test-comp"),
+            vec![
+                ClaimResource {
+                    id: "state_dir".to_string(),
+                    purpose: "openclaw_state_dir".to_string(),
+                    kind: ClaimResourceKind::ExternalPath {
+                        path: PathBuf::from("/home/user/.openclaw"),
+                    },
+                },
+                ClaimResource {
+                    id: "plugin".to_string(),
+                    purpose: "openclaw_plugin".to_string(),
+                    kind: ClaimResourceKind::FrameworkPlugin {
+                        framework: "openclaw".to_string(),
+                        plugin_id: "test-comp".to_string(),
+                    },
+                },
+            ],
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let report = plan_disable_report(&claim);
+        assert!(report.cleanup_complete);
+        assert!(
+            report
+                .messages
+                .iter()
+                .any(|m| m.contains("would unregister") && m.contains("test-comp")),
+            "must describe plugin unregister: {:#?}",
+            report.messages
+        );
+        // Framework home/state_dir must NOT be listed as a removal target.
+        assert!(
+            !report
+                .messages
+                .iter()
+                .any(|m| m.contains("would remove") && m.contains(".openclaw")),
+            "must NOT claim to remove the framework home dir: {:#?}",
+            report.messages
+        );
+        assert!(
+            report
+                .messages
+                .iter()
+                .any(|m| m.contains("would remove adapter receipt")),
+            "must note receipt removal: {:#?}",
+            report.messages
+        );
+    }
+
+    #[test]
+    fn plan_disable_report_skill_bundle_adapter() {
+        use crate::adapter::claim::{ClaimResource, ClaimResourceKind};
+
+        let claim = make_claim_for_plan_test(
+            Some("skill_bundle"),
+            None,
+            vec![
+                ClaimResource {
+                    id: "state_dir".to_string(),
+                    purpose: "openclaw_state_dir".to_string(),
+                    kind: ClaimResourceKind::ExternalPath {
+                        path: PathBuf::from("/home/user/.openclaw"),
+                    },
+                },
+                ClaimResource {
+                    id: "skill:os-tools".to_string(),
+                    purpose: "openclaw_skill".to_string(),
+                    kind: ClaimResourceKind::ExternalPath {
+                        path: PathBuf::from("/home/user/.openclaw/skills/os-tools"),
+                    },
+                },
+            ],
+            vec!["skill:os-tools".to_string()],
+            Vec::new(),
+        );
+
+        let report = plan_disable_report(&claim);
+        assert!(report.cleanup_complete);
+        // plugin resource "plugin" has no matching ClaimResource so
+        // plugin unregister must NOT appear.
+        assert!(
+            !report
+                .messages
+                .iter()
+                .any(|m| m.contains("would unregister")),
+            "skill_bundle must not mention plugin unregister: {:#?}",
+            report.messages
+        );
+        // Framework home/state_dir must NOT be listed.
+        assert!(
+            !report
+                .messages
+                .iter()
+                .any(|m| m == "would remove /home/user/.openclaw"),
+            "must NOT claim to remove the framework home: {:#?}",
+            report.messages
+        );
+        assert!(
+            report
+                .messages
+                .iter()
+                .any(|m| m.contains("would remove") && m.contains("skills/os-tools")),
+            "must describe skill dir removal: {:#?}",
+            report.messages
+        );
+        assert!(
+            report
+                .messages
+                .iter()
+                .any(|m| m.contains("would remove adapter receipt")),
+            "must note receipt removal: {:#?}",
+            report.messages
+        );
+    }
+
+    #[test]
+    fn plan_disable_report_with_config_entries() {
+        use crate::adapter::claim::{ClaimResource, ClaimResourceKind};
+
+        let claim = make_claim_for_plan_test(
+            Some("plugin"),
+            Some("test-comp"),
+            vec![ClaimResource {
+                id: "config:0".to_string(),
+                purpose: "openclaw_config".to_string(),
+                kind: ClaimResourceKind::FrameworkConfig {
+                    framework: "openclaw".to_string(),
+                    key: "plugins.entries.test-comp.enabled".to_string(),
+                },
+            }],
+            Vec::new(),
+            vec!["config:0".to_string()],
+        );
+
+        let report = plan_disable_report(&claim);
+        assert!(
+            report
+                .messages
+                .iter()
+                .any(|m| m.contains("config key") && m.contains("left in place")),
+            "must note config entries are not reversed: {:#?}",
+            report.messages
+        );
+    }
+
+    #[test]
+    fn plan_disable_report_hermes_plugin_adapter() {
+        use crate::adapter::claim::{
+            ClaimResource, ClaimResourceKind, ClaimStatus, DriverPayload, HermesClaim,
+        };
+
+        // Hermes stores both the home and the plugin as ExternalPath; only
+        // the plugin dir is a cleanup target, and disable runs a CLI step
+        // first.
+        let claim = AdapterClaim {
+            claim_schema: 1,
+            component: "test-comp".to_string(),
+            framework: "hermes".to_string(),
+            plugin_id: Some("test-comp".to_string()),
+            adapter_type: Some("plugin".to_string()),
+            enabled_at: "2026-06-30T00:00:00Z".to_string(),
+            resource_root: PathBuf::from("/fake/adapters/test-comp/hermes"),
+            bundle_digest: None,
+            driver_schema: 1,
+            status: ClaimStatus::Enabled,
+            resources: vec![
+                ClaimResource {
+                    id: "hermes_home".to_string(),
+                    purpose: "hermes_home".to_string(),
+                    kind: ClaimResourceKind::ExternalPath {
+                        path: PathBuf::from("/home/user/.hermes"),
+                    },
+                },
+                ClaimResource {
+                    id: "hermes_plugin".to_string(),
+                    purpose: "hermes_plugin".to_string(),
+                    kind: ClaimResourceKind::ExternalPath {
+                        path: PathBuf::from("/home/user/.hermes/plugins/test-comp"),
+                    },
+                },
+            ],
+            driver_payload: DriverPayload::Hermes(HermesClaim {
+                home_resource: "hermes_home".to_string(),
+                plugin_resource: "hermes_plugin".to_string(),
+                skill_resources: Vec::new(),
+            }),
+        };
+
+        let report = plan_disable_report(&claim);
+        assert!(report.cleanup_complete);
+        assert!(
+            report
+                .messages
+                .iter()
+                .any(|m| m == "would disable hermes plugin 'test-comp'"),
+            "must describe the hermes CLI disable step: {:#?}",
+            report.messages
+        );
+        assert!(
+            report
+                .messages
+                .iter()
+                .any(|m| m == "would remove /home/user/.hermes/plugins/test-comp"),
+            "must describe the hermes plugin directory removal: {:#?}",
+            report.messages
+        );
+        // Hermes home dir must NOT be a removal target.
+        assert!(
+            !report
+                .messages
+                .iter()
+                .any(|m| m == "would remove /home/user/.hermes"),
+            "must NOT claim to remove the hermes home: {:#?}",
+            report.messages
+        );
+    }
+
+    #[test]
+    fn plan_disable_report_hermes_skill_bundle_omits_plugin() {
+        use crate::adapter::claim::{
+            ClaimResource, ClaimResourceKind, ClaimStatus, DriverPayload, HermesClaim,
+        };
+
+        // skill_bundle Hermes receipts carry no plugin resource (empty id):
+        // the dry-run plan must not mention any plugin disable step.
+        let claim = AdapterClaim {
+            claim_schema: 1,
+            component: "test-comp".to_string(),
+            framework: "hermes".to_string(),
+            plugin_id: None,
+            adapter_type: Some("skill_bundle".to_string()),
+            enabled_at: "2026-06-30T00:00:00Z".to_string(),
+            resource_root: PathBuf::from("/fake/adapters/test-comp/hermes"),
+            bundle_digest: None,
+            driver_schema: 1,
+            status: ClaimStatus::Enabled,
+            resources: vec![
+                ClaimResource {
+                    id: "hermes_home".to_string(),
+                    purpose: "hermes_home".to_string(),
+                    kind: ClaimResourceKind::ExternalPath {
+                        path: PathBuf::from("/home/user/.hermes"),
+                    },
+                },
+                ClaimResource {
+                    id: "hermes_skill_audit".to_string(),
+                    purpose: "hermes_skill".to_string(),
+                    kind: ClaimResourceKind::ExternalPath {
+                        path: PathBuf::from("/home/user/.hermes/skills/audit"),
+                    },
+                },
+            ],
+            driver_payload: DriverPayload::Hermes(HermesClaim {
+                home_resource: "hermes_home".to_string(),
+                plugin_resource: String::new(),
+                skill_resources: vec!["hermes_skill_audit".to_string()],
+            }),
+        };
+
+        let report = plan_disable_report(&claim);
+        assert!(
+            !report
+                .messages
+                .iter()
+                .any(|m| m.contains("disable hermes plugin")),
+            "skill_bundle must not mention a plugin disable step: {:#?}",
+            report.messages
+        );
+        assert!(
+            report
+                .messages
+                .iter()
+                .any(|m| m == "would remove /home/user/.hermes/skills/audit"),
+            "must describe skill dir removal: {:#?}",
+            report.messages
+        );
+        assert!(
+            !report
+                .messages
+                .iter()
+                .any(|m| m == "would remove /home/user/.hermes"),
+            "must NOT claim to remove the hermes home: {:#?}",
+            report.messages
         );
     }
 }

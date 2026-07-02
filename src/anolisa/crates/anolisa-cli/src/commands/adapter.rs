@@ -131,6 +131,7 @@ struct DisablePayload {
     component: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     framework: Option<String>,
+    dry_run: bool,
     claim_removed: bool,
     cleanup_complete: bool,
     messages: Vec<String>,
@@ -328,8 +329,28 @@ fn handle_disable(
     const COMMAND: &str = "adapter disable";
     let manager = build_manager(ctx);
     let outcome: DisableOutcome = manager
-        .disable(component, framework)
+        .disable(component, framework, ctx.dry_run)
         .map_err(|e| map_err(COMMAND, e))?;
+
+    if outcome.dry_run {
+        if ctx.json {
+            let payload = DisablePayload {
+                component: outcome.component.clone(),
+                framework: outcome.framework.clone(),
+                dry_run: true,
+                claim_removed: false,
+                cleanup_complete: outcome.report.cleanup_complete,
+                messages: outcome.report.messages.clone(),
+            };
+            return render_json(COMMAND, payload);
+        }
+        let target = disable_target(&outcome);
+        println!("[dry-run] would disable {target}:");
+        for msg in &outcome.report.messages {
+            println!("  - {msg}");
+        }
+        return Ok(());
+    }
 
     // Cleanup that did not complete is a degraded outcome: the receipt was
     // kept (marked cleanup_failed) so the operator can retry. Surface a
@@ -349,6 +370,7 @@ fn handle_disable(
         let payload = DisablePayload {
             component: outcome.component.clone(),
             framework: outcome.framework.clone(),
+            dry_run: false,
             claim_removed: outcome.claim_removed,
             cleanup_complete: outcome.report.cleanup_complete,
             messages: outcome.report.messages.clone(),
@@ -356,10 +378,7 @@ fn handle_disable(
         return render_json(COMMAND, payload);
     }
 
-    let target = match &outcome.framework {
-        Some(f) => format!("{}/{}", outcome.component, f),
-        None => outcome.component.clone(),
-    };
+    let target = disable_target(&outcome);
     if outcome.claim_removed {
         println!("Disabled {target}.");
     } else if outcome.report.cleanup_complete {
@@ -371,6 +390,15 @@ fn handle_disable(
         println!("  - {msg}");
     }
     degraded.map_or(Ok(()), Err)
+}
+
+/// Human-facing `component/framework` label for a disable outcome, falling
+/// back to the component alone when no framework was resolved.
+fn disable_target(outcome: &DisableOutcome) -> String {
+    match &outcome.framework {
+        Some(f) => format!("{}/{}", outcome.component, f),
+        None => outcome.component.clone(),
+    }
 }
 
 // ---------------------------------------------------------------------------
