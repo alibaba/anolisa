@@ -124,7 +124,14 @@ install -m 0644 manifests/repo.toml %{buildroot}%{_sysconfdir}/anolisa/repo.toml
 #%%doc %%{_docdir}/%%{name}/README.md
 
 %changelog
-* Wed Jul 01 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Thu Jul 02 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- `anolisa adapter disable --dry-run` now previews cleanup without removing adapter receipts or resources.
+- Read-only commands now use downloaded repo config when saving `repo.toml` fails.
+- Component commands now accept package aliases consistently when targeting installed components.
+- Ambiguous package aliases no longer choose an arbitrary installed component.
+- Unknown component names now report no match without querying packages.
+
+* Wed Jul 01 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.1.18-1
 - `anolisa install` now auto-installs missing system packages for raw components in system mode.
 - `anolisa install --dry-run` now labels unresolved dependencies as auto-install or manual.
 - `anolisa install` now reports packages auto-installed during raw component installs.

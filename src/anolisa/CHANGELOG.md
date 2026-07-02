@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.19] - 2026-07-02
+
+### Fixed
+
+- `anolisa adapter disable --dry-run` now previews cleanup without removing adapter receipts or resources.
+- Read-only commands now use downloaded repo config when saving `repo.toml` fails.
+- Component commands now accept package aliases consistently when targeting installed components.
+- Ambiguous package aliases no longer choose an arbitrary installed component.
+- Unknown component names now report no match without querying packages.
+
 ## [0.1.18] - 2026-07-01
 
 ### Added
@@ -387,6 +397,16 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.1.19] - 2026-07-02
+
+### 修复
+
+- `anolisa adapter disable --dry-run` 现只预览清理。
+- 只读命令保存 `repo.toml` 失败时仍可使用已下载配置。
+- 组件命令现可一致接受软件包别名。
+- 模糊软件包别名不再误选已安装组件。
+- 未知组件名不再先查询软件包。
 
 ## [0.1.18] - 2026-07-01
 
