@@ -273,12 +273,29 @@ SUP_PID="$(cat "$SUP_PID_FILE")"
 info "强杀 worker (pid=$OLD_WORKER_PID)，保留 supervisor (pid=$SUP_PID)"
 kill -KILL "$OLD_WORKER_PID" 2>/dev/null || true
 
+# After SIGKILL the endpoint is dead: still in /proc/mounts but access returns
+# ENOTCONN ("Transport endpoint is not connected"), or the worker has exited.
+# Best-effort observation of that transient state (may race with fast recovery).
+for _ in $(seq 1 30); do
+	if ! kill -0 "$OLD_WORKER_PID" 2>/dev/null; then
+		break
+	fi
+	if ! ls "$MANAGED_MOUNT_DIR" >/dev/null 2>&1; then
+		info "检测到 dead FUSE endpoint (预期)"
+		break
+	fi
+	sleep 0.1
+done
+
+# Recovery must: clear the stale endpoint, start a new worker, and leave the
+# mountpoint actually readable again (ls succeeds => ENOTCONN is gone).
 restored=false
 for _ in $(seq 1 150); do
 	if grep -Fq " $MANAGED_MOUNT_DIR " /proc/mounts 2>/dev/null; then
 		NEW_WORKER_PID="$(cat "$WORKER_PID_FILE" 2>/dev/null || echo)"
 		if [[ -n "$NEW_WORKER_PID" && "$NEW_WORKER_PID" != "$OLD_WORKER_PID" ]] \
-			&& kill -0 "$NEW_WORKER_PID" 2>/dev/null; then
+			&& kill -0 "$NEW_WORKER_PID" 2>/dev/null \
+			&& ls "$MANAGED_MOUNT_DIR" >/dev/null 2>&1; then
 			restored=true
 			break
 		fi
@@ -286,7 +303,13 @@ for _ in $(seq 1 150); do
 	sleep 0.1
 done
 [[ "$restored" == true ]] || fail "worker 被杀后未在超时内恢复挂载"
-pass "worker 崩溃后 supervisor 自动重挂"
+pass "worker 崩溃后 supervisor 清理 dead endpoint 并重挂"
+
+# Confirm the recovered mount serves content, not a stale endpoint.
+if ! ls "$MANAGED_MOUNT_DIR/skills" >/dev/null 2>&1; then
+	fail "恢复后 mountpoint 仍不可访问"
+fi
+pass "恢复后 ls <mountpoint>/skills 成功"
 
 info "执行 skillfs stop"
 if ! "$BIN" stop "$MANAGED_MOUNT_DIR" >/dev/null 2>&1; then

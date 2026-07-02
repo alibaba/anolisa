@@ -12,7 +12,9 @@
 //!   the mount to become ready, then returns.
 //! * **supervisor** — `skillfs supervise --instance <id>` (hidden): runs the
 //!   foreground FUSE worker and remounts it after a bounded backoff whenever
-//!   it exits while the desired state is still "mounted".
+//!   it exits while the desired state is still "mounted". A `kill -9`ed worker
+//!   leaves a dead FUSE endpoint (mounted but `ENOTCONN`); the supervisor
+//!   detects and unmounts that stale endpoint before starting a replacement.
 //! * **worker** — `skillfs mount --foreground ...`: the ordinary foreground
 //!   mount path, unchanged.
 //!
@@ -285,6 +287,24 @@ fn write_pid(path: &Path, pid: u32) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Observed state of a managed mountpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MountState {
+    /// Present in `/proc/mounts` and a minimal access succeeds.
+    Ready,
+    /// Not present in `/proc/mounts`.
+    NotMounted,
+    /// Present in `/proc/mounts` but access fails with `ENOTCONN`
+    /// ("Transport endpoint is not connected") — a dead FUSE endpoint, e.g.
+    /// after the worker was `kill -9`ed.
+    Stale,
+    /// Present in `/proc/mounts` but access fails for some other reason.
+    UnknownError,
+}
+
+/// How long to keep retrying unmount of a stale endpoint before giving up.
+const UNMOUNT_TIMEOUT_MS: u64 = 3_000;
+
 /// Whether the mountpoint currently appears in `/proc/mounts`.
 pub fn is_mounted(mountpoint: &Path) -> bool {
     let target = mountpoint.to_string_lossy();
@@ -296,15 +316,62 @@ pub fn is_mounted(mountpoint: &Path) -> bool {
     }
 }
 
-/// Readiness = present in `/proc/mounts` and a minimal readdir succeeds.
-fn is_mount_ready(mountpoint: &Path) -> bool {
-    is_mounted(mountpoint) && std::fs::read_dir(mountpoint).is_ok()
+/// Classify the mountpoint: distinguish a healthy mount from a dead FUSE
+/// endpoint so recovery can unmount stale mounts before remounting.
+pub fn classify_mount(mountpoint: &Path) -> MountState {
+    if !is_mounted(mountpoint) {
+        return MountState::NotMounted;
+    }
+    // Minimal access. A dead FUSE endpoint fails opendir with ENOTCONN.
+    match std::fs::read_dir(mountpoint) {
+        Ok(_) => MountState::Ready,
+        Err(e) if e.raw_os_error() == Some(libc::ENOTCONN) => MountState::Stale,
+        Err(_) => MountState::UnknownError,
+    }
 }
 
-fn force_unmount(mountpoint: &Path) {
+/// Readiness = mounted and a minimal readdir succeeds.
+fn is_mount_ready(mountpoint: &Path) -> bool {
+    classify_mount(mountpoint) == MountState::Ready
+}
+
+/// Attempt a single unmount pass: `fusermount3 -u`, then `umount` as a
+/// fallback. Returns `true` if the mountpoint is gone afterward.
+fn unmount_once(mountpoint: &Path) -> bool {
     let _ = std::process::Command::new("fusermount3")
         .args(["-u", &mountpoint.to_string_lossy()])
         .output();
+    if !is_mounted(mountpoint) {
+        return true;
+    }
+    let _ = std::process::Command::new("umount")
+        .arg(mountpoint.as_os_str())
+        .output();
+    !is_mounted(mountpoint)
+}
+
+/// Unmount a (possibly stale/dead) FUSE endpoint, retrying within a bounded
+/// window. Succeeds immediately if nothing is mounted. Errors only if the
+/// endpoint is still present after both `fusermount3 -u` and `umount` over the
+/// retry window.
+fn clear_mount(mountpoint: &Path) -> Result<(), Box<dyn Error>> {
+    let deadline = Instant::now() + Duration::from_millis(UNMOUNT_TIMEOUT_MS);
+    loop {
+        if !is_mounted(mountpoint) {
+            return Ok(());
+        }
+        if unmount_once(mountpoint) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "failed to unmount '{}' via fusermount3 and umount",
+                mountpoint.display()
+            )
+            .into());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -602,6 +669,27 @@ pub fn run_supervisor(instance_id: &str) -> Result<(), Box<dyn Error>> {
             break;
         }
 
+        // A `kill -9`ed worker leaves a dead FUSE endpoint behind: the
+        // mountpoint is still listed in /proc/mounts but every access returns
+        // ENOTCONN ("Transport endpoint is not connected"). The replacement
+        // worker cannot mount over it, so unmount the stale endpoint before
+        // remounting.
+        match classify_mount(&mountpoint) {
+            MountState::Stale | MountState::UnknownError => {
+                warn!(
+                    mountpoint = %mountpoint.display(),
+                    "detected stale FUSE mount after worker exit; clearing before remount"
+                );
+                if let Err(e) = clear_mount(&mountpoint) {
+                    warn!(
+                        error = %e,
+                        "failed to clear stale mount; remount may fail this cycle"
+                    );
+                }
+            }
+            MountState::Ready | MountState::NotMounted => {}
+        }
+
         if start.elapsed() >= Duration::from_secs(STABLE_RUN_SECS) {
             backoff_ms = INITIAL_BACKOFF_MS;
         }
@@ -652,7 +740,9 @@ fn wait_child_timeout(child: &mut std::process::Child, timeout: Duration) -> std
 /// Final cleanup: ensure the mount is gone and remove instance state.
 fn finish(paths: &ManagedPaths, mountpoint: &Path) {
     if is_mounted(mountpoint) {
-        force_unmount(mountpoint);
+        if let Err(e) = clear_mount(mountpoint) {
+            warn!(error = %e, "failed to unmount during supervisor cleanup");
+        }
     }
     let _ = std::fs::remove_file(&paths.worker_pid);
     let _ = std::fs::remove_file(&paths.supervisor_pid);
@@ -682,14 +772,19 @@ pub fn run_stop(mountpoint: &Path) -> Result<(), Box<dyn Error>> {
     if !had_state {
         let _ = std::fs::remove_file(&paths.worker_pid);
         let _ = std::fs::remove_file(&paths.supervisor_pid);
-        if is_mounted(&normalized) {
-            force_unmount(&normalized);
-            println!("skillfs: unmounted {}", normalized.display());
-        } else {
-            println!(
-                "skillfs: no managed mount at {} (already stopped)",
-                normalized.display()
-            );
+        match classify_mount(&normalized) {
+            MountState::NotMounted => {
+                println!(
+                    "skillfs: no managed mount at {} (already stopped)",
+                    normalized.display()
+                );
+            }
+            // Present (ready or a stale/dead endpoint): unmount it, surfacing
+            // an error if cleanup cannot complete.
+            _ => {
+                clear_mount(&normalized)?;
+                println!("skillfs: unmounted {}", normalized.display());
+            }
         }
         return Ok(());
     }
@@ -721,13 +816,14 @@ pub fn run_stop(mountpoint: &Path) -> Result<(), Box<dyn Error>> {
         }
     }
 
-    // Wait for processes to exit and the mount to disappear.
+    // Wait for the managed processes to exit. The supervisor unmounts cleanly
+    // on SIGTERM, so once it is gone the mount is normally already down; any
+    // remaining endpoint is cleared explicitly below.
     let deadline = Instant::now() + Duration::from_millis(STOP_TIMEOUT_MS);
     loop {
         let sup_gone = sup_pid.is_none_or(|p| !pid_alive(p));
         let worker_gone = worker_pid.is_none_or(|p| !pid_alive(p));
-        let unmounted = !is_mounted(&normalized);
-        if sup_gone && worker_gone && unmounted {
+        if sup_gone && worker_gone {
             break;
         }
         if Instant::now() >= deadline {
@@ -742,19 +838,25 @@ pub fn run_stop(mountpoint: &Path) -> Result<(), Box<dyn Error>> {
                     send_signal(p, libc::SIGKILL);
                 }
             }
-            if is_mounted(&normalized) {
-                force_unmount(&normalized);
-            }
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+
+    // Ensure the mount is gone, clearing any stale/dead endpoint a killed
+    // worker left behind. Errors are surfaced after state cleanup.
+    let unmount_result = if is_mounted(&normalized) {
+        clear_mount(&normalized)
+    } else {
+        Ok(())
+    };
 
     // Best-effort final cleanup of any residual state files.
     let _ = std::fs::remove_file(&paths.worker_pid);
     let _ = std::fs::remove_file(&paths.supervisor_pid);
     let _ = std::fs::remove_file(&paths.state);
 
+    unmount_result?;
     println!("skillfs: stopped managed mount at {}", normalized.display());
     Ok(())
 }
@@ -867,6 +969,35 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("nope.json");
         assert_eq!(current_desired_state(&missing), DesiredState::Stopped);
+    }
+
+    #[test]
+    fn classify_mount_absent_path_is_not_mounted() {
+        let dir = tempfile::tempdir().unwrap();
+        let never_mounted = dir.path().join("not-a-mount");
+        assert_eq!(classify_mount(&never_mounted), MountState::NotMounted);
+    }
+
+    #[test]
+    fn classify_mount_plain_dir_is_not_mounted() {
+        // A real, accessible directory that is not a mountpoint classifies as
+        // NotMounted (it is not present in /proc/mounts), never Ready.
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(classify_mount(dir.path()), MountState::NotMounted);
+    }
+
+    #[test]
+    fn is_mount_ready_false_for_plain_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!is_mount_ready(dir.path()));
+    }
+
+    #[test]
+    fn clear_mount_is_ok_when_nothing_mounted() {
+        let dir = tempfile::tempdir().unwrap();
+        // Not a mountpoint, so clear_mount must succeed immediately without
+        // invoking any unmount tooling.
+        clear_mount(dir.path()).unwrap();
     }
 
     #[test]
