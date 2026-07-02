@@ -94,6 +94,50 @@ def test_prompt_scan_handler_degrades_for_all_non_ready_states(
     assert f"status={status}" in result.data["degraded_reason"]
 
 
+def test_prompt_scan_handler_degraded_reason_carries_warmup_hint_and_diagnostics(
+    monkeypatch,
+    tmp_path: Path,
+):
+    """A permanently degraded (preload failed) state surfaces the warmup hint,
+    ``model`` and ``last_error`` so operators can tell it apart from a
+    transient cold-start (pending/downloading/loading), which carries none
+    of those fields."""
+    runtime = DaemonRuntime(socket_path=tmp_path / "daemon.sock")
+    runtime.prompt_scan_state.status = "degraded"
+    runtime.prompt_scan_state.loaded = False
+    runtime.prompt_scan_state.model = "LLM-Research/Llama-Prompt-Guard-2-86M"
+    runtime.prompt_scan_state.last_error = "model load failed: oom"
+
+    def fake_invoke_prompt_scan(**kwargs):
+        return ActionResult(
+            success=True,
+            data={"ok": True, "verdict": "pass"},
+            stdout='{"ok": true, "verdict": "pass"}',
+            exit_code=0,
+        )
+
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.handlers.prompt_scan._invoke_prompt_scan",
+        fake_invoke_prompt_scan,
+    )
+    request = DaemonRequest(
+        method="scan-prompt",
+        request_id="req-prompt",
+        params={"text": "hello", "mode": "strict"},
+    )
+
+    result = asyncio.run(prompt_scan_handler(request, runtime))
+
+    assert result.data["degraded"] is True
+    reason = result.data["degraded_reason"]
+    assert "status=degraded" in reason
+    assert "preload failed" in reason
+    assert "agent-sec-cli scan-prompt warmup" in reason
+    assert "restart the daemon" in reason
+    assert "model=LLM-Research/Llama-Prompt-Guard-2-86M" in reason
+    assert "last_error=model load failed: oom" in reason
+
+
 def test_prompt_scan_handler_fast_mode_bypasses_model_check(
     monkeypatch, tmp_path: Path
 ):
