@@ -24,6 +24,7 @@ Three integration paths are available:
 |---|---|---|
 | Schema compression | ~57% | Compresses OpenAI Function Calling tool schemas |
 | Response compression | ~26–78% | Compresses API / tool responses (varies by content type) |
+| Reversible compression (stash) | — | Dropped array items are stashed and retrievable via `<<tokenless:KEY>>` markers |
 | TOON context compression | 15–40% | Encodes JSON to TOON format for LLMs |
 | Command rewriting | 60–90% | Filters CLI output via RTK (70+ commands supported) |
 | Tool Ready | reduces retry waste | Pre-check env, auto-fix deps, failure attribution |
@@ -41,7 +42,7 @@ Three integration paths are available:
 Token-Less/
 ├── crates/tokenless-schema/   # Core library: SchemaCompressor + ResponseCompressor
 ├── crates/tokenless-ccr/      # Reversible compression stash (Compress-Cache-Retrieve)
-├── crates/tokenless-cli/      # CLI binary: `tokenless` command (env-check, compress, stats)
+├── crates/tokenless-cli/      # CLI binary: `tokenless` command (env-check, compress, retrieve, stats)
 ├── adapters/tokenless/        # FHS adapter bundle (manifest, common, openclaw, hermes, qoder, claude-code, codex)
 │   ├── manifest.json            # Adapter manifest (cosh + openclaw + hermes + qoder + claude-code + codex)
 │   ├── common/                  # Shared: hooks, spec, env-fix, commands, cosh-extension
@@ -104,6 +105,25 @@ tokenless compress-response -f response.json
 
 # From stdin
 curl -s https://api.example.com/data | tokenless compress-response
+```
+
+By default `compress-response` stashes dropped array items so they can be
+retrieved later (see [Reversible compression](docs/stash-reversible-compression.md)).
+Pass `--no-stash` for lossy truncation, or `--stash-db <path>` to override the
+stash database (default `~/.tokenless/stash.db`).
+
+### retrieve
+
+Recover a payload stashed during `compress-response`. Accepts a bare 24-hex
+hash or any text containing a `<<tokenless:HASH>>` marker:
+
+```bash
+# Bare hash
+tokenless retrieve c30ccf5ed1125e0ed871ba8e
+
+# Or paste the whole truncation line — the hash is extracted automatically.
+# (Use the FULL 24-hex hash from your output; the value below is shorthand.)
+tokenless retrieve "<... 195 items truncated, retrieve with <<tokenless:c30ccf5ed1125e0ed871ba8e>>"
 ```
 
 ### compress-toon / decompress-toon

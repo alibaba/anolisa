@@ -556,10 +556,16 @@ mod tests {
         let compressor = ResponseCompressor::new().with_truncate_arrays_at(3);
         let arr: Vec<i32> = (1..=10).collect();
         let result = compressor.compress(&json!(arr));
-        let marker = result.as_array().unwrap().last().unwrap();
-        let s = marker.as_str().unwrap();
-        assert!(s.contains("more items truncated"));
-        assert!(!s.contains("tokenless:"));
+        let arr_result = result.as_array().unwrap();
+        // 3 kept items + 1 marker
+        assert_eq!(arr_result.len(), 4);
+        assert_eq!(arr_result[0], json!(1));
+        assert_eq!(arr_result[1], json!(2));
+        assert_eq!(arr_result[2], json!(3));
+        let marker = arr_result[3].as_str().unwrap();
+        assert!(marker.contains("more items truncated"));
+        assert!(marker.contains("7")); // 10 - 3 dropped
+        assert!(!marker.contains("tokenless:"));
     }
 
     #[test]
@@ -576,6 +582,10 @@ mod tests {
         let arr_result = result.as_array().unwrap();
         // 3 kept items + 1 marker
         assert_eq!(arr_result.len(), 4);
+        // Kept items are the first 3 (off-by-one in the slice would break this).
+        assert_eq!(arr_result[0], json!(1));
+        assert_eq!(arr_result[1], json!(2));
+        assert_eq!(arr_result[2], json!(3));
         let marker = arr_result[3].as_str().unwrap();
         assert!(marker.contains("retrieve with"));
         let hash = extract_hash(marker).expect("marker should embed a hash");
@@ -618,5 +628,82 @@ mod tests {
         let s = marker.as_str().unwrap();
         assert!(s.contains("more items truncated"));
         assert!(!s.contains("tokenless:"));
+    }
+
+    #[test]
+    fn test_stash_round_trip_with_cjk_items() {
+        // CJK payloads are multi-byte; the stashed JSON must round-trip
+        // byte-for-byte (review §12: char vs byte semantics).
+        use std::sync::Arc;
+        use tokenless_ccr::{InMemoryStore, StashStore, extract_hash};
+
+        let store = Arc::new(InMemoryStore::new());
+        let compressor = ResponseCompressor::new()
+            .with_truncate_arrays_at(2)
+            .with_stash_store(store.clone());
+        let arr = json!(["你好世界", "第二个条目", "第三个条目", "第四个条目"]);
+        let result = compressor.compress(&arr);
+        let arr_result = result.as_array().unwrap();
+        // Kept items are the first 2.
+        assert_eq!(arr_result[0], json!("你好世界"));
+        assert_eq!(arr_result[1], json!("第二个条目"));
+        let marker = arr_result.last().unwrap();
+        let hash = extract_hash(marker.as_str().unwrap()).unwrap();
+        let retrieved = store.retrieve(hash).unwrap().unwrap();
+        let recovered: Vec<String> = serde_json::from_str(&retrieved).unwrap();
+        assert_eq!(recovered, vec!["第三个条目", "第四个条目"]);
+    }
+
+    #[test]
+    fn test_stash_round_trip_with_object_array() {
+        // The "100 normal + 2 error" case: dropped object items must be
+        // recoverable verbatim, including fields the compressor would
+        // otherwise strip (debug/trace). The kept item carries a `debug`
+        // field too, so the test can prove kept items ARE compressed
+        // (debug stripped) while stashed items are raw (debug preserved).
+        use std::sync::Arc;
+        use tokenless_ccr::{InMemoryStore, StashStore, extract_hash};
+
+        let store = Arc::new(InMemoryStore::new());
+        let compressor = ResponseCompressor::new()
+            .with_truncate_arrays_at(1)
+            .with_stash_store(store.clone());
+        let arr = json!([
+            {"id": 1, "status": "ok", "debug": "should be stripped"},
+            {"id": 2, "status": "error", "debug": "trace data"},
+            {"id": 3, "status": "ok"}
+        ]);
+        let result = compressor.compress(&arr);
+        let arr_result = result.as_array().unwrap();
+        // Kept item is compressed: debug stripped.
+        assert_eq!(arr_result[0]["id"], json!(1));
+        assert!(
+            arr_result[0].get("debug").is_none(),
+            "kept items must be compressed (debug stripped)"
+        );
+        let marker = arr_result.last().unwrap();
+        let hash = extract_hash(marker.as_str().unwrap()).unwrap();
+        let retrieved = store.retrieve(hash).unwrap().unwrap();
+        let recovered: Vec<Value> = serde_json::from_str(&retrieved).unwrap();
+        // Stashed items are raw (pre-compression): debug survives.
+        assert_eq!(recovered.len(), 2);
+        assert_eq!(recovered[0]["debug"], json!("trace data"));
+    }
+
+    #[test]
+    fn test_stash_not_engaged_when_array_within_limit() {
+        // No truncation → no stash write → no marker. Stash stays empty.
+        use std::sync::Arc;
+        use tokenless_ccr::InMemoryStore;
+
+        let store = Arc::new(InMemoryStore::new());
+        let compressor = ResponseCompressor::new()
+            .with_truncate_arrays_at(10)
+            .with_stash_store(store.clone());
+        let arr: Vec<i32> = (1..=5).collect();
+        let result = compressor.compress(&json!(arr));
+        // No truncation marker at all.
+        assert!(result.as_array().unwrap().iter().all(|v| v.is_number()));
+        assert_eq!(store.len(), 0);
     }
 }
