@@ -42,6 +42,11 @@ on:
         required: false
         type: boolean
         default: false
+      run_ktuner:
+        description: 'Force run ktuner tests (ignore change detection)'
+        required: false
+        type: boolean
+        default: false
       run_skillfs:
         description: 'Force run SkillFS tests (ignore change detection)'
         required: false
@@ -73,6 +78,7 @@ jobs:
       anolisa: ${{ steps.changes.outputs.anolisa }}
       skillfs: ${{ steps.changes.outputs.skillfs }}
       cosh_ng: ${{ steps.changes.outputs.cosh_ng }}
+      ktuner: ${{ steps.changes.outputs.ktuner }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -102,6 +108,7 @@ jobs:
           ANOLISA=false
           SKILLFS=false
           COSH_NG=false
+          KTUNER=false
 
           # Path-based detection
           if echo "$CHANGED" | grep -q "^src/copilot-shell/"; then
@@ -130,6 +137,9 @@ jobs:
           fi
           if echo "$CHANGED" | grep -q "^src/cosh-ng/"; then
             COSH_NG=true
+          fi
+          if echo "$CHANGED" | grep -q "^src/ktuner/"; then
+            KTUNER=true
           fi
 
           # Manual override via workflow_dispatch
@@ -160,6 +170,9 @@ jobs:
           if [[ "${{ inputs.run_cosh_ng }}" == "true" ]]; then
             COSH_NG=true
           fi
+          if [[ "${{ inputs.run_ktuner }}" == "true" ]]; then
+            KTUNER=true
+          fi
 
           echo "copilot_shell=$COPILOT_SHELL" >> $GITHUB_OUTPUT
           echo "agent_sec_core=$AGENT_SEC" >> $GITHUB_OUTPUT
@@ -170,6 +183,7 @@ jobs:
           echo "anolisa=$ANOLISA" >> $GITHUB_OUTPUT
           echo "skillfs=$SKILLFS" >> $GITHUB_OUTPUT
           echo "cosh_ng=$COSH_NG" >> $GITHUB_OUTPUT
+          echo "ktuner=$KTUNER" >> $GITHUB_OUTPUT
 
           echo "### Change Detection Results" >> $GITHUB_STEP_SUMMARY
           echo "| Component | Changed |" >> $GITHUB_STEP_SUMMARY
@@ -183,6 +197,7 @@ jobs:
           echo "| anolisa | $ANOLISA |" >> $GITHUB_STEP_SUMMARY
           echo "| SkillFS | $SKILLFS |" >> $GITHUB_STEP_SUMMARY
           echo "| cosh-ng | $COSH_NG |" >> $GITHUB_STEP_SUMMARY
+          echo "| ktuner | $KTUNER |" >> $GITHUB_STEP_SUMMARY
 
   # =========================================================================
   # Step 2: Build & Lint copilot-shell
@@ -960,3 +975,38 @@ jobs:
         run: |
           cd src/cosh-ng
           cargo test --workspace
+
+  # =========================================================================
+  # Step 12: Test ktuner (deterministic kernel-tuning engine)
+  # =========================================================================
+  test-ktuner:
+    name: Test ktuner
+    needs: detect-changes
+    if: needs.detect-changes.outputs.ktuner == 'true'
+    runs-on: [self-hosted, ubuntu]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.89.0'
+          components: 'rustfmt, clippy'
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/ktuner
+
+      - name: Check formatting
+        run: |
+          cd src/ktuner
+          cargo fmt --all --check
+
+      - name: Lint
+        run: |
+          cd src/ktuner
+          cargo clippy --all-targets -- -D warnings
+
+      - name: Run tests
+        run: |
+          cd src/ktuner
+          cargo test --lib

@@ -17,6 +17,7 @@
         "memory",
         "anolisa",
         "skillfs",
+        "ktuner",
         "deps",
         "ci",
         "docs",
