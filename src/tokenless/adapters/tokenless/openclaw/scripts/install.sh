@@ -55,6 +55,16 @@ if ! command -v "$OPENCLAW_BIN" &>/dev/null; then
     exit 0
 fi
 
+# OpenClaw's built-in security scanner flags child_process imports as "dangerous
+# code patterns" and requires --dangerously-force-unsafe-install to proceed.
+# This is expected for the tokenless plugin: it delegates to tokenless and rtk
+# system binaries via execFileSync/spawnSync with fixed paths and timeouts.
+# No shell injection vector exists — all subprocess arguments are hardcoded or
+# come from resolveBinaryPath(), never from user input.
+echo "[${COMPONENT}] Note: --dangerously-force-unsafe-install is required because"
+echo "[${COMPONENT}]       this plugin wraps tokenless/rtk system binaries via child_process."
+echo "[${COMPONENT}]       See https://github.com/alibaba/anolisa for source."
+
 env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" plugins install "$PLUGIN_SRC" \
     --force --dangerously-force-unsafe-install || {
     echo "[${COMPONENT}] openclaw CLI install failed — check OpenClaw version >= 5.0.0" >&2
