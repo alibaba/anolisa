@@ -132,7 +132,34 @@ cargo run -p skillfs -- classify /path/to/skills
 
 # 挂载 FUSE 文件系统
 cargo run -p skillfs -- mount /path/to/skills /path/to/mountpoint
+
+# Managed 挂载（opt-in）：托管监督器保持挂载存活，网关重启不会丢失挂载
+cargo run -p skillfs -- mount /path/to/skills /path/to/mountpoint --managed
+
+# 停止 managed 挂载：清除 desired state、终止监督器/worker 并卸载
+cargo run -p skillfs -- stop /path/to/mountpoint
 ```
+
+### Managed 挂载模式
+
+默认 `mount`（含 `--foreground`）与原来完全一致：进程在前台阻塞，`SIGTERM`
+/ `Ctrl+C` 会干净卸载。当启动 SkillFS 的进程（如 OpenClaw 网关）重启时，其
+子进程会被终止，挂载随之消失。
+
+`--managed` 是一个 opt-in 选项，用于跨网关重启保持挂载：
+
+- 客户端写入托管状态后，用 `setsid` 启动一个脱离调用者进程组/会话的
+  **监督器**，等待挂载 ready 后返回。
+- 监督器以相同的 source、mountpoint、config、security、audit、activation、
+  trusted-writer 和 logging 选项启动前台 FUSE **worker**。
+- 若 worker 在 desired state 仍为 mounted 时意外退出，监督器会在有界退避后
+  自动重挂。
+- **只有显式执行 `skillfs stop <MOUNTPOINT>`（或 unmount）才会清除 desired
+  mounted 状态**，终止监督器/worker 并干净卸载。`stop` 是幂等的，可安全地对
+  已卸载的挂载重复执行。
+
+托管状态存放在 `$XDG_RUNTIME_DIR/skillfs/`（否则 `/run/user/<uid>/skillfs/`，
+再回退到 `/tmp/skillfs-<uid>/`），instance id 由规范化后的 mountpoint 派生。
 
 ### `skillfs-views.toml`
 

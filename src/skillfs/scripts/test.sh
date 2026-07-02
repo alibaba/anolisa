@@ -25,6 +25,7 @@ MOUNT_DIR="$TMP_ROOT/mount"
 PID_FILE="$TMP_ROOT/skillfs.pid"
 LOG_FILE="$TMP_ROOT/skillfs.log"
 MOUNT_PID=""
+MANAGED_MOUNT_DIR=""
 
 info() {
 	echo "[skillfs-e2e] $1"
@@ -51,6 +52,12 @@ cleanup() {
 	if [[ -n "$MOUNT_PID" ]] && kill -0 "$MOUNT_PID" 2>/dev/null; then
 		kill "$MOUNT_PID" 2>/dev/null || true
 		wait "$MOUNT_PID" 2>/dev/null || true
+	fi
+	if [[ -n "$MANAGED_MOUNT_DIR" ]]; then
+		"$BIN" stop "$MANAGED_MOUNT_DIR" >/dev/null 2>&1 || true
+		if grep -Fq " $MANAGED_MOUNT_DIR " /proc/mounts 2>/dev/null; then
+			fusermount3 -u "$MANAGED_MOUNT_DIR" >/dev/null 2>&1 || true
+		fi
 	fi
 	rm -rf "$TMP_ROOT"
 }
@@ -225,5 +232,84 @@ if ! wait_for_mount_state unmounted; then
 	fail "卸载超时"
 fi
 pass "FUSE 已正确卸载"
+
+# ---------------------------------------------------------------------------
+# Managed mount supervisor smoke test
+# ---------------------------------------------------------------------------
+
+info "测试 managed mount 监督器"
+
+# Isolate managed runtime state in a dedicated XDG_RUNTIME_DIR so the pid /
+# state files for this run are the only ones present.
+export XDG_RUNTIME_DIR="$TMP_ROOT/xdg"
+mkdir -p "$XDG_RUNTIME_DIR"
+RUNTIME_STATE_DIR="$XDG_RUNTIME_DIR/skillfs"
+MANAGED_MOUNT_DIR="$TMP_ROOT/managed-mount"
+mkdir -p "$MANAGED_MOUNT_DIR"
+
+if ! "$BIN" mount "$SOURCE_DIR" "$MANAGED_MOUNT_DIR" --managed \
+	--log-file "$TMP_ROOT/managed-client.log" >/dev/null 2>&1; then
+	fail "managed mount 客户端返回非零"
+fi
+
+managed_ready=false
+for _ in $(seq 1 50); do
+	if grep -Fq " $MANAGED_MOUNT_DIR " /proc/mounts 2>/dev/null; then
+		managed_ready=true
+		break
+	fi
+	sleep 0.1
+done
+[[ "$managed_ready" == true ]] || fail "managed 挂载超时"
+pass "managed 挂载成功"
+
+WORKER_PID_FILE="$(ls "$RUNTIME_STATE_DIR"/*.worker.pid 2>/dev/null | head -n1)"
+SUP_PID_FILE="$(ls "$RUNTIME_STATE_DIR"/*.supervisor.pid 2>/dev/null | head -n1)"
+[[ -n "$WORKER_PID_FILE" ]] || fail "找不到 worker pid 文件"
+[[ -n "$SUP_PID_FILE" ]] || fail "找不到 supervisor pid 文件"
+OLD_WORKER_PID="$(cat "$WORKER_PID_FILE")"
+SUP_PID="$(cat "$SUP_PID_FILE")"
+
+info "强杀 worker (pid=$OLD_WORKER_PID)，保留 supervisor (pid=$SUP_PID)"
+kill -KILL "$OLD_WORKER_PID" 2>/dev/null || true
+
+restored=false
+for _ in $(seq 1 150); do
+	if grep -Fq " $MANAGED_MOUNT_DIR " /proc/mounts 2>/dev/null; then
+		NEW_WORKER_PID="$(cat "$WORKER_PID_FILE" 2>/dev/null || echo)"
+		if [[ -n "$NEW_WORKER_PID" && "$NEW_WORKER_PID" != "$OLD_WORKER_PID" ]] \
+			&& kill -0 "$NEW_WORKER_PID" 2>/dev/null; then
+			restored=true
+			break
+		fi
+	fi
+	sleep 0.1
+done
+[[ "$restored" == true ]] || fail "worker 被杀后未在超时内恢复挂载"
+pass "worker 崩溃后 supervisor 自动重挂"
+
+info "执行 skillfs stop"
+if ! "$BIN" stop "$MANAGED_MOUNT_DIR" >/dev/null 2>&1; then
+	fail "stop 返回非零"
+fi
+
+managed_stopped=false
+for _ in $(seq 1 50); do
+	if ! grep -Fq " $MANAGED_MOUNT_DIR " /proc/mounts 2>/dev/null; then
+		managed_stopped=true
+		break
+	fi
+	sleep 0.1
+done
+[[ "$managed_stopped" == true ]] || fail "stop 后未卸载"
+
+if kill -0 "$SUP_PID" 2>/dev/null; then
+	fail "stop 后 supervisor 仍在运行"
+fi
+if [[ -f "$WORKER_PID_FILE" || -f "$SUP_PID_FILE" ]]; then
+	fail "stop 后仍残留 pid 状态文件"
+fi
+pass "stop 清理 managed 挂载与进程"
+MANAGED_MOUNT_DIR=""
 
 info "端到端测试完成"

@@ -35,6 +35,7 @@ use tokio::signal;
 use tracing::{error, info, warn};
 
 mod help_text;
+mod managed;
 
 // ---------------------------------------------------------------------------
 // CLI Arguments
@@ -84,6 +85,16 @@ enum Commands {
         /// Keep SkillFS in the foreground; useful for tests and systemd.
         #[arg(long, help_heading = help_text::HEADING_PROCESS)]
         foreground: bool,
+
+        /// Opt in to managed mode: keep the mount alive across gateway
+        /// restarts.
+        ///
+        /// Starts a detached supervisor (in its own session) that holds the
+        /// desired state as "mounted" and remounts the FUSE worker if it
+        /// exits unexpectedly. The command returns once the mount is ready.
+        /// Clear the desired state with `skillfs stop <MOUNTPOINT>`.
+        #[arg(long, help_heading = help_text::HEADING_PROCESS)]
+        managed: bool,
 
         /// Write the SkillFS process PID after the mount starts.
         ///
@@ -274,6 +285,22 @@ enum Commands {
         #[arg(long)]
         enabled_only: bool,
     },
+
+    /// Stop a managed mount and clear its desired state
+    #[command(after_help = help_text::STOP_AFTER_HELP)]
+    Stop {
+        /// Mountpoint of the managed mount to stop.
+        #[arg(value_name = "MOUNTPOINT")]
+        mountpoint: PathBuf,
+    },
+
+    /// Internal: run the managed mount supervisor (spawned by `mount --managed`).
+    #[command(hide = true)]
+    Supervise {
+        /// Managed instance identifier.
+        #[arg(long, value_name = "ID")]
+        instance: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
@@ -288,6 +315,10 @@ enum OutputFormat {
 
 #[tokio::main]
 async fn main() {
+    // Capture the raw arguments (excluding the program name) before clap
+    // consumes them. Managed mode reconstructs the foreground worker
+    // invocation from these so every mount flag is preserved verbatim.
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
     let cli = Cli::parse();
 
     let pid = std::process::id();
@@ -347,19 +378,20 @@ async fn main() {
 
     info!(pid, "starting skillfs CLI");
 
-    if let Err(e) = run(cli).await {
+    if let Err(e) = run(cli, raw_args).await {
         error!(error = %e, "command failed");
         std::process::exit(1);
     }
 }
 
-async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+async fn run(cli: Cli, raw_args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Mount {
             source,
             mountpoint,
             allow_other,
             foreground,
+            managed,
             pid_file,
             audit_log,
             audit_queue_capacity,
@@ -380,6 +412,12 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             trusted_peer_uid,
             trusted_peer_gid,
         } => {
+            if managed {
+                // Managed mode: spawn a detached supervisor and return once
+                // the mount is ready. The supervisor re-invokes this binary
+                // as a foreground worker using the preserved raw arguments.
+                return managed::run_client(&raw_args, &source, &mountpoint);
+            }
             cmd_mount(
                 source,
                 mountpoint,
@@ -417,6 +455,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             source,
             enabled_only,
         } => cmd_list(source, enabled_only).await,
+        Commands::Stop { mountpoint } => managed::run_stop(&mountpoint),
+        Commands::Supervise { instance } => managed::run_supervisor(&instance),
     }
 }
 

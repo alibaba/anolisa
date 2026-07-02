@@ -1104,6 +1104,85 @@ fn control_socket_with_decision_command_fails_startup() {
     );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Managed mount / stop startup gates
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn managed_mount_parses_and_rejects_missing_source() {
+    // `--managed` must parse, and the managed client must fail fast with a
+    // clear source error before detaching a supervisor — proving the flag is
+    // wired without needing FUSE.
+    let parent = tempfile::tempdir().expect("parent tempdir");
+    let missing_source = parent.path().join("does-not-exist");
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            missing_source.to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--managed",
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("Source directory does not exist"),
+        "expected missing-source error, got: {combined}"
+    );
+}
+
+#[test]
+fn stop_is_idempotent_when_nothing_mounted() {
+    // `stop` on a path with no managed instance and nothing mounted must
+    // succeed (idempotent teardown).
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let out = Command::new(bin_path())
+        .args(["stop", mount.path().to_str().unwrap()])
+        .output()
+        .expect("invoke skillfs");
+    assert!(
+        out.status.success(),
+        "expected success (idempotent stop), stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("no managed mount") || combined.contains("already stopped"),
+        "expected idempotent no-op message, got: {combined}"
+    );
+}
+
+#[test]
+fn supervise_missing_instance_fails() {
+    // The hidden supervise subcommand must fail cleanly when the instance
+    // state file is absent, rather than spinning.
+    let out = Command::new(bin_path())
+        .args(["supervise", "--instance", "nonexistent-0000000000000000"])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("failed to load managed state"),
+        "expected managed-state load error, got: {combined}"
+    );
+}
+
 #[test]
 fn control_socket_created_and_accepts_ping() {
     let source = empty_source();

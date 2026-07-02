@@ -738,7 +738,9 @@ name = "skillfs"
 version = "0.3.0"
 dependencies = [
  "clap",
+ "libc",
  "parking_lot",
+ "serde",
  "serde_json",
  "skillfs-core",
  "skillfs-fuse",

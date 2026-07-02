@@ -43,6 +43,11 @@ pub const MOUNT_AFTER_HELP: &str = r#"Examples:
   skillfs mount ./skills /mnt/skillfs --foreground
       Development mount. Browse skills at /mnt/skillfs/skills.
 
+  skillfs mount ./skills /mnt/skillfs --managed
+      Opt-in managed mount. A detached supervisor keeps the mount alive and
+      remounts it if the FUSE worker exits, so a gateway restart does not drop
+      the mount. Clear the desired state with 'skillfs stop /mnt/skillfs'.
+
   skillfs mount ./skills ./skills --security-mode --audit-log /var/log/skillfs/audit.jsonl
       In-place mount with audit events and .skill-meta protection.
 
@@ -64,6 +69,14 @@ Security notes:
   hidden from the ordinary view.
   Same-skill relative symlinks and same-skill hardlinks are allowed; cross-skill
   and absolute symlink targets are rejected by policy."#;
+
+pub const STOP_AFTER_HELP: &str = r#"Example:
+  skillfs stop /mnt/skillfs
+      Clear the managed desired state, terminate the supervisor and worker,
+      and unmount. Idempotent: safe to run when nothing is mounted.
+
+Only managed mounts (started with 'skillfs mount --managed') are tracked. A
+non-managed foreground mount is stopped with SIGTERM / Ctrl+C or fusermount3 -u."#;
 
 pub const CLASSIFY_AFTER_HELP: &str = r#"Example:
   skillfs classify ./skills --primary-count 6
