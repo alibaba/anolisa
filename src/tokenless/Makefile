@@ -170,7 +170,7 @@ test: test-tokenless test-hooks
 
 test-tokenless:
 	@echo "==> Testing tokenless..."
-	cargo test -p tokenless-cli -p tokenless-schema -p tokenless-stats
+	cargo test --workspace
 
 test-hooks:
 	@echo "==> Testing copilot-shell hooks..."
@@ -179,12 +179,12 @@ test-hooks:
 # Lint (rtk excluded — vendored third-party source)
 lint:
 	@echo "==> Linting tokenless..."
-	cargo clippy -p tokenless-cli -p tokenless-schema -p tokenless-stats -- -D warnings
+	cargo clippy --workspace -- -D warnings
 
 # Format
 fmt:
 	@echo "==> Formatting..."
-	cargo fmt -p tokenless-cli -p tokenless-schema -p tokenless-stats
+	cargo fmt --all
 
 # Clean (rtk excluded from workspace — needs explicit clean)
 clean:

@@ -721,17 +721,17 @@ jobs:
       - name: Check formatting
         run: |
           cd src/tokenless
-          cargo fmt -p tokenless-cli -p tokenless-schema -p tokenless-stats -- --check
+          cargo fmt --all -- --check
 
       - name: Lint
         run: |
           cd src/tokenless
-          cargo clippy -p tokenless-cli -p tokenless-schema -p tokenless-stats -- -D warnings
+          cargo clippy --workspace -- -D warnings
 
       - name: Run tests
         run: |
           cd src/tokenless
-          cargo test -p tokenless-cli -p tokenless-schema -p tokenless-stats
+          cargo test --workspace
 
   # =========================================================================
   # Step 7: Test ws-ckpt

@@ -40,6 +40,7 @@ Three integration paths are available:
 ```
 Token-Less/
 ├── crates/tokenless-schema/   # Core library: SchemaCompressor + ResponseCompressor
+├── crates/tokenless-ccr/      # Reversible compression stash (Compress-Cache-Retrieve)
 ├── crates/tokenless-cli/      # CLI binary: `tokenless` command (env-check, compress, stats)
 ├── adapters/tokenless/        # FHS adapter bundle (manifest, common, openclaw, hermes, qoder, claude-code, codex)
 │   ├── manifest.json            # Adapter manifest (cosh + openclaw + hermes + qoder + claude-code + codex)
