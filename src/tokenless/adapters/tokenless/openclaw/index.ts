@@ -20,9 +20,9 @@
  * session; revisit if that changes.
  */
 
-import { execSync, execFileSync, spawnSync } from "child_process";
-import { existsSync, statSync, readFileSync } from "fs";
-import { join } from "path";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, statSync, readFileSync } from "node:fs";
+import { delimiter, join } from "node:path";
 
 // ---- Session ID mapping --------------------------------------------------------
 // OpenClaw's tool_result_persist ctx provides sessionKey ("agent:main:main")
@@ -79,14 +79,19 @@ function isExecutable(path: string): boolean {
 }
 
 function resolveBinaryPath(name: string, ...fallbacks: string[]): string | null {
-  try {
-    const result = spawnSync("sh", ["-c", `command -v "$1"`, "--", name], {
-      encoding: "utf-8", timeout: 2000,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const output = result.stdout?.trim();
-    if (output && output !== "") return output;
-  } catch { /* not on PATH */ }
+  // Search PATH directories without spawning a shell (mirrors headroom
+  // and agent-memory plugins).  Avoids `sh -c "command -v"` so the
+  // only child_process calls are direct binary invocations with fixed
+  // paths — no shell interpolation vector exists.
+  const pathEnv = process.env.PATH || "";
+  for (const dir of pathEnv.split(delimiter)) {
+    if (!dir) continue;
+    const candidate = join(dir, name);
+    if (existsSync(candidate) && isExecutable(candidate)) {
+      return candidate;
+    }
+  }
+  // Fall back to known locations.
   for (const fb of fallbacks) {
     if (fb && isExecutable(fb)) return fb;
   }
