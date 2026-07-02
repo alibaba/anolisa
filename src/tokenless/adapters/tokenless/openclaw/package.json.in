@@ -9,7 +9,7 @@
   },
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
-    "build": "npm run clean && tsc --project tsconfig.json"
+    "build": "npm run clean && tsc --project tsconfig.json && cp ../common/hooks/tool_categories.json dist/"
   },
   "peerDependencies": {
     "rtk": ">=0.35.0",

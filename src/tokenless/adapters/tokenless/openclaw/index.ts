@@ -292,6 +292,7 @@ function loadToolCategories(): ToolCategories {
   try {
     // Try multiple possible locations for tool_categories.json
     const possiblePaths = [
+      join(import.meta.dirname, "tool_categories.json"),
       join(import.meta.dirname, "..", "..", "common", "hooks", "tool_categories.json"),
       join(import.meta.dirname, "common", "hooks", "tool_categories.json"),
       "/usr/share/anolisa/adapters/tokenless/common/hooks/tool_categories.json",
