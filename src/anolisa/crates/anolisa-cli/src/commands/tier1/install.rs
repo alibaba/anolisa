@@ -64,6 +64,7 @@ use chrono::{SecondsFormat, Utc};
 
 use crate::color::Palette;
 use crate::commands::common;
+use crate::commands::common::RepoPersistPolicy;
 use crate::context::{CliContext, InstallMode};
 use crate::repo_config::{
     BackendConfig, HostVars, RepoConfig, RepoConfigError, normalize_override_url, raw_artifact_url,
@@ -647,7 +648,7 @@ fn handle_one(
 ) -> Result<InstallOutcome, CliError> {
     let layout = common::resolve_layout(ctx);
     let env = anolisa_env::EnvService::detect();
-    let repo_config = common::load_repo_config(ctx, &layout, COMMAND)?;
+    let repo_config = common::load_repo_config(ctx, &layout, COMMAND, RepoPersistPolicy::Require)?;
     let rpm_repo = if rpm_repo_required(&component, &args, ctx, &repo_config)? {
         configured_rpm_repo_source(&repo_config, &env)?
     } else {
@@ -683,7 +684,7 @@ pub(crate) fn handle_one_with_exec(
 ) -> Result<InstallOutcome, CliError> {
     let layout = common::resolve_layout(ctx);
     let env = anolisa_env::EnvService::detect();
-    let repo_config = common::load_repo_config(ctx, &layout, COMMAND)?;
+    let repo_config = common::load_repo_config(ctx, &layout, COMMAND, RepoPersistPolicy::Require)?;
     handle_one_with_config(component, args, ctx, exec, layout, env, repo_config)
 }
 
@@ -2242,7 +2243,8 @@ fn resolve_all_components(
 ) -> Result<Vec<String>, CliError> {
     let layout = common::resolve_layout(ctx);
     let env = anolisa_env::EnvService::detect();
-    let repo_config = common::load_repo_config(ctx, &layout, "install --all")?;
+    let repo_config =
+        common::load_repo_config(ctx, &layout, "install --all", RepoPersistPolicy::Require)?;
     let index =
         crate::resolution::load_component_index(&layout, &env, &repo_config).map_err(|err| {
             CliError::Runtime {

@@ -66,6 +66,7 @@ use super::install::{
 };
 use crate::color::Palette;
 use crate::commands::common;
+use crate::commands::common::RepoPersistPolicy;
 use crate::context::CliContext;
 use crate::repo_config::{HostVars, RepoConfig};
 use crate::response::{self, CliError};
@@ -169,7 +170,7 @@ fn handle_component_update(component: &str, ctx: &CliContext) -> Result<(), CliE
     let command = format!("update {component}");
     let target = resolve_update_target(component, ctx, &command)?;
     let layout = common::resolve_layout(ctx);
-    let repo_config = common::load_repo_config(ctx, &layout, &command)?;
+    let repo_config = common::load_repo_config(ctx, &layout, &command, RepoPersistPolicy::Require)?;
     match target {
         UpdateTarget::Raw {
             backend_name,
@@ -388,7 +389,7 @@ fn update_raw_component(
     command: &str,
 ) -> Result<(), CliError> {
     let layout = common::resolve_layout(ctx);
-    let repo_config = common::load_repo_config(ctx, &layout, command)?;
+    let repo_config = common::load_repo_config(ctx, &layout, command, RepoPersistPolicy::Require)?;
     update_raw_component_with_repo(
         component,
         backend_name,

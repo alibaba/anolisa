@@ -52,6 +52,7 @@ use anolisa_platform::rpm_query::RpmPackageQuery;
 
 use crate::color::{Palette, pad_right};
 use crate::commands::common;
+use crate::commands::common::RepoPersistPolicy;
 use crate::commands::tier1::install::rpm_package_candidates_with_index;
 use crate::context::{CliContext, InstallMode};
 use crate::repo_config::BackendConfig;
@@ -143,7 +144,9 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
 
     let query = RpmPackageQuery::system();
     let repo_config = (ctx.install_mode == InstallMode::System && args.component.is_some())
-        .then(|| common::load_repo_config(ctx, &layout, COMMAND).ok())
+        .then(|| {
+            common::load_repo_config(ctx, &layout, COMMAND, RepoPersistPolicy::BestEffort).ok()
+        })
         .flatten();
     let rpm_backend = repo_config.as_ref().and_then(|c| c.backends.get("rpm"));
     let env = EnvService::detect();

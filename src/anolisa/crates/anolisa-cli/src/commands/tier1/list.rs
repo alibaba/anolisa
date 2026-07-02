@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use crate::color::{Palette, pad_right};
 use crate::commands::common;
+use crate::commands::common::RepoPersistPolicy;
 use crate::context::CliContext;
 use crate::resolution::{ComponentIndex, ComponentIndexEntry, load_component_index};
 use crate::response::{CliError, render_json};
@@ -44,7 +45,8 @@ struct ListPayload {
 pub fn handle(args: ListArgs, ctx: &CliContext) -> Result<(), CliError> {
     let layout = common::resolve_layout(ctx);
     let env = anolisa_env::EnvService::detect();
-    let repo_config = common::load_repo_config(ctx, &layout, COMMAND)?;
+    let repo_config =
+        common::load_repo_config(ctx, &layout, COMMAND, RepoPersistPolicy::BestEffort)?;
 
     let index =
         load_component_index(&layout, &env, &repo_config).map_err(|err| CliError::Runtime {

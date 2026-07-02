@@ -178,8 +178,23 @@ pub(crate) struct RepoConfigLoadResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RepoConfigProvisioning {
     Existing,
-    Downloaded { url: String, dest: PathBuf },
-    FetchedForDryRun { url: String, dest: PathBuf },
+    Downloaded {
+        url: String,
+        dest: PathBuf,
+    },
+    FetchedForDryRun {
+        url: String,
+        dest: PathBuf,
+    },
+    /// Downloaded and parsed successfully, but writing to disk failed.
+    ///
+    /// The in-memory config is valid; callers that only need read access may
+    /// proceed and warn, while mutating commands should treat this as an error.
+    DownloadedPersistFailed {
+        url: String,
+        dest: PathBuf,
+        reason: String,
+    },
 }
 
 /// Errors raised while provisioning a missing repo config.
@@ -329,14 +344,23 @@ impl RepoConfig {
             });
         }
 
-        write_repo_config(&dest, &body)?;
-        Ok(RepoConfigLoadResult {
-            config,
-            provisioning: RepoConfigProvisioning::Downloaded {
-                url: bootstrap_url.to_string(),
-                dest,
-            },
-        })
+        match write_repo_config(&dest, &body) {
+            Ok(()) => Ok(RepoConfigLoadResult {
+                config,
+                provisioning: RepoConfigProvisioning::Downloaded {
+                    url: bootstrap_url.to_string(),
+                    dest,
+                },
+            }),
+            Err(err) => Ok(RepoConfigLoadResult {
+                config,
+                provisioning: RepoConfigProvisioning::DownloadedPersistFailed {
+                    url: bootstrap_url.to_string(),
+                    dest,
+                    reason: err.to_string(),
+                },
+            }),
+        }
     }
 
     /// Local discovery helper used before the provisioning fallback.
@@ -1307,5 +1331,63 @@ scope = "@anolis"
             npm_cfg.package_name(npm, "tokenless", None),
             "@anolis/tokenless"
         );
+    }
+
+    /// When all local sources are missing and the dest directory is not writable,
+    /// `load_with_sources` still returns the valid in-memory config with a
+    /// `DownloadedPersistFailed` provisioning status.
+    #[test]
+    fn load_returns_config_when_persist_fails() {
+        let body = "schema_version = 1\ndefault_backend = \"raw\"\n\n[backends.raw]\nbase_url = \"https://example.com/v1/\"\n";
+        let url = serve_once(body.to_string());
+        // Point dest to a path that cannot be created (parent is a file, not a dir).
+        let tmp = tempfile::tempdir().expect("tmp");
+        let blocker = tmp.path().join("blocker");
+        std::fs::write(&blocker, "I am a file").expect("create blocker file");
+        let dest = blocker.join("repo.toml"); // parent is a file → write will fail
+
+        let result = RepoConfig::load_with_sources(missing_sources(dest.clone()), false, &url)
+            .expect("must succeed with in-memory config");
+
+        assert!(
+            matches!(
+                &result.provisioning,
+                RepoConfigProvisioning::DownloadedPersistFailed { reason, .. } if !reason.is_empty()
+            ),
+            "expected DownloadedPersistFailed, got {:?}",
+            result.provisioning
+        );
+        // The config is valid and usable despite the write failure.
+        assert_eq!(result.config.default_backend, "raw");
+        assert_eq!(
+            result.config.backends["raw"].base_url,
+            "https://example.com/v1/"
+        );
+    }
+
+    /// `DownloadedPersistFailed` carries the correct url and dest metadata.
+    #[test]
+    fn persist_failed_carries_metadata() {
+        let body = "schema_version = 1\ndefault_backend = \"raw\"\n\n[backends.raw]\nbase_url = \"file:///srv/repo\"\n";
+        let url = serve_once(body.to_string());
+        let tmp = tempfile::tempdir().expect("tmp");
+        let blocker = tmp.path().join("blocker");
+        std::fs::write(&blocker, "I am a file").expect("create blocker");
+        let dest = blocker.join("repo.toml");
+
+        let result = RepoConfig::load_with_sources(missing_sources(dest.clone()), false, &url)
+            .expect("load");
+
+        match &result.provisioning {
+            RepoConfigProvisioning::DownloadedPersistFailed {
+                url: got_url,
+                dest: got_dest,
+                ..
+            } => {
+                assert_eq!(got_dest, &dest);
+                assert!(got_url.contains("127.0.0.1"));
+            }
+            other => panic!("expected DownloadedPersistFailed, got {other:?}"),
+        }
     }
 }

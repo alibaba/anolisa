@@ -105,19 +105,56 @@ fn render_repo_config_provisioning(ctx: &CliContext, provisioning: &RepoConfigPr
                 color.path(dest.display().to_string()),
             );
         }
+        RepoConfigProvisioning::DownloadedPersistFailed { url, dest, reason } => {
+            eprintln!(
+                "{} repo config fetched from {} but could not write to {}: {}",
+                color.warn("⚠"),
+                url,
+                color.path(dest.display().to_string()),
+                reason,
+            );
+        }
     }
 }
 
+/// Controls whether a failed persistence of downloaded repo config is fatal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RepoPersistPolicy {
+    /// Mutating commands: persistence failure is an error.
+    Require,
+    /// Read-only / best-effort commands: warn and use in-memory config.
+    BestEffort,
+}
+
 /// Load `repo.toml`, provisioning it if every local source is missing.
+///
+/// `persist_policy` governs what happens when a freshly-downloaded config
+/// cannot be written to disk:
+/// - [`RepoPersistPolicy::Require`]: command fails (use for mutating ops).
+/// - [`RepoPersistPolicy::BestEffort`]: warn and return the in-memory config.
 pub(crate) fn load_repo_config(
     ctx: &CliContext,
     layout: &FsLayout,
     command: &str,
+    persist_policy: RepoPersistPolicy,
 ) -> Result<RepoConfig, CliError> {
     let repo_load = RepoConfig::load(layout, ctx.dry_run).map_err(|err| CliError::Runtime {
         command: command.to_string(),
         reason: err.to_string(),
     })?;
+    if persist_policy == RepoPersistPolicy::Require {
+        if let RepoConfigProvisioning::DownloadedPersistFailed { dest, reason, .. } =
+            &repo_load.provisioning
+        {
+            return Err(CliError::Runtime {
+                command: command.to_string(),
+                reason: format!(
+                    "repo config downloaded but could not be written to {}: {reason}",
+                    dest.display()
+                ),
+            });
+        }
+    }
     render_repo_config_provisioning(ctx, &repo_load.provisioning);
     Ok(repo_load.config)
 }

@@ -23,6 +23,7 @@ use anolisa_platform::rpm_query::RpmPackageQuery;
 
 use crate::color::Palette;
 use crate::commands::common;
+use crate::commands::common::RepoPersistPolicy;
 use crate::commands::tier1::install::rpm_package_candidates_with_index;
 use crate::context::CliContext;
 use crate::resolution::{ResolutionUse, load_optional_component_index, resolve_rpm_component_name};
@@ -242,7 +243,8 @@ fn resolve_repair_component_name(
     }
 
     let layout = common::resolve_layout(ctx);
-    let repo_config = common::load_repo_config(ctx, &layout, COMMAND).ok();
+    let repo_config =
+        common::load_repo_config(ctx, &layout, COMMAND, RepoPersistPolicy::BestEffort).ok();
     let rpm_backend = repo_config.as_ref().and_then(|c| c.backends.get("rpm"));
     let env = anolisa_env::EnvService::detect();
     let component_index = repo_config
@@ -284,7 +286,8 @@ fn resolve_repair_package(
     // inputs (mirrors status::observed_record): a load failure just drops that
     // precedence tier.
     let layout = common::resolve_layout(ctx);
-    let repo_config = common::load_repo_config(ctx, &layout, COMMAND).ok();
+    let repo_config =
+        common::load_repo_config(ctx, &layout, COMMAND, RepoPersistPolicy::BestEffort).ok();
     let rpm_backend = repo_config.as_ref().and_then(|c| c.backends.get("rpm"));
     let env = anolisa_env::EnvService::detect();
     let component_index = repo_config

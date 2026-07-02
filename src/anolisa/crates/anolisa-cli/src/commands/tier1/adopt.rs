@@ -15,6 +15,7 @@ use anolisa_platform::pkg_query::PackageQuery;
 use anolisa_platform::rpm_query::RpmPackageQuery;
 
 use crate::commands::common;
+use crate::commands::common::RepoPersistPolicy;
 use crate::commands::tier1::install::{RpmSituation, execute_adopt, probe_rpm_situation};
 use crate::context::CliContext;
 use crate::resolution::{ResolutionUse, load_optional_component_index};
@@ -102,7 +103,8 @@ pub(crate) fn adopt_with_query(
     // are supplementary to the explicit --package input, installed Provides
     // contract, and default name candidate, so unreadable config degrades to
     // "no rpm backend config" rather than failing the adopt.
-    let repo_config = common::load_repo_config(ctx, &layout, COMMAND).ok();
+    let repo_config =
+        common::load_repo_config(ctx, &layout, COMMAND, RepoPersistPolicy::BestEffort).ok();
     let rpm_backend = repo_config.as_ref().and_then(|c| c.backends.get("rpm"));
     let env = anolisa_env::EnvService::detect();
     let component_index = repo_config
