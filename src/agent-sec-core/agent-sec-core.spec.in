@@ -229,6 +229,9 @@ rm -rf $RPM_BUILD_ROOT
 make install-all-for-rpmbuild DESTDIR=$RPM_BUILD_ROOT
 
 %changelog
+* Thu Jul 02 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.7.1-1
+- Update version to 0.7.1
+
 * Fri Jun 26 2026 YiZheng Yang <YiZheng.Yang@linux.alibaba.com> - 0.7.0-1
 - Update version to 0.7.0
 

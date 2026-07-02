@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.7.1
+
+**Prompt Scanner**
+
+- Degraded scan-prompt to fast mode when model unready; rewrote DENY to WARN and enriched degraded reason with diagnostics. (#1258)
+
+**Skill Ledger**
+
+- Clarified skill ledger fallback warnings and sanitized finding summaries. (#1240)
+- Tamed ledger reconcile noise and typed live-root skip errors. (#1232)
+
+**Security Observability**
+
+- Added observability mapping for new pii_scan at before_tool_call & after_tool_call. (#1229)
+
 ## 0.7.0
 
 **Codex Plugin — Full security integration for OpenAI Codex**
