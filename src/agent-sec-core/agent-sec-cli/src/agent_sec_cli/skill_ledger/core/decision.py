@@ -626,8 +626,15 @@ def _finding_field(finding: dict[str, Any], key: str) -> str | None:
             value = metadata.get(key)
     if value is None:
         return None
-    text = str(value).strip()
+    text = _sanitize_finding_text(str(value))
     return text or None
+
+
+def _sanitize_finding_text(text: str) -> str:
+    safe_chars = [
+        " " if ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F else char for char in text
+    ]
+    return " ".join("".join(safe_chars).split())
 
 
 def _truncate_finding_part(text: str) -> str:

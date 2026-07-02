@@ -2459,6 +2459,48 @@ def test_show_findings_summary_handles_missing_fields_and_empty_findings(ws):
     assert "Latest findings:" not in drifted_out["message"]
 
 
+def test_show_findings_summary_strips_control_characters(ws):
+    skill = make_skill(
+        ws.skills_dir, "decision-show-control-findings", {"data.txt": "v1"}
+    )
+    env = ws.env()
+    pass_findings = write_findings_file(
+        ws.fixtures,
+        "decision-show-control-pass.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    deny_findings = write_findings_file(
+        ws.fixtures,
+        "decision-show-control-deny.json",
+        [
+            {
+                "rule": "ansi\x1b]0;owned\x07rule",
+                "level": "deny",
+                "file": "danger\x1b[2J.sh",
+                "message": "line1\nline2\t\x00<script>alert(1)</script>\x9b",
+            }
+        ],
+    )
+
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(pass_findings)], env_extra=env
+    )
+    (skill / "data.txt").write_text("v2 risky")
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(deny_findings)], env_extra=env
+    )
+
+    r = run_skill_ledger(["show", str(skill), "--policy", "pass_only"], env_extra=env)
+    assert r.returncode == 0, f"show exit {r.returncode}: {r.stderr}"
+    out = parse_json_output(r.stdout)
+    message = out["message"]
+
+    assert message is not None
+    assert "Latest findings:" in message
+    assert "line1 line2 <script>alert(1)</script>" in message
+    assert not any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in message)
+
+
 def test_show_reuses_exposure_summary_check_result(ws, monkeypatch):
     """show should not check the same skill once directly and once via summary."""
     skill = make_skill(ws.skills_dir, "decision-show-single-check", {"data.txt": "v1"})
