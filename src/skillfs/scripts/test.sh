@@ -311,6 +311,118 @@ if ! ls "$MANAGED_MOUNT_DIR/skills" >/dev/null 2>&1; then
 fi
 pass "恢复后 ls <mountpoint>/skills 成功"
 
+ORPHAN_WORKER_PID="$(cat "$WORKER_PID_FILE")"
+info "强杀 supervisor (pid=$SUP_PID)，保留孤儿 worker (pid=$ORPHAN_WORKER_PID)"
+kill -KILL "$SUP_PID" 2>/dev/null || true
+for _ in $(seq 1 50); do
+	if ! kill -0 "$SUP_PID" 2>/dev/null; then
+		break
+	fi
+	sleep 0.1
+done
+if kill -0 "$SUP_PID" 2>/dev/null; then
+	fail "supervisor 被 kill -9 后仍在运行"
+fi
+if ! kill -0 "$ORPHAN_WORKER_PID" 2>/dev/null; then
+	fail "supervisor 被 kill -9 后 worker 未保持孤儿运行"
+fi
+
+if ! "$BIN" mount "$SOURCE_DIR" "$MANAGED_MOUNT_DIR" --managed \
+	--log-file "$TMP_ROOT/managed-client-recover.log" >/dev/null 2>&1; then
+	fail "孤儿 worker 场景下重新执行 managed mount 失败"
+fi
+
+SUP_PID_FILE="$(ls "$RUNTIME_STATE_DIR"/*.supervisor.pid 2>/dev/null | head -n1)"
+WORKER_PID_FILE="$(ls "$RUNTIME_STATE_DIR"/*.worker.pid 2>/dev/null | head -n1)"
+[[ -n "$SUP_PID_FILE" ]] || fail "恢复后找不到 supervisor pid 文件"
+[[ -n "$WORKER_PID_FILE" ]] || fail "恢复后找不到 worker pid 文件"
+SUP_PID="$(cat "$SUP_PID_FILE")"
+NEW_WORKER_PID="$(cat "$WORKER_PID_FILE")"
+if [[ "$NEW_WORKER_PID" == "$ORPHAN_WORKER_PID" ]]; then
+	fail "重新 managed mount 后仍复用孤儿 worker"
+fi
+if kill -0 "$ORPHAN_WORKER_PID" 2>/dev/null; then
+	fail "重新 managed mount 后孤儿 worker 仍在运行"
+fi
+if ! kill -0 "$SUP_PID" 2>/dev/null || ! kill -0 "$NEW_WORKER_PID" 2>/dev/null; then
+	fail "重新 managed mount 后 supervisor/worker 未运行"
+fi
+if ! ls "$MANAGED_MOUNT_DIR/skills" >/dev/null 2>&1; then
+	fail "清理孤儿 worker 后 mountpoint 不可访问"
+fi
+pass "supervisor 被杀后的孤儿 worker 可由下一次 managed mount 清理并重建"
+
+# ---------------------------------------------------------------------------
+# Fast-failure / ready-timeout crash-loop circuit breaker
+# ---------------------------------------------------------------------------
+
+info "测试 managed mount 快速失败熔断"
+
+# Isolate this instance's runtime state in its own XDG_RUNTIME_DIR so its pid /
+# state / log files are the only ones present, independent of the still-active
+# managed mount above.
+FAIL_XDG="$TMP_ROOT/xdg-fail"
+mkdir -p "$FAIL_XDG"
+FAIL_STATE_DIR="$FAIL_XDG/skillfs"
+FAIL_MOUNT_DIR="$TMP_ROOT/managed-fail-mount"
+mkdir -p "$FAIL_MOUNT_DIR"
+FAIL_CLIENT_LOG="$TMP_ROOT/managed-fail-client.log"
+
+# `--activation-mode bogus` passes client-side source validation but makes every
+# foreground worker exit immediately, so the supervisor faces a permanent crash
+# loop. The client must fail (not falsely report success) and the supervisor
+# must give up rather than retry forever.
+if XDG_RUNTIME_DIR="$FAIL_XDG" "$BIN" mount "$SOURCE_DIR" "$FAIL_MOUNT_DIR" \
+	--managed --activation-mode bogus \
+	--log-file "$FAIL_CLIENT_LOG" >/dev/null 2>&1; then
+	fail "快速失败场景下 managed mount 客户端应返回非零"
+fi
+pass "快速失败场景 managed mount 客户端返回错误"
+
+# No live supervisor or worker may remain after the client returns.
+fail_daemon_gone=false
+for _ in $(seq 1 100); do
+	live=false
+	for pf in "$FAIL_STATE_DIR"/*.supervisor.pid "$FAIL_STATE_DIR"/*.worker.pid; do
+		[[ -e "$pf" ]] || continue
+		p="$(cat "$pf" 2>/dev/null || echo)"
+		if [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null; then
+			live=true
+		fi
+	done
+	if [[ "$live" == false ]]; then
+		fail_daemon_gone=true
+		break
+	fi
+	sleep 0.1
+done
+[[ "$fail_daemon_gone" == true ]] || fail "快速失败后仍有存活的 supervisor/worker"
+pass "快速失败后无存活 supervisor/worker"
+
+# The mountpoint must not stay mounted, and the desired state must not remain
+# "mounted" (crash-loop give up marks it stopped and clears the state file).
+if grep -Fq " $FAIL_MOUNT_DIR " /proc/mounts 2>/dev/null; then
+	fail "快速失败后 mountpoint 仍处于挂载状态"
+fi
+FAIL_STATE_FILE="$(ls "$FAIL_STATE_DIR"/*.state.json 2>/dev/null | head -n1 || true)"
+if [[ -n "$FAIL_STATE_FILE" ]] && grep -Fq '"mounted"' "$FAIL_STATE_FILE" 2>/dev/null; then
+	fail "快速失败后 desired state 仍为 mounted"
+fi
+pass "快速失败后 state 未保持 mounted 且未残留挂载"
+
+# The crash loop must be bounded: once the supervisor gives up (and exits), its
+# log stops growing. With no live daemon, two samples must be identical.
+FAIL_SUP_LOG="$(ls "$FAIL_STATE_DIR"/*.supervisor.log 2>/dev/null | head -n1 || true)"
+if [[ -n "$FAIL_SUP_LOG" ]]; then
+	fail_size1="$(wc -c <"$FAIL_SUP_LOG")"
+	sleep 1
+	fail_size2="$(wc -c <"$FAIL_SUP_LOG")"
+	assert_equals "$fail_size2" "$fail_size1" "快速失败后 supervisor 日志不再增长"
+fi
+
+# Best-effort cleanup of the failed instance (mountpoint should already be gone).
+XDG_RUNTIME_DIR="$FAIL_XDG" "$BIN" stop "$FAIL_MOUNT_DIR" >/dev/null 2>&1 || true
+
 info "执行 skillfs stop"
 if ! "$BIN" stop "$MANAGED_MOUNT_DIR" >/dev/null 2>&1; then
 	fail "stop 返回非零"

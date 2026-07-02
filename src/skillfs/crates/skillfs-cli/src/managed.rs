@@ -42,6 +42,10 @@ const MAX_BACKOFF_MS: u64 = 5_000;
 /// A worker that ran at least this long is treated as a healthy mount whose
 /// later exit is not part of a crash loop, so the backoff resets.
 const STABLE_RUN_SECS: u64 = 10;
+/// Maximum consecutive sub-`STABLE_RUN_SECS` worker failures before the
+/// supervisor gives up remounting. Bounds a crash loop caused by a persistently
+/// failing worker (bad config, FUSE unavailable, EBUSY, ...).
+const MAX_FAST_FAILURES: u32 = 5;
 /// Poll interval while waiting on the worker child.
 const WORKER_POLL_MS: u64 = 200;
 /// How long the client waits for the mount to become ready before failing.
@@ -463,6 +467,32 @@ pub fn run_client(
         }
     }
 
+    // A killed supervisor can leave behind an orphan worker that still serves
+    // the mount. Do not start a competing worker over it: terminate the orphan
+    // and clear the mountpoint, then create a fresh supervised pair below.
+    if let Some(pid) = read_pid(&paths.worker_pid) {
+        if pid_alive(pid) {
+            warn!(
+                worker_pid = pid,
+                mountpoint = %normalized.display(),
+                "found orphan managed worker without a live supervisor; replacing it"
+            );
+            send_signal(pid, libc::SIGTERM);
+            let deadline = Instant::now() + Duration::from_millis(STOP_TIMEOUT_MS);
+            while pid_alive(pid) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            if pid_alive(pid) {
+                send_signal(pid, libc::SIGKILL);
+            }
+        }
+        let _ = std::fs::remove_file(&paths.worker_pid);
+    }
+    if is_mounted(&normalized) {
+        clear_mount(&normalized)?;
+    }
+    let _ = std::fs::remove_file(&paths.supervisor_pid);
+
     let worker_program = std::env::current_exe()
         .map_err(|e| format!("failed to resolve current executable: {e}"))?;
     let worker_args = build_worker_args(raw_args);
@@ -509,12 +539,22 @@ pub fn run_client(
         std::thread::sleep(Duration::from_millis(100));
     }
 
+    // Readiness failed (timeout, or the supervisor died before the mount came
+    // up). Capture the worker log before cleanup, then tear down the supervisor
+    // we just spawned so it does not keep retrying in the background after we
+    // return an error.
     let worker_log = std::fs::read_to_string(&paths.worker_log).unwrap_or_default();
     let mut tail_lines: Vec<&str> = worker_log.lines().rev().take(20).collect();
     tail_lines.reverse();
     let tail = tail_lines.join("\n");
+
+    if let Err(e) = teardown_instance(&paths, &normalized) {
+        warn!(error = %e, "failed to clean up after managed mount startup failure");
+    }
+
     Err(format!(
-        "managed mount did not become ready within {}ms.\n--- worker log tail ---\n{}",
+        "managed mount did not become ready within {}ms; supervisor stopped.\n\
+         --- worker log tail ---\n{}",
         READY_TIMEOUT_MS, tail
     )
     .into())
@@ -605,6 +645,7 @@ pub fn run_supervisor(instance_id: &str) -> Result<(), Box<dyn Error>> {
     );
 
     let mut backoff_ms = INITIAL_BACKOFF_MS;
+    let mut fast_failures: u32 = 0;
 
     loop {
         if SHUTDOWN.load(Ordering::SeqCst) {
@@ -691,11 +732,31 @@ pub fn run_supervisor(instance_id: &str) -> Result<(), Box<dyn Error>> {
         }
 
         if start.elapsed() >= Duration::from_secs(STABLE_RUN_SECS) {
+            // The worker ran long enough to be a healthy mount; this exit is not
+            // part of a crash loop, so reset both the backoff and the counter.
             backoff_ms = INITIAL_BACKOFF_MS;
+            fast_failures = 0;
+        } else {
+            fast_failures += 1;
+            if fast_failures >= MAX_FAST_FAILURES {
+                warn!(
+                    fast_failures,
+                    stable_run_secs = STABLE_RUN_SECS,
+                    mountpoint = %mountpoint.display(),
+                    "managed worker keeps failing fast; giving up crash-loop remount"
+                );
+                // Mark the instance stopped so nothing resurrects it, then fall
+                // through to finish(): unmount and clear residual state.
+                if let Ok(mut state) = ManagedState::load(&paths.state) {
+                    state.desired_state = DesiredState::Stopped;
+                    let _ = state.save(&paths.state);
+                }
+                break;
+            }
         }
         info!(
             backoff_ms,
-            "managed worker exited unexpectedly; remounting after backoff"
+            fast_failures, "managed worker exited unexpectedly; remounting after backoff"
         );
         // Sleep in small slices so shutdown is responsive during backoff.
         let backoff_deadline = Instant::now() + Duration::from_millis(backoff_ms);
@@ -754,41 +815,14 @@ fn finish(paths: &ManagedPaths, mountpoint: &Path) {
 // Stop: `skillfs stop <MOUNTPOINT>`
 // ---------------------------------------------------------------------------
 
-/// Entry point for `skillfs stop`. Clears the desired state, terminates the
-/// managed supervisor/worker, and unmounts. Idempotent: tolerates an
-/// already-unmounted mount and a missing managed instance.
-pub fn run_stop(mountpoint: &Path) -> Result<(), Box<dyn Error>> {
-    let normalized = normalize_mountpoint(mountpoint);
-    let instance_id = instance_id_for(&normalized);
-    let paths = ManagedPaths::new(&instance_id);
-    secure_runtime_dir()?;
-
-    let had_state = paths.state.exists();
-
-    // No managed instance recorded for this mountpoint. `stop` is still a
-    // reliable teardown, so unmount immediately instead of waiting the full
-    // stop timeout on processes that do not exist (handles stale or
-    // non-managed dead mounts).
-    if !had_state {
-        let _ = std::fs::remove_file(&paths.worker_pid);
-        let _ = std::fs::remove_file(&paths.supervisor_pid);
-        match classify_mount(&normalized) {
-            MountState::NotMounted => {
-                println!(
-                    "skillfs: no managed mount at {} (already stopped)",
-                    normalized.display()
-                );
-            }
-            // Present (ready or a stale/dead endpoint): unmount it, surfacing
-            // an error if cleanup cannot complete.
-            _ => {
-                clear_mount(&normalized)?;
-                println!("skillfs: unmounted {}", normalized.display());
-            }
-        }
-        return Ok(());
-    }
-
+/// Tear down a managed instance: mark it stopped, signal the supervisor
+/// (falling back to the worker), wait for exit, unmount, and remove residual
+/// pid/state files. Returns the unmount result so callers can surface a cleanup
+/// failure; every other step is best-effort.
+///
+/// Shared by `stop` and by the client's startup-abort path so neither has to
+/// duplicate the signal/wait/unmount sequence.
+fn teardown_instance(paths: &ManagedPaths, mountpoint: &Path) -> Result<(), Box<dyn Error>> {
     // Clear desired state first so the supervisor will not remount even if a
     // remount races with our signal.
     if let Ok(mut state) = ManagedState::load(&paths.state) {
@@ -827,7 +861,7 @@ pub fn run_stop(mountpoint: &Path) -> Result<(), Box<dyn Error>> {
             break;
         }
         if Instant::now() >= deadline {
-            warn!("stop timed out waiting for clean shutdown; forcing");
+            warn!("teardown timed out waiting for clean shutdown; forcing");
             if let Some(p) = sup_pid {
                 if pid_alive(p) {
                     send_signal(p, libc::SIGKILL);
@@ -844,9 +878,9 @@ pub fn run_stop(mountpoint: &Path) -> Result<(), Box<dyn Error>> {
     }
 
     // Ensure the mount is gone, clearing any stale/dead endpoint a killed
-    // worker left behind. Errors are surfaced after state cleanup.
-    let unmount_result = if is_mounted(&normalized) {
-        clear_mount(&normalized)
+    // worker left behind. The error is surfaced after state cleanup.
+    let unmount_result = if is_mounted(mountpoint) {
+        clear_mount(mountpoint)
     } else {
         Ok(())
     };
@@ -856,7 +890,45 @@ pub fn run_stop(mountpoint: &Path) -> Result<(), Box<dyn Error>> {
     let _ = std::fs::remove_file(&paths.supervisor_pid);
     let _ = std::fs::remove_file(&paths.state);
 
-    unmount_result?;
+    unmount_result
+}
+
+/// Entry point for `skillfs stop`. Clears the desired state, terminates the
+/// managed supervisor/worker, and unmounts. Idempotent: tolerates an
+/// already-unmounted mount and a missing managed instance.
+pub fn run_stop(mountpoint: &Path) -> Result<(), Box<dyn Error>> {
+    let normalized = normalize_mountpoint(mountpoint);
+    let instance_id = instance_id_for(&normalized);
+    let paths = ManagedPaths::new(&instance_id);
+    secure_runtime_dir()?;
+
+    let had_state = paths.state.exists();
+
+    // No managed instance recorded for this mountpoint. `stop` is still a
+    // reliable teardown, so unmount immediately instead of waiting the full
+    // stop timeout on processes that do not exist (handles stale or
+    // non-managed dead mounts).
+    if !had_state {
+        let _ = std::fs::remove_file(&paths.worker_pid);
+        let _ = std::fs::remove_file(&paths.supervisor_pid);
+        match classify_mount(&normalized) {
+            MountState::NotMounted => {
+                println!(
+                    "skillfs: no managed mount at {} (already stopped)",
+                    normalized.display()
+                );
+            }
+            // Present (ready or a stale/dead endpoint): unmount it, surfacing
+            // an error if cleanup cannot complete.
+            _ => {
+                clear_mount(&normalized)?;
+                println!("skillfs: unmounted {}", normalized.display());
+            }
+        }
+        return Ok(());
+    }
+
+    teardown_instance(&paths, &normalized)?;
     println!("skillfs: stopped managed mount at {}", normalized.display());
     Ok(())
 }

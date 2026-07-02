@@ -157,6 +157,9 @@ cargo run -p skillfs -- stop /path/to/mountpoint
 - **只有显式执行 `skillfs stop <MOUNTPOINT>`（或 unmount）才会清除 desired
   mounted 状态**，终止监督器/worker 并干净卸载。`stop` 是幂等的，可安全地对
   已卸载的挂载重复执行。
+- 如果监督器被 `kill -9` 等方式强制终止，可能留下仍在服务但无人监控的孤儿
+  worker。此时执行 `skillfs stop <MOUNTPOINT>` 可清理残留状态、进程和挂载，
+  再重新执行 `mount --managed` 即可恢复托管。
 
 托管状态存放在 `$XDG_RUNTIME_DIR/skillfs/`（否则 `/run/user/<uid>/skillfs/`，
 再回退到 `/tmp/skillfs-<uid>/`），instance id 由规范化后的 mountpoint 派生。
