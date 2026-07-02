@@ -325,3 +325,39 @@ Components with complex architectures maintain their own AGENTS.md for module-sp
 | **agent-sec-core** | [`src/agent-sec-core/AGENTS.md`](src/agent-sec-core/AGENTS.md) | Python environment, ruff/black rules, hermes-plugin, capability system |
 | **anolisa** | [`src/anolisa/AGENTS.md`](src/anolisa/AGENTS.md) | Workspace structure, crate responsibilities |
 | **skillfs** | [`src/skillfs/AGENTS.md`](src/skillfs/AGENTS.md) | Three-crate layout, dependency exceptions, FUSE e2e testing |
+
+## 12. User Guide Documentation Standards
+
+### Writing Process
+
+- **Source of truth**: code is the ground truth. Read clap definitions, config loaders, and runtime logic before writing. Existing docs (design repo, cloud vendor pages) are reference only — never copy without code verification.
+- **Scope**: only document components whose source code exists in this repository (`src/`). If the code is not here, the component does not exist in the docs.
+- **Verification**: every CLI example, config path, and behavioral claim must be traceable to a specific code location. If you cannot point to the code, do not write it.
+
+### Installation Priority
+
+1. `anolisa install <component>` — always first
+2. RPM package (`yum install`) — alternative for Alinux users
+3. Source build — last, developers only
+- agentsight and agent-sec-core require system mode: `sudo anolisa install`
+- All others use user mode
+
+### Content Boundaries
+
+- Cloud-specific service configuration (SLS endpoints, AK/SK auth, security group rules) belongs to cloud vendor docs, not here
+- Alinux ecosystem tools (loongshield, yum repos) may be mentioned with context
+- Never document planned-but-unimplemented features as available
+- Never describe behavior ("replaces not extends", "auto-assigns") without having verified the code path
+
+### Framing Principles
+
+- Each component doc opens with a value proposition answering "why install this?" — not a technical architecture description
+- Cross-component integration stories belong in docs (e.g. "install AgentSight + Tokenless, savings appear in Dashboard automatically")
+- Gotchas that cause real user confusion deserve prominent warnings, even if technically derivable from code
+
+### Language
+
+- Bilingual: `docs/user-guide/{en/, zh/}` mirror structure
+- en/ and zh/ must be semantically equivalent
+- Technical terms keep English form in Chinese docs (eBPF, Token, CLI)
+- Command examples identical across languages; only prose differs
