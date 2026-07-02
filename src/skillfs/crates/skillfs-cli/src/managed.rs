@@ -89,7 +89,6 @@ impl ManagedState {
 
 /// Filesystem paths for a managed mount instance.
 pub struct ManagedPaths {
-    pub dir: PathBuf,
     pub state: PathBuf,
     pub supervisor_pid: PathBuf,
     pub worker_pid: PathBuf,
@@ -106,7 +105,6 @@ impl ManagedPaths {
             worker_pid: dir.join(format!("{instance_id}.worker.pid")),
             supervisor_log: dir.join(format!("{instance_id}.supervisor.log")),
             worker_log: dir.join(format!("{instance_id}.worker.log")),
-            dir,
         }
     }
 }
@@ -128,6 +126,73 @@ pub fn runtime_dir() -> PathBuf {
         return run_user.join("skillfs");
     }
     PathBuf::from(format!("/tmp/skillfs-{uid}"))
+}
+
+/// Resolve and secure the managed-state runtime directory.
+///
+/// The state and pid files under this directory drive process signaling and
+/// remount behavior, so the directory must be private to the current user.
+/// The directory is created `0700` if missing; if it already exists it must be
+/// a real directory (not a symlink) owned by the current uid, and any
+/// group/other permission bits are stripped. This matters most for the
+/// `/tmp/skillfs-<uid>` fallback, where a hostile actor could pre-create the
+/// path.
+pub fn secure_runtime_dir() -> Result<PathBuf, Box<dyn Error>> {
+    let dir = runtime_dir();
+    secure_dir(&dir)?;
+    Ok(dir)
+}
+
+/// Create `dir` `0700` if missing, or validate + tighten it if it exists.
+fn secure_dir(dir: &Path) -> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+    let uid = unsafe { libc::getuid() };
+
+    match std::fs::symlink_metadata(dir) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(format!(
+                    "refusing to use runtime dir '{}': it is a symlink",
+                    dir.display()
+                )
+                .into());
+            }
+            if !meta.is_dir() {
+                return Err(format!(
+                    "runtime path '{}' exists but is not a directory",
+                    dir.display()
+                )
+                .into());
+            }
+            if meta.uid() != uid {
+                return Err(format!(
+                    "refusing to use runtime dir '{}': owned by uid {}, expected {}",
+                    dir.display(),
+                    meta.uid(),
+                    uid
+                )
+                .into());
+            }
+            // Strip any group/other access bits so pid/state files stay private.
+            if meta.mode() & 0o077 != 0 {
+                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(
+                    |e| format!("failed to tighten runtime dir '{}': {e}", dir.display()),
+                )?;
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)
+                .map_err(|e| format!("failed to create runtime dir '{}': {e}", dir.display()))?;
+        }
+        Err(e) => {
+            return Err(format!("failed to inspect runtime dir '{}': {e}", dir.display()).into());
+        }
+    }
+    Ok(())
 }
 
 /// Normalize a mountpoint path for identity purposes: canonicalize if it
@@ -279,29 +344,57 @@ pub fn run_client(
     let instance_id = instance_id_for(&normalized);
     let paths = ManagedPaths::new(&instance_id);
 
-    // If a live supervisor already owns this mountpoint, do not start a
-    // second one.
+    // Create/validate the private runtime dir before reading or writing any
+    // pid/state files it holds.
+    secure_runtime_dir()?;
+
+    // A live supervisor PID owns this instance, even if the mount is
+    // momentarily down during remount/backoff recovery. Never spawn a second
+    // supervisor for the same instance: it would overwrite state and race the
+    // incumbent over the mountpoint.
     if let Some(pid) = read_pid(&paths.supervisor_pid) {
-        if pid_alive(pid) && is_mounted(&normalized) {
-            info!(
-                mountpoint = %normalized.display(),
-                supervisor_pid = pid,
-                "managed mount already active; nothing to do"
-            );
-            println!(
-                "skillfs: managed mount already active at {}",
-                normalized.display()
-            );
-            return Ok(());
+        if pid_alive(pid) {
+            if is_mount_ready(&normalized) {
+                info!(
+                    mountpoint = %normalized.display(),
+                    supervisor_pid = pid,
+                    "managed mount already active; nothing to do"
+                );
+                println!(
+                    "skillfs: managed mount already active at {}",
+                    normalized.display()
+                );
+                return Ok(());
+            }
+            // Supervisor alive but mount not ready yet — wait for it to
+            // converge rather than starting a competing supervisor.
+            let deadline = Instant::now() + Duration::from_millis(READY_TIMEOUT_MS);
+            while Instant::now() < deadline {
+                if !pid_alive(pid) {
+                    break; // incumbent died; fall through to (re)start below
+                }
+                if is_mount_ready(&normalized) {
+                    println!(
+                        "skillfs: managed mount ready at {} (stop with: skillfs stop {})",
+                        normalized.display(),
+                        normalized.display()
+                    );
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            if pid_alive(pid) {
+                return Err(format!(
+                    "managed supervisor (pid {pid}) is active for {} but the mount is not ready; \
+                     run 'skillfs stop {}' to recover before remounting",
+                    normalized.display(),
+                    normalized.display()
+                )
+                .into());
+            }
+            // Incumbent supervisor exited while we waited — safe to start fresh.
         }
     }
-
-    std::fs::create_dir_all(&paths.dir).map_err(|e| {
-        format!(
-            "failed to create runtime dir '{}': {e}",
-            paths.dir.display()
-        )
-    })?;
 
     let worker_program = std::env::current_exe()
         .map_err(|e| format!("failed to resolve current executable: {e}"))?;
@@ -431,6 +524,7 @@ fn install_term_handler() {
 /// Entry point for the detached supervisor process.
 pub fn run_supervisor(instance_id: &str) -> Result<(), Box<dyn Error>> {
     let paths = ManagedPaths::new(instance_id);
+    secure_runtime_dir()?;
     let state = ManagedState::load(&paths.state)
         .map_err(|e| format!("failed to load managed state for '{instance_id}': {e}"))?;
     let mountpoint = PathBuf::from(&state.mountpoint);
@@ -577,16 +671,34 @@ pub fn run_stop(mountpoint: &Path) -> Result<(), Box<dyn Error>> {
     let normalized = normalize_mountpoint(mountpoint);
     let instance_id = instance_id_for(&normalized);
     let paths = ManagedPaths::new(&instance_id);
+    secure_runtime_dir()?;
 
     let had_state = paths.state.exists();
 
+    // No managed instance recorded for this mountpoint. `stop` is still a
+    // reliable teardown, so unmount immediately instead of waiting the full
+    // stop timeout on processes that do not exist (handles stale or
+    // non-managed dead mounts).
+    if !had_state {
+        let _ = std::fs::remove_file(&paths.worker_pid);
+        let _ = std::fs::remove_file(&paths.supervisor_pid);
+        if is_mounted(&normalized) {
+            force_unmount(&normalized);
+            println!("skillfs: unmounted {}", normalized.display());
+        } else {
+            println!(
+                "skillfs: no managed mount at {} (already stopped)",
+                normalized.display()
+            );
+        }
+        return Ok(());
+    }
+
     // Clear desired state first so the supervisor will not remount even if a
     // remount races with our signal.
-    if had_state {
-        if let Ok(mut state) = ManagedState::load(&paths.state) {
-            state.desired_state = DesiredState::Stopped;
-            let _ = state.save(&paths.state);
-        }
+    if let Ok(mut state) = ManagedState::load(&paths.state) {
+        state.desired_state = DesiredState::Stopped;
+        let _ = state.save(&paths.state);
     }
 
     // Prefer signaling the supervisor: it owns the worker and unmounts it
@@ -643,19 +755,7 @@ pub fn run_stop(mountpoint: &Path) -> Result<(), Box<dyn Error>> {
     let _ = std::fs::remove_file(&paths.supervisor_pid);
     let _ = std::fs::remove_file(&paths.state);
 
-    if had_state {
-        println!("skillfs: stopped managed mount at {}", normalized.display());
-    } else if is_mounted(&normalized) {
-        // No managed instance recorded, but something is mounted here — still
-        // best-effort unmount so `stop` is a reliable teardown.
-        force_unmount(&normalized);
-        println!("skillfs: unmounted {}", normalized.display());
-    } else {
-        println!(
-            "skillfs: no managed mount at {} (already stopped)",
-            normalized.display()
-        );
-    }
+    println!("skillfs: stopped managed mount at {}", normalized.display());
     Ok(())
 }
 
@@ -767,6 +867,46 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("nope.json");
         assert_eq!(current_desired_state(&missing), DesiredState::Stopped);
+    }
+
+    #[test]
+    fn secure_dir_creates_private_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let parent = tempfile::tempdir().unwrap();
+        let dir = parent.path().join("skillfs");
+        secure_dir(&dir).unwrap();
+        assert!(dir.is_dir());
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "runtime dir must be created 0700, got {mode:o}"
+        );
+    }
+
+    #[test]
+    fn secure_dir_tightens_loose_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let parent = tempfile::tempdir().unwrap();
+        let dir = parent.path().join("skillfs");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        secure_dir(&dir).unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode & 0o077, 0, "group/other bits must be stripped");
+    }
+
+    #[test]
+    fn secure_dir_rejects_symlink() {
+        let parent = tempfile::tempdir().unwrap();
+        let target = parent.path().join("real");
+        std::fs::create_dir(&target).unwrap();
+        let link = parent.path().join("skillfs");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let err = secure_dir(&link).unwrap_err();
+        assert!(
+            err.to_string().contains("symlink"),
+            "expected symlink rejection, got: {err}"
+        );
     }
 
     #[test]

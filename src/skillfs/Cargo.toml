@@ -28,3 +28,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time"] 
 thiserror = "2"
 parking_lot = "0.12"
 tempfile = "3"
+libc = "0.2"
