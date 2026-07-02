@@ -579,7 +579,46 @@ h1 span{color:var(--accent-light)}
 
       <div class="release-list" id="release-list">
         <!-- ANOLISA_CLI_CHANGELOG_START -->
-        <article class="release reveal reveal-d1" id="anolisa-cli-0-1-17">
+        <article class="release reveal reveal-d1" id="anolisa-cli-0-1-18">
+          <div class="release-meta">
+            <div class="release-version">0.1.18</div>
+            <div class="release-date">2026-07-01</div>
+          </div>
+          <div class="release-body">
+          <div class="release-body-section">
+            <h3>Added</h3>
+            <ul>
+              <li><code>anolisa install</code> now auto-installs missing system packages for raw components in system mode.</li>
+              <li><code>anolisa install --dry-run</code> now labels unresolved dependencies as auto-install or manual.</li>
+              <li><code>anolisa install</code> now reports packages auto-installed during raw component installs.</li>
+              <li><code>anolisa status --verbose</code> now shows packages auto-installed for each component.</li>
+            </ul>
+          </div>
+          <div class="release-body-section">
+            <h3>Changed</h3>
+            <ul>
+              <li>Commands that need repo access now download and validate <code>repo.toml</code> on first use.</li>
+              <li>Repo config dry-runs now fetch and validate without writing <code>repo.toml</code>.</li>
+              <li>RPM install and update now use only the <code>repo.toml</code> RPM repository.</li>
+              <li>User-mode raw installs now report missing dependencies with install commands before changing files.</li>
+              <li>Failed raw installs now list any auto-installed packages left on the system.</li>
+              <li><code>anolisa update self</code> no longer fetches repo config before checking CLI updates.</li>
+            </ul>
+          </div>
+          <div class="release-body-section">
+            <h3>Fixed</h3>
+            <ul>
+              <li><code>anolisa list --installed</code> now includes adopted RPM components.</li>
+              <li><code>anolisa list</code> now shows adopted, failed, and disabled component statuses.</li>
+              <li>Adapter commands now prefer resources from the datadir that supplied the component contract.</li>
+              <li>RPM installs now fail before <code>dnf</code> when <code>[backends.rpm]</code> is missing.</li>
+              <li>RPM updates now explain missing <code>[backends.rpm]</code> instead of using host repositories.</li>
+            </ul>
+          </div>
+          </div>
+        </article>
+
+        <article class="release reveal reveal-d2" id="anolisa-cli-0-1-17">
           <div class="release-meta">
             <div class="release-version">0.1.17</div>
             <div class="release-date">2026-06-30</div>
@@ -618,7 +657,7 @@ h1 span{color:var(--accent-light)}
           </div>
         </article>
 
-        <article class="release reveal reveal-d2" id="anolisa-cli-0-1-16">
+        <article class="release reveal reveal-d3" id="anolisa-cli-0-1-16">
           <div class="release-meta">
             <div class="release-version">0.1.16</div>
             <div class="release-date">2026-06-29</div>
@@ -663,7 +702,7 @@ h1 span{color:var(--accent-light)}
           </div>
         </article>
 
-        <article class="release reveal reveal-d3" id="anolisa-cli-0-1-15">
+        <article class="release reveal reveal-d4" id="anolisa-cli-0-1-15">
           <div class="release-meta">
             <div class="release-version">0.1.15</div>
             <div class="release-date">2026-06-25</div>
@@ -695,7 +734,7 @@ h1 span{color:var(--accent-light)}
           </div>
         </article>
 
-        <article class="release reveal reveal-d4" id="anolisa-cli-0-1-14">
+        <article class="release reveal reveal-d5" id="anolisa-cli-0-1-14">
           <div class="release-meta">
             <div class="release-version">0.1.14</div>
             <div class="release-date">2026-06-24</div>
@@ -728,49 +767,6 @@ h1 span{color:var(--accent-light)}
           </div>
           </div>
         </article>
-
-        <article class="release reveal reveal-d5" id="anolisa-cli-0-1-13">
-          <div class="release-meta">
-            <div class="release-version">0.1.13</div>
-            <div class="release-date">2026-06-23</div>
-          </div>
-          <div class="release-body">
-          <div class="release-body-section">
-            <h3>Added</h3>
-            <ul>
-              <li><code>anolisa adapter enable</code> now supports Hermes plugins.</li>
-              <li><code>anolisa adapter enable</code> now installs declared OpenClaw skills.</li>
-              <li><code>anolisa adapter enable</code> now applies declared OpenClaw config values.</li>
-              <li><code>anolisa install</code> now starts declared services for raw components.</li>
-              <li><code>anolisa install</code> now applies declared file capabilities for raw components.</li>
-              <li><code>anolisa install</code> now runs declared hooks for raw components.</li>
-              <li><code>anolisa update &lt;component&gt;</code> now restarts declared services for raw components.</li>
-              <li><code>anolisa update &lt;component&gt;</code> now reapplies declared file capabilities for raw components.</li>
-              <li><code>anolisa uninstall</code> now runs declared hooks for raw components.</li>
-              <li><code>anolisa uninstall</code> now disables declared services after stopping them.</li>
-            </ul>
-          </div>
-          <div class="release-body-section">
-            <h3>Changed</h3>
-            <ul>
-              <li><code>anolisa adapter scan</code> now honors declared adapter resource locations.</li>
-              <li><code>anolisa adapter enable</code> now reads package-installed adapter resources.</li>
-              <li><code>anolisa install --dry-run</code> now previews declared capabilities for raw components.</li>
-              <li><code>anolisa register status</code> now reports the latest registration after repeated changes.</li>
-              <li>Cancelled <code>anolisa register</code> and <code>unregister</code> prompts now exit successfully.</li>
-            </ul>
-          </div>
-          <div class="release-body-section">
-            <h3>Fixed</h3>
-            <ul>
-              <li><code>anolisa adapter status</code> now detects OpenClaw plugins from wrapped table output.</li>
-              <li><code>anolisa adapter status</code> now ignores bundled Hermes plugins during checks.</li>
-              <li><code>anolisa adapter</code> commands now find metadata shipped by RPM-installed components.</li>
-              <li><code>anolisa register status</code> now reports sysom console registrations as active.</li>
-            </ul>
-          </div>
-          </div>
-        </article>
         <!-- ANOLISA_CLI_CHANGELOG_END -->
       </div>
 
@@ -781,7 +777,7 @@ h1 span{color:var(--accent-light)}
         <!-- ANOLISA_CHANGELOG_DATA_START -->
         <script type="application/json" id="changelog-data">{
   "limit": 5,
-  "latestVersion": "0.1.17",
+  "latestVersion": "0.1.18",
   "components": [
     {
       "id": "anolisa",
@@ -792,6 +788,42 @@ h1 span{color:var(--accent-light)}
         "en": {
           "label": "EN",
           "releases": [
+            {
+              "version": "0.1.18",
+              "date": "2026-07-01",
+              "sections": [
+                {
+                  "title": "Added",
+                  "items": [
+                    "`anolisa install` now auto-installs missing system packages for raw components in system mode.",
+                    "`anolisa install --dry-run` now labels unresolved dependencies as auto-install or manual.",
+                    "`anolisa install` now reports packages auto-installed during raw component installs.",
+                    "`anolisa status --verbose` now shows packages auto-installed for each component."
+                  ]
+                },
+                {
+                  "title": "Changed",
+                  "items": [
+                    "Commands that need repo access now download and validate `repo.toml` on first use.",
+                    "Repo config dry-runs now fetch and validate without writing `repo.toml`.",
+                    "RPM install and update now use only the `repo.toml` RPM repository.",
+                    "User-mode raw installs now report missing dependencies with install commands before changing files.",
+                    "Failed raw installs now list any auto-installed packages left on the system.",
+                    "`anolisa update self` no longer fetches repo config before checking CLI updates."
+                  ]
+                },
+                {
+                  "title": "Fixed",
+                  "items": [
+                    "`anolisa list --installed` now includes adopted RPM components.",
+                    "`anolisa list` now shows adopted, failed, and disabled component statuses.",
+                    "Adapter commands now prefer resources from the datadir that supplied the component contract.",
+                    "RPM installs now fail before `dnf` when `[backends.rpm]` is missing.",
+                    "RPM updates now explain missing `[backends.rpm]` instead of using host repositories."
+                  ]
+                }
+              ]
+            },
             {
               "version": "0.1.17",
               "date": "2026-06-30",
@@ -929,52 +961,48 @@ h1 span{color:var(--accent-light)}
                   ]
                 }
               ]
-            },
-            {
-              "version": "0.1.13",
-              "date": "2026-06-23",
-              "sections": [
-                {
-                  "title": "Added",
-                  "items": [
-                    "`anolisa adapter enable` now supports Hermes plugins.",
-                    "`anolisa adapter enable` now installs declared OpenClaw skills.",
-                    "`anolisa adapter enable` now applies declared OpenClaw config values.",
-                    "`anolisa install` now starts declared services for raw components.",
-                    "`anolisa install` now applies declared file capabilities for raw components.",
-                    "`anolisa install` now runs declared hooks for raw components.",
-                    "`anolisa update \u003ccomponent>` now restarts declared services for raw components.",
-                    "`anolisa update \u003ccomponent>` now reapplies declared file capabilities for raw components.",
-                    "`anolisa uninstall` now runs declared hooks for raw components.",
-                    "`anolisa uninstall` now disables declared services after stopping them."
-                  ]
-                },
-                {
-                  "title": "Changed",
-                  "items": [
-                    "`anolisa adapter scan` now honors declared adapter resource locations.",
-                    "`anolisa adapter enable` now reads package-installed adapter resources.",
-                    "`anolisa install --dry-run` now previews declared capabilities for raw components.",
-                    "`anolisa register status` now reports the latest registration after repeated changes.",
-                    "Cancelled `anolisa register` and `unregister` prompts now exit successfully."
-                  ]
-                },
-                {
-                  "title": "Fixed",
-                  "items": [
-                    "`anolisa adapter status` now detects OpenClaw plugins from wrapped table output.",
-                    "`anolisa adapter status` now ignores bundled Hermes plugins during checks.",
-                    "`anolisa adapter` commands now find metadata shipped by RPM-installed components.",
-                    "`anolisa register status` now reports sysom console registrations as active."
-                  ]
-                }
-              ]
             }
           ]
         },
         "zh": {
           "label": "中文",
           "releases": [
+            {
+              "version": "0.1.18",
+              "date": "2026-07-01",
+              "sections": [
+                {
+                  "title": "新增",
+                  "items": [
+                    "`anolisa install` 系统模式现自动安装缺失系统包。",
+                    "`anolisa install --dry-run` 现标出依赖处理方式。",
+                    "`anolisa install` 现显示自动安装的系统包。",
+                    "`anolisa status --verbose` 现显示组件自动安装包。"
+                  ]
+                },
+                {
+                  "title": "变更",
+                  "items": [
+                    "需要仓库的命令现首次使用会下载 `repo.toml`。",
+                    "仓库配置 dry-run 现只校验不写入。",
+                    "RPM 安装和更新现只使用 `repo.toml` 源。",
+                    "用户模式 raw 安装现先提示缺失依赖。",
+                    "raw 安装失败现提示已保留的自动安装包。",
+                    "`anolisa update self` 不再预先获取仓库配置。"
+                  ]
+                },
+                {
+                  "title": "修复",
+                  "items": [
+                    "`anolisa list --installed` 现包含已收编 RPM。",
+                    "`anolisa list` 现显示 adopted、failed、disabled 状态。",
+                    "Adapter 命令现优先使用契约所在数据目录资源。",
+                    "缺少 `[backends.rpm]` 时 RPM 安装不再调用 `dnf`。",
+                    "RPM 更新缺少 `[backends.rpm]` 时不再使用主机源。"
+                  ]
+                }
+              ]
+            },
             {
               "version": "0.1.17",
               "date": "2026-06-30",
@@ -1109,46 +1137,6 @@ h1 span{color:var(--accent-light)}
                     "`anolisa install` 现无需手动重载即可启动新单元。",
                     "`anolisa uninstall` 现会停用用户模式安装的服务。",
                     "`anolisa adapter enable` 现从包目录查找 `{datadir}` 技能。"
-                  ]
-                }
-              ]
-            },
-            {
-              "version": "0.1.13",
-              "date": "2026-06-23",
-              "sections": [
-                {
-                  "title": "新增",
-                  "items": [
-                    "`anolisa adapter enable` 现支持 Hermes 插件。",
-                    "`anolisa adapter enable` 现安装声明的 OpenClaw 技能。",
-                    "`anolisa adapter enable` 现写入声明的 OpenClaw 配置。",
-                    "`anolisa install` 现启动 raw 组件声明的服务。",
-                    "`anolisa install` 现设置 raw 组件声明的文件能力。",
-                    "`anolisa install` 现执行 raw 组件声明的钩子。",
-                    "`anolisa update \u003ccomponent>` 现重启 raw 组件声明的服务。",
-                    "`anolisa update \u003ccomponent>` 现重设 raw 组件声明的文件能力。",
-                    "`anolisa uninstall` 现执行 raw 组件卸载钩子。",
-                    "`anolisa uninstall` 现停用已停止的声明服务。"
-                  ]
-                },
-                {
-                  "title": "变更",
-                  "items": [
-                    "`anolisa adapter scan` 现按声明位置查找资源。",
-                    "`anolisa adapter enable` 现读取包内适配器资源。",
-                    "`anolisa install --dry-run` 现预览 raw 文件能力。",
-                    "`anolisa register status` 现显示最新注册记录。",
-                    "取消 `anolisa register` 或 `unregister` 不再报错。"
-                  ]
-                },
-                {
-                  "title": "修复",
-                  "items": [
-                    "`anolisa adapter status` 现能识别换行的 OpenClaw 表格。",
-                    "`anolisa adapter status` 检查 Hermes 时忽略内置插件。",
-                    "`anolisa adapter` 现能找到 RPM 组件附带的元数据。",
-                    "`anolisa register status` 现显示 sysom 控制台注册。"
                   ]
                 }
               ]
