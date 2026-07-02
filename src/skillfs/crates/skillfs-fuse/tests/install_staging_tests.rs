@@ -1633,6 +1633,55 @@ fn pending_activation_clears_pending_and_shows_skill() {
     );
 }
 
+/// #1264 regression: a direct final-skill pending install dir must still
+/// accept `cp -a`-style metadata preservation (chmod + utimensat) on the
+/// top-level directory instead of failing with EROFS. Pending semantics
+/// (hidden from /skills listing) must be preserved.
+#[test]
+fn pending_skill_dir_metadata_preservation() {
+    skip_if_no_fuse!();
+
+    let fixture = PendingInstallFixture::new(5000, |src| {
+        create_skill(src, "existing");
+    });
+
+    let new_skill = fixture.skill_path("cp-a-pending");
+    std::fs::create_dir(&new_skill).unwrap();
+
+    // chmod (setattr mode) must succeed on the pending skill dir.
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&new_skill, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod pending skill dir must succeed");
+
+    // utimensat (setattr atime/mtime) must succeed on the pending skill dir.
+    let c_path = std::ffi::CString::new(new_skill.to_string_lossy().into_owned()).unwrap();
+    let times = [
+        libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_NOW,
+        },
+        libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_NOW,
+        },
+    ];
+    let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
+    assert_eq!(
+        rc,
+        0,
+        "utimensat pending skill dir must succeed, errno={}",
+        std::io::Error::last_os_error()
+    );
+
+    // Pending skill must still be hidden from the /skills listing.
+    let skills = common::list_dir_names(&fixture.skills_root());
+    assert!(
+        !skills.contains(&"cp-a-pending".to_string()),
+        "pending skill must remain hidden from listing: {:?}",
+        skills
+    );
+}
+
 #[test]
 fn pending_activated_skill_uses_normal_notify() {
     skip_if_no_fuse!();

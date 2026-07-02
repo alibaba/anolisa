@@ -732,17 +732,15 @@ impl SkillFs {
                 }
                 // `cp -a` preserves mode/timestamps on the freshly-created
                 // top-level skill directory. Route those metadata mutations
-                // to the physical source dir for ordinary skills instead of
-                // rejecting with EROFS. Keep the read-only façade for the
-                // always-virtual skill-discover, staging roots, and pending
-                // installs; hide hidden skills; lifecycle reserved names are
-                // rejected by the shared gate below. `.skill-meta/**` never
-                // parses as a SkillDir, so trusted-writer policy is
-                // unaffected.
-                if is_skill_discover_path(skill_name)
-                    || self.is_staging_skill_root(skill_name)
-                    || self.is_pending_install(skill_name)
-                {
+                // to the physical source dir instead of rejecting with
+                // EROFS. Pending installs are the CLI's direct final-skill
+                // authoring path, so they must preserve metadata too. Keep
+                // the read-only façade for the always-virtual skill-discover
+                // and staging roots; hide hidden skills; lifecycle reserved
+                // names are rejected by the shared gate below.
+                // `.skill-meta/**` never parses as a SkillDir, so
+                // trusted-writer policy is unaffected.
+                if is_skill_discover_path(skill_name) || self.is_staging_skill_root(skill_name) {
                     reply.error(libc::EROFS);
                     return;
                 }
@@ -753,6 +751,18 @@ impl SkillFs {
                 // A directory has no size to truncate.
                 if size.is_some() {
                     reply.error(libc::EISDIR);
+                    return;
+                }
+                // Ownership changes on the virtual skill directory stay
+                // restricted to privileged / trusted-writer callers. cp -a
+                // from an ordinary user only needs mode/atime/mtime
+                // preservation, so we do not widen the daemon-side chown
+                // surface for unprivileged callers.
+                if (uid.is_some() || gid.is_some())
+                    && req.uid() != 0
+                    && !self.evaluate_trusted_writer(req).is_allowed()
+                {
+                    reply.error(libc::EPERM);
                     return;
                 }
                 // Fall through to the shared physical setattr handling.
