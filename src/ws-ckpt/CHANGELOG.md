@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.1
+
+### Features
+- Added skip auto-checkpoint after rollback (#1263)
+
+### Bug Fixes
+- Fixed workspace sync after config update (#1263)
+- Fixed absolute path handling for ws-ckpt in crontab entries (#1263)
+- Changed rollback -n offset, pass numAncestors as-is (#1263)
+
 ## 0.4.0
 
 ### Breaking Changes

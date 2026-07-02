@@ -138,6 +138,12 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Thu Jul 02 2026 ziqi02 <ziqi02@alibaba-inc.com> - 0.4.1-1
+- Added skip auto-checkpoint after rollback
+- Fixed workspace sync after config update
+- Fixed absolute path handling for ws-ckpt in crontab entries
+- Changed rollback -n offset, pass numAncestors as-is
+
 * Thu Jun 25 2026 ziqi02 <ziqi02@alibaba-inc.com> - 0.4.0-1
 - Added plugin install/uninstall subcommand
 - Added component.toml for anolisa-cli adapter discovery
