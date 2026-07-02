@@ -23,6 +23,7 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import type { OpenAICredentials } from '../components/OpenAIKeyPrompt.js';
 import { appEvents, AppEvent } from '../../utils/events.js';
+import { maybeRunKtunerFirstRunCheck } from '../../utils/ktunerFirstRun.js';
 import { AuthState, MessageType } from '../types.js';
 import type { HistoryItem } from '../types.js';
 import { t } from '../../i18n/index.js';
@@ -263,6 +264,14 @@ export const useAuthCommand = (
       if (isInitialAuthPending.current) {
         isInitialAuthPending.current = false;
         refreshStatic?.();
+      }
+
+      // Opt-in only (off by default): running an external binary after auth is
+      // gated on an explicit user setting. When enabled, surface a read-only
+      // kernel tuning report if ktuner is installed at a trusted path. Never
+      // blocks onboarding, never applies changes; fire-and-forget.
+      if (settings.merged.general?.ktunerFirstRunCheck === true) {
+        void maybeRunKtunerFirstRunCheck(addItem);
       }
     },
     [settings, handleAuthFailure, config, addItem, refreshStatic],

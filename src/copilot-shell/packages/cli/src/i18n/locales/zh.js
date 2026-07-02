@@ -997,6 +997,8 @@ export default {
     '{{authType}} 配置已保存，当前模型：{{model}}',
   '{{authType}} credentials saved successfully.':
     '{{authType}} 认证方式凭据已保存。',
+  'Kernel: {{score}}/100, {{count}} tuning suggestion(s) ({{high}} high-confidence). Explore them anytime with ktuner.':
+    '内核:{{score}}/100,{{count}} 条调优建议({{high}} 条高置信)。想看优化项随时用 ktuner。',
   // OpenAI API key validation errors
   'Invalid API key. Please check your API key and try again.':
     '无效的 API 密钥。请检查您的 API 密钥并重试。',

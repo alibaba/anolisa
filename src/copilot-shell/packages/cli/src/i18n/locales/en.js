@@ -1053,6 +1053,8 @@ export default {
     '{{authType}} configuration saved successfully, current model: {{model}}',
   '{{authType}} credentials saved successfully.':
     '{{authType}} credentials saved successfully.',
+  'Kernel: {{score}}/100, {{count}} tuning suggestion(s) ({{high}} high-confidence). Explore them anytime with ktuner.':
+    'Kernel: {{score}}/100, {{count}} tuning suggestion(s) ({{high}} high-confidence). Explore them anytime with ktuner.',
   // OpenAI API key validation errors
   'Invalid API key. Please check your API key and try again.':
     'Invalid API key. Please check your API key and try again.',

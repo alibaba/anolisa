@@ -10,6 +10,7 @@ import type { Config } from '@copilot-shell/core';
 import { AuthType } from '@copilot-shell/core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { useAuthCommand } from './useAuth.js';
+import { maybeRunKtunerFirstRunCheck } from '../../utils/ktunerFirstRun.js';
 
 vi.mock('../hooks/useQwenAuth.js', () => ({
   useQwenAuth: () => ({
@@ -20,6 +21,12 @@ vi.mock('../hooks/useQwenAuth.js', () => ({
 
 vi.mock('../../config/modelProvidersScope.js', () => ({
   getPersistScopeForModelSelection: () => 'user',
+}));
+
+// Mock the ktuner first-run helper so successful-auth tests never spawn a real
+// external binary or write a global sentinel (kongche #2).
+vi.mock('../../utils/ktunerFirstRun.js', () => ({
+  maybeRunKtunerFirstRunCheck: vi.fn(),
 }));
 
 describe('useAuthCommand', () => {
@@ -322,5 +329,63 @@ describe('useAuthCommand', () => {
     });
 
     expect(refreshStatic).not.toHaveBeenCalled();
+  });
+
+  it('does NOT call ktuner check when the setting is off (default)', async () => {
+    const settings = createMockSettings();
+    // merged.general is undefined → setting reads as false → gate closed.
+    const config = createMockConfig();
+    const addItem = vi.fn();
+    vi.mocked(config.refreshAuth).mockResolvedValue(undefined);
+    vi.mocked(config.getContentGeneratorConfig).mockReturnValue({
+      model: 'test',
+    } as ReturnType<Config['getContentGeneratorConfig']>);
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings, config, addItem, false),
+    );
+
+    await act(async () => {
+      await result.current.handleAuthSelect(AuthType.USE_OPENAI);
+    });
+    await act(async () => {
+      await result.current.handleAuthSelect(AuthType.USE_OPENAI, {
+        apiKey: 'sk-test',
+        baseUrl: 'https://example.com/v1',
+        model: 'test',
+      });
+    });
+
+    expect(maybeRunKtunerFirstRunCheck).not.toHaveBeenCalled();
+  });
+
+  it('calls ktuner check when the setting is explicitly enabled', async () => {
+    const settings = createMockSettings();
+    (settings.merged as Record<string, unknown>)['general'] = {
+      ktunerFirstRunCheck: true,
+    };
+    const config = createMockConfig();
+    const addItem = vi.fn();
+    vi.mocked(config.refreshAuth).mockResolvedValue(undefined);
+    vi.mocked(config.getContentGeneratorConfig).mockReturnValue({
+      model: 'test',
+    } as ReturnType<Config['getContentGeneratorConfig']>);
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings, config, addItem, false),
+    );
+
+    await act(async () => {
+      await result.current.handleAuthSelect(AuthType.USE_OPENAI);
+    });
+    await act(async () => {
+      await result.current.handleAuthSelect(AuthType.USE_OPENAI, {
+        apiKey: 'sk-test',
+        baseUrl: 'https://example.com/v1',
+        model: 'test',
+      });
+    });
+
+    expect(maybeRunKtunerFirstRunCheck).toHaveBeenCalledTimes(1);
   });
 });
