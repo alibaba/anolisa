@@ -579,7 +579,26 @@ h1 span{color:var(--accent-light)}
 
       <div class="release-list" id="release-list">
         <!-- ANOLISA_CLI_CHANGELOG_START -->
-        <article class="release reveal reveal-d1" id="anolisa-cli-0-1-18">
+        <article class="release reveal reveal-d1" id="anolisa-cli-0-1-19">
+          <div class="release-meta">
+            <div class="release-version">0.1.19</div>
+            <div class="release-date">2026-07-02</div>
+          </div>
+          <div class="release-body">
+          <div class="release-body-section">
+            <h3>Fixed</h3>
+            <ul>
+              <li><code>anolisa adapter disable --dry-run</code> now previews cleanup without removing adapter receipts or resources.</li>
+              <li>Read-only commands now use downloaded repo config when saving <code>repo.toml</code> fails.</li>
+              <li>Component commands now accept package aliases consistently when targeting installed components.</li>
+              <li>Ambiguous package aliases no longer choose an arbitrary installed component.</li>
+              <li>Unknown component names now report no match without querying packages.</li>
+            </ul>
+          </div>
+          </div>
+        </article>
+
+        <article class="release reveal reveal-d2" id="anolisa-cli-0-1-18">
           <div class="release-meta">
             <div class="release-version">0.1.18</div>
             <div class="release-date">2026-07-01</div>
@@ -618,7 +637,7 @@ h1 span{color:var(--accent-light)}
           </div>
         </article>
 
-        <article class="release reveal reveal-d2" id="anolisa-cli-0-1-17">
+        <article class="release reveal reveal-d3" id="anolisa-cli-0-1-17">
           <div class="release-meta">
             <div class="release-version">0.1.17</div>
             <div class="release-date">2026-06-30</div>
@@ -657,7 +676,7 @@ h1 span{color:var(--accent-light)}
           </div>
         </article>
 
-        <article class="release reveal reveal-d3" id="anolisa-cli-0-1-16">
+        <article class="release reveal reveal-d4" id="anolisa-cli-0-1-16">
           <div class="release-meta">
             <div class="release-version">0.1.16</div>
             <div class="release-date">2026-06-29</div>
@@ -702,7 +721,7 @@ h1 span{color:var(--accent-light)}
           </div>
         </article>
 
-        <article class="release reveal reveal-d4" id="anolisa-cli-0-1-15">
+        <article class="release reveal reveal-d5" id="anolisa-cli-0-1-15">
           <div class="release-meta">
             <div class="release-version">0.1.15</div>
             <div class="release-date">2026-06-25</div>
@@ -733,40 +752,6 @@ h1 span{color:var(--accent-light)}
           </div>
           </div>
         </article>
-
-        <article class="release reveal reveal-d5" id="anolisa-cli-0-1-14">
-          <div class="release-meta">
-            <div class="release-version">0.1.14</div>
-            <div class="release-date">2026-06-24</div>
-          </div>
-          <div class="release-body">
-          <div class="release-body-section">
-            <h3>Added</h3>
-            <ul>
-              <li>Raw components can now place systemd unit files with <code>{unitdir}</code>.</li>
-              <li>Raw components can now place user service unit files with <code>{userunitdir}</code>.</li>
-              <li>User-mode <code>anolisa install</code> now activates declared user-scope services.</li>
-            </ul>
-          </div>
-          <div class="release-body-section">
-            <h3>Changed</h3>
-            <ul>
-              <li>User-mode <code>anolisa install</code> now resolves <code>%u</code> service templates to the current user.</li>
-              <li>System-mode <code>anolisa install</code> now preserves <code>%u</code> user service templates for later per-user activation.</li>
-              <li><code>anolisa uninstall</code> now reloads systemd after removing declared service unit files.</li>
-              <li><code>anolisa restart &lt;component&gt;</code> now restarts user-scope services from user-mode installs.</li>
-            </ul>
-          </div>
-          <div class="release-body-section">
-            <h3>Fixed</h3>
-            <ul>
-              <li><code>anolisa install</code> now starts freshly installed service units without a manual systemd reload.</li>
-              <li><code>anolisa uninstall</code> now deactivates user-scope services from user-mode installs.</li>
-              <li><code>anolisa adapter enable</code> now finds <code>{datadir}</code> skills from the package directory that provides the adapter.</li>
-            </ul>
-          </div>
-          </div>
-        </article>
         <!-- ANOLISA_CLI_CHANGELOG_END -->
       </div>
 
@@ -777,7 +762,7 @@ h1 span{color:var(--accent-light)}
         <!-- ANOLISA_CHANGELOG_DATA_START -->
         <script type="application/json" id="changelog-data">{
   "limit": 5,
-  "latestVersion": "0.1.18",
+  "latestVersion": "0.1.19",
   "components": [
     {
       "id": "anolisa",
@@ -788,6 +773,22 @@ h1 span{color:var(--accent-light)}
         "en": {
           "label": "EN",
           "releases": [
+            {
+              "version": "0.1.19",
+              "date": "2026-07-02",
+              "sections": [
+                {
+                  "title": "Fixed",
+                  "items": [
+                    "`anolisa adapter disable --dry-run` now previews cleanup without removing adapter receipts or resources.",
+                    "Read-only commands now use downloaded repo config when saving `repo.toml` fails.",
+                    "Component commands now accept package aliases consistently when targeting installed components.",
+                    "Ambiguous package aliases no longer choose an arbitrary installed component.",
+                    "Unknown component names now report no match without querying packages."
+                  ]
+                }
+              ]
+            },
             {
               "version": "0.1.18",
               "date": "2026-07-01",
@@ -930,43 +931,28 @@ h1 span{color:var(--accent-light)}
                   ]
                 }
               ]
-            },
-            {
-              "version": "0.1.14",
-              "date": "2026-06-24",
-              "sections": [
-                {
-                  "title": "Added",
-                  "items": [
-                    "Raw components can now place systemd unit files with `{unitdir}`.",
-                    "Raw components can now place user service unit files with `{userunitdir}`.",
-                    "User-mode `anolisa install` now activates declared user-scope services."
-                  ]
-                },
-                {
-                  "title": "Changed",
-                  "items": [
-                    "User-mode `anolisa install` now resolves `%u` service templates to the current user.",
-                    "System-mode `anolisa install` now preserves `%u` user service templates for later per-user activation.",
-                    "`anolisa uninstall` now reloads systemd after removing declared service unit files.",
-                    "`anolisa restart \u003ccomponent>` now restarts user-scope services from user-mode installs."
-                  ]
-                },
-                {
-                  "title": "Fixed",
-                  "items": [
-                    "`anolisa install` now starts freshly installed service units without a manual systemd reload.",
-                    "`anolisa uninstall` now deactivates user-scope services from user-mode installs.",
-                    "`anolisa adapter enable` now finds `{datadir}` skills from the package directory that provides the adapter."
-                  ]
-                }
-              ]
             }
           ]
         },
         "zh": {
           "label": "中文",
           "releases": [
+            {
+              "version": "0.1.19",
+              "date": "2026-07-02",
+              "sections": [
+                {
+                  "title": "修复",
+                  "items": [
+                    "`anolisa adapter disable --dry-run` 现只预览清理。",
+                    "只读命令保存 `repo.toml` 失败时仍可使用已下载配置。",
+                    "组件命令现可一致接受软件包别名。",
+                    "模糊软件包别名不再误选已安装组件。",
+                    "未知组件名不再先查询软件包。"
+                  ]
+                }
+              ]
+            },
             {
               "version": "0.1.18",
               "date": "2026-07-01",
@@ -1106,37 +1092,6 @@ h1 span{color:var(--accent-light)}
                   "items": [
                     "`anolisa adapter enable` 现按包内元数据展开 `{datadir}`。",
                     "`anolisa uninstall` 和 `forget` 后 adapter 不再见旧元数据。"
-                  ]
-                }
-              ]
-            },
-            {
-              "version": "0.1.14",
-              "date": "2026-06-24",
-              "sections": [
-                {
-                  "title": "新增",
-                  "items": [
-                    "raw 组件现可用 `{unitdir}` 放置系统单元。",
-                    "raw 组件现可用 `{userunitdir}` 放置用户单元。",
-                    "用户模式 `anolisa install` 现会激活用户服务。"
-                  ]
-                },
-                {
-                  "title": "变更",
-                  "items": [
-                    "用户模式 `anolisa install` 现将 `%u` 展开为当前用户。",
-                    "系统模式 `anolisa install` 现保留 `%u` 用户模板。",
-                    "`anolisa uninstall` 删除单元文件后现会重载 systemd。",
-                    "`anolisa restart \u003ccomponent>` 现会重启用户服务。"
-                  ]
-                },
-                {
-                  "title": "修复",
-                  "items": [
-                    "`anolisa install` 现无需手动重载即可启动新单元。",
-                    "`anolisa uninstall` 现会停用用户模式安装的服务。",
-                    "`anolisa adapter enable` 现从包目录查找 `{datadir}` 技能。"
                   ]
                 }
               ]
