@@ -55,12 +55,10 @@ async def prompt_scan_handler(
     ``degraded_reason`` field so callers can distinguish full-fidelity
     results from rule-only fallback results.
 
-    Verdict semantics change under degradation: in STANDARD/STRICT mode an
-    L1 rule-engine hit that the L2 ML classifier would *not* confirm yields
-    ``WARN`` (a possible false-positive), but in degraded FAST mode L1 is
-    the sole authority so the same input yields ``DENY``.  Callers that want
-    to avoid false-positive blocks during the cold-start window may treat a
-    degraded ``DENY`` as a ``WARN`` (alert and log without blocking).
+    Under degradation a backend ``DENY`` (L1-only, no L2 confirmation) is
+    rewritten to ``WARN`` to avoid blocking on a possible L1 false-positive
+    during the cold-start window.  Raw verdict kept in
+    ``degraded_original_verdict`` for audit.
 
     Modes outside ``fast``/``standard``/``strict`` (notably the beta
     ``multi_turn`` L4 mode) are rejected up front with ``BadRequestError``.
@@ -101,7 +99,7 @@ async def prompt_scan_handler(
     )
 
     if degraded:
-        result = _inject_degraded_metadata(result, degraded_reason)
+        result = _apply_degraded_semantics(result, degraded_reason)
 
     return _action_result_to_handler_result(result)
 
@@ -152,9 +150,17 @@ def _build_degraded_reason(state: PromptScanRuntimeState, requested_mode: str) -
     return ", ".join(parts)
 
 
-def _inject_degraded_metadata(result: ActionResult, reason: str) -> ActionResult:
-    """Inject degraded=true into an ActionResult's data dict (non-mutating)."""
+def _apply_degraded_semantics(result: ActionResult, reason: str) -> ActionResult:
+    """Rewrite a degraded backend DENY to WARN (non-mutating).
+
+    Degradation runs L1 only (no L2 to confirm), so an L1 hit yields DENY.
+    Rewrite to WARN to avoid blocking on a possible L1 false-positive.
+    Raw verdict kept in ``degraded_original_verdict`` for audit.
+    """
     data = dict(result.data) if result.data else {}
+    if data.get("verdict") == "deny":
+        data["verdict"] = "warn"
+        data["degraded_original_verdict"] = "deny"
     data["degraded"] = True
     data["degraded_reason"] = reason
     stdout = json.dumps(data, indent=2, ensure_ascii=False)
