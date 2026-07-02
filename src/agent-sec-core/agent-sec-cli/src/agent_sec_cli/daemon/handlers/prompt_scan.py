@@ -1,9 +1,10 @@
 """Daemon handler for the scan-prompt CLI-compatible method."""
 
 import asyncio
+import json
 from typing import Any
 
-from agent_sec_cli.daemon.errors import UnavailableError
+from agent_sec_cli.daemon.errors import BadRequestError
 from agent_sec_cli.daemon.protocol import DaemonRequest
 from agent_sec_cli.daemon.registry import (
     HandlerResult,
@@ -11,6 +12,19 @@ from agent_sec_cli.daemon.registry import (
     MethodSpec,
 )
 from agent_sec_cli.daemon.runtime import DaemonRuntime
+from agent_sec_cli.security_middleware.result import ActionResult
+
+_MODEL_FREE_MODES = frozenset({"fast"})
+# Modes that depend on the BERT-based L2/L3 model and are degraded to FAST
+# when that model is not yet loaded.
+_MODEL_REQUIRED_MODES = frozenset({"standard", "strict"})
+# The complete set of modes the daemon is willing to route. Anything outside
+# this set — including the beta ``multi_turn`` L4 mode, which calls Ollama
+# directly and is never routed through the daemon — is rejected up front so
+# callers get a stable, daemon-owned error rather than either a
+# mis-parameterised backend call or a backend message that advertises modes
+# the daemon itself refuses.
+_SUPPORTED_MODES = _MODEL_FREE_MODES | _MODEL_REQUIRED_MODES
 
 
 def register_prompt_scan_methods(registry: MethodRegistry) -> None:
@@ -30,18 +44,66 @@ def register_prompt_scan_methods(registry: MethodRegistry) -> None:
 async def prompt_scan_handler(
     request: DaemonRequest, runtime: DaemonRuntime
 ) -> HandlerResult:
-    """Execute prompt scanning through security middleware."""
-    prompt_scan_state = runtime.prompt_scan_state
-    if prompt_scan_state.status != "ready" or not prompt_scan_state.loaded:
-        raise UnavailableError(_prompt_unavailable_message(runtime))
+    """Execute prompt scanning through security middleware.
 
+    When the ML model is not yet loaded (cold-start window), the handler
+    degrades gracefully to FAST mode (L1 rule-engine only) instead of
+    returning verdict=error.  The response carries ``degraded=true`` and a
+    ``degraded_reason`` field so callers can distinguish full-fidelity
+    results from rule-only fallback results.
+
+    Verdict semantics change under degradation: in STANDARD/STRICT mode an
+    L1 rule-engine hit that the L2 ML classifier would *not* confirm yields
+    ``WARN`` (a possible false-positive), but in degraded FAST mode L1 is
+    the sole authority so the same input yields ``DENY``.  Callers that want
+    to avoid false-positive blocks during the cold-start window may treat a
+    degraded ``DENY`` as a ``WARN`` (alert and log without blocking).
+
+    Modes outside ``fast``/``standard``/``strict`` (notably the beta
+    ``multi_turn`` L4 mode) are rejected up front with ``BadRequestError``.
+    """
     params = request.params
+    requested_mode = _string_param(params, "mode", default="standard").lower()
+
+    if requested_mode not in _SUPPORTED_MODES:
+        allowed = ", ".join(sorted(_SUPPORTED_MODES))
+        raise BadRequestError(
+            f"prompt_scan mode '{requested_mode}' must be one of: {allowed}"
+        )
+
+    text = _string_param(params, "text")
+    source = _string_param(params, "source")
+
+    prompt_scan_state = runtime.prompt_scan_state
+    model_ready = prompt_scan_state.status == "ready" and prompt_scan_state.loaded
+
+    # Determine effective mode and whether we are degrading.
+    degraded = False
+    degraded_reason = ""
+    if requested_mode in _MODEL_FREE_MODES or model_ready:
+        # Fast mode never needs the model; other modes pass through when ready.
+        effective_mode = requested_mode
+    else:
+        # Model-dependent mode (standard/strict) but model not ready — fall
+        # back to FAST (L1 rule engine only).
+        effective_mode = "fast"
+        degraded = True
+        degraded_reason = (
+            f"model not ready (status={prompt_scan_state.status}), "
+            f"degraded from mode='{requested_mode}' to mode='fast' "
+            "(L1 rule-engine only)"
+        )
+
     result = await asyncio.to_thread(
         _invoke_prompt_scan,
-        text=_string_param(params, "text"),
-        mode=_string_param(params, "mode", default="standard"),
-        source=_string_param(params, "source"),
+        text=text,
+        mode=effective_mode,
+        source=source,
     )
+
+    if degraded:
+        result = _inject_degraded_metadata(result, degraded_reason)
+
     return _action_result_to_handler_result(result)
 
 
@@ -64,6 +126,21 @@ def _invoke_prompt_scan(
     )
 
 
+def _inject_degraded_metadata(result: ActionResult, reason: str) -> ActionResult:
+    """Inject degraded=true into an ActionResult's data dict (non-mutating)."""
+    data = dict(result.data) if result.data else {}
+    data["degraded"] = True
+    data["degraded_reason"] = reason
+    stdout = json.dumps(data, indent=2, ensure_ascii=False)
+    return ActionResult(
+        success=result.success,
+        data=data,
+        stdout=stdout,
+        error=result.error,
+        exit_code=result.exit_code,
+    )
+
+
 def _action_result_to_handler_result(result: Any) -> HandlerResult:
     return HandlerResult(
         data=result.data,
@@ -82,36 +159,3 @@ def _string_param(
     if value is None:
         return default
     return str(value)
-
-
-def _prompt_unavailable_message(runtime: DaemonRuntime) -> str:
-    prompt_scan_state = runtime.prompt_scan_state.to_dict()
-    status = prompt_scan_state.get("status", "unknown")
-    model = prompt_scan_state.get("model")
-    last_error = prompt_scan_state.get("last_error")
-
-    if status == "downloading":
-        parts = [
-            "prompt scanner is not ready: model download is still in progress",
-            "status=downloading",
-        ]
-    elif status == "loading":
-        parts = [
-            "prompt scanner is not ready: model download completed and the model is loading",
-            "status=loading",
-        ]
-    elif status == "degraded":
-        parts = [
-            "prompt scanner preload failed",
-            "retry with `agent-sec-cli scan-prompt warmup`",
-            "then restart the agent-sec daemon process",
-            "status=degraded",
-        ]
-    else:
-        parts = [f"prompt scanner is not ready: status={status}"]
-
-    if model:
-        parts.append(f"model={model}")
-    if last_error:
-        parts.append(f"last_error={last_error}")
-    return ", ".join(parts)

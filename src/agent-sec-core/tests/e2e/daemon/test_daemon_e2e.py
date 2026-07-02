@@ -230,7 +230,7 @@ def test_daemon_unknown_method_returns_structured_error(
     assert _has_request_log(tmp_path, response["request_id"], "unknown.method")
 
 
-def test_daemon_scan_prompt_returns_unavailable_until_model_ready(
+def test_daemon_scan_prompt_degrades_to_fast_when_model_not_ready(
     daemon_command: list[str], tmp_path: Path
 ) -> None:
     socket_path = tmp_path / "runtime" / "daemon.sock"
@@ -240,7 +240,7 @@ def test_daemon_scan_prompt_returns_unavailable_until_model_ready(
         response = _call_daemon(
             socket_path,
             {
-                "id": "e2e-scan-prompt-not-ready",
+                "id": "e2e-scan-prompt-degrade",
                 "method": "scan-prompt",
                 "params": {
                     "text": "hello",
@@ -254,11 +254,13 @@ def test_daemon_scan_prompt_returns_unavailable_until_model_ready(
 
     assert response["request_id"] != "e2e-scan-prompt-not-ready"
     _assert_uuid(response["request_id"])
-    assert response["ok"] is False
-    assert response["exit_code"] == 1
-    assert response["error"]["code"] == "unavailable"
-    assert "prompt scanner is not ready" in response["stderr"]
-    assert "status=pending" in response["stderr"]
+    # Handler degrades to FAST mode instead of returning an error.
+    assert response["ok"] is True
+    assert response["exit_code"] == 0
+    assert response["data"]["degraded"] is True
+    # The exact status depends on whether the preload job has started; only
+    # assert that a status is reported rather than pinning it to "pending".
+    assert "status=" in response["data"]["degraded_reason"]
     assert output.returncode == 0
     assert _has_request_log(tmp_path, response["request_id"], "scan-prompt")
 

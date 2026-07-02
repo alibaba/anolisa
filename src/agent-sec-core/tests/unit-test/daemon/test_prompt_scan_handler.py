@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 from agent_sec_cli.correlation_context import TraceContext
-from agent_sec_cli.daemon.errors import UnavailableError
+from agent_sec_cli.daemon.errors import BadRequestError
 from agent_sec_cli.daemon.handlers.prompt_scan import prompt_scan_handler
 from agent_sec_cli.daemon.protocol import DaemonRequest
 from agent_sec_cli.daemon.request_context import daemon_request_context
@@ -13,85 +13,199 @@ from agent_sec_cli.daemon.runtime import DaemonRuntime
 from agent_sec_cli.security_middleware.result import ActionResult
 
 
-def test_prompt_scan_handler_rejects_when_prompt_runtime_not_ready(tmp_path: Path):
+def test_prompt_scan_handler_degrades_to_fast_when_model_not_ready(
+    monkeypatch, tmp_path: Path
+):
+    """When model is not ready, handler degrades to FAST mode instead of raising."""
     runtime = DaemonRuntime(socket_path=tmp_path / "daemon.sock")
+    # Default state: status="pending", loaded=False
+    captured = {}
+
+    def fake_invoke_prompt_scan(**kwargs):
+        captured.update(kwargs)
+        return ActionResult(
+            success=True,
+            data={"ok": True, "verdict": "pass"},
+            stdout='{"ok": true, "verdict": "pass"}',
+            exit_code=0,
+        )
+
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.handlers.prompt_scan._invoke_prompt_scan",
+        fake_invoke_prompt_scan,
+    )
     request = DaemonRequest(
         method="scan-prompt",
         request_id="req-prompt",
         params={"text": "hello", "mode": "standard"},
     )
 
-    with pytest.raises(UnavailableError, match="prompt scanner is not ready"):
-        asyncio.run(prompt_scan_handler(request, runtime))
+    result = asyncio.run(prompt_scan_handler(request, runtime))
+
+    # Should have degraded to fast mode
+    assert captured["mode"] == "fast"
+    assert captured["text"] == "hello"
+    assert captured["source"] == ""
+    assert result.data["degraded"] is True
+    assert "degraded_reason" in result.data
+    assert "status=pending" in result.data["degraded_reason"]
+    assert result.exit_code == 0
 
 
 @pytest.mark.parametrize(
-    ("status", "model", "last_error", "expected_parts"),
-    [
-        (
-            "pending",
-            None,
-            None,
-            ("prompt scanner is not ready: status=pending",),
-        ),
-        (
-            "downloading",
-            "LLM-Research/Llama-Prompt-Guard-2-86M",
-            None,
-            (
-                "model download is still in progress",
-                "status=downloading",
-                "model=LLM-Research/Llama-Prompt-Guard-2-86M",
-            ),
-        ),
-        (
-            "loading",
-            "LLM-Research/Llama-Prompt-Guard-2-86M",
-            None,
-            (
-                "model download completed and the model is loading",
-                "status=loading",
-                "model=LLM-Research/Llama-Prompt-Guard-2-86M",
-            ),
-        ),
-        (
-            "degraded",
-            "LLM-Research/Llama-Prompt-Guard-2-86M",
-            "forced preload failure",
-            (
-                "prompt scanner preload failed",
-                "agent-sec-cli scan-prompt warmup",
-                "restart the agent-sec daemon process",
-                "status=degraded",
-                "model=LLM-Research/Llama-Prompt-Guard-2-86M",
-                "last_error=forced preload failure",
-            ),
-        ),
-    ],
+    "status",
+    ["pending", "downloading", "loading", "degraded"],
 )
-def test_prompt_scan_handler_unavailable_message_describes_preload_state(
+def test_prompt_scan_handler_degrades_for_all_non_ready_states(
     status: str,
-    model: str | None,
-    last_error: str | None,
-    expected_parts: tuple[str, ...],
+    monkeypatch,
     tmp_path: Path,
 ):
+    """All non-ready states trigger degradation to fast mode."""
     runtime = DaemonRuntime(socket_path=tmp_path / "daemon.sock")
     runtime.prompt_scan_state.status = status
-    runtime.prompt_scan_state.model = model
-    runtime.prompt_scan_state.last_error = last_error
+    runtime.prompt_scan_state.loaded = False
+    captured = {}
+
+    def fake_invoke_prompt_scan(**kwargs):
+        captured.update(kwargs)
+        return ActionResult(
+            success=True,
+            data={"ok": True, "verdict": "pass"},
+            stdout='{"ok": true, "verdict": "pass"}',
+            exit_code=0,
+        )
+
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.handlers.prompt_scan._invoke_prompt_scan",
+        fake_invoke_prompt_scan,
+    )
     request = DaemonRequest(
         method="scan-prompt",
         request_id="req-prompt",
         params={"text": "hello", "mode": "standard"},
     )
 
-    with pytest.raises(UnavailableError) as exc_info:
+    result = asyncio.run(prompt_scan_handler(request, runtime))
+
+    assert captured["mode"] == "fast"
+    assert captured["text"] == "hello"
+    assert result.data["degraded"] is True
+    assert f"status={status}" in result.data["degraded_reason"]
+
+
+def test_prompt_scan_handler_fast_mode_bypasses_model_check(
+    monkeypatch, tmp_path: Path
+):
+    """FAST mode does not require model readiness — no degradation flag."""
+    runtime = DaemonRuntime(socket_path=tmp_path / "daemon.sock")
+    # Model not ready
+    runtime.prompt_scan_state.status = "downloading"
+    runtime.prompt_scan_state.loaded = False
+    captured = {}
+
+    def fake_invoke_prompt_scan(**kwargs):
+        captured.update(kwargs)
+        return ActionResult(
+            success=True,
+            data={"ok": True, "verdict": "pass"},
+            stdout='{"ok": true, "verdict": "pass"}',
+            exit_code=0,
+        )
+
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.handlers.prompt_scan._invoke_prompt_scan",
+        fake_invoke_prompt_scan,
+    )
+    request = DaemonRequest(
+        method="scan-prompt",
+        request_id="req-prompt",
+        params={"text": "hello", "mode": "fast"},
+    )
+
+    result = asyncio.run(prompt_scan_handler(request, runtime))
+
+    # Fast mode should pass through without degradation
+    assert captured["mode"] == "fast"
+    assert "degraded" not in result.data
+    assert result.exit_code == 0
+
+
+def test_prompt_scan_handler_rejects_multi_turn_mode(tmp_path: Path):
+    """multi_turn (L4) is a beta mode that calls Ollama directly and is never
+    routed through the daemon — it is rejected up front together with any other
+    unsupported mode, with a daemon-owned error that does not advertise it."""
+    runtime = DaemonRuntime(socket_path=tmp_path / "daemon.sock")
+    request = DaemonRequest(
+        method="scan-prompt",
+        request_id="req-prompt",
+        params={"text": "hello", "mode": "multi_turn"},
+    )
+
+    with pytest.raises(BadRequestError, match="must be one of") as exc_info:
         asyncio.run(prompt_scan_handler(request, runtime))
 
-    message = exc_info.value.message
-    for expected_part in expected_parts:
-        assert expected_part in message
+    # The supported-mode list must not include multi_turn (the daemon refuses
+    # it). The input mode may be echoed back, but it must never appear as a
+    # valid choice.
+    assert "fast, standard, strict" in exc_info.value.message
+
+
+def test_prompt_scan_handler_rejects_unknown_mode(tmp_path: Path):
+    """An unknown mode is rejected up front by the daemon rather than passed
+    through to the backend — the daemon owns the supported-mode list, so the
+    error never advertises modes it itself refuses (e.g. multi_turn)."""
+    runtime = DaemonRuntime(socket_path=tmp_path / "daemon.sock")
+    request = DaemonRequest(
+        method="scan-prompt",
+        request_id="req-prompt",
+        params={"text": "hello", "mode": "bogus"},
+    )
+
+    with pytest.raises(BadRequestError, match="must be one of") as exc_info:
+        asyncio.run(prompt_scan_handler(request, runtime))
+
+    assert "multi_turn" not in exc_info.value.message
+    assert "bogus" in exc_info.value.message
+
+
+def test_prompt_scan_handler_injects_degraded_metadata_on_backend_failure(
+    monkeypatch, tmp_path: Path
+):
+    """Degraded flag is still injected when the backend itself fails."""
+    runtime = DaemonRuntime(socket_path=tmp_path / "daemon.sock")
+    runtime.prompt_scan_state.status = "pending"
+    runtime.prompt_scan_state.loaded = False
+    captured = {}
+
+    def fake_invoke_prompt_scan(**kwargs):
+        captured.update(kwargs)
+        return ActionResult(
+            success=False,
+            data={},
+            error="prompt_scan error: no input text provided",
+            exit_code=1,
+        )
+
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.handlers.prompt_scan._invoke_prompt_scan",
+        fake_invoke_prompt_scan,
+    )
+    request = DaemonRequest(
+        method="scan-prompt",
+        request_id="req-prompt",
+        params={"text": "", "mode": "standard"},
+    )
+
+    result = asyncio.run(prompt_scan_handler(request, runtime))
+
+    # Degraded metadata injected even when the scan fails.
+    assert captured["mode"] == "fast"
+    assert result.data["degraded"] is True
+    assert "degraded_reason" in result.data
+    # Error semantics preserved.
+    assert result.stderr == "prompt_scan error: no input text provided"
+    assert result.exit_code == 1
 
 
 def test_prompt_scan_handler_invokes_middleware_with_prompt_params(
