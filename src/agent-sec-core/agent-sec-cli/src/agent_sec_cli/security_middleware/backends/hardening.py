@@ -165,10 +165,23 @@ class HardeningBackend(BaseBackend):
         data["returncode"] = proc.returncode
         self._parse_output(clean_output, data)
 
+        # loongshield may return exit 0 even when it encounters errors
+        # (e.g. missing config file, ENFORCE-ERROR on reinforce without root).
+        # Detect such conditions in the parsed output and override the exit
+        # code so the CLI surface reports failure to callers.
+        has_output_errors = bool(data.get("failures")) or bool(
+            data.get("fixed_items")
+        )
+        has_error_lines = bool(re.search(r"\[ERROR", clean_output))
+
+        effective_exit = proc.returncode
+        if effective_exit == 0 and (has_output_errors or has_error_lines):
+            effective_exit = 1
+
         return ActionResult(
-            success=(proc.returncode == 0),
+            success=(effective_exit == 0),
             stdout=clean_output,
-            exit_code=proc.returncode,
+            exit_code=effective_exit,
             data=data,
         )
 

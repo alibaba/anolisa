@@ -21,7 +21,10 @@ class ErrManifestMissing(SkillVerifyError):
 
     def __init__(self, skill_name: str) -> None:
         super().__init__(
-            f"ERR_MANIFEST_MISSING: Missing .skill-meta/Manifest.json in '{skill_name}'"
+            f"ERR_MANIFEST_MISSING: Missing .skill-meta/Manifest.json in '{skill_name}'.\n"
+            f"  Cause: the skill directory has not been signed, or the manifest was deleted.\n"
+            f"  Please run `agent-sec-cli sign-skill --skill {skill_name}` to create it,\n"
+            f"  or use `agent-sec-cli verify --help` for usage details."
         )
 
 
