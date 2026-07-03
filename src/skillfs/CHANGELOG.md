@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-03
+
+### Added
+- Managed mount supervision can recover stale FUSE mounts and bound recovery
+  retries during repeated starts.
+
+### Changed
+- English and Chinese README guidance now covers managed mounts, in-place
+  operation, security boundaries, and troubleshooting.
+
+### Fixed
+- Post-publish grace reads fallback skill files from source paths after
+  installers finish.
+- `skillfs validate` now reports parse failures in the status summary.
+- In-place authoring supports new skills and pending-install ownership changes.
+- Managed stop and runtime-dir handling avoid stale ownership and unbounded
+  recovery retries.
+- Daemon-facing backing roots under PrivateTmp are rejected before mount
+  startup.
+- FUSE smoke cleanup handles leftover mounts and temporary paths more reliably.
+
 ## [0.3.0] - 2026-06-26
 
 ### Added
