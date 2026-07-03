@@ -97,6 +97,7 @@ Built with maturin as a Rust native Python extension.
 
 %post -n agent-sec-cli
 %systemd_user_post agent-sec-core.service
+systemctl --user enable agent-sec-core.service 2>/dev/null || true
 
 %preun -n agent-sec-cli
 %systemd_user_preun agent-sec-core.service
