@@ -1,0 +1,283 @@
+use anolisa_core::state::{InstalledObject, InstalledState, ObjectKind, ObjectStatus, Ownership};
+use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError};
+
+use crate::commands::common;
+use crate::resolution::ComponentIndexEntry;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LocalState {
+    Observed,
+    Tracked,
+    Installed,
+    Drifted,
+    Missing,
+    Failed,
+    Degraded,
+    Disabled,
+    NotInstalled,
+}
+
+impl LocalState {
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::Observed => "observed",
+            Self::Tracked => "tracked",
+            Self::Installed => "installed",
+            Self::Drifted => "drifted",
+            Self::Missing => "missing",
+            Self::Failed => "failed",
+            Self::Degraded => "degraded",
+            Self::Disabled => "disabled",
+            Self::NotInstalled => "not_installed",
+        }
+    }
+
+    pub(super) const fn matches_installed_filter(self) -> bool {
+        match self {
+            Self::Observed | Self::Tracked | Self::Installed | Self::Degraded => true,
+            Self::Drifted | Self::Missing | Self::Failed | Self::Disabled | Self::NotInstalled => {
+                false
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListAction {
+    Install,
+    Status,
+}
+
+impl ListAction {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Install => "install",
+            Self::Status => "status",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct LocalProjection {
+    pub(super) backend: Option<String>,
+    pub(super) local_state: LocalState,
+    pub(super) ownership: Option<Ownership>,
+    action: ListAction,
+    pub(super) status: String,
+    pub(super) rpm_package: Option<String>,
+    pub(super) rpm_evr: Option<String>,
+    pub(super) rpm_arch: Option<String>,
+    pub(super) rpm_source_repo: Option<String>,
+}
+
+impl LocalProjection {
+    #[cfg(test)]
+    pub(super) const fn local_state_label(&self) -> &'static str {
+        self.local_state.label()
+    }
+
+    pub(super) fn ownership_label(&self) -> &'static str {
+        match self.ownership {
+            Some(o) => o.label(),
+            // Observed RPMs are owned by the package manager even though
+            // ANOLISA has not claimed any ownership yet.
+            None if self.local_state == LocalState::Observed => "rpm",
+            None => "none",
+        }
+    }
+
+    pub(super) const fn action_label(&self) -> &'static str {
+        self.action.label()
+    }
+}
+
+pub(super) fn project_component(
+    entry: &ComponentIndexEntry,
+    state: &InstalledState,
+    rpm_query: Option<&dyn PackageQuery>,
+) -> LocalProjection {
+    match state.find_object(ObjectKind::Component, &entry.name) {
+        Some(object) => project_tracked_object(object, rpm_query),
+        None => project_untracked_entry(entry, rpm_query),
+    }
+}
+
+fn project_untracked_entry(
+    entry: &ComponentIndexEntry,
+    rpm_query: Option<&dyn PackageQuery>,
+) -> LocalProjection {
+    match observed_rpm_info(entry, rpm_query) {
+        Some(info) => projection_from_observed_rpm(info),
+        None => LocalProjection {
+            backend: None,
+            local_state: LocalState::NotInstalled,
+            ownership: None,
+            action: ListAction::Install,
+            status: "not_installed".to_string(),
+            rpm_package: None,
+            rpm_evr: None,
+            rpm_arch: None,
+            rpm_source_repo: None,
+        },
+    }
+}
+
+fn project_tracked_object(
+    object: &InstalledObject,
+    rpm_query: Option<&dyn PackageQuery>,
+) -> LocalProjection {
+    let ownership = object.effective_ownership();
+    let base_state = tracked_state_without_rpm_drift(object.status, ownership);
+    let local_state = match base_state {
+        LocalState::Installed | LocalState::Tracked => {
+            rpm_drift_state(object, rpm_query).unwrap_or(base_state)
+        }
+        LocalState::Observed
+        | LocalState::Drifted
+        | LocalState::Missing
+        | LocalState::Failed
+        | LocalState::Degraded
+        | LocalState::Disabled
+        | LocalState::NotInstalled => base_state,
+    };
+    let rpm_info = object.rpm_metadata.as_ref();
+
+    LocalProjection {
+        backend: Some(backend_label_for_ownership(ownership).to_string()),
+        local_state,
+        ownership: Some(ownership),
+        action: ListAction::Status,
+        status: common::object_status_str(object.status).to_string(),
+        rpm_package: rpm_info.map(|meta| meta.package_name.clone()),
+        rpm_evr: rpm_info.and_then(|meta| meta.evr.clone()),
+        rpm_arch: rpm_info.and_then(|meta| meta.arch.clone()),
+        rpm_source_repo: rpm_info.and_then(|meta| meta.source_repo.clone()),
+    }
+}
+
+fn tracked_state_without_rpm_drift(status: ObjectStatus, ownership: Ownership) -> LocalState {
+    match status {
+        ObjectStatus::Installed => match ownership {
+            Ownership::RawManaged | Ownership::RpmManaged => LocalState::Installed,
+            Ownership::RpmObserved => LocalState::Tracked,
+        },
+        ObjectStatus::Partial => LocalState::Degraded,
+        ObjectStatus::Disabled => LocalState::Disabled,
+        ObjectStatus::Failed => LocalState::Failed,
+        ObjectStatus::Adopted => match ownership {
+            Ownership::RawManaged | Ownership::RpmManaged => LocalState::Installed,
+            Ownership::RpmObserved => LocalState::Tracked,
+        },
+    }
+}
+
+fn backend_label_for_ownership(ownership: Ownership) -> &'static str {
+    match ownership {
+        Ownership::RawManaged => "raw",
+        Ownership::RpmManaged | Ownership::RpmObserved => "rpm",
+    }
+}
+
+fn rpm_drift_state(
+    object: &InstalledObject,
+    rpm_query: Option<&dyn PackageQuery>,
+) -> Option<LocalState> {
+    let metadata = object.rpm_metadata.as_ref()?;
+    let query = rpm_query?;
+    match query.query_installed(&metadata.package_name) {
+        Ok(Some(info)) => {
+            let live_evr = info.version.to_string();
+            let evr_drifted = metadata.evr.as_deref().is_some_and(|evr| evr != live_evr);
+            let arch_drifted = metadata
+                .arch
+                .as_deref()
+                .is_some_and(|arch| arch != info.arch);
+            if evr_drifted || arch_drifted {
+                Some(LocalState::Drifted)
+            } else {
+                None
+            }
+        }
+        Ok(None) => Some(LocalState::Missing),
+        Err(PackageQueryError::CommandMissing { .. })
+        | Err(PackageQueryError::PermissionDenied { .. })
+        | Err(PackageQueryError::QueryFailed { .. })
+        | Err(PackageQueryError::UnexpectedOutput { .. }) => None,
+    }
+}
+
+fn observed_rpm_info(
+    entry: &ComponentIndexEntry,
+    rpm_query: Option<&dyn PackageQuery>,
+) -> Option<PackageInfo> {
+    let query = rpm_query?;
+
+    // 1. Probe RPM backend package names.
+    for backend in entry.backends.iter().filter(|b| b.kind == "rpm") {
+        if let Some(info) = safe_query_installed(query, &backend.package) {
+            return Some(info);
+        }
+    }
+
+    // 2. Probe RPM package aliases (alternate historical names).
+    for alias in entry.aliases.iter().filter(|a| a.kind == "rpm-package") {
+        if let Some(info) = safe_query_installed(query, &alias.name) {
+            return Some(info);
+        }
+    }
+
+    // 3. Fallback: use `what_provides` for backends that declare a Provides
+    //    capability. This catches legacy RPMs whose package name differs from
+    //    the index entry but still declares `anolisa-component(<name>)`.
+    for backend in entry.backends.iter().filter(|b| b.kind == "rpm") {
+        let Some(capability) = backend.provides.as_deref().filter(|p| !p.is_empty()) else {
+            continue;
+        };
+        if let Some(info) = safe_what_provides(query, capability) {
+            return Some(info);
+        }
+    }
+
+    None
+}
+
+/// Query an installed package, treating all errors as "not found" so the list
+/// command degrades gracefully when `rpm`/`dnf` is absent or the query fails.
+fn safe_query_installed(query: &dyn PackageQuery, package: &str) -> Option<PackageInfo> {
+    match query.query_installed(package) {
+        Ok(Some(mut info)) => {
+            if info.origin.is_none() {
+                info.origin = query.installed_origin(&info.name).ok().flatten();
+            }
+            Some(info)
+        }
+        Ok(None) => None,
+        Err(_) => None,
+    }
+}
+
+/// Resolve a capability to a single installed package via `what_provides`,
+/// then fetch its full info. Returns `None` for zero or ambiguous (>1)
+/// providers so the list summary never picks an arbitrary package.
+fn safe_what_provides(query: &dyn PackageQuery, capability: &str) -> Option<PackageInfo> {
+    let names = query.what_provides_installed(capability).ok()?;
+    if names.len() == 1 {
+        safe_query_installed(query, &names[0])
+    } else {
+        None
+    }
+}
+
+fn projection_from_observed_rpm(info: PackageInfo) -> LocalProjection {
+    LocalProjection {
+        backend: Some("rpm".to_string()),
+        local_state: LocalState::Observed,
+        ownership: None,
+        action: ListAction::Install,
+        status: "not_installed".to_string(),
+        rpm_package: Some(info.name),
+        rpm_evr: Some(info.version.to_string()),
+        rpm_arch: Some(info.arch),
+        rpm_source_repo: info.origin,
+    }
+}
