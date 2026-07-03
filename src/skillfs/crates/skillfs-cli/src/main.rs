@@ -36,6 +36,7 @@ use tracing::{error, info, warn};
 
 mod help_text;
 mod managed;
+mod sls_ops;
 
 // ---------------------------------------------------------------------------
 // CLI Arguments
@@ -421,9 +422,18 @@ async fn run(cli: Cli, raw_args: Vec<String>) -> Result<(), Box<dyn std::error::
                 // Managed mode: spawn a detached supervisor and return once
                 // the mount is ready. The supervisor re-invokes this binary
                 // as a foreground worker using the preserved raw arguments.
-                return managed::run_client(&raw_args, &source, &mountpoint);
+                // Log this public mount invocation too — the detached worker's
+                // own mount record is separate.
+                let start = std::time::Instant::now();
+                let result = managed::run_client(&raw_args, &source, &mountpoint);
+                sls_ops::log_command("mount", start, err_reason(&result));
+                return result;
             }
-            cmd_mount(
+            // Log the mount startup attempt as a best-effort ops record. The
+            // mount may be long-running, so this captures startup success or
+            // failure; the mount-session summary writer remains untouched.
+            let start = std::time::Instant::now();
+            let result = cmd_mount(
                 source,
                 mountpoint,
                 allow_other,
@@ -448,21 +458,53 @@ async fn run(cli: Cli, raw_args: Vec<String>) -> Result<(), Box<dyn std::error::
                 trusted_peer_uid,
                 trusted_peer_gid,
             )
-            .await
+            .await;
+            sls_ops::log_command("mount", start, err_reason(&result));
+            result
         }
         Commands::Classify {
             source,
             primary_count,
             dry_run,
-        } => cmd_classify(source, primary_count, dry_run).await,
-        Commands::Validate { source, format } => cmd_validate(source, format).await,
+        } => {
+            let start = std::time::Instant::now();
+            let result = cmd_classify(source, primary_count, dry_run).await;
+            sls_ops::log_command("classify", start, err_reason(&result));
+            result
+        }
+        Commands::Validate { source, format } => {
+            let start = std::time::Instant::now();
+            let (result, validation_failed) = cmd_validate(source, format).await;
+            // A validation failure exits non-zero but is not a command error;
+            // record it with a concise err_reason before exiting.
+            let reason = match err_reason(&result) {
+                Some(r) => Some(r),
+                None if validation_failed => Some("validation failed".to_string()),
+                None => None,
+            };
+            sls_ops::log_command("validate", start, reason);
+            if result.is_ok() && validation_failed {
+                std::process::exit(1);
+            }
+            result
+        }
         Commands::List {
             source,
             enabled_only,
-        } => cmd_list(source, enabled_only).await,
+        } => {
+            let start = std::time::Instant::now();
+            let result = cmd_list(source, enabled_only).await;
+            sls_ops::log_command("list", start, err_reason(&result));
+            result
+        }
         Commands::Stop { mountpoint } => managed::run_stop(&mountpoint),
         Commands::Supervise { instance } => managed::run_supervisor(&instance),
     }
+}
+
+/// Extract a concise error string from a command result for the SLS ops log.
+fn err_reason<T>(result: &Result<T, Box<dyn std::error::Error>>) -> Option<String> {
+    result.as_ref().err().map(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -2313,17 +2355,29 @@ async fn cmd_classify(
 // Validate Command
 // ---------------------------------------------------------------------------
 
+/// Validate skills in `source`.
+///
+/// Returns `(result, validation_failed)`. `validation_failed` is `true` when
+/// one or more skills failed to load or parse; the caller records an SLS ops
+/// record and then exits non-zero. Directory-level problems are returned as
+/// `Err` in the result.
 async fn cmd_validate(
     source: PathBuf,
     format: OutputFormat,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> (Result<(), Box<dyn std::error::Error>>, bool) {
     info!(source = %source.display(), "validating skills");
 
     if !source.exists() {
-        return Err(format!("Source directory does not exist: {}", source.display()).into());
+        return (
+            Err(format!("Source directory does not exist: {}", source.display()).into()),
+            false,
+        );
     }
     if !source.is_dir() {
-        return Err(format!("Source is not a directory: {}", source.display()).into());
+        return (
+            Err(format!("Source is not a directory: {}", source.display()).into()),
+            false,
+        );
     }
 
     let mut store = SkillStore::new();
@@ -2465,15 +2519,14 @@ async fn cmd_validate(
                     }
                 }).collect::<Vec<_>>()
             });
-            println!("{}", serde_json::to_string_pretty(&result)?);
+            match serde_json::to_string_pretty(&result) {
+                Ok(s) => println!("{}", s),
+                Err(e) => return (Err(e.into()), failed > 0),
+            }
         }
     }
 
-    if failed > 0 {
-        std::process::exit(1);
-    }
-
-    Ok(())
+    (Ok(()), failed > 0)
 }
 
 // ---------------------------------------------------------------------------
