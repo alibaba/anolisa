@@ -26,6 +26,8 @@ PID_FILE="$TMP_ROOT/skillfs.pid"
 LOG_FILE="$TMP_ROOT/skillfs.log"
 MOUNT_PID=""
 MANAGED_MOUNT_DIR=""
+FAIL_XDG=""
+FAIL_MOUNT_DIR=""
 
 info() {
 	echo "[skillfs-e2e] $1"
@@ -46,8 +48,11 @@ fail() {
 
 cleanup() {
 	set +e
-	if grep -Fq " $MOUNT_DIR " /proc/mounts 2>/dev/null; then
-		fusermount3 -u "$MOUNT_DIR" >/dev/null 2>&1 || true
+	if [[ -n "$FAIL_MOUNT_DIR" ]]; then
+		if [[ -n "$FAIL_XDG" ]]; then
+			XDG_RUNTIME_DIR="$FAIL_XDG" "$BIN" stop "$FAIL_MOUNT_DIR" >/dev/null 2>&1 || true
+		fi
+		force_unmount "$FAIL_MOUNT_DIR" || true
 	fi
 	if [[ -n "$MOUNT_PID" ]] && kill -0 "$MOUNT_PID" 2>/dev/null; then
 		kill "$MOUNT_PID" 2>/dev/null || true
@@ -55,13 +60,43 @@ cleanup() {
 	fi
 	if [[ -n "$MANAGED_MOUNT_DIR" ]]; then
 		"$BIN" stop "$MANAGED_MOUNT_DIR" >/dev/null 2>&1 || true
-		if grep -Fq " $MANAGED_MOUNT_DIR " /proc/mounts 2>/dev/null; then
-			fusermount3 -u "$MANAGED_MOUNT_DIR" >/dev/null 2>&1 || true
-		fi
+		force_unmount "$MANAGED_MOUNT_DIR" || true
 	fi
+	force_unmount "$MOUNT_DIR" || true
+	cleanup_mounts_under_tmp
 	rm -rf "$TMP_ROOT"
 }
 trap cleanup EXIT
+
+is_mounted() {
+	local mountpoint="$1"
+	grep -Fq " $mountpoint " /proc/mounts 2>/dev/null
+}
+
+force_unmount() {
+	local mountpoint="$1"
+
+	for _ in $(seq 1 50); do
+		if ! is_mounted "$mountpoint"; then
+			return 0
+		fi
+		fusermount3 -u "$mountpoint" >/dev/null 2>&1 \
+			|| fusermount3 -u -z "$mountpoint" >/dev/null 2>&1 \
+			|| umount -l "$mountpoint" >/dev/null 2>&1 \
+			|| true
+		sleep 0.1
+	done
+	return 1
+}
+
+cleanup_mounts_under_tmp() {
+	awk -v root="$TMP_ROOT" '$2 == root || index($2, root "/") == 1 { print $2 }' /proc/mounts 2>/dev/null \
+		| sort -r \
+		| while read -r mountpoint; do
+			[[ -n "$mountpoint" ]] || continue
+			force_unmount "$mountpoint" || true
+		done
+}
 
 assert_contains() {
 	local haystack="$1"

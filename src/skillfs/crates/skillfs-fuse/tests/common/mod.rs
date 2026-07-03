@@ -1,8 +1,8 @@
 //! Shared FUSE test harness for SkillFS Phase 1 acceptance tests.
 //!
 //! `MountFixture` owns the temp source dir, the optional separate mount-point,
-//! and the `MountHandle`. Drop unmounts via `fusermount3 -u` and lets `tempfile`
-//! clean up the underlying directories.
+//! and the `MountHandle`. Drop verifies the FUSE mount is gone before `tempfile`
+//! cleans up the underlying directories.
 //!
 //! Each integration test file in `crates/skillfs-fuse/tests/*.rs` is compiled
 //! as its own crate, so individual files only consume a subset of the items
@@ -244,20 +244,53 @@ impl MountFixture {
     }
 }
 
+fn is_mounted(path: &Path) -> bool {
+    let Ok(mounts) = std::fs::read_to_string("/proc/mounts") else {
+        return false;
+    };
+    let target = path.to_string_lossy();
+    mounts
+        .lines()
+        .any(|line| line.split_whitespace().nth(1) == Some(&*target))
+}
+
+fn force_unmount(path: &Path) {
+    for _ in 0..50 {
+        if !is_mounted(path) {
+            return;
+        }
+
+        let mountpoint = path.to_string_lossy().to_string();
+        let _ = std::process::Command::new("fusermount3")
+            .args(["-u", mountpoint.as_str()])
+            .output();
+        let _ = std::process::Command::new("fusermount3")
+            .args(["-u", "-z", mountpoint.as_str()])
+            .output();
+        let _ = std::process::Command::new("umount")
+            .args(["-l", mountpoint.as_str()])
+            .output();
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    if is_mounted(path) {
+        eprintln!("WARN: leaked SkillFS FUSE mount at {}", path.display());
+    }
+}
+
 impl Drop for MountFixture {
     fn drop(&mut self) {
-        // Drop the join handle so the FUSE thread can exit once unmount fires.
-        if let Some(handle) = self.handle.take() {
-            drop(handle);
-        }
-        // Best-effort unmount. Failure is fine — the temp dir cleanup will
-        // still try to recursively delete, and any leftover mount will surface
-        // in subsequent runs.
         let mp = self.mountpoint().to_path_buf();
-        std::thread::sleep(Duration::from_millis(150));
-        let _ = std::process::Command::new("fusermount3")
-            .args(["-u", &mp.to_string_lossy()])
-            .output();
+
+        if let Some(handle) = self.handle.take() {
+            if let Err(e) = handle.unmount() {
+                eprintln!(
+                    "WARN: SkillFS test unmount failed for {}: {e}",
+                    mp.display()
+                );
+            }
+        }
+        force_unmount(&mp);
     }
 }
 
