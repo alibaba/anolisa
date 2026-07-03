@@ -281,7 +281,20 @@ export const useShellCommandProcessor = (
                 finalOutput = `Command terminated by signal: ${result.signal}.\n${finalOutput}`;
               } else if (result.exitCode !== 0) {
                 finalStatus = ToolCallStatus.Error;
-                finalOutput = `Command exited with code ${result.exitCode}.\n${finalOutput}`;
+                // Exit code 127 typically means "command not found". Provide
+                // actionable guidance so the user understands the error and
+                // knows what to do next (check spelling, install the tool, etc.).
+                if (result.exitCode === 127) {
+                  finalOutput =
+                    `Error: command not found (exit code 127).\n` +
+                    `Please check the command name and spelling, or use ` +
+                    `'which <command>' to verify the command is installed.\n` +
+                    `If the command is not installed, try installing it or ` +
+                    `adding it to your PATH.\n\n` +
+                    finalOutput;
+                } else {
+                  finalOutput = `Command exited with code ${result.exitCode}.\n${finalOutput}`;
+                }
               }
 
               if (pwdFilePath && fs.existsSync(pwdFilePath)) {
