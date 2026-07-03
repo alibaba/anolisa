@@ -1,6 +1,6 @@
 //! SkillFS CLI — AI agent skill management via virtual filesystem.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 fn cleanup_pid_file(pid_file: &Option<PathBuf>) {
@@ -216,6 +216,11 @@ enum Commands {
         /// validates the path and fails closed if ownership, permissions, or
         /// mount layout are unsafe. Requires `--security --activation-mode
         /// file` and is mutually exclusive with `--decision-command`.
+        ///
+        /// Recommended location: `/run/user/$UID/skillfs-ledger/...` or
+        /// `/run/skillfs-ledger/...`. Do NOT use `/tmp` or `/var/tmp`:
+        /// agent-sec-core.service runs with PrivateTmp=true, so a daemon-facing
+        /// path there is invisible to the daemon and startup is rejected.
         #[arg(long, value_name = "PATH", help_heading = help_text::HEADING_LEDGER)]
         ledger_backing_root: Option<PathBuf>,
 
@@ -471,6 +476,69 @@ async fn run(cli: Cli, raw_args: Vec<String>) -> Result<(), Box<dyn std::error::
 /// window keeps audit volume reasonable without losing the signal that an
 /// out-of-band change happened.
 const DRIFT_DEBOUNCE_MS: u64 = 200;
+
+/// Compute the expected canonical path a daemon-facing directory will
+/// resolve to, without requiring the leaf to exist.
+///
+/// Mirrors the parent-canonicalize + leaf-join shape used by
+/// `LedgerBackingRoot::setup`: the parent must resolve, but the final
+/// component may be created later. Falls back to the input path when the
+/// parent cannot be canonicalized so the caller still gets a best-effort
+/// answer instead of silently skipping the check.
+fn expected_daemon_facing_path(p: &Path) -> PathBuf {
+    let parent = p
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    match parent.canonicalize() {
+        Ok(parent_canon) => match p.file_name() {
+            Some(leaf) => parent_canon.join(leaf),
+            None => parent_canon,
+        },
+        Err(_) => p.to_path_buf(),
+    }
+}
+
+/// Return `true` when a daemon-facing path resolves under a private-tmp
+/// root (`/tmp` or `/var/tmp`).
+///
+/// `agent-sec-core.service` runs with `PrivateTmp=true`, so the daemon
+/// gets a private mount namespace where the host `/tmp` and `/var/tmp`
+/// are invisible. A daemon-facing source/backing root under those roots
+/// would make the daemon reject notifications and time out activation.
+/// Both the literal and canonical forms of the tmp roots are checked so
+/// a symlinked `/tmp` (e.g. `/tmp -> /private/tmp`) is still caught.
+fn daemon_facing_path_under_private_tmp(candidate: &Path) -> bool {
+    for root in ["/tmp", "/var/tmp"] {
+        let root_path = Path::new(root);
+        if candidate.starts_with(root_path) {
+            return true;
+        }
+        if let Ok(canon_root) = root_path.canonicalize() {
+            if candidate.starts_with(&canon_root) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Return `true` when an operator-supplied daemon-facing argument resolves
+/// under a private-tmp root.
+///
+/// Checks both the parent-canonicalize + leaf shape (so a not-yet-created
+/// leaf is still evaluated) and, when the path already exists, its fully
+/// canonicalized form. The latter closes a symlink bypass such as
+/// `/run/.../x -> /tmp/real`, which passes the shape check but is resolved
+/// to a PrivateTmp-invisible path once the daemon follows it.
+fn daemon_facing_arg_under_private_tmp(path: &Path) -> bool {
+    daemon_facing_path_under_private_tmp(&expected_daemon_facing_path(path))
+        || path
+            .canonicalize()
+            .ok()
+            .as_deref()
+            .is_some_and(daemon_facing_path_under_private_tmp)
+}
 
 #[allow(clippy::too_many_arguments)]
 async fn cmd_mount(
@@ -907,6 +975,86 @@ async fn cmd_mount(
         skillfs_fuse::security::validate_protocol_events_path_outside_source(p, &source_canon)
             .map_err(|e| format!("{}", e))?;
     }
+
+    // #1262 PrivateTmp gate. When daemon-driven activation is enabled,
+    // agent-sec-core.service runs with PrivateTmp=true and therefore
+    // cannot see the host /tmp or /var/tmp. Any daemon-facing path under
+    // those roots makes the daemon reject notify, fail to tail the events
+    // log, or time out the activation reload, which hides the affected
+    // skills. Fail fast here — before the audit sink is opened, the
+    // mountpoint is auto-created, or any backing root bind mount runs — so
+    // a rejected config leaves no side effects behind. The pure
+    // inside-source guards above keep their own error ordering; this only
+    // adds a check, never a side effect.
+    //
+    // Guarded paths (all daemon-facing):
+    //   * backing root, or the source fallback (the daemon's scan target);
+    //   * --activation-events-log (the daemon tails this JSONL file);
+    //   * --notify-socket (the daemon owns this Unix socket).
+    // A plain agent-visible mountpoint under /tmp is NOT guarded.
+    let daemon_driven_activation = security
+        && activation_mode == ActivationMode::File
+        && (notify_socket.is_some() || activation_events_log.is_some());
+    if daemon_driven_activation {
+        // Daemon-facing root: the backing root when set, otherwise the
+        // source is what the daemon scans directly.
+        if let Some(ref br_path) = ledger_backing_root {
+            if daemon_facing_arg_under_private_tmp(br_path) {
+                return Err(format!(
+                    "--ledger-backing-root {} resolves under /tmp or /var/tmp, which the \
+                     agent-sec-core.service daemon cannot see because it runs with \
+                     PrivateTmp=true. Daemon-driven activation would be rejected and the \
+                     affected skills hidden. Use a daemon-visible backing root such as \
+                     /run/user/$UID/skillfs-ledger/... or /run/skillfs-ledger/... instead.",
+                    br_path.display()
+                )
+                .into());
+            }
+        } else if daemon_facing_path_under_private_tmp(&source_canon) {
+            return Err(format!(
+                "the daemon-facing source root {} resolves under /tmp or /var/tmp, which the \
+                 agent-sec-core.service daemon cannot see because it runs with PrivateTmp=true. \
+                 Daemon-driven activation would be rejected and the affected skills hidden. \
+                 Set --ledger-backing-root to a daemon-visible path such as \
+                 /run/user/$UID/skillfs-ledger/... or /run/skillfs-ledger/... instead.",
+                source_canon.display()
+            )
+            .into());
+        }
+
+        // Daemon-facing transport paths. These are independent of the
+        // backing root: the daemon must reach them regardless of where the
+        // scan target lives.
+        if let Some(ref p) = activation_events_log {
+            if daemon_facing_arg_under_private_tmp(p) {
+                return Err(format!(
+                    "--activation-events-log {} resolves under /tmp or /var/tmp, which the \
+                     agent-sec-core.service daemon cannot see because it runs with \
+                     PrivateTmp=true. The daemon tails this JSONL file, so daemon-driven \
+                     activation would break and the affected skills be hidden. Use a \
+                     daemon-visible path such as /run/user/$UID/skillfs-ledger/... or \
+                     /run/skillfs-ledger/... instead.",
+                    p.display()
+                )
+                .into());
+            }
+        }
+        if let Some(ref p) = notify_socket {
+            if daemon_facing_arg_under_private_tmp(p) {
+                return Err(format!(
+                    "--notify-socket {} resolves under /tmp or /var/tmp, which the \
+                     agent-sec-core.service daemon cannot see because it runs with \
+                     PrivateTmp=true. The daemon owns this socket, so daemon-driven \
+                     activation would break and the affected skills be hidden. Use a \
+                     daemon-visible path such as /run/user/$UID/skillfs-ledger/... or \
+                     /run/skillfs-ledger/... instead.",
+                    p.display()
+                )
+                .into());
+            }
+        }
+    }
+
     let audit_sink = audit_runtime.build_sink().map_err(|e| {
         format!(
             "failed to open audit log '{}': {}",

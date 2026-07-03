@@ -666,6 +666,445 @@ fn ledger_backing_root_inside_source_fails_before_mount() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// #1262: PrivateTmp daemon-facing backing root / source gates
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// agent-sec-core.service runs with PrivateTmp=true, so a daemon-facing
+// source or backing root under /tmp or /var/tmp is invisible to the
+// daemon. SkillFS must fail fast at startup (before any mount / bind
+// mount) rather than letting notify be rejected and activation time out.
+
+/// A directory that is NOT under /tmp (tempfile defaults to /tmp). Rooted
+/// at the crate's target dir so daemon-facing paths can be exercised with
+/// a genuinely non-tmp canonical location.
+fn non_tmp_dir() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("skillfs-nontmp-")
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .expect("non-tmp tempdir")
+}
+
+/// A collision-resistant leaf name (pid + nanosecond timestamp) so tests
+/// that use a fixed parent directory (e.g. /tmp) never trip over a stale
+/// path left behind by a previous manual run.
+fn unique_leaf(prefix: &str) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{prefix}-{}-{}", std::process::id(), nanos)
+}
+
+/// Spawn the binary, let startup run briefly, then kill it and return the
+/// combined stdout+stderr. Used for configs that pass the new gate and
+/// would otherwise block on the FUSE mount.
+fn run_briefly(args: &[&str]) -> String {
+    let mut child = Command::new(bin_path())
+        .args(args)
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn skillfs");
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let _ = child.kill();
+    let out = child.wait_with_output().expect("wait for child");
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    )
+}
+
+#[test]
+fn backing_root_under_tmp_fails_before_setup() {
+    // --ledger-backing-root under /tmp with daemon-driven activation
+    // (--notify-socket) must be rejected before any mount / bind mount.
+    let source = empty_source();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    // Leaf need not exist; parent (/tmp) canonicalizes. Nothing is created.
+    // Use a unique leaf so a stale dir from a prior run cannot skew the
+    // "dir not created" assertion below.
+    let backing = format!("/tmp/{}", unique_leaf("skillfs-privtmp-test-backing"));
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
+            "--notify-socket",
+            "/run/skillfs-privtmp-test.sock",
+            "--ledger-backing-root",
+            &backing,
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("--ledger-backing-root")
+            && combined.contains("/tmp or /var/tmp")
+            && combined.contains("PrivateTmp=true")
+            && combined.contains("/run/user/$UID/")
+            && combined.contains("/run/"),
+        "expected PrivateTmp backing-root rejection, got: {combined}"
+    );
+    assert!(
+        !Path::new(&backing).exists(),
+        "backing root dir must not be created when the gate rejects it"
+    );
+}
+
+#[test]
+fn backing_root_under_var_tmp_fails_before_setup() {
+    let source = empty_source();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let backing = format!("/var/tmp/{}", unique_leaf("skillfs-privtmp-test-backing"));
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
+            "--activation-events-log",
+            "/run/skillfs-privtmp-test-events.jsonl",
+            "--ledger-backing-root",
+            &backing,
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("--ledger-backing-root")
+            && combined.contains("/tmp or /var/tmp")
+            && combined.contains("PrivateTmp=true"),
+        "expected PrivateTmp backing-root rejection for /var/tmp, got: {combined}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn backing_root_symlink_to_tmp_fails_before_setup() {
+    // A backing root whose path shape is non-tmp but which symlinks to a
+    // real /tmp directory must still be rejected. Without canonicalizing
+    // the backing root itself, the parent-canonicalize + leaf shape check
+    // would pass while LedgerBackingRoot::setup resolves the symlink and
+    // hands the daemon a /tmp path it cannot see.
+    let source = empty_source();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    // Real target directory under /tmp (must exist for canonicalize to
+    // resolve the symlink through to it).
+    let tmp_target = tempfile::tempdir().expect("tmp target");
+    // Symlink lives under a non-tmp parent so the shape check alone passes.
+    let parent = non_tmp_dir();
+    let link = parent.path().join("backing-link");
+    std::os::unix::fs::symlink(tmp_target.path(), &link).expect("create symlink");
+
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
+            "--notify-socket",
+            "/run/skillfs-privtmp-test.sock",
+            "--ledger-backing-root",
+            link.to_str().unwrap(),
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("--ledger-backing-root")
+            && combined.contains("/tmp or /var/tmp")
+            && combined.contains("PrivateTmp=true"),
+        "expected PrivateTmp rejection for symlinked backing root, got: {combined}"
+    );
+}
+
+#[test]
+fn fallback_source_under_tmp_fails_before_mount() {
+    // Non-in-place mount, no backing root: the daemon-facing root falls
+    // back to the source. A source under /tmp with a notify trigger must
+    // be rejected with a message that points at --ledger-backing-root.
+    let source = empty_source(); // tempfile => under /tmp
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
+            "--notify-socket",
+            "/run/skillfs-privtmp-test.sock",
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("source")
+            && combined.contains("/tmp or /var/tmp")
+            && combined.contains("PrivateTmp=true")
+            && combined.contains("--ledger-backing-root")
+            && combined.contains("/run/"),
+        "expected PrivateTmp source-fallback rejection, got: {combined}"
+    );
+}
+
+#[test]
+fn mountpoint_under_tmp_not_rejected_when_source_is_non_tmp() {
+    // Only the daemon-facing path (source/backing root) is guarded. A
+    // plain agent-visible mountpoint under /tmp must NOT trip the new
+    // PrivateTmp gate when the source is non-tmp. The mount may still fail
+    // later for ordinary environment reasons, but the PrivateTmp error
+    // must not fire.
+    let source = non_tmp_dir();
+    let mount = tempfile::tempdir().expect("mount tempdir"); // under /tmp
+    let combined = run_briefly(&[
+        "mount",
+        source.path().to_str().unwrap(),
+        mount.path().to_str().unwrap(),
+        "--security",
+        "--activation-mode",
+        "file",
+        "--notify-socket",
+        "/run/skillfs-privtmp-test.sock",
+    ]);
+    assert!(
+        !combined.contains("PrivateTmp=true"),
+        "PrivateTmp gate must not fire for an agent-visible /tmp mountpoint \
+         with a non-tmp source, got: {combined}"
+    );
+}
+
+#[test]
+fn non_tmp_daemon_facing_root_passes_gate() {
+    // A non-tmp daemon-facing backing root keeps existing behavior: the
+    // new gate does not fire. Using backing_root == source (a non-in-place
+    // convenience that needs no bind mount) exercises the backing-root
+    // branch without requiring CAP_SYS_ADMIN.
+    let source = non_tmp_dir();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let combined = run_briefly(&[
+        "mount",
+        source.path().to_str().unwrap(),
+        mount.path().to_str().unwrap(),
+        "--security",
+        "--activation-mode",
+        "file",
+        "--notify-socket",
+        "/run/skillfs-privtmp-test.sock",
+        "--ledger-backing-root",
+        source.path().to_str().unwrap(),
+    ]);
+    assert!(
+        !combined.contains("PrivateTmp=true") && !combined.contains("resolves under /tmp"),
+        "PrivateTmp gate must not fire for a non-tmp backing root, got: {combined}"
+    );
+}
+
+#[test]
+fn activation_events_log_under_tmp_fails_before_mount() {
+    // The daemon tails the activation events log, so it is a daemon-facing
+    // transport path. A non-tmp source/mount with the events log under /tmp
+    // must still be rejected, naming --activation-events-log.
+    let source = non_tmp_dir();
+    let mount = non_tmp_dir();
+    let events_log = format!("/tmp/{}", unique_leaf("skillfs-privtmp-test-events.jsonl"));
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
+            "--activation-events-log",
+            &events_log,
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("--activation-events-log")
+            && combined.contains("/tmp or /var/tmp")
+            && combined.contains("agent-sec-core.service")
+            && combined.contains("PrivateTmp=true")
+            && combined.contains("/run/"),
+        "expected PrivateTmp events-log rejection, got: {combined}"
+    );
+}
+
+#[test]
+fn activation_events_log_under_var_tmp_fails_before_mount() {
+    let source = non_tmp_dir();
+    let mount = non_tmp_dir();
+    let events_log = format!(
+        "/var/tmp/{}",
+        unique_leaf("skillfs-privtmp-test-events.jsonl")
+    );
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
+            "--activation-events-log",
+            &events_log,
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("--activation-events-log")
+            && combined.contains("/tmp or /var/tmp")
+            && combined.contains("PrivateTmp=true"),
+        "expected PrivateTmp events-log rejection for /var/tmp, got: {combined}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn activation_events_log_symlink_to_tmp_fails_before_mount() {
+    // A non-tmp events-log path that symlinks to a real /tmp file resolves
+    // (via canonicalize) to a PrivateTmp-invisible path and must be
+    // rejected, mirroring the backing-root symlink handling.
+    let source = non_tmp_dir();
+    let mount = non_tmp_dir();
+    let tmp_target = tempfile::NamedTempFile::new().expect("tmp target file"); // /tmp
+    let parent = non_tmp_dir();
+    let link = parent.path().join("events-link.jsonl");
+    std::os::unix::fs::symlink(tmp_target.path(), &link).expect("create symlink");
+
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
+            "--activation-events-log",
+            link.to_str().unwrap(),
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("--activation-events-log")
+            && combined.contains("/tmp or /var/tmp")
+            && combined.contains("PrivateTmp=true"),
+        "expected PrivateTmp rejection for symlinked events log, got: {combined}"
+    );
+}
+
+#[test]
+fn notify_socket_under_tmp_fails_before_mount() {
+    // The daemon owns the notify socket, so it is daemon-facing. A non-tmp
+    // source/mount with the notify socket under /tmp must be rejected,
+    // naming --notify-socket.
+    let source = non_tmp_dir();
+    let mount = non_tmp_dir();
+    let socket = format!("/tmp/{}", unique_leaf("skillfs-privtmp-test.sock"));
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
+            "--notify-socket",
+            &socket,
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("--notify-socket")
+            && combined.contains("/tmp or /var/tmp")
+            && combined.contains("agent-sec-core.service")
+            && combined.contains("PrivateTmp=true")
+            && combined.contains("/run/"),
+        "expected PrivateTmp notify-socket rejection, got: {combined}"
+    );
+}
+
+#[test]
+fn non_tmp_transport_paths_pass_gate() {
+    // Non-tmp events log AND non-tmp notify socket keep existing behavior:
+    // the PrivateTmp gate does not fire.
+    let source = non_tmp_dir();
+    let mount = non_tmp_dir();
+    let events_dir = non_tmp_dir();
+    let events_log = events_dir.path().join("events.jsonl");
+    let combined = run_briefly(&[
+        "mount",
+        source.path().to_str().unwrap(),
+        mount.path().to_str().unwrap(),
+        "--security",
+        "--activation-mode",
+        "file",
+        "--activation-events-log",
+        events_log.to_str().unwrap(),
+        "--notify-socket",
+        "/run/skillfs-privtmp-test.sock",
+    ]);
+    assert!(
+        !combined.contains("PrivateTmp=true") && !combined.contains("resolves under /tmp"),
+        "PrivateTmp gate must not fire for non-tmp transport paths, got: {combined}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // PID file cleanup tests
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -800,11 +1239,15 @@ staging_patterns = [".openclaw-install-stage-*"]
 
 #[test]
 fn staging_patterns_with_activation_events_log_passes_gate() {
-    let source = empty_source();
+    // Source and events log must be non-tmp: with the PrivateTmp gate a
+    // /tmp events log or source would abort startup, making the "staging
+    // gate did not fire" assertion pass for the wrong reason.
+    let source = non_tmp_dir();
     let mount = tempfile::tempdir().expect("mount tempdir");
     let config_dir = tempfile::tempdir().expect("config dir");
     let config_path = config_dir.path().join("security.toml");
-    let events_log = tempfile::NamedTempFile::new().expect("events log");
+    let events_dir = non_tmp_dir();
+    let events_log = events_dir.path().join("events.jsonl");
     std::fs::write(
         &config_path,
         r#"
@@ -826,7 +1269,7 @@ staging_patterns = [".openclaw-install-stage-*"]
             "--config",
             config_path.to_str().unwrap(),
             "--activation-events-log",
-            events_log.path().to_str().unwrap(),
+            events_log.to_str().unwrap(),
         ])
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -845,11 +1288,17 @@ staging_patterns = [".openclaw-install-stage-*"]
         !combined.contains("install.staging_patterns requires"),
         "staging gate must not fire when --activation-events-log is set, got: {combined}"
     );
+    assert!(
+        !combined.contains("PrivateTmp=true"),
+        "PrivateTmp gate must not fire for a non-tmp source + events log, got: {combined}"
+    );
 }
 
 #[test]
 fn staging_patterns_with_notify_socket_passes_gate() {
-    let source = empty_source();
+    // Source and notify socket must be non-tmp for the same reason as
+    // above: otherwise the PrivateTmp gate would mask the staging check.
+    let source = non_tmp_dir();
     let mount = tempfile::tempdir().expect("mount tempdir");
     let config_dir = tempfile::tempdir().expect("config dir");
     let config_path = config_dir.path().join("security.toml");
@@ -874,7 +1323,7 @@ staging_patterns = [".openclaw-install-stage-*"]
             "--config",
             config_path.to_str().unwrap(),
             "--notify-socket",
-            "/tmp/nonexistent-daemon.sock",
+            "/run/skillfs-staging-test.sock",
         ])
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -892,6 +1341,10 @@ staging_patterns = [".openclaw-install-stage-*"]
     assert!(
         !combined.contains("install.staging_patterns requires"),
         "staging gate must not fire when --notify-socket is set, got: {combined}"
+    );
+    assert!(
+        !combined.contains("PrivateTmp=true"),
+        "PrivateTmp gate must not fire for a non-tmp source + notify socket, got: {combined}"
     );
 }
 

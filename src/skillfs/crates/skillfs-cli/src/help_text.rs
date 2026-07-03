@@ -53,10 +53,13 @@ pub const MOUNT_AFTER_HELP: &str = r#"Examples:
 
   skillfs mount ./skills ./skills --security-mode --security --activation-mode file \
     --notify-socket /run/skill-ledger.sock \
-    --ledger-backing-root /run/skillfs/source \
+    --ledger-backing-root /run/user/$UID/skillfs-ledger/source \
     --trusted-writer-exe /usr/bin/skill-ledger
       Ledger-driven activation flow. The daemon writes activation state;
-      SkillFS exposes current, fallback, or hidden skill views.
+      SkillFS exposes current, fallback, or hidden skill views. Put the
+      daemon-facing source/backing root under /run/user/$UID/... or /run/...:
+      agent-sec-core.service runs with PrivateTmp=true, so /tmp and /var/tmp
+      are invisible to the daemon and are rejected at startup.
 
 Important paths:
   SOURCE      Directory that stores real skill folders and skillfs-views.toml.
