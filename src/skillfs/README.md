@@ -1,85 +1,70 @@
 # SkillFS
 
-基于 FUSE 的本地技能文件系统，负责解析 `SKILL.md`、按 view 组织技能，并把编译后的 `SKILL.md` 通过 FUSE 文件系统暴露出来。
+**English** | [中文](README_zh.md)
+
+SkillFS is a local FUSE filesystem for agent skills. It parses `SKILL.md`,
+organizes skills with views, and exposes compiled `SKILL.md` content through a
+mounted filesystem while ordinary skill files remain backed by the source tree.
 
 [![Rust](https://img.shields.io/badge/Rust-1.86+-orange.svg)](https://www.rust-lang.org/)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-## 能力
+## Capabilities
 
-- 解析标准的 `SKILL.md`。
-- 支持平铺目录和分类目录加载。
-- 通过 `skillfs-views.toml` 管理默认视图和 secondary views。
-- FUSE 目录中显示 primary view 技能。
-- 始终暴露 `skill-discover`，用于列出 secondary views 中的技能及其源文件路径。
-- 读取 `SKILL.md` 时执行条件编译和命令归一化。
-- 透传 skill 目录内的物理文件和子目录。
-- 支持 normal mount 与 in-place mount。
-- 支持挂载后的物理写入透传，并把 `SKILL.md` 变化同步回 store。
-- 支持主流 POSIX/FUSE 读写语义：fd-backed I/O、metadata、目录流、
-  rename、PATH_MAX fallback、open-after-unlink、safe symlink/link、FIFO、
-  `user.*` xattr。
-- 提供安全集成基础设施：`.skill-meta` 保护、audit JSONL、security mount
-  mode、install inbox、trusted writer (exe identity)、activation file/xattr、notify、
-  protocol event log、runtime reload 和 startup reconcile。
+- Parses standard `SKILL.md` files.
+- Loads both flat skill directories and categorized directory layouts.
+- Uses `skillfs-views.toml` to choose the default view and secondary views.
+- Shows default-view skills directly in the mounted agent view.
+- Always exposes the virtual `skill-discover` skill so agents can discover
+  skills from secondary views and their source paths.
+- Compiles `SKILL.md` on read, including conditional blocks and command
+  normalization.
+- Passes ordinary files and subdirectories through to the physical source tree.
+- Supports normal mounts and in-place mounts.
+- Supports physical write passthrough while mounted; `SKILL.md` changes reparse
+  and update the in-memory store.
+- Provides a Linux POSIX compatibility baseline for ordinary passthrough paths:
+  fd-backed I/O, create/mkdir mode handling, long-path fallback,
+  open-after-unlink handles, restricted symlink/hardlink policy, FIFO creation,
+  and conservative `user.*` xattr passthrough.
+- Provides optional external security integration surfaces: decision-command
+  activation, activation file/xattr consumption, notify socket events, protocol
+  JSONL events, active-mapping reload, startup reconcile, trusted writer
+  identity checks, trusted control socket writes, and managed mount recovery.
 
-## 功能矩阵
+## Behavior Matrix
 
-| 操作 | normal mount | in-place mount | 说明 |
-|------|--------------|----------------|------|
-| `readdir` | 虚拟视图 | 虚拟视图 | 由 views + store 决定可见 skill |
-| 读 `SKILL.md` | 编译后返回 | 编译后返回 | 走 `compiler::compile` |
-| 读其他文件 | 透传 | 透传 | 直接读取物理文件 |
-| 写 `SKILL.md` | 透传 + store reparse | 透传 + store reparse | 目录名是 store 权威 key |
-| `create` 普通文件 | 透传 | 透传 | 不触发 store 更新 |
-| `mkdir` skill 目录 | 立即可见 | 立即可见 | 先插入 degraded placeholder |
-| `rename` skill 目录 | 立即切换可见性 | 立即切换可见性 | 无空窗，旧名立即移除 |
-| `unlink` `SKILL.md` | 从 store 移除 | 从 store 移除 | skill 从虚拟视图消失 |
-| `rmdir` skill 目录 | 从 store 移除 | 从 store 移除 | 递归清理 inode 映射 |
-| `setattr(size)` | 支持 truncate | 支持 truncate | 其他控制属性不作为主要能力 |
-| `symlink` | 策略允许 | 策略允许 | 允许相对 same-skill；拒绝绝对、跨 skill、`.skill-meta`、lifecycle |
-| `link` | 策略允许 | 策略允许 | 允许 same-skill regular file；拒绝跨 skill 和特殊文件 |
-| `mknod` | FIFO only | FIFO only | block/char/socket/device node 仍拒绝 |
-| xattr | `user.*` | `user.*` | no-follow passthrough；非 user namespace 拒绝 |
+| Operation | Normal mount | In-place mount | Notes |
+| --- | --- | --- | --- |
+| `readdir` | Virtual view | Virtual view | Visibility comes from views plus the store. |
+| Read `SKILL.md` | Compiled output | Compiled output | Uses `compiler::compile`. |
+| Read other files | Passthrough | Passthrough | Reads the physical source file. |
+| Write `SKILL.md` | Passthrough + store reparse | Passthrough + store reparse | Directory name is the authoritative store key. |
+| `create` ordinary file | Passthrough | Passthrough | Does not update the store. |
+| `mkdir` skill directory | Immediately visible | Immediately visible | Inserts a degraded placeholder before async reparse. |
+| `rename` skill directory | Visibility switches immediately | Visibility switches immediately | Old name is removed without a visibility gap. |
+| `unlink` `SKILL.md` | Removes from store | Removes from store | Skill disappears from the virtual view. |
+| `rmdir` skill directory | Removes from store | Removes from store | Also clears inode mappings. |
+| `setattr(size)` | Truncate supported | Truncate supported | Other metadata operations are conservative passthrough where allowed. |
+| `symlink` | Restricted passthrough | Restricted passthrough | Allows relative same-skill targets only. |
+| `link` | Restricted passthrough | Restricted passthrough | Allows same-skill regular files only. |
+| `mkfifo` | Passthrough | Passthrough | FIFO only; device/socket nodes are rejected. |
+| `xattr user.*` | Passthrough | Passthrough | Ordinary passthrough paths only. |
 
-## 安全集成能力
+## Scope
 
-SkillFS 不直接实现扫描、签名校验或风险判断。它提供文件系统层能力，让外部
-安全组件决定一个 skill 应该暴露为 current、fallback snapshot，还是 hidden。
+- Public CLI commands are `mount`, `stop`, `classify`, `validate`, and `list`.
+- Skill visibility is controlled by `skillfs-views.toml`.
+- FUSE write passthrough is supported while mounted, but only `SKILL.md`
+  changes trigger store synchronization.
+- The authoritative skill key is the directory name, not a stale frontmatter
+  `name:` after rename.
+- In-place mounting over-mounts the source directory. Controlled skill writes
+  through SkillFS are supported, but tools that rename or replace the mounted
+  directory itself, such as workspace checkpoint/init/rollback tools, must run
+  before mounting or after unmounting.
 
-当前已支持：
-
-- `.skill-meta/**` 默认 mutation-protected，普通 mount-path 写入返回
-  deterministic permission error。
-- `--audit-log <PATH>` 输出稳定 JSONL audit stream。
-- `--security-mode` 要求 source 和 mountpoint 指向同一目录，用于更强的
-  in-place enforcement。
-- `/.skillfs-inbox/<skill>/...` 作为安装候选入口；写入落到 source，完成信号
-  触发后续安全流程。
-- `--decision-command <COMMAND>` 兼容路径：变更后 debounce，执行
-  `<COMMAND> scan <skill_dir> --json`，再执行
-  `<COMMAND> resolve <skill_dir> --json`，刷新 active mapping。
-- `--activation-mode file` 生产路径：从
-  `.skill-meta/activation.json` 或
-  `user.agent_sec.skill_ledger.activation` xattr 读取 activation。
-- `--notify-socket <PATH>` 发送 skill 变更通知给外部 daemon。
-- `--activation-events-log <PATH>` 写入 activation protocol event JSONL。
-- `--activation-reload-mode poll` 在 notify 后轮询 activation 并刷新 resolver。
-- startup reconcile 会在挂载后对已知 skill 发出 best-effort reconcile 通知。
-- `--trusted-writer-exe <PATH>`（推荐）生产级可信写门禁，按
-  `/proc/<tgid>/exe` readlink + 文件身份 `(dev, ino)` 匹配，结合 starttime
-  做 PID reuse 防护，抗 `prctl PR_SET_NAME` 伪造。
-- `--trusted-writer <NAME>`（deprecated / 兼容性）按 Linux TGID `comm` 匹配；
-  进程 `comm` 可被伪造，不应用于生产。两者同时配置时 exe 为授权依据。
-
-## 范围
-
-- 运行入口是 `mount`、`classify`、`validate`、`list`。
-- 技能可见性由 `skillfs-views.toml` 决定。
-- FUSE 当前已经支持挂载后的写 passthrough，但只有 `SKILL.md` 会触发 store 同步。
-- store 的权威 key 是目录名，不再信任重命名后可能滞后的 frontmatter `name:`。
-
-## 架构
+## Architecture
 
 ```text
 physical skills dir
@@ -99,74 +84,95 @@ physical skills dir
      mounted /skills view
 ```
 
-    ## 写路径与一致性
+## Write Path And Consistency
 
-    SkillFS 现在不是纯只读文件系统，而是“虚拟目录视图 + 物理写透传”的混合模型：
+SkillFS is a hybrid filesystem: a virtual directory view plus physical
+passthrough writes.
 
-    - `readdir` 仍由虚拟视图控制。
-    - `SKILL.md` 读取仍返回编译后的内容，而不是原始文件。
-    - 其他文件读写直接落到底层文件系统。
-    - `SKILL.md` 的写入、创建、rename 后写入会通过后台 sync worker 重新解析并更新 `SharedSkillStore`。
-    - `mkdir` / `rename` skill 目录走立即一致路径，先同步更新 store，再由异步 reparse 覆盖为真实条目。
-    - in-place mount 通过 `/proc/self/fd/{n}` 访问底层 source，避免 over-mount 自回环。
+- `readdir` is still controlled by the virtual view.
+- Reading `SKILL.md` returns compiled content, not the raw source file.
+- Other files read and write directly against the underlying filesystem.
+- Writing, creating, or writing after renaming `SKILL.md` reparses the file and
+  updates `SharedSkillStore`.
+- `mkdir` and skill-directory `rename` take an immediate-consistency path by
+  synchronously updating the store, with async reparse later replacing the
+  placeholder with the real entry.
+- In-place mounts use `/proc/self/fd/{n}` to reach the underlying source and
+  avoid recursively entering the FUSE over-mount.
 
-## 快速开始
+## Quick Start
 
-### 构建
+### Build
 
 ```bash
 cargo build --release
 ```
 
-### 常用命令
+### Common Commands
 
 ```bash
-# 验证 skills
+# Validate skills.
 cargo run -p skillfs -- validate /path/to/skills
 
-# 列出 skills
+# List skills.
 cargo run -p skillfs -- list /path/to/skills
 
-# 生成或查看 skillfs-views.toml
+# Generate or inspect skillfs-views.toml.
 cargo run -p skillfs -- classify /path/to/skills
 
-# 挂载 FUSE 文件系统
+# Mount the FUSE filesystem.
 cargo run -p skillfs -- mount /path/to/skills /path/to/mountpoint
 
-# Managed 挂载（opt-in）：托管监督器保持挂载存活，网关重启不会丢失挂载
+# Opt-in managed mount: a detached supervisor keeps the mount alive.
 cargo run -p skillfs -- mount /path/to/skills /path/to/mountpoint --managed
 
-# 停止 managed 挂载：清除 desired state、终止监督器/worker 并卸载
+# Stop a managed mount and clear desired mounted state.
 cargo run -p skillfs -- stop /path/to/mountpoint
 ```
 
-### Managed 挂载模式
+### Managed Mount Mode
 
-默认 `mount`（含 `--foreground`）与原来完全一致：进程在前台阻塞，`SIGTERM`
-/ `Ctrl+C` 会干净卸载。当启动 SkillFS 的进程（如 OpenClaw 网关）重启时，其
-子进程会被终止，挂载随之消失。
+Default `mount`, including `--foreground`, keeps the original foreground
+behavior: the process blocks, and `SIGTERM` or `Ctrl+C` cleanly unmounts. If the
+launcher process, such as a gateway, restarts and terminates its child
+processes, the mount disappears with it.
 
-`--managed` 是一个 opt-in 选项，用于跨网关重启保持挂载：
+`--managed` is opt-in and is intended for mounts that should survive gateway
+restarts:
 
-- 客户端写入托管状态后，用 `setsid` 启动一个脱离调用者进程组/会话的
-  **监督器**，等待挂载 ready 后返回。
-- 监督器以相同的 source、mountpoint、config、security、audit、activation、
-  trusted-writer 和 logging 选项启动前台 FUSE **worker**。
-- 若 worker 在 desired state 仍为 mounted 时意外退出，监督器会在有界退避后
-  自动重挂。
-- **只有显式执行 `skillfs stop <MOUNTPOINT>`（或 unmount）才会清除 desired
-  mounted 状态**，终止监督器/worker 并干净卸载。`stop` 是幂等的，可安全地对
-  已卸载的挂载重复执行。
-- 如果监督器被 `kill -9` 等方式强制终止，可能留下仍在服务但无人监控的孤儿
-  worker。此时执行 `skillfs stop <MOUNTPOINT>` 可清理残留状态、进程和挂载，
-  再重新执行 `mount --managed` 即可恢复托管。
+- The client writes managed state, starts a detached supervisor in its own
+  session with `setsid`, waits for readiness, and then returns.
+- The supervisor starts a foreground FUSE worker with the same source,
+  mountpoint, config, security, audit, activation, trusted-writer, control
+  socket, and logging options.
+- If the worker exits unexpectedly while desired state remains `mounted`, the
+  supervisor remounts after bounded backoff.
+- Only `skillfs stop <MOUNTPOINT>` clears desired mounted state, terminates the
+  supervisor/worker, and unmounts. `stop` is idempotent and can be run safely on
+  an already-unmounted path.
+- If the supervisor is killed with `kill -9`, an orphan worker may continue to
+  serve the mount without monitoring. Run `skillfs stop <MOUNTPOINT>` to clean
+  residual state, processes, and mounts before starting `mount --managed` again.
 
-托管状态存放在 `$XDG_RUNTIME_DIR/skillfs/`（否则 `/run/user/<uid>/skillfs/`，
-再回退到 `/tmp/skillfs-<uid>/`），instance id 由规范化后的 mountpoint 派生。
+Managed state is stored in a user-isolated runtime directory: first
+`$XDG_RUNTIME_DIR/skillfs/`, then `/run/user/<uid>/skillfs/`, and when neither
+is available it falls back to `/tmp/skillfs-<uid>/`. The instance id is derived
+from the normalized mountpoint, so `mount` and `stop` always resolve the same
+mountpoint to the same instance.
 
-### `skillfs-views.toml`
+### In-place Mount And Workspace Snapshots
 
-技能选择依赖 `skillfs-views.toml`：
+When SkillFS is mounted in-place, tools that replace the mountpoint directory
+itself must run before mounting or after unmounting. For example,
+`ws-ckpt checkpoint -w <MOUNTPOINT>` may fail with `Device or resource busy` if
+`<MOUNTPOINT>` is an active SkillFS mount.
+
+Writes through SkillFS, including skill install/update/remove, remain supported
+while mounted.
+
+## `skillfs-views.toml`
+
+Skill selection is controlled by `skillfs-views.toml`:
 
 ```toml
 [[view]]
@@ -182,12 +188,13 @@ description = "Skills exposed via skill-discover"
 skills = ["apple-notes", "blogwatcher"]
 ```
 
-挂载后：
+After mounting:
 
-- `/skills` 中显示默认 view 技能。
-- `skill-discover/SKILL.md` 中列出 secondary views 的技能和 `source_path`。
+- `/skills` shows skills from the default view.
+- `skill-discover/SKILL.md` lists skills from secondary views and their
+  `source_path`.
 
-## `SKILL.md` 格式
+## `SKILL.md` Format
 
 ```markdown
 ---
@@ -212,87 +219,190 @@ Detailed instructions.
 - `result` (string, required): Result value
 ```
 
-## 条件编译
+## Conditional Compilation
 
-FUSE 读取 `SKILL.md` 时会执行 `compiler::compile`，支持：
+When FUSE reads `SKILL.md`, SkillFS runs `compiler::compile` and supports:
 
 - `<!-- @if os == darwin -->`
 - `<!-- @if has_command("uv") -->`
 - `<!-- @else -->`
 - `<!-- @endif -->`
 
-没有条件块时，也会做少量启发式命令归一化，例如：
+When there are no conditional blocks, SkillFS also applies a small set of
+heuristic command normalizations, for example:
 
 - `pip install` -> `uv pip install`
 - `python -m venv` -> `uv venv`
 - `npm install` -> `pnpm install` / `yarn install`
 
-## 项目结构
+## Project Layout
 
 ```text
 crates/
   skillfs-core/   parser, store, views, compiler, env, watcher
-  skillfs-fuse/   FUSE 文件系统
-  skillfs-cli/    mount / classify / validate / list
-docs/specs/       实现说明
-scripts/          保留 build.sh 与 test.sh
+  skillfs-fuse/   FUSE filesystem and POSIX passthrough layer
+  skillfs-cli/    mount / stop / classify / validate / list
+docs/specs/       implementation specifications
+docs/security/    external decision and runtime activation docs
+docs/testing/     POSIX acceptance and external harness docs
+docs/skills/      bundled agent-facing SkillFS skill
+scripts/          build.sh, test.sh, and optional POSIX harness
 ```
 
-## 测试脚本
+## Test Scripts
 
 - [scripts/build.sh](scripts/build.sh)
-  - 统一执行 workspace 构建。
+  - Runs the workspace build.
 - [scripts/test.sh](scripts/test.sh)
-  - 创建临时 skill 源目录和 `skillfs-views.toml`。
-  - 验证 FUSE 挂载成功。
-  - 验证 `/skills` 暴露 default view 技能。
-  - 验证 `skill-discover` 正确列出 secondary view 与 `source_path`。
-  - 验证 skill 目录中的物理文件透传。
-  - 验证通过 `SIGTERM` 可以正确卸载。
+  - Creates a temporary skill source directory and `skillfs-views.toml`.
+  - Verifies that the FUSE mount starts.
+  - Verifies that `/skills` exposes default-view skills.
+  - Verifies that `skill-discover` lists secondary views and `source_path`.
+  - Verifies passthrough reads for physical files inside a skill directory.
+  - Verifies clean unmount through `SIGTERM`.
+- [scripts/posix/run_pjdfstest.sh](scripts/posix/run_pjdfstest.sh)
+  - Optional external POSIX harness; normal `cargo test` does not depend on it.
 
-## 测试覆盖
+## Test Coverage
 
-`crates/skillfs-fuse/tests/` 当前覆盖：
+`crates/skillfs-fuse/tests/` covers:
 
-- normal / in-place mount 的 `SKILL.md` 编译读、写透传、store reparse、
-  mkdir/rename/unlink/rmdir 可见性和 stale frontmatter 防回归。
-- POSIX open/create、metadata、目录流、PATH_MAX fallback、open-after-unlink、
-  safe symlink/link/FIFO、`user.*` xattr。
-- `.skill-meta`、lifecycle、security mode、audit runtime、source drift、
-  install inbox、trusted writer、activation consumer、notify、runtime reload、
-  startup reconcile。
-- 外部 pjdfstest harness 可选运行，正常 `cargo test` 不依赖 pjdfstest。
+- compiled `SKILL.md` reads, write passthrough, store reparse,
+  mkdir/rename/unlink/rmdir visibility, and stale-frontmatter regressions for
+  normal and in-place mounts;
+- POSIX open/create, metadata, directory streams, long-path fallback,
+  open-after-unlink, safe symlink/link/FIFO, and `user.*` xattrs;
+- `.skill-meta`, lifecycle namespaces, security mode, audit runtime, source
+  drift, install inbox, staging/direct install flows, trusted writer, trusted
+  metadata view, activation consumer, control socket server behavior, notify,
+  runtime reload, startup reconcile, and post-publish grace paths.
 
-`skillfs-core` 当前覆盖：
+`crates/skillfs-cli/tests/` covers CLI parsing and startup gates, including
+managed mount supervision, activation/notify option compatibility, backing-root
+requirements, trusted writer executable validation, and control-socket trusted
+peer configuration.
 
-- parser、store、watcher 的单元与集成测试。
+`skillfs-core` covers parser, store, compiler, and watcher behavior with unit
+and integration tests.
 
-## 功能亮点
+## Highlights
 
-- 虚拟视图与物理文件系统解耦：目录展示由 views 控制，文件内容仍来自真实 source。
-- `SKILL.md` 读写分离：读取给 agent 编译结果，写入落到原始文件。
-- rename 后目录名是统一权威 key，避免 stale frontmatter 把旧 skill 名重新注入 store。
-- in-place mount 通过 dir fd 绕过 FUSE 自身，避免写回进入自循环。
-- active mapping 支持把 `/skills/<name>` 映射到当前 source、可信 snapshot 或
-  hidden，已打开 fd 保持 open-time target pinning。
+- Virtual views are decoupled from the physical filesystem: directory
+  visibility is view-controlled while file content still comes from the real
+  source tree.
+- `SKILL.md` reads and writes are intentionally split: agents read compiled
+  content, while writes update the raw source file.
+- Directory name is the unified authoritative skill key after rename, avoiding
+  stale frontmatter reinjection under the old skill name.
+- In-place mounts use a pre-opened source dir fd so SkillFS can write through
+  without recursively entering its own FUSE mount.
+- Active mapping can expose `/skills/<name>` as current source, trusted
+  snapshot, or hidden, and open file handles keep their open-time target pinned.
 
-## 文档
+## Security Integration
 
-- [HANDOFF.md](HANDOFF.md) - 代码状态与后续建议
-- [docs/specs/skillfs-v1-spec.md](docs/specs/skillfs-v1-spec.md) - 整体架构说明
-- [docs/specs/core-spec.md](docs/specs/core-spec.md) - `skillfs-core` 实现
-- [docs/specs/fuse-spec.md](docs/specs/fuse-spec.md) - `skillfs-fuse` 实现
-- [docs/skillfs-filesystem-capability-record.md](docs/skillfs-filesystem-capability-record.md) - 文件系统能力、POSIX 兼容、安全集成与演进记录
-- [docs/specs/posix-phase1-spec.md](docs/specs/posix-phase1-spec.md) - POSIX Phase 1 行为规格
-- [docs/testing/posix-external-harness.md](docs/testing/posix-external-harness.md) - 外部 POSIX harness 使用说明
-- [docs/testing/posix-phase1-acceptance.md](docs/testing/posix-phase1-acceptance.md) - Phase 1 验收条件
-- [POSIX_FS_TEST_MATRIX.csv](POSIX_FS_TEST_MATRIX.csv) - POSIX 文件系统测试矩阵
-- [POSIX_FS_REFERENCES.md](POSIX_FS_REFERENCES.md) - POSIX / FUSE / 本仓库参考资料
+SkillFS does not perform scanning, signing, or risk decisions inside the
+filesystem core. An external provider decides whether a skill is exposed as:
 
-## 验证
+- `current`: serve the live source tree;
+- `fallback`: serve a trusted `.skill-meta/versions/*.snapshot`;
+- `hidden`: hide the skill from the agent-facing view.
+
+Two integration paths are supported:
+
+- Legacy decision-command mode:
+  `--security --decision-command <COMMAND>` runs
+  `<COMMAND> scan <skill_dir> --json` and then
+  `<COMMAND> resolve <skill_dir> --json`.
+- Activation-file mode:
+  `--security --activation-mode file` consumes
+  `.skill-meta/activation.json` or
+  `user.agent_sec.skill_ledger.activation`, sends notify events to an external
+  daemon when configured, and reloads active mappings when activation changes.
+
+Related security surfaces:
+
+- `.skill-meta/**` is hidden from untrusted lookup/list/read paths and ordinary
+  mutation attempts are rejected. Trusted exact-path access can route to the
+  live source for metadata operations.
+- `--audit-log <PATH>` writes stable JSONL audit events.
+- `--security-mode` requires `SOURCE` and `MOUNTPOINT` to resolve to the same
+  directory so normal userspace access goes through FUSE policy and audit.
+- `/.skillfs-inbox/<skill>/...` is an install/repair entry point for hidden or
+  new skills; writes land in the source tree and completion can trigger the
+  external security flow.
+- `--notify-socket <PATH>` sends debounced skill mutation notifications to an
+  external daemon.
+- `--activation-events-log <PATH>` writes activation protocol events as JSONL.
+- `--activation-reload-mode poll` re-reads activation state after notify events
+  and updates the resolver without a remount.
+- Startup reconcile sends best-effort notifications for known skills after
+  mount startup.
+- `--ledger-backing-root <PATH>` provides a daemon-visible source view for
+  in-place activation/notify mounts, because the public source path is a FUSE
+  over-mount. Use `/run/user/$UID/skillfs-ledger/...` or
+  `/run/skillfs-ledger/...` for daemon-facing roots. Do not use `/tmp` or
+  `/var/tmp`: packaged `agent-sec-core.service` runs with `PrivateTmp=true`,
+  so host tmp paths are invisible to the daemon and are rejected at startup.
+- `--trusted-writer-exe <PATH>` is the recommended mount-path trusted writer
+  gate. It verifies `/proc/<tgid>/exe`, `(dev, ino)`, and process start time to
+  reduce PID-reuse and process-name spoofing risk.
+- `--trusted-writer <NAME>` is a deprecated compatibility gate based on Linux
+  TGID `comm`; process names can be spoofed and this should not be used for
+  production trust.
+- `--control-socket <PATH>` with `--trusted-peer-exe <PATH>` starts a trusted
+  Unix socket control plane. Trusted peers can write activation JSON or xattr
+  through methods such as `meta.writeActivation` and
+  `meta.setActivationXattr`.
+
+## Documentation
+
+- [docs/specs/skillfs-spec.md](docs/specs/skillfs-spec.md) - Architecture,
+  runtime consistency boundaries, and deployment scenarios.
+- [docs/specs/core-spec.md](docs/specs/core-spec.md) - `skillfs-core`
+  implementation.
+- [docs/specs/fuse-spec.md](docs/specs/fuse-spec.md) - `skillfs-fuse`
+  implementation.
+- [docs/specs/posix-phase1-spec.md](docs/specs/posix-phase1-spec.md) - POSIX
+  passthrough baseline.
+- [docs/testing/posix-phase1-acceptance.md](docs/testing/posix-phase1-acceptance.md)
+  - POSIX acceptance checklist.
+- [docs/testing/posix-external-harness.md](docs/testing/posix-external-harness.md)
+  - External POSIX harness usage.
+- [docs/security/external-decision-protocol.md](docs/security/external-decision-protocol.md)
+  - Decision-command JSON protocol.
+- [docs/security/runtime-activation-implementation-plan.md](docs/security/runtime-activation-implementation-plan.md)
+  - Activation, notify, reload, and backing-root integration.
+- [docs/skillfs-filesystem-capability-record.md](docs/skillfs-filesystem-capability-record.md)
+  - Long-lived filesystem capability record.
+- [POSIX_FS_TEST_MATRIX.csv](POSIX_FS_TEST_MATRIX.csv) - POSIX test matrix and
+  current coverage.
+- [POSIX_FS_REFERENCES.md](POSIX_FS_REFERENCES.md) - POSIX, FUSE, and project
+  references.
+
+## Validation
+
+These commands are CI-equivalent checks. Run them before PR submission when
+touching SkillFS code.
 
 ```bash
-cargo test -p skillfs-core
-cargo test -p skillfs-fuse
-cargo check -p skillfs -p skillfs-fuse
+# 1. Formatting: must produce no diff.
+cargo fmt --all --check
+
+# 2. Clippy: must be warning-free under -D warnings.
+cargo clippy --workspace --all-targets -- -D warnings
+
+# 3. Unit and integration tests in the workspace.
+cargo test --workspace
+
+# 4. End-to-end FUSE mount test. Requires fuse3 and /dev/fuse; skips itself
+#    on macOS or containers without /dev/fuse.
+scripts/test.sh
+
+# 5. Rustdoc. Required when changing public API or doc comments; useful for
+#    catching broken intra-doc links early.
+cargo doc --workspace --no-deps
 ```
+
+Contributor conventions for comments, module layout, dependencies, error
+handling, and commits are documented in [AGENTS.md](AGENTS.md).
