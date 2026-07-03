@@ -278,6 +278,7 @@ ifeq ($(INSTALL_PROFILE),user)
   SKILLDIR        ?= $(HOME)/.copilot-shell/skills
   OPENCLAW_PLUGIN_DIR ?= $(LIBDIR)/openclaw-plugin
   HERMES_PLUGIN_DIR   ?= $(LIBDIR)/hermes-plugin
+  CODEX_PLUGIN_DIR    ?= $(LIBDIR)/codex-plugin
 else
   PREFIX          ?= /usr/local
   ANOLISA_DATADIR ?= /usr/share/anolisa
@@ -285,6 +286,7 @@ else
   SKILLDIR        ?= $(ANOLISA_DATADIR)/skills
   OPENCLAW_PLUGIN_DIR ?= $(LIBDIR)/openclaw-plugin
   HERMES_PLUGIN_DIR   ?= $(LIBDIR)/hermes-plugin
+  CODEX_PLUGIN_DIR    ?= $(LIBDIR)/codex-plugin
 endif
 
 ADAPTER_DIR         ?= $(ANOLISA_DATADIR)/adapters/sec-core
@@ -376,9 +378,9 @@ install-hermes-plugin: ## Install hermes-plugin to target directory
 	chmod 0755 $(DESTDIR)$(HERMES_PLUGIN_DIR)/scripts/*.sh
 
 .PHONY: install-codex-plugin
-install-codex-plugin: ## Install codex-plugin hooks to RPM target
-	install -d -m 0755 $(DESTDIR)$(RPM_CODEX_PLUGIN_DIR)
-	cp -rp $(BUILD_DIR)/codex-plugin/. $(DESTDIR)$(RPM_CODEX_PLUGIN_DIR)/
+install-codex-plugin: ## Install codex-plugin hooks and install script
+	install -d -m 0755 $(DESTDIR)$(CODEX_PLUGIN_DIR)
+	cp -rp $(BUILD_DIR)/codex-plugin/. $(DESTDIR)$(CODEX_PLUGIN_DIR)/
 
 .PHONY: install-cosh-hook
 install-cosh-hook: ## Install cosh hooks (linux-sandbox + extension)
@@ -415,11 +417,12 @@ install-systemd-user: ## Install agent-sec-core systemd user service
 	install -p -m 0644 $(SYSTEMD_USER_UNIT_SOURCE) $(DESTDIR)$(SYSTEMD_USER_UNIT_DIR)/agent-sec-core.service
 
 .PHONY: install-all
-install-all: install-cli-venv install-cosh-hook install-openclaw-plugin install-hermes-plugin install-skills install-adapter-manifest ## Install all (user source build)
+install-all: install-cli-venv install-cosh-hook install-codex-plugin install-openclaw-plugin install-hermes-plugin install-skills install-adapter-manifest ## Install all (user source build)
 
 .PHONY: install-all-for-rpmbuild
 install-all-for-rpmbuild: OPENCLAW_PLUGIN_DIR := $(RPM_OPENCLAW_PLUGIN_DIR)
 install-all-for-rpmbuild: HERMES_PLUGIN_DIR := $(RPM_HERMES_PLUGIN_DIR)
+install-all-for-rpmbuild: CODEX_PLUGIN_DIR := $(RPM_CODEX_PLUGIN_DIR)
 install-all-for-rpmbuild: install-cli-site install-cosh-hook install-codex-plugin install-openclaw-plugin install-hermes-plugin install-skills install-adapter-manifest install-component-manifest install-systemd-user ## Install all (RPM build)
 
 # =============================================================================
@@ -453,6 +456,10 @@ uninstall-openclaw-plugin: ## Remove openclaw plugin
 uninstall-hermes-plugin: ## Remove hermes plugin
 	rm -rf $(DESTDIR)$(HERMES_PLUGIN_DIR)
 
+.PHONY: uninstall-codex-plugin
+uninstall-codex-plugin: ## Remove codex plugin
+	rm -rf $(DESTDIR)$(CODEX_PLUGIN_DIR)
+
 .PHONY: uninstall-skills
 uninstall-skills: ## Remove sec-core's own skill subdirs from SKILLDIR
 	@for d in skills/*/; do \
@@ -470,7 +477,7 @@ uninstall-component-manifest: ## Remove component manifest
 	rm -rf $(DESTDIR)$(COMPONENT_DIR)
 
 .PHONY: uninstall
-uninstall: uninstall-cli-venv uninstall-cosh-hook uninstall-openclaw-plugin uninstall-hermes-plugin uninstall-skills uninstall-adapter-manifest ## Uninstall everything install-all installed
+uninstall: uninstall-cli-venv uninstall-cosh-hook uninstall-codex-plugin uninstall-openclaw-plugin uninstall-hermes-plugin uninstall-skills uninstall-adapter-manifest ## Uninstall everything install-all installed
 
 .PHONY: help
 help: ## Show this help message
