@@ -324,7 +324,64 @@ Components with complex architectures maintain their own AGENTS.md for module-sp
 | **agentsight** | [`src/agentsight/AGENTS.md`](src/agentsight/AGENTS.md) | eBPF probes, data pipeline architecture, module map, FFI constraints, API endpoints |
 | **agent-sec-core** | [`src/agent-sec-core/AGENTS.md`](src/agent-sec-core/AGENTS.md) | Python environment, ruff/black rules, hermes-plugin, capability system |
 | **anolisa** | [`src/anolisa/AGENTS.md`](src/anolisa/AGENTS.md) | Workspace structure, crate responsibilities |
+| **cosh-ng** | [`src/cosh-ng/AGENTS.md`](src/cosh-ng/AGENTS.md) | 5-crate workspace, security heuristics, PTY testing strategy |
 | **skillfs** | [`src/skillfs/AGENTS.md`](src/skillfs/AGENTS.md) | Three-crate layout, dependency exceptions, FUSE e2e testing |
+
+## 11.1 File Placement Rules
+
+### Per-component files at `src/<component>/`
+
+Every component MUST have:
+
+| File | Purpose |
+|------|---------|
+| `README.md` | Human entry point: what it is, quick start, architecture overview |
+| `CONTRIBUTING.md` | How to contribute (build, test, lint, PR checklist) |
+| `CHANGELOG.md` | User-perceivable changes per release |
+
+Optional (only when the component has non-trivial AI-agent constraints):
+
+| File | Purpose |
+|------|---------|
+| `AGENTS.md` | Value proposition, doc boundaries, gotchas, terminology |
+
+#### README.md opening paragraph convention
+
+Every component `README.md` MUST open with a structured introduction:
+
+1. **First sentence**: one-line positioning (reusable verbatim in indexes)
+2. **Remainder of paragraph**: 2–4 sentences expanding scope and differentiators
+
+When composing `user-guide` indexes, quote the first sentence verbatim.
+
+### Repo root `/`
+
+| File | Purpose |
+|------|---------|
+| `AGENTS.md` | Global conventions (this file) |
+| `README.md` | Project-level overview |
+| `CONTRIBUTING.md` | General contribution guide (references component-specific ones) |
+| `LICENSE`, `Makefile` | Legal, unified build entry |
+
+### `docs/` structure
+
+| Path | Audience | Content |
+|------|----------|---------|
+| `docs/QUICKSTART.md` | Users | Cross-component quick start |
+| `docs/BUILDING.md` | Developers | Build instructions |
+| `docs/user-guide/{en,zh}/` | Users | Unified user documentation, organized by capability |
+| `docs/developer-guide/{en,zh}/` | Contributors | Architecture, hook development, IPC protocol, testing |
+
+Component user docs migrate into `docs/user-guide/` under the appropriate capability directory.
+Component developer docs migrate into `docs/developer-guide/` under the component name.
+
+Example:
+```
+docs/user-guide/en/user-entrypoint/copilot-shell/    ← users/ content
+docs/developer-guide/en/copilot-shell/               ← developers/ content
+```
+
+Each component directory in `user-guide/` uses `QUICKSTART.md` as its entry point.
 
 ## 12. User Guide Documentation Standards
 
