@@ -18,7 +18,7 @@ import {
   logAuth,
   saveAliyunCredentials,
 } from '@copilot-shell/core';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { LoadedSettings } from '../../config/settings.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import type { OpenAICredentials } from '../components/OpenAIKeyPrompt.js';
@@ -48,6 +48,7 @@ export const useAuthCommand = (
   config: Config,
   addItem: (item: Omit<HistoryItem, 'id'>, timestamp: number) => void,
   showBashOptionOnStartup: boolean,
+  refreshStatic?: () => void,
 ) => {
   const unAuthenticated = config.getAuthType() === undefined;
 
@@ -65,6 +66,12 @@ export const useAuthCommand = (
   const [pendingAuthType, setPendingAuthType] = useState<AuthType | undefined>(
     undefined,
   );
+
+  // Track first-launch auth so we can redraw the static area exactly once
+  // after the very first successful login. Without this, the tips banner is
+  // pushed into scrollback when the auth dialog unmounts and new history
+  // items are appended below Ink's <Static>.
+  const isInitialAuthPending = useRef(unAuthenticated);
 
   const onAuthError = useCallback(
     (error: string | null) => {
@@ -252,8 +259,13 @@ export const useAuthCommand = (
         },
         Date.now(),
       );
+
+      if (isInitialAuthPending.current) {
+        isInitialAuthPending.current = false;
+        refreshStatic?.();
+      }
     },
-    [settings, handleAuthFailure, config, addItem],
+    [settings, handleAuthFailure, config, addItem, refreshStatic],
   );
 
   const performAuth = useCallback(
@@ -466,6 +478,7 @@ export const useAuthCommand = (
   }, [showBashOptionOnStartup]);
 
   const handleContinueToBash = useCallback(() => {
+    isInitialAuthPending.current = false;
     setAuthError(null);
     setIsAuthenticating(false);
     setShowBashOptionInAuthDialog(false);

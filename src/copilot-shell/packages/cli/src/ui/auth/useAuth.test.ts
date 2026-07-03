@@ -217,4 +217,110 @@ describe('useAuthCommand', () => {
     });
     expect(errorItem).toBeDefined();
   });
+
+  it('refreshes the static area exactly once after the initial login', async () => {
+    const settings = createMockSettings();
+    const config = createMockConfig();
+    const addItem = vi.fn();
+    const refreshStatic = vi.fn();
+    vi.mocked(config.refreshAuth).mockResolvedValue(undefined);
+    vi.mocked(config.getContentGeneratorConfig).mockReturnValue({
+      model: 'my-model',
+    } as ReturnType<Config['getContentGeneratorConfig']>);
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings, config, addItem, false, refreshStatic),
+    );
+
+    await act(async () => {
+      await result.current.handleAuthSelect(AuthType.USE_OPENAI);
+    });
+    await act(async () => {
+      await result.current.handleAuthSelect(AuthType.USE_OPENAI, {
+        apiKey: 'sk-test',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'my-model',
+      });
+    });
+
+    expect(refreshStatic).toHaveBeenCalledTimes(1);
+
+    // A subsequent re-authentication (e.g. user switches provider) must not
+    // clear the screen again, otherwise the session scrollback would be lost.
+    await act(async () => {
+      await result.current.handleAuthSelect(AuthType.USE_OPENAI);
+    });
+    await act(async () => {
+      await result.current.handleAuthSelect(AuthType.USE_OPENAI, {
+        apiKey: 'sk-test-2',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'my-model',
+      });
+    });
+
+    expect(refreshStatic).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not refresh the static area when the session was already authenticated', async () => {
+    const settings = createMockSettings();
+    const config = createMockConfig();
+    vi.mocked(config.getAuthType).mockReturnValue(AuthType.USE_OPENAI);
+    vi.mocked(config.refreshAuth).mockResolvedValue(undefined);
+    vi.mocked(config.getContentGeneratorConfig).mockReturnValue({
+      model: 'my-model',
+    } as ReturnType<Config['getContentGeneratorConfig']>);
+    const addItem = vi.fn();
+    const refreshStatic = vi.fn();
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings, config, addItem, false, refreshStatic),
+    );
+
+    await act(async () => {
+      await result.current.handleAuthSelect(AuthType.USE_OPENAI);
+    });
+    await act(async () => {
+      await result.current.handleAuthSelect(AuthType.USE_OPENAI, {
+        apiKey: 'sk-test',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'my-model',
+      });
+    });
+
+    expect(refreshStatic).not.toHaveBeenCalled();
+  });
+
+  it('does not refresh the static area when user chose Continue to Bash then later authenticates', async () => {
+    const settings = createMockSettings();
+    const config = createMockConfig();
+    vi.mocked(config.refreshAuth).mockResolvedValue(undefined);
+    vi.mocked(config.getContentGeneratorConfig).mockReturnValue({
+      model: 'my-model',
+    } as ReturnType<Config['getContentGeneratorConfig']>);
+    const addItem = vi.fn();
+    const refreshStatic = vi.fn();
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings, config, addItem, true, refreshStatic),
+    );
+
+    // User skips auth and continues to bash
+    act(() => {
+      result.current.handleContinueToBash();
+    });
+
+    // Later the user authenticates via /auth
+    await act(async () => {
+      await result.current.handleAuthSelect(AuthType.USE_OPENAI);
+    });
+    await act(async () => {
+      await result.current.handleAuthSelect(AuthType.USE_OPENAI, {
+        apiKey: 'sk-test',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'my-model',
+      });
+    });
+
+    expect(refreshStatic).not.toHaveBeenCalled();
+  });
 });

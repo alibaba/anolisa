@@ -504,6 +504,7 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
     historyManager.addItem,
     initializationResult.shouldOpenAuthDialog,
+    refreshStatic,
   );
 
   useInitializationAuthError(initializationResult.authError, onAuthError);
