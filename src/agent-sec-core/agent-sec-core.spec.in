@@ -110,6 +110,7 @@ Built with maturin as a Rust native Python extension.
 %package -n agent-sec-cosh-hook
 Summary:        CoPilot Shell security hooks with linux-sandbox
 Requires:       agent-sec-cli = %{version}-%{release}
+Requires:       copilot-shell >= 2.4.0
 Requires:       bubblewrap
 Requires:       python3 >= 3.11
 Requires:       python3 < 3.12
