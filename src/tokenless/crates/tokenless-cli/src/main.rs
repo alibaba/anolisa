@@ -437,6 +437,9 @@ fn run() -> Result<(), (String, i32)> {
                 input,
                 output_text,
                 mode,
+                None,
+                None,
+                None,
             );
         }
         Commands::CompressResponse {
@@ -480,6 +483,25 @@ fn run() -> Result<(), (String, i32)> {
                 compressor = compressor.with_stash_store(store.clone());
             }
             let result = compressor.compress(&value);
+            // Stash observability: capture write/error counts + live entry
+            // count for stats. All three are None when no stash store is
+            // attached (vs Some(0) when a stash is attached but nothing was
+            // truncated) so stats queries can distinguish "no stash" runs
+            // from "stash, zero writes" runs. Counts are read AFTER compress
+            // so they reflect this call; stash_size reflects entries added.
+            let stash_writes = stash.as_ref().map(|_| compressor.stash_writes());
+            let stash_errors = stash.as_ref().map(|_| compressor.stash_errors());
+            let stash_size = stash.as_ref().map(|s| s.len());
+            // Surface persistent stash backend failures (disk full, locked DB,
+            // I/O) so they aren't invisible — compression degrades to the
+            // lossy marker per entry, but a non-zero count means the stash
+            // path is broken and retrievals will miss.
+            if matches!(stash_errors, Some(e) if e > 0) {
+                eprintln!(
+                    "[tokenless] stash: {} write(s) failed during compression; truncated entries are not retrievable (check stash db health)",
+                    stash_errors.expect("checked Some above")
+                );
+            }
             let after_compact = serde_json::to_string(&result).unwrap_or_else(|_| String::new());
 
             let before_tokens = estimate_tokens(&input);
@@ -516,6 +538,9 @@ fn run() -> Result<(), (String, i32)> {
                 input,
                 output_text,
                 mode,
+                stash_writes,
+                stash_errors,
+                stash_size,
             );
         }
         Commands::Retrieve { hash, stash_db } => {
@@ -734,6 +759,9 @@ fn run() -> Result<(), (String, i32)> {
                 input,
                 record_after,
                 mode,
+                None,
+                None,
+                None,
             );
         }
         Commands::DecompressToon { file } => {
@@ -816,6 +844,9 @@ fn record_compression_stats(
     before_text: String,
     after_text: String,
     mode: CompressionMode,
+    stash_writes: Option<usize>,
+    stash_errors: Option<usize>,
+    stash_size: Option<usize>,
 ) {
     // Short-circuit only if both stats and SLS are disabled.
     if !config.is_stats_enabled() && !config.is_sls_enabled() {
@@ -853,7 +884,10 @@ fn record_compression_stats(
     if let Some(tuid) = tool_use_id {
         record = record.with_tool_use_id(tuid);
     }
-    record = record.with_source_pid(pid as i64).with_mode(mode);
+    record = record
+        .with_source_pid(pid as i64)
+        .with_mode(mode)
+        .with_stash(stash_writes, stash_errors, stash_size);
 
     // SQLite stats recording — gated by stats_enabled
     if config.is_stats_enabled()

@@ -64,7 +64,10 @@ impl StatsRecorder {
                 after_text TEXT,
                 before_output TEXT,
                 after_output TEXT,
-                mode TEXT
+                mode TEXT,
+                stash_writes INTEGER,
+                stash_errors INTEGER,
+                stash_size INTEGER
             )",
             [],
         )?;
@@ -86,11 +89,18 @@ impl StatsRecorder {
             [],
         )?;
 
-        // Schema migration: add columns introduced in v0.3.0 if missing.
-        // Use PRAGMA table_info to check column existence before ALTER TABLE
-        // instead of relying on error-message string matching, which is
-        // fragile across SQLite versions and locales.
-        for col in &["before_output", "after_output", "mode"] {
+        // Schema migration: add columns introduced after the initial schema if
+        // missing. Use PRAGMA table_info to check column existence before
+        // ALTER TABLE instead of relying on error-message string matching,
+        // which is fragile across SQLite versions and locales.
+        for (col, col_type) in &[
+            ("before_output", "TEXT"),
+            ("after_output", "TEXT"),
+            ("mode", "TEXT"),
+            ("stash_writes", "INTEGER"),
+            ("stash_errors", "INTEGER"),
+            ("stash_size", "INTEGER"),
+        ] {
             let exists: bool = conn
                 .query_row(
                     "SELECT COUNT(*) FROM pragma_table_info('stats') WHERE name = ?",
@@ -100,7 +110,10 @@ impl StatsRecorder {
                 .map(|c| c > 0)
                 .unwrap_or(false);
             if !exists {
-                conn.execute(&format!("ALTER TABLE stats ADD COLUMN {} TEXT", col), [])?;
+                conn.execute(
+                    &format!("ALTER TABLE stats ADD COLUMN {} {}", col, col_type),
+                    [],
+                )?;
             }
         }
 
@@ -137,8 +150,9 @@ impl StatsRecorder {
                 timestamp, operation, agent_id, source_pid, session_id, tool_use_id,
                 before_chars, before_tokens, after_chars, after_tokens,
                 before_text, after_text,
-                before_output, after_output, mode
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                before_output, after_output, mode,
+                stash_writes, stash_errors, stash_size
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rusqlite::params![
                 record.timestamp.to_rfc3339(),
                 record.operation.as_str(),
@@ -155,6 +169,9 @@ impl StatsRecorder {
                 record.before_output,
                 record.after_output,
                 record.mode.as_str(),
+                record.stash_writes,
+                record.stash_errors,
+                record.stash_size,
             ],
         )?;
 
@@ -165,19 +182,27 @@ impl StatsRecorder {
     /// from unbounded loads while remaining generous for practical use.
     const DEFAULT_LIMIT: usize = 10_000;
 
+    /// Canonical column list for `stats` SELECTs. Defined once at impl level
+    /// so `row_to_record`'s positional `row.get(N)` indices stay in sync with
+    /// the SELECT order — adding a column here is the only place to update.
+    /// `concat!` keeps the source multi-line (one group per row_to_record
+    /// index span) without leaking indentation padding into the SQL string.
+    const SELECT_COLS: &str = concat!(
+        "id, timestamp, operation, agent_id, source_pid, ",
+        "session_id, tool_use_id, before_chars, before_tokens, ",
+        "after_chars, after_tokens, before_text, after_text, ",
+        "before_output, after_output, mode, stash_writes, ",
+        "stash_errors, stash_size"
+    );
+
     /// Query all records, newest first, with optional limit
     pub fn all_records(&self, limit: Option<usize>) -> StatsResult<Vec<StatsRecord>> {
         let conn = self.lock_conn();
 
-        const SELECT_COLS: &str =
-            "id, timestamp, operation, agent_id, source_pid, session_id, tool_use_id,
-                        before_chars, before_tokens, after_chars, after_tokens,
-                        before_text, after_text, before_output, after_output, mode";
-
         let n = limit.unwrap_or(Self::DEFAULT_LIMIT);
         let mut stmt = conn.prepare(&format!(
             "SELECT {} FROM stats ORDER BY timestamp DESC LIMIT ?",
-            SELECT_COLS
+            Self::SELECT_COLS
         ))?;
         let rows = stmt.query_map([n as i64], Self::row_to_record)?;
         let records: Vec<_> = rows
@@ -204,12 +229,10 @@ impl StatsRecorder {
     pub fn record_by_id(&self, id: i64) -> StatsResult<Option<StatsRecord>> {
         let conn = self.lock_conn();
 
-        let mut stmt = conn.prepare(
-            "SELECT id, timestamp, operation, agent_id, source_pid, session_id, tool_use_id,
-                    before_chars, before_tokens, after_chars, after_tokens,
-                    before_text, after_text, before_output, after_output, mode
-             FROM stats WHERE id = ?",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM stats WHERE id = ?",
+            Self::SELECT_COLS
+        ))?;
 
         let mut rows = stmt.query_map([id], Self::row_to_record)?;
 
@@ -228,15 +251,10 @@ impl StatsRecorder {
     ) -> StatsResult<Vec<StatsRecord>> {
         let conn = self.lock_conn();
 
-        const SELECT_COLS: &str =
-            "id, timestamp, operation, agent_id, source_pid, session_id, tool_use_id,
-                        before_chars, before_tokens, after_chars, after_tokens,
-                        before_text, after_text, before_output, after_output, mode";
-
         let n = limit.unwrap_or(Self::DEFAULT_LIMIT);
         let mut stmt = conn.prepare(&format!(
             "SELECT {} FROM stats WHERE session_id = ? ORDER BY timestamp DESC LIMIT ?",
-            SELECT_COLS
+            Self::SELECT_COLS
         ))?;
         let rows = stmt.query_map(rusqlite::params![session_id, n as i64], Self::row_to_record)?;
         Ok(rows.filter_map(|r| r.ok()).collect())
@@ -295,6 +313,9 @@ impl StatsRecorder {
             before_output: row.get(13)?,
             after_output: row.get(14)?,
             mode: CompressionMode::from_db(&row.get::<_, Option<String>>(15)?.unwrap_or_default()),
+            stash_writes: row.get(16)?,
+            stash_errors: row.get(17)?,
+            stash_size: row.get(18)?,
         })
     }
 }
@@ -390,6 +411,38 @@ mod tests {
         let got = rec.record_by_id(id).unwrap().unwrap();
         assert_eq!(got.mode, CompressionMode::DryRun);
         assert_eq!(got.session_id.as_deref(), Some("s1"));
+    }
+
+    #[test]
+    fn records_and_reads_stash_fields() {
+        let (rec, _dir) = new_recorder();
+        let rec_in = sample(
+            OperationType::CompressResponse,
+            CompressionMode::Active,
+            "stash-ses",
+        )
+        .with_stash(Some(3), Some(0), Some(42));
+        let id = rec.record(&rec_in).unwrap();
+        let got = rec.record_by_id(id).unwrap().unwrap();
+        assert_eq!(got.stash_writes, Some(3));
+        assert_eq!(got.stash_errors, Some(0));
+        assert_eq!(got.stash_size, Some(42));
+    }
+
+    #[test]
+    fn stash_fields_default_none_when_unstashed() {
+        let (rec, _dir) = new_recorder();
+        let id = rec
+            .record(&sample(
+                OperationType::CompressResponse,
+                CompressionMode::Active,
+                "no-stash",
+            ))
+            .unwrap();
+        let got = rec.record_by_id(id).unwrap().unwrap();
+        assert_eq!(got.stash_writes, None);
+        assert_eq!(got.stash_errors, None);
+        assert_eq!(got.stash_size, None);
     }
 
     #[test]

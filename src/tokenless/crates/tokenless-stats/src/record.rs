@@ -116,6 +116,17 @@ pub struct StatsRecord {
     pub after_output: Option<String>,
     /// Whether compression was applied (Active) or only predicted (DryRun)
     pub mode: CompressionMode,
+    /// Number of stash writes triggered by this compression (reversible stash
+    /// feature). `None` for records written by older versions (pre-stash) or
+    /// for operations that don't involve the stash.
+    pub stash_writes: Option<i64>,
+    /// Number of stash writes that failed during this compression (backend
+    /// error — disk full, locked DB, I/O). `None` for pre-stash records or
+    /// operations without a stash store attached.
+    pub stash_errors: Option<i64>,
+    /// Stash entry count at record time (a gauge of stash growth). `None` for
+    /// pre-stash records or operations without a stash store attached.
+    pub stash_size: Option<i64>,
 }
 
 impl StatsRecord {
@@ -145,6 +156,9 @@ impl StatsRecord {
             before_output: None,
             after_output: None,
             mode: CompressionMode::default(),
+            stash_writes: None,
+            stash_errors: None,
+            stash_size: None,
         }
     }
 
@@ -195,6 +209,22 @@ impl StatsRecord {
     pub fn with_output(mut self, before: String, after: String) -> Self {
         self.before_output = Some(before);
         self.after_output = Some(after);
+        self
+    }
+
+    /// Set stash write/error counts and stash size for this record (reversible
+    /// stash observability). All `Option`; pass `None` when the operation had
+    /// no stash store attached — this distinguishes "no stash" from "stash,
+    /// zero writes" in stats queries.
+    pub fn with_stash(
+        mut self,
+        writes: Option<usize>,
+        errors: Option<usize>,
+        size: Option<usize>,
+    ) -> Self {
+        self.stash_writes = writes.map(|w| w as i64);
+        self.stash_errors = errors.map(|e| e as i64);
+        self.stash_size = size.map(|s| s as i64);
         self
     }
 

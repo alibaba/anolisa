@@ -1,4 +1,5 @@
 use serde_json::{Map, Value};
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokenless_ccr::{StashStore, marker_for};
@@ -20,6 +21,15 @@ pub struct ResponseCompressor {
     /// pre-stash behavior. Keeping this optional means the stash stays off
     /// the core compression path unless a caller explicitly enables it.
     stash_store: Option<Arc<dyn StashStore>>,
+    /// Number of stash writes performed during the last `compress()` call.
+    /// Exposed for stats recording so callers can observe stash usage without
+    /// the schema crate depending on the stats crate.
+    stash_writes: Cell<usize>,
+    /// Number of stash writes that **failed** during the last `compress()`
+    /// call (backend error — disk full, locked DB, I/O). Exposed so the CLI
+    /// can surface persistent backend failures instead of silently degrading
+    /// to the lossy marker.
+    stash_errors: Cell<usize>,
 }
 
 impl Default for ResponseCompressor {
@@ -49,6 +59,8 @@ impl Default for ResponseCompressor {
             max_depth: 8,
             add_truncation_marker: true,
             stash_store: None,
+            stash_writes: Cell::new(0),
+            stash_errors: Cell::new(0),
         }
     }
 }
@@ -110,6 +122,13 @@ impl ResponseCompressor {
 
     /// Compress a JSON response value
     pub fn compress(&self, response: &Value) -> Value {
+        // Reset the stash counters so they reflect this call only. Cell (not
+        // AtomicUsize) is the right primitive: ResponseCompressor is
+        // stack-allocated per compress call and never shared across threads,
+        // and Cell makes the struct !Sync — preventing the false thread-safety
+        // impression that a reset-then-increment AtomicUsize pattern would give.
+        self.stash_writes.set(0);
+        self.stash_errors.set(0);
         let original_text = serde_json::to_string(response).unwrap_or_default();
         let result = self.compress_value(response, 0);
 
@@ -120,6 +139,19 @@ impl ResponseCompressor {
         }
 
         result
+    }
+
+    /// Number of stash writes performed during the last `compress()` call.
+    /// Zero when no stash store is attached or no arrays were truncated.
+    pub fn stash_writes(&self) -> usize {
+        self.stash_writes.get()
+    }
+
+    /// Number of stash writes that failed during the last `compress()` call.
+    /// Non-zero signals a persistent backend problem (disk full, locked DB,
+    /// I/O) — the caller should log it so the failure isn't invisible.
+    pub fn stash_errors(&self) -> usize {
+        self.stash_errors.get()
     }
 
     /// Recursively compress a JSON value
@@ -256,7 +288,19 @@ impl ResponseCompressor {
         if payload.is_empty() {
             return None;
         }
-        stash.stash(&payload).ok()
+        let key = match stash.stash(&payload) {
+            Ok(k) => {
+                self.stash_writes.set(self.stash_writes.get() + 1);
+                k
+            }
+            Err(_) => {
+                // Surface the backend failure via the counter so the CLI can
+                // log it; degrade to the lossy marker for this entry.
+                self.stash_errors.set(self.stash_errors.get() + 1);
+                return None;
+            }
+        };
+        Some(key)
     }
 
     /// Compress an object, removing drop_fields and recursing
@@ -584,6 +628,38 @@ mod tests {
         let retrieved = store.retrieve(hash).unwrap().expect("must be retrievable");
         let recovered: Vec<i32> = serde_json::from_str(&retrieved).unwrap();
         assert_eq!(recovered, (4..=10).collect::<Vec<_>>());
+        // One truncated array → one stash write.
+        assert_eq!(compressor.stash_writes(), 1);
+    }
+
+    #[test]
+    fn test_stash_writes_counter_zero_without_store() {
+        // No stash store attached → counter stays zero even when arrays are
+        // truncated (lossy path).
+        let compressor = ResponseCompressor::new().with_truncate_arrays_at(3);
+        let arr: Vec<i32> = (1..=10).collect();
+        compressor.compress(&json!(arr));
+        assert_eq!(compressor.stash_writes(), 0);
+    }
+
+    #[test]
+    fn test_stash_writes_counter_resets_per_compress() {
+        use std::sync::Arc;
+        use tokenless_ccr::InMemoryStore;
+
+        let store = Arc::new(InMemoryStore::new());
+        let compressor = ResponseCompressor::new()
+            .with_truncate_arrays_at(3)
+            .with_stash_store(store);
+        let arr: Vec<i32> = (1..=10).collect();
+        compressor.compress(&json!(arr));
+        assert_eq!(compressor.stash_writes(), 1);
+        // Second call resets, then writes again — still 1, not 2.
+        compressor.compress(&json!(arr));
+        assert_eq!(compressor.stash_writes(), 1);
+        // A call that doesn't truncate (within limit) resets to 0.
+        compressor.compress(&json!([1, 2, 3]));
+        assert_eq!(compressor.stash_writes(), 0);
     }
 
     #[test]
@@ -618,5 +694,9 @@ mod tests {
         let s = marker.as_str().unwrap();
         assert!(s.contains("more items truncated"));
         assert!(!s.contains("tokenless:"));
+        // The failed write is surfaced via the error counter so a persistent
+        // backend failure isn't invisible.
+        assert_eq!(compressor.stash_errors(), 1);
+        assert_eq!(compressor.stash_writes(), 0);
     }
 }
