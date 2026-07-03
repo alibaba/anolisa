@@ -266,7 +266,7 @@ MEMORY_GIT_ENABLED=true MEMORY_GIT_AUTO_COMMIT=true agent-memory
 
 ### 全文搜索
 
-SQLite FTS5 BM25 索引，亚毫秒级查询。后台 tokio 任务通过 `inotify` 监听 mount，事件经 200 ms debounce 聚合后在单事务中应用。分词器用 `trigram`（对中文/日文友好）。`IN_Q_OVERFLOW` 时自动触发全量 rescan，不静默丢事件。
+SQLite FTS5 BM25 索引，亚毫秒级查询。后台 tokio 任务通过 `inotify` 监听 mount，事件经 200 ms debounce 聚合后在单事务中应用。分词器用 `trigram`（对 ≥3 字符的子串匹配友好）。trigram 分词器以 3 字符滑窗生成 token，因此少于 3 字符的查询词（如中文的"花名""小云"）不产生任何 token，本会静默命中为空；`memory_search` 会识别这种情况并回退到 `body LIKE '%term%'` 子串扫描，确保短 CJK 查询仍能召回。`IN_Q_OVERFLOW` 时自动触发全量 rescan，不静默丢事件。
 
 ### 混合向量搜索
 

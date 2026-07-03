@@ -266,7 +266,7 @@ With git on, `mem_log` exposes change history and `mem_revert` gives the agent a
 
 ### Full-text search
 
-SQLite FTS5 BM25 index, sub-millisecond queries. A background tokio task watches the mount via `inotify`; events are debounced 200 ms and applied in a single transaction. Tokenizer is `trigram` (CJK-friendly). `IN_Q_OVERFLOW` triggers a full rescan — events are never silently dropped.
+SQLite FTS5 BM25 index, sub-millisecond queries. A background tokio task watches the mount via `inotify`; events are debounced 200 ms and applied in a single transaction. Tokenizer is `trigram` (substring matching for ≥3-char terms). The trigram tokenizer emits one token per 3-character window, so a query term shorter than 3 characters (common for CJK words like "花名" / "小云") produces no tokens and would silently match nothing; `memory_search` detects this case and falls back to a `body LIKE '%term%'` substring scan so short CJK queries still recall. `IN_Q_OVERFLOW` triggers a full rescan — events are never silently dropped.
 
 ### Hybrid vector search
 

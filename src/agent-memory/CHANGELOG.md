@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- fix memory_search returning zero hits for short CJK query terms (< 3 chars, e.g. "花名"/"小云"): the trigram tokenizer emits no tokens for terms shorter than 3 characters, so such queries now fall back to a `body LIKE '%term%'` substring scan that preserves recall, agent-scope filtering, and cold/superseded exclusion
+
 ## 0.2.0
 
 - add prompt-injection safety module (looksLikePromptInjection + escapeMemoryForPrompt) mirrored between Rust core and TS adapter

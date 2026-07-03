@@ -331,40 +331,28 @@ impl BM25Store {
         };
         let superseded_filter = "AND f.is_superseded = 0";
 
+        let scope = resolve_agent_scope(agent_scope)?;
+
+        // The FTS5 `trigram` tokenizer emits one token per 3-character
+        // window. A query term shorter than 3 chars (common for CJK words
+        // like "花名" / "小云") produces zero tokens and MATCH silently
+        // returns nothing. When any term is that short we fall back to a
+        // `body LIKE '%term%'` substring scan — trigram can't help here,
+        // but a linear scan over the (small) indexed corpus still recalls
+        // the right rows. Long-token-only queries keep the BM25 path.
+        let tokens: Vec<&str> = fts_q.split_whitespace().collect();
+        let needs_like_fallback = tokens.iter().any(|t| t.chars().count() < 3);
+        if needs_like_fallback {
+            return self.search_like(&tokens, top_k, cold_filter, superseded_filter, &scope);
+        }
+
+        // ── BM25 / FTS5 MATCH path (all terms ≥ 3 chars) ──────────────
         // Agent scope filter: when set, only return results from the specified agent.
         // Use parameterised binding (`?3`) rather than `format!()` so an
         // attacker-controlled `MCP_CLIENT_NAME` cannot escape the literal.
         // `/` and `\` are rejected so a client name like `org/team/agent`
         // cannot be confused with a path component elsewhere in the query.
-        let (agent_filter, agent_param) = match agent_scope {
-            Some(scope) if scope.starts_with("isolated:") || scope.starts_with("filter:") => {
-                let agent_id = scope.split_once(':').map(|x| x.1).unwrap_or("");
-                if agent_id.contains(|c: char| {
-                    c == '\''
-                        || c == '"'
-                        || c == ';'
-                        || c == '\\'
-                        || c == '/'
-                        || c == '\0'
-                        || c == '\n'
-                        || c == '\r'
-                }) {
-                    return Err(MemoryError::InvalidArgument(format!(
-                        "agent_scope contains invalid characters: {agent_id:?}"
-                    )));
-                }
-                // isolated: only the agent's own memories.
-                // filter: agent's own plus unscoped (NULL) memories.
-                let sql_filter = if scope.starts_with("isolated:") {
-                    "AND f.agent_id = ?3"
-                } else {
-                    "AND (f.agent_id = ?3 OR f.agent_id IS NULL)"
-                };
-                (sql_filter.to_string(), Some(agent_id.to_string()))
-            }
-            // Unknown prefix or shared -> no filter (parameter list stays at 2).
-            _ => (String::new(), None),
-        };
+        let (agent_filter, agent_param) = agent_scope_sql_match(&scope);
 
         // Join with files to get mtime for time decay.
         let sql = format!(
@@ -437,6 +425,103 @@ impl BM25Store {
         Ok(out)
     }
 
+    /// LIKE-based substring fallback for queries that the trigram tokenizer
+    /// cannot serve (any term < 3 chars, e.g. short CJK words). AND-joins
+    /// one `body LIKE ? ESCAPE '\'` clause per token so multi-term queries
+    /// keep "all terms must appear" semantics. `_` and `%` surviving
+    /// `sanitize_fts_query` are backslash-escaped so they match literally.
+    /// Scoring is a coarse term-frequency sum plus time decay — no BM25 is
+    /// available off the MATCH path, but recall (not ranking) is the goal.
+    fn search_like(
+        &self,
+        tokens: &[&str],
+        top_k: usize,
+        cold_filter: &str,
+        superseded_filter: &str,
+        scope: &AgentScope,
+    ) -> Result<Vec<SearchHit>> {
+        if tokens.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (agent_filter, agent_param) = agent_scope_sql_like(scope);
+
+        let like_clause = tokens
+            .iter()
+            .map(|_| "files_fts.body LIKE ? ESCAPE '\\'")
+            .collect::<Vec<_>>()
+            .join(" AND ");
+
+        let sql = format!(
+            r#"
+            SELECT f.path, files_fts.body, f.mtime_ms
+            FROM files_fts
+            JOIN files f ON f.rowid = files_fts.rowid
+            WHERE {like_clause} {cold_filter} {superseded_filter} {agent_filter}
+            LIMIT ?
+            "#
+        );
+        // No SQL ORDER BY: the LIKE path has no rank, and ordering by mtime
+        // would discard high-frequency old documents before Rust scoring.
+        // Fetch a generous pool (top_k * 4) and let Rust sort by score +
+        // truncate, so the scoring dimension (frequency) — not mtime —
+        // decides what survives.
+
+        let like_patterns: Vec<String> = tokens.iter().map(|t| like_pattern(t)).collect();
+        let mut bind: Vec<rusqlite::types::Value> = like_patterns
+            .iter()
+            .map(|s| rusqlite::types::Value::Text(s.clone()))
+            .collect();
+        if let Some(ref agent_id) = agent_param {
+            bind.push(rusqlite::types::Value::Text(agent_id.clone()));
+        }
+        bind.push(rusqlite::types::Value::Integer((top_k * 4).max(1) as i64));
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(bind.iter()), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+
+        // Anchor the snippet on the shortest token — it is the most
+        // specific term and the one the trigram path would have refused.
+        let needle = tokens
+            .iter()
+            .min_by_key(|t| t.chars().count())
+            .copied()
+            .unwrap_or("");
+
+        let mut out: Vec<SearchHit> = Vec::new();
+        for row in rows.flatten() {
+            let (path, body, mtime_ms) = row;
+            let snippet = make_snippet(&body, needle, 24);
+            let suspicious =
+                crate::safety::looks_like_prompt_injection(&strip_snippet_markers(&snippet));
+            // Case-insensitive frequency: SQLite LIKE is ASCII
+            // case-insensitive by default, so a case-sensitive `matches()`
+            // would under-count (to zero) for mixed-case ASCII matches,
+            // collapsing the score to pure time decay. CJK is unaffected
+            // (LIKE is case-sensitive for non-ASCII).
+            let body_lower = body.to_lowercase();
+            let freq: f64 = tokens
+                .iter()
+                .map(|t| body_lower.matches(&t.to_lowercase()).count() as f64)
+                .sum();
+            let decay = time_decay(mtime_ms, self.time_decay_lambda);
+            out.push(SearchHit {
+                path,
+                snippet,
+                score: freq + self.time_decay_alpha * decay,
+                suspicious,
+            });
+        }
+        out.sort_by(|a, b| b.score.total_cmp(&a.score));
+        out.truncate(top_k);
+        Ok(out)
+    }
+
     /// Deep search: include cold files too.
     pub fn search_deep(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>> {
         self.search(query, top_k, false)
@@ -504,6 +589,15 @@ impl BM25Store {
             return Ok(Vec::new());
         }
 
+        // Same short-CJK gap as `search_scoped`: a trigram query term < 3
+        // chars produces zero tokens and MATCH silently returns nothing,
+        // so duplicates/contradictions with short-CJK keywords would slip
+        // past conflict detection. Fall back to a LIKE substring scan.
+        let tokens: Vec<&str> = fts_q.split_whitespace().collect();
+        if tokens.iter().any(|t| t.chars().count() < 3) {
+            return self.detect_conflicts_like(&tokens, threshold);
+        }
+
         // Search excluding cold and superseded files.
         let sql = r#"
             SELECT f.path, bm25(files_fts) AS rank
@@ -524,6 +618,72 @@ impl BM25Store {
             .collect();
 
         Ok(results)
+    }
+
+    /// LIKE-based conflict detection fallback for short-CJK queries (any term
+    /// < 3 chars). No BM25 is available off the MATCH path, so the score is a
+    /// term-frequency sum plus time decay — always ≥ 0, hence ≥ the
+    /// typically-negative BM25 `threshold`. This is deliberately
+    /// recall-oriented: when we can't rank, flag every substring match as a
+    /// potential conflict rather than silently miss a duplicate/contradiction.
+    /// The caller still reviews flagged conflicts before superseding.
+    fn detect_conflicts_like(&self, tokens: &[&str], threshold: f64) -> Result<Vec<(String, f64)>> {
+        if tokens.is_empty() {
+            return Ok(Vec::new());
+        }
+        let like_clause = tokens
+            .iter()
+            .map(|_| "files_fts.body LIKE ? ESCAPE '\\'")
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        // No ORDER BY: the MATCH path orders by BM25 rank, but the LIKE path
+        // has no rank, and ordering by mtime would cut high-frequency old
+        // documents before scoring. Fetch a generous pool, score in Rust,
+        // then sort + truncate.
+        let sql = format!(
+            r#"
+            SELECT f.path, files_fts.body, f.mtime_ms
+            FROM files_fts
+            JOIN files f ON f.rowid = files_fts.rowid
+            WHERE {like_clause} AND f.is_cold = 0 AND f.is_superseded = 0
+            LIMIT 50
+            "#
+        );
+        let like_patterns: Vec<String> = tokens.iter().map(|t| like_pattern(t)).collect();
+        let bind: Vec<rusqlite::types::Value> = like_patterns
+            .iter()
+            .map(|s| rusqlite::types::Value::Text(s.clone()))
+            .collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(bind.iter()), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+
+        let mut out: Vec<(String, f64)> = Vec::new();
+        for row in rows.flatten() {
+            let (path, body, mtime_ms) = row;
+            // Case-insensitive frequency: SQLite LIKE is ASCII
+            // case-insensitive, so a Rust `matches()` (case-sensitive) would
+            // under-count and zero the score for mixed-case matches.
+            let body_lower = body.to_lowercase();
+            let freq: f64 = tokens
+                .iter()
+                .map(|t| body_lower.matches(&t.to_lowercase()).count() as f64)
+                .sum();
+            let decay = time_decay(mtime_ms, self.time_decay_lambda);
+            let score = freq + self.time_decay_alpha * decay;
+            if score >= threshold {
+                out.push((path, score));
+            }
+        }
+        // Highest score first, then cap at 5 to match the MATCH path's LIMIT.
+        out.sort_by(|a, b| b.1.total_cmp(&a.1));
+        out.truncate(5);
+        Ok(out)
     }
 
     /// Mark a file as superseded by another file. The superseded file
@@ -792,6 +952,135 @@ fn strip_snippet_markers(s: &str) -> String {
     out
 }
 
+// ── agent scope helpers (shared by MATCH and LIKE search paths) ───────
+
+#[derive(Clone, Copy)]
+enum ScopeKind {
+    /// Only the agent's own memories.
+    Isolated,
+    /// Agent's own plus unscoped (agent_id IS NULL) memories.
+    Filter,
+}
+
+/// A resolved agent scope: `None` is shared (no filter), `Some((kind, id))`
+/// constrains results to the named agent. Centralising this here keeps the
+/// agent_id validation in one place — both the MATCH and LIKE search paths
+/// must reject the same set of SQL-meta / path-separator characters so a
+/// misconfigured `MCP_CLIENT_NAME` can't widen the visibility domain.
+type AgentScope = Option<(ScopeKind, String)>;
+
+fn resolve_agent_scope(agent_scope: Option<&str>) -> Result<AgentScope> {
+    let Some(scope) = agent_scope else {
+        return Ok(None);
+    };
+    if !scope.starts_with("isolated:") && !scope.starts_with("filter:") {
+        return Ok(None);
+    }
+    let agent_id = scope.split_once(':').map(|x| x.1).unwrap_or("");
+    if agent_id.contains(|c: char| {
+        c == '\''
+            || c == '"'
+            || c == ';'
+            || c == '\\'
+            || c == '/'
+            || c == '\0'
+            || c == '\n'
+            || c == '\r'
+    }) {
+        return Err(MemoryError::InvalidArgument(format!(
+            "agent_scope contains invalid characters: {agent_id:?}"
+        )));
+    }
+    let kind = if scope.starts_with("isolated:") {
+        ScopeKind::Isolated
+    } else {
+        ScopeKind::Filter
+    };
+    Ok(Some((kind, agent_id.to_string())))
+}
+
+/// Agent filter SQL for the FTS5 MATCH path. Uses explicit `?3` because the
+/// MATCH query numbers its parameters (`?1` = query, `?2` = limit).
+fn agent_scope_sql_match(scope: &AgentScope) -> (String, Option<String>) {
+    match scope {
+        None => (String::new(), None),
+        Some((ScopeKind::Isolated, id)) => ("AND f.agent_id = ?3".to_string(), Some(id.clone())),
+        Some((ScopeKind::Filter, id)) => (
+            "AND (f.agent_id = ?3 OR f.agent_id IS NULL)".to_string(),
+            Some(id.clone()),
+        ),
+    }
+}
+
+/// Agent filter SQL for the LIKE fallback path. Uses bare positional `?`
+/// because the LIKE query binds a variable number of leading pattern params,
+/// so fixed `?3` numbering would be wrong.
+fn agent_scope_sql_like(scope: &AgentScope) -> (String, Option<String>) {
+    match scope {
+        None => (String::new(), None),
+        Some((ScopeKind::Isolated, id)) => ("AND f.agent_id = ?".to_string(), Some(id.clone())),
+        Some((ScopeKind::Filter, id)) => (
+            "AND (f.agent_id = ? OR f.agent_id IS NULL)".to_string(),
+            Some(id.clone()),
+        ),
+    }
+}
+
+/// Build a `LIKE` pattern matching `token` as a substring, backslash-escaping
+/// the `%` / `_` / `\` wildcards so they match literally. `sanitize_fts_query`
+/// keeps `_` (and drops `%`), but escaping all three is defensive against
+/// future sanitisation changes.
+fn like_pattern(token: &str) -> String {
+    let mut s = String::with_capacity(token.len() + 4);
+    s.push('%');
+    for c in token.chars() {
+        match c {
+            '_' | '%' | '\\' => {
+                s.push('\\');
+                s.push(c);
+            }
+            other => s.push(other),
+        }
+    }
+    s.push('%');
+    s
+}
+
+/// Produce a snippet window of `radius` chars on each side of the first
+/// occurrence of `needle` in `body`, wrapped in `«»` and elided with `…` so
+/// it is shaped like the FTS5 `snippet()` output the MATCH path returns.
+/// Falls back to the first `radius` chars of the body if `needle` is absent.
+fn make_snippet(body: &str, needle: &str, radius: usize) -> String {
+    if needle.is_empty() {
+        return body.chars().take(radius).collect();
+    }
+    let npos = match body.find(needle) {
+        Some(p) => p,
+        None => return body.chars().take(radius).collect(),
+    };
+    let before: Vec<char> = body[..npos].chars().collect();
+    let needle_chars: Vec<char> = needle.chars().collect();
+    let after_start = (npos + needle.len()).min(body.len());
+    let after: Vec<char> = body[after_start..].chars().collect();
+
+    let start = before.len().saturating_sub(radius);
+    let end = radius.min(after.len());
+
+    let mut s = String::new();
+    if start > 0 {
+        s.push('…');
+    }
+    s.extend(before[start..].iter());
+    s.push('«');
+    s.extend(needle_chars.iter());
+    s.push('»');
+    s.extend(after[..end].iter());
+    if end < after.len() {
+        s.push('…');
+    }
+    s
+}
+
 /// Convert a raw query into something safe for FTS5: drop quotes /
 /// punctuation that confuse the parser, AND-join surviving tokens.
 /// `-` is dropped because FTS5 interprets a leading `-` as the NOT
@@ -909,6 +1198,116 @@ mod tests {
         s.upsert("a.md", 0, 0, "你好世界 hello", None).unwrap();
         let hits = s.search("hello", 5, true).unwrap();
         assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn search_two_char_cjk_query_recalls_via_like_fallback() {
+        // Regression for issue #1254: the trigram tokenizer needs ≥3 chars
+        // per term, so a 2-char CJK word like "花名" silently returned
+        // zero hits via the MATCH path. The LIKE fallback must recall it.
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("notes/observed/x.md", 0, 0, "用户的花名是\"小云\"。", None)
+            .unwrap();
+        s.upsert("notes/other.md", 0, 0, "无关内容 weather report", None)
+            .unwrap();
+
+        // 2-char term that previously returned 0 hits.
+        let hits = s.search("花名", 5, true).unwrap();
+        assert_eq!(hits.len(), 1, "花名 should recall the observed note");
+        assert_eq!(hits[0].path, "notes/observed/x.md");
+        // Snippet should bracket the matched term.
+        assert!(hits[0].snippet.contains("«花名»"));
+
+        // The other 2-char term in the same body also recalls.
+        let hits = s.search("小云", 5, true).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "notes/observed/x.md");
+    }
+
+    #[test]
+    fn search_three_char_cjk_still_uses_trigram() {
+        // 3-char terms must keep working through the BM25/trigram path
+        // (the fallback must not swallow queries trigram can serve).
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("a.md", 0, 0, "用户的花名是小云", None).unwrap();
+        let hits = s.search("花名是", 5, true).unwrap();
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn search_mixed_short_and_long_tokens_and_joins() {
+        // "花名 小云" — both terms 2 chars → LIKE fallback, AND-joined:
+        // only bodies containing both substrings should match.
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("both.md", 0, 0, "花名叫做小云没错", None).unwrap();
+        s.upsert("only_one.md", 0, 0, "这里只有花名没有别的", None)
+            .unwrap();
+        let hits = s.search("花名 小云", 5, true).unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["both.md"]);
+    }
+
+    #[test]
+    fn search_like_respects_agent_scope() {
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("own.md", 0, 0, "花名是小云", Some("alpha"))
+            .unwrap();
+        s.upsert("other.md", 0, 0, "花名是大云", Some("beta"))
+            .unwrap();
+        s.upsert("legacy.md", 0, 0, "花名是老云", None).unwrap();
+
+        // isolated:alpha sees only its own — not beta, not the unscoped row.
+        let hits = s
+            .search_scoped("花名", 10, true, Some("isolated:alpha"))
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["own.md"]);
+
+        // filter:alpha sees its own + unscoped, never beta.
+        let hits = s
+            .search_scoped("花名", 10, true, Some("filter:alpha"))
+            .unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert!(paths.contains(&"own.md"));
+        assert!(paths.contains(&"legacy.md"));
+        assert!(!paths.contains(&"other.md"));
+    }
+
+    #[test]
+    fn search_like_skips_cold_and_superseded() {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let mut s = BM25Store::open_in_memory_with(0.01, 0.3, true).unwrap();
+        s.upsert("warm.md", now_ms, 10, "花名是小云", None).unwrap();
+        s.upsert("cold.md", now_ms - 100 * 86_400_000, 10, "花名是老云", None)
+            .unwrap();
+        s.compact(30).unwrap();
+        // Normal (exclude_cold) search hides the cold row.
+        let hits = s.search("花名", 10, true).unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["warm.md"]);
+        // Deep search (include cold) finds both.
+        let hits = s.search("花名", 10, false).unwrap();
+        assert_eq!(hits.len(), 2);
+    }
+
+    #[test]
+    fn search_like_handles_underscore_literal() {
+        // `_` survives sanitize_fts_query and is a LIKE wildcard — it must
+        // be escaped so "a_" doesn't match "ax". Use a 2-char token so the
+        // query takes the LIKE path (trigram needs ≥ 3 chars); a 3-char
+        // "a_b" would go through BM25/MATCH and not exercise the LIKE
+        // escaping at all.
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("lit.md", 0, 0, "the token is a_b here", None)
+            .unwrap();
+        s.upsert("wild.md", 0, 0, "the token is axb here", None)
+            .unwrap();
+        let hits = s.search("a_", 10, true).unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, vec!["lit.md"], "underscore must match literally");
     }
 
     #[test]
@@ -1213,6 +1612,43 @@ mod tests {
         // Unrelated query should not match.
         let conflicts = s.detect_conflicts("rust ownership rules", -2.0).unwrap();
         assert!(conflicts.is_empty());
+    }
+
+    #[test]
+    fn detect_conflicts_short_cjk_uses_like_fallback() {
+        // Regression: a 2-char CJK query term produces zero trigram tokens,
+        // so MATCH silently returned nothing and a duplicate memory with
+        // that keyword slipped past conflict detection. The LIKE fallback
+        // must catch it (see review finding #1).
+        let mut s = BM25Store::open_in_memory_with(0.01, 0.3, true).unwrap();
+        s.upsert("dup.md", 100, 50, "花名登记为小云", None).unwrap();
+        s.upsert("other.md", 100, 50, "完全无关的内容", None)
+            .unwrap();
+        let conflicts = s.detect_conflicts("花名", -2.0).unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].0, "dup.md");
+    }
+
+    #[test]
+    fn search_like_mixed_short_and_long_tokens() {
+        // A single short token pulls the whole query into the LIKE path; long
+        // tokens keep AND semantics (all terms must appear). This is the
+        // documented recall-over-ranking tradeoff, here pinned as a test
+        // (see review finding #5).
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert("both.md", 0, 0, "花名 reversible compression", None)
+            .unwrap();
+        s.upsert("short_only.md", 0, 0, "花名 unrelated content", None)
+            .unwrap();
+        s.upsert("long_only.md", 0, 0, "reversible compression no cjk", None)
+            .unwrap();
+        let hits = s.search("花名 reversible", 10, true).unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["both.md"],
+            "LIKE path AND-joins short + long tokens"
+        );
     }
 
     #[test]
