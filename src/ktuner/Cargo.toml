@@ -3,7 +3,7 @@ name = "ktuner"
 version = "0.1.0"
 edition = "2021"
 description = "Deterministic kernel-tuning engine for ANOLISA agents"
-license = "MIT"
+license = "Apache-2.0"
 
 [lib]
 name = "ktuner_engine"
