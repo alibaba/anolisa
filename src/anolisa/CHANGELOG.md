@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.20] - 2026-07-03
+
+### Added
+
+- ANOLISA can now be distributed as `@anolisa/cli` with Linux x64 and arm64 binaries.
+- `repo.toml` now enables the npm backend for component distribution.
+
+### Changed
+
+- `anolisa list` now shows local state, ownership, and next action for each component.
+- `anolisa list --json` now includes RPM package, version, architecture, and source repository details.
+
+### Fixed
+
+- RPM installs and updates now keep system repositories available for dependencies.
+- Adapter commands now distinguish missing component manifests from invalid manifests.
+
 ## [0.1.19] - 2026-07-02
 
 ### Fixed
@@ -397,6 +414,23 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.1.20] - 2026-07-03
+
+### 新增
+
+- ANOLISA 现可通过 `@anolisa/cli` 发布 Linux x64 和 arm64 二进制。
+- `repo.toml` 现启用 npm 后端用于组件分发。
+
+### 变更
+
+- `anolisa list` 现显示本地状态、归属和下一步操作。
+- `anolisa list --json` 现包含 RPM 包名、版本、架构和来源。
+
+### 修复
+
+- RPM 安装和更新现可继续使用系统软件源解析依赖。
+- Adapter 命令现区分缺失清单和无效清单。
 
 ## [0.1.19] - 2026-07-02
 

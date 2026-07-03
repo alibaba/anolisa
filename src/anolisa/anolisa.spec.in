@@ -124,7 +124,15 @@ install -m 0644 manifests/repo.toml %{buildroot}%{_sysconfdir}/anolisa/repo.toml
 #%%doc %%{_docdir}/%%{name}/README.md
 
 %changelog
-* Thu Jul 02 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Fri Jul 03 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- ANOLISA can now be distributed as `@anolisa/cli` with Linux x64 and arm64 binaries.
+- `repo.toml` now enables the npm backend for component distribution.
+- `anolisa list` now shows local state, ownership, and next action for each component.
+- `anolisa list --json` now includes RPM package, version, architecture, and source repository details.
+- RPM installs and updates now keep system repositories available for dependencies.
+- Adapter commands now distinguish missing component manifests from invalid manifests.
+
+* Thu Jul 02 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.1.19-1
 - `anolisa adapter disable --dry-run` now previews cleanup without removing adapter receipts or resources.
 - Read-only commands now use downloaded repo config when saving `repo.toml` fails.
 - Component commands now accept package aliases consistently when targeting installed components.
