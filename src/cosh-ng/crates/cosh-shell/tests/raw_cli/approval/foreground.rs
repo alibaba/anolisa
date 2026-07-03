@@ -9,14 +9,18 @@ fn raw_cli_streaming_tool_approval_renders_before_agent_finishes() {
     ]);
 
     assert!(output.contains("Preparing a streamed tool request before finishing."));
-    assert!(output.contains("Approval required"));
+    assert_approval_request_card_visible(&output);
     assert!(output.contains("Subject: Bash"));
     assert!(output.contains("$ git status --short"));
     assert!(output.contains("medium risk"));
     assert!(!output.contains("Subject: tool Bash"));
     assert!(!output.contains("Command: git status --short"));
-    assert!(!output.contains("Keys: Left/Right select"));
     assert!(output.contains("Approved req-1"), "{output}");
+    let approved_tail = output
+        .split("Approved req-1")
+        .last()
+        .expect("approved receipt tail");
+    assert!(!approved_tail.contains("Keys: Left/Right select"));
     assert!(output.contains("sent to shell"), "{output}");
     assert!(!output.contains("Bash tool - approved"), "{output}");
     assert!(output.contains("$ git status --short"), "{output}");
@@ -25,7 +29,7 @@ fn raw_cli_streaming_tool_approval_renders_before_agent_finishes() {
     assert_inline_before_followup(
         &output,
         "Preparing a streamed tool request before finishing.",
-        "Approval required",
+        "Approval req-1",
     );
     assert!(!output.contains("Analysis continued after the approved command"));
     assert!(!output.contains("stdout captured; [Details]"), "{output}");
@@ -46,7 +50,7 @@ fn raw_cli_approved_bash_tool_prints_native_command_and_stdout() {
     let expected_cwd = env!("CARGO_MANIFEST_DIR");
 
     assert!(output.contains("Preparing a streamed pwd request before finishing."));
-    assert!(output.contains("Approval required"), "{output}");
+    assert_approval_request_card_visible(&output);
     assert!(output.contains("Subject: Bash"), "{output}");
     assert!(output.contains("$ pwd"), "{output}");
     assert!(output.contains(expected_cwd), "{output}");
@@ -73,7 +77,7 @@ fn raw_cli_approved_bash_tool_streams_delayed_output_before_analysis() {
     let normalized = output.replace('\r', "");
 
     assert!(output.contains("Preparing a delayed streamed tool request before finishing."));
-    assert!(output.contains("Approval required"), "{output}");
+    assert_approval_request_card_visible(&output);
     assert!(
         output.contains("$ sleep 1; echo a; sleep 1; echo b"),
         "{output}"
@@ -103,7 +107,7 @@ fn raw_cli_approved_bash_tool_streams_stderr_to_transcript() {
     ]);
 
     assert!(output.contains("Preparing a stderr streamed tool request before finishing."));
-    assert!(output.contains("Approval required"), "{output}");
+    assert_approval_request_card_visible(&output);
     assert!(
         output.contains("$ printf 'out\\n'; printf 'err\\n' >&2"),
         "{output}"
@@ -147,7 +151,7 @@ readonly_disabled = ["git status", "pwd"]"#,
         ],
     );
 
-    assert!(output.contains("Approval required"), "{output}");
+    assert_approval_request_card_visible(&output);
     assert!(output.contains("Approved req-1"), "{output}");
     assert!(output.contains("$ sudo printf approved-sudo"), "{output}");
     assert!(output.contains("fake-sudo:approved-sudo"), "{output}");
@@ -279,7 +283,7 @@ fn raw_cli_approved_bash_tool_drops_stale_pre_approval_followup() {
     let expected_cwd = env!("CARGO_MANIFEST_DIR");
 
     assert!(output.contains("Preparing a command before approval."));
-    assert!(output.contains("Approval required"), "{output}");
+    assert_approval_request_card_visible(&output);
     assert!(output.contains("req-1"), "{output}");
     assert!(output.contains("Approved req-1"), "{output}");
     assert!(output.contains("sent to shell"), "{output}");
@@ -303,7 +307,7 @@ fn raw_cli_denied_bash_tool_does_not_render_stale_executed_claim() {
     let expected_cwd = env!("CARGO_MANIFEST_DIR");
 
     assert!(output.contains("Preparing a streamed pwd request before finishing."));
-    assert!(output.contains("Approval required"), "{output}");
+    assert_approval_request_card_visible(&output);
     assert!(output.contains("Subject: Bash"), "{output}");
     assert!(output.contains("Denied req-1"), "{output}");
     assert!(!output.contains("No command ran."), "{output}");
@@ -336,7 +340,7 @@ fn raw_cli_denied_bash_tool_uses_zh_language_env() {
     );
     let expected_cwd = env!("CARGO_MANIFEST_DIR");
 
-    assert!(output.contains("需要审批"), "{output}");
+    assert_approval_request_card_visible(&output);
     assert!(output.contains("对象: Bash"), "{output}");
     assert!(output.contains("已拒绝 req-1"), "{output}");
     assert!(output.contains("$ pwd"), "{output}");
@@ -345,6 +349,7 @@ fn raw_cli_denied_bash_tool_uses_zh_language_env() {
         "{output}"
     );
     assert!(!output.contains("Approval required"), "{output}");
+    assert!(!output.contains("Approval req-"), "{output}");
     assert!(!output.contains("Subject: Bash"), "{output}");
     assert!(!output.contains("Denied req-1"), "{output}");
     assert!(!output.contains(expected_cwd), "{output}");
@@ -367,12 +372,16 @@ fn raw_cli_user_approved_bash_tool_supports_pipe() {
     );
 
     assert!(output.contains("Preparing a piped streamed tool request before finishing."));
-    assert!(output.contains("Approval required"));
+    assert_approval_request_card_visible(&output);
     assert!(output.contains("Subject: Bash"));
     assert!(output.contains("$ ps aux | head"));
     assert!(output.contains("Approved req-1"), "{output}");
     assert!(!output.contains("Blocked req-1"), "{output}");
-    assert!(!output.contains("Keys: Left/Right select"));
+    let approved_tail = output
+        .split("Approved req-1")
+        .last()
+        .expect("approved receipt tail");
+    assert!(!approved_tail.contains("Keys: Left/Right select"));
     assert!(output.contains("$ ps aux | head"), "{output}");
     assert!(
         !output.contains("cosh-shell: blocked shell metacharacter"),

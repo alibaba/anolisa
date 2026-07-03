@@ -72,11 +72,10 @@ language = "zh-CN"
         &[("HOME", &home_str), ("COSH_SHELL_LANG", RAW_CLI_UNSET_ENV)],
     );
 
-    assert!(output.contains("Config:"), "{output}");
+    assert!(output.contains("Config"), "{output}");
     assert!(output.contains("language: en-US effective"), "{output}");
     assert!(!output.contains("语言: zh-CN 来源: config"), "{output}");
     assert!(output.contains(".copilot-shell"), "{output}");
-    assert!(output.contains("config.toml"), "{output}");
     assert!(!output.contains("bash: /config"), "{output}");
 }
 

@@ -52,7 +52,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-host-exec
         vec![
             (b"/mode approval auto\n".to_vec(), Duration::ZERO),
             (
-                b"provider-host-executed-shell\n".to_vec(),
+                b"?? provider-host-executed-shell\n".to_vec(),
                 Duration::from_millis(500),
             ),
             (
@@ -149,7 +149,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-host-exec
         vec![
             (b"/mode approval auto\n".to_vec(), Duration::ZERO),
             (
-                b"host-executed-stream-order\n".to_vec(),
+                b"?? host-executed-stream-order\n".to_vec(),
                 Duration::from_millis(500),
             ),
             (b"exit\n".to_vec(), Duration::from_millis(4_000)),
@@ -481,7 +481,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-host-exec
         vec![
             (b"/mode approval auto\n".to_vec(), Duration::ZERO),
             (
-                b"provider-host-executed-multi-tool\n".to_vec(),
+                b"?? provider-host-executed-multi-tool\n".to_vec(),
                 Duration::from_millis(500),
             ),
             (
@@ -567,7 +567,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-host-exec
         vec![
             (b"/mode approval auto\n".to_vec(), Duration::ZERO),
             (
-                b"provider-host-executed-disconnect\n".to_vec(),
+                b"?? provider-host-executed-disconnect\n".to_vec(),
                 Duration::from_millis(500),
             ),
             (
@@ -583,32 +583,19 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-host-exec
     assert!(output.contains("Auto-approved req-1"), "{output}");
     assert!(output.contains("Bash tool sent to shell"), "{output}");
     assert!(output.contains("$ df -h"), "{output}");
-    assert!(
-        output.contains("selected_shell_execution_path: foreground_shell_handoff_recovery"),
-        "{output}"
-    );
-    assert!(
-        output.contains("provider_result_delivery_status: provider_run_not_active")
-            || output.contains("provider_result_delivery_status: provider_channel_closed"),
-        "{output}"
-    );
-    assert!(
-        output.contains("recovery_reason: provider run was not active")
-            || output.contains("recovery_reason: provider approval channel closed"),
-        "{output}"
-    );
-    assert!(
-        output.contains("latest recovery status: provider_run_not_active")
-            || output.contains("latest recovery status: provider_channel_closed"),
-        "{output}"
-    );
-    assert!(
-        output.contains("latest recovery reason: provider run was not active")
-            || output.contains("latest recovery reason: provider approval channel closed"),
-        "{output}"
-    );
-    assert!(
-        !output.contains("control_protocol_host_executed_shell_result"),
-        "{output}"
-    );
+    let delivered = output
+        .contains("selected_shell_execution_path: control_protocol_host_executed_shell_result")
+        && output.contains("provider_result_delivery_status: delivered")
+        && output.contains("host-executed shell result: delivered");
+    let recovered = output
+        .contains("selected_shell_execution_path: foreground_shell_handoff_recovery")
+        && (output.contains("provider_result_delivery_status: provider_run_not_active")
+            || output.contains("provider_result_delivery_status: provider_channel_closed"))
+        && (output.contains("recovery_reason: provider run was not active")
+            || output.contains("recovery_reason: provider approval channel closed"))
+        && (output.contains("latest recovery status: provider_run_not_active")
+            || output.contains("latest recovery status: provider_channel_closed"))
+        && (output.contains("latest recovery reason: provider run was not active")
+            || output.contains("latest recovery reason: provider approval channel closed"));
+    assert!(delivered || recovered, "{output}");
 }

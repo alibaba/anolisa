@@ -119,8 +119,12 @@ printf '%s\n' '{{"type":"result","subtype":"success","session_id":"sess-cosh-cor
         output.contains("Run /mode approval trust confirm"),
         "{output}"
     );
-    assert!(output.contains("Approval required"), "{output}");
-    assert!(output.contains(&command), "{output}");
+    assert_approval_request_card_visible(&output);
+    assert!(output.contains("$ touch"), "{output}");
+    assert!(
+        output.contains("should-n") || output.contains("should-not-exist"),
+        "{output}"
+    );
     assert!(!output.contains("Mode set to trust."), "{output}");
     assert!(!output.contains("Auto-approved req-1"), "{output}");
     assert!(!output.contains("Trusted req-1"), "{output}");
@@ -182,7 +186,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
     );
     let _ = fs::remove_dir_all(&home);
 
-    assert!(output.contains("Approval required"), "{output}");
+    assert_approval_request_card_visible(&output);
     assert!(output.contains("Subject: Write"), "{output}");
     assert!(
         output.contains("/tmp/cosh-core-provider-smoke.txt"),
@@ -261,7 +265,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
     );
     let _ = fs::remove_dir_all(&home);
 
-    assert!(output.contains("Approval required"), "{output}");
+    assert_approval_request_card_visible(&output);
     assert!(output.contains("Subject: Write"), "{output}");
     assert!(
         output.contains("/tmp/cosh-core-provider-details.txt"),
@@ -338,7 +342,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","session_id":"sess-cosh-cor
     );
     let _ = fs::remove_dir_all(&home);
 
-    assert!(output.contains("Approval required"), "{output}");
+    assert_approval_request_card_visible(&output);
     assert!(output.contains("Subject: Write"), "{output}");
     assert!(output.contains("Denied req-1"), "{output}");
     assert!(

@@ -164,7 +164,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
     assert!(output.contains("$ df -h"), "{output}");
     assert!(output.contains("Filesystem"), "{output}");
     assert!(output.contains("AUTO SAFE HOSTEXEC RECEIVED"), "{output}");
-    assert!(!output.contains("Approval required"), "{output}");
+    assert_no_approval_request_card(&output);
     assert!(
         !output.contains("missing auto host_executed_shell result"),
         "{output}"
@@ -295,7 +295,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
         output.contains("TRUST CONFIRM HOSTEXEC RECEIVED"),
         "{output}"
     );
-    assert!(!output.contains("Approval required"), "{output}");
+    assert_no_approval_request_card(&output);
     assert!(
         !output.contains("missing trust host_executed_shell result"),
         "{output}"

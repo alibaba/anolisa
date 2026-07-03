@@ -12,11 +12,7 @@ fn raw_cli_shell_handoff_continuation_denies_second_shell_tool() {
         "{output}"
     );
     assert!(!output.contains("$ du -sh ~"), "{output}");
-    assert_eq!(
-        count_occurrences(&output, "Approval required"),
-        1,
-        "{output}"
-    );
+    assert_eq!(approval_request_card_count(&output), 1, "{output}");
 }
 
 #[test]
@@ -32,8 +28,9 @@ fn raw_cli_zh_shell_handoff_continuation_denies_second_shell_tool() {
         "{output}"
     );
     assert!(!output.contains("$ du -sh ~"), "{output}");
-    assert_eq!(count_occurrences(&output, "需要审批"), 1, "{output}");
+    assert_eq!(approval_request_card_count(&output), 1, "{output}");
     assert!(!output.contains("Approval required"), "{output}");
+    assert!(!output.contains("Approval req-"), "{output}");
     assert!(!output.contains("Approved req-1"), "{output}");
     assert!(!output.contains("Bash tool sent to shell"), "{output}");
 }
@@ -98,7 +95,7 @@ exit 0
         vec![
             (b"/mode approval auto\n".to_vec(), Duration::ZERO),
             (
-                b"provider-auto-second-tool\n".to_vec(),
+                b"?? provider-auto-second-tool\n".to_vec(),
                 Duration::from_millis(500),
             ),
             (b"\n".to_vec(), Duration::from_millis(1_500)),

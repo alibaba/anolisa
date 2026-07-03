@@ -404,7 +404,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-late-tool
     assert!(!output.contains("SHOULD_NOT_RUN"), "{output}");
     assert!(!output.contains("late-ctrl"), "{output}");
     assert!(!output.contains("echo SHOULD_NOT_RUN"), "{output}");
-    assert!(!output.contains("Approval required"), "{output}");
+    assert_no_approval_request_card(&output);
     assert!(!output.contains("Bash tool sent to shell"), "{output}");
 }
 

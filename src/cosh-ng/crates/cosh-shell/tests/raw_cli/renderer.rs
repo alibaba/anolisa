@@ -21,7 +21,11 @@ fn raw_cli_no_color_keeps_box_layout_when_terminal_supports_it() {
     let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",
         &[],
-        &[("NO_COLOR", "1"), ("TERM", "xterm-256color")],
+        &[
+            ("NO_COLOR", "1"),
+            ("TERM", "xterm-256color"),
+            ("COSH_SHELL_ANALYSIS_MODE", "auto"),
+        ],
         vec![
             (b"ls /path/that/does/not/exist\n".to_vec(), Duration::ZERO),
             (b"exit 0\n".to_vec(), Duration::from_millis(500)),
@@ -326,7 +330,11 @@ fn raw_cli_dumb_terminal_uses_plain_blocks() {
     let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",
         &[],
-        &[("NO_COLOR", "1"), ("TERM", "dumb")],
+        &[
+            ("NO_COLOR", "1"),
+            ("TERM", "dumb"),
+            ("COSH_SHELL_ANALYSIS_MODE", "auto"),
+        ],
         vec![
             (b"ls /path/that/does/not/exist\n".to_vec(), Duration::ZERO),
             (b"exit 0\n".to_vec(), Duration::from_millis(500)),
@@ -341,7 +349,11 @@ fn raw_cli_explicit_plain_render_mode_uses_plain_blocks() {
     let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",
         &[],
-        &[("COSH_SHELL_RENDER", "plain"), ("TERM", "xterm-256color")],
+        &[
+            ("COSH_SHELL_RENDER", "plain"),
+            ("TERM", "xterm-256color"),
+            ("COSH_SHELL_ANALYSIS_MODE", "auto"),
+        ],
         vec![
             (b"ls /path/that/does/not/exist\n".to_vec(), Duration::ZERO),
             (b"exit 0\n".to_vec(), Duration::from_millis(500)),

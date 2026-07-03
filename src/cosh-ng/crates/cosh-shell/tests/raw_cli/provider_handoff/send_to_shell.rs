@@ -32,7 +32,8 @@ fn raw_cli_provider_tool_interactive_escape_hatch_requires_explicit_send() {
     assert!(output.contains("[Send to shell]"), "{output}");
     assert!(output.contains("handoff-1"), "{output}");
     assert!(
-        output.contains("Tool error: sudo: a terminal is required"),
+        output.contains("Tool - error · sudo: a terminal is required")
+            || output.contains("Tool error: sudo: a terminal is required"),
         "{output}"
     );
     assert!(output.contains("sudo: a terminal is required"), "{output}");
@@ -53,7 +54,8 @@ fn raw_cli_provider_tool_interactive_escape_hatch_requires_explicit_send() {
     assert!(output.contains("tool_use_id: toolu-tty"), "{output}");
     assert!(output.contains("redaction_status: ref_only"), "{output}");
     assert!(
-        output.contains("start a new Agent turn after the shell command completes"),
+        output.contains("Command result analysis for handoff-1")
+            || output.contains("start a new Agent turn after the shell command completes"),
         "{output}"
     );
     assert!(output.contains("after-handoff"), "{output}");

@@ -45,10 +45,12 @@ fn raw_cli_approval_cancel_records_receipt_and_advances_queue() {
         (b"exit\n".to_vec(), Duration::from_millis(200)),
     ]);
 
-    assert!(output.contains("Approval required"));
-    assert!(output.contains("req-1 · tool request · medium risk"));
+    assert_approval_request_card_visible(&output);
+    assert!(output.contains("req-1"));
+    assert!(output.contains("tool request"));
+    assert!(output.contains("medium risk"));
     assert!(output.contains("$ git status"));
-    assert!(output.contains("Queue: 1 of 1 pending"));
+    assert!(output.contains("Queue: 1 of 1 pending") || output.contains("Queue: 1/1 pending"));
     assert!(!output.contains("req-1 · shell tool · medium risk"));
     assert!(output.contains("Cancelled"), "{output}");
     assert!(!output.contains("Cancelled req-2"));
@@ -75,7 +77,7 @@ fn raw_cli_approval_ctrl_c_cancels_card_without_agent_cancel() {
         (b"exit\n".to_vec(), Duration::from_millis(200)),
     ]);
 
-    assert!(output.contains("Approval required"), "{output}");
+    assert_approval_request_card_visible(&output);
     assert!(output.contains("Cancelled req-1"), "{output}");
     assert!(output.contains("after-approval-ctrl-c"), "{output}");
     assert!(!output.contains("Agent cancellation requested"), "{output}");
@@ -98,18 +100,17 @@ fn raw_cli_approval_card_uses_zh_language_env() {
         ],
     );
 
-    assert!(output.contains("需要审批"), "{output}");
+    assert_approval_request_card_visible(&output);
     assert!(output.contains("对象: Bash"), "{output}");
-    assert!(
-        output.contains("Tool 输入: $ git status --short"),
-        "{output}"
-    );
+    assert!(output.contains("Tool 输入:"), "{output}");
+    assert!(output.contains("$ git status --short"), "{output}");
     assert!(output.contains("允许一次"), "{output}");
     assert!(output.contains("始终信任"), "{output}");
     assert!(output.contains("拒绝"), "{output}");
     assert!(output.contains("已批准 req-1"), "{output}");
     assert!(output.contains("已发送到 shell"), "{output}");
     assert!(!output.contains("Approval required"), "{output}");
+    assert!(!output.contains("Approval req-"), "{output}");
     assert!(!output.contains("Subject: Bash"), "{output}");
     assert!(!output.contains("Allow once"), "{output}");
     assert!(!output.contains("Always trust"), "{output}");

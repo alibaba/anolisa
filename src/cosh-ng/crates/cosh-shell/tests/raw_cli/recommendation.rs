@@ -50,14 +50,13 @@ fn raw_cli_copy_fallback_shows_recommendation_without_executing_it() {
     let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",
         &[],
-        &[("COSH_SHELL_LANG", "en-US")],
+        &[
+            ("COSH_SHELL_LANG", "en-US"),
+            ("COSH_SHELL_ANALYSIS_MODE", "auto"),
+        ],
         vec![
-            (b"/explain last error\n".to_vec(), Duration::ZERO),
-            (
-                b"ls /path/that/does/not/exist\n".to_vec(),
-                Duration::from_millis(100),
-            ),
-            (b"/copy 1\n".to_vec(), Duration::from_millis(1_200)),
+            (b"ls /path/that/does/not/exist\n".to_vec(), Duration::ZERO),
+            (b"/copy 1\n".to_vec(), Duration::from_millis(2_000)),
             (b"echo after-copy\n".to_vec(), Duration::from_millis(200)),
             (b"exit 0\n".to_vec(), Duration::from_millis(100)),
         ],

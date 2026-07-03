@@ -61,3 +61,25 @@ mod support;
 
 pub(crate) use i18n::*;
 use support::raw_cli::*;
+
+fn approval_request_card_visible(output: &str) -> bool {
+    output.contains("Approval req-")
+        || output.contains("审批 req-")
+        || output.contains("Approval required")
+        || output.contains("需要审批")
+}
+
+fn assert_approval_request_card_visible(output: &str) {
+    assert!(approval_request_card_visible(output), "{output}");
+}
+
+fn assert_no_approval_request_card(output: &str) {
+    assert!(!approval_request_card_visible(output), "{output}");
+}
+
+fn approval_request_card_count(output: &str) -> usize {
+    count_occurrences(output, "Approval req-")
+        + count_occurrences(output, "审批 req-")
+        + count_occurrences(output, "Approval required")
+        + count_occurrences(output, "需要审批")
+}

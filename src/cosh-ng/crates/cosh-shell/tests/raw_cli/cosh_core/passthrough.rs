@@ -18,7 +18,7 @@ fn raw_cli_cosh_core_bash_ordinary_commands_passthrough_without_agent() {
     assert!(output.contains("bash-pwd:"), "{output}");
     assert!(output.contains("cosh-pass-bash"), "{output}");
     assert!(!output.contains("Thinking..."), "{output}");
-    assert!(!output.contains("Approval required"), "{output}");
+    assert_no_approval_request_card(&output);
     assert!(!output.contains("failed to run cosh-core"), "{output}");
 }
 
@@ -44,6 +44,6 @@ fn raw_cli_cosh_core_zsh_ordinary_commands_passthrough_without_agent() {
     assert!(output.contains("zsh-pwd:"), "{output}");
     assert!(output.contains("cosh-pass-zsh"), "{output}");
     assert!(!output.contains("Thinking..."), "{output}");
-    assert!(!output.contains("Approval required"), "{output}");
+    assert_no_approval_request_card(&output);
     assert!(!output.contains("failed to run cosh-core"), "{output}");
 }

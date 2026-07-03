@@ -50,7 +50,7 @@ fn raw_cli_double_dash_passthrough_preserves_exit_status() {
 fn raw_cli_double_dash_passthrough_does_not_capture_child_help_arg() {
     let binary = env!("CARGO_BIN_EXE_cosh-shell");
     let output = Command::new(binary)
-        .args(["--", "echo", "--help"])
+        .args(["--", "printf", "%s\n", "--help"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
