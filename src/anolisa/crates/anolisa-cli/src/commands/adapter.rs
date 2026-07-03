@@ -486,6 +486,7 @@ fn map_err(command: &str, err: AdapterError) -> CliError {
             reason: err.to_string(),
         },
         AdapterError::AdapterManifest { .. }
+        | AdapterError::MissingAdapterManifest { .. }
         | AdapterError::FrameworkCli { .. }
         | AdapterError::Lock(_)
         | AdapterError::State(_)
@@ -578,6 +579,32 @@ mod tests {
             },
         );
         assert!(matches!(err, CliError::Runtime { .. }));
+    }
+
+    #[test]
+    fn missing_manifest_maps_to_runtime_and_says_missing() {
+        let err = map_err(
+            "adapter enable",
+            AdapterError::MissingAdapterManifest {
+                component: "agent-memory".to_string(),
+                searched: vec![std::path::PathBuf::from(
+                    "/var/lib/anolisa/component-manifests/agent-memory/component.toml",
+                )],
+            },
+        );
+        match err {
+            CliError::Runtime { reason, .. } => {
+                assert!(
+                    reason.contains("missing"),
+                    "error should say 'missing', got: {reason}"
+                );
+                assert!(
+                    !reason.contains("invalid"),
+                    "error must not say 'invalid' for a missing file, got: {reason}"
+                );
+            }
+            other => panic!("expected Runtime, got {other:?}"),
+        }
     }
 
     #[test]

@@ -372,7 +372,8 @@ impl AdapterManager {
     /// # Errors
     ///
     /// [`AdapterError::ComponentNotInstalled`], [`AdapterError::AdapterNotDeclared`],
-    /// [`AdapterError::AdapterManifest`], [`AdapterError::UnknownFramework`],
+    /// [`AdapterError::AdapterManifest`], [`AdapterError::MissingAdapterManifest`],
+    /// [`AdapterError::UnknownFramework`],
     /// [`AdapterError::AmbiguousFramework`], [`AdapterError::UnsupportedAdapterType`],
     /// [`AdapterError::ResourceRootNotFound`],
     /// [`AdapterError::FrameworkNotDetected`], [`AdapterError::BundleInvalid`],
@@ -1668,10 +1669,9 @@ fn install_mode_str(mode: InstallMode) -> &'static str {
 fn map_contract_error(component: &str, err: super::contract::ContractError) -> AdapterError {
     match err {
         super::contract::ContractError::Unavailable { searched, .. } => {
-            AdapterError::AdapterManifest {
+            AdapterError::MissingAdapterManifest {
                 component: component.to_string(),
-                path: searched.into_iter().next().unwrap_or_default(),
-                reason: "component contract not found in the matched component scope".to_string(),
+                searched,
             }
         }
         super::contract::ContractError::ParseError { path, reason } => {

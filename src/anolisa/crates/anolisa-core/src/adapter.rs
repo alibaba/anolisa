@@ -119,7 +119,10 @@ pub enum AdapterError {
     },
 
     /// The installed component manifest required by adapter enable is
-    /// missing, unreadable, or inconsistent with state.
+    /// present but unreadable, unparseable, or inconsistent with state.
+    ///
+    /// Contrast with [`MissingAdapterManifest`](Self::MissingAdapterManifest),
+    /// which is raised when *no* manifest file exists at any searched path.
     #[error("invalid installed component manifest for '{component}' at {path}: {reason}")]
     AdapterManifest {
         /// Component whose installed manifest was read.
@@ -128,6 +131,18 @@ pub enum AdapterError {
         path: PathBuf,
         /// Human-readable failure detail.
         reason: String,
+    },
+
+    /// No component manifest was found at the state snapshot path or under
+    /// any datadir root. This typically means the component's package (e.g.
+    /// RPM) did not ship a `component.toml`, so the install flow had nothing
+    /// to copy into the state directory.
+    #[error("missing installed component manifest for '{component}'; searched: {searched:?}")]
+    MissingAdapterManifest {
+        /// Component whose manifest was not found.
+        component: String,
+        /// Paths that were tried, in search order.
+        searched: Vec<PathBuf>,
     },
 
     /// No resource directory was found for the component/framework under
