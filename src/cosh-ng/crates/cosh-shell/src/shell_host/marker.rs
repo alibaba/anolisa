@@ -53,6 +53,7 @@ _cosh_load_native_bash_history_if_empty
 _COSH_AT_PROMPT=0
 _COSH_LAST_HISTORY_NO=0
 _COSH_LAST_HISTORY_COMMAND=
+_COSH_IN_PROMPT_COMMAND=0
 
 _cosh_apply_internal_recovery() {
   if [[ -z "${COSH_RECOVERY_REQUEST_FILE:-}" || ! -f "$COSH_RECOVERY_REQUEST_FILE" ]]; then
@@ -272,6 +273,10 @@ _cosh_preexec_marker() {
   if [[ -n "${_COSH_OLD_DEBUG_TRAP:-}" ]]; then
     eval "$_COSH_OLD_DEBUG_TRAP" 2>/dev/null || true
   fi
+  if [[ "${_COSH_IN_PROMPT_COMMAND:-0}" == 1 ]]; then
+    trap '_cosh_preexec_marker' DEBUG
+    return 0
+  fi
   if [[ "${_COSH_AT_PROMPT:-0}" == 1 ]]; then
     local history_entry
     local history_no
@@ -279,6 +284,24 @@ _cosh_preexec_marker() {
     history_entry="$(_cosh_history_entry)"
     history_no="$(_cosh_history_no "$history_entry")"
     command="$(_cosh_history_command_from_entry "$history_entry")"
+    if [[ -n "${BASH_COMMAND:-}" && "$command" != *"$BASH_COMMAND"* ]]; then
+      local fallback_command="$BASH_COMMAND"
+      local fallback_first_word="$fallback_command"
+      local fallback_argc=1
+      if [[ "$fallback_command" == *[[:space:]]* ]]; then
+        fallback_first_word="${fallback_command%%[[:space:]]*}"
+        fallback_argc=2
+      fi
+      local fallback_reason
+      if fallback_reason="$(_cosh_should_intercept_unknown "$fallback_first_word" "$fallback_command" "$fallback_argc")"; then
+        _cosh_emit_intercept_marker "$fallback_command" "$fallback_reason"
+        _COSH_AT_PROMPT=0
+        trap '_cosh_preexec_marker' DEBUG
+        return 1
+      fi
+      trap '_cosh_preexec_marker' DEBUG
+      return 0
+    fi
     if [[ -n "$history_no" && -n "$command" && ( "$history_no" != "${_COSH_LAST_HISTORY_NO:-0}" || "$command" != "${_COSH_LAST_HISTORY_COMMAND:-}" ) ]]; then
       _COSH_LAST_HISTORY_NO="$history_no"
       _COSH_LAST_HISTORY_COMMAND="$command"
@@ -318,7 +341,7 @@ _cosh_preexec_marker() {
 }
 
 _cosh_precmd_marker() {
-  local status=$?
+  local status="${1:-$?}"
   _cosh_apply_internal_recovery
   _cosh_replace_handoff_history
   _cosh_clear_handoff_request
@@ -327,16 +350,47 @@ _cosh_precmd_marker() {
   _COSH_AT_PROMPT=1
 }
 
+_cosh_run_user_prompt_command() {
+  local status="$1"
+  if [[ -z "${_COSH_USER_PROMPT_COMMAND+x}" ]]; then
+    return "$status"
+  fi
+
+  if [[ "${_COSH_USER_PROMPT_COMMAND_IS_ARRAY:-0}" == 1 ]]; then
+    local _cosh_prompt_command
+    for _cosh_prompt_command in "${_COSH_USER_PROMPT_COMMAND[@]}"; do
+      eval "$_cosh_prompt_command"
+    done
+  elif [[ -n "${_COSH_USER_PROMPT_COMMAND:-}" ]]; then
+    eval "$_COSH_USER_PROMPT_COMMAND"
+  fi
+  return "$status"
+}
+
+_cosh_prompt_command() {
+  local status=$?
+  _COSH_IN_PROMPT_COMMAND=1
+  _cosh_precmd_marker "$status"
+  _cosh_run_user_prompt_command "$status"
+  _COSH_IN_PROMPT_COMMAND=0
+  return "$status"
+}
+
 # ── Hook setup (re-set after user rcfile may have overridden) ──
 shopt -s extdebug 2>/dev/null || true
 _COSH_OLD_DEBUG_TRAP="$(trap -p DEBUG 2>/dev/null | sed "s/^trap -- '\\(.*\\)' DEBUG$/\\1/" || true)"
 trap '_cosh_preexec_marker' DEBUG
-# Append precmd to existing PROMPT_COMMAND
 if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
-  PROMPT_COMMAND+=(_cosh_precmd_marker)
+  _COSH_USER_PROMPT_COMMAND_IS_ARRAY=1
+  _COSH_USER_PROMPT_COMMAND=("${PROMPT_COMMAND[@]}")
+elif [[ -n "${PROMPT_COMMAND+x}" ]]; then
+  _COSH_USER_PROMPT_COMMAND_IS_ARRAY=0
+  _COSH_USER_PROMPT_COMMAND="$PROMPT_COMMAND"
 else
-  PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND;}_cosh_precmd_marker"
+  unset _COSH_USER_PROMPT_COMMAND
+  _COSH_USER_PROMPT_COMMAND_IS_ARRAY=0
 fi
+PROMPT_COMMAND=_cosh_prompt_command
 if [[ -n "${COSH_SHELL_ISOLATED:-}" ]]; then
   builtin history -c 2>/dev/null || true
 fi
@@ -383,6 +437,9 @@ fi
 _cosh_load_native_zsh_history_if_empty() {
   if [[ -n "${COSH_SHELL_ISOLATED:-}" ]]; then
     return 0
+  fi
+  if [[ -z "${HISTFILE:-}" && -n "${COSH_ZDOTDIR_ORIG:-}" && -r "${COSH_ZDOTDIR_ORIG}/.zsh_history" ]]; then
+    HISTFILE="${COSH_ZDOTDIR_ORIG}/.zsh_history"
   fi
   if [[ -z "${HISTFILE:-}" || ! -r "$HISTFILE" ]]; then
     return 0

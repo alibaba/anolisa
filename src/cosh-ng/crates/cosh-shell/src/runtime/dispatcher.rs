@@ -102,6 +102,29 @@ fn render_inline_guidance_from_batch<W: Write>(
         stop_active_agent_run_without_rendering(state, output)?;
         return Ok(());
     }
+    let question_actions =
+        QuestionConsumer::consume(action_events, adapter, state, output, event_index_base)?;
+    RuntimeDispatcher::apply_actions(question_actions, state);
+    crate::auth::runtime::render_auth_card_actions(action_events, state, output, event_index_base)?;
+    crate::auth::runtime::check_aliyun_poll_result(state, output)?;
+    let evidence_actions = EvidenceRequestConsumer::consume(
+        action_events,
+        &ledger.blocks,
+        adapter,
+        state,
+        output,
+        event_index_base,
+    )?;
+    RuntimeDispatcher::apply_actions(evidence_actions, state);
+    let approval_actions = ApprovalConsumer::consume(
+        action_events,
+        &ledger.blocks,
+        adapter,
+        state,
+        output,
+        event_index_base,
+    )?;
+    RuntimeDispatcher::apply_actions(approval_actions, state);
     let shell_busy = shell_has_active_foreground_command(events);
     if shell_busy {
         let slash_actions = SlashConsumer::consume(
@@ -126,20 +149,6 @@ fn render_inline_guidance_from_batch<W: Write>(
 
     render_startup_banner(events, adapter, shell_label, state, output)?;
     render_startup_health_banner(state, output)?;
-    let question_actions =
-        QuestionConsumer::consume(action_events, adapter, state, output, event_index_base)?;
-    RuntimeDispatcher::apply_actions(question_actions, state);
-    crate::auth::runtime::render_auth_card_actions(action_events, state, output, event_index_base)?;
-    crate::auth::runtime::check_aliyun_poll_result(state, output)?;
-    let evidence_actions = EvidenceRequestConsumer::consume(
-        action_events,
-        &ledger.blocks,
-        adapter,
-        state,
-        output,
-        event_index_base,
-    )?;
-    RuntimeDispatcher::apply_actions(evidence_actions, state);
     let slash_actions = SlashConsumer::consume(
         action_events,
         &ledger.blocks,
@@ -216,15 +225,6 @@ fn render_inline_guidance_from_batch<W: Write>(
     )?;
 
     render_selection_actions(action_events, state, output, event_index_base)?;
-    let approval_actions = ApprovalConsumer::consume(
-        action_events,
-        &ledger.blocks,
-        adapter,
-        state,
-        output,
-        event_index_base,
-    )?;
-    RuntimeDispatcher::apply_actions(approval_actions, state);
     flush_held_agent_events(state, output)?;
     if !shell_busy && !state.control.shell_handoff().has_active_handoff() {
         poll_active_agent_run(state, output, adapter)?;

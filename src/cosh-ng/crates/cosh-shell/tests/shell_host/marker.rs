@@ -96,6 +96,58 @@ fn shell_host_runs_bash_pty_and_emits_command_events() {
 }
 
 #[test]
+fn shell_host_owns_prompt_boundary_before_user_prompt_command() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-prompt-command-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::write(home_dir.join(".bash_history"), "exit\n").expect("history");
+    std::fs::write(
+        home_dir.join(".bashrc"),
+        "set -o history\n\
+         HISTFILE=\"$HOME/.bash_history\"\n\
+         history -r \"$HISTFILE\" 2>/dev/null || true\n\
+         PROMPT_COMMAND='history 1 >/dev/null; printf \"__cosh_prompt_noise__\\n\" >&2'\n",
+    )
+    .expect("bashrc");
+
+    let config = ShellHostConfig::new("prompt-command-test", &work_dir)
+        .with_env("HOME", home_dir.display().to_string());
+    let output = run_scripted_bash(
+        &config,
+        &[ScriptedInput::user_line("ls /path/that/does/not/exist")],
+    )
+    .expect("scripted bash pty");
+
+    let replayed_events = read_shell_events(&output.journal_path).expect("journal events");
+    let ledger = build_command_blocks(&replayed_events);
+    assert!(ledger.errors.is_empty(), "{:?}", ledger.errors);
+    let failed = ledger
+        .blocks
+        .iter()
+        .find(|block| block.command.contains("/path/that/does/not/exist"))
+        .expect("failed command block");
+    assert_ne!(failed.exit_code, 0);
+    let output_ref = failed
+        .output
+        .terminal_output_ref
+        .as_deref()
+        .expect("terminal output ref");
+    let output_ref_text = std::fs::read_to_string(output_ref).expect("output ref text");
+    assert!(
+        !output_ref_text.contains("__cosh_prompt_noise__"),
+        "{output_ref_text}"
+    );
+}
+
+#[test]
 fn shell_host_rejects_forged_osc_markers_without_session_token() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;

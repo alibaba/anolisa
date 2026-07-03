@@ -91,6 +91,9 @@ fn start_shell_session(
             .env("BASH_SILENCE_DEPRECATION_WARNING", "1")
             .env("COSH_SHELL_ISOLATED", "1");
     }
+    for (key, value) in &config.env_overrides {
+        command.env(key, value);
+    }
 
     unsafe {
         command.pre_exec(|| {

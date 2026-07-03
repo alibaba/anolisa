@@ -17,6 +17,7 @@ pub struct ShellHostConfig {
     pub input_classifier: InputClassifier,
     pub native_mode: bool,
     pub login_shell: bool,
+    pub env_overrides: Vec<(String, String)>,
 }
 
 impl ShellHostConfig {
@@ -32,7 +33,13 @@ impl ShellHostConfig {
             input_classifier: InputClassifier::default(),
             native_mode: true,
             login_shell: false,
+            env_overrides: Vec::new(),
         }
+    }
+
+    pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env_overrides.push((key.into(), value.into()));
+        self
     }
 }
 
