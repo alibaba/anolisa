@@ -14,10 +14,62 @@
 //! wiring in `cmd_mount`.
 
 use std::path::Path;
-use std::process::Command;
+use std::process::{Child, Command};
+use std::time::Duration;
 
 fn bin_path() -> &'static str {
     env!("CARGO_BIN_EXE_skillfs")
+}
+
+/// True when `path` is a live mountpoint per `/proc/mounts`. Authoritative
+/// even for a dead FUSE endpoint (where `metadata()` would misbehave).
+fn is_mounted(path: &Path) -> bool {
+    let Ok(mounts) = std::fs::read_to_string("/proc/mounts") else {
+        return false;
+    };
+    let target = path.to_string_lossy();
+    mounts
+        .lines()
+        .any(|line| line.split_whitespace().nth(1) == Some(&*target))
+}
+
+/// Bounded, best-effort force unmount: `fusermount3 -u`, then lazy `-z`, then
+/// `umount -l`, retried until the path leaves `/proc/mounts` or the budget is
+/// exhausted. Never panics.
+fn force_unmount(path: &Path) {
+    for _ in 0..50 {
+        if !is_mounted(path) {
+            return;
+        }
+        let mp = path.to_string_lossy();
+        let _ = Command::new("fusermount3").args(["-u", &mp]).output();
+        let _ = Command::new("fusermount3").args(["-u", "-z", &mp]).output();
+        let _ = Command::new("umount").args(["-l", &mp]).output();
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if is_mounted(path) {
+        eprintln!("WARN: leaked SkillFS FUSE mount at {}", path.display());
+    }
+}
+
+/// Stop a spawned `skillfs mount` child without leaking its FUSE mount.
+///
+/// `child.kill()` sends SIGKILL, which the binary cannot catch, so the FUSE
+/// endpoint would survive under the (possibly workspace-rooted) mountpoint.
+/// Instead send SIGTERM — the mount command unmounts cleanly on SIGTERM —
+/// wait a bounded time for graceful exit, then force-unmount as a fallback
+/// and SIGKILL to guarantee the child is reap-able by the caller.
+fn stop_mount_child(child: &mut Child, mountpoint: &Path) {
+    let pid = child.id().to_string();
+    let _ = Command::new("kill").args(["-TERM", &pid]).status();
+    for _ in 0..50 {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    force_unmount(mountpoint);
+    let _ = child.kill();
 }
 
 fn empty_source() -> tempfile::TempDir {
@@ -695,18 +747,20 @@ fn unique_leaf(prefix: &str) -> String {
     format!("{prefix}-{}-{}", std::process::id(), nanos)
 }
 
-/// Spawn the binary, let startup run briefly, then kill it and return the
-/// combined stdout+stderr. Used for configs that pass the new gate and
-/// would otherwise block on the FUSE mount.
-fn run_briefly(args: &[&str]) -> String {
+/// Spawn the binary, let startup run briefly, then stop it cleanly and return
+/// the combined stdout+stderr. Used for configs that pass the new gate and
+/// would otherwise block on the FUSE mount. `mountpoint` must match the mount
+/// path passed in `args` so the FUSE mount is always torn down (never leaked
+/// under the workspace).
+fn run_briefly(mountpoint: &Path, args: &[&str]) -> String {
     let mut child = Command::new(bin_path())
         .args(args)
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
         .expect("spawn skillfs");
-    std::thread::sleep(std::time::Duration::from_secs(1));
-    let _ = child.kill();
+    std::thread::sleep(Duration::from_secs(1));
+    stop_mount_child(&mut child, mountpoint);
     let out = child.wait_with_output().expect("wait for child");
     format!(
         "{}{}",
@@ -886,16 +940,19 @@ fn mountpoint_under_tmp_not_rejected_when_source_is_non_tmp() {
     // must not fire.
     let source = non_tmp_dir();
     let mount = tempfile::tempdir().expect("mount tempdir"); // under /tmp
-    let combined = run_briefly(&[
-        "mount",
-        source.path().to_str().unwrap(),
-        mount.path().to_str().unwrap(),
-        "--security",
-        "--activation-mode",
-        "file",
-        "--notify-socket",
-        "/run/skillfs-privtmp-test.sock",
-    ]);
+    let combined = run_briefly(
+        mount.path(),
+        &[
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
+            "--notify-socket",
+            "/run/skillfs-privtmp-test.sock",
+        ],
+    );
     assert!(
         !combined.contains("PrivateTmp=true"),
         "PrivateTmp gate must not fire for an agent-visible /tmp mountpoint \
@@ -911,18 +968,21 @@ fn non_tmp_daemon_facing_root_passes_gate() {
     // branch without requiring CAP_SYS_ADMIN.
     let source = non_tmp_dir();
     let mount = tempfile::tempdir().expect("mount tempdir");
-    let combined = run_briefly(&[
-        "mount",
-        source.path().to_str().unwrap(),
-        mount.path().to_str().unwrap(),
-        "--security",
-        "--activation-mode",
-        "file",
-        "--notify-socket",
-        "/run/skillfs-privtmp-test.sock",
-        "--ledger-backing-root",
-        source.path().to_str().unwrap(),
-    ]);
+    let combined = run_briefly(
+        mount.path(),
+        &[
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
+            "--notify-socket",
+            "/run/skillfs-privtmp-test.sock",
+            "--ledger-backing-root",
+            source.path().to_str().unwrap(),
+        ],
+    );
     assert!(
         !combined.contains("PrivateTmp=true") && !combined.contains("resolves under /tmp"),
         "PrivateTmp gate must not fire for a non-tmp backing root, got: {combined}"
@@ -1086,18 +1146,21 @@ fn non_tmp_transport_paths_pass_gate() {
     let mount = non_tmp_dir();
     let events_dir = non_tmp_dir();
     let events_log = events_dir.path().join("events.jsonl");
-    let combined = run_briefly(&[
-        "mount",
-        source.path().to_str().unwrap(),
-        mount.path().to_str().unwrap(),
-        "--security",
-        "--activation-mode",
-        "file",
-        "--activation-events-log",
-        events_log.to_str().unwrap(),
-        "--notify-socket",
-        "/run/skillfs-privtmp-test.sock",
-    ]);
+    let combined = run_briefly(
+        mount.path(),
+        &[
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
+            "--activation-events-log",
+            events_log.to_str().unwrap(),
+            "--notify-socket",
+            "/run/skillfs-privtmp-test.sock",
+        ],
+    );
     assert!(
         !combined.contains("PrivateTmp=true") && !combined.contains("resolves under /tmp"),
         "PrivateTmp gate must not fire for non-tmp transport paths, got: {combined}"
@@ -1277,7 +1340,7 @@ staging_patterns = [".openclaw-install-stage-*"]
         .expect("spawn skillfs");
 
     std::thread::sleep(std::time::Duration::from_secs(2));
-    let _ = child.kill();
+    stop_mount_child(&mut child, mount.path());
     let out = child.wait_with_output().expect("wait for child");
     let combined = format!(
         "{}{}",
@@ -1331,7 +1394,7 @@ staging_patterns = [".openclaw-install-stage-*"]
         .expect("spawn skillfs");
 
     std::thread::sleep(std::time::Duration::from_secs(2));
-    let _ = child.kill();
+    stop_mount_child(&mut child, mount.path());
     let out = child.wait_with_output().expect("wait for child");
     let combined = format!(
         "{}{}",
@@ -1694,7 +1757,7 @@ fn control_socket_created_and_accepts_ping() {
         false
     };
 
-    let _ = child.kill();
+    stop_mount_child(&mut child, mount.path());
     let _ = child.wait();
 
     if socket_exists {

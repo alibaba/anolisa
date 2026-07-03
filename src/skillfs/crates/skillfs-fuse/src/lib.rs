@@ -117,10 +117,16 @@ impl MountHandle {
                     info!("unmount successful");
                 }
                 Ok(output) => {
+                    // A plain `fusermount3 -u` can fail transiently (busy /
+                    // lazy). Best-effort force cleanup so we never leave the
+                    // mountpoint dangling, but still surface the original
+                    // failure to the caller for explicit `unmount()`.
                     let stderr = String::from_utf8_lossy(&output.stderr);
+                    Self::force_unmount_path(&self.mountpoint);
                     return Err(FuseError::UnmountFailed(stderr.to_string()));
                 }
                 Err(e) => {
+                    Self::force_unmount_path(&self.mountpoint);
                     return Err(FuseError::IoError(e));
                 }
             }
@@ -141,13 +147,83 @@ impl MountHandle {
     pub fn is_mounted(&self) -> bool {
         std::fs::metadata(&self.mountpoint).is_ok()
     }
+
+    /// Return `true` when `path` currently appears as a mountpoint in
+    /// `/proc/mounts`. This is the authoritative signal (unlike
+    /// `std::fs::metadata`, which can succeed on a dead FUSE endpoint).
+    #[cfg(target_os = "linux")]
+    fn path_is_mounted(path: &std::path::Path) -> bool {
+        let Ok(mounts) = std::fs::read_to_string("/proc/mounts") else {
+            return false;
+        };
+        let target = path.to_string_lossy();
+        mounts
+            .lines()
+            .any(|line| line.split_whitespace().nth(1) == Some(&*target))
+    }
+
+    /// One best-effort unmount pass: plain `fusermount3 -u`, then lazy
+    /// `fusermount3 -u -z`, then `umount -l`. All failures are ignored; the
+    /// caller re-checks `/proc/mounts` to decide whether to retry.
+    #[cfg(target_os = "linux")]
+    fn try_unmount_once(path: &std::path::Path) {
+        let mountpoint = path.to_string_lossy();
+        let _ = std::process::Command::new("fusermount3")
+            .args(["-u", &mountpoint])
+            .output();
+        let _ = std::process::Command::new("fusermount3")
+            .args(["-u", "-z", &mountpoint])
+            .output();
+        let _ = std::process::Command::new("umount")
+            .args(["-l", &mountpoint])
+            .output();
+    }
+
+    /// Bounded, non-panicking force cleanup of a mountpoint. Returns as soon
+    /// as the path is no longer mounted; otherwise retries a fixed number of
+    /// times before giving up with a warning. Used by both `Drop` and the
+    /// explicit `unmount()` error path so every test/handle teardown route is
+    /// covered — a leaked FUSE mount under a workspace directory is far worse
+    /// than a slow teardown.
+    #[cfg(target_os = "linux")]
+    fn force_unmount_path(path: &std::path::Path) {
+        for _ in 0..50 {
+            if !Self::path_is_mounted(path) {
+                return;
+            }
+            Self::try_unmount_once(path);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        if Self::path_is_mounted(path) {
+            eprintln!(
+                "WARN: leaked SkillFS FUSE mount at {} (force cleanup exhausted)",
+                path.display()
+            );
+        }
+    }
 }
 
 impl Drop for MountHandle {
     fn drop(&mut self) {
+        // Best-effort teardown. Must never panic (a panic while unwinding a
+        // failing test would abort the process) and must never block
+        // unboundedly.
+        //
+        // On a clean unmount `unmount_inner` already joins the session thread.
+        // We deliberately do NOT force a join afterwards: if the mountpoint
+        // could only be torn down lazily, the FUSE session thread may never
+        // return, and joining it would hang. Dropping the `JoinHandle` simply
+        // detaches the thread, which is safe once the mount is gone.
         if self.session.is_some() {
             let _ = self.unmount_inner();
         }
+
+        // Cover every path — including tests that just `drop(handle)` — by
+        // force-cleaning the mountpoint even when `unmount_inner` bailed out
+        // early on a `fusermount3` error. Bounded (see `force_unmount_path`).
+        #[cfg(target_os = "linux")]
+        Self::force_unmount_path(&self.mountpoint);
     }
 }
 
