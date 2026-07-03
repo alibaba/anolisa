@@ -422,3 +422,39 @@ uv run --project agent-sec-cli pytest tests/unit-test/hermes-plugin/ -v
 ## skills
 
 > TODO: 待补充
+
+---
+
+## User-Facing Documentation Guidelines
+
+### Authoring Protocol
+
+Every factual assertion in this section and in user-facing docs MUST be verified against source code before writing. Specifically:
+
+1. **Enum/value-set claims** — read the defining source file that declares the enum
+2. **External dependency sources** — grep for download/fetch calls in the relevant module
+3. **Config field names** — read the config-loading function for that specific capability
+4. **Module/section counts** — count actual headings in the user guide, never rely on memory
+5. **Cross-file consistency** — if this file prescribes ordering/structure, verify the user guide matches before commit
+6. **Intra-file consistency** — overview tables, section headings, and enumeration lists within the same document must agree
+
+Do NOT write guidelines from design intent or mental models. Write them AFTER verifying the implementation.
+
+### Value Proposition
+- Lead with "all-local, zero Token cost" — addresses the common misconception that runtime security = expensive API calls or performance overhead.
+- The three-layer defense framing (pre-execution prevention → runtime detection → kernel-level containment) helps users understand why multiple modules exist.
+
+### Content Decisions
+- Eight modules in overview table (Sandbox is architecture-only, no dedicated usage section). Seven usage sections: Prompt Scanner, Code Scanner, Skill Ledger, PII Checker, Security Baseline, Observability, Security Events. Do not merge them.
+- Agent integration order in docs: CLI (always available) → OpenClaw plugin → Hermes plugin → cosh hook (auto-loaded, no user action needed). This reflects manual-effort-first ordering.
+- `loongshield` may be mentioned alongside `agent-sec-cli harden` — loongshield is an Alinux system component users already know; `agent-sec-cli harden` is ANOLISA's unified entry point wrapping it.
+- ML model warmup: state that models come from ModelScope (Llama-Prompt-Guard-2-86M). Never reference internal model registries.
+
+### Gotchas to Warn About
+- Code Scanner verdict enum defines `pass` / `warn` / `deny` / `error`. Built-in rules currently produce `warn` or `pass`; `deny` and `error` are available for custom/LLM-driven rules. Do not invent levels outside this enum (no "critical", no "info").
+- Skill Ledger has exactly 6 states: pass / none / drifted / warn / deny / tampered. The state table must always appear in full when documenting Skill Ledger.
+- Default plugin behavior is observe-only (fail-open). Users must explicitly enable blocking — always document both modes.
+
+### Terminology
+- "Security Baseline" not "hardening scan" (the feature name in CLI is `harden`, but user docs should call the concept "Security Baseline")
+- "Skill Ledger" not "skill integrity" or "skill verification" (the latter was v0.3 naming, now superseded)
