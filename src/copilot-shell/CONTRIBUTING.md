@@ -75,11 +75,11 @@ named `*.test.ts`.
 
 ### Package Structure
 
-| Package | Path | Responsibility |
-|---------|------|----------------|
-| `@copilot-shell/cli` | `packages/cli/` | CLI entry and TUI |
-| `@copilot-shell/core` | `packages/core/` | Core engine |
-| `@copilot-shell/test-utils` | `packages/test-utils/` | Test utilities |
+| Package                     | Path                   | Responsibility    |
+| --------------------------- | ---------------------- | ----------------- |
+| `@copilot-shell/cli`        | `packages/cli/`        | CLI entry and TUI |
+| `@copilot-shell/core`       | `packages/core/`       | Core engine       |
+| `@copilot-shell/test-utils` | `packages/test-utils/` | Test utilities    |
 
 ### Module Conventions
 

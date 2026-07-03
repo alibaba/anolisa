@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.6.1
+
+- Added npm packaging support for CLI and cosh. (#1307)
+- Added multi-hook toggles support. (#1206)
+- Fixed tips banner to stay visible after initial login. (#1308)
+- Fixed Ctrl+O to prioritize error details over compact mode. (#1202)
+- Fixed system-profile BINDIR to follow PREFIX. (#1193)
+- Fixed AfterModel hook non-blocking notifications not surfacing. (#1182)
+- Updated component docs to migrate into user-guide and developer-guide. (#1295)
+- Added copilot-shell zh/en user and developer docs. (#1236)
+- Fixed CONTRIBUTING.md file mode from symlink to regular file. (65601f06)
+
 ## 2.6.0
 
 - Added multi-hook enable and disable support to `/hooks`. (#1200)
