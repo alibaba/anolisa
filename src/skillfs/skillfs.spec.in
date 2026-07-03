@@ -61,6 +61,12 @@ cp -rp docs/skills/skillfs-mount/. \
 %{_datadir}/anolisa/runtime/skills/skillfs/
 
 %changelog
+* Fri Jul 03 2026 Kongche <kongche.jbw@alibaba-inc.com> - 0.3.2-1
+- Fix SLS ops logging and runtime metric delta reporting.
+
+* Fri Jul 03 2026 Kongche <kongche.jbw@alibaba-inc.com> - 0.3.1-1
+- Release managed mount recovery and installer hardening updates.
+
 * Fri Jun 26 2026 Kongche <kongche.jbw@alibaba-inc.com> - 0.3.0-1
 - Release SkillFS runtime security and installer compatibility updates.
 

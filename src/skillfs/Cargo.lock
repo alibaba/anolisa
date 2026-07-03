@@ -735,7 +735,7 @@ dependencies = [
 
 [[package]]
 name = "skillfs"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "clap",
  "libc",
@@ -752,7 +752,7 @@ dependencies = [
 
 [[package]]
 name = "skillfs-core"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "notify",
  "parking_lot",
@@ -770,7 +770,7 @@ dependencies = [
 
 [[package]]
 name = "skillfs-fuse"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "fuser",
  "libc",
