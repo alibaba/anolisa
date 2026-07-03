@@ -363,17 +363,46 @@ impl SkillFs {
                         PathType::SkillMd { .. } => Some(Path::new("SKILL.md")),
                         _ => None,
                     };
+                    // Best-effort runtime metrics. `skill_hit` fires for any
+                    // agent-visible read open of a real skill file; `policy_*`
+                    // fires only when an active resolver actually made a
+                    // security decision — plain non-security passthrough (no
+                    // resolver) is NOT counted as an allow. `.skill-meta/**` and
+                    // skill-discover are excluded.
+                    let is_discover = skill_name == "skill-discover";
+                    let is_meta = matches!(
+                        &path_type,
+                        PathType::Passthrough { relative_path, .. }
+                            if crate::security::is_skill_meta_path(relative_path)
+                    );
+                    let record_hit = !is_discover && !is_meta && !is_mutating_open;
+                    let policy_decided = self.active_resolver.is_some() && !is_discover && !is_meta;
                     match self.resolve_skill_read(skill_name) {
                         ReadResolution::Hidden
                             if !self.is_post_publish_grace_allowed(skill_name, grace_rel) =>
                         {
+                            if policy_decided {
+                                self.metric_policy_denied();
+                            }
                             reply.error(libc::ENOENT);
                             return;
                         }
                         ReadResolution::Hidden => {
-                            // I4: grace bypass — let the open proceed against source.
+                            // I4: grace bypass — serve from source (allowed).
+                            if record_hit {
+                                self.metric_skill_hit();
+                            }
+                            if policy_decided {
+                                self.metric_policy_allow();
+                            }
                         }
                         ReadResolution::Snapshot { dir, .. } if !is_mutating_open => {
+                            if record_hit {
+                                self.metric_skill_hit();
+                            }
+                            if policy_decided {
+                                self.metric_policy_fallback();
+                            }
                             if let PathType::Passthrough { relative_path, .. } = &path_type {
                                 // I4: grace bypass — if the path matches the
                                 // post-publish whitelist, open from physical
@@ -386,7 +415,22 @@ impl SkillFs {
                                 }
                             }
                         }
-                        _ => {}
+                        ReadResolution::Snapshot { .. } => {
+                            // Mutating open resolving to a snapshot: the write
+                            // still targets live source; count the fallback
+                            // decision but not a read hit.
+                            if policy_decided {
+                                self.metric_policy_fallback();
+                            }
+                        }
+                        ReadResolution::Source => {
+                            if record_hit {
+                                self.metric_skill_hit();
+                            }
+                            if policy_decided {
+                                self.metric_policy_allow();
+                            }
+                        }
                     }
                 }
             }

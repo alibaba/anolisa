@@ -110,6 +110,7 @@ pub mod path;
 pub mod policy;
 pub mod protocol_events;
 pub mod refresh;
+pub mod runtime_metrics;
 pub mod session_stats;
 pub mod session_stats_writer;
 pub mod trusted_writer;
@@ -194,6 +195,9 @@ pub use protocol_events::{
 pub use refresh::{
     DEFAULT_REFRESH_DEBOUNCE_MS, FailedResolveBehavior, MutationKind, RefreshController,
     RefreshObservation,
+};
+pub use runtime_metrics::{
+    RuntimeMetricRecord, RuntimeMetricsSink, RuntimeMetricsWriter, SKILLFS_RUNTIME_METRICS_LOG_PATH,
 };
 pub use session_stats::{
     RuntimeDecisionOutcome, SkillfsSessionStats, SkillfsSessionSummary, serialize_session_summary,

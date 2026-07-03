@@ -200,6 +200,7 @@ impl SkillFs {
                             .with_caller(req.uid(), req.gid())
                             .with_detail(deny_detail);
                         self.emit_event(event);
+                        self.metric_policy_denied();
                         return Some(errno);
                     }
                 }
@@ -215,6 +216,7 @@ impl SkillFs {
                         .with_detail(format!("op={:?} reason={} {}", operation, reason, extra));
                 }
                 self.emit_event(event);
+                self.metric_policy_denied();
                 Some(errno)
             }
         }
@@ -302,6 +304,7 @@ impl SkillFs {
         };
         event = event.with_detail(final_detail);
         self.emit_event(event);
+        self.metric_policy_denied();
         Some(errno)
     }
 

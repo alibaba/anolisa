@@ -111,6 +111,9 @@ impl SkillFs {
                     && !self.is_post_publish_grace_allowed(&skill_name, None)
                     && !self.evaluate_trusted_writer(_req).is_allowed()
                 {
+                    // A direct lookup of a ledger-hidden skill is a real
+                    // security denial (best-effort runtime metric).
+                    self.metric_policy_denied();
                     reply.error(libc::ENOENT);
                     return;
                 }

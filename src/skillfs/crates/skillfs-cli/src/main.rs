@@ -24,11 +24,11 @@ use skillfs_fuse::security::{
     DEFAULT_RELOAD_INTERVAL_MS, DEFAULT_RELOAD_TIMEOUT_MS, DecisionCommand,
     InstallerStagingController, JsonlProtocolEventWriter, JsonlSecurityEventWriter, LedgerAdapter,
     LedgerBackingRoot, NoopProtocolEventWriter, NoopSecurityEventWriter, NotifyController,
-    ProtocolEventWriter, RefreshController, ReloadMode, RuntimeDecisionOutcome, SecurityConfig,
-    SecurityEventWriter, SecurityModeConfig, SessionStatsWriter, SkillfsSessionStats,
-    SourceDriftObserver, StagingMatcher, TrustedPeerConfig, TrustedWriterConfig,
-    UnixSocketNotifyClient, bootstrap_activation, resolve_events_path,
-    resolve_protocol_events_path, spawn_drift_watcher,
+    ProtocolEventWriter, RefreshController, ReloadMode, RuntimeDecisionOutcome, RuntimeMetricsSink,
+    RuntimeMetricsWriter, SecurityConfig, SecurityEventWriter, SecurityModeConfig,
+    SessionStatsWriter, SkillfsSessionStats, SourceDriftObserver, StagingMatcher,
+    TrustedPeerConfig, TrustedWriterConfig, UnixSocketNotifyClient, bootstrap_activation,
+    resolve_events_path, resolve_protocol_events_path, spawn_drift_watcher,
 };
 use skillfs_fuse::{FuseError as FuseErr, MountConfig, MountOptions, mount_configured};
 use tokio::signal;
@@ -1978,6 +1978,9 @@ async fn cmd_mount(
 
     // --- Session stats: create collector before mount starts ---
     let session_stats = Arc::new(SkillfsSessionStats::new());
+    // Captured for the runtime `view_pruned` metric event (emitted below).
+    let runtime_pruned_skill_count: u64;
+    let runtime_token_saved_estimate: u64;
     {
         // Load ViewsConfig once; derive all metrics from a single canonical set.
         let store_guard = shared_store.read();
@@ -2008,6 +2011,7 @@ async fn cmd_mount(
 
         let default_exposed_count = default_served.len() as u64;
         session_stats.set_skill_counts(total_skills, default_exposed_count);
+        runtime_pruned_skill_count = total_skills.saturating_sub(default_exposed_count);
 
         // prompt_token_saved_estimate: body chars of pruned skills / 4.
         // Pruned = in store but NOT in default_served.
@@ -2027,6 +2031,7 @@ async fn cmd_mount(
             0
         };
         session_stats.set_prompt_token_saved_estimate(token_estimate);
+        runtime_token_saved_estimate = token_estimate;
 
         // V1 skill_hit_times: default-view served skills (deduplicated).
         for name in &default_served {
@@ -2075,10 +2080,24 @@ async fn cmd_mount(
         std::env::var("ANOLISA_AGENT_NAME").unwrap_or_else(|_| "agent".to_string());
     let stats_for_flush = session_stats.clone();
 
+    // --- Runtime metrics: real-time delta events for the SLS ops log ---
+    // Best-effort: writes are skipped when the deployment-owned file is absent
+    // and never affect mount behavior or exit status.
+    let runtime_metrics = Arc::new(RuntimeMetricsSink::new(
+        RuntimeMetricsWriter::new(sls_ops::resolve_ops_log_path()),
+        session_id_for_flush.clone(),
+        agent_name_for_flush.clone(),
+    ));
+    // `view_pruned`: emitted once at startup after views are computed.
+    runtime_metrics.emit_view_pruned(runtime_pruned_skill_count, runtime_token_saved_estimate);
+
     // Mark mount ready immediately before spawning — the FUSE session
     // start is the closest signal we have.
     session_stats.mark_mount_ready();
 
+    // Clone for the FUSE runtime; the original stays in this scope for the
+    // lifecycle events (mount_start / heartbeat / mount_end / mount_error).
+    let mount_runtime_metrics = runtime_metrics.clone();
     let mount_task = tokio::task::spawn_blocking(move || {
         mount_configured(
             &mountpoint,
@@ -2098,8 +2117,24 @@ async fn cmd_mount(
                 quiet_timeout_controller,
                 pending_install_controller,
                 post_publish_controller,
+                runtime_metrics: Some(mount_runtime_metrics),
             },
         )
+    });
+
+    // `mount_start`: the FUSE task spawned successfully.
+    runtime_metrics.emit_mount_start();
+
+    // Emit a periodic `mount_heartbeat` (duration delta) while the mount is
+    // alive. Aborted on every exit path below.
+    let heartbeat_metrics = runtime_metrics.clone();
+    let heartbeat_handle = tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+        ticker.tick().await; // consume the immediate first tick
+        loop {
+            ticker.tick().await;
+            heartbeat_metrics.emit_heartbeat();
+        }
     });
 
     // A5: start activation watcher after mount is spawned.
@@ -2168,6 +2203,9 @@ async fn cmd_mount(
         _ = signal::ctrl_c() => {
             info!("received Ctrl+C, unmounting");
             trigger_unmount(&mountpoint_for_signal);
+            // Clean exit: stop heartbeats and emit the final runtime metric.
+            heartbeat_handle.abort();
+            runtime_metrics.emit_mount_end();
             // Flush session stats before exit.
             flush_session_stats(&stats_for_flush, &session_id_for_flush, &agent_name_for_flush);
             if let Some(h) = drift_handle {
@@ -2186,6 +2224,9 @@ async fn cmd_mount(
         } => {
             info!("received SIGTERM, unmounting");
             trigger_unmount(&mountpoint_for_signal);
+            // Clean exit: stop heartbeats and emit the final runtime metric.
+            heartbeat_handle.abort();
+            runtime_metrics.emit_mount_end();
             // Flush session stats before exit.
             flush_session_stats(&stats_for_flush, &session_id_for_flush, &agent_name_for_flush);
             if let Some(h) = drift_handle {
@@ -2199,10 +2240,12 @@ async fn cmd_mount(
         }
     };
 
-    // Mount exited on its own (FUSE event loop returned). Make sure the
-    // drift watcher does not outlive the mount it was paired with: shut
-    // it down explicitly so the underlying notify watcher and the drift
-    // adapter task are torn down deterministically before this function
+    // Mount exited on its own (FUSE event loop returned). Stop heartbeats.
+    heartbeat_handle.abort();
+
+    // Make sure the drift watcher does not outlive the mount it was paired
+    // with: shut it down explicitly so the underlying notify watcher and the
+    // drift adapter task are torn down deterministically before this function
     // returns.
     if let Some(h) = drift_handle {
         h.shutdown().await;
@@ -2216,6 +2259,8 @@ async fn cmd_mount(
 
     match result {
         Ok(()) => {
+            // Clean exit: emit the final runtime metric delta.
+            runtime_metrics.emit_mount_end();
             // Only flush session stats on successful mount exit.
             // Failed mounts must not write mount_times=1.
             flush_session_stats(
@@ -2227,9 +2272,12 @@ async fn cmd_mount(
             Ok(())
         }
         Err(e) => {
-            // Mount failed — do NOT write a success summary.
+            // Mount failed — emit a runtime error metric, and do NOT write a
+            // success summary.
+            let reason = format!("Mount failed: {}", e);
+            runtime_metrics.emit_mount_error(&reason);
             info!("mount failed; skipping session stats flush");
-            Err(format!("Mount failed: {}", e).into())
+            Err(reason.into())
         }
     }
 }

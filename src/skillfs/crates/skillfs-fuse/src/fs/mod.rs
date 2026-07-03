@@ -21,7 +21,7 @@ use crate::inode::InodeManager;
 use crate::security::{
     ActiveSkillResolver, InstallerStagingController, NoopEventSink, NotifyController,
     PendingInstallController, PostPublishGraceController, ProcessIdentityResolver,
-    QuietTimeoutController, RefreshController, SecurityPolicy, SkillEventSink,
+    QuietTimeoutController, RefreshController, RuntimeMetricsSink, SecurityPolicy, SkillEventSink,
     SkillMetaProtectionPolicy, StagingMatcher, TrustedWriterConfig, default_identity_resolver,
 };
 use crate::sync::{SyncEvent, spawn_sync_worker};
@@ -111,6 +111,11 @@ pub struct SkillFs {
     quiet_timeout_controller: Option<Arc<QuietTimeoutController>>,
     pending_install_controller: Option<Arc<PendingInstallController>>,
     post_publish_controller: Option<Arc<PostPublishGraceController>>,
+    /// Best-effort runtime metric delta sink. When `Some`, agent-visible skill
+    /// opens emit a `skill_hit` delta and — when an active resolver made a real
+    /// security decision — a `policy_allow` / `policy_fallback` / `policy_denied`
+    /// delta. Metric emission is best-effort and never changes FUSE behavior.
+    runtime_metrics: Option<Arc<RuntimeMetricsSink>>,
 }
 
 impl SkillFs {
@@ -188,6 +193,7 @@ impl SkillFs {
             quiet_timeout_controller: None,
             pending_install_controller: None,
             post_publish_controller: None,
+            runtime_metrics: None,
         };
 
         // In normal mode pre-populate the /skills inode.
@@ -353,6 +359,42 @@ impl SkillFs {
     ) -> Self {
         self.post_publish_controller = Some(controller);
         self
+    }
+
+    /// Attach a best-effort runtime metric delta sink. When set, agent-visible
+    /// skill opens and real security/policy decisions emit `runtime_metric`
+    /// JSONL deltas. Emission never changes FUSE behavior or errno mapping.
+    pub fn with_runtime_metrics(mut self, sink: Arc<RuntimeMetricsSink>) -> Self {
+        self.runtime_metrics = Some(sink);
+        self
+    }
+
+    /// Record one agent-visible skill open (`skill_hit` delta). Best-effort.
+    pub(super) fn metric_skill_hit(&self) {
+        if let Some(s) = &self.runtime_metrics {
+            s.record_skill_hit();
+        }
+    }
+
+    /// Record a security/policy allow decision (`policy_allow` delta). Best-effort.
+    pub(super) fn metric_policy_allow(&self) {
+        if let Some(s) = &self.runtime_metrics {
+            s.record_policy_allow();
+        }
+    }
+
+    /// Record a security/policy fallback decision (`policy_fallback` delta). Best-effort.
+    pub(super) fn metric_policy_fallback(&self) {
+        if let Some(s) = &self.runtime_metrics {
+            s.record_policy_fallback();
+        }
+    }
+
+    /// Record a security/policy denial (`policy_denied` delta). Best-effort.
+    pub(super) fn metric_policy_denied(&self) {
+        if let Some(s) = &self.runtime_metrics {
+            s.record_policy_denied();
+        }
     }
 
     fn virtual_file_attr(&self, size: u64) -> FileAttr {

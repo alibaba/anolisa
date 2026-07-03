@@ -154,6 +154,14 @@ fn validate_override_path(path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Resolve the ops log path used by every SkillFS SLS writer (CLI ops and
+/// runtime metrics), honoring the validated `SKILLFS_SLS_OPS_PATH` override.
+/// Falls back to the default deployment path.
+pub fn resolve_ops_log_path() -> PathBuf {
+    let env_val = std::env::var(SLS_OPS_PATH_ENV).ok();
+    resolve_ops_path(env_val.as_deref())
+}
+
 /// Resolve the ops log path from the optional env override, falling back to the
 /// default when unset, empty, or invalid.
 fn resolve_ops_path(env_val: Option<&str>) -> PathBuf {
