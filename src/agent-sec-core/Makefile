@@ -381,6 +381,7 @@ install-hermes-plugin: ## Install hermes-plugin to target directory
 install-codex-plugin: ## Install codex-plugin hooks and install script
 	install -d -m 0755 $(DESTDIR)$(CODEX_PLUGIN_DIR)
 	cp -rp $(BUILD_DIR)/codex-plugin/. $(DESTDIR)$(CODEX_PLUGIN_DIR)/
+	chmod 0755 $(DESTDIR)$(CODEX_PLUGIN_DIR)/install.sh
 
 .PHONY: install-cosh-hook
 install-cosh-hook: ## Install cosh hooks (linux-sandbox + extension)

@@ -65,10 +65,12 @@ jobs:
           ls ~/.local/lib/anolisa/sec-core/openclaw-plugin/
           ls ~/.local/lib/anolisa/sec-core/openclaw-plugin/dist/
           ls ~/.local/lib/anolisa/sec-core/openclaw-plugin/scripts/
+          test -x ~/.local/lib/anolisa/sec-core/openclaw-plugin/scripts/deploy.sh
           echo "=== Hermes Plugin ==="
           ls ~/.local/lib/anolisa/sec-core/hermes-plugin/src/
           ls ~/.local/lib/anolisa/sec-core/hermes-plugin/src/plugin.yaml
           ls ~/.local/lib/anolisa/sec-core/hermes-plugin/scripts/deploy.sh
+          test -x ~/.local/lib/anolisa/sec-core/hermes-plugin/scripts/deploy.sh
           echo "=== Codex Plugin ==="
           ls ~/.local/lib/anolisa/sec-core/codex-plugin/
           ls ~/.local/lib/anolisa/sec-core/codex-plugin/hooks-plugin/hooks/
@@ -76,6 +78,7 @@ jobs:
           ls ~/.local/lib/anolisa/sec-core/codex-plugin/hooks-plugin/hooks/skill_ledger_hook.py
           ls ~/.local/lib/anolisa/sec-core/codex-plugin/hooks-plugin/.codex-plugin/plugin.json
           ls ~/.local/lib/anolisa/sec-core/codex-plugin/install.sh
+          test -x ~/.local/lib/anolisa/sec-core/codex-plugin/install.sh
           ls ~/.local/lib/anolisa/sec-core/codex-plugin/.agents/plugins/marketplace.json
           echo "=== CLI venv ==="
           ls ~/.local/lib/anolisa/sec-core/venv/bin/agent-sec-cli
