@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.1
+
+- Rewrote `sysom-diagnosis` skill and removed legacy CLI. (#1241)
+- Fixed OpenClaw gateway write scope verification in `install-openclaw` skill. (#1205)
+
 ## 0.6.0
 
 - Added anolisa component contract (component.toml, Makefile, RPM spec). (#1159)
