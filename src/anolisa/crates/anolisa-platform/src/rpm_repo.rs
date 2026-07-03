@@ -37,8 +37,34 @@ impl DnfRepoSource {
         self.gpgcheck
     }
 
+    /// DNF options for **read-only queries** (e.g. `repoquery`).
+    ///
+    /// Disables all host repos (`--disablerepo=*`) so availability probes only
+    /// report packages from the ANOLISA-configured repo, never silently falling
+    /// back to a system repo that happens to carry a same-named package.
     pub(crate) fn append_dnf_options(&self, args: &mut Vec<String>) {
         args.push("--disablerepo=*".to_string());
+        args.push(format!("--repofrompath={},{}", self.id, self.base_url));
+        args.push(format!("--enablerepo={}", self.id));
+        if let Some(gpgcheck) = self.gpgcheck {
+            args.push(format!(
+                "--setopt={}.gpgcheck={}",
+                self.id,
+                if gpgcheck { "1" } else { "0" }
+            ));
+        }
+    }
+
+    /// DNF options for **write transactions** (`install`/`update`/`remove`).
+    ///
+    /// Unlike [`append_dnf_options`](Self::append_dnf_options), this does **not**
+    /// emit `--disablerepo=*`. RPM packages declare their own `Requires:` and dnf
+    /// resolves the entire dependency graph in one transaction. If all system
+    /// repos are disabled, dnf cannot satisfy cross-repo dependencies that live
+    /// outside the ANOLISA repo (e.g. `bubblewrap` in EPEL). Keeping system repos
+    /// enabled lets dnf pull ANOLISA components from the configured repo while
+    /// still resolving system-level `Requires` from the host's enabled repos.
+    pub(crate) fn append_dnf_txn_options(&self, args: &mut Vec<String>) {
         args.push(format!("--repofrompath={},{}", self.id, self.base_url));
         args.push(format!("--enablerepo={}", self.id));
         if let Some(gpgcheck) = self.gpgcheck {

@@ -1,6 +1,6 @@
 //! Dependency provisioner: install missing system packages after resolver preflight.
 //!
-//! This module bridges the gap between the read-only [`DependencyResolver`] and
+//! This module bridges the gap between the read-only [`DependencyResolver`](crate::resolver::DependencyResolver) and
 //! the install executor. It consumes a [`ResolutionPlan`], classifies each
 //! unsatisfied dependency by provisionability, and either auto-installs (system
 //! mode) or reports remediation (user mode).

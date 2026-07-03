@@ -96,8 +96,30 @@ impl<R: CommandRunner> RpmTransaction<R> {
         };
 
         let mut args = vec!["-y".to_string()];
-        repo.append_dnf_options(&mut args);
-        args.push(verb.to_string());
+        repo.append_dnf_txn_options(&mut args);
+
+        // For install/upgrade, use `repository-packages <repo-id>` to constrain
+        // the primary target to the configured repo. System repos stay enabled
+        // for dependency resolution, but dnf will only pull the requested
+        // package from the ANOLISA-configured repo — not a higher-EVR build
+        // from a host-enabled system repo. For remove, use the plain verb
+        // since the package should be removed regardless of its source repo.
+        match verb {
+            "install" => {
+                args.push("repository-packages".to_string());
+                args.push(repo.id().to_string());
+                args.push("install".to_string());
+            }
+            "update" => {
+                // `dnf repository-packages` uses `upgrade`, not `update`.
+                args.push("repository-packages".to_string());
+                args.push(repo.id().to_string());
+                args.push("upgrade".to_string());
+            }
+            _ => {
+                args.push(verb.to_string());
+            }
+        }
         args.push(package.to_string());
         args
     }
@@ -259,22 +281,70 @@ mod tests {
     }
 
     #[test]
-    fn install_with_repo_uses_configured_repo_only() {
+    fn install_with_repo_uses_repository_packages() {
+        // Transactions keep system repos enabled (no --disablerepo=*) so dnf
+        // can resolve cross-repo Requires (e.g. bubblewrap in EPEL). The
+        // primary target is constrained to the configured repo via
+        // `repository-packages`, preventing dnf from pulling a higher-EVR
+        // build from a host-enabled system repo.
         let t = txn_with_repo(
             "install",
             "copilot-shell",
             &[
                 "-y",
-                "--disablerepo=*",
                 "--repofrompath=anolisa-configured,http://repo.example/alinux/4/agentic-os/x86_64/os",
                 "--enablerepo=anolisa-configured",
                 "--setopt=anolisa-configured.gpgcheck=1",
+                "repository-packages",
+                "anolisa-configured",
                 "install",
                 "copilot-shell",
             ],
             ok_out(Some(0), "Installed:\n  copilot-shell\n", ""),
         );
         t.install("copilot-shell").expect("install ok");
+    }
+
+    #[test]
+    fn update_with_repo_uses_repository_packages_upgrade() {
+        // `dnf repository-packages` uses `upgrade`, not `update`.
+        let t = txn_with_repo(
+            "update",
+            "copilot-shell",
+            &[
+                "-y",
+                "--repofrompath=anolisa-configured,http://repo.example/alinux/4/agentic-os/x86_64/os",
+                "--enablerepo=anolisa-configured",
+                "--setopt=anolisa-configured.gpgcheck=1",
+                "repository-packages",
+                "anolisa-configured",
+                "upgrade",
+                "copilot-shell",
+            ],
+            ok_out(Some(0), "Upgraded:\n  copilot-shell\n", ""),
+        );
+        t.update("copilot-shell").expect("update ok");
+    }
+
+    #[test]
+    fn remove_with_repo_uses_plain_verb() {
+        // Remove must NOT use `repository-packages`: the package should be
+        // removed regardless of which repo it was installed from (e.g. an
+        // adopted system RPM that was later recorded as rpm-managed).
+        let t = txn_with_repo(
+            "remove",
+            "copilot-shell",
+            &[
+                "-y",
+                "--repofrompath=anolisa-configured,http://repo.example/alinux/4/agentic-os/x86_64/os",
+                "--enablerepo=anolisa-configured",
+                "--setopt=anolisa-configured.gpgcheck=1",
+                "remove",
+                "copilot-shell",
+            ],
+            ok_out(Some(0), "Removed:\n  copilot-shell\n", ""),
+        );
+        t.remove("copilot-shell").expect("remove ok");
     }
 
     #[test]
