@@ -74,11 +74,11 @@ make test
 
 ### 包结构
 
-| 包 | 路径 | 职责 |
-|---|---|---|
-| `@copilot-shell/cli` | `packages/cli/` | 命令行入口和 TUI |
-| `@copilot-shell/core` | `packages/core/` | 核心引擎 |
-| `@copilot-shell/test-utils` | `packages/test-utils/` | 测试工具 |
+| 包                          | 路径                   | 职责             |
+| --------------------------- | ---------------------- | ---------------- |
+| `@copilot-shell/cli`        | `packages/cli/`        | 命令行入口和 TUI |
+| `@copilot-shell/core`       | `packages/core/`       | 核心引擎         |
+| `@copilot-shell/test-utils` | `packages/test-utils/` | 测试工具         |
 
 ### 模块约定
 
