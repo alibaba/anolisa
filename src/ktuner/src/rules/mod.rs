@@ -251,7 +251,11 @@ pub fn evaluate_with_workload(info: &SystemInfo, workload: &WorkloadType) -> Res
     checked += eval_max_queued_signals(info, &mut recs);
     checked += eval_keys_maxbytes(info, &mut recs);
     checked += eval_pipe_max_size(info, &mut recs);
-    checked += eval_shmall(info, &mut recs);
+    checked += eval_shmall(info, &mut recs, current_page_size, |path| {
+        std::path::Path::new(path)
+            .exists()
+            .then(|| read_sysctl_u64(path))
+    });
     checked += eval_tcp_app_win(info, &mut recs);
     checked += eval_ip_default_ttl(info, &mut recs);
     checked += eval_tcp_frto(info, &mut recs);
@@ -4934,13 +4938,40 @@ fn eval_pipe_max_size(_info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usi
     1
 }
 
-fn eval_shmall(info: &SystemInfo, recs: &mut Vec<Recommendation>) -> usize {
-    let path = "/proc/sys/kernel/shmall";
-    if !std::path::Path::new(path).exists() {
+/// Query the running kernel's page size (bytes). `shmall` is measured in pages,
+/// and the page size is architecture/kernel dependent — 4 KiB on x86_64 but up
+/// to 64 KiB on arm64 — so it MUST be read at runtime, never hardcoded.
+/// Falls back to 4096 if `sysconf` fails (a non-positive return).
+fn current_page_size() -> u64 {
+    // SAFETY: sysconf(_SC_PAGESIZE) is a pure, side-effect-free query.
+    let sz = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if sz > 0 {
+        sz as u64
+    } else {
+        4096
+    }
+}
+
+/// Recommended `kernel.shmall` (in pages): half of physical RAM, converted to
+/// pages using the given page size. Returns 0 for a zero page size (guards the
+/// division). Kept pure so it can be tested across page sizes.
+fn shmall_target_pages(memory_total_gb: u64, page_size: u64) -> u64 {
+    if page_size == 0 {
         return 0;
     }
-    let current = read_sysctl_u64(path);
-    let target_pages = (info.memory_total_gb * 1024 * 1024 * 1024 / 4096) / 2;
+    (memory_total_gb * 1024 * 1024 * 1024 / page_size) / 2
+}
+
+fn eval_shmall(
+    info: &SystemInfo,
+    recs: &mut Vec<Recommendation>,
+    page_size: impl FnOnce() -> u64,
+    read_current: impl FnOnce(&str) -> Option<u64>,
+) -> usize {
+    let Some(current) = read_current("/proc/sys/kernel/shmall") else {
+        return 0;
+    };
+    let target_pages = shmall_target_pages(info.memory_total_gb, page_size());
     if current < target_pages && target_pages > 0 {
         recs.push(Recommendation {
             param: "kernel.shmall".to_string(),
@@ -7416,15 +7447,86 @@ mod tests {
     }
 
     #[test]
-    fn test_shmall() {
+    fn test_shmall_target_pages_scales_with_page_size() {
+        let mem_gb = 256;
+        let half_bytes = mem_gb * 1024 * 1024 * 1024 / 2;
+
+        // 4 KiB pages (x86_64): half of RAM expressed in 4K pages.
+        assert_eq!(shmall_target_pages(mem_gb, 4096), half_bytes / 4096);
+        // 64 KiB pages (arm64): same memory, so 16x FEWER pages. This is the
+        // discriminating check — the old hardcoded-4096 code produced the 4K
+        // count on every arch, over-recommending ~16x on 64K-page kernels.
+        assert_eq!(shmall_target_pages(mem_gb, 65536), half_bytes / 65536);
+        assert_eq!(
+            shmall_target_pages(mem_gb, 4096),
+            shmall_target_pages(mem_gb, 65536) * 16
+        );
+        // Zero page size must not divide-by-zero.
+        assert_eq!(shmall_target_pages(mem_gb, 0), 0);
+    }
+
+    #[test]
+    fn test_eval_shmall_recommends_using_injected_page_size() {
         let mut info = make_test_info();
         info.memory_total_gb = 256;
-        let mut recs = Vec::new();
-        eval_shmall(&info, &mut recs);
-        if let Some(rec) = recs.iter().find(|r| r.param == "kernel.shmall") {
-            let target = (256u64 * 1024 * 1024 * 1024 / 4096) / 2;
-            assert_eq!(rec.recommended_value, target.to_string());
+
+        for (page_size, expected) in [(4096, "33554432"), (65536, "2097152")] {
+            let mut recs = Vec::new();
+            let checked = eval_shmall(
+                &info,
+                &mut recs,
+                || page_size,
+                |path| {
+                    assert_eq!(path, "/proc/sys/kernel/shmall");
+                    Some(1024)
+                },
+            );
+            assert_eq!(checked, 1);
+            assert_eq!(recs.len(), 1, "page_size={page_size}");
+            assert_eq!(recs[0].param, "kernel.shmall");
+            assert_eq!(recs[0].current_value, "1024");
+            assert_eq!(recs[0].recommended_value, expected, "page_size={page_size}");
         }
+    }
+
+    #[test]
+    fn test_eval_shmall_does_not_recommend_at_or_above_target() {
+        let mut info = make_test_info();
+        info.memory_total_gb = 256;
+
+        for current in [2_097_152, 2_097_153] {
+            let mut recs = Vec::new();
+            assert_eq!(
+                eval_shmall(&info, &mut recs, || 65536, |_| Some(current)),
+                1
+            );
+            assert!(recs.is_empty(), "current={current}");
+        }
+    }
+
+    #[test]
+    fn test_eval_shmall_skips_missing_parameter() {
+        let info = make_test_info();
+        let mut recs = Vec::new();
+        let checked = eval_shmall(
+            &info,
+            &mut recs,
+            || panic!("参数不存在时不应查询页大小"),
+            |path| {
+                assert_eq!(path, "/proc/sys/kernel/shmall");
+                None
+            },
+        );
+        assert_eq!(checked, 0);
+        assert!(recs.is_empty());
+    }
+
+    #[test]
+    fn test_current_page_size_is_plausible() {
+        // Whatever the host arch, the page size must be a non-zero power of two.
+        let ps = current_page_size();
+        assert!(ps >= 4096, "page size {ps} implausibly small");
+        assert!(ps.is_power_of_two(), "page size {ps} not a power of two");
     }
 
     #[test]
