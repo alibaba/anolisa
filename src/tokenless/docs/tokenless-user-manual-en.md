@@ -554,5 +554,5 @@ All hooks receive `TOKENLESS_AGENT_ID=copilot-shell`. Auxiliary files: `hook_uti
 ---
 
 **License**: MIT (tokenless core) + Apache-2.0 (vendored rtk)
-**Version**: 0.6.0
+**Version**: 0.6.1
 **Document version**: 2.1 (aligned with ANOLISA-design user-guide structure)

@@ -6,7 +6,7 @@
 # Installed to: %{_datadir}/anolisa/components/tokenless/component.toml
 [component]
 name = "tokenless"
-version = "0.6.0"
+version = "0.6.1"
 
 [[adapters]]
 framework = "openclaw"
