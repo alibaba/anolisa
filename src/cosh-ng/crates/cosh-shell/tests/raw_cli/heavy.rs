@@ -301,7 +301,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-host-exec
         vec![
             (b"/mode approval auto\n".to_vec(), Duration::ZERO),
             (
-                b"provider-host-executed-timeout\n".to_vec(),
+                b"?? provider-host-executed-timeout\n".to_vec(),
                 Duration::from_millis(500),
             ),
             (b"\n".to_vec(), Duration::from_millis(2_000)),

@@ -52,9 +52,9 @@ fn raw_cli_copy_fallback_shows_recommendation_without_executing_it() {
         &[],
         &[("COSH_SHELL_LANG", "en-US")],
         vec![
-            (b"/explain last error\n".to_vec(), Duration::ZERO),
+            (b"ls /path/that/does/not/exist\n".to_vec(), Duration::ZERO),
             (
-                b"ls /path/that/does/not/exist\n".to_vec(),
+                b"/explain last error\n".to_vec(),
                 Duration::from_millis(100),
             ),
             (b"/copy 1\n".to_vec(), Duration::from_millis(1_200)),

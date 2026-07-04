@@ -9,8 +9,13 @@ fn raw_cli_zsh_native_loads_existing_user_history() {
     let home = temp_zsh_home("native-history");
     let history_file = home.join(".zsh_history");
     fs::write(
+        home.join(".zshenv"),
+        "export HISTFILE=$HOME/.zsh_history\nHISTSIZE=1000\nSAVEHIST=1000\nfc -R \"$HISTFILE\" 2>/dev/null || true\n",
+    )
+    .unwrap();
+    fs::write(
         home.join(".zshrc"),
-        "HISTSIZE=1000\nSAVEHIST=1000\nsetopt appendhistory\n",
+        "setopt appendhistory incappendhistory\n",
     )
     .unwrap();
     fs::write(&history_file, "echo old-cosh-zsh-history\n").unwrap();

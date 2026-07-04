@@ -67,7 +67,7 @@ exit 0
         vec![
             (b"/mode approval auto\n".to_vec(), Duration::ZERO),
             (
-                b"provider-real-resume-silent\n".to_vec(),
+                b"?? provider-real-resume-silent\n".to_vec(),
                 Duration::from_millis(500),
             ),
             (b"exit 0\n".to_vec(), Duration::from_millis(3_000)),
@@ -138,7 +138,7 @@ exit 0
         vec![
             (b"/mode approval auto\n".to_vec(), Duration::ZERO),
             (
-                b"qwen-foreground-tool-result\n".to_vec(),
+                b"?? qwen-foreground-tool-result\n".to_vec(),
                 Duration::from_millis(500),
             ),
             (b"exit 0\n".to_vec(), Duration::from_millis(3_000)),
@@ -231,7 +231,7 @@ exit 0
         vec![
             (b"/mode approval auto\n".to_vec(), Duration::ZERO),
             (
-                b"provider-cwd-resume-silent\n".to_vec(),
+                b"?? provider-cwd-resume-silent\n".to_vec(),
                 Duration::from_millis(500),
             ),
             (b"exit 0\n".to_vec(), Duration::from_millis(3_000)),

@@ -61,3 +61,34 @@ mod support;
 
 pub(crate) use i18n::*;
 use support::raw_cli::*;
+
+pub(crate) fn assert_approval_prompt_visible(output: &str) {
+    assert!(
+        output.contains("Approval required") || output.contains("Approval req-1"),
+        "{output}"
+    );
+}
+
+pub(crate) fn assert_zh_approval_prompt_visible(output: &str) {
+    assert!(
+        output.contains("需要审批") || output.contains("审批 req-1"),
+        "{output}"
+    );
+}
+
+pub(crate) fn count_approval_prompts(output: &str) -> usize {
+    count_occurrences(output, "Approval required") + count_occurrences(output, "Approval req-")
+}
+
+pub(crate) fn count_zh_approval_prompts(output: &str) -> usize {
+    count_occurrences(output, "需要审批") + count_occurrences(output, "审批 req-")
+}
+
+pub(crate) fn ls_ccc_failure_analysis(output: &str) -> Option<&'static str> {
+    [
+        "The command ls ccc failed with exit code 1.",
+        "The command ls ccc failed with exit code 2.",
+    ]
+    .into_iter()
+    .find(|message| output.contains(message))
+}

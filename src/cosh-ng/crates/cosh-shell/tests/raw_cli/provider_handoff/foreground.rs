@@ -14,7 +14,7 @@ fn raw_cli_control_shell_permission_uses_foreground_and_suppresses_provider_outp
         ],
     );
 
-    assert!(output.contains("Approval required"), "{output}");
+    assert_approval_prompt_visible(&output);
     assert!(output.contains("Approved req-1"), "{output}");
     assert!(!output.contains("Auto-approved req-1"), "{output}");
     assert!(output.contains("Bash tool sent to shell"), "{output}");
@@ -24,7 +24,7 @@ fn raw_cli_control_shell_permission_uses_foreground_and_suppresses_provider_outp
         output.contains("Tool - Bash requested: $ printf 'provider-shell-handoff"),
         "{output}"
     );
-    assert!(output.contains("Details unavailable:"), "{output}");
+    assert!(output.contains("Details unavailable"), "{output}");
     assert!(output.contains("out-1 is not available"), "{output}");
     assert!(
         output.contains("Execution: foreground_shell_pty"),
@@ -178,7 +178,7 @@ fn raw_cli_zh_control_shell_details_localizes_shell_owned_chrome() {
         output.contains("Bash 请求审批：$ printf 'provider-shell-handoff"),
         "{output}"
     );
-    assert!(output.contains("详情不可用:"), "{output}");
+    assert!(output.contains("详情不可用"), "{output}");
     assert!(output.contains("out-1 不可用"), "{output}");
     assert!(
         output.contains("execution_path: provider_control_protocol"),

@@ -284,8 +284,8 @@ printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-ho
 read -r user_message
 case "$user_message" in
   *cosh-core-provider-host-executed-disconnect*)
-    printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-disconnect","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"df -h"},"tool_use_id":"toolu-cosh-core-disconnect"}}'
-    exit 0
+    printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-disconnect","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"sleep 1; df -h"},"tool_use_id":"toolu-cosh-core-disconnect"}}'
+    kill -9 "$$"
     ;;
 esac
 printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-host-executed-disconnect","is_error":false,"result":"ignored"}'
@@ -298,7 +298,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
         &[],
         &[("HOME", &home_str), ("COSH_CORE_PATH", &cosh_core_path_str)],
         vec![
-            (b"/mode approval auto\n".to_vec(), Duration::ZERO),
+            (b"/mode approval trust confirm\n".to_vec(), Duration::ZERO),
             (
                 b"?? cosh-core-provider-host-executed-disconnect\n".to_vec(),
                 Duration::from_millis(500),
@@ -315,7 +315,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
 
     assert!(output.contains("Auto-approved req-1"), "{output}");
     assert!(output.contains("Bash tool sent to shell"), "{output}");
-    assert!(output.contains("$ df -h"), "{output}");
+    assert!(output.contains("$ sleep 1; df -h"), "{output}");
     assert!(
         output.contains("selected_shell_execution_path: foreground_shell_handoff_recovery"),
         "{output}"

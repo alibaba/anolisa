@@ -15,6 +15,13 @@ const RAW_CLI_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const RAW_CLI_UNSET_ENV: &str = "__cosh_raw_cli_unset_env__";
 
 static RAW_CLI_RUN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static RAW_CLI_GIT_FIXTURE: OnceLock<PathBuf> = OnceLock::new();
+
+pub(crate) fn raw_cli_command(binary: &str) -> Command {
+    let mut command = Command::new(binary);
+    configure_raw_cli_command(&mut command);
+    command
+}
 
 pub(crate) fn run_raw_cli_with_envs(adapter: &str, envs: &[(&str, &str)]) -> String {
     run_raw_cli_with_args_env_and_delayed_input(
@@ -52,12 +59,8 @@ pub(crate) fn run_raw_cli_with_args_and_env(
         .args(extra_args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env("COSH_SHELL_ISOLATED", "1")
-        .env("COSH_SHELL_RAW_SHELL", "bash")
-        .env("COSH_SHELL_DEFAULT_SHELL", "bash")
-        .env("COSH_SHELL_LANG", "en-US")
-        .env("COSH_SHELL_BOOTSTRAP_PATH", "0");
+        .stderr(Stdio::piped());
+    configure_raw_cli_command(&mut command);
     apply_raw_cli_envs(&mut command, envs);
     command.process_group(0);
     let mut child = command.spawn().expect("spawn cosh-shell raw");
@@ -129,12 +132,8 @@ pub(crate) fn run_raw_cli_with_args_env_current_dir_and_delayed_input(
         .args(extra_args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env("COSH_SHELL_ISOLATED", "1")
-        .env("COSH_SHELL_RAW_SHELL", "bash")
-        .env("COSH_SHELL_DEFAULT_SHELL", "bash")
-        .env("COSH_SHELL_LANG", "en-US")
-        .env("COSH_SHELL_BOOTSTRAP_PATH", "0");
+        .stderr(Stdio::piped());
+    configure_raw_cli_command(&mut command);
     apply_raw_cli_envs(&mut command, envs);
     command.process_group(0);
     let mut child = command.spawn().expect("spawn cosh-shell raw");
@@ -175,12 +174,8 @@ pub(crate) fn run_raw_cli_default_with_args_env_and_delayed_input(
         .args(extra_args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env("COSH_SHELL_ISOLATED", "1")
-        .env("COSH_SHELL_RAW_SHELL", "bash")
-        .env("COSH_SHELL_DEFAULT_SHELL", "bash")
-        .env("COSH_SHELL_LANG", "en-US")
-        .env("COSH_SHELL_BOOTSTRAP_PATH", "0");
+        .stderr(Stdio::piped());
+    configure_raw_cli_command(&mut command);
     apply_raw_cli_envs(&mut command, envs);
     command.process_group(0);
     let mut child = command.spawn().expect("spawn cosh-shell raw default");
@@ -213,6 +208,41 @@ fn raw_cli_run_lock() -> std::sync::MutexGuard<'static, ()> {
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn configure_raw_cli_command(command: &mut Command) {
+    let home = temp_shell_home("default-home");
+    let git_work_tree = raw_cli_git_fixture();
+    command
+        .env("COSH_SHELL_ISOLATED", "1")
+        .env("COSH_SHELL_RAW_SHELL", "bash")
+        .env("COSH_SHELL_DEFAULT_SHELL", "bash")
+        .env("COSH_SHELL_LANG", "en-US")
+        .env("COSH_SHELL_BOOTSTRAP_PATH", "0")
+        .env("COSH_SHELL_HEALTH_SCAN", "disabled")
+        .env("LANG", "C.UTF-8")
+        .env("LC_ALL", "C.UTF-8")
+        .env("HOME", home)
+        .env("GIT_DIR", git_work_tree.join(".git"))
+        .env("GIT_WORK_TREE", git_work_tree);
+}
+
+fn raw_cli_git_fixture() -> &'static Path {
+    RAW_CLI_GIT_FIXTURE
+        .get_or_init(|| {
+            let path = temp_shell_home("git-fixture");
+            let status = Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(&path)
+                .status()
+                .expect("initialize raw cli git fixture");
+            assert!(
+                status.success(),
+                "initialize raw cli git fixture: {status:?}"
+            );
+            path
+        })
+        .as_path()
 }
 
 struct RawCliOutput {
