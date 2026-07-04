@@ -3,12 +3,12 @@
 > Canonical reference for documentation structure, naming, bilingual conventions, and maintenance rules.
 > Both human contributors and AI agents MUST follow this specification.
 
-## Agent Reading Order
+## Agent Navigation (for documentation tasks)
 
-When an agent starts working on this repository:
+Agents enter this repository via `AGENTS.md` (auto-loaded by tooling). For **documentation-related work**, `AGENTS.md` §9/§11.1/§12 redirects here with MANDATORY directives. The reading priority for documentation tasks is:
 
-1. `specs/` — normative rules (this directory)
-2. `AGENTS.md` — development conventions and coding standards
+1. `AGENTS.md` — natural entry; contains redirect to this spec
+2. `specs/documentation-standard.md` — normative documentation rules (this file)
 3. `src/<component>/AGENTS.md` — scoped module rules (if working on that component)
 4. `src/<component>/README.md` — component context
 
@@ -60,15 +60,14 @@ When an agent starts working on this repository:
 | CONTRIBUTING | Structured sections: prerequisites, build, test, PR checklist | Root covers general flow; component covers local build/test only |
 | CHANGELOG | [Keep a Changelog](https://keepachangelog.com/) format (Added / Changed / Fixed) | Root MUST prepend a "Component Versions" table before highlights |
 
-**CHANGELOG writing rules:**
+**CHANGELOG writing rules** (content standard — what to write, not when):
 
-1. Each user-perceivable change requires an entry in the affected component's CHANGELOG
+1. Only record user-perceivable changes; skip pure refactors, test infra, CI tweaks
 2. One sentence per bullet — max 25 English words / 40 Chinese characters
 3. User perspective — describe the behavior change, not the code change
 4. No internal jargon — command names and config keys are fine; kernel APIs and syscalls are not
 5. One bullet, one change — do not combine unrelated changes
-6. Skip invisible changes — pure refactors, test infra, CI tweaks do not belong
-7. Key entries should reference the implementing PR
+6. Key entries should reference the implementing PR
 
 **Root CHANGELOG structural requirement** — each version entry starts with:
 
@@ -115,11 +114,13 @@ docs/
 
 | Content type | Location | NOT here |
 |-------------|----------|----------|
-| User-facing how-to | `docs/user-guide/{en,zh}/` | Component root |
+| Full user-facing how-to / reference | `docs/user-guide/{en,zh}/` | — |
 | Developer architecture / IPC / hooks | `docs/developer-guide/{en,zh}/` | Component root |
 | Component design docs | `src/<component>/docs/` | `docs/` top level |
 | Cross-component quick start | `docs/QUICKSTART.md` | README |
 | Build instructions | `docs/BUILDING.md` | README |
+
+> **Note on component README**: README.md serves as a **summary entry point** (positioning + quick-start + basic install/use). It is NOT a full how-to or reference manual. Complete usage documentation belongs in `docs/user-guide/`. When CLI/config changes occur, update both the README summary and the user-guide reference.
 
 ### 3.2 Design Documents
 
@@ -219,12 +220,13 @@ When a PR introduces any of the following changes, documentation MUST be updated
 
 | Change type | Required doc update |
 |-------------|-------------------|
-| New/modified CLI command or flag | Component README + user-guide |
-| New/modified config option | Component README + user-guide |
-| User-perceivable feature or fix | Component CHANGELOG |
+| New/modified CLI command or flag | Component README (summary) + user-guide (full reference) |
+| New/modified config option | Component README (summary) + user-guide (full reference) |
 | Installation method change | docs/QUICKSTART + component README |
 | Architecture or protocol change | Component `docs/design/` |
 | New component added | Root README + NOTICE (if applicable) |
+
+**CHANGELOG update timing**: Daily feature/fix PRs update README and user-guide only; CHANGELOG is written exclusively in **release version bump PRs** that aggregate all user-perceivable changes since the last release.
 
 ---
 

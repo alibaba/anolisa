@@ -299,15 +299,11 @@ Use [`.github/pull_request_template.md`](.github/pull_request_template.md) as th
 - **Testing**: command used, scope (unit/integration/manual), edge cases verified
 - PR title follows commit message format: `type(scope): description`
 
-## 9. Changelog Entries
+## 9. Documentation Rules
 
-Each user-perceivable change requires a `CHANGELOG.md` entry in the affected component. Follow [Keep a Changelog](https://keepachangelog.com/) format (Added / Changed / Fixed).
+> **MANDATORY**: All documentation rules — file naming, bilingual conventions, CHANGELOG format, file placement, user-guide standards — are defined in [`specs/documentation-standard.md`](specs/documentation-standard.md). You MUST read that file before creating, renaming, or modifying any documentation file. Non-compliance will be rejected in review.
 
-1. **One sentence per bullet** — max 25 English words / 40 Chinese characters
-2. **User perspective** — describe the behavior change, not the code change
-3. **No internal jargon** — command names and config keys are fine; kernel APIs and syscalls are not
-4. **One bullet, one change** — do not combine unrelated changes
-5. **Skip invisible changes** — pure refactors, test infra, and CI tweaks do not belong in the changelog
+This section intentionally does not duplicate the spec. Do NOT invent documentation rules from memory or prior context — the spec is the single source of truth.
 
 ## 10. Code Standards (General)
 
@@ -327,94 +323,10 @@ Components with complex architectures maintain their own AGENTS.md for module-sp
 | **cosh-ng** | [`src/cosh-ng/AGENTS.md`](src/cosh-ng/AGENTS.md) | 5-crate workspace, security heuristics, PTY testing strategy |
 | **skillfs** | [`src/skillfs/AGENTS.md`](src/skillfs/AGENTS.md) | Three-crate layout, dependency exceptions, FUSE e2e testing |
 
-## 11.1 File Placement Rules
+## 11.1 File Placement & Documentation Structure
 
-### Per-component files at `src/<component>/`
-
-Every component MUST have:
-
-| File | Purpose |
-|------|---------|
-| `README.md` | Human entry point: what it is, quick start, architecture overview |
-| `CONTRIBUTING.md` | How to contribute (build, test, lint, PR checklist) |
-| `CHANGELOG.md` | User-perceivable changes per release |
-
-Optional (only when the component has non-trivial AI-agent constraints):
-
-| File | Purpose |
-|------|---------|
-| `AGENTS.md` | Value proposition, doc boundaries, gotchas, terminology |
-
-#### README.md opening paragraph convention
-
-Every component `README.md` MUST open with a structured introduction:
-
-1. **First sentence**: one-line positioning (reusable verbatim in indexes)
-2. **Remainder of paragraph**: 2–4 sentences expanding scope and differentiators
-
-When composing `user-guide` indexes, quote the first sentence verbatim.
-
-### Repo root `/`
-
-| File | Purpose |
-|------|---------|
-| `AGENTS.md` | Global conventions (this file) |
-| `README.md` | Project-level overview |
-| `CONTRIBUTING.md` | General contribution guide (references component-specific ones) |
-| `LICENSE`, `Makefile` | Legal, unified build entry |
-
-### `docs/` structure
-
-| Path | Audience | Content |
-|------|----------|---------|
-| `docs/QUICKSTART.md` | Users | Cross-component quick start |
-| `docs/BUILDING.md` | Developers | Build instructions |
-| `docs/user-guide/{en,zh}/` | Users | Unified user documentation, organized by capability |
-| `docs/developer-guide/{en,zh}/` | Contributors | Architecture, hook development, IPC protocol, testing |
-
-Component user docs migrate into `docs/user-guide/` under the appropriate capability directory.
-Component developer docs migrate into `docs/developer-guide/` under the component name.
-
-Example:
-```
-docs/user-guide/en/user-entrypoint/copilot-shell/    ← users/ content
-docs/developer-guide/en/copilot-shell/               ← developers/ content
-```
-
-Each component directory in `user-guide/` uses `QUICKSTART.md` as its entry point.
+> **MANDATORY**: See [`specs/documentation-standard.md`](specs/documentation-standard.md) §2–§4 for the complete file placement rules, bilingual naming convention, and component-level file requirements. Do NOT rely on cached or memorized rules — read the spec file directly.
 
 ## 12. User Guide Documentation Standards
 
-### Writing Process
-
-- **Source of truth**: code is the ground truth. Read clap definitions, config loaders, and runtime logic before writing. Existing docs (design repo, cloud vendor pages) are reference only — never copy without code verification.
-- **Scope**: only document components whose source code exists in this repository (`src/`). If the code is not here, the component does not exist in the docs.
-- **Verification**: every CLI example, config path, and behavioral claim must be traceable to a specific code location. If you cannot point to the code, do not write it.
-
-### Installation Priority
-
-1. `anolisa install <component>` — always first
-2. RPM package (`yum install`) — alternative for Alinux users
-3. Source build — last, developers only
-- agentsight and agent-sec-core require system mode: `sudo anolisa install`
-- All others use user mode
-
-### Content Boundaries
-
-- Cloud-specific service configuration (SLS endpoints, AK/SK auth, security group rules) belongs to cloud vendor docs, not here
-- Alinux ecosystem tools (loongshield, yum repos) may be mentioned with context
-- Never document planned-but-unimplemented features as available
-- Never describe behavior ("replaces not extends", "auto-assigns") without having verified the code path
-
-### Framing Principles
-
-- Each component doc opens with a value proposition answering "why install this?" — not a technical architecture description
-- Cross-component integration stories belong in docs (e.g. "install AgentSight + Tokenless, savings appear in Dashboard automatically")
-- Gotchas that cause real user confusion deserve prominent warnings, even if technically derivable from code
-
-### Language
-
-- Bilingual: `docs/user-guide/{en/, zh/}` mirror structure
-- en/ and zh/ must be semantically equivalent
-- Technical terms keep English form in Chinese docs (eBPF, Token, CLI)
-- Command examples identical across languages; only prose differs
+> **MANDATORY**: See [`specs/documentation-standard.md`](specs/documentation-standard.md) §4.6 for user-guide writing standards including installation priority, content boundaries, framing principles, and bilingual language rules. You MUST comply — skipping this spec and writing docs from assumptions is a blocking review issue.
