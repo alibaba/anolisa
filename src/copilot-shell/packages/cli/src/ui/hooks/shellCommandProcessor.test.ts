@@ -188,7 +188,7 @@ describe('useShellCommandProcessor', () => {
     expect(setShellInputFocusedMock).toHaveBeenCalledWith(false);
   });
 
-  it('should handle command failure and display error status', async () => {
+  it('should show actionable guidance for command not found', async () => {
     const { result } = renderProcessorHook();
 
     act(() => {
@@ -209,10 +209,40 @@ describe('useShellCommandProcessor', () => {
     const finalHistoryItem = addItemToHistoryMock.mock.calls[1][0];
     expect(finalHistoryItem.tools[0].status).toBe(ToolCallStatus.Error);
     expect(finalHistoryItem.tools[0].resultDisplay).toContain(
-      'Command exited with code 127',
+      'Error: command not found (exit code 127)',
+    );
+    expect(finalHistoryItem.tools[0].resultDisplay).toContain('Please check');
+    expect(finalHistoryItem.tools[0].resultDisplay).toContain(
+      'try installing it',
     );
     expect(finalHistoryItem.tools[0].resultDisplay).toContain('not found');
     expect(setShellInputFocusedMock).toHaveBeenCalledWith(false);
+  });
+
+  it('should preserve generic guidance for other command failures', async () => {
+    const { result } = renderProcessorHook();
+
+    act(() => {
+      result.current.handleShellCommand(
+        'bad-cmd',
+        new AbortController().signal,
+      );
+    });
+    const execPromise = onExecMock.mock.calls[0][0];
+
+    act(() => {
+      resolveExecutionPromise(
+        createMockServiceResult({ exitCode: 2, output: 'usage error' }),
+      );
+    });
+    await act(async () => await execPromise);
+
+    const finalHistoryItem = addItemToHistoryMock.mock.calls[1][0];
+    expect(finalHistoryItem.tools[0].status).toBe(ToolCallStatus.Error);
+    expect(finalHistoryItem.tools[0].resultDisplay).toContain(
+      'Command exited with code 2',
+    );
+    expect(finalHistoryItem.tools[0].resultDisplay).toContain('usage error');
   });
 
   describe('UI Streaming and Throttling', () => {
