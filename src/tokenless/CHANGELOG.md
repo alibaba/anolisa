@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.6.1
+
+- bundle tool_categories.json into dist for npm installs
+- use node: prefix, eliminate shell subprocess in openclaw plugin
 
 ## 0.6.0
 

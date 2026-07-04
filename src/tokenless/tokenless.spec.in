@@ -448,6 +448,10 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Sat Jul 04 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.6.1-1
+- fix(tokenless): use node: prefix, eliminate shell subprocess in openclaw plugin
+- fix(tokenless): bundle tool_categories.json into dist for npm installs
+
 * Mon Jun 29 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.6.0-1
 - fix(tokenless): add absolute saved values + schema version to JSON output
 - fix(tokenless): use import.meta.dirname instead of __dirname in openclaw plugin
