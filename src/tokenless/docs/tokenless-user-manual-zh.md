@@ -554,5 +554,5 @@ make adapter-scan         # 查看已注册适配器能力
 ---
 
 **许可证**：MIT（tokenless core）+ Apache-2.0（vendored rtk）
-**版本**：0.6.0
+**版本**：0.6.1
 **文档版本**：2.1（对齐 ANOLISA-design user-guide 结构）
