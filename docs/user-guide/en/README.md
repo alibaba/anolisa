@@ -37,6 +37,7 @@ ANOLISA provides a complete server-side runtime for AI Agent workloads. Componen
 | [anolisa CLI](user-entrypoint/anolisa-cli.md) | anolisa | Unified CLI for component management |
 | [Copilot Shell](user-entrypoint/copilot-shell.md) | cosh | AI terminal assistant and command gateway |
 | [OS Skills](user-entrypoint/os-skills.md) | os-skills | System management and DevOps skills |
+| [ktuner](user-entrypoint/ktuner.md) | ktuner | Deterministic kernel-parameter tuning engine |
 
 ### Agent Observability (`agent-observability/`)
 

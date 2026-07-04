@@ -17,8 +17,9 @@ This file provides context for AI coding assistants (Qoder, Claude, etc.) workin
 | **anolisa** | `src/anolisa/` | Rust | Linux + macOS (arm64) |
 | **SkillFS** (`skillfs`) | `src/skillfs/` | Rust / FUSE | Linux only |
 | **ws-ckpt** | `src/ws-ckpt/` | Rust + TypeScript | Linux only |
+| **ktuner** | `src/ktuner/` | Rust | Linux only |
 
-> `agent-sec-core`, `agentsight`, `tokenless`, `agent-memory`, and `skillfs` require Linux. Do **not** attempt to build them on macOS or Windows.
+> `agent-sec-core`, `agentsight`, `tokenless`, `agent-memory`, `skillfs`, and `ktuner` require Linux. Do **not** attempt to build them on macOS or Windows.
 
 ## 2. Development Commands
 
@@ -83,11 +84,17 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 scripts/test.sh   # FUSE smoke test; skips itself if fuse3 or /dev/fuse is unavailable
+
+# ktuner (Linux only, per-component)
+cd src/ktuner
+cargo fmt --all --check
+cargo clippy --all-targets -- -D warnings
+cargo test
 ```
 
 ## 3. Rust Common Conventions
 
-> Applies to all Rust components: `anolisa`, `agentsight`, `tokenless`, `agent-memory`, `skillfs`.
+> Applies to all Rust components: `anolisa`, `agentsight`, `tokenless`, `agent-memory`, `skillfs`, `ktuner`.
 
 ### 3.1 Comment Guidelines
 
@@ -259,6 +266,7 @@ When generating commits, detect the active tool and fill in the actual version. 
 | `src/agent-memory/` | `memory` |
 | `src/anolisa/` | `anolisa` |
 | `src/skillfs/` | `skillfs` |
+| `src/ktuner/` | `ktuner` |
 | `.github/workflows/` | `ci` |
 | `docs/` | `docs` |
 | `**/package*.json`, `Cargo.lock`, `*.toml` (dep bumps) | `deps` |
