@@ -1464,15 +1464,101 @@ impl AdapterOps for ManagerOps {
 
     fn remove_tree(&self, path: &Path) -> Result<bool, AdapterError> {
         validate_ops_path(path, &self.allowed_roots)?;
-        if !path.exists() {
-            return Ok(false);
+        // Use symlink_metadata so a symlink at `path` is removed as a link
+        // rather than followed (remove_dir_all refuses a symlink, and
+        // following one could escape the allowed roots).
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                std::fs::remove_file(path).map_err(|source| AdapterError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+                Ok(true)
+            }
+            Ok(_) => {
+                std::fs::remove_dir_all(path).map_err(|source| AdapterError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+                Ok(true)
+            }
+            // Only a genuinely-absent path is a no-op. Permission or other
+            // IO errors must surface, not masquerade as "already removed"
+            // (which would let a driver mark cleanup complete and drop the
+            // receipt without having verified the target was gone).
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(source) => Err(AdapterError::Io {
+                path: path.to_path_buf(),
+                source,
+            }),
         }
-        std::fs::remove_dir_all(path).map_err(|source| AdapterError::Io {
+    }
+
+    fn write_file(&self, path: &Path, contents: &[u8]) -> Result<(), AdapterError> {
+        validate_ops_path(path, &self.allowed_roots)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| AdapterError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        std::fs::write(path, contents).map_err(|source| AdapterError::Io {
             path: path.to_path_buf(),
             source,
-        })?;
-        Ok(true)
+        })
     }
+
+    fn create_symlink(&self, link: &Path, target: &Path) -> Result<(), AdapterError> {
+        validate_ops_path(link, &self.allowed_roots)?;
+        validate_ops_path(target, &self.allowed_roots)?;
+        if let Some(parent) = link.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| AdapterError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        // Replace an existing ANOLISA-created symlink (idempotent
+        // re-enable), but refuse to clobber a real file/dir we did not
+        // create.
+        match std::fs::symlink_metadata(link) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                std::fs::remove_file(link).map_err(|source| AdapterError::Io {
+                    path: link.to_path_buf(),
+                    source,
+                })?;
+            }
+            Ok(_) => {
+                return Err(AdapterError::Io {
+                    path: link.to_path_buf(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        "refusing to replace a non-symlink at the adapter link path",
+                    ),
+                });
+            }
+            Err(_) => {}
+        }
+        symlink_file(target, link).map_err(|source| AdapterError::Io {
+            path: link.to_path_buf(),
+            source,
+        })
+    }
+}
+
+/// Create a symlink at `link` pointing to `target`. Unix-only; on other
+/// platforms this returns an unsupported error so the boundary never
+/// silently degrades.
+#[cfg(unix)]
+fn symlink_file(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(not(unix))]
+fn symlink_file(_target: &Path, _link: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "symlink adapters are only supported on Unix",
+    ))
 }
 
 /// Spawn `cmd` as a direct argv (no shell), enforce its timeout, and return
@@ -1729,7 +1815,7 @@ fn declared_adapter_type(manifest: &ComponentManifest, framework: &str) -> Optio
 }
 
 fn is_supported_adapter_type(adapter_type: &str) -> bool {
-    matches!(adapter_type, "plugin" | "skill_bundle")
+    matches!(adapter_type, "plugin" | "skill_bundle" | "extension")
 }
 
 /// Whether a component status makes it visible to adapter scan/enable.
@@ -1959,6 +2045,32 @@ fn plan_disable_report(claim: &AdapterClaim) -> DisableReport {
                 Some(h.plugin_resource.as_str())
             }
         }
+        DriverPayload::Cosh(c) => {
+            cleanup_ids.push(&c.extension_dir_resource);
+            None
+        }
+        DriverPayload::Codex(c) => {
+            // Real disable order: plugin remove, marketplace remove, then
+            // remove the marketplace directory (which contains the symlink).
+            cleanup_ids.push(&c.plugin_resource);
+            cleanup_ids.push(&c.marketplace_resource);
+            cleanup_ids.push(&c.symlink_resource);
+            cleanup_ids.push(&c.marketplace_dir_resource);
+            None
+        }
+        DriverPayload::ClaudeCode(c) => {
+            cleanup_ids.push(&c.plugin_resource);
+            cleanup_ids.push(&c.marketplace_resource);
+            None
+        }
+    };
+
+    // Whether disable uninstalls (Claude Code semantics) rather than
+    // unregisters (registry-only). Purely cosmetic for the plan text.
+    let plugin_verb = if matches!(claim.driver_payload, DriverPayload::ClaudeCode(_)) {
+        "uninstall"
+    } else {
+        "unregister"
     };
 
     for resource in &claim.resources {
@@ -1975,7 +2087,20 @@ fn plan_disable_report(claim: &AdapterClaim) -> DisableReport {
                 framework,
                 plugin_id,
             } => {
-                messages.push(format!("would unregister {framework} plugin '{plugin_id}'"));
+                messages.push(format!(
+                    "would {plugin_verb} {framework} plugin '{plugin_id}'"
+                ));
+            }
+            ClaimResourceKind::FrameworkMarketplace {
+                framework,
+                marketplace,
+            } => {
+                messages.push(format!(
+                    "would remove {framework} marketplace '{marketplace}'"
+                ));
+            }
+            ClaimResourceKind::Symlink { link, .. } => {
+                messages.push(format!("would remove symlink {}", link.display()));
             }
             ClaimResourceKind::ExternalPath { path } => {
                 // Hermes stores its plugin as a directory (ExternalPath) but
@@ -2186,19 +2311,16 @@ mod tests {
         assert!(msg.contains("service"));
         assert!(msg.contains("tokenless"));
         assert!(msg.contains("openclaw"));
-        assert!(msg.contains("'plugin' and 'skill_bundle'"));
+        assert!(msg.contains("'plugin', 'skill_bundle', and 'extension'"));
     }
 
     #[test]
-    fn unsupported_adapter_type_extension() {
-        let err = AdapterError::UnsupportedAdapterType {
-            component: "agentsight".to_string(),
-            framework: "openclaw".to_string(),
-            adapter_type: "extension".to_string(),
-        };
-        let msg = err.to_string();
-        assert!(msg.contains("extension"));
-        assert!(msg.contains("agentsight"));
+    fn supported_adapter_types_include_extension() {
+        assert!(is_supported_adapter_type("plugin"));
+        assert!(is_supported_adapter_type("skill_bundle"));
+        assert!(is_supported_adapter_type("extension"));
+        assert!(!is_supported_adapter_type("service"));
+        assert!(!is_supported_adapter_type("magic"));
     }
 
     #[test]
@@ -2210,7 +2332,7 @@ mod tests {
         };
         let msg = err.to_string();
         assert!(msg.contains("magic"));
-        assert!(msg.contains("'plugin' and 'skill_bundle'"));
+        assert!(msg.contains("'plugin', 'skill_bundle', and 'extension'"));
     }
 
     #[test]

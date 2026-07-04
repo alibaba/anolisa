@@ -960,6 +960,12 @@ mod tests {
         fn remove_tree(&self, _: &Path) -> Result<bool, AdapterError> {
             unimplemented!()
         }
+        fn write_file(&self, _: &Path, _: &[u8]) -> Result<(), AdapterError> {
+            unimplemented!()
+        }
+        fn create_symlink(&self, _: &Path, _: &Path) -> Result<(), AdapterError> {
+            unimplemented!()
+        }
     }
 
     #[test]

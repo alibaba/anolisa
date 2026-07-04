@@ -21,12 +21,16 @@ use anolisa_platform::fs_layout::FsLayout;
 use crate::manifest::AdapterSpec;
 
 pub mod claim;
+pub mod claude_code;
+pub mod codex;
 pub mod contract;
+pub mod cosh;
 pub mod driver;
 pub mod hermes;
 pub mod manager;
 pub mod openclaw;
 pub mod registry;
+mod util;
 
 // ---------------------------------------------------------------------------
 // Error
@@ -93,9 +97,9 @@ pub enum AdapterError {
     },
 
     /// The manifest declares an `adapter_type` that is not yet supported
-    /// by any built-in driver (e.g. `extension`, `service`).
+    /// by any built-in driver (e.g. `service`).
     #[error(
-        "adapter type '{adapter_type}' for {component}/{framework} is not supported; only 'plugin' and 'skill_bundle' are implemented"
+        "adapter type '{adapter_type}' for {component}/{framework} is not supported; only 'plugin', 'skill_bundle', and 'extension' are implemented"
     )]
     UnsupportedAdapterType {
         /// Component whose adapter was requested.

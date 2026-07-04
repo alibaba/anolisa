@@ -2,8 +2,11 @@
 //!
 //! The set of supported frameworks is closed and compiled in: a framework
 //! is supported only if an ANOLISA release ships a driver for it. There is
-//! no runtime plugin loading. MVP registers only the OpenClaw driver.
+//! no runtime plugin loading.
 
+use super::claude_code::ClaudeCodeDriver;
+use super::codex::CodexDriver;
+use super::cosh::CoshDriver;
 use super::driver::FrameworkDriver;
 use super::hermes::HermesDriver;
 use super::openclaw::OpenClawDriver;
@@ -20,6 +23,9 @@ impl DriverRegistry {
             drivers: vec![
                 Box::new(OpenClawDriver::new()),
                 Box::new(HermesDriver::new()),
+                Box::new(CoshDriver::new()),
+                Box::new(CodexDriver::new()),
+                Box::new(ClaudeCodeDriver::new()),
             ],
         }
     }
@@ -54,17 +60,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtin_registers_openclaw_and_hermes() {
+    fn builtin_registers_all_shipped_drivers() {
         let reg = DriverRegistry::builtin();
         assert!(reg.contains("openclaw"));
         assert!(reg.contains("hermes"));
-        assert!(!reg.contains("cosh"), "cosh driver not yet shipped");
-        assert_eq!(reg.names(), vec!["openclaw", "hermes"]);
+        assert!(reg.contains("cosh"));
+        assert!(reg.contains("codex"));
+        assert!(reg.contains("claude-code"));
+        assert_eq!(
+            reg.names(),
+            vec!["openclaw", "hermes", "cosh", "codex", "claude-code"]
+        );
     }
 
     #[test]
     fn get_unknown_framework_is_none() {
         let reg = DriverRegistry::builtin();
+        // `qoder` ships an adapter bundle but no built-in driver yet.
         assert!(reg.get("qoder").is_none());
+        assert!(reg.get("qwencode").is_none());
     }
 }

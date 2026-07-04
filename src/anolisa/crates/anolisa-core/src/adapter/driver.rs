@@ -271,10 +271,11 @@ impl CliOutput {
 /// The closed set of dangerous IO a driver may perform, mediated by the
 /// Manager.
 ///
-/// MVP exposes only [`run_framework_cli`](AdapterOps::run_framework_cli);
-/// the file/JSON/symlink helpers from the design land with the drivers
-/// that need them (Cosh, Qoder, Hermes), so the boundary grows one
-/// reviewed method at a time rather than shipping unused surface.
+/// The boundary grows one reviewed method at a time rather than shipping
+/// unused surface: `run_framework_cli` plus the tree-copy helpers landed
+/// with OpenClaw/Hermes, and [`write_file`](AdapterOps::write_file) /
+/// [`create_symlink`](AdapterOps::create_symlink) landed with the
+/// Codex/Claude Code drivers.
 pub trait AdapterOps {
     /// Spawn a framework CLI with a timeout, capture and truncate its
     /// output, and record the invocation in the central log. The argv is
@@ -317,6 +318,32 @@ pub trait AdapterOps {
     /// [`AdapterError::Io`] on filesystem failure;
     /// [`AdapterError::ClaimValidation`] if `path` fails boundary check.
     fn remove_tree(&self, path: &Path) -> Result<bool, AdapterError>;
+
+    /// Write `contents` to `path`, creating parent directories. The
+    /// Manager validates that `path` is under an allowed external root
+    /// before executing. An existing file is overwritten (idempotent
+    /// re-enable). The bytes are pure data built by the driver — never an
+    /// executable path or argv.
+    ///
+    /// # Errors
+    ///
+    /// [`AdapterError::Io`] on filesystem failure;
+    /// [`AdapterError::ClaimValidation`] if `path` fails boundary check.
+    fn write_file(&self, path: &Path, contents: &[u8]) -> Result<(), AdapterError>;
+
+    /// Create a symlink at `link` pointing to `target`, creating `link`'s
+    /// parent directories. The Manager validates that **both** `link` and
+    /// `target` are under an allowed external root before executing. When a
+    /// symlink already exists at `link`, it is replaced (idempotent
+    /// re-enable); a non-symlink at `link` is an error so ANOLISA never
+    /// clobbers a real file it did not create.
+    ///
+    /// # Errors
+    ///
+    /// [`AdapterError::Io`] on filesystem failure or when `link` exists and
+    /// is not a symlink; [`AdapterError::ClaimValidation`] if either path
+    /// fails boundary check.
+    fn create_symlink(&self, link: &Path, target: &Path) -> Result<(), AdapterError>;
 }
 
 // ---------------------------------------------------------------------------

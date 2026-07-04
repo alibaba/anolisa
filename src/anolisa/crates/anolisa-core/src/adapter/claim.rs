@@ -127,6 +127,7 @@ impl AdapterClaim {
             resource.validate(layout, allowed_external_roots)?;
             match &resource.kind {
                 ClaimResourceKind::FrameworkPlugin { framework, .. }
+                | ClaimResourceKind::FrameworkMarketplace { framework, .. }
                 | ClaimResourceKind::FrameworkConfig { framework, .. }
                     if framework != &self.framework =>
                 {
@@ -196,7 +197,41 @@ impl ClaimResource {
                     }
                 })
             }
+            ClaimResourceKind::Symlink { link, target } => {
+                // The `link` is a per-user framework path, validated against
+                // the driver's static external roots so disable removes only
+                // ANOLISA's own entry. We validate the link *location*
+                // without resolving the link itself: canonicalizing the link
+                // would follow it to its (owned) target and wrongly reject
+                // an in-boundary link. The `target` must be an
+                // ANOLISA-owned path (validated against the *trusted layout*
+                // roots, never the receipt-derived external roots): a forged
+                // receipt must not be able to point a claimed symlink at,
+                // say, `/etc` and have it validate. Owned-path validation is
+                // independent of the receipt, closing the self-authorization
+                // hole.
+                validate_external_link_location(link, allowed_external_roots).map_err(
+                    |source| ClaimValidationError::ExternalPath {
+                        id: self.id.clone(),
+                        source,
+                    },
+                )?;
+                validate_owned_path(layout, target).map_err(|source| {
+                    ClaimValidationError::OwnedPath {
+                        id: self.id.clone(),
+                        source,
+                    }
+                })
+            }
             ClaimResourceKind::FrameworkPlugin { plugin_id, .. } => validate_plugin_id(plugin_id),
+            ClaimResourceKind::FrameworkMarketplace { marketplace, .. } => {
+                validate_marketplace_name(marketplace).map_err(|_| {
+                    ClaimValidationError::MarketplaceName {
+                        id: self.id.clone(),
+                        marketplace: marketplace.clone(),
+                    }
+                })
+            }
             ClaimResourceKind::FrameworkConfig { key, .. } => {
                 if key.is_empty() {
                     return Err(ClaimValidationError::ConfigKey {
@@ -215,13 +250,13 @@ impl ClaimResource {
 
 /// The closed set of resource kinds a receipt may declare.
 ///
-/// MVP implements only the three kinds OpenClaw needs. Additional kinds
-/// (`Tree`, `JsonKeys`, `Symlink`, `FrameworkMarketplace`) are introduced
-/// when their first driver lands — adding a variant here is a deliberate,
-/// reviewed extension of the security boundary, never an open map.
+/// Additional kinds (`Tree`, `JsonKeys`) are introduced when their first
+/// driver lands — adding a variant here is a deliberate, reviewed
+/// extension of the security boundary, never an open map. `Symlink` and
+/// `FrameworkMarketplace` landed with the Codex/Claude Code drivers.
 ///
 /// Externally tagged with snake_case variant keys (`owned_path`,
-/// `external_path`, `framework_plugin`).
+/// `external_path`, `framework_plugin`, `symlink`, `framework_marketplace`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ClaimResourceKind {
@@ -239,6 +274,16 @@ pub enum ClaimResourceKind {
         /// Absolute external path.
         path: PathBuf,
     },
+    /// A symlink ANOLISA created and took over. Both the `link` location
+    /// and its `target` are validated against the driver's static
+    /// external roots (a symlink can otherwise redirect a later removal
+    /// outside the allowed boundary).
+    Symlink {
+        /// Absolute path of the link ANOLISA created.
+        link: PathBuf,
+        /// Absolute path the link points at.
+        target: PathBuf,
+    },
     /// A record in a framework's plugin registry. `plugin_id` is
     /// whitelist-sanitized before it enters any argv.
     FrameworkPlugin {
@@ -246,6 +291,15 @@ pub enum ClaimResourceKind {
         framework: String,
         /// Native plugin id.
         plugin_id: String,
+    },
+    /// A source registered in a framework's marketplace (e.g. Codex,
+    /// Claude Code). `marketplace` is whitelist-sanitized before it enters
+    /// any argv.
+    FrameworkMarketplace {
+        /// Framework that owns the marketplace (e.g. `codex`).
+        framework: String,
+        /// Marketplace name ANOLISA registered.
+        marketplace: String,
     },
     /// A framework configuration key/value pair that ANOLISA applied.
     /// The key path is framework-specific; the value is the TOML
@@ -270,6 +324,15 @@ pub enum DriverPayload {
     /// Hermes driver payload.
     #[serde(rename = "hermes")]
     Hermes(HermesClaim),
+    /// Cosh (copilot-shell) driver payload.
+    #[serde(rename = "cosh")]
+    Cosh(CoshClaim),
+    /// Codex driver payload.
+    #[serde(rename = "codex")]
+    Codex(CodexClaim),
+    /// Claude Code driver payload.
+    #[serde(rename = "claude_code")]
+    ClaudeCode(ClaudeCodeClaim),
 }
 
 /// OpenClaw driver payload. Holds only [`ClaimResource::id`] references —
@@ -303,6 +366,50 @@ pub struct HermesClaim {
     /// Resource ids of delivered skill directories.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skill_resources: Vec<String>,
+}
+
+/// Cosh (copilot-shell) driver payload. Holds only [`ClaimResource::id`]
+/// references. Cosh is extension-based: ANOLISA drops an auto-discovered
+/// extension tree into the user's cosh home and takes over only that
+/// directory.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CoshClaim {
+    /// Resource id of the delivered extension directory
+    /// ([`ClaimResourceKind::ExternalPath`]).
+    pub extension_dir_resource: String,
+}
+
+/// Codex driver payload. Holds only [`ClaimResource::id`] references. Codex
+/// requires a local marketplace layout (a directory plus a symlink to the
+/// resource root) before a plugin can be added from it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexClaim {
+    /// Resource id of the marketplace root directory ANOLISA created
+    /// ([`ClaimResourceKind::ExternalPath`]).
+    pub marketplace_dir_resource: String,
+    /// Resource id of the plugin symlink under the marketplace root
+    /// ([`ClaimResourceKind::Symlink`]).
+    pub symlink_resource: String,
+    /// Resource id of the registered marketplace
+    /// ([`ClaimResourceKind::FrameworkMarketplace`]).
+    pub marketplace_resource: String,
+    /// Resource id of the installed plugin
+    /// ([`ClaimResourceKind::FrameworkPlugin`]).
+    pub plugin_resource: String,
+}
+
+/// Claude Code driver payload. Holds only [`ClaimResource::id`] references.
+/// Claude Code owns its own registry and settings; ANOLISA only registers a
+/// marketplace pointing at the shared resource root and installs the plugin
+/// — it never writes `~/.claude/settings.json` directly.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClaudeCodeClaim {
+    /// Resource id of the registered marketplace
+    /// ([`ClaimResourceKind::FrameworkMarketplace`]).
+    pub marketplace_resource: String,
+    /// Resource id of the installed plugin
+    /// ([`ClaimResourceKind::FrameworkPlugin`]).
+    pub plugin_resource: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -348,6 +455,16 @@ pub enum ClaimValidationError {
         id: String,
         /// Why it was rejected.
         reason: String,
+    },
+    /// A `marketplace` name in a [`ClaimResourceKind::FrameworkMarketplace`]
+    /// resource is empty or contains characters outside the argv-safe
+    /// whitelist.
+    #[error("invalid marketplace name '{marketplace}' in resource '{id}'")]
+    MarketplaceName {
+        /// Offending resource id.
+        id: String,
+        /// The rejected marketplace name.
+        marketplace: String,
     },
     /// A resource declares a framework that differs from the claim's.
     #[error(
@@ -424,6 +541,59 @@ pub fn validate_external_path(
     Ok(())
 }
 
+/// Validate the *location* of a symlink `link` against `allowed_roots`
+/// without following the link itself.
+///
+/// [`validate_external_path`] canonicalizes the whole path, which for an
+/// existing symlink resolves through it to the target — the wrong thing for
+/// a claimed link that legitimately points at an ANOLISA-owned path outside
+/// the external roots. Instead this rejects traversal, requires the link to
+/// live lexically under an allowed root, and canonicalizes only the link's
+/// **parent** (catching a symlinked ancestor that escapes the boundary)
+/// while leaving the final link component unresolved.
+///
+/// # Errors
+///
+/// [`ExternalPathError::Traversal`] for `.`/`..` segments;
+/// [`ExternalPathError::OutsideAllowedRoots`] when the link (or its
+/// canonicalized parent) is not under any allowed root.
+pub fn validate_external_link_location(
+    link: &Path,
+    allowed_roots: &[PathBuf],
+) -> Result<(), ExternalPathError> {
+    use std::path::Component;
+    for component in link.components() {
+        if matches!(component, Component::ParentDir | Component::CurDir) {
+            return Err(ExternalPathError::Traversal {
+                path: link.to_path_buf(),
+            });
+        }
+    }
+    if !allowed_roots.iter().any(|root| link.starts_with(root)) {
+        return Err(ExternalPathError::OutsideAllowedRoots {
+            path: link.to_path_buf(),
+        });
+    }
+    if let Some(parent) = link.parent()
+        && let Some(canonical_parent) = canonicalize_nearest_existing(parent)
+    {
+        let canonical_roots: Vec<PathBuf> = allowed_roots
+            .iter()
+            .filter_map(|r| canonicalize_nearest_existing(r))
+            .collect();
+        if !canonical_roots.is_empty()
+            && !canonical_roots
+                .iter()
+                .any(|r| canonical_parent.starts_with(r))
+        {
+            return Err(ExternalPathError::OutsideAllowedRoots {
+                path: link.to_path_buf(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Reject a plugin id unless it is a non-empty string of argv-safe
 /// characters (`[A-Za-z0-9._-]`) that is neither `.`/`..` nor leading
 /// with `-` (which an argv parser could mistake for a flag).
@@ -457,6 +627,20 @@ pub fn validate_plugin_id(plugin_id: &str) -> Result<(), ClaimValidationError> {
         });
     }
     Ok(())
+}
+
+/// Reject a marketplace name unless it is a non-empty string of argv-safe
+/// characters (`[A-Za-z0-9._-]`) that is neither `.`/`..` nor leading with
+/// `-`. Codex/Claude Code marketplace names are passed to the framework
+/// CLI (`marketplace add/remove`) and combined into a `plugin@marketplace`
+/// argument, so the same whitelist as [`validate_plugin_id`] applies.
+///
+/// # Errors
+///
+/// [`ClaimValidationError::PluginId`] with a specific reason (reused so the
+/// argv-safety whitelist stays defined in one place).
+pub fn validate_marketplace_name(marketplace: &str) -> Result<(), ClaimValidationError> {
+    validate_plugin_id(marketplace)
 }
 
 /// Reject a skill name that is empty, `.`/`..`, starts with `-`, or
@@ -808,6 +992,243 @@ mod tests {
         assert!(validate_config_key("a`b").is_err(), "backtick");
         assert!(validate_config_key("a b").is_err(), "space");
         assert!(validate_config_key("a|b").is_err(), "pipe");
+    }
+
+    fn sample_codex_claim() -> AdapterClaim {
+        AdapterClaim {
+            claim_schema: CLAIM_SCHEMA_VERSION,
+            component: "tokenless".to_string(),
+            framework: "codex".to_string(),
+            plugin_id: Some("tokenless".to_string()),
+            adapter_type: Some("plugin".to_string()),
+            enabled_at: "2026-07-04T10:30:45Z".to_string(),
+            resource_root: PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/codex"),
+            bundle_digest: Some("sha256:c0de".to_string()),
+            driver_schema: DRIVER_SCHEMA_VERSION,
+            status: ClaimStatus::Enabled,
+            resources: vec![
+                ClaimResource {
+                    id: "codex_marketplace_dir".to_string(),
+                    purpose: "codex_marketplace_dir".to_string(),
+                    kind: ClaimResourceKind::ExternalPath {
+                        path: PathBuf::from("/home/alice/.local/share/anolisa/codex-marketplace"),
+                    },
+                },
+                ClaimResource {
+                    id: "codex_symlink".to_string(),
+                    purpose: "codex_plugin_symlink".to_string(),
+                    kind: ClaimResourceKind::Symlink {
+                        link: PathBuf::from(
+                            "/home/alice/.local/share/anolisa/codex-marketplace/tokenless",
+                        ),
+                        target: PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/codex"),
+                    },
+                },
+                ClaimResource {
+                    id: "codex_marketplace".to_string(),
+                    purpose: "codex_marketplace".to_string(),
+                    kind: ClaimResourceKind::FrameworkMarketplace {
+                        framework: "codex".to_string(),
+                        marketplace: "anolisa-tokenless".to_string(),
+                    },
+                },
+                ClaimResource {
+                    id: "codex_plugin".to_string(),
+                    purpose: "codex_plugin".to_string(),
+                    kind: ClaimResourceKind::FrameworkPlugin {
+                        framework: "codex".to_string(),
+                        plugin_id: "tokenless".to_string(),
+                    },
+                },
+            ],
+            driver_payload: DriverPayload::Codex(CodexClaim {
+                marketplace_dir_resource: "codex_marketplace_dir".to_string(),
+                symlink_resource: "codex_symlink".to_string(),
+                marketplace_resource: "codex_marketplace".to_string(),
+                plugin_resource: "codex_plugin".to_string(),
+            }),
+        }
+    }
+
+    #[test]
+    fn codex_claim_toml_and_json_round_trip() {
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct Wrapper {
+            adapter_claims: Vec<AdapterClaim>,
+        }
+        let wrapper = Wrapper {
+            adapter_claims: vec![sample_codex_claim()],
+        };
+        let text = toml::to_string_pretty(&wrapper).expect("serialize Codex to TOML");
+        let parsed: Wrapper = toml::from_str(&text).expect("parse Codex from TOML");
+        assert_eq!(wrapper, parsed, "Codex round-trip mismatch; TOML:\n{text}");
+
+        let claim = sample_codex_claim();
+        let json = serde_json::to_string(&claim).expect("serialize Codex JSON");
+        let back: AdapterClaim = serde_json::from_str(&json).expect("parse Codex JSON");
+        assert_eq!(claim, back);
+    }
+
+    #[test]
+    fn codex_claim_validates_under_allowed_roots() {
+        let layout = FsLayout::system(None);
+        let allowed = vec![
+            PathBuf::from("/home/alice/.local/share/anolisa"),
+            PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/codex"),
+        ];
+        sample_codex_claim()
+            .validate(&layout, &allowed)
+            .expect("codex claim under allowed roots must pass");
+    }
+
+    #[test]
+    fn cosh_claim_round_trips_and_validates() {
+        let claim = AdapterClaim {
+            claim_schema: CLAIM_SCHEMA_VERSION,
+            component: "tokenless".to_string(),
+            framework: "cosh".to_string(),
+            plugin_id: Some("tokenless".to_string()),
+            adapter_type: Some("extension".to_string()),
+            enabled_at: "2026-07-04T10:30:45Z".to_string(),
+            resource_root: PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/common"),
+            bundle_digest: Some("sha256:c05h".to_string()),
+            driver_schema: DRIVER_SCHEMA_VERSION,
+            status: ClaimStatus::Enabled,
+            resources: vec![ClaimResource {
+                id: "cosh_extension_dir".to_string(),
+                purpose: "cosh_extension_dir".to_string(),
+                kind: ClaimResourceKind::ExternalPath {
+                    path: PathBuf::from("/home/alice/.copilot-shell/extensions/tokenless"),
+                },
+            }],
+            driver_payload: DriverPayload::Cosh(CoshClaim {
+                extension_dir_resource: "cosh_extension_dir".to_string(),
+            }),
+        };
+        let json = serde_json::to_string(&claim).expect("serialize Cosh JSON");
+        let back: AdapterClaim = serde_json::from_str(&json).expect("parse Cosh JSON");
+        assert_eq!(claim, back);
+
+        let layout = FsLayout::system(None);
+        let allowed = vec![PathBuf::from("/home/alice/.copilot-shell")];
+        claim
+            .validate(&layout, &allowed)
+            .expect("cosh claim under allowed roots must pass");
+    }
+
+    #[test]
+    fn claude_code_claim_round_trips() {
+        let claim = AdapterClaim {
+            claim_schema: CLAIM_SCHEMA_VERSION,
+            component: "tokenless".to_string(),
+            framework: "claude-code".to_string(),
+            plugin_id: Some("tokenless".to_string()),
+            adapter_type: Some("plugin".to_string()),
+            enabled_at: "2026-07-04T10:30:45Z".to_string(),
+            resource_root: PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/claude-code"),
+            bundle_digest: None,
+            driver_schema: DRIVER_SCHEMA_VERSION,
+            status: ClaimStatus::Enabled,
+            resources: vec![
+                ClaimResource {
+                    id: "cc_marketplace".to_string(),
+                    purpose: "claude_code_marketplace".to_string(),
+                    kind: ClaimResourceKind::FrameworkMarketplace {
+                        framework: "claude-code".to_string(),
+                        marketplace: "anolisa".to_string(),
+                    },
+                },
+                ClaimResource {
+                    id: "cc_plugin".to_string(),
+                    purpose: "claude_code_plugin".to_string(),
+                    kind: ClaimResourceKind::FrameworkPlugin {
+                        framework: "claude-code".to_string(),
+                        plugin_id: "tokenless".to_string(),
+                    },
+                },
+            ],
+            driver_payload: DriverPayload::ClaudeCode(ClaudeCodeClaim {
+                marketplace_resource: "cc_marketplace".to_string(),
+                plugin_resource: "cc_plugin".to_string(),
+            }),
+        };
+        let json = serde_json::to_string(&claim).expect("serialize Claude Code JSON");
+        let back: AdapterClaim = serde_json::from_str(&json).expect("parse Claude Code JSON");
+        assert_eq!(claim, back);
+    }
+
+    #[test]
+    fn forged_symlink_target_outside_roots_rejected() {
+        let layout = FsLayout::system(None);
+        let allowed = vec![
+            PathBuf::from("/home/alice/.local/share/anolisa"),
+            PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/codex"),
+        ];
+        let mut claim = sample_codex_claim();
+        // Repoint the symlink target at /etc — outside every owned root.
+        for res in &mut claim.resources {
+            if let ClaimResourceKind::Symlink { target, .. } = &mut res.kind {
+                *target = PathBuf::from("/etc/cron.d/evil");
+            }
+        }
+        let err = claim.validate(&layout, &allowed).expect_err("must reject");
+        // The target is validated as an ANOLISA-owned path, so a non-owned
+        // target is an OwnedPath boundary violation.
+        assert!(
+            matches!(err, ClaimValidationError::OwnedPath { .. }),
+            "got {err:?}"
+        );
+    }
+
+    /// A forged receipt cannot self-authorize a symlink target by also
+    /// forging its own `resource_root`: the target is validated against the
+    /// trusted layout, not against anything the receipt names.
+    #[test]
+    fn forged_symlink_target_not_authorized_by_forged_resource_root() {
+        let layout = FsLayout::system(None);
+        let allowed = vec![PathBuf::from("/home/alice/.local/share/anolisa")];
+        let mut claim = sample_codex_claim();
+        claim.resource_root = PathBuf::from("/etc");
+        for res in &mut claim.resources {
+            if let ClaimResourceKind::Symlink { target, .. } = &mut res.kind {
+                *target = PathBuf::from("/etc/cron.d/evil");
+            }
+        }
+        let err = claim.validate(&layout, &allowed).expect_err("must reject");
+        assert!(
+            matches!(err, ClaimValidationError::OwnedPath { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn marketplace_framework_mismatch_rejected() {
+        let layout = FsLayout::system(None);
+        let allowed = vec![
+            PathBuf::from("/home/alice/.local/share/anolisa"),
+            PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/codex"),
+        ];
+        let mut claim = sample_codex_claim();
+        for res in &mut claim.resources {
+            if let ClaimResourceKind::FrameworkMarketplace { framework, .. } = &mut res.kind {
+                *framework = "claude-code".to_string();
+            }
+        }
+        let err = claim.validate(&layout, &allowed).expect_err("must reject");
+        assert!(
+            matches!(err, ClaimValidationError::FrameworkMismatch { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_marketplace_name_rejects_unsafe() {
+        validate_marketplace_name("anolisa").expect("plain");
+        validate_marketplace_name("anolisa-tokenless").expect("dash");
+        assert!(validate_marketplace_name("").is_err(), "empty");
+        assert!(validate_marketplace_name("a b").is_err(), "space");
+        assert!(validate_marketplace_name("a@b").is_err(), "at-sign");
+        assert!(validate_marketplace_name("-x").is_err(), "leading dash");
     }
 
     #[test]
