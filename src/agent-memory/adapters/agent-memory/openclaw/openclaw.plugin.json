@@ -1,14 +1,19 @@
 {
   "id": "memory-anolisa",
   "name": "Anolisa Memory",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Persistent memory backed by the agent-memory MCP server with namespace isolation and openat2 sandbox. Provides BM25 search, file read/write, observe, and context assembly tools.",
   "activation": {
     "onStartup": false
   },
   "kind": "memory",
   "contracts": {
-    "tools": ["memory_search", "memory_get", "memory_observe", "memory_get_context"]
+    "tools": [
+      "memory_search",
+      "memory_get",
+      "memory_observe",
+      "memory_get_context"
+    ]
   },
   "configSchema": {
     "type": "object",
@@ -25,7 +30,11 @@
       },
       "profile": {
         "type": "string",
-        "enum": ["basic", "advanced", "expert"],
+        "enum": [
+          "basic",
+          "advanced",
+          "expert"
+        ],
         "description": "Memory profile controlling which tools are visible to the agent."
       },
       "maxReadBytes": {

@@ -205,6 +205,14 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Fri Jul 04 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.2.1-1
+- fix(memory): unblock vector/hybrid search on tokio runtime (thread runtime handle into index worker, block_in_place in search)
+- fix(memory): stop leaking .git internals via memory_get_context (reserved-path filter covers .git/)
+- fix(memory): backfill vectors for preexisting files in full_scan
+- fix(memory): recall short CJK queries (< 3 chars) via LIKE fallback
+- refactor(memory): resolve embedding dimensions from first response (was hardcoded 1536)
+- feat(memory): add anolisa-cli adapter contract via component.toml
+
 * Mon Jun 29 2026 Shile Zhang <shile.zhang@linux.alibaba.com> - 0.2.0-1
 - Add semantic search (BM25/vector/hybrid via RRF) with OpenAI and Ollama
   embedding providers; graceful fallback to BM25 when unconfigured

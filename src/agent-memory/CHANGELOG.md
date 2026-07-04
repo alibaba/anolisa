@@ -1,8 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.2.1
 
+- fix vector/hybrid search panic and empty index when an embedding provider is configured: the index worker ran on a std::thread with no tokio Handle so embeddings were never produced, and memory_search mode=vector|hybrid called Handle::block_on from a worker thread; the runtime handle is now captured at spawn and threaded through to the worker, and the search path uses block_in_place
+- fix memory_get_context leaking .git internals (e.g. .git/logs/HEAD) into agent context by extending the reserved-path filter to cover .git/ via a shared is_under_git predicate in safe_fs
+- fix full_scan (startup and inotify-overflow recovery) only building the BM25 index and never dense embeddings, so preexisting files were invisible to vector search until modified; a paths_without_vec query plus a backfill pass now embeds them, centralised in an embed_sync helper shared with flush
 - fix memory_search returning zero hits for short CJK query terms (< 3 chars, e.g. "花名"/"小云"): the trigram tokenizer emits no tokens for terms shorter than 3 characters, so such queries now fall back to a `body LIKE '%term%'` substring scan that preserves recall, agent-scope filtering, and cold/superseded exclusion
+- resolve embedding dimensions from the first real response instead of hardcoding 1536 (DashScope text-embedding-v3 is 1024): dimensionality is stored in an AtomicUsize seeded with the estimate and overwritten on first embed
+- add anolisa-cli adapter contract via .anolisa/component.toml so the CLI adapter manager can discover the openclaw plugin bundle through the [[adapters]] TOML schema
 
 ## 0.2.0
 
