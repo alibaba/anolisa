@@ -70,6 +70,11 @@ async fn spawn_with_dir(
         .env("MEMORY_SESSION_DIR", &session_dir)
         .env("MEMORY_MOUNT_STRATEGY", "userland")
         .env("USER_ID", "tester")
+        // Hermeticity: seal off ~/.anolisa/memory.toml leaks (see
+        // McpAgent::spawn in tests/common/mod.rs for the full rationale).
+        // Tests needing git/embedding use spawn_with_env to override these.
+        .env("MEMORY_EMBEDDING_BACKEND", "none")
+        .env("MEMORY_GIT_ENABLED", "false")
         .spawn()
         .expect("failed to spawn MCP server");
 
@@ -344,6 +349,10 @@ async fn promote_round_trip_from_scratch_to_store() {
         .env("MEMORY_SESSION_ID", "ses_promote_test")
         .env("MEMORY_MOUNT_STRATEGY", "userland")
         .env("USER_ID", "tester")
+        // Hermeticity: seal ~/.anolisa/memory.toml leaks (see
+        // McpAgent::spawn in tests/common/mod.rs).
+        .env("MEMORY_EMBEDDING_BACKEND", "none")
+        .env("MEMORY_GIT_ENABLED", "false")
         .spawn()
         .expect("spawn");
 
@@ -447,7 +456,12 @@ async fn spawn_with_env(
         .env("MEMORY_BASE_DIR", data_dir)
         .env("MEMORY_SESSION_DIR", &session_dir)
         .env("MEMORY_MOUNT_STRATEGY", "userland")
-        .env("USER_ID", "tester");
+        .env("USER_ID", "tester")
+        // Hermeticity defaults (see McpAgent::spawn in tests/common/mod.rs);
+        // extra_env below overrides these, so git/embedding tests flip them
+        // back on by passing the matching MEMORY_* var.
+        .env("MEMORY_EMBEDDING_BACKEND", "none")
+        .env("MEMORY_GIT_ENABLED", "false");
     for (k, v) in extra_env {
         cmd.env(k, v);
     }

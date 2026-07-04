@@ -37,7 +37,25 @@ impl McpAgent {
             .env("MEMORY_BASE_DIR", data_dir)
             .env("MEMORY_SESSION_DIR", &session_dir)
             .env("MEMORY_MOUNT_STRATEGY", "userland")
-            .env("USER_ID", "tester");
+            .env("USER_ID", "tester")
+            // Hermeticity: the server otherwise reads ~/.anolisa/memory.toml
+            // (default config path), so a developer's global config leaks into
+            // the test. Disable the two subsystems whose leak breaks the BM25
+            // e2e flow:
+            //  - embedding: since 0.2.1 the index worker actually drives
+            //    embeddings (runtime handle is now captured at spawn), so a
+            //    configured provider makes per-file HTTP embed calls that
+            //    delay BM25 upsert past the test's 500 ms wait, making
+            //    memory_search spuriously return empty. Vector/hybrid search
+            //    is covered separately in tier_b_test.rs with a mock provider.
+            //  - git: auto-commit writes .git/logs/HEAD whose commit messages
+            //    echo file paths (e.g. "notes/hello.md"), so mem_grep for a
+            //    pattern that also appears in a path picks up spurious hits.
+            // Tests that need either subsystem set the matching MEMORY_*_ENABLED
+            // / MEMORY_EMBEDDING_BACKEND env via extra_env, which overrides
+            // these defaults (extra_env is applied last).
+            .env("MEMORY_EMBEDDING_BACKEND", "none")
+            .env("MEMORY_GIT_ENABLED", "false");
         for (k, v) in extra_env {
             cmd.env(k, v);
         }
