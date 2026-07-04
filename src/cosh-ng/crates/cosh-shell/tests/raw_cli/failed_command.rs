@@ -10,7 +10,7 @@ fn raw_cli_slash_after_failed_command_invokes_adapter() {
 
     assert_agent_loading_visible(&output);
     assert!(output.contains("The command ls /path/that/does/not/exist failed"));
-    assert!(output.contains("Recommendations"), "{output}");
+    assert!(output.contains("Command failed"), "{output}");
     assert_inline_before_followup(&output, "Thinking...", "The command");
     assert_inline_before_followup(&output, "The command", "after-explain");
 }
@@ -176,7 +176,7 @@ fn raw_cli_natural_language_includes_recent_failed_command_fact_without_hook_hin
     );
     let compact = compact_terminal_words(&output);
     assert!(
-        compact.contains("Runtime context hints visible to Agent:"),
+        compact.contains("Runtime context hints visible to Agent: <none>"),
         "{output}"
     );
     assert!(
@@ -202,13 +202,20 @@ fn raw_cli_natural_language_includes_recent_failed_command_fact_without_hook_hin
 
 #[test]
 fn raw_cli_natural_language_after_failure_keeps_failed_command_analysis() {
-    let input = "ls /path/that/does/not/exist\n\u{4f60}\u{597d}\nexit 0\n";
-    let output = run_raw_cli_with_env(
+    let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",
-        input,
+        &[],
         &[
             ("COSH_SHELL_LANG", "en-US"),
             ("COSH_SHELL_ANALYSIS_MODE", "auto"),
+        ],
+        vec![
+            (b"ls /path/that/does/not/exist\n".to_vec(), Duration::ZERO),
+            (
+                "\u{4f60}\u{597d}\n".as_bytes().to_vec(),
+                Duration::from_millis(400),
+            ),
+            (b"exit 0\n".to_vec(), Duration::from_millis(400)),
         ],
     );
 
@@ -233,10 +240,9 @@ fn raw_cli_failed_command_guidance_appears_before_next_prompt() {
         ],
     );
 
-    assert!(output.contains("No such file") || output.contains("cannot access"));
-    let analysis = "The command ls ccc failed with exit code ";
-    assert!(output.contains(analysis));
-    assert_inline_before_followup(&output, analysis, "exit 0");
+    assert!(output.contains("No such file or directory"), "{output}");
+    let failure_message = ls_ccc_failure_analysis(&output).expect(&output);
+    assert_inline_before_followup(&output, failure_message, "exit 0");
     assert!(!output.contains("Command failed:"), "{output}");
     assert!(!output.contains("Agent not called"));
     assert!(!output.contains("suggestion: show a short explanation"));
@@ -271,7 +277,7 @@ fn raw_cli_repeated_failed_command_skips_without_auto_analyzed_notice() {
         "{output}"
     );
     assert_eq!(
-        count_occurrences(&output, "The command ls ccc failed with exit code "),
+        count_occurrences(&output, ls_ccc_failure_analysis(&output).expect(&output)),
         1,
         "{output}"
     );
@@ -304,7 +310,7 @@ fn raw_cli_zh_repeated_failed_command_uses_localized_notices() {
         "{output}"
     );
     assert!(output.contains("Agent 回复"), "{output}");
-    assert!(output.contains("The command ls ccc failed with exit code "));
+    assert!(ls_ccc_failure_analysis(&output).is_some(), "{output}");
     assert!(output.contains("after-zh-repeat"), "{output}");
     assert!(!output.contains("bash: ls ccc"), "{output}");
 }
@@ -468,11 +474,10 @@ fn raw_cli_zsh_failed_command_auto_hook_restores_prompt_without_consultation_car
 
     assert_agent_loading_visible(&output);
     assert!(!output.contains("[Analyze] [Ignore]"), "{output}");
-    let analysis = "The command ls ccc failed with exit code ";
-    assert!(output.contains(analysis));
+    let failure_message = ls_ccc_failure_analysis(&output).expect(&output);
     assert!(output.contains("after-hook"), "{output}");
     assert!(
-        count_occurrences_between(&output, analysis, "echo after-hook", "ZPROMPT> ") >= 1,
+        count_occurrences_between(&output, failure_message, "echo after-hook", "ZPROMPT> ") >= 1,
         "{output}"
     );
 }

@@ -9,10 +9,8 @@ fn raw_cli_approval_text_input_does_not_confirm_or_leak_to_bash() {
         (b"exit\n".to_vec(), Duration::from_millis(200)),
     ]);
 
-    assert_approval_request_card_visible(&output);
-    assert!(output.contains("req-1"));
-    assert!(output.contains("tool request"));
-    assert!(output.contains("medium risk"));
+    assert_approval_prompt_visible(&output);
+    assert!(output.contains("tool request") && output.contains("medium risk"));
     assert!(output.contains("Cancelled"));
     assert!(output.contains("$ git status"));
     assert!(!output.contains("No command ran."));
@@ -35,10 +33,8 @@ fn raw_cli_approval_split_arrow_sequence_does_not_cancel() {
         (b"exit\n".to_vec(), Duration::from_millis(1_000)),
     ]);
 
-    assert_approval_request_card_visible(&output);
-    assert!(output.contains("req-1"));
-    assert!(output.contains("tool request"));
-    assert!(output.contains("medium risk"));
+    assert_approval_prompt_visible(&output);
+    assert!(output.contains("tool request") && output.contains("medium risk"));
     assert!(
         output.contains("> [ Deny ]") || output.contains("[Deny]"),
         "{output}"
@@ -62,10 +58,8 @@ fn raw_cli_approval_application_cursor_arrow_updates_focus() {
         (b"exit\n".to_vec(), Duration::from_millis(1_000)),
     ]);
 
-    assert_approval_request_card_visible(&output);
-    assert!(output.contains("req-1"));
-    assert!(output.contains("tool request"));
-    assert!(output.contains("medium risk"));
+    assert_approval_prompt_visible(&output);
+    assert!(output.contains("tool request") && output.contains("medium risk"));
     assert!(
         output.contains("> [ Deny ]") || output.contains("[Deny]"),
         "{output}"

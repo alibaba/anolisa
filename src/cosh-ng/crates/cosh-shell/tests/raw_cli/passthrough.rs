@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn raw_cli_double_dash_passthrough_executes_command_directly() {
     let binary = env!("CARGO_BIN_EXE_cosh-shell");
-    let output = Command::new(binary)
+    let output = raw_cli_command(binary)
         .args(["--", "echo", "ok"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -21,7 +21,7 @@ fn raw_cli_double_dash_passthrough_executes_command_directly() {
 #[test]
 fn raw_cli_double_dash_passthrough_preserves_exit_status() {
     let binary = env!("CARGO_BIN_EXE_cosh-shell");
-    let output = Command::new(binary)
+    let output = raw_cli_command(binary)
         .args(["--", "sh", "-c", "exit 43"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -49,7 +49,7 @@ fn raw_cli_double_dash_passthrough_preserves_exit_status() {
 #[test]
 fn raw_cli_double_dash_passthrough_does_not_capture_child_help_arg() {
     let binary = env!("CARGO_BIN_EXE_cosh-shell");
-    let output = Command::new(binary)
+    let output = raw_cli_command(binary)
         .args(["--", "printf", "%s\n", "--help"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -70,7 +70,7 @@ fn raw_cli_double_dash_passthrough_does_not_capture_child_help_arg() {
 #[test]
 fn raw_cli_double_dash_passthrough_requires_command() {
     let binary = env!("CARGO_BIN_EXE_cosh-shell");
-    let output = Command::new(binary)
+    let output = raw_cli_command(binary)
         .arg("--")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -94,7 +94,7 @@ fn raw_cli_double_dash_passthrough_requires_command() {
 #[test]
 fn raw_cli_dash_c_passthrough_preserves_exit_status() {
     let binary = env!("CARGO_BIN_EXE_cosh-shell");
-    let output = Command::new(binary)
+    let output = raw_cli_command(binary)
         .args(["-c", "exit 42"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -122,7 +122,7 @@ fn raw_cli_dash_c_passthrough_preserves_exit_status() {
 #[test]
 fn raw_cli_dash_c_passthrough_filters_wrapper_shell_option() {
     let binary = env!("CARGO_BIN_EXE_cosh-shell");
-    let output = Command::new(binary)
+    let output = raw_cli_command(binary)
         .args(["--shell", "bash", "-c", "echo shell-filter-ok"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -150,7 +150,7 @@ fn raw_cli_dash_c_passthrough_filters_wrapper_shell_option() {
 #[test]
 fn raw_cli_stdin_passthrough_preserves_exit_status() {
     let binary = env!("CARGO_BIN_EXE_cosh-shell");
-    let mut child = Command::new(binary)
+    let mut child = raw_cli_command(binary)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -185,7 +185,7 @@ fn raw_cli_stdin_passthrough_preserves_exit_status() {
 #[test]
 fn raw_cli_login_dash_c_passthrough_executes_without_agent_ui() {
     let binary = env!("CARGO_BIN_EXE_cosh-shell");
-    let output = Command::new(binary)
+    let output = raw_cli_command(binary)
         .args(["--login", "-c", "echo login-c-ok"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -213,7 +213,7 @@ fn raw_cli_login_dash_c_passthrough_executes_without_agent_ui() {
 #[test]
 fn raw_cli_login_dash_c_passthrough_preserves_exit_status() {
     let binary = env!("CARGO_BIN_EXE_cosh-shell");
-    let output = Command::new(binary)
+    let output = raw_cli_command(binary)
         .args(["--login", "-c", "exit 45"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -241,7 +241,7 @@ fn raw_cli_login_dash_c_passthrough_preserves_exit_status() {
 #[test]
 fn raw_cli_login_argv0_dash_c_passthrough_executes_without_agent_ui() {
     let binary = env!("CARGO_BIN_EXE_cosh-shell");
-    let output = Command::new(binary)
+    let output = raw_cli_command(binary)
         .arg0("-cosh-shell")
         .args(["-c", "echo argv0-login-c-ok"])
         .stdin(Stdio::null())
@@ -270,7 +270,7 @@ fn raw_cli_login_argv0_dash_c_passthrough_executes_without_agent_ui() {
 #[test]
 fn raw_cli_login_argv0_dash_c_passthrough_preserves_exit_status() {
     let binary = env!("CARGO_BIN_EXE_cosh-shell");
-    let output = Command::new(binary)
+    let output = raw_cli_command(binary)
         .arg0("-cosh-shell")
         .args(["-c", "exit 46"])
         .stdin(Stdio::null())
@@ -299,7 +299,7 @@ fn raw_cli_login_argv0_dash_c_passthrough_preserves_exit_status() {
 #[test]
 fn raw_cli_login_argv0_stdin_passthrough_preserves_exit_status_without_agent_ui() {
     let binary = env!("CARGO_BIN_EXE_cosh-shell");
-    let mut child = Command::new(binary)
+    let mut child = raw_cli_command(binary)
         .arg0("-cosh-shell")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

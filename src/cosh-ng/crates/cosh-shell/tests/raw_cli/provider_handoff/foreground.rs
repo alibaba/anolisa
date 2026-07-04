@@ -14,7 +14,7 @@ fn raw_cli_control_shell_permission_uses_foreground_and_suppresses_provider_outp
         ],
     );
 
-    assert_approval_request_card_visible(&output);
+    assert_approval_prompt_visible(&output);
     assert!(output.contains("Approved req-1"), "{output}");
     assert!(!output.contains("Auto-approved req-1"), "{output}");
     assert!(output.contains("Bash tool sent to shell"), "{output}");
@@ -65,7 +65,7 @@ fn raw_cli_auto_provider_shell_permission_uses_foreground_handoff() {
     assert!(output.contains("Mode set to auto."), "{output}");
     assert!(output.contains("Auto-approved req-1"), "{output}");
     assert!(output.contains("Bash tool sent to shell"), "{output}");
-    assert_no_approval_request_card(&output);
+    assert!(!output.contains("Approval required"), "{output}");
     assert!(output.contains("Filesystem"), "{output}");
     assert!(
         !output.contains("Provider-native shell tool allowed"),

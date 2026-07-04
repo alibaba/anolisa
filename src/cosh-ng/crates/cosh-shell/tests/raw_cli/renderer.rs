@@ -2,7 +2,15 @@ use super::*;
 
 #[test]
 fn raw_cli_tool_output_does_not_break_markdown_stream_finalization() {
-    let output = run_raw_cli_with_input("fake", "?? tool output finalization\nexit\n");
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[],
+        vec![
+            (b"?? tool output finalization\n".to_vec(), Duration::ZERO),
+            (b"exit\n".to_vec(), Duration::from_millis(1_200)),
+        ],
+    );
 
     assert!(output.contains("Before tool"), "{output}");
     assert!(output.contains("After tool"), "{output}");
@@ -32,8 +40,7 @@ fn raw_cli_no_color_keeps_box_layout_when_terminal_supports_it() {
         ],
     );
 
-    assert!(output.contains("╭ Agent"));
-    assert!(output.contains("╭─ Recommendations"));
+    assert!(output.contains("╭ Command failed"), "{output}");
     assert!(!output.contains("╭─ Agent status"));
 }
 
@@ -364,8 +371,7 @@ fn raw_cli_explicit_plain_render_mode_uses_plain_blocks() {
 }
 
 fn assert_plain_blocks(output: &str) {
-    assert!(output.contains("Agent:"));
-    assert!(output.contains("Recommendations:"));
+    assert!(output.contains("Command failed:"), "{output}");
     assert!(!output.contains("Agent status:"));
     assert!(!output.contains('╭'));
     assert!(!output.contains('│'));

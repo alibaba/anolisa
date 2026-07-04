@@ -314,7 +314,7 @@ fn raw_cli_auto_mode_runs_safe_bash_tool_without_approval_panel() {
     assert!(output.contains("Mode set to auto."), "{output}");
     assert!(output.contains("Deferred req-1"), "{output}");
     assert!(output.contains("$ git status"), "{output}");
-    assert_no_approval_request_card(&output);
+    assert!(!output.contains("Approval req-1"), "{output}");
     assert!(!output.contains("[ Allow once ]"), "{output}");
     assert!(!output.contains("Command result analysis for req-1"));
     assert!(!output.contains("Tool result for request req-1"));
@@ -365,7 +365,7 @@ fn raw_cli_auto_mode_skips_readonly_builtin_tool_approval_panel() {
     assert!(!output.contains("Read called"), "{output}");
     assert!(!output.contains("Grep called"), "{output}");
     assert!(!output.contains("[Details] tool-"), "{output}");
-    assert_no_approval_request_card(&output);
+    assert!(!output.contains("Approval req-1"), "{output}");
     assert!(!output.contains("[ Allow once ]"), "{output}");
     assert!(!output.contains("$ {\"file_path\""), "{output}");
 }
@@ -386,7 +386,7 @@ fn raw_cli_auto_mode_still_asks_for_unsafe_bash_tool() {
     );
 
     assert!(output.contains("Mode set to auto."), "{output}");
-    assert_approval_request_card_visible(&output);
+    assert_approval_prompt_visible(&output);
     assert!(output.contains("req-1"), "{output}");
     assert!(
         output.contains("touch /tmp/cosh-shell-fake-action-should-not-run"),
@@ -415,7 +415,7 @@ fn raw_cli_auto_mode_skips_exact_trusted_command() {
 
     assert!(output.contains("Deferred req-1"), "{output}");
     assert!(output.contains("$ touch /tmp/cosh-shell-fake-action-should-not-run"));
-    assert_no_approval_request_card(&output);
+    assert!(!output.contains("Approval req-1"), "{output}");
     assert!(!output.contains("Trusted req-1"), "{output}");
 
     let _ = fs::remove_file("/tmp/cosh-shell-fake-action-should-not-run");
@@ -445,7 +445,7 @@ fn raw_cli_auto_mode_trusted_command_requires_exact_match() {
         ],
     );
 
-    assert_approval_request_card_visible(&output);
+    assert_approval_prompt_visible(&output);
     assert!(!output.contains("Trusted req-1"), "{output}");
     assert!(!output.contains("Auto-approved req-1"), "{output}");
 

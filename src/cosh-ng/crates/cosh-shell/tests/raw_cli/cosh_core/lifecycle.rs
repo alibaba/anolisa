@@ -284,8 +284,8 @@ printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-ho
 read -r user_message
 case "$user_message" in
   *cosh-core-provider-host-executed-disconnect*)
-    printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-disconnect","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"df -h"},"tool_use_id":"toolu-cosh-core-disconnect"}}'
-    exit 0
+    printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-disconnect","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"sleep 1; df -h"},"tool_use_id":"toolu-cosh-core-disconnect"}}'
+    kill -9 "$$"
     ;;
 esac
 printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-host-executed-disconnect","is_error":false,"result":"ignored"}'
@@ -298,7 +298,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
         &[],
         &[("HOME", &home_str), ("COSH_CORE_PATH", &cosh_core_path_str)],
         vec![
-            (b"/mode approval auto\n".to_vec(), Duration::ZERO),
+            (b"/mode approval trust confirm\n".to_vec(), Duration::ZERO),
             (
                 b"?? cosh-core-provider-host-executed-disconnect\n".to_vec(),
                 Duration::from_millis(500),
@@ -315,28 +315,41 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
 
     assert!(output.contains("Auto-approved req-1"), "{output}");
     assert!(output.contains("Bash tool sent to shell"), "{output}");
-    assert!(output.contains("$ df -h"), "{output}");
-    let delivered = output
-        .contains("selected_shell_execution_path: control_protocol_host_executed_shell_result")
-        && output.contains("provider_result_delivery_status: delivered")
-        && output.contains("host-executed shell result: delivered");
-    let recovered = output
-        .contains("selected_shell_execution_path: foreground_shell_handoff_recovery")
-        && (output.contains("provider_result_delivery_status: provider_run_not_active")
-            || output.contains("provider_result_delivery_status: provider_channel_closed"))
-        && (output.contains("recovery_reason: provider run was not active")
-            || output.contains("recovery_reason: provider approval channel closed"))
-        && (output.contains("latest recovery status: provider_run_not_active")
-            || output.contains("latest recovery status: provider_channel_closed"))
-        && (output.contains("latest recovery reason: provider run was not active")
-            || output.contains("latest recovery reason: provider approval channel closed"));
-    assert!(delivered || recovered, "{output}");
+    assert!(output.contains("$ sleep 1; df -h"), "{output}");
+    assert!(
+        output.contains("selected_shell_execution_path: foreground_shell_handoff_recovery"),
+        "{output}"
+    );
+    assert!(
+        output.contains("provider_result_delivery_status: provider_run_not_active")
+            || output.contains("provider_result_delivery_status: provider_channel_closed"),
+        "{output}"
+    );
+    assert!(
+        output.contains("recovery_reason: provider run was not active")
+            || output.contains("recovery_reason: provider approval channel closed"),
+        "{output}"
+    );
+    assert!(
+        output.contains("latest recovery status: provider_run_not_active")
+            || output.contains("latest recovery status: provider_channel_closed"),
+        "{output}"
+    );
+    assert!(
+        output.contains("latest recovery reason: provider run was not active")
+            || output.contains("latest recovery reason: provider approval channel closed"),
+        "{output}"
+    );
     assert!(
         output.contains("latest provider request: ctrl-cosh-core-disconnect"),
         "{output}"
     );
     assert!(
         output.contains("latest tool use id: toolu-cosh-core-disconnect"),
+        "{output}"
+    );
+    assert!(
+        !output.contains("control_protocol_host_executed_shell_result"),
         "{output}"
     );
     assert!(

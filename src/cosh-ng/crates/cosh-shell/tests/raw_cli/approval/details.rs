@@ -151,10 +151,7 @@ fn raw_cli_details_for_approval_uses_structured_panel() {
         (b"exit\n".to_vec(), Duration::from_millis(800)),
     ]);
 
-    assert!(
-        output.contains("Approval required") || output.contains("Approval req-1"),
-        "{output}"
-    );
+    assert_approval_prompt_visible(&output);
     assert!(output.contains("tool request"), "{output}");
     assert!(output.contains("Cancelled req-1"), "{output}");
     assert!(output.contains("medium risk"), "{output}");
@@ -187,7 +184,7 @@ fn raw_cli_details_for_approval_uses_zh_language_env() {
         ],
     );
 
-    assert_approval_request_card_visible(&output);
+    assert_zh_approval_prompt_visible(&output);
     assert!(output.contains("已取消 req-1"), "{output}");
     assert!(output.contains("风险 medium"), "{output}");
     assert!(
@@ -197,7 +194,7 @@ fn raw_cli_details_for_approval_uses_zh_language_env() {
     assert!(output.contains("命令:"), "{output}");
     assert!(output.contains("git status"), "{output}");
     assert!(!output.contains("Approval required"), "{output}");
-    assert!(!output.contains("Approval req-"), "{output}");
+    assert!(!output.contains("Approval req-1"), "{output}");
     assert!(!output.contains("Approval details"), "{output}");
     assert!(!output.contains("Cancelled req-1"), "{output}");
     assert!(
@@ -225,7 +222,7 @@ fn raw_cli_multiline_bash_tool_is_visible_in_approval_details() {
         (b"exit\n".to_vec(), Duration::from_millis(200)),
     ]);
 
-    assert_approval_request_card_visible(&output);
+    assert_approval_prompt_visible(&output);
     assert!(output.contains("Command:"), "{output}");
     assert!(output.contains("printf one"), "{output}");
     assert!(output.contains("printf two"), "{output}");

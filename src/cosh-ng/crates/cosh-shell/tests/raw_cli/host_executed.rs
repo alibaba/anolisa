@@ -190,10 +190,10 @@ printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-manual-host-
 read -r user_message
 case "$user_message" in
   *manual-provider-host-executed-shell*)
-    printf '%s\n' '{"type":"control_request","request_id":"ctrl-manual","request":{"subtype":"can_use_tool","tool_name":"run_shell_command","input":{"command":"sudo -V"},"tool_use_id":"toolu-manual"}}'
+    printf '%s\n' '{"type":"control_request","request_id":"ctrl-manual","request":{"subtype":"can_use_tool","tool_name":"run_shell_command","input":{"command":"touch \"$HOME/manual-host-executed-ok\""},"tool_use_id":"toolu-manual"}}'
     if IFS= read -r response; then
       case "$response" in
-        *'"behavior":"host_executed_shell"'*bounded_output_summary*'sudo -V'*)
+        *'"behavior":"host_executed_shell"'*bounded_output_summary*'manual-host-executed-ok'*)
           printf '%s\n' '{"type":"assistant","session_id":"sess-manual-host-executed","message":{"content":[{"type":"text","text":"Manual host-executed shell result received in same provider turn."}]}}'
           printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-manual-host-executed","is_error":false,"result":"done"}'
           exit 0
@@ -237,7 +237,10 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-manual-ho
     assert!(output.contains("Approved req-1"), "{output}");
     assert!(!output.contains("Auto-approved req-1"), "{output}");
     assert!(output.contains("Bash tool sent to shell"), "{output}");
-    assert!(output.contains("$ sudo -V"), "{output}");
+    assert!(
+        output.contains("$ touch \"$HOME/manual-host-executed-ok\""),
+        "{output}"
+    );
     assert!(
         output.contains("Manual host-executed shell result received in same provider turn."),
         "{output}"
@@ -550,8 +553,8 @@ printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-host-execute
 read -r user_message
 case "$user_message" in
   *provider-host-executed-disconnect*)
-    printf '%s\n' '{"type":"control_request","request_id":"ctrl-1","request":{"subtype":"can_use_tool","tool_name":"run_shell_command","input":{"command":"df -h"},"tool_use_id":"toolu-1"}}'
-    exit 0
+    printf '%s\n' '{"type":"control_request","request_id":"ctrl-1","request":{"subtype":"can_use_tool","tool_name":"run_shell_command","input":{"command":"sleep 1; df -h"},"tool_use_id":"toolu-1"}}'
+    kill -9 "$$"
     ;;
 esac
 printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-host-executed-disconnect","is_error":false,"result":"ignored"}'
@@ -565,7 +568,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-host-exec
         &[],
         &[("HOME", &home_str), ("PATH", &path)],
         vec![
-            (b"/mode approval auto\n".to_vec(), Duration::ZERO),
+            (b"/mode approval trust confirm\n".to_vec(), Duration::ZERO),
             (
                 b"?? provider-host-executed-disconnect\n".to_vec(),
                 Duration::from_millis(500),
@@ -582,20 +585,33 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-host-exec
 
     assert!(output.contains("Auto-approved req-1"), "{output}");
     assert!(output.contains("Bash tool sent to shell"), "{output}");
-    assert!(output.contains("$ df -h"), "{output}");
-    let delivered = output
-        .contains("selected_shell_execution_path: control_protocol_host_executed_shell_result")
-        && output.contains("provider_result_delivery_status: delivered")
-        && output.contains("host-executed shell result: delivered");
-    let recovered = output
-        .contains("selected_shell_execution_path: foreground_shell_handoff_recovery")
-        && (output.contains("provider_result_delivery_status: provider_run_not_active")
-            || output.contains("provider_result_delivery_status: provider_channel_closed"))
-        && (output.contains("recovery_reason: provider run was not active")
-            || output.contains("recovery_reason: provider approval channel closed"))
-        && (output.contains("latest recovery status: provider_run_not_active")
-            || output.contains("latest recovery status: provider_channel_closed"))
-        && (output.contains("latest recovery reason: provider run was not active")
-            || output.contains("latest recovery reason: provider approval channel closed"));
-    assert!(delivered || recovered, "{output}");
+    assert!(output.contains("$ sleep 1; df -h"), "{output}");
+    assert!(
+        output.contains("selected_shell_execution_path: foreground_shell_handoff_recovery"),
+        "{output}"
+    );
+    assert!(
+        output.contains("provider_result_delivery_status: provider_run_not_active")
+            || output.contains("provider_result_delivery_status: provider_channel_closed"),
+        "{output}"
+    );
+    assert!(
+        output.contains("recovery_reason: provider run was not active")
+            || output.contains("recovery_reason: provider approval channel closed"),
+        "{output}"
+    );
+    assert!(
+        output.contains("latest recovery status: provider_run_not_active")
+            || output.contains("latest recovery status: provider_channel_closed"),
+        "{output}"
+    );
+    assert!(
+        output.contains("latest recovery reason: provider run was not active")
+            || output.contains("latest recovery reason: provider approval channel closed"),
+        "{output}"
+    );
+    assert!(
+        !output.contains("control_protocol_host_executed_shell_result"),
+        "{output}"
+    );
 }

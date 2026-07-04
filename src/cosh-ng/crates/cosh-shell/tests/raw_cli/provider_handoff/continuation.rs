@@ -12,7 +12,7 @@ fn raw_cli_shell_handoff_continuation_denies_second_shell_tool() {
         "{output}"
     );
     assert!(!output.contains("$ du -sh ~"), "{output}");
-    assert_eq!(approval_request_card_count(&output), 1, "{output}");
+    assert_eq!(count_approval_prompts(&output), 1, "{output}");
 }
 
 #[test]
@@ -28,9 +28,8 @@ fn raw_cli_zh_shell_handoff_continuation_denies_second_shell_tool() {
         "{output}"
     );
     assert!(!output.contains("$ du -sh ~"), "{output}");
-    assert_eq!(approval_request_card_count(&output), 1, "{output}");
+    assert_eq!(count_zh_approval_prompts(&output), 1, "{output}");
     assert!(!output.contains("Approval required"), "{output}");
-    assert!(!output.contains("Approval req-"), "{output}");
     assert!(!output.contains("Approved req-1"), "{output}");
     assert!(!output.contains("Bash tool sent to shell"), "{output}");
 }

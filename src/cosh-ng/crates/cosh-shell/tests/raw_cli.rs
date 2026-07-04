@@ -69,17 +69,37 @@ fn approval_request_card_visible(output: &str) -> bool {
         || output.contains("需要审批")
 }
 
-fn assert_approval_request_card_visible(output: &str) {
-    assert!(approval_request_card_visible(output), "{output}");
-}
-
 fn assert_no_approval_request_card(output: &str) {
     assert!(!approval_request_card_visible(output), "{output}");
 }
 
-fn approval_request_card_count(output: &str) -> usize {
-    count_occurrences(output, "Approval req-")
-        + count_occurrences(output, "审批 req-")
-        + count_occurrences(output, "Approval required")
-        + count_occurrences(output, "需要审批")
+pub(crate) fn assert_approval_prompt_visible(output: &str) {
+    assert!(
+        output.contains("Approval required") || output.contains("Approval req-1"),
+        "{output}"
+    );
+}
+
+pub(crate) fn assert_zh_approval_prompt_visible(output: &str) {
+    assert!(
+        output.contains("需要审批") || output.contains("审批 req-1"),
+        "{output}"
+    );
+}
+
+pub(crate) fn count_approval_prompts(output: &str) -> usize {
+    count_occurrences(output, "Approval required") + count_occurrences(output, "Approval req-")
+}
+
+pub(crate) fn count_zh_approval_prompts(output: &str) -> usize {
+    count_occurrences(output, "需要审批") + count_occurrences(output, "审批 req-")
+}
+
+pub(crate) fn ls_ccc_failure_analysis(output: &str) -> Option<&'static str> {
+    [
+        "The command ls ccc failed with exit code 1.",
+        "The command ls ccc failed with exit code 2.",
+    ]
+    .into_iter()
+    .find(|message| output.contains(message))
 }
