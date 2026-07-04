@@ -1009,4 +1009,4 @@ jobs:
       - name: Run tests
         run: |
           cd src/ktuner
-          cargo test --lib
+          cargo test

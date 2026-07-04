@@ -19,6 +19,7 @@ system built for AI Agent workloads.
 | [Agent Memory](src/agent-memory/) | CMA-style persistent filesystem memory for AI agents, served over MCP — sandboxed file tools, SQLite FTS5 BM25 index, optional git versioning and tar.gz snapshots. Linux only. |
 | [OS Skills](src/os-skills/) | Curated skill library for system administration, monitoring, security, DevOps, and cloud integration. |
 | [SkillFS](src/skillfs/) | FUSE-backed virtual filesystem for local agent skills and view-based `SKILL.md` exposure. Linux only. |
+| [ktuner](src/ktuner/) | Deterministic kernel-tuning engine for AI agents — evaluates 207 rules against the running system and outputs structured JSON tuning recommendations. Linux only. |
 
 See each component's README for detailed documentation.
 
