@@ -7,16 +7,18 @@ ANOLISA provides a complete server-side runtime for AI Agent workloads. Componen
 ## Component Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Agent Applications (cosh / OpenClaw / Hermes / custom)     │
-├─────────────────────────────────────────────────────────────┤
-│  User Entry Points                                          │
-│  anolisa-cli · cosh · os-skills                             │
-├─────────────────────────────────────────────────────────────┤
-│  Agent Runtime                                              │
-│  tokenless · ws-ckpt · agentsight · agent-sec-core          │
-│  agent-memory · skillfs                                     │
-└─────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│  Agent Applications (cosh / OpenClaw / Hermes / custom)            │
+├────────────────────────────────────────────────────────────────────┤
+│  User Entry Points                                                 │
+│  anolisa-cli · cosh · os-skills                                    │
+├──────────────────────────────────┬─────────────────────────────────┤
+│  Token Saving                    │  Runtime                        │
+│  tokenless · agent-memory        │  skillfs · ws-ckpt              │
+├──────────────────────────────────┼─────────────────────────────────┤
+│  Agent Observability             │  Agent Security                 │
+│  agentsight                      │  agent-sec-core                 │
+└──────────────────────────────────┴─────────────────────────────────┘
 ```
 
 ---
@@ -37,7 +39,6 @@ ANOLISA provides a complete server-side runtime for AI Agent workloads. Componen
 | [anolisa CLI](user-entrypoint/anolisa-cli.md) | anolisa | Unified CLI for component management |
 | [Copilot Shell](user-entrypoint/copilot-shell.md) | cosh | AI terminal assistant and command gateway |
 | [OS Skills](user-entrypoint/os-skills.md) | os-skills | System management and DevOps skills |
-| [ktuner](user-entrypoint/ktuner.md) | ktuner | Deterministic kernel-parameter tuning engine |
 
 ### Agent Observability (`agent-observability/`)
 

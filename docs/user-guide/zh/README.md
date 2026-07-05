@@ -7,16 +7,18 @@ ANOLISA 为 AI Agent 提供完整的服务端运行时能力。通过 `anolisa` 
 ## 组件全景
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Agent 应用层（cosh / OpenClaw / Hermes / 自定义）          │
-├─────────────────────────────────────────────────────────────┤
-│  用户入口点                                                  │
-│  anolisa-cli · cosh · os-skills                             │
-├─────────────────────────────────────────────────────────────┤
-│  Agent Runtime                                              │
-│  tokenless · ws-ckpt · agentsight · agent-sec-core          │
-│  agent-memory · skillfs                                     │
-└─────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│  Agent 应用层（cosh / OpenClaw / Hermes / 自定义）                 │
+├────────────────────────────────────────────────────────────────────┤
+│  用户入口点                                                        │
+│  anolisa-cli · cosh · os-skills                                    │
+├──────────────────────────────────┬─────────────────────────────────┤
+│  Token 节省                       │  运行时                          │
+│  tokenless · agent-memory        │  skillfs · ws-ckpt              │
+├──────────────────────────────────┼─────────────────────────────────┤
+│  Agent 可观测                     │  Agent 安全                      │
+│  agentsight                      │  agent-sec-core                 │
+└──────────────────────────────────┴─────────────────────────────────┘
 ```
 
 ---
@@ -37,7 +39,6 @@ ANOLISA 为 AI Agent 提供完整的服务端运行时能力。通过 `anolisa` 
 | [anolisa CLI](user-entrypoint/anolisa-cli.md) | anolisa | 统一 CLI 组件管理 |
 | [Copilot Shell](user-entrypoint/copilot-shell.md) | cosh | AI 终端助手与命令网关 |
 | [OS 技能库](user-entrypoint/os-skills.md) | os-skills | 系统管理与 DevOps 技能 |
-| [ktuner](user-entrypoint/ktuner.md) | ktuner | 确定性内核参数调优引擎 |
 
 ### 可观测性 `agent-observability/`
 

@@ -311,6 +311,8 @@ Use [`.github/pull_request_template.md`](.github/pull_request_template.md) as th
 
 > **MANDATORY**: All documentation rules — file naming, bilingual conventions, CHANGELOG format, file placement, user-guide standards — are defined in [`specs/documentation-standard.md`](specs/documentation-standard.md). You MUST read that file before creating, renaming, or modifying any documentation file. Non-compliance will be rejected in review.
 
+> **MANDATORY**: When introducing a new `src/<name>/` component, you MUST read and follow [`specs/component-onboarding.md`](specs/component-onboarding.md) before opening the scaffold PR.
+
 This section intentionally does not duplicate the spec. Do NOT invent documentation rules from memory or prior context — the spec is the single source of truth.
 
 ## 10. Code Standards (General)
