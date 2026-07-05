@@ -1,6 +1,6 @@
 # SkillFS
 
-**English** | [中文](README_zh.md)
+[中文版](README_zh.md)
 
 SkillFS is a local FUSE filesystem for agent skills. It parses `SKILL.md`,
 organizes skills with views, and exposes compiled `SKILL.md` content through a

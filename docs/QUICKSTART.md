@@ -1,5 +1,7 @@
 # ANOLISA Quick Start
 
+[中文版](QUICKSTART_zh.md)
+
 ANOLISA is a server-side operating layer for AI Agent workloads. It provides Token optimization, workspace checkpoints, observability, security enforcement, persistent memory, and more — all installable via a unified CLI.
 
 ---

@@ -1,6 +1,6 @@
 # Copilot Shell
 
-[中文版](README_CN.md)
+[中文版](README_zh.md)
 
 An AI-powered terminal assistant for code understanding, task automation, and system management. Copilot Shell is a core component of [ANOLISA](../../README.md), built on top of upstream [Qwen Code](https://github.com/QwenLM/qwen-code) v0.9.0.
 

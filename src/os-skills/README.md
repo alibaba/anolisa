@@ -1,6 +1,6 @@
 # OS Skills
 
-[中文版](README_CN.md)
+[中文版](README_zh.md)
 
 A curated collection of operational skills for AI Agents, covering system administration, monitoring, security, DevOps, and cloud integration. OS Skills is the skill library of [ANOLISA](../../README.md), installed to `/usr/share/anolisa/skills/` and discovered automatically by Copilot Shell.
 

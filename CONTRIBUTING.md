@@ -1,5 +1,7 @@
 # Contributing to ANOLISA
 
+[中文版](CONTRIBUTING_zh.md)
+
 We welcome contributions! This document covers the basics of contributing to the project.
 
 > **Done coding?** Ask your AI assistant: *"Read AGENT.md and help me generate a commit message and PR description."*

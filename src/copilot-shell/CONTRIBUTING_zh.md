@@ -1,5 +1,7 @@
 # 贡献指南
 
+[English](CONTRIBUTING.md)
+
 本文档介绍如何参与 Copilot Shell 的开发。
 
 ## 环境准备

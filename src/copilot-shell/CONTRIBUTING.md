@@ -1,5 +1,7 @@
 # Contributing Guide
 
+[中文版](CONTRIBUTING_zh.md)
+
 This document explains how to participate in Copilot Shell development.
 
 ## Environment Setup

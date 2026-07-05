@@ -1,6 +1,6 @@
 # ANOLISA — An Agentic OS Implementation
 
-[中文版](README_CN.md)
+[中文版](README_zh.md)
 
 ANOLISA, the Agentic evolution of Anolis OS, aims to deliver the
 best-practice implementation of Agentic OS — a server-side operating

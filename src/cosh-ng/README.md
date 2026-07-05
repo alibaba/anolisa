@@ -1,6 +1,6 @@
 # cosh-ng
 
-[中文版](README_CN.md)
+[中文版](README_zh.md)
 
 ## What is cosh
 

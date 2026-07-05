@@ -1,5 +1,7 @@
 # ANOLISA 快速入门
 
+[English](QUICKSTART.md)
+
 ANOLISA 是面向 AI Agent 工作负载的服务端操作系统层。通过统一的 `anolisa` CLI 安装和管理所有组件，为 Agent 提供 Token 优化、工作区快照、可观测性、安全策略、持久记忆等能力。
 
 ---

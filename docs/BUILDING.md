@@ -1,6 +1,6 @@
 # Building ANOLISA from Source
 
-[中文版](BUILDING_CN.md)
+[中文版](BUILDING_zh.md)
 
 This guide describes how to prepare the development environment, build each component from source, and run tests.
 

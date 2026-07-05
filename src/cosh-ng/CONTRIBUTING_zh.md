@@ -1,5 +1,7 @@
 # 贡献指南
 
+[English](CONTRIBUTING.md)
+
 ## 开发环境
 
 | 要求 | 版本 |

@@ -1,5 +1,7 @@
 # Changelog
 
+[中文版](CHANGELOG_zh.md)
+
 ## 0.4.1
 
 ### Features

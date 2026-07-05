@@ -1,5 +1,7 @@
 # Contributing Guide
 
+[中文版](CONTRIBUTING_zh.md)
+
 ## Development Environment
 
 | Requirement | Version |
