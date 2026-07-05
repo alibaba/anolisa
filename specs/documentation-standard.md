@@ -63,30 +63,39 @@ Agents enter this repository via `AGENTS.md` (auto-loaded by tooling). For **doc
 **CHANGELOG writing rules** (content standard — what to write, not when):
 
 1. Only record user-perceivable changes; skip pure refactors, test infra, CI tweaks
-2. One sentence per bullet — max 25 English words / 40 Chinese characters
-3. User perspective — describe the behavior change, not the code change
+2. Three-part bullet format: `**component**: [Updated to vX.Y.Z | First release vX.Y.Z], [verb-object action], [user-perceivable effect]`
+3. User perspective — the third part must describe what the user/Agent can now do, not internal implementation
 4. No internal jargon — command names and config keys are fine; kernel APIs and syscalls are not
-5. One bullet, one change — do not combine unrelated changes
+5. One bullet, one component — do not combine multiple components in one bullet
 6. Key entries should reference the implementing PR
 
-**Root CHANGELOG structural requirement** — each version entry starts with:
+**Root CHANGELOG section structure** — each version entry contains (in order):
 
 ```markdown
-## [0.3.0] - 2026-08-01
+## [X.Y] - YYYY-MM-DD
 
 ### Component Versions
-
 | Component | Version |
 |-----------|--------|
-| copilot-shell | 2.2.0 |
-| agent-sec-core | 0.5.0 |
-| ...
+| ... | ... |
 
 ### Highlights
-- ...
+- **component**: Updated to vX.Y.Z, [action], [user effect]
+
+### New Components
+- **component**: First release vX.Y.Z, [action], [user effect]
+
+### Updated
+- **component**: Updated to vX.Y.Z, [action], [user effect]
 ```
 
-Chinese version (`CHANGELOG_zh.md`) mirrors the same structure.
+- `Highlights`: one bullet per component, version-level summary
+- `New Components`: components first introduced in this release; use "First release vX.Y.Z"
+- `Updated`: existing components with version bumps; use "Updated to vX.Y.Z"
+- Sections with no content may be omitted
+- Unreleased versions use `## [X.Y] - Unreleased`; replace with actual date at release time
+
+Chinese version (`CHANGELOG_zh.md`) mirrors the same structure with translated section headers (`重点特性` / `新增组件` / `组件更新`).
 
 ## 3. docs/ Directory Structure
 
