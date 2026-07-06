@@ -119,10 +119,12 @@ mod tests {
 
     #[test]
     fn dismissed_prompt_ghost_clears_pending_binding() {
-        let mut state = InlineState::default();
-        state.pending_input_ghost_binding = Some(PendingInputGhostBinding {
-            binding: AgentContextBinding::StartupHealthFollowUp,
-        });
+        let mut state = InlineState {
+            pending_input_ghost_binding: Some(PendingInputGhostBinding {
+                binding: AgentContextBinding::StartupHealthFollowUp,
+            }),
+            ..Default::default()
+        };
 
         clear_dismissed_prompt_ghost_context(
             &prompt_ghost_event(Some("dismissed"), None),
@@ -134,10 +136,12 @@ mod tests {
 
     #[test]
     fn accepted_prompt_ghost_does_not_clear_pending_binding_before_binding() {
-        let mut state = InlineState::default();
-        state.pending_input_ghost_binding = Some(PendingInputGhostBinding {
-            binding: AgentContextBinding::StartupHealthFollowUp,
-        });
+        let mut state = InlineState {
+            pending_input_ghost_binding: Some(PendingInputGhostBinding {
+                binding: AgentContextBinding::StartupHealthFollowUp,
+            }),
+            ..Default::default()
+        };
 
         clear_dismissed_prompt_ghost_context(
             &prompt_ghost_event(

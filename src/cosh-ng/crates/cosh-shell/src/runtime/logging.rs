@@ -47,7 +47,7 @@ fn cleanup_old_logs(dir: &std::path::Path, keep_days: u64) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.extension().map_or(false, |e| e.len() == 10) {
+        if path.extension().is_none_or(|e| e.len() != 10) {
             continue;
         }
         if let Ok(meta) = path.metadata() {
