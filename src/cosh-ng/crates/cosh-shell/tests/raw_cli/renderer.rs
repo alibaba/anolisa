@@ -95,10 +95,18 @@ fn raw_cli_agent_response_renders_markdown_inside_card() {
 
 #[test]
 fn raw_cli_zh_agent_response_renders_markdown_labels() {
-    let output = run_raw_cli_with_env(
+    let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",
-        "?? render markdown\n?? render markdown table\nexit\n",
+        &[],
         &[("COSH_SHELL_LANG", "zh-CN"), ("TERM", "xterm-256color")],
+        vec![
+            (b"?? render markdown\n".to_vec(), Duration::ZERO),
+            (
+                b"?? render markdown table\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(1_000)),
+        ],
     );
 
     assert!(output.contains("╭ Agent 回复"), "{output}");
