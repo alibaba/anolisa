@@ -46,6 +46,16 @@ install -m 0755 target/release/cosh-cli %{buildroot}%{_bindir}/cosh-cli
 # Install launcher script
 cat > %{buildroot}%{_bindir}/cosh << 'EOF'
 #!/bin/bash
+case "${1:-}" in
+  -c|--|--help|--version)
+    exec %{_libexecdir_cosh}/cosh-shell "$@"
+    ;;
+esac
+
+if [ "$#" -eq 0 ] && [ ! -t 0 ]; then
+  exec %{_libexecdir_cosh}/cosh-shell "$@"
+fi
+
 exec %{_libexecdir_cosh}/cosh-shell raw cosh-core "$@"
 EOF
 chmod 0755 %{buildroot}%{_bindir}/cosh
