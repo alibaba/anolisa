@@ -1145,10 +1145,21 @@ _configure_uv_mirror() {
     export UV_PYTHON_INSTALL_MIRROR="$python_install_mirror"
     export PIP_INDEX_URL="$aliyun_pypi"
 
+    # python-install-mirror toml field requires uv >= 0.5.2; skip for older versions
+    local _uv_supports_pim=true
+    if cmd_exists uv; then
+        local _uv_ver
+        _uv_ver=$(extract_ver "$(uv --version 2>/dev/null)")
+        if [[ -n "$_uv_ver" ]] && ! ver_gte "$_uv_ver" "0.5.2"; then
+            _uv_supports_pim=false
+        fi
+    fi
+
     local uv_cfg="$HOME/.config/uv/uv.toml"
     if [[ ! -f "$uv_cfg" ]]; then
         mkdir -p "$(dirname "$uv_cfg")"
-        cat > "$uv_cfg" <<EOF
+        if [[ "$_uv_supports_pim" == "true" ]]; then
+            cat > "$uv_cfg" <<EOF
 # uv configuration — managed by build-all.sh
 python-install-mirror = "$python_install_mirror"
 
@@ -1156,20 +1167,35 @@ python-install-mirror = "$python_install_mirror"
 url = "https://mirrors.aliyun.com/pypi/simple/"
 default = true
 EOF
-        ok "uv PyPI mirror configured: $aliyun_pypi"
-        ok "uv Python install mirror configured: $python_install_mirror"
+            ok "uv PyPI mirror configured: $aliyun_pypi"
+            ok "uv Python install mirror configured: $python_install_mirror"
+        else
+            cat > "$uv_cfg" <<EOF
+# uv configuration — managed by build-all.sh
+
+[[index]]
+url = "https://mirrors.aliyun.com/pypi/simple/"
+default = true
+EOF
+            ok "uv PyPI mirror configured: $aliyun_pypi"
+            info "uv < 0.5.2: python-install-mirror skipped in toml (env var still active)"
+        fi
         return 0
     fi
 
-    if ! grep -Eq '^[[:space:]]*python-install-mirror[[:space:]]*=' "$uv_cfg" 2>/dev/null; then
-        local tmp_cfg
-        tmp_cfg=$(mktemp)
-        {
-            echo "python-install-mirror = \"$python_install_mirror\""
-            echo ""
-            cat "$uv_cfg"
-        } > "$tmp_cfg" && mv "$tmp_cfg" "$uv_cfg"
-        ok "uv Python install mirror configured: $python_install_mirror"
+    if [[ "$_uv_supports_pim" == "true" ]]; then
+        if ! grep -Eq '^[[:space:]]*python-install-mirror[[:space:]]*=' "$uv_cfg" 2>/dev/null; then
+            local tmp_cfg
+            tmp_cfg=$(mktemp)
+            {
+                echo "python-install-mirror = \"$python_install_mirror\""
+                echo ""
+                cat "$uv_cfg"
+            } > "$tmp_cfg" && mv "$tmp_cfg" "$uv_cfg"
+            ok "uv Python install mirror configured: $python_install_mirror"
+        fi
+    else
+        : # uv < 0.5.2 does not support python-install-mirror in toml; env var is sufficient
     fi
 
     if ! grep -q 'mirrors.aliyun.com/pypi/simple/' "$uv_cfg" 2>/dev/null; then

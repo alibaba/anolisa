@@ -180,7 +180,7 @@ setup: ## Install all dependencies (including dev), create .venv
 
 .PHONY: build-openclaw-plugin
 build-openclaw-plugin: ## Build openclaw-plugin TypeScript sources
-	cd openclaw-plugin && npm install && npm run build
+	cd openclaw-plugin && NODE_ENV=development npm install --include=dev && npm run build
 	install -d -m 0755 $(BUILD_DIR)/openclaw-plugin/dist
 	install -d -m 0755 $(BUILD_DIR)/openclaw-plugin/scripts
 	cp openclaw-plugin/openclaw.plugin.json $(BUILD_DIR)/openclaw-plugin/
