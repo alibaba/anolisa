@@ -10,5 +10,6 @@ pub(crate) mod intercept;
 mod pending_tools;
 pub(crate) mod poll;
 pub(super) mod run;
+pub(crate) mod skill_context;
 
 pub(crate) use governance::{govern_agent_events, govern_agent_events_with_language};

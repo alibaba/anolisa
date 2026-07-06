@@ -286,7 +286,7 @@ fn build_details_agent_request(
         redaction_status = excerpt.redaction_status,
     );
 
-    Ok(AgentRequest {
+    let mut request = AgentRequest {
         id: format!("details-evidence-{sequence}"),
         session_id: block.session_id.clone(),
         command_block: block.clone(),
@@ -298,7 +298,9 @@ fn build_details_agent_request(
         user_confirmed: true,
         hook_finding: None,
         recommended_skill: None,
-    })
+    };
+    crate::types::set_request_context_binding(&mut request, AgentContextBinding::SelectedCommand);
+    Ok(request)
 }
 
 fn command_block_by_details_id<'a>(
@@ -374,6 +376,7 @@ mod tests {
         let mut output = Vec::new();
 
         render_runtime_details(&state, &[block], "cmd-1", &mut output).expect("render details");
+        let _ = std::fs::remove_file(&output_ref);
 
         let rendered = String::from_utf8(output).expect("utf8 details");
         assert!(rendered.contains("Command details"), "{rendered}");
@@ -432,6 +435,7 @@ mod tests {
         let mut output = Vec::new();
 
         render_runtime_details(&state, &[block], "cmd-1", &mut output).expect("render details");
+        let _ = std::fs::remove_file(&output_ref);
 
         let rendered = String::from_utf8(output).expect("utf8 details");
         assert!(
@@ -597,6 +601,40 @@ mod tests {
             "{input}"
         );
         assert!(!input.contains(output_ref.to_str().unwrap()), "{input}");
+    }
+
+    #[test]
+    fn details_agent_request_keeps_selected_command_context_bound() {
+        let dir = std::env::temp_dir().join(format!(
+            "cosh-shell-details-selected-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let output_ref = dir.join("cmd-1.txt");
+        std::fs::write(&output_ref, "Killed\n").expect("write output");
+        let mut block = command_block(
+            "session-1",
+            "cmd-1",
+            Some(output_ref.to_str().expect("utf8 output path")),
+        );
+        block.status = CommandStatus::Failed;
+        block.exit_code = 137;
+        let mut request =
+            agent_request_from_details_input(&[block], "/details cmd-1 --agent --tail 1", 7)
+                .expect("details agent syntax")
+                .expect("details agent request");
+        assert_eq!(
+            crate::types::request_context_binding(&request),
+            AgentContextBinding::SelectedCommand
+        );
+        crate::agent::skill_context::finalize_agent_request_skill_context(&mut request, None);
+        let input = request.user_input.expect("user input");
+        assert!(input.contains("ShellEvidenceExcerpt"), "{input}");
+        let hints = request.context_hints.join("\n");
+        assert!(!hints.contains("__cosh_context_binding"), "{hints}");
+        assert!(!hints.contains("failed_command_context"), "{hints}");
+        assert!(!hints.contains("diagnostic_context"), "{hints}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

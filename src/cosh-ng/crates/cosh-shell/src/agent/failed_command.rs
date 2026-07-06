@@ -429,7 +429,11 @@ pub(crate) fn start_agent_for_block<W: Write>(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+    use std::time::Instant;
+
     use super::*;
+    use crate::agent::run::ActiveAgentRun;
 
     fn failed_block(exit_code: i32, command: &str) -> CommandBlock {
         CommandBlock {
@@ -448,6 +452,51 @@ mod tests {
                 terminal_output_ref: None,
                 terminal_output_bytes: 0,
             },
+        }
+    }
+
+    fn test_active_run() -> ActiveAgentRun {
+        let request = AgentRequest {
+            id: "active-request".to_string(),
+            session_id: "session-1".to_string(),
+            command_block: failed_block(1, "active command"),
+            context_blocks: Vec::new(),
+            context_hints: Vec::new(),
+            user_input: Some("active command".to_string()),
+            findings: Vec::new(),
+            mode: AgentMode::RecommendOnly,
+            user_confirmed: true,
+            hook_finding: None,
+            recommended_skill: None,
+        };
+        let (approval_sender, _approval_receiver) = mpsc::channel();
+        let handle = AgentRunHandle::test_with_approval_sender(approval_sender);
+        let renderer = RatatuiInlineRenderer::for_terminal();
+        ActiveAgentRun {
+            request,
+            handle,
+            provider_name: "fake",
+            language: Language::EnUs,
+            renderer: renderer.clone(),
+            status_animation: renderer.status_animation(),
+            markdown_stream: renderer.stream_markdown_agent(),
+            governed_events: Vec::new(),
+            deferred_events: Vec::new(),
+            held_events: Vec::new(),
+            cosh_request_filter: crate::evidence::stream::CoshRequestStreamFilter::default(),
+            pending_cosh_requests: Vec::new(),
+            pending_cosh_request_audits: Vec::new(),
+            pending_hook_notifications: Vec::new(),
+            rendered_governed_event_count: 0,
+            selectable_after_event_index: None,
+            started_at: Instant::now(),
+            last_activity_at: Instant::now(),
+            last_heartbeat_at: Instant::now(),
+            current_phase: String::new(),
+            current_message: String::new(),
+            has_visible_text_delta: false,
+            completed: false,
+            host_completed_tool_ids: Vec::new(),
         }
     }
 
@@ -585,6 +634,17 @@ mod tests {
     }
 
     #[test]
+    fn oom_like_failed_command_has_no_sysom_hint_before_finalizer() {
+        let mut block = failed_block(137, "/tmp/run-worker");
+        block.output.terminal_output_ref = Some(write_output(b"Killed\n"));
+
+        let excerpt = failure_output_excerpt(&block).expect("excerpt");
+        let _ = std::fs::remove_file(block.output.terminal_output_ref.unwrap());
+
+        assert!(excerpt.contains("Killed"));
+    }
+
+    #[test]
     fn failed_command_analysis_uses_related_history_facts() {
         let mut setup = failed_block(0, "echo setup context");
         setup.id = "setup".to_string();
@@ -609,6 +669,7 @@ mod tests {
             analysis_mode: AnalysisMode::Auto,
             ..InlineState::default()
         };
+        state.agent_run.active = Some(test_active_run());
         let mut output = Vec::new();
 
         start_agent_for_block(
@@ -625,7 +686,7 @@ mod tests {
         )
         .expect("start failed command analysis");
 
-        let request = &state.agent_run.active.as_ref().expect("active run").request;
+        let request = &state.agent_run.queued_requests[0].request;
         let ids = request
             .context_blocks
             .iter()
@@ -682,7 +743,7 @@ mod tests {
     }
 
     #[test]
-    fn card_analyze_starts_agent_even_in_manual_mode() {
+    fn card_analyze_queues_agent_even_in_manual_mode_when_run_is_active() {
         let mut target = failed_block(2, "ls --bad-flag");
         target.id = "target".to_string();
         let blocks = vec![target];
@@ -692,6 +753,7 @@ mod tests {
             analysis_mode: AnalysisMode::Manual,
             ..InlineState::default()
         };
+        state.agent_run.active = Some(test_active_run());
         let mut output = Vec::new();
         let events = vec![card_event("failed_command_analyze", Some("target"))];
 
@@ -707,9 +769,11 @@ mod tests {
         .expect("handle card analyze");
 
         assert!(state.analyzed_blocks.contains("target"));
-        let output = String::from_utf8(output).expect("utf8 output");
-        assert!(output.contains("Agent"), "{output}");
-        assert!(output.contains("Thinking"), "{output}");
+        assert_eq!(state.agent_run.queued_requests.len(), 1);
+        assert_eq!(
+            state.agent_run.queued_requests[0].request.command_block.id,
+            "target"
+        );
     }
 
     #[test]

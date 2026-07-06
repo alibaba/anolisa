@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use crate::agent::continuation::provider_mode_for_agent_run;
 use crate::agent::poll::poll_active_agent_run;
-use crate::diagnostics::health::health_context_hint;
+use crate::agent::skill_context::finalize_agent_request_skill_context;
 use crate::evidence::request::ParsedCoshRequest;
 use crate::evidence::stream::{CoshRequestAuditRecord, CoshRequestStreamFilter};
 use crate::runtime::prelude::*;
@@ -124,8 +124,9 @@ fn start_agent_run_with_queue_policy<W: Write>(
     output.flush()?;
 
     let mut request = request.clone();
-    attach_health_context_hint(&mut request, state);
+    state.startup_health.poll_ready();
     attach_continuity_prompt_hint(&mut request, state);
+    finalize_agent_request_skill_context(&mut request, state.startup_health.report.as_ref());
     let provider_mode = provider_mode_for_agent_run(&request, state.approval_mode);
     let handle = adapter.start_cancellable(request.clone(), provider_mode);
     let now = Instant::now();
@@ -163,23 +164,6 @@ fn start_agent_run_with_queue_policy<W: Write>(
 
 fn queue_agent_request(state: &mut InlineState, pending: PendingAgentRequest) {
     state.agent_run.queue_request(pending);
-}
-
-fn attach_health_context_hint(request: &mut AgentRequest, state: &mut InlineState) {
-    state.startup_health.poll_ready();
-    let Some(report) = state.startup_health.report.as_ref() else {
-        return;
-    };
-    let Some(hint) = health_context_hint(report) else {
-        return;
-    };
-    if !request
-        .context_hints
-        .iter()
-        .any(|existing| existing.starts_with("health_scan "))
-    {
-        request.context_hints.push(hint);
-    }
 }
 
 fn attach_continuity_prompt_hint(request: &mut AgentRequest, state: &InlineState) {
@@ -228,21 +212,36 @@ pub(super) fn has_queued_run_before_held_text(state: &InlineState) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc;
-
     use super::*;
+    use crate::agent::skill_context::finalize_agent_request_skill_context;
     use crate::diagnostics::health::{
         HealthFact, HealthFactCategory, HealthFactSource, HealthFactValue, HealthScanReport,
         HealthSeverity,
     };
+    use crate::types::STARTUP_HEALTH_FOLLOW_UP_BINDING_HINT;
 
     #[test]
-    fn health_context_hint_is_attached_to_agent_request() {
-        let mut state = InlineState::default();
-        state.startup_health.report = Some(test_health_report());
+    fn health_context_hint_is_not_attached_to_free_form_request() {
+        let report = test_health_report();
         let mut request = test_agent_request();
 
-        attach_health_context_hint(&mut request, &mut state);
+        finalize_agent_request_skill_context(&mut request, Some(&report));
+
+        assert!(!request
+            .context_hints
+            .iter()
+            .any(|hint| hint.starts_with("health_scan ")));
+    }
+
+    #[test]
+    fn health_context_hint_is_attached_to_startup_health_follow_up() {
+        let report = test_health_report();
+        let mut request = test_agent_request();
+        request
+            .context_hints
+            .push(STARTUP_HEALTH_FOLLOW_UP_BINDING_HINT.to_string());
+
+        finalize_agent_request_skill_context(&mut request, Some(&report));
 
         let hint = request
             .context_hints
@@ -257,33 +256,17 @@ mod tests {
     }
 
     #[test]
-    fn health_context_hint_polls_ready_startup_report() {
-        let (sender, receiver) = mpsc::channel();
-        sender.send(Some(test_health_report())).unwrap();
-        let mut state = InlineState::default();
-        state.startup_health.pending = Some(receiver);
-        let mut request = test_agent_request();
-
-        attach_health_context_hint(&mut request, &mut state);
-
-        assert!(state.startup_health.pending.is_none());
-        assert!(state.startup_health.report.is_some());
-        assert!(request
-            .context_hints
-            .iter()
-            .any(|hint| hint.starts_with("health_scan ")));
-    }
-
-    #[test]
     fn health_context_hint_dedupes_existing_health_hint() {
-        let mut state = InlineState::default();
-        state.startup_health.report = Some(test_health_report());
+        let report = test_health_report();
         let mut request = test_agent_request();
+        request
+            .context_hints
+            .push(STARTUP_HEALTH_FOLLOW_UP_BINDING_HINT.to_string());
         request
             .context_hints
             .push("health_scan scan_id=existing".to_string());
 
-        attach_health_context_hint(&mut request, &mut state);
+        finalize_agent_request_skill_context(&mut request, Some(&report));
 
         assert_eq!(
             request

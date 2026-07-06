@@ -173,7 +173,7 @@ pub(crate) fn approval_resolution_agent_request(request: &RuntimeApprovalRequest
         decision = decision,
     );
 
-    AgentRequest {
+    let mut agent_request = AgentRequest {
         id: format!("agent-request-{block_id}"),
         session_id: request.session_id.clone(),
         command_block: CommandBlock {
@@ -201,7 +201,12 @@ pub(crate) fn approval_resolution_agent_request(request: &RuntimeApprovalRequest
         user_confirmed: true,
         hook_finding: None,
         recommended_skill: None,
-    }
+    };
+    crate::types::set_request_context_binding(
+        &mut agent_request,
+        AgentContextBinding::ControlProtocolEvidence,
+    );
+    agent_request
 }
 
 #[cfg(test)]

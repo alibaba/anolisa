@@ -216,10 +216,8 @@ fn prompt_appends_hook_finding_when_present() {
         prompt.contains("Description: Available memory is low"),
         "{prompt}"
     );
-    assert!(
-        prompt.contains("Recommended skill: memory-analysis"),
-        "{prompt}"
-    );
+    assert!(!prompt.contains("Recommended skill"), "{prompt}");
+    assert!(!prompt.contains("memory-analysis"), "{prompt}");
 }
 
 #[test]

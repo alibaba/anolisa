@@ -109,6 +109,20 @@ pub fn agent_request_after_confirmation(
     })
 }
 
+pub(crate) fn failed_command_agent_request_after_confirmation(
+    session_id: impl Into<String>,
+    block: &CommandBlock,
+    findings: &[Finding],
+    confirmed: bool,
+) -> Option<AgentRequest> {
+    let mut request = agent_request_after_confirmation(session_id, block, findings, confirmed)?;
+    crate::types::set_request_context_binding(
+        &mut request,
+        crate::types::AgentContextBinding::FailedCommand,
+    );
+    Some(request)
+}
+
 pub fn agent_request_from_intercepted_input(
     event: &ShellEvent,
     sequence: usize,
@@ -399,10 +413,52 @@ fn guidance_for_finding(kind: &FindingKind) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        approval_command_from_event, event_requests_agent_cancel, recommendation_action_from_event,
+        agent_request_after_confirmation, approval_command_from_event, event_requests_agent_cancel,
+        failed_command_agent_request_after_confirmation, recommendation_action_from_event,
         ApprovalCommand, ApprovalCommandKind, RecommendationAction, RecommendationActionKind,
     };
-    use crate::types::ShellEvent;
+    use crate::types::{CommandBlock, CommandOrigin, CommandStatus, OutputRefs, ShellEvent};
+
+    fn failed_block() -> CommandBlock {
+        CommandBlock {
+            id: "cmd-1".to_string(),
+            session_id: "session-1".to_string(),
+            command: "false".to_string(),
+            origin: CommandOrigin::UserInteractive,
+            cwd: "/tmp".to_string(),
+            end_cwd: "/tmp".to_string(),
+            started_at_ms: 1,
+            ended_at_ms: 2,
+            duration_ms: 1,
+            exit_code: 1,
+            status: CommandStatus::Failed,
+            output: OutputRefs {
+                terminal_output_ref: None,
+                terminal_output_bytes: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn public_agent_request_builder_does_not_leak_internal_binding_hint() {
+        let block = failed_block();
+        let findings = super::findings_from_blocks(std::slice::from_ref(&block));
+
+        let public_request = agent_request_after_confirmation("session-1", &block, &findings, true)
+            .expect("public request");
+        assert!(public_request
+            .context_hints
+            .iter()
+            .all(|hint| !hint.starts_with("__cosh_context_binding=")));
+
+        let internal_request =
+            failed_command_agent_request_after_confirmation("session-1", &block, &findings, true)
+                .expect("internal request");
+        assert!(internal_request
+            .context_hints
+            .iter()
+            .any(|hint| hint == "__cosh_context_binding=failed_command"));
+    }
 
     #[test]
     fn parses_recommendation_actions_from_slash_events() {

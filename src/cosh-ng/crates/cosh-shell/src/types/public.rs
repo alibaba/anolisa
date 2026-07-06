@@ -8,3 +8,5 @@ pub use implementation::{
     OutputRefs, Policy, QuestionSelectionMode, ShellEvent, ShellEventKind, ShellHandoffRequest,
     COMMAND_OUTPUT_REF_MAX_BYTES, SESSION_OUTPUT_REF_MAX_BYTES,
 };
+
+pub(crate) use implementation::{set_request_context_binding, AgentContextBinding};

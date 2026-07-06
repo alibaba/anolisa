@@ -140,6 +140,40 @@ impl AgentAdapter for FakeAgentAdapter {
             }
             if input.contains("ShellEvidenceExcerpt") {
                 if input.contains("history_index:") {
+                    if input.contains("printf 'alpha\\nbeta\\ngamma\\n'") {
+                        if let Some(output_id) = first_terminal_output_id(input) {
+                            return Ok(vec![
+                                AgentEvent::TextDelta {
+                                    run_id: run_id.clone(),
+                                    text: format!(
+                                        "I found captured output.\n```cosh-request\noutput {output_id} tail\nlines 2\n```\n"
+                                    ),
+                                },
+                                AgentEvent::AgentCompleted {
+                                    run_id,
+                                    summary: "requested captured output after history"
+                                        .to_string(),
+                                },
+                            ]);
+                        }
+                    }
+                    if input.contains("printf 'misroute-output\\n'") {
+                        if let Some(output_id) = first_terminal_output_id(input) {
+                            return Ok(vec![
+                                AgentEvent::ToolCall {
+                                    run_id: run_id.clone(),
+                                    tool_id: Some("toolu-misroute".to_string()),
+                                    name: "read_file".to_string(),
+                                    input: format!(r#"{{"path":"{output_id}"}}"#),
+                                },
+                                AgentEvent::AgentCompleted {
+                                    run_id,
+                                    summary: "misroute terminal output read after history"
+                                        .to_string(),
+                                },
+                            ]);
+                        }
+                    }
                     let text = if input.contains("token=<redacted>")
                         && !input.contains("command: echo token=super-secret")
                     {
@@ -255,6 +289,30 @@ impl AgentAdapter for FakeAgentAdapter {
                     AgentEvent::AgentCompleted {
                         run_id,
                         summary: "recent context fake analysis completed".to_string(),
+                    },
+                ]);
+            }
+            if request
+                .context_hints
+                .iter()
+                .any(|hint| hint.starts_with("health_scan "))
+            {
+                return Ok(vec![
+                    AgentEvent::StatusChanged {
+                        run_id: run_id.clone(),
+                        phase: "health_context".to_string(),
+                        message: "returning startup health context".to_string(),
+                    },
+                    AgentEvent::TextDelta {
+                        run_id: run_id.clone(),
+                        text: format!(
+                            "Received shell prompt request: {input}\nRuntime context hints visible to Agent:\n{}",
+                            request.context_hints.join("\n")
+                        ),
+                    },
+                    AgentEvent::AgentCompleted {
+                        run_id,
+                        summary: "startup health context fake analysis completed".to_string(),
                     },
                 ]);
             }
@@ -501,19 +559,31 @@ impl AgentAdapter for FakeAgentAdapter {
                 ]);
             }
             if input.contains("request captured output evidence") {
-                let output_id = first_request_output_id(request)
-                    .or_else(|| first_terminal_output_id(input))
-                    .unwrap_or_else(|| "terminal-output://raw-session/cmd-1".to_string());
+                if let Some(output_id) =
+                    first_request_output_id(request).or_else(|| first_terminal_output_id(input))
+                {
+                    return Ok(vec![
+                        AgentEvent::TextDelta {
+                            run_id: run_id.clone(),
+                            text: format!(
+                                "I need captured output.\n```cosh-request\noutput {output_id} tail\nlines 2\n```\n"
+                            ),
+                        },
+                        AgentEvent::AgentCompleted {
+                            run_id,
+                            summary: "requested captured output evidence".to_string(),
+                        },
+                    ]);
+                }
                 return Ok(vec![
                     AgentEvent::TextDelta {
                         run_id: run_id.clone(),
-                        text: format!(
-                            "I need captured output.\n```cosh-request\noutput {output_id} tail\nlines 2\n```\n"
-                        ),
+                        text: "I need to find the captured output first.\n```cosh-request\nhistory\n```\n"
+                            .to_string(),
                     },
                     AgentEvent::AgentCompleted {
                         run_id,
-                        summary: "requested captured output evidence".to_string(),
+                        summary: "requested shell history before captured output".to_string(),
                     },
                 ]);
             }
@@ -568,19 +638,31 @@ impl AgentAdapter for FakeAgentAdapter {
                 ]);
             }
             if input.contains("misroute terminal output read") {
-                let output_id = first_request_output_id(request)
-                    .or_else(|| first_terminal_output_id(input))
-                    .unwrap_or_else(|| "terminal-output://raw-session/cmd-1".to_string());
+                if let Some(output_id) =
+                    first_request_output_id(request).or_else(|| first_terminal_output_id(input))
+                {
+                    return Ok(vec![
+                        AgentEvent::ToolCall {
+                            run_id: run_id.clone(),
+                            tool_id: Some("toolu-misroute".to_string()),
+                            name: "read_file".to_string(),
+                            input: format!(r#"{{"path":"{output_id}"}}"#),
+                        },
+                        AgentEvent::AgentCompleted {
+                            run_id,
+                            summary: "misroute terminal output read rendered".to_string(),
+                        },
+                    ]);
+                }
                 return Ok(vec![
-                    AgentEvent::ToolCall {
+                    AgentEvent::TextDelta {
                         run_id: run_id.clone(),
-                        tool_id: Some("toolu-misroute".to_string()),
-                        name: "read_file".to_string(),
-                        input: format!(r#"{{"path":"{output_id}"}}"#),
+                        text: "I need to locate the captured output first.\n```cosh-request\nhistory\n```\n"
+                            .to_string(),
                     },
                     AgentEvent::AgentCompleted {
                         run_id,
-                        summary: "misroute terminal output read rendered".to_string(),
+                        summary: "requested shell history before misroute".to_string(),
                     },
                 ]);
             }

@@ -3,6 +3,7 @@ use super::prelude::*;
 use crate::agent::run::ActiveAgentRun;
 use crate::evidence::model::{EvidenceExcerptRequest, OutputExcerptDirection};
 use crate::evidence::request::{CoshRequest, ParsedCoshRequest};
+use crate::types::{request_context_binding, AgentContextBinding};
 
 #[test]
 fn output_request_injects_bounded_excerpt_without_path() {
@@ -318,7 +319,10 @@ fn evidence_follow_ups_keep_session_and_plain_user_payload() {
         assert_eq!(request.mode, AgentMode::RecommendOnly);
         assert!(request.user_confirmed);
         assert!(request.context_blocks.is_empty());
-        assert!(request.context_hints.is_empty());
+        assert_eq!(
+            request_context_binding(&request),
+            AgentContextBinding::ControlProtocolEvidence
+        );
         let input = request.user_input.as_deref().expect("plain user input");
         assert!(input.starts_with("ShellEvidenceExcerpt\n"), "{input}");
         assert!(input.contains("command:"), "{input}");

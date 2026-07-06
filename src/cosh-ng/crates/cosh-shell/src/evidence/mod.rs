@@ -14,3 +14,4 @@ pub(crate) use context_window::{
     terminal_output_id, ContextEntry, ContextWindowConfig, ProviderCommandFacts,
     RelatedHistoryConfig, ShellEvidenceAccess,
 };
+pub(crate) use output_policy::output_excerpt_status_for_block;

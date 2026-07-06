@@ -58,6 +58,15 @@ fn prepare_invocation_headless_flag() {
 }
 
 #[test]
+fn agent_request_does_not_serialize_internal_context_binding() {
+    let request = test_request();
+
+    let json = serde_json::to_string(&request).expect("serialize request");
+
+    assert!(!json.contains("context_binding"), "{json}");
+}
+
+#[test]
 fn prepare_invocation_approval_modes() {
     let recommend = test_adapter().prepare_invocation(&test_request(), CoshApprovalMode::Recommend);
     assert!(recommend.args.contains(&"strict".to_string()));

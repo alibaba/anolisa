@@ -141,6 +141,22 @@ pub enum AgentRunPoll {
 }
 
 impl AgentRunHandle {
+    #[cfg(test)]
+    pub(crate) fn test_with_approval_sender(
+        approval_sender: mpsc::Sender<ApprovalResponse>,
+    ) -> Self {
+        let (_sender, receiver) = mpsc::channel();
+        Self {
+            receiver,
+            cancel: Arc::new(|| {}),
+            approval_sender: Some(approval_sender),
+            auth_sender: None,
+            control_capabilities: Arc::new(Mutex::new(ControlProtocolCapabilities::default())),
+            pending_provider_session: None,
+            cancellation_artifacts: ProviderCancellationArtifactStore::default(),
+        }
+    }
+
     pub fn cancel(&self) {
         (self.cancel)();
     }

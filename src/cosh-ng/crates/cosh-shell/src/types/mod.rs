@@ -320,6 +320,23 @@ pub enum AgentMode {
     RecommendOnly,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(dead_code)]
+pub(crate) enum AgentContextBinding {
+    #[default]
+    FreeForm,
+    FailedCommand,
+    HookConsultation,
+    StartupHealthFollowUp,
+    SelectedCommand,
+    ControlProtocolEvidence,
+    ShellHandoffContinuation,
+}
+
+pub(crate) const CONTEXT_BINDING_HINT_PREFIX: &str = "__cosh_context_binding=";
+pub(crate) const STARTUP_HEALTH_FOLLOW_UP_BINDING_HINT: &str =
+    "__cosh_context_binding=startup_health_follow_up";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentRequest {
     pub id: String,
@@ -337,6 +354,57 @@ pub struct AgentRequest {
     pub hook_finding: Option<HookFinding>,
     #[serde(default)]
     pub recommended_skill: Option<String>,
+}
+
+pub(crate) fn set_request_context_binding(
+    request: &mut AgentRequest,
+    binding: AgentContextBinding,
+) {
+    request
+        .context_hints
+        .retain(|hint| !hint.starts_with(CONTEXT_BINDING_HINT_PREFIX));
+    if let Some(hint) = context_binding_hint(binding) {
+        request.context_hints.push(hint.to_string());
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn request_context_binding(request: &AgentRequest) -> AgentContextBinding {
+    request
+        .context_hints
+        .iter()
+        .find_map(|hint| context_binding_from_hint(hint))
+        .unwrap_or_default()
+}
+
+fn context_binding_hint(binding: AgentContextBinding) -> Option<&'static str> {
+    match binding {
+        AgentContextBinding::FreeForm => None,
+        AgentContextBinding::FailedCommand => Some("__cosh_context_binding=failed_command"),
+        AgentContextBinding::HookConsultation => Some("__cosh_context_binding=hook_consultation"),
+        AgentContextBinding::StartupHealthFollowUp => Some(STARTUP_HEALTH_FOLLOW_UP_BINDING_HINT),
+        AgentContextBinding::SelectedCommand => Some("__cosh_context_binding=selected_command"),
+        AgentContextBinding::ControlProtocolEvidence => {
+            Some("__cosh_context_binding=control_protocol_evidence")
+        }
+        AgentContextBinding::ShellHandoffContinuation => {
+            Some("__cosh_context_binding=shell_handoff_continuation")
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn context_binding_from_hint(hint: &str) -> Option<AgentContextBinding> {
+    let value = hint.strip_prefix(CONTEXT_BINDING_HINT_PREFIX)?;
+    match value {
+        "failed_command" => Some(AgentContextBinding::FailedCommand),
+        "hook_consultation" => Some(AgentContextBinding::HookConsultation),
+        "startup_health_follow_up" => Some(AgentContextBinding::StartupHealthFollowUp),
+        "selected_command" => Some(AgentContextBinding::SelectedCommand),
+        "control_protocol_evidence" => Some(AgentContextBinding::ControlProtocolEvidence),
+        "shell_handoff_continuation" => Some(AgentContextBinding::ShellHandoffContinuation),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

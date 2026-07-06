@@ -278,14 +278,9 @@ fn hook_finding_prompt(request: &AgentRequest) -> String {
     let Some(finding) = &request.hook_finding else {
         return String::new();
     };
-    let skill = request
-        .recommended_skill
-        .as_deref()
-        .or(finding.skill.as_deref())
-        .unwrap_or("none");
     format!(
-        "\n\nHook finding: {}\nDescription: {}\nRecommended skill: {}",
-        finding.title, finding.description, skill
+        "\n\nHook finding: {}\nDescription: {}",
+        finding.title, finding.description
     )
 }
 
@@ -297,22 +292,11 @@ fn runtime_frame_prompt(
     format!(
         "\n\nruntime_frame:\n\
          cwd: {}\n\
-         mode: {:?}{}{}{}",
+         mode: {:?}{}{}",
         request.command_block.cwd,
         request.mode,
-        recommended_skill_prompt(request),
         rich_context_prompt(request, access, allow_output_requests),
         runtime_context_hints_prompt(request)
-    )
-}
-
-fn recommended_skill_prompt(request: &AgentRequest) -> String {
-    let Some(skill) = request.recommended_skill.as_deref() else {
-        return String::new();
-    };
-    format!(
-        "\nrecommended_skill: {skill}\n\
-         If this skill matches the task or runtime hints, invoke it before ad hoc shell probing."
     )
 }
 

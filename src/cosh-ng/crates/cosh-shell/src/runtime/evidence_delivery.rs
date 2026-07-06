@@ -1,7 +1,7 @@
 use crate::runtime::prelude::{
-    redact_provider_command_text, AgentMode, AgentRequest, ApprovalDecision, ApprovalResponse,
-    CommandBlock, CommandStatus, HostExecutedShellMetadata, HostExecutedShellResult, OutputRefs,
-    ShellHandoffRequest,
+    redact_provider_command_text, AgentContextBinding, AgentMode, AgentRequest, ApprovalDecision,
+    ApprovalResponse, CommandBlock, CommandStatus, HostExecutedShellMetadata,
+    HostExecutedShellResult, OutputRefs, ShellHandoffRequest,
 };
 use crate::runtime::state::{InlineState, RuntimeApprovalRequest};
 
@@ -229,7 +229,7 @@ fn shell_handoff_continuation_request(
          {}",
         view.provider_summary,
     );
-    AgentRequest {
+    let mut request = AgentRequest {
         id: format!("agent-request-shell-evidence-{approval_id}"),
         session_id: approval
             .map(|request| request.session_id.clone())
@@ -271,7 +271,12 @@ fn shell_handoff_continuation_request(
         user_confirmed: true,
         hook_finding: None,
         recommended_skill: None,
-    }
+    };
+    crate::types::set_request_context_binding(
+        &mut request,
+        AgentContextBinding::ShellHandoffContinuation,
+    );
+    request
 }
 
 #[cfg(test)]

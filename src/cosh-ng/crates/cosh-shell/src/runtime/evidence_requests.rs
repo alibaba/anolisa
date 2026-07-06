@@ -382,7 +382,7 @@ fn agent_request_from_history_request(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    Ok(AgentRequest {
+    let mut request = AgentRequest {
         id: format!("evidence-history-{sequence}"),
         session_id: anchor.session_id.clone(),
         command_block: anchor.clone(),
@@ -396,7 +396,12 @@ fn agent_request_from_history_request(
         user_confirmed: true,
         hook_finding: None,
         recommended_skill: None,
-    })
+    };
+    crate::types::set_request_context_binding(
+        &mut request,
+        AgentContextBinding::ControlProtocolEvidence,
+    );
+    Ok(request)
 }
 
 fn agent_request_from_output_request(
@@ -470,7 +475,7 @@ fn agent_request_from_output_request(
         excerpt_status = excerpt.status,
         redaction_status = excerpt.redaction_status,
     );
-    Ok(AgentRequest {
+    let mut request = AgentRequest {
         id: format!("evidence-output-{sequence}"),
         session_id: block.session_id.clone(),
         command_block: block.clone(),
@@ -482,7 +487,12 @@ fn agent_request_from_output_request(
         user_confirmed: true,
         hook_finding: None,
         recommended_skill: None,
-    })
+    };
+    crate::types::set_request_context_binding(
+        &mut request,
+        AgentContextBinding::ControlProtocolEvidence,
+    );
+    Ok(request)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -32,11 +32,12 @@ pub(crate) use crate::hooks::{HookSourceInfo, RegisteredHookInfo};
 pub(crate) use crate::i18n::{I18n, MessageId};
 pub(crate) use crate::ledger::build_command_blocks;
 pub(crate) use crate::parser::{
-    agent_request_after_confirmation, agent_request_confirmed_by_events,
-    agent_request_from_intercepted_input, approval_command_from_event,
-    event_cancels_failed_command_analysis, event_confirms_failed_command_analysis,
-    event_requests_agent_cancel, findings_from_blocks, interventions_from_findings,
-    recommendation_action_from_event, ApprovalCommandKind, RecommendationActionKind,
+    agent_request_confirmed_by_events, agent_request_from_intercepted_input,
+    approval_command_from_event, event_cancels_failed_command_analysis,
+    event_confirms_failed_command_analysis, event_requests_agent_cancel,
+    failed_command_agent_request_after_confirmation as agent_request_after_confirmation,
+    findings_from_blocks, interventions_from_findings, recommendation_action_from_event,
+    ApprovalCommandKind, RecommendationActionKind,
 };
 pub(crate) use crate::raw_input::{RawInputCapture, RawObserverAction};
 pub(crate) use crate::shell_host::{
@@ -54,9 +55,10 @@ pub(crate) use crate::tools::{
     CommandAssessment, CommandRiskOutputStability, ExecutionDecision, OutputExposure,
 };
 pub(crate) use crate::types::{
-    AgentEvent, AgentMode, AgentRequest, CommandBlock, CommandOrigin, CommandStatus, Finding,
-    FindingSeverity, GovernanceDecision, GovernancePolicyDecision, GovernedEvent, OutputRefs,
-    Policy, QuestionSelectionMode, ShellEvent, ShellEventKind, ShellHandoffRequest,
+    AgentContextBinding, AgentEvent, AgentMode, AgentRequest, CommandBlock, CommandOrigin,
+    CommandStatus, Finding, FindingSeverity, GovernanceDecision, GovernancePolicyDecision,
+    GovernedEvent, OutputRefs, Policy, QuestionSelectionMode, ShellEvent, ShellEventKind,
+    ShellHandoffRequest,
 };
 pub(crate) use crate::ui::{
     approval_action_at, health_uses_startup_row, hook_approval_action_at, hook_warning_icon,
