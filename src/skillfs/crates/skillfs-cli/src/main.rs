@@ -2527,6 +2527,7 @@ async fn cmd_validate(
                     if entry.parse_status.is_error() {
                         error_entries.push(serde_json::json!({
                             "name": name,
+                            "path": entry.source_path.to_string_lossy().to_string(),
                             "status": "error",
                             "message": entry.parse_status.message()
                         }));
@@ -2540,6 +2541,7 @@ async fn cmd_validate(
                     if entry.parse_status.is_degraded() {
                         warning_entries.push(serde_json::json!({
                             "name": name,
+                            "path": entry.source_path.to_string_lossy().to_string(),
                             "status": "degraded",
                             "message": entry.parse_status.message()
                         }));
