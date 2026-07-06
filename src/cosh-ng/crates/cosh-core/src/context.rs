@@ -36,7 +36,15 @@ impl ContextBuilder {
                 .collect();
             parts.push(format!(
                 "# Available Skills\nThe following skills are available. \
-                 To use a skill, call the `skill` tool with action `invoke` and the skill name.\n{}",
+                 To use a skill, call the `skill` tool with action `invoke` and the skill name. \
+                 When skills are available, use a skill when it clearly matches the user's request. \
+                 For troubleshooting or diagnostic requests about a running machine, service, command failure, \
+                 performance, stability, resource usage, or operational incident, first inspect the available skill \
+                 descriptions. If one clearly matches, make invoking that skill your first diagnostic action. \
+                 Invoke the matching skill directly; do not list skills or run broad shell diagnostics first. \
+                 Use broad ad-hoc shell investigation first only when no available skill clearly matches, \
+                 or when the matching skill's instructions tell you to do so. \
+                 If no available skill clearly applies, continue normally.\n{}",
                 list.join("\n")
             ));
         }
@@ -101,6 +109,13 @@ mod tests {
         assert!(prompt.contains("**code-review**: Review code changes"));
         assert!(prompt.contains("**deploy**: Deploy to production"));
         assert!(prompt.contains("call the `skill` tool"));
+        assert!(prompt.contains("clearly matches the user's request"));
+        assert!(prompt.contains("running machine, service, command failure"));
+        assert!(prompt.contains("make invoking that skill your first diagnostic action"));
+        assert!(prompt.contains("Invoke the matching skill directly"));
+        assert!(prompt
+            .contains("Use broad ad-hoc shell investigation first only when no available skill"));
+        assert!(prompt.contains("continue normally"));
     }
 
     #[test]

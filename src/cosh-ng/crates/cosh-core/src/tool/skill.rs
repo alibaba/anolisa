@@ -25,7 +25,7 @@ impl Tool for SkillTool {
     }
 
     fn description(&self) -> &str {
-        "Load and invoke a skill (SKILL.md) from the skills directory. Use action 'list' to see available skills, or provide a skill name to get its prompt."
+        "Load and invoke a skill (SKILL.md) from the skills directory. For troubleshooting or diagnostic requests, invoke a clearly matching skill before broad ad-hoc shell investigation. Use action 'list' only when no listed skill clearly matches yet, or provide a skill name to get its prompt."
     }
 
     fn parameters_schema(&self) -> Value {
