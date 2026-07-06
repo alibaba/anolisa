@@ -1,6 +1,7 @@
 use std::collections::HashSet;
-use std::io::Write;
+use std::io::{self, BufRead, Read, Write};
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use cosh_shell::adapter::{adapter_for_kind, AdapterKind, AgentAdapter};
@@ -10,13 +11,18 @@ use cosh_shell::ledger::build_command_blocks;
 use cosh_shell::parser::{agent_request_after_confirmation, findings_from_blocks};
 use cosh_shell::raw_input::{RawObserverAction, RawRelayAction};
 use cosh_shell::shell_host::{
-    run_line_interactive_bash, run_raw_relay_bash, run_raw_relay_bash_with_actions,
-    run_raw_relay_bash_with_actions_output_control, run_raw_relay_bash_with_observer,
-    run_raw_relay_zsh_with_actions, run_raw_relay_zsh_with_output_control, run_scripted_bash,
-    run_scripted_zsh, ScriptedInput, ShellHostConfig,
+    run_line_interactive_bash as shell_run_line_interactive_bash,
+    run_raw_relay_bash as shell_run_raw_relay_bash,
+    run_raw_relay_bash_with_actions as shell_run_raw_relay_bash_with_actions,
+    run_raw_relay_bash_with_actions_output_control as shell_run_raw_relay_bash_with_actions_output_control,
+    run_raw_relay_bash_with_observer as shell_run_raw_relay_bash_with_observer,
+    run_raw_relay_zsh_with_actions as shell_run_raw_relay_zsh_with_actions,
+    run_raw_relay_zsh_with_output_control as shell_run_raw_relay_zsh_with_output_control,
+    run_scripted_bash as shell_run_scripted_bash, run_scripted_zsh as shell_run_scripted_zsh,
+    LineInteractiveOutput, ScriptedInput, ShellHostConfig, ShellHostOutput,
 };
 use cosh_shell::types::{
-    AgentEvent, GovernanceDecision, Policy, ShellEventKind, ShellHandoffRequest,
+    AgentEvent, GovernanceDecision, Policy, ShellEvent, ShellEventKind, ShellHandoffRequest,
 };
 
 #[path = "support/shell_host.rs"]
@@ -44,3 +50,122 @@ mod native;
 mod relay;
 #[path = "shell_host/termios.rs"]
 mod termios;
+
+static SHELL_HOST_RUN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn shell_host_run_guard() -> MutexGuard<'static, ()> {
+    SHELL_HOST_RUN_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn run_scripted_bash(
+    config: &ShellHostConfig,
+    inputs: &[ScriptedInput],
+) -> io::Result<ShellHostOutput> {
+    let _guard = shell_host_run_guard();
+    shell_run_scripted_bash(config, inputs)
+}
+
+fn run_scripted_zsh(
+    config: &ShellHostConfig,
+    inputs: &[ScriptedInput],
+) -> io::Result<ShellHostOutput> {
+    let _guard = shell_host_run_guard();
+    shell_run_scripted_zsh(config, inputs)
+}
+
+fn run_line_interactive_bash<R, W>(
+    config: &ShellHostConfig,
+    input: R,
+    output: W,
+) -> io::Result<LineInteractiveOutput>
+where
+    R: BufRead,
+    W: Write,
+{
+    let _guard = shell_host_run_guard();
+    shell_run_line_interactive_bash(config, input, output)
+}
+
+fn run_raw_relay_bash<R, W>(
+    config: &ShellHostConfig,
+    input: R,
+    output: W,
+) -> io::Result<ShellHostOutput>
+where
+    R: Read + Send + 'static,
+    W: Write,
+{
+    let _guard = shell_host_run_guard();
+    shell_run_raw_relay_bash(config, input, output)
+}
+
+fn run_raw_relay_bash_with_observer<R, W, F>(
+    config: &ShellHostConfig,
+    input: R,
+    output: W,
+    event_observer: F,
+) -> io::Result<ShellHostOutput>
+where
+    R: Read + Send + 'static,
+    W: Write,
+    F: FnMut(&[ShellEvent], &mut W) -> io::Result<()>,
+{
+    let _guard = shell_host_run_guard();
+    shell_run_raw_relay_bash_with_observer(config, input, output, event_observer)
+}
+
+fn run_raw_relay_bash_with_actions<W>(
+    config: &ShellHostConfig,
+    actions: Vec<RawRelayAction>,
+    output: W,
+) -> io::Result<ShellHostOutput>
+where
+    W: Write,
+{
+    let _guard = shell_host_run_guard();
+    shell_run_raw_relay_bash_with_actions(config, actions, output)
+}
+
+fn run_raw_relay_zsh_with_actions<W>(
+    config: &ShellHostConfig,
+    actions: Vec<RawRelayAction>,
+    output: W,
+) -> io::Result<ShellHostOutput>
+where
+    W: Write,
+{
+    let _guard = shell_host_run_guard();
+    shell_run_raw_relay_zsh_with_actions(config, actions, output)
+}
+
+fn run_raw_relay_bash_with_actions_output_control<W, F>(
+    config: &ShellHostConfig,
+    actions: Vec<RawRelayAction>,
+    output: W,
+    event_observer: F,
+) -> io::Result<ShellHostOutput>
+where
+    W: Write,
+    F: FnMut(&[ShellEvent], &mut W) -> io::Result<RawObserverAction>,
+{
+    let _guard = shell_host_run_guard();
+    shell_run_raw_relay_bash_with_actions_output_control(config, actions, output, event_observer)
+}
+
+fn run_raw_relay_zsh_with_output_control<R, W, F>(
+    config: &ShellHostConfig,
+    input: R,
+    output: W,
+    event_observer: F,
+) -> io::Result<ShellHostOutput>
+where
+    R: Read + Send + 'static,
+    W: Write,
+    F: FnMut(&[ShellEvent], &mut W) -> io::Result<RawObserverAction>,
+{
+    let _guard = shell_host_run_guard();
+    shell_run_raw_relay_zsh_with_output_control(config, input, output, event_observer)
+}
