@@ -17,10 +17,12 @@ Test classes
 """
 
 import sys
-import tempfile
+import threading
+import time
 import types
 import unittest
-from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 # ---------------------------------------------------------------------------
@@ -532,3 +534,209 @@ class TestMLClassifierLayer(unittest.TestCase):
     def test_detect_layer_name(self) -> None:
         result = self._detect_with_mocked_availability("BENIGN", 0.99)
         self.assertEqual(result.layer_name, "ml_classifier")
+
+
+# ---------------------------------------------------------------------------
+# Helpers: concurrent-access-detecting tokenizer (mimics Rust RefCell)
+# ---------------------------------------------------------------------------
+
+
+class _RefCellTokenizer:
+    """Mimic HuggingFace Rust-backed tokenizer's RefCell borrow semantics.
+
+    Raises ``RuntimeError("Already borrowed")`` if ``__call__`` is entered
+    while a previous call is still in-flight — reproducing the panic that
+    occurs when a non-reentrant tokenizer is used from multiple threads.
+
+    ``tokenize`` / ``convert_tokens_to_string`` are read-only and left
+    unsynchronised, mirroring the real tokenizer where only ``__call__``
+    triggers a mutable borrow.
+    """
+
+    def __init__(self) -> None:
+        self._active = 0
+        self._guard = threading.Lock()
+        self.overlap_count = 0
+
+    def __call__(self, text: Any, **kwargs: Any) -> dict:
+        with self._guard:
+            if self._active > 0:
+                self.overlap_count += 1
+                raise RuntimeError("Already borrowed")
+            self._active += 1
+        try:
+            # Hold the borrow window open so concurrent callers trip the check.
+            time.sleep(0.002)
+            return {"input_ids": MagicMock(), "attention_mask": MagicMock()}
+        finally:
+            with self._guard:
+                self._active -= 1
+
+    def tokenize(self, text: str) -> list[str]:
+        return text.split()
+
+    def convert_tokens_to_string(self, tokens: list[str]) -> str:
+        return " ".join(tokens)
+
+
+class _FakeModelOutput:
+    """Wraps a fake logits tensor so ``model(**inputs).logits`` works."""
+
+    def __init__(self, logits: Any) -> None:
+        self.logits = logits
+
+
+def _make_fake_model(fake_torch: types.ModuleType) -> Any:
+    """Return a model stub whose forward call yields a fixed fake logits tensor."""
+
+    class _FakeModel:
+        def __call__(self, **kwargs: Any) -> _FakeModelOutput:
+            return _FakeModelOutput(fake_torch.Tensor([0.05, 0.95]))
+
+        def to(self, device: Any) -> "_FakeModel":
+            return self
+
+        def eval(self) -> "_FakeModel":
+            return self
+
+    return _FakeModel()
+
+
+def _install_fake_torch() -> tuple[Any, types.ModuleType]:
+    """Patch sys.modules with a minimal fake torch and its nn submodules.
+
+    ``PromptGuardClassifier._get_probabilities`` does
+    ``from torch.nn.functional import softmax``, so ``torch.nn.functional``
+    must be importable as a submodule, not merely an attribute of ``torch``.
+    """
+    fake_torch = _make_fake_torch()
+    modules = {
+        "torch": fake_torch,
+        "torch.nn": fake_torch.nn,
+        "torch.nn.functional": fake_torch.nn.functional,
+    }
+    return patch.dict(sys.modules, modules), fake_torch
+
+
+# ---------------------------------------------------------------------------
+# Tests: PromptGuardClassifier concurrency (issue #1305)
+# ---------------------------------------------------------------------------
+
+
+class TestPromptGuardConcurrentSharedManager(unittest.TestCase):
+    """Reproduce issue #1305: concurrent classify() on a shared tokenizer.
+
+    Multiple PromptGuardClassifier instances backed by the same shared
+    ModelManager must serialise inference so the Rust-backed tokenizer is
+    never borrowed re-entrantly — otherwise "Already borrowed" panics.
+    """
+
+    def setUp(self) -> None:
+        from agent_sec_cli.prompt_scanner.models.model_manager import (  # noqa: PLC0415
+            ModelManager,
+        )
+        from agent_sec_cli.prompt_scanner.models.prompt_guard import (  # noqa: PLC0415
+            PromptGuardClassifier,
+        )
+
+        self._torch_patch, self.fake_torch = _install_fake_torch()
+        self._torch_patch.start()
+        self.ModelManager = ModelManager
+        self.PromptGuardClassifier = PromptGuardClassifier
+
+    def tearDown(self) -> None:
+        self._torch_patch.stop()
+
+    def test_concurrent_classify_serializes_tokenizer(self) -> None:
+        mgr = self.ModelManager(device="cpu")
+        tokenizer = _RefCellTokenizer()
+        mgr._loaded_models["test-model"] = (
+            _make_fake_model(self.fake_torch),
+            tokenizer,
+        )
+        # Distinct classifier instances sharing one manager — mirrors the
+        # daemon / PromptScanBackend path where each request builds a fresh
+        # PromptScanner (and thus a fresh PromptGuardClassifier).
+        classifiers = [
+            self.PromptGuardClassifier(model_name="test-model", manager=mgr)
+            for _ in range(8)
+        ]
+
+        errors: list[str] = []
+
+        def _work(i: int) -> None:
+            clf = classifiers[i % len(classifiers)]
+            try:
+                clf.classify(f"prompt {i}")
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{type(exc).__name__}: {exc}")
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(_work, range(200)))
+
+        self.assertEqual(errors, [], f"concurrent classify failed: {errors[:3]}")
+        self.assertEqual(
+            tokenizer.overlap_count,
+            0,
+            "tokenizer was borrowed concurrently (Already borrowed)",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests: MLClassifier concurrency (issue #1305, non-daemon / daemon path)
+# ---------------------------------------------------------------------------
+
+
+class TestMLClassifierConcurrentSharedManager(unittest.TestCase):
+    """Reproduce issue #1305 at the MLClassifier layer.
+
+    Each ``MLClassifier()`` builds its own ``PromptGuardClassifier`` but
+    shares ``MLClassifier._shared_manager`` (a class-level singleton
+    ModelManager).  Concurrent ``detect()`` across many such layers must
+    serialise on the shared tokenizer — covering both the daemon path
+    (per-request PromptScanner) and the non-daemon Python API path.
+    """
+
+    def setUp(self) -> None:
+        from agent_sec_cli.prompt_scanner.detectors.ml_classifier import (  # noqa: PLC0415
+            MLClassifier,
+        )
+
+        MLClassifier._shared_manager = None
+        self._torch_patch, self.fake_torch = _install_fake_torch()
+        self._torch_patch.start()
+        self.MLClassifier = MLClassifier
+
+    def tearDown(self) -> None:
+        self._torch_patch.stop()
+        self.MLClassifier._shared_manager = None
+
+    def test_concurrent_detect_serializes_tokenizer(self) -> None:
+        layers = [self.MLClassifier() for _ in range(8)]
+        # Inject a shared concurrent-detecting tokenizer into the singleton
+        # manager so every layer's classifier hits the same instance.
+        shared_manager = self.MLClassifier._shared_manager
+        tokenizer = _RefCellTokenizer()
+        shared_manager._loaded_models["LLM-Research/Llama-Prompt-Guard-2-86M"] = (
+            _make_fake_model(self.fake_torch),
+            tokenizer,
+        )
+
+        errors: list[str] = []
+
+        def _work(i: int) -> None:
+            layer = layers[i % len(layers)]
+            try:
+                layer.detect(f"prompt {i}")
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{type(exc).__name__}: {exc}")
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(_work, range(200)))
+
+        self.assertEqual(errors, [], f"concurrent detect failed: {errors[:3]}")
+        self.assertEqual(
+            tokenizer.overlap_count,
+            0,
+            "tokenizer was borrowed concurrently (Already borrowed)",
+        )
