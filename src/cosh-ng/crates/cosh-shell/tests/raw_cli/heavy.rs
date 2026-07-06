@@ -85,7 +85,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","session_id":"sess-host-exe
     let old_path = std::env::var("PATH").unwrap_or_default();
     let path = format!("{}:{old_path}", bin_dir.display());
     let home_str = home.to_string_lossy().to_string();
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    let output = run_raw_cli_serial_with_args_env_and_delayed_input(
         "qwen",
         &[],
         &[
@@ -178,7 +178,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","session_id":"sess-host-exe
     let old_path = std::env::var("PATH").unwrap_or_default();
     let path = format!("{}:{old_path}", bin_dir.display());
     let home_str = home.to_string_lossy().to_string();
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    let output = run_raw_cli_serial_with_args_env_and_delayed_input(
         "qwen",
         &[],
         &[

@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::os::unix::{fs::PermissionsExt, process::CommandExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -12,10 +12,11 @@ use ratatui::text::Span;
 use wait_timeout::ChildExt;
 
 const RAW_CLI_TIMEOUT: Duration = Duration::from_secs(30);
+const RAW_CLI_SHARED_PARALLELISM: usize = 8;
 pub(crate) const RAW_CLI_UNSET_ENV: &str = "__cosh_raw_cli_unset_env__";
 
-static RAW_CLI_RUN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static RAW_CLI_GIT_FIXTURE: OnceLock<PathBuf> = OnceLock::new();
+static RAW_CLI_RUN_GATE: OnceLock<RawCliRunGate> = OnceLock::new();
 
 pub(crate) fn raw_cli_command(binary: &str) -> Command {
     let mut command = Command::new(binary);
@@ -51,7 +52,7 @@ pub(crate) fn run_raw_cli_with_args_and_env(
     input: &str,
     envs: &[(&str, &str)],
 ) -> String {
-    let _run_lock = raw_cli_run_lock();
+    let _run_guard = raw_cli_shared_run_guard();
     let binary = env!("CARGO_BIN_EXE_cosh-shell");
     let mut command = Command::new(binary);
     command
@@ -116,6 +117,22 @@ pub(crate) fn run_raw_cli_with_args_env_and_delayed_input(
     )
 }
 
+pub(crate) fn run_raw_cli_serial_with_args_env_and_delayed_input(
+    adapter: &str,
+    extra_args: &[&str],
+    envs: &[(&str, &str)],
+    chunks: Vec<(Vec<u8>, Duration)>,
+) -> String {
+    run_raw_cli_with_args_env_current_dir_and_delayed_input_inner(
+        adapter,
+        extra_args,
+        envs,
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        chunks,
+        RawCliRunMode::Exclusive,
+    )
+}
+
 pub(crate) fn run_raw_cli_with_args_env_current_dir_and_delayed_input(
     adapter: &str,
     extra_args: &[&str],
@@ -123,7 +140,25 @@ pub(crate) fn run_raw_cli_with_args_env_current_dir_and_delayed_input(
     current_dir: &Path,
     chunks: Vec<(Vec<u8>, Duration)>,
 ) -> String {
-    let _run_lock = raw_cli_run_lock();
+    run_raw_cli_with_args_env_current_dir_and_delayed_input_inner(
+        adapter,
+        extra_args,
+        envs,
+        current_dir,
+        chunks,
+        RawCliRunMode::Shared,
+    )
+}
+
+fn run_raw_cli_with_args_env_current_dir_and_delayed_input_inner(
+    adapter: &str,
+    extra_args: &[&str],
+    envs: &[(&str, &str)],
+    current_dir: &Path,
+    chunks: Vec<(Vec<u8>, Duration)>,
+    run_mode: RawCliRunMode,
+) -> String {
+    let _run_guard = raw_cli_run_guard(run_mode);
     let binary = env!("CARGO_BIN_EXE_cosh-shell");
     let mut command = Command::new(binary);
     command
@@ -166,7 +201,7 @@ pub(crate) fn run_raw_cli_default_with_args_env_and_delayed_input(
     envs: &[(&str, &str)],
     chunks: Vec<(Vec<u8>, Duration)>,
 ) -> String {
-    let _run_lock = raw_cli_run_lock();
+    let _run_guard = raw_cli_shared_run_guard();
     let binary = env!("CARGO_BIN_EXE_cosh-shell");
     let mut command = Command::new(binary);
     command
@@ -203,11 +238,102 @@ pub(crate) fn run_raw_cli_default_with_args_env_and_delayed_input(
     text
 }
 
-fn raw_cli_run_lock() -> std::sync::MutexGuard<'static, ()> {
-    RAW_CLI_RUN_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+#[derive(Clone, Copy)]
+enum RawCliRunMode {
+    Shared,
+    Exclusive,
+}
+
+struct RawCliRunGate {
+    state: Mutex<RawCliRunGateState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct RawCliRunGateState {
+    active_shared: usize,
+    exclusive_active: bool,
+    exclusive_waiting: usize,
+}
+
+struct RawCliRunGuard {
+    gate: &'static RawCliRunGate,
+    mode: RawCliRunMode,
+}
+
+fn raw_cli_shared_run_guard() -> RawCliRunGuard {
+    raw_cli_run_guard(RawCliRunMode::Shared)
+}
+
+fn raw_cli_run_guard(mode: RawCliRunMode) -> RawCliRunGuard {
+    let gate = RAW_CLI_RUN_GATE.get_or_init(RawCliRunGate::default);
+    gate.acquire(mode);
+    RawCliRunGuard { gate, mode }
+}
+
+impl Default for RawCliRunGate {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(RawCliRunGateState::default()),
+            changed: Condvar::new(),
+        }
+    }
+}
+
+impl RawCliRunGate {
+    fn acquire(&self, mode: RawCliRunMode) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match mode {
+            RawCliRunMode::Shared => {
+                while state.exclusive_active
+                    || state.exclusive_waiting > 0
+                    || state.active_shared >= RAW_CLI_SHARED_PARALLELISM
+                {
+                    state = self
+                        .changed
+                        .wait(state)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                }
+                state.active_shared += 1;
+            }
+            RawCliRunMode::Exclusive => {
+                state.exclusive_waiting += 1;
+                while state.exclusive_active || state.active_shared > 0 {
+                    state = self
+                        .changed
+                        .wait(state)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                }
+                state.exclusive_waiting -= 1;
+                state.exclusive_active = true;
+            }
+        }
+    }
+
+    fn release(&self, mode: RawCliRunMode) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match mode {
+            RawCliRunMode::Shared => {
+                state.active_shared -= 1;
+            }
+            RawCliRunMode::Exclusive => {
+                state.exclusive_active = false;
+            }
+        }
+        self.changed.notify_all();
+    }
+}
+
+impl Drop for RawCliRunGuard {
+    fn drop(&mut self) {
+        self.gate.release(self.mode);
+    }
 }
 
 fn configure_raw_cli_command(command: &mut Command) {

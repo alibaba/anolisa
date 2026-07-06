@@ -65,7 +65,7 @@ fn raw_cli_zsh_shell_arg_intercepts_fragmented_natural_language() {
 }
 
 #[test]
-fn raw_cli_natural_language_includes_recent_command_facts_without_output_body() {
+fn raw_cli_natural_language_omits_recent_command_facts_by_default() {
     let output = run_raw_cli_with_input(
         "fake",
         "echo shell-context-ok\n\
@@ -75,19 +75,19 @@ fn raw_cli_natural_language_includes_recent_command_facts_without_output_body() 
 
     assert!(output.contains("shell-context-ok"), "{output}");
     assert!(
-        output.contains("Recent context visible to Agent"),
+        output.contains("Recent context visible to Agent: <none>"),
         "{output}"
     );
     let no_wrap: String = output.replace('│', "");
     assert!(
-        no_wrap.contains("command=echo shell-context-ok"),
+        !no_wrap.contains("command=echo shell-context-ok"),
         "{output}"
     );
     assert!(
-        no_wrap.contains("output_id=terminal-output://raw-session-"),
+        !no_wrap.contains("output_id=terminal-output://raw-session-"),
         "{output}"
     );
-    assert!(no_wrap.contains("/cmd-1"), "{output}");
+    assert!(!no_wrap.contains("/cmd-1"), "{output}");
     assert!(
         !no_wrap.contains("output_id=terminal-output://raw-session/cmd-1"),
         "{output}"

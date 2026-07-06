@@ -8,7 +8,7 @@ fn raw_cli_details_for_activity_uses_structured_panel() {
         &[("COSH_SHELL_LANG", "en-US")],
         vec![
             (b"?? request tool approval\n".to_vec(), Duration::ZERO),
-            (b"/details out-1\n".to_vec(), Duration::from_millis(1_200)),
+            (b"/details out-1\n".to_vec(), Duration::from_millis(2_500)),
             (b"exit\n".to_vec(), Duration::from_millis(300)),
         ],
     );
@@ -41,7 +41,7 @@ fn raw_cli_activity_details_uses_zh_language_env() {
         &[("COSH_SHELL_LANG", "zh-CN")],
         vec![
             (b"?? request tool approval\n".to_vec(), Duration::ZERO),
-            (b"/details out-1\n".to_vec(), Duration::from_millis(1_200)),
+            (b"/details out-1\n".to_vec(), Duration::from_millis(2_500)),
             (b"exit\n".to_vec(), Duration::from_millis(300)),
         ],
     );

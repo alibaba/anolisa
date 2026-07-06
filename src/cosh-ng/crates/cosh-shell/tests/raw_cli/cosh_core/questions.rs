@@ -48,8 +48,8 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
                 b"?? cosh-core-provider-question-card\n".to_vec(),
                 Duration::ZERO,
             ),
-            (b"\n".to_vec(), Duration::from_millis(1_200)),
-            (b"exit\n".to_vec(), Duration::from_millis(1_500)),
+            (b"\n".to_vec(), Duration::from_millis(2_500)),
+            (b"exit\n".to_vec(), Duration::from_millis(1_000)),
         ],
     );
     let _ = fs::remove_dir_all(&home);

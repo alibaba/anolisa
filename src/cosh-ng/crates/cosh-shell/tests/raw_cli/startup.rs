@@ -434,20 +434,19 @@ fn raw_cli_startup_health_prompt_ghost_tab_fills_first_suggestion() {
         output.contains("Analyze memory pressure and identify top consumers"),
         "{output}"
     );
-    assert!(
-        output.contains("\x1b[s\x1b[2m Analyze memory pressure"),
-        "{output}"
-    );
-    assert!(
-        !output.contains("\x1b[s\x1b[2m  Analyze memory pressure"),
-        "{output}"
-    );
     let first_prompt = first_health_prompt(&output).expect("first health prompt");
     let compact = compact_without_box_chars(&output);
     assert!(
         compact.contains(&format!("Received shell prompt request: {first_prompt}")),
         "{output}"
     );
+    assert!(
+        compact.contains("Runtime context hints visible to Agent"),
+        "{output}"
+    );
+    assert!(compact.contains("health_scan"), "{output}");
+    assert!(compact.contains("scan_id=health-"), "{output}");
+    assert!(compact.contains("bounded_facts_only=true"), "{output}");
     assert!(
         !output.contains("command not found: Analyze memory pressure"),
         "{output}"
@@ -479,19 +478,11 @@ fn raw_cli_startup_health_prompt_ghost_tab_only_does_not_submit() {
         vec![
             (b"\t".to_vec(), Duration::from_millis(1400)),
             (vec![0x15], Duration::from_millis(300)),
-            (b"exit\n".to_vec(), Duration::from_millis(300)),
+            (b"exit\n".to_vec(), Duration::from_millis(700)),
         ],
     );
 
     assert!(first_health_prompt(&output).is_some(), "{output}");
-    assert!(
-        output.contains("\x1b[s\x1b[2m Analyze memory pressure"),
-        "{output}"
-    );
-    assert!(
-        !output.contains("\x1b[s\x1b[2m  Analyze memory pressure"),
-        "{output}"
-    );
     assert!(
         !output.contains("Received shell prompt request:"),
         "{output}"
@@ -575,11 +566,7 @@ fn raw_cli_startup_health_prompt_ghost_does_not_override_manual_input() {
     );
 
     assert!(first_health_prompt(&output).is_some(), "{output}");
-    assert!(
-        output.contains("\x1b[s\x1b[2m Analyze memory pressure"),
-        "{output}"
-    );
-    assert!(output.contains("\x1b[0m\x1b[u\r\x1b[2K"), "{output}");
+    assert!(output.contains("echo manual"), "{output}");
     assert!(output.contains("manual"), "{output}");
     assert!(
         !output.contains("Received shell prompt request: Analyze memory pressure"),
@@ -592,7 +579,7 @@ fn raw_cli_startup_health_prompt_ghost_does_not_override_manual_input() {
 }
 
 #[test]
-fn raw_cli_startup_health_context_reaches_agent_request() {
+fn raw_cli_startup_health_context_is_not_attached_to_plain_agent_request() {
     let cwd = temp_shell_home("startup-health-context");
     let suppression_store = cwd.join("health-suppression");
     let suppression_store = suppression_store.to_string_lossy().into_owned();
@@ -613,7 +600,7 @@ fn raw_cli_startup_health_context_reaches_agent_request() {
         vec![
             (
                 b"please show context\n".to_vec(),
-                Duration::from_millis(250),
+                Duration::from_millis(1_000),
             ),
             (b"exit\n".to_vec(), Duration::from_millis(100)),
         ],
@@ -625,9 +612,10 @@ fn raw_cli_startup_health_context_reaches_agent_request() {
         "{output}"
     );
     let compact = compact_terminal_words(&output);
-    assert!(compact.contains("health_scan"), "{output}");
-    assert!(compact.contains("scan_id=health-"), "{output}");
-    assert!(compact.contains("bounded_facts_only=true"), "{output}");
+    assert!(compact.contains("Runtime context hints visible to Agent: <none>"));
+    assert!(!compact.contains("health_scan"), "{output}");
+    assert!(!compact.contains("scan_id=health-"), "{output}");
+    assert!(!compact.contains("bounded_facts_only=true"), "{output}");
     assert!(!output.contains("journalctl -k"), "{output}");
     let context_tail = output
         .split("Runtime context hints visible to Agent")

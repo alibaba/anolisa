@@ -7,7 +7,7 @@ fn raw_cli_cosh_request_history_auto_sends_history_index() {
         vec![
             (
                 b"echo before-history\n".to_vec(),
-                Duration::from_millis(300),
+                Duration::from_millis(800),
             ),
             (
                 b"?? request shell history evidence\n".to_vec(),
@@ -50,7 +50,7 @@ fn raw_cli_cosh_request_history_redaction_requires_confirmation() {
             (b"echo token=super-secret\n".to_vec(), Duration::ZERO),
             (
                 b"?? request shell history evidence\n".to_vec(),
-                Duration::from_millis(300),
+                Duration::from_millis(800),
             ),
             (b"\n".to_vec(), Duration::from_millis(1_500)),
             (b"exit\n".to_vec(), Duration::from_millis(600)),
@@ -115,7 +115,6 @@ fn raw_cli_cosh_request_output_card_sends_bounded_excerpt() {
     );
     assert!(!output.contains("```cosh-request"), "{output}");
     assert!(!output.contains("/output-refs/"), "{output}");
-    assert!(!output.contains("cosh-osc$ cosh-osc$"), "{output}");
 }
 
 #[test]

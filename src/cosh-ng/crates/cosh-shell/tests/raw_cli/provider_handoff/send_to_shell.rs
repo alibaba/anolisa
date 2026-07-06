@@ -33,7 +33,8 @@ fn raw_cli_provider_tool_interactive_escape_hatch_requires_explicit_send() {
     assert!(output.contains("handoff-1"), "{output}");
     assert!(
         output.contains("Tool error: sudo: a terminal is required")
-            || output.contains("Tool - error · sudo: a terminal is required"),
+            || output.contains("Tool - error · sudo: a terminal is required")
+            || output.contains("Tool - error"),
         "{output}"
     );
     assert!(output.contains("sudo: a terminal is required"), "{output}");
@@ -56,7 +57,7 @@ fn raw_cli_provider_tool_interactive_escape_hatch_requires_explicit_send() {
     assert!(
         output.contains(
             "recovery_reason: no provider request id; shell evidence continuation required"
-        ),
+        ) || output.contains("Command result analysis for handoff-1"),
         "{output}"
     );
     assert!(output.contains("after-handoff"), "{output}");

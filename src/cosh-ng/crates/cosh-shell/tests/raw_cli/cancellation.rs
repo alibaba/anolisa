@@ -504,10 +504,8 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"cancelled-sess
         vec![
             (b"?? cancelled-provider-session\n".to_vec(), Duration::ZERO),
             (vec![0x03], Duration::from_millis(700)),
-            (
-                b"?? continue\nexit\n".to_vec(),
-                Duration::from_millis(1_500),
-            ),
+            (b"?? continue\n".to_vec(), Duration::from_millis(1_500)),
+            (b"exit\n".to_vec(), Duration::from_millis(2_000)),
         ],
     );
     let second_prompt = fs::read_to_string(home.join("second-prompt.txt")).unwrap_or_default();

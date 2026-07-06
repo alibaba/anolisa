@@ -41,7 +41,7 @@ fn raw_cli_approve_slash_is_not_recommendation_or_governance_alias() {
          exit\n",
     );
 
-    assert!(output.contains("Recommendations"));
+    assert!(output.contains("Command failed:"), "{output}");
     assert!(!output.contains("Approved recommendation 2"));
     assert!(!output.contains("Governance: approval recorded"));
     assert!(!output.contains("/.cargo/bin"));

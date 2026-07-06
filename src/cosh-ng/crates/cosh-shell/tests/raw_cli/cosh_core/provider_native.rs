@@ -393,7 +393,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
                 b"?? cosh-core-provider-native-non-shell-visible\n".to_vec(),
                 Duration::from_millis(500),
             ),
-            (b"/details tool-1\n".to_vec(), Duration::from_millis(1_500)),
+            (b"/details tool-1\n".to_vec(), Duration::from_millis(3_000)),
             (b"/details out-1\n".to_vec(), Duration::from_millis(500)),
             (b"exit\n".to_vec(), Duration::from_millis(500)),
         ],

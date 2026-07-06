@@ -162,7 +162,7 @@ fn raw_cli_natural_language_keeps_later_failed_command_auto_analysis() {
 }
 
 #[test]
-fn raw_cli_natural_language_includes_recent_failed_command_fact_without_hook_hints() {
+fn raw_cli_natural_language_omits_unbound_recent_failed_command_context() {
     let output = run_raw_cli_with_input(
         "fake",
         "ls /path/that/does/not/exist\n\
@@ -180,14 +180,13 @@ fn raw_cli_natural_language_includes_recent_failed_command_fact_without_hook_hin
         "{output}"
     );
     assert!(
-        compact.contains("command=ls /path/that/does/not/exist"),
+        compact.contains("Recent context visible to Agent: <none>"),
         "{output}"
     );
     assert!(
-        compact.contains("output_id=terminal-output://raw-session-"),
+        !compact.contains("command=ls /path/that/does/not/exist"),
         "{output}"
     );
-    assert!(compact.contains("/cmd-1"), "{output}");
     assert!(
         !compact.contains("output_id=terminal-output://raw-session/cmd-1"),
         "{output}"
@@ -344,7 +343,10 @@ fn raw_cli_hook_consultation_uses_zh_language_env() {
     assert!(output.contains("Available memory is low"), "{output}");
     assert!(output.contains("发现:"), "{output}");
     assert!(output.contains("建议动作:"), "{output}");
-    assert!(output.contains("Use memory-analysis"), "{output}");
+    assert!(
+        output.contains("Use available memory diagnosis skills"),
+        "{output}"
+    );
     assert!(!output.contains("Hook: memory-pressure"), "{output}");
     assert!(
         !output.contains("置信度: medium; 原因: allowed"),

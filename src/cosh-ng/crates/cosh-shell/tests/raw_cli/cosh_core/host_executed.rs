@@ -144,7 +144,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
     );
     let home_str = home.to_string_lossy().to_string();
     let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    let output = run_raw_cli_serial_with_args_env_and_delayed_input(
         "cosh-core",
         &[],
         &[("HOME", &home_str), ("COSH_CORE_PATH", &cosh_core_path_str)],
@@ -215,7 +215,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
                 b"?? cosh-core-sysctl-non-ascii-shell\n".to_vec(),
                 Duration::from_millis(500),
             ),
-            (b"exit\n".to_vec(), Duration::from_millis(1_500)),
+            (b"exit\n".to_vec(), Duration::from_millis(2_500)),
         ],
     );
     let _ = fs::remove_dir_all(&home);
@@ -269,7 +269,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
     );
     let home_str = home.to_string_lossy().to_string();
     let cosh_core_path_str = cosh_core_path.to_string_lossy().to_string();
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    let output = run_raw_cli_serial_with_args_env_and_delayed_input(
         "cosh-core",
         &[],
         &[("HOME", &home_str), ("COSH_CORE_PATH", &cosh_core_path_str)],

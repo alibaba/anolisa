@@ -57,7 +57,7 @@ fn raw_cli_copy_fallback_shows_recommendation_without_executing_it() {
                 b"/explain last error\n".to_vec(),
                 Duration::from_millis(100),
             ),
-            (b"/copy 1\n".to_vec(), Duration::from_millis(1_200)),
+            (b"/copy 1\n".to_vec(), Duration::from_millis(2_000)),
             (b"echo after-copy\n".to_vec(), Duration::from_millis(200)),
             (b"exit 0\n".to_vec(), Duration::from_millis(100)),
         ],

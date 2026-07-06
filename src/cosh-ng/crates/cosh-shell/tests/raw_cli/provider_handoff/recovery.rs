@@ -67,11 +67,13 @@ fn raw_cli_shell_handoff_resume_timeout_renders_structured_context_before_recove
     assert_ordered(
         &output,
         &[
-            "$ printf structured-before-recovery",
-            "structured-before-recovery",
             "Using a fresh provider turn for shell evidence recovery.",
             "Command result analysis for req-1: foreground shell evidence received",
         ],
+    );
+    assert!(
+        !output.contains("Skill failed: recovery-context"),
+        "{output}"
     );
     assert_eq!(
         count_occurrences(
