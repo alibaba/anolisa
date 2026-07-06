@@ -9,6 +9,7 @@ use crate::diagnostics::health::{
 };
 use crate::runtime::cli_args::RawShellKind;
 use crate::runtime::prelude::*;
+use crate::runtime::state::PendingInputGhostBinding;
 
 const LOGO_LINES: &[&str] = &[
     "  ██████╗  ██████╗  ███████╗ ██╗  ██╗",
@@ -84,13 +85,14 @@ pub(crate) fn render_startup_banner<W: Write>(
     ];
     state.startup_health.wait_ready(STARTUP_HEALTH_ROW_WAIT);
     if let Some(report) = state.startup_health.report.as_ref() {
-        state.pending_input_ghost = startup_health_prompt_ghost(report, i18n);
+        let prompt_ghost = startup_health_prompt_ghost(report, i18n);
         if health_uses_startup_row(report) {
             body.push(renderer.startup_section_separator_line());
             body.extend(renderer.health_startup_row_lines(HealthBannerModel { report }));
             state.startup_health.rendered = true;
             record_startup_health_recommendations(report);
         }
+        set_startup_health_prompt_ghost(state, prompt_ghost);
     }
     if let Some(markdown) = startup_hook.markdown {
         body.push(String::new());
@@ -120,11 +122,12 @@ pub(crate) fn render_startup_health_banner<W: Write>(
     };
 
     state.startup_health.rendered = true;
-    state.pending_input_ghost = startup_health_prompt_ghost(report, state.i18n());
+    let prompt_ghost = startup_health_prompt_ghost(report, state.i18n());
     write!(output, "\r\x1b[2K")?;
     let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
     renderer.write_health_banner(output, HealthBannerModel { report })?;
     record_startup_health_recommendations(report);
+    set_startup_health_prompt_ghost(state, prompt_ghost);
     writeln!(output)?;
     restore_startup_prompt(state, output)?;
     output.flush()
@@ -144,6 +147,13 @@ fn restore_startup_prompt<W: Write>(
 
 fn startup_health_prompt_ghost(report: &HealthScanReport, i18n: crate::I18n) -> Option<String> {
     startup_prompt_ghost_allowed(report).then(|| primary_health_prompt_suggestion(report, i18n))?
+}
+
+fn set_startup_health_prompt_ghost(state: &mut InlineState, prompt: Option<String>) {
+    state.pending_input_ghost = prompt.clone();
+    state.pending_input_ghost_binding = prompt.map(|_| PendingInputGhostBinding {
+        binding: AgentContextBinding::StartupHealthFollowUp,
+    });
 }
 
 fn startup_prompt_ghost_allowed(report: &HealthScanReport) -> bool {

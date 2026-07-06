@@ -357,6 +357,9 @@ fn drain_raw_input_events<W: Write>(
             RawInputEvent::PromptGhostClear => {
                 clear_prompt_ghost_line(parser, output, prompt, native_candidate_echoed_len)?;
             }
+            RawInputEvent::PromptGhostDismissed => {
+                parser.push_prompt_ghost_event("dismissed");
+            }
             RawInputEvent::CandidateClearLine => {
                 if native_mode {
                     for _ in 0..*native_candidate_echoed_len {

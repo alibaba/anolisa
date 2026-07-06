@@ -18,6 +18,7 @@ pub(crate) use crate::runtime::state_prelude::CoshApprovalMode;
 use crate::runtime::state_prelude::{
     first_program_token, ApprovalPanelAction, CommandBlock, GovernedEvent, I18n, Language,
 };
+use crate::types::AgentContextBinding;
 
 pub(crate) struct AnalysisThrottle {
     recent: HashMap<String, (Instant, usize)>,
@@ -88,9 +89,15 @@ pub(crate) struct InlineState {
     pub(crate) analysis_throttle: AnalysisThrottle,
     pub(crate) trigger_pty_prompt: bool,
     pub(crate) pending_input_ghost: Option<String>,
+    pub(crate) pending_input_ghost_binding: Option<PendingInputGhostBinding>,
     pub(crate) pending_shell_handoff_timeout_notice: Option<Duration>,
     pub(crate) continuity: ContinuityState,
     pub(crate) startup_health: StartupHealthState,
+}
+
+#[derive(Clone)]
+pub(crate) struct PendingInputGhostBinding {
+    pub(crate) binding: AgentContextBinding,
 }
 
 #[derive(Default)]

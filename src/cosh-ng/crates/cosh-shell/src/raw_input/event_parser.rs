@@ -1,6 +1,6 @@
 use crate::input::InputClassifier;
 
-use super::CTRL_C;
+use super::{CTRL_C, CTRL_U};
 
 const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
 const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
@@ -29,6 +29,10 @@ impl CandidateLineBuffer {
                 continue;
             }
             match bytes[idx] {
+                CTRL_U => {
+                    self.clear();
+                    idx += 1;
+                }
                 0x7f | 0x08 => {
                     self.pop_visible_char();
                     idx += 1;
@@ -118,7 +122,7 @@ impl NativeLineState {
                 continue;
             }
             match bytes[idx] {
-                CTRL_C | b'\n' | b'\r' => {
+                CTRL_C | CTRL_U | b'\n' | b'\r' => {
                     self.clear();
                     idx += 1;
                 }

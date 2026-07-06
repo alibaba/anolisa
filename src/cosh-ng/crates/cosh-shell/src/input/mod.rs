@@ -127,6 +127,7 @@ pub enum InterceptReason {
     Slash,
     NaturalLanguage,
     AgentMarker,
+    PromptGhost,
 }
 
 impl InterceptReason {
@@ -135,6 +136,7 @@ impl InterceptReason {
             Self::Slash => "slash",
             Self::NaturalLanguage => "natural_language",
             Self::AgentMarker => "agent_marker",
+            Self::PromptGhost => "prompt_ghost",
         }
     }
 }

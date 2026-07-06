@@ -507,27 +507,27 @@ impl OscParser {
     }
 
     pub(super) fn push_control_event(&mut self, input: &str) {
-        self.events.push(ShellEvent {
-            kind: ShellEventKind::UserInputIntercepted,
-            session_id: self.session_id.clone(),
-            command_id: None,
-            command: None,
-            cwd: None,
-            end_cwd: None,
-            exit_code: None,
-            started_at_ms: Some(now_ms()),
-            ended_at_ms: None,
-            duration_ms: None,
-            terminal_output_ref: None,
-            terminal_output_bytes: None,
-            input: Some(input.to_string()),
-            component: Some("control".to_string()),
-            message: Some("control input observed while relaying to bash".to_string()),
-            command_origin: None,
-        });
+        self.push_self_session_input_event(
+            "control",
+            "control input observed while relaying to bash",
+            Some(input),
+        );
     }
 
     pub(super) fn push_card_event(&mut self, action: &str, value: &str) {
+        self.push_self_session_input_event("card", action, Some(value));
+    }
+
+    pub(super) fn push_prompt_ghost_event(&mut self, action: &str) {
+        self.push_self_session_input_event("prompt_ghost", action, None);
+    }
+
+    fn push_self_session_input_event(
+        &mut self,
+        component: &str,
+        message: &str,
+        input: Option<&str>,
+    ) {
         self.events.push(ShellEvent {
             kind: ShellEventKind::UserInputIntercepted,
             session_id: self.session_id.clone(),
@@ -541,9 +541,9 @@ impl OscParser {
             duration_ms: None,
             terminal_output_ref: None,
             terminal_output_bytes: None,
-            input: Some(value.to_string()),
-            component: Some("card".to_string()),
-            message: Some(action.to_string()),
+            input: input.map(str::to_string),
+            component: Some(component.to_string()),
+            message: Some(message.to_string()),
             command_origin: None,
         });
     }

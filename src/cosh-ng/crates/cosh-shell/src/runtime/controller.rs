@@ -40,6 +40,7 @@ fn render_raw_inline_events<W: Write>(
         if inline_state.trigger_pty_prompt {
             inline_state.trigger_pty_prompt = false;
             inline_state.pending_input_ghost = None;
+            inline_state.pending_input_ghost_binding = None;
             return Ok(RawObserverAction::EmitToPtyWithPromptRestore(request));
         }
         return Ok(RawObserverAction::EmitToPty(request));

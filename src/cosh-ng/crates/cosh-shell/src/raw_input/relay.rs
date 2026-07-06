@@ -71,6 +71,7 @@ pub(super) fn relay_prompt_ghost_input(
         *mode = RawInputMode::Passthrough;
     }
     let _ = relay.input_events.send(RawInputEvent::PromptGhostClear);
+    let _ = relay.input_events.send(RawInputEvent::PromptGhostDismissed);
     relay_passthrough_input(bytes, relay)
 }
 
@@ -146,7 +147,7 @@ fn relay_candidate_line(relay: &mut InputRelayContext<'_>) -> io::Result<bool> {
                 }
                 let _ = relay.input_events.send(RawInputEvent::UserIntercept(
                     line,
-                    InterceptReason::NaturalLanguage,
+                    InterceptReason::PromptGhost,
                 ));
                 if !remainder.is_empty() {
                     relay_passthrough_input(&remainder, relay)?;

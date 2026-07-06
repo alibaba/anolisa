@@ -18,6 +18,7 @@ pub use relay_action::RawRelayAction;
 pub(crate) use spawn::{spawn_raw_action_relay, spawn_raw_input_relay};
 
 pub(super) const CTRL_C: u8 = 0x03;
+pub(super) const CTRL_U: u8 = 0x15;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RawInputEvent {
@@ -28,6 +29,7 @@ pub(crate) enum RawInputEvent {
     },
     CandidateCommit(Vec<u8>),
     PromptGhostClear,
+    PromptGhostDismissed,
     CandidateClearLine,
     UserIntercept(String, InterceptReason),
     CardFocus(String, usize),
@@ -115,6 +117,17 @@ mod tests {
         line.clear();
         line.push(b"/\t");
         assert!(native_candidate_should_return_to_shell(&classifier, &line));
+    }
+
+    #[test]
+    fn candidate_line_ctrl_u_clears_pending_input() {
+        let mut line = CandidateLineBuffer::default();
+
+        line.push(b"Analyze memory pressure");
+        line.push(&[super::CTRL_U]);
+
+        assert!(!line.is_active());
+        assert!(line.visible_line_bytes().is_empty());
     }
 
     #[test]
