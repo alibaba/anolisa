@@ -1,6 +1,8 @@
 """Daemon handler for the scan-prompt CLI-compatible method."""
 
 import asyncio
+import copy
+import json
 from typing import Any
 
 from agent_sec_cli.daemon.errors import UnavailableError
@@ -33,6 +35,14 @@ async def prompt_scan_handler(
     """Execute prompt scanning through security middleware."""
     prompt_scan_state = runtime.prompt_scan_state
     if prompt_scan_state.status != "ready" or not prompt_scan_state.loaded:
+        # Cold-start degradation: when the ML model (L2) is not ready,
+        # degrade to fast mode (L1 rule-engine only) instead of returning
+        # an error.  This keeps the security scanner online during the
+        # model download/load window.  L1 DENY is rewritten to WARN to
+        # avoid false blocks during the degraded window.
+        mode = _string_param(request.params, "mode", default="standard")
+        if mode in ("standard", "strict"):
+            return await _degraded_scan(request, runtime, mode)
         raise UnavailableError(_prompt_unavailable_message(runtime))
 
     params = request.params
@@ -62,6 +72,42 @@ def _invoke_prompt_scan(
         mode=mode,
         source=source,
     )
+
+
+async def _degraded_scan(
+    request: DaemonRequest,
+    runtime: DaemonRuntime,
+    original_mode: str,
+) -> HandlerResult:
+    """Run a fast-mode (L1-only) scan and tag the result as degraded.
+
+    When the ML model is not ready, fall back to L1 rule-engine scanning
+    so the scanner stays functional during cold start.  The response carries
+    ``degraded=true``, ``degraded_reason``, and ``degraded_original_verdict``
+    for audit purposes.  Any L1 DENY is rewritten to WARN to avoid false
+    blocks during the degraded window.
+    """
+    result = await asyncio.to_thread(
+        _invoke_prompt_scan,
+        text=_string_param(request.params, "text"),
+        mode="fast",
+        source=_string_param(request.params, "source"),
+    )
+    data = copy.deepcopy(result.data) if result.data else {}
+    original_verdict = data.get("verdict", "pass")
+    # Rewrite DENY → WARN during degraded mode to avoid cold-start false blocks.
+    if data.get("verdict") == "deny":
+        data["verdict"] = "warn"
+        data["ok"] = True
+        data["risk_level"] = "medium"
+    data["degraded"] = True
+    data["degraded_reason"] = (
+        f"model not ready (status={runtime.prompt_scan_state.status}), "
+        f"degraded from {original_mode} to fast (L1 rule-engine only)"
+    )
+    data["degraded_original_verdict"] = original_verdict
+    stdout = json.dumps(data, indent=2, ensure_ascii=False)
+    return HandlerResult(data=data, stdout=stdout, stderr="", exit_code=0)
 
 
 def _action_result_to_handler_result(result: Any) -> HandlerResult:
