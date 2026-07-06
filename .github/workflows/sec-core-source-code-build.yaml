@@ -52,6 +52,8 @@ jobs:
         run: |
           agent-sec-cli --version
           agent-sec-cli --help
+      - name: Verify daemon
+        run: agent-sec-daemon --help
       - name: Verify sandbox
         run: linux-sandbox --help
       - name: Verify deployment
