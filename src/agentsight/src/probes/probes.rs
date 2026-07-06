@@ -345,7 +345,7 @@ impl Probes {
                         }
                         ChannelPolicy::Sample(n) => {
                             let idx = drop_counter.fetch_add(1, Ordering::Relaxed);
-                            if idx % n == 0 {
+                            if idx.is_multiple_of(n) {
                                 if event_tx.try_send(e).is_err() {
                                     log::warn!(
                                         "Probes event channel full (capacity={}); dropping sampled event",

@@ -79,9 +79,7 @@ fn value_has_error_signal(value: &serde_json::Value) -> bool {
         serde_json::Value::Array(items) => items.iter().any(value_has_error_signal),
         serde_json::Value::Object(map) => {
             map.get("is_error").and_then(|value| value.as_bool()) == Some(true)
-                || map
-                    .values()
-                    .any(|nested_value| value_has_error_signal(nested_value))
+                || map.values().any(value_has_error_signal)
         }
         _ => false,
     }
