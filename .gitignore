@@ -7,3 +7,5 @@
 !scripts/sync-site-changelog.mjs
 !agents/
 !agents/**
+!docs/
+!docs/**

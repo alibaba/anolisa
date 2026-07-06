@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ANOLISA 文档</title>
+<meta name="description" content="ANOLISA 用户指南、组件文档、变更日志和面向 Agent 的项目说明。">
+<link rel="stylesheet" href="../styles.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../../"><span class="brand-mark">&gt;_</span><span>ANOLISA Docs</span></a>
+  <nav class="top-actions" aria-label="顶部导航">
+    <a class="top-link" href="../../">首页</a>
+    <a class="top-link" href="../../agents/">Agents</a>
+    <a class="top-link" href="https://github.com/alibaba/anolisa" target="_blank" rel="noopener">GitHub</a>
+    <a class="lang-link" href="../en/" lang="en">EN</a>
+    <a class="lang-link active" href="../zh/">中文</a>
+  </nav>
+</header>
+
+<div class="layout">
+  <aside class="sidebar" aria-label="文档导航">
+    <section class="nav-section">
+      <p class="sidebar-title">开始</p>
+      <ul>
+        <li><a href="#start">概览</a></li>
+        <li><a href="#architecture">组件架构</a></li>
+        <li><a href="#guides">用户指南</a></li>
+        <li><a href="#developer">开发者指南</a></li>
+        <li><a href="#release-notes">变更日志</a></li>
+      </ul>
+    </section>
+    <section class="nav-section">
+      <p class="sidebar-title">组件</p>
+      <ul>
+        <li><a href="#copilot-shell">Copilot Shell</a></li>
+        <li><a href="#anolisa-cli">ANOLISA CLI</a></li>
+        <li><a href="#os-skills">OS Skills</a></li>
+        <li><a href="#ktuner">ktuner</a></li>
+        <li><a href="#runtime">Runtime</a></li>
+        <li><a href="#token-saving">Token saving</a></li>
+        <li><a href="#observability">Observability</a></li>
+        <li><span class="nav-muted">AgentSecCore 规划中</span></li>
+      </ul>
+    </section>
+  </aside>
+
+  <main class="main">
+    <section class="hero" id="start">
+      <p class="eyebrow">Documentation</p>
+      <h1>ANOLISA 文档索引。</h1>
+      <p class="lead">浏览 ANOLISA Agent 操作层的用户指南、开发者参考、组件概览和变更日志。文档按组件能力分组，并提供英文与中文入口。</p>
+      <div class="notice">AgentSecCore 用户文档已列入规划，将在专门指南完成后加入文档索引。</div>
+    </section>
+
+    <section class="section" id="architecture">
+      <h2>组件架构</h2>
+      <p class="section-intro">Copilot Shell 是终端原生 Agent 工作流的产品级入口，覆盖当前 <code>cosh</code> 实现和新的 <code>cosh-ng</code> 实现；两个实现仍分别映射到各自源码目录。</p>
+      <ul class="component-tree">
+        <li id="copilot-shell">
+          <strong>Copilot Shell</strong>
+          终端原生 Agent Shell 与命令网关。
+          <ul>
+            <li><code>cosh</code>：当前 Copilot Shell 实现，源码位于 <code>src/copilot-shell/</code>。</li>
+            <li><code>cosh-ng</code>：下一代 Shell 实现，源码位于 <code>src/cosh-ng/</code>。</li>
+          </ul>
+        </li>
+        <li><strong>ANOLISA Runtime</strong> 通过统一 CLI 安装、检查和运维组件。</li>
+        <li><strong>Runtime services</strong> SkillFS、工作区快照、Anvil 沙箱编排。</li>
+        <li><strong>Optimization and memory</strong> Tokenless 与 Agent Memory。</li>
+        <li><strong>Observability</strong> AgentSight 追踪与 Dashboard 文档。</li>
+      </ul>
+    </section>
+
+    <section class="section" id="guides">
+      <h2>用户指南</h2>
+      <p class="section-intro">用户文档按操作任务和组件能力分组。每个入口链接到主仓库中的规范源文档。</p>
+      <div class="grid">
+        <article class="card" id="anolisa-cli">
+          <h3>ANOLISA CLI</h3>
+          <p>统一安装、状态检查、适配器和组件管理入口。</p>
+          <div class="links">
+            <a href="https://github.com/alibaba/anolisa/blob/main/docs/user-guide/zh/user-entrypoint/anolisa-cli.md">用户指南</a>
+            <a href="https://github.com/alibaba/anolisa/blob/main/src/anolisa/CHANGELOG.md">变更日志</a>
+          </div>
+        </article>
+        <article class="card">
+          <h3>Copilot Shell</h3>
+          <p>面向 <code>cosh</code> 与 <code>cosh-ng</code> 实现的统一 Shell 文档入口。</p>
+          <div class="links">
+            <a href="https://github.com/alibaba/anolisa/tree/main/docs/user-guide/zh/user-entrypoint/copilot-shell">cosh 文档</a>
+            <a href="https://github.com/alibaba/anolisa/tree/main/docs/user-guide/zh/user-entrypoint/cosh-ng">cosh-ng 文档</a>
+            <a href="https://github.com/alibaba/anolisa/blob/main/src/copilot-shell/CHANGELOG.md">cosh 变更</a>
+            <a href="https://github.com/alibaba/anolisa/blob/main/src/cosh-ng/CHANGELOG.md">cosh-ng 变更</a>
+          </div>
+        </article>
+        <article class="card" id="os-skills">
+          <h3>OS Skills</h3>
+          <p>系统管理与 DevOps 技能集合。</p>
+          <div class="links">
+            <a href="https://github.com/alibaba/anolisa/blob/main/docs/user-guide/zh/user-entrypoint/os-skills.md">用户指南</a>
+            <a href="https://github.com/alibaba/anolisa/blob/main/src/os-skills/CHANGELOG.md">变更日志</a>
+          </div>
+        </article>
+        <article class="card" id="ktuner">
+          <h3>ktuner</h3>
+          <p>面向 Agent 操作的确定性内核参数调优工具。</p>
+          <div class="links">
+            <a href="https://github.com/alibaba/anolisa/blob/main/docs/user-guide/zh/user-entrypoint/ktuner.md">用户指南</a>
+            <a href="https://github.com/alibaba/anolisa/blob/main/src/ktuner/CHANGELOG.md">变更日志</a>
+          </div>
+        </article>
+        <article class="card" id="runtime">
+          <h3>Runtime</h3>
+          <p>工作区回滚、技能虚拟视图和沙箱生命周期管理。</p>
+          <div class="links">
+            <a href="https://github.com/alibaba/anolisa/blob/main/docs/user-guide/zh/runtime/ws-ckpt.md">ws-ckpt</a>
+            <a href="https://github.com/alibaba/anolisa/blob/main/docs/user-guide/zh/runtime/skillfs.md">SkillFS</a>
+            <a href="https://github.com/alibaba/anolisa/blob/main/src/anvil/README.md">Anvil 概览</a>
+          </div>
+        </article>
+        <article class="card" id="token-saving">
+          <h3>Token Saving</h3>
+          <p>提示词压缩、响应整理与持久化文件记忆。</p>
+          <div class="links">
+            <a href="https://github.com/alibaba/anolisa/blob/main/docs/user-guide/zh/token-saving/tokenless.md">Tokenless</a>
+            <a href="https://github.com/alibaba/anolisa/blob/main/docs/user-guide/zh/token-saving/agent-memory.md">Agent Memory</a>
+          </div>
+        </article>
+        <article class="card" id="observability">
+          <h3>AgentSight</h3>
+          <p>eBPF 追踪、Token 计账和 Dashboard 工作流。</p>
+          <div class="links">
+            <a href="https://github.com/alibaba/anolisa/blob/main/docs/user-guide/zh/agent-observability/agentsight.md">用户指南</a>
+            <a href="https://github.com/alibaba/anolisa/blob/main/src/agentsight/CHANGELOG.md">变更日志</a>
+          </div>
+        </article>
+        <article class="card">
+          <h3>AgentSecCore</h3>
+          <p>安全组件用户文档已列入规划。</p>
+          <div class="links"><span class="chip deferred">规划中</span></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="developer">
+      <h2>开发者指南</h2>
+      <p class="section-intro">开发者参考与用户指南分开维护，用于区分运维使用路径和实现贡献路径。</p>
+      <div class="links">
+        <a href="https://github.com/alibaba/anolisa/tree/main/docs/developer-guide/zh/copilot-shell">Copilot Shell 开发者文档</a>
+        <a href="https://github.com/alibaba/anolisa/tree/main/docs/developer-guide/zh/cosh-ng">cosh-ng 开发者文档</a>
+        <a href="https://github.com/alibaba/anolisa/blob/main/AGENTS.md">仓库 AGENTS.md</a>
+      </div>
+    </section>
+
+    <section class="section" id="release-notes">
+      <h2>变更日志</h2>
+      <p class="section-intro">变更日志同时提供首页摘要视图和各组件源文件入口。</p>
+      <div class="links">
+        <a href="../../#anolisa-cli-changelog">首页变更区块</a>
+        <a href="https://github.com/alibaba/anolisa/blob/main/src/anvil/CHANGELOG.md">Anvil</a>
+        <a href="https://github.com/alibaba/anolisa/blob/main/src/ktuner/CHANGELOG.md">ktuner</a>
+        <a href="https://github.com/alibaba/anolisa/blob/main/src/skillfs/CHANGELOG.md">SkillFS</a>
+        <a href="https://github.com/alibaba/anolisa/blob/main/src/ws-ckpt/CHANGELOG.md">ws-ckpt</a>
+      </div>
+    </section>
+  </main>
+</div>
+</body>
+</html>

@@ -18,8 +18,14 @@ const COMPONENTS = [
   {
     id: 'copilot-shell',
     label: 'Copilot Shell',
-    summary: 'Terminal-native agent shell and interactive CLI.',
+    summary: 'Product-level shell entry for cosh and cosh-ng.',
     path: 'src/copilot-shell/CHANGELOG.md',
+  },
+  {
+    id: 'cosh-ng',
+    label: 'cosh-ng',
+    summary: 'Next-generation Copilot Shell implementation.',
+    path: 'src/cosh-ng/CHANGELOG.md',
   },
   {
     id: 'agent-sec-core',
@@ -46,10 +52,28 @@ const COMPONENTS = [
     path: 'src/os-skills/CHANGELOG.md',
   },
   {
+    id: 'ktuner',
+    label: 'ktuner',
+    summary: 'Deterministic kernel-parameter tuning engine.',
+    path: 'src/ktuner/CHANGELOG.md',
+  },
+  {
+    id: 'skillfs',
+    label: 'SkillFS',
+    summary: 'FUSE-backed skill filesystem and progressive disclosure views.',
+    path: 'src/skillfs/CHANGELOG.md',
+  },
+  {
     id: 'tokenless',
     label: 'Tokenless',
     summary: 'Prompt compression, token optimization, and agent adapters.',
     path: 'src/tokenless/CHANGELOG.md',
+  },
+  {
+    id: 'anvil',
+    label: 'Anvil',
+    summary: 'Per-host sandbox daemon and lifecycle API.',
+    path: 'src/anvil/CHANGELOG.md',
   },
   {
     id: 'ws-ckpt',
@@ -285,7 +309,10 @@ ${sections}
 }
 
 function renderJsonScript(data) {
-  const json = JSON.stringify(data, null, 2).replaceAll('<', '\\u003c');
+  const json = JSON.stringify(data, null, 2)
+    .replaceAll('<', '\\u003c')
+    .replaceAll('>', '\\u003e')
+    .replaceAll('&', '\\u0026');
   return `        <!-- ANOLISA_CHANGELOG_DATA_START -->\n        <script type="application/json" id="changelog-data">${json}</script>\n        <!-- ANOLISA_CHANGELOG_DATA_END -->`;
 }
 
@@ -293,14 +320,14 @@ function replaceChangelogData(html, data) {
   const block = renderJsonScript(data);
   const markerPattern = /        <!-- ANOLISA_CHANGELOG_DATA_START -->[\s\S]*?        <!-- ANOLISA_CHANGELOG_DATA_END -->/;
   if (markerPattern.test(html)) {
-    return html.replace(markerPattern, block);
+    return html.replace(markerPattern, () => block);
   }
 
   const morePattern = /(\n      <div class="changelog-more">[\s\S]*?      <\/div>)/;
   if (!morePattern.test(html)) {
     throw new Error('could not find changelog more block in index.html');
   }
-  return html.replace(morePattern, `$1\n\n${block}`);
+  return html.replace(morePattern, (_match, moreBlock) => `${moreBlock}\n\n${block}`);
 }
 
 function replaceReleaseList(html, releases) {
@@ -309,14 +336,14 @@ function replaceReleaseList(html, releases) {
   const markerPattern = /        <!-- ANOLISA_CLI_CHANGELOG_START -->[\s\S]*?        <!-- ANOLISA_CLI_CHANGELOG_END -->/;
 
   if (markerPattern.test(html)) {
-    return html.replace(markerPattern, block);
+    return html.replace(markerPattern, () => block);
   }
 
   const releaseListPattern = /(<div class="release-list">\n)[\s\S]*?(\n      <\/div>\n\n      <footer class="cap-footer">)/;
   if (!releaseListPattern.test(html)) {
     throw new Error('could not find changelog release list in index.html');
   }
-  return html.replace(releaseListPattern, `$1${block}$2`);
+  return html.replace(releaseListPattern, (_match, before, after) => `${before}${block}${after}`);
 }
 
 async function buildChangelogData(limit) {
@@ -327,7 +354,8 @@ async function buildChangelogData(limit) {
     const enReleases = parseReleases(markdown, 'en').slice(0, limit);
     const zhReleases = parseReleases(markdown, 'zh').slice(0, limit);
     if (enReleases.length === 0) {
-      throw new Error(`no released versions found in ${component.path}`);
+      console.warn(`warning: skipping ${component.id}; no released versions found in ${component.path}`);
+      continue;
     }
 
     components.push({
@@ -383,7 +411,7 @@ function printCommitInfo({ title, body, signedOffBy }) {
   console.log(signedOffBy);
   console.log('');
   console.log('Suggested commands:');
-  console.log('git add .gitignore index.html scripts/sync-site-changelog.mjs');
+  console.log('git add .gitignore index.html docs scripts/sync-site-changelog.mjs');
   console.log(`git commit -s -m ${JSON.stringify(title)} \\`);
   body.forEach((line, index) => {
     const suffix = index === body.length - 1 ? '' : ' \\';

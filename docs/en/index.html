@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ANOLISA Documentation</title>
+<meta name="description" content="ANOLISA user guides, component docs, changelogs, and agent-facing project notes.">
+<link rel="stylesheet" href="../styles.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../../"><span class="brand-mark">&gt;_</span><span>ANOLISA Docs</span></a>
+  <nav class="top-actions" aria-label="Top navigation">
+    <a class="top-link" href="../../">Home</a>
+    <a class="top-link" href="../../agents/">Agents</a>
+    <a class="top-link" href="https://github.com/alibaba/anolisa" target="_blank" rel="noopener">GitHub</a>
+    <a class="lang-link active" href="../en/">EN</a>
+    <a class="lang-link" href="../zh/" lang="zh">中文</a>
+  </nav>
+</header>
+
+<div class="layout">
+  <aside class="sidebar" aria-label="Documentation navigation">
+    <section class="nav-section">
+      <p class="sidebar-title">Start</p>
+      <ul>
+        <li><a href="#start">Overview</a></li>
+        <li><a href="#architecture">Component architecture</a></li>
+        <li><a href="#guides">User guides</a></li>
+        <li><a href="#developer">Developer guides</a></li>
+        <li><a href="#release-notes">Release notes</a></li>
+      </ul>
+    </section>
+    <section class="nav-section">
+      <p class="sidebar-title">Components</p>
+      <ul>
+        <li><a href="#copilot-shell">Copilot Shell</a></li>
+        <li><a href="#anolisa-cli">ANOLISA CLI</a></li>
+        <li><a href="#os-skills">OS Skills</a></li>
+        <li><a href="#ktuner">ktuner</a></li>
+        <li><a href="#runtime">Runtime</a></li>
+        <li><a href="#token-saving">Token saving</a></li>
+        <li><a href="#observability">Observability</a></li>
+        <li><span class="nav-muted">AgentSecCore planned</span></li>
+      </ul>
+    </section>
+  </aside>
+
+  <main class="main">
+    <section class="hero" id="start">
+      <p class="eyebrow">Documentation</p>
+      <h1>ANOLISA documentation index.</h1>
+      <p class="lead">Browse user guides, developer references, component overviews, and release notes for the ANOLISA agent operating layer. The documentation is organized by component family and mirrored across English and Chinese entry points.</p>
+      <div class="notice">AgentSecCore user documentation is tracked as planned content and will be added after the dedicated guide is complete.</div>
+    </section>
+
+    <section class="section" id="architecture">
+      <h2>Component Architecture</h2>
+      <p class="section-intro">Copilot Shell is the product-level entry point for terminal-native agent workflows. It covers both the current <code>cosh</code> implementation and the newer <code>cosh-ng</code> implementation, while each implementation remains mapped to its source directory.</p>
+      <ul class="component-tree">
+        <li id="copilot-shell">
+          <strong>Copilot Shell</strong>
+          Terminal-native agent shell and command gateway.
+          <ul>
+            <li><code>cosh</code>: current Copilot Shell implementation in <code>src/copilot-shell/</code>.</li>
+            <li><code>cosh-ng</code>: next-generation shell implementation in <code>src/cosh-ng/</code>.</li>
+          </ul>
+        </li>
+        <li><strong>ANOLISA Runtime</strong> Install, inspect, and operate components through the unified CLI.</li>
+        <li><strong>Runtime services</strong> SkillFS, workspace checkpoints, Anvil sandbox orchestration.</li>
+        <li><strong>Optimization and memory</strong> Tokenless and Agent Memory.</li>
+        <li><strong>Observability</strong> AgentSight tracing and dashboard docs.</li>
+      </ul>
+    </section>
+
+    <section class="section" id="guides">
+      <h2>User Guides</h2>
+      <p class="section-intro">User-facing documentation is grouped by operating task and component family. Each entry links to the canonical source document in the main repository.</p>
+      <div class="grid">
+        <article class="card" id="anolisa-cli">
+          <h3>ANOLISA CLI</h3>
+          <p>Unified installation, status, adapter, and component management.</p>
+          <div class="links">
+            <a href="https://github.com/alibaba/anolisa/blob/main/docs/user-guide/en/user-entrypoint/anolisa-cli.md">User guide</a>
+            <a href="https://github.com/alibaba/anolisa/blob/main/src/anolisa/CHANGELOG.md">Changelog</a>
+          </div>
+        </article>
+        <article class="card">
+          <h3>Copilot Shell</h3>
+          <p>Unified shell documentation for the <code>cosh</code> and <code>cosh-ng</code> implementations.</p>
+          <div class="links">
+            <a href="https://github.com/alibaba/anolisa/tree/main/docs/user-guide/en/user-entrypoint/copilot-shell">cosh docs</a>
+            <a href="https://github.com/alibaba/anolisa/tree/main/docs/user-guide/en/user-entrypoint/cosh-ng">cosh-ng docs</a>
+            <a href="https://github.com/alibaba/anolisa/blob/main/src/copilot-shell/CHANGELOG.md">cosh changelog</a>
+            <a href="https://github.com/alibaba/anolisa/blob/main/src/cosh-ng/CHANGELOG.md">cosh-ng changelog</a>
+          </div>
+        </article>
+        <article class="card" id="os-skills">
+          <h3>OS Skills</h3>
+          <p>System management and DevOps skill bundles.</p>
+          <div class="links">
+            <a href="https://github.com/alibaba/anolisa/blob/main/docs/user-guide/en/user-entrypoint/os-skills.md">User guide</a>
+            <a href="https://github.com/alibaba/anolisa/blob/main/src/os-skills/CHANGELOG.md">Changelog</a>
+          </div>
+        </article>
+        <article class="card" id="ktuner">
+          <h3>ktuner</h3>
+          <p>Deterministic kernel-parameter tuning for agent-facing operations.</p>
+          <div class="links">
+            <a href="https://github.com/alibaba/anolisa/blob/main/docs/user-guide/en/user-entrypoint/ktuner.md">User guide</a>
+            <a href="https://github.com/alibaba/anolisa/blob/main/src/ktuner/CHANGELOG.md">Changelog</a>
+          </div>
+        </article>
+        <article class="card" id="runtime">
+          <h3>Runtime</h3>
+          <p>Workspace rollback, virtual skill views, and sandbox lifecycle control.</p>
+          <div class="links">
+            <a href="https://github.com/alibaba/anolisa/blob/main/docs/user-guide/en/runtime/ws-ckpt.md">ws-ckpt</a>
+            <a href="https://github.com/alibaba/anolisa/blob/main/docs/user-guide/en/runtime/skillfs.md">SkillFS</a>
+            <a href="https://github.com/alibaba/anolisa/blob/main/src/anvil/README.md">Anvil overview</a>
+          </div>
+        </article>
+        <article class="card" id="token-saving">
+          <h3>Token Saving</h3>
+          <p>Prompt compression, response shaping, and persistent file memory.</p>
+          <div class="links">
+            <a href="https://github.com/alibaba/anolisa/blob/main/docs/user-guide/en/token-saving/tokenless.md">Tokenless</a>
+            <a href="https://github.com/alibaba/anolisa/blob/main/docs/user-guide/en/token-saving/agent-memory.md">Agent Memory</a>
+          </div>
+        </article>
+        <article class="card" id="observability">
+          <h3>AgentSight</h3>
+          <p>eBPF tracing, token accounting, and dashboard workflows.</p>
+          <div class="links">
+            <a href="https://github.com/alibaba/anolisa/blob/main/docs/user-guide/en/agent-observability/agentsight.md">User guide</a>
+            <a href="https://github.com/alibaba/anolisa/blob/main/src/agentsight/CHANGELOG.md">Changelog</a>
+          </div>
+        </article>
+        <article class="card">
+          <h3>AgentSecCore</h3>
+          <p>Security component documentation is tracked as planned content.</p>
+          <div class="links"><span class="chip deferred">Planned</span></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="developer">
+      <h2>Developer Guides</h2>
+      <p class="section-intro">Developer references are kept separate from user guides to distinguish operational workflows from implementation and contribution details.</p>
+      <div class="links">
+        <a href="https://github.com/alibaba/anolisa/tree/main/docs/developer-guide/en/copilot-shell">Copilot Shell developer docs</a>
+        <a href="https://github.com/alibaba/anolisa/tree/main/docs/developer-guide/en/cosh-ng">cosh-ng developer docs</a>
+        <a href="https://github.com/alibaba/anolisa/blob/main/AGENTS.md">Repository AGENTS.md</a>
+      </div>
+    </section>
+
+    <section class="section" id="release-notes">
+      <h2>Release Notes</h2>
+      <p class="section-intro">Release notes are available both as a compact homepage view and as source changelogs for each component.</p>
+      <div class="links">
+        <a href="../../#anolisa-cli-changelog">Homepage changelog</a>
+        <a href="https://github.com/alibaba/anolisa/blob/main/src/anvil/CHANGELOG.md">Anvil</a>
+        <a href="https://github.com/alibaba/anolisa/blob/main/src/ktuner/CHANGELOG.md">ktuner</a>
+        <a href="https://github.com/alibaba/anolisa/blob/main/src/skillfs/CHANGELOG.md">SkillFS</a>
+        <a href="https://github.com/alibaba/anolisa/blob/main/src/ws-ckpt/CHANGELOG.md">ws-ckpt</a>
+      </div>
+    </section>
+  </main>
+</div>
+</body>
+</html>

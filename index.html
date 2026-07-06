@@ -217,13 +217,13 @@ h1 span{color:var(--accent-light)}
 #capabilities{padding:0 0 120px}
 #capabilities{
   scroll-snap-align:start;scroll-snap-stop:always;
-  height:100vh;
+  min-height:100vh;
   position:relative;z-index:1;
-  overflow:hidden;
+  overflow:visible;
 }
 .cap-inner{
-  height:100%;display:flex;flex-direction:column;justify-content:center;
-  padding:40px 24px 0;
+  min-height:100vh;display:flex;flex-direction:column;justify-content:center;
+  padding:88px 24px 48px;
 }
 .cap-footer{
   display:flex;justify-content:space-between;align-items:center;
@@ -232,7 +232,7 @@ h1 span{color:var(--accent-light)}
   font-family:var(--mono);font-size:0.6875rem;
 }
 
-.cap-header{margin-bottom:36px}
+.cap-header{margin-bottom:28px}
 .cap-label{
   font-family:var(--mono);font-size:0.6875rem;letter-spacing:0.1em;
   color:var(--accent-light);text-transform:uppercase;margin-bottom:12px;
@@ -247,6 +247,12 @@ h1 span{color:var(--accent-light)}
 }
 
 /* ── bento grid ── */
+.cap-workbench{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) minmax(320px,0.72fr);
+  gap:16px;
+  align-items:stretch;
+}
 .bento{
   display:grid;
   grid-template-columns:repeat(12,1fr);
@@ -254,12 +260,13 @@ h1 span{color:var(--accent-light)}
   gap:12px;
 }
 .bento-item{
+  appearance:none;-webkit-appearance:none;text-align:left;font:inherit;color:inherit;
   background:rgba(10,20,27,0.5);
   border:1px solid rgba(255,255,255,0.04);
   border-radius:12px;padding:22px 22px;
   backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
   transition:all .3s cubic-bezier(.4,0,.2,1);
-  position:relative;overflow:hidden;
+  position:relative;overflow:hidden;cursor:pointer;
 }
 .bento-item::before{
   content:'';position:absolute;inset:0;
@@ -271,6 +278,11 @@ h1 span{color:var(--accent-light)}
   border-color:var(--border);
   transform:translateY(-2px);
   box-shadow:0 16px 40px rgba(0,0,0,0.35);
+}
+.bento-item:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.bento-item.active{
+  border-color:var(--border-hover);
+  background:linear-gradient(135deg,rgba(10,110,92,0.16) 0%,rgba(10,20,27,0.68) 100%);
 }
 
 .bento-item.span-8{grid-column:span 8}
@@ -306,6 +318,62 @@ h1 span{color:var(--accent-light)}
 .bento-item.highlight .bento-icon{
   background:var(--accent);color:#fff;
   box-shadow:0 0 16px var(--accent-glow);
+}
+
+/* ── component detail ── */
+.component-detail{
+  min-width:0;
+  display:flex;flex-direction:column;
+  background:rgba(10,20,27,0.54);
+  border:1px solid rgba(255,255,255,0.05);
+  border-radius:12px;padding:22px;
+  backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+}
+.detail-kicker{
+  font-family:var(--mono);font-size:0.6875rem;letter-spacing:0.08em;
+  color:var(--accent-light);text-transform:uppercase;margin-bottom:10px;
+}
+.detail-title{
+  font-size:1.125rem;font-weight:700;line-height:1.25;margin:0 0 8px;
+}
+.detail-copy{
+  color:var(--text-2);font-size:0.8125rem;line-height:1.7;margin:0 0 16px;
+}
+.detail-links{
+  display:flex;flex-wrap:wrap;gap:8px;margin-bottom:18px;
+}
+.detail-link,.detail-link-disabled{
+  display:inline-flex;align-items:center;min-height:32px;
+  border:1px solid var(--border);border-radius:6px;padding:7px 10px;
+  font-family:var(--mono);font-size:0.6875rem;letter-spacing:0.04em;
+  text-transform:uppercase;text-decoration:none;white-space:nowrap;
+}
+.detail-link{color:var(--accent-light);background:var(--accent-dim)}
+.detail-link:hover{border-color:var(--border-hover);background:rgba(10,110,92,0.2);text-decoration:none}
+.detail-link:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.detail-link-disabled{
+  color:var(--text-3);background:rgba(255,255,255,0.02);
+  border-color:rgba(255,255,255,0.05);cursor:not-allowed;
+}
+.detail-release{
+  margin-top:auto;padding-top:18px;border-top:1px solid rgba(255,255,255,0.05);
+}
+.detail-release-head{
+  display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:10px;
+}
+.detail-release-title{
+  font-family:var(--mono);font-size:0.75rem;letter-spacing:0.06em;
+  color:var(--text);text-transform:uppercase;
+}
+.detail-release-version{
+  font-family:var(--mono);font-size:0.6875rem;color:var(--text-3);
+}
+.detail-release ul{display:grid;gap:7px;margin:0;padding-left:18px;color:var(--text-2)}
+.detail-release li{font-size:0.78rem;line-height:1.55}
+.detail-release code{
+  font-family:var(--mono);font-size:0.72rem;color:var(--accent-light);
+  background:rgba(10,110,92,0.1);border:1px solid var(--border);
+  border-radius:4px;padding:1px 4px;
 }
 
 /* ── changelog ── */
@@ -431,24 +499,16 @@ h1 span{color:var(--accent-light)}
 
 /* ── responsive ── */
 @media(max-width:768px){
-  .nav-links{display:none}
   .hero{padding-top:100px;min-height:auto;padding-bottom:48px}
   .scroll-cue{display:none}
-  .bento{grid-template-columns:1fr}
-  .bento-item.span-8,.bento-item.span-4,.bento-item.span-6,
-  .bento-item.span-5,.bento-item.span-7{grid-column:span 1}
+  .hero .wrap{width:100%;max-width:100%}
+  .hero-sub,.hero-tagline{white-space:normal;max-width:100%;overflow-wrap:anywhere}
+  .badge,.agent-label{max-width:100%}
+  .install-bar,.agent-bar,.agent-prompt{max-width:100%;width:100%;align-self:stretch}
   #capabilities{height:auto;min-height:100vh}
-  .cap-inner{height:auto;min-height:100vh}
+  .cap-inner{height:auto;min-height:100vh;padding-left:0;padding-right:0}
   .cap-header{margin-bottom:24px}
-  #anolisa-cli-changelog{padding:56px 0 104px}
-  .changelog-head{display:block}
-  .source-link{display:inline-flex;margin-top:18px}
-  .changelog-controls{align-items:flex-start;flex-direction:column}
-  .component-tabs{gap:7px}
-  .component-tab{font-size:0.625rem;padding:7px 9px}
-  .release{grid-template-columns:1fr;gap:14px;padding:18px}
   .top-btn{right:16px;bottom:16px}
-  .cap-footer{flex-direction:column;gap:12px;text-align:center}
 }
 @media(max-width:414px){
   .wrap{padding:0 16px}
@@ -458,27 +518,221 @@ h1 span{color:var(--accent-light)}
   *,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important}
   .reveal{opacity:1;transform:none}
 }
+
+/* ── nav right + language toggle ── */
+.nav-right{display:flex;align-items:center;gap:14px}
+.nav-ext{
+  font-family:var(--mono);font-size:0.75rem;color:var(--text-2);
+  text-decoration:none;letter-spacing:0.02em;transition:color .15s;
+}
+.nav-ext:hover{color:var(--text)}
+.nav-ext:focus-visible{outline:2px solid var(--accent);outline-offset:4px;border-radius:2px}
+
+/* ── docs workbench (second screen) ── */
+.wb{
+  display:grid;grid-template-columns:minmax(0,0.9fr) minmax(0,1.1fr);
+  gap:16px;align-items:start;
+}
+.wb-modules{display:grid;gap:10px;min-width:0}
+.mod-card{
+  appearance:none;-webkit-appearance:none;text-align:left;font:inherit;color:inherit;cursor:pointer;
+  display:flex;gap:13px;align-items:flex-start;
+  background:rgba(10,20,27,0.5);border:1px solid rgba(255,255,255,0.05);
+  border-radius:12px;padding:15px 17px;
+  transition:border-color .2s,background .2s,transform .2s;
+}
+.mod-card:hover{border-color:var(--border);transform:translateY(-1px)}
+.mod-card:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.mod-card.active{
+  border-color:var(--border-hover);
+  background:linear-gradient(135deg,rgba(10,110,92,0.16) 0%,rgba(10,20,27,0.66) 100%);
+}
+.mod-ic{
+  flex-shrink:0;width:34px;height:34px;display:flex;align-items:center;justify-content:center;
+  background:var(--accent-dim);border:1px solid var(--border);border-radius:8px;
+  color:var(--accent-light);font-family:var(--mono);font-size:0.72rem;font-weight:600;transition:all .2s;
+}
+.mod-card.active .mod-ic{background:var(--accent);color:#fff;box-shadow:0 0 16px var(--accent-glow)}
+.mod-body{min-width:0}
+.mod-name{font-size:0.9rem;font-weight:600;line-height:1.3;margin-bottom:3px}
+.mod-desc{font-size:0.75rem;color:var(--text-2);line-height:1.5}
+.mod-count{font-family:var(--mono);font-size:0.6rem;color:var(--text-3);margin-top:7px;letter-spacing:0.05em;text-transform:uppercase}
+
+.wb-components{display:grid;gap:12px;min-width:0}
+.comp-card{
+  background:rgba(10,20,27,0.54);border:1px solid rgba(255,255,255,0.05);
+  border-radius:12px;padding:19px 20px;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+}
+.comp-top{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+.comp-name{font-size:1rem;font-weight:700;line-height:1.25}
+.comp-tag{
+  font-family:var(--mono);font-size:0.6rem;letter-spacing:0.05em;text-transform:uppercase;
+  color:var(--text-3);border:1px solid rgba(255,255,255,0.06);border-radius:100px;
+  padding:3px 9px;white-space:nowrap;flex-shrink:0;
+}
+.comp-tag.planned{color:var(--accent-light);border-color:var(--border-hover);background:var(--accent-dim)}
+.comp-intro{color:var(--text-2);font-size:0.8rem;line-height:1.65;margin:9px 0 14px}
+.comp-cl{border-top:1px solid rgba(255,255,255,0.05);padding-top:12px;margin-bottom:14px}
+.comp-cl-head{display:flex;align-items:baseline;gap:8px;margin-bottom:5px;flex-wrap:wrap}
+.comp-cl-label{font-family:var(--mono);font-size:0.6rem;letter-spacing:0.06em;text-transform:uppercase;color:var(--text-3)}
+.comp-cl-ver{font-family:var(--mono);font-size:0.68rem;color:var(--accent-light)}
+.comp-cl-sum{font-size:0.76rem;color:var(--text-2);line-height:1.55}
+.comp-actions{display:flex;flex-wrap:wrap;gap:8px}
+.doc-btn{
+  appearance:none;-webkit-appearance:none;font:inherit;cursor:pointer;
+  display:inline-flex;align-items:center;gap:6px;min-height:34px;
+  border:1px solid var(--border);border-radius:6px;padding:8px 12px;
+  font-family:var(--mono);font-size:0.68rem;letter-spacing:0.04em;text-transform:uppercase;
+  color:var(--accent-light);background:var(--accent-dim);transition:all .15s;
+}
+.doc-btn:hover{border-color:var(--border-hover);background:rgba(10,110,92,0.2)}
+.doc-btn:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.doc-btn[disabled]{
+  color:var(--text-3);background:rgba(255,255,255,0.02);
+  border-color:rgba(255,255,255,0.05);cursor:not-allowed;
+}
+
+/* ── in-site doc reader (third layer) ── */
+.reader{
+  position:fixed;inset:0;z-index:200;background:var(--bg);
+  overflow-y:auto;overscroll-behavior:contain;
+}
+.reader[hidden]{display:none}
+.reader::before{
+  content:'';position:fixed;inset:0;z-index:0;pointer-events:none;
+  background-image:radial-gradient(var(--border) 1px,transparent 1px);
+  background-size:24px 24px;opacity:0.25;
+}
+.reader-bar{
+  position:sticky;top:0;z-index:10;
+  background:rgba(5,11,15,0.9);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  border-bottom:1px solid var(--border);
+}
+.reader-bar-inner{
+  max-width:1180px;margin:0 auto;padding:12px 24px;
+  display:flex;align-items:center;gap:16px;
+}
+.reader-back{
+  appearance:none;-webkit-appearance:none;font:inherit;cursor:pointer;
+  font-family:var(--mono);font-size:0.72rem;color:var(--text-2);
+  background:transparent;border:1px solid var(--border);border-radius:6px;padding:7px 12px;
+  transition:all .15s;white-space:nowrap;
+}
+.reader-back:hover{color:var(--text);border-color:var(--border-hover);background:var(--accent-dim)}
+.reader-back:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.reader-crumb{
+  flex:1;min-width:0;font-family:var(--mono);font-size:0.72rem;color:var(--text-3);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.reader-crumb b{color:var(--text)}
+.reader-switch{display:inline-flex;gap:4px;padding:3px;border:1px solid rgba(255,255,255,0.06);border-radius:8px;background:rgba(0,0,0,0.2);flex-shrink:0}
+.reader-switch button{
+  appearance:none;-webkit-appearance:none;font:inherit;cursor:pointer;
+  font-family:var(--mono);font-size:0.66rem;letter-spacing:0.03em;text-transform:uppercase;
+  color:var(--text-2);background:transparent;border:1px solid transparent;border-radius:6px;padding:6px 10px;transition:all .15s;
+}
+.reader-switch button.active{color:var(--accent-light);border-color:var(--border-hover);background:var(--accent-dim)}
+.reader-switch button:disabled{color:var(--text-3);cursor:not-allowed;opacity:.55}
+.reader-switch button:hover:not(:disabled):not(.active){color:var(--text)}
+.comp-cl-badge{
+  font-family:var(--mono);font-size:0.56rem;letter-spacing:0.04em;text-transform:uppercase;
+  color:var(--text-3);border:1px solid rgba(255,255,255,0.08);border-radius:100px;padding:1px 7px;
+}
+.reader-layout{
+  position:relative;z-index:1;
+  max-width:1180px;margin:0 auto;padding:0 24px;
+  display:grid;grid-template-columns:236px minmax(0,1fr) 196px;gap:32px;align-items:start;
+}
+.reader-sidebar{position:sticky;top:70px;max-height:calc(100vh - 90px);overflow:auto;padding:26px 0}
+.reader-toc{position:sticky;top:70px;max-height:calc(100vh - 90px);overflow:auto;padding:26px 0}
+.reader-main{min-width:0;padding:26px 0 96px}
+.rs-group{margin-bottom:22px}
+.rs-group-title{font-family:var(--mono);font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;color:var(--accent-light);margin-bottom:10px}
+.rs-comp{margin-bottom:12px}
+.rs-comp-name{font-size:0.78rem;color:var(--text);font-weight:600;margin:0 0 4px}
+.rs-link{
+  display:block;font-size:0.74rem;color:var(--text-2);text-decoration:none;
+  padding:4px 10px;border-radius:5px;border-left:2px solid transparent;transition:all .15s;
+}
+.rs-link:hover{color:var(--text);background:rgba(10,110,92,0.08)}
+.rs-link.active{color:var(--accent-light);border-left-color:var(--accent-light);background:var(--accent-dim)}
+.rs-link.disabled{color:var(--text-3);cursor:not-allowed}
+.rs-link.disabled:hover{background:none}
+.toc-title{font-family:var(--mono);font-size:0.6rem;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-3);margin-bottom:12px}
+.toc-link{display:block;font-size:0.72rem;color:var(--text-2);text-decoration:none;padding:4px 0;line-height:1.4;border-left:2px solid transparent;padding-left:10px;transition:color .15s,border-color .15s}
+.toc-link.lvl3{padding-left:22px;font-size:0.68rem}
+.toc-link:hover{color:var(--accent-light)}
+.toc-link.active{color:var(--accent-light);border-left-color:var(--accent-light)}
+
+/* markdown-rendered doc body */
+.doc .doc-kicker{font-family:var(--mono);font-size:0.68rem;letter-spacing:0.08em;text-transform:uppercase;color:var(--accent-light);margin-bottom:12px}
+.doc .doc-source{font-family:var(--mono);font-size:0.68rem;color:var(--text-3);margin:-4px 0 18px}
+.doc .doc-source a{color:var(--text-2)}
+.doc h1{font-family:var(--sans);font-size:1.85rem;font-weight:700;letter-spacing:-0.02em;line-height:1.2;margin:0 0 10px}
+.doc h2{font-size:1.28rem;font-weight:700;margin:34px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border);scroll-margin-top:84px}
+.doc h3{font-size:1.02rem;font-weight:600;margin:24px 0 10px;scroll-margin-top:84px}
+.doc p{color:var(--text-2);margin:0 0 14px;line-height:1.75}
+.doc ul,.doc ol{color:var(--text-2);margin:0 0 14px;padding-left:22px;display:grid;gap:6px}
+.doc li{line-height:1.65}
+.doc li::marker{color:var(--text-3)}
+.doc a{color:var(--accent-light);text-decoration:none}
+.doc a:hover{text-decoration:underline}
+.doc strong{color:var(--text);font-weight:600}
+.doc code{font-family:var(--mono);font-size:0.82em;color:var(--accent-light);background:rgba(10,110,92,0.1);border:1px solid var(--border);border-radius:4px;padding:1px 5px}
+.doc pre{background:rgba(0,0,0,0.45);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:8px;padding:14px 16px;overflow-x:auto;margin:0 0 16px}
+.doc pre code{background:none;border:none;padding:0;color:var(--text);font-size:0.8rem;line-height:1.6}
+.doc-release-date{font-family:var(--mono);font-size:0.72rem;color:var(--text-3);margin:-6px 0 16px}
+.doc-empty{color:var(--text-2);border:1px solid var(--border);border-radius:12px;background:rgba(10,20,27,0.5);padding:28px}
+.doc-empty h2{border:none;margin:0 0 8px;padding:0;font-size:1.15rem}
+.doc-empty p{margin:0}
+
+/* ── site footer ── */
+.site-footer{position:relative;z-index:1;border-top:1px solid rgba(255,255,255,0.04)}
+.site-footer .wrap{
+  display:flex;justify-content:space-between;align-items:center;
+  padding-top:20px;padding-bottom:20px;font-family:var(--mono);font-size:0.6875rem;
+}
+
+@media(max-width:768px){
+  .nav-right{gap:10px}
+  .wb{grid-template-columns:1fr}
+  .site-footer .wrap{flex-direction:column;gap:12px;text-align:center}
+}
+@media(max-width:960px){
+  .reader-layout{grid-template-columns:1fr}
+  .reader-toc{display:none}
+  .reader-main{order:-1;padding:20px 0 40px}
+  .reader-sidebar{order:1;position:static;max-height:none;padding:20px 0 40px;border-top:1px solid var(--border)}
+}
+@media(max-width:600px){
+  .reader-bar-inner{gap:8px 10px;flex-wrap:wrap}
+  .reader-crumb{display:none}
+  .reader-back{order:-1}
+  .reader-switch{flex:1 1 auto}
+}
 </style>
 </head>
 <body>
 
 <nav>
   <div class="wrap">
-    <a href="/" class="nav-logo"><span>&gt;_</span> ANOLISA</a>
-    <ul class="nav-links">
-      <li><a href="#anolisa-cli-changelog">Changelog</a></li>
-      <li><a href="https://github.com/alibaba/anolisa" target="_blank" rel="noopener">GitHub</a></li>
-      <li><a href="https://github.com/alibaba/anolisa/tree/main/docs" target="_blank" rel="noopener">Docs</a></li>
-    </ul>
+    <a href="./" class="nav-logo"><span>&gt;_</span> ANOLISA</a>
+    <div class="nav-right">
+      <a class="nav-ext" href="https://github.com/alibaba/anolisa" target="_blank" rel="noopener">GitHub</a>
+      <div class="lang-toggle" id="nav-lang" aria-label="Language">
+        <button class="lang-btn active" type="button" data-lang="en">EN</button>
+        <button class="lang-btn" type="button" data-lang="zh" lang="zh">中文</button>
+      </div>
+    </div>
   </div>
 </nav>
 
 <section class="hero">
   <div class="wrap">
-    <div class="badge"><span class="badge-dot"></span>Agentic OS 0.6</div>
+    <div class="badge"><span class="badge-dot"></span>Agentic OS 1.0</div>
     <h1><span>&gt;_</span> ANOLISA</h1>
-    <p class="hero-sub">Agent-native OS layer.<br>Sandbox isolation, kernel observability, token&nbsp;optimization.<br>Managed as one system, deployed in one command.</p>
-    <p class="hero-tagline">The operating system's user has changed. ANOLISA makes every Agent a first-class citizen of the&nbsp;kernel.</p>
+    <p class="hero-sub" id="hero-sub">Agent-native OS layer.<br>Sandbox isolation, kernel observability, token&nbsp;optimization.<br>Managed as one system, deployed in one command.</p>
+    <p class="hero-tagline" id="hero-tagline">The operating system's user has changed. ANOLISA makes every Agent a first-class citizen of the&nbsp;kernel.</p>
 
     <div class="install-bar" id="install-bar">
       <div class="install-cmd" id="cmd-block" tabindex="0" role="button" aria-label="Copy install command">
@@ -492,10 +746,10 @@ h1 span{color:var(--accent-light)}
     </div>
 
     <div class="agent-bar">
-      <div class="agent-label">TALK TO YOUR AGENT</div>
+      <div class="agent-label" id="agent-label">TALK TO YOUR AGENT</div>
       <div class="agent-prompt">
         <div class="agent-prompt-cmd" id="agent-block" tabindex="0" role="button" aria-label="Copy agent prompt">
-          <code>Read <span class="hl">https://agentic-os.sh/agents/</span> to learn how to use ANOLISA, then help me set it up.</code>
+          <code id="agent-code">Read <span class="hl">https://agentic-os.sh/agents/</span> to learn how to use ANOLISA, then help me set it up.</code>
         </div>
         <button class="copy-btn" id="agent-copy-btn" type="button" aria-label="Copy">
           <svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
@@ -506,7 +760,7 @@ h1 span{color:var(--accent-light)}
     </div>
 
     <div class="scroll-cue" id="scroll-cue" role="button" tabindex="0" aria-label="Scroll to capabilities">
-      <span>SCROLL</span>
+      <span id="scroll-label">SCROLL</span>
       <div class="scroll-arrow"></div>
     </div>
   </div>
@@ -516,70 +770,52 @@ h1 span{color:var(--accent-light)}
   <section id="capabilities">
     <div class="cap-inner wrap">
       <div class="cap-header reveal">
-        <div class="cap-label">Capabilities</div>
-        <h2 class="cap-title">Every agent deserves an <em>operating system</em> that understands it.</h2>
+        <div class="cap-label" id="cap-label">Documentation</div>
+        <h2 class="cap-title" id="cap-title">Every agent deserves an <em>operating system</em> that understands it.</h2>
       </div>
 
-      <div class="bento">
-        <div class="bento-item span-8 highlight reveal reveal-d1">
-          <div class="bento-icon">&gt;_</div>
-          <div class="bento-h">Copilot Shell</div>
-          <p class="bento-p">Terminal-native AI copilot with streaming tool use. Works with any model provider. Contextual autocomplete, operation orchestration, and self-healing diagnostics.</p>
-        </div>
-        <div class="bento-item span-4 reveal reveal-d2">
-          <div class="bento-icon">#!</div>
-          <div class="bento-h">OS-level Sandbox</div>
-          <p class="bento-p">Seccomp + namespace isolation per agent. Least-privilege at the kernel boundary.</p>
-        </div>
-        <div class="bento-item span-5 reveal reveal-d1">
-          <div class="bento-icon">~$</div>
-          <div class="bento-h">Agent Observability</div>
-          <p class="bento-p">eBPF-based kernel tracing for syscalls, file access, and network. Zero overhead.</p>
-        </div>
-        <div class="bento-item span-7 reveal reveal-d2">
-          <div class="bento-icon">%&lt;</div>
-          <div class="bento-h">Token Optimization</div>
-          <p class="bento-p">Transparent prompt caching and context compression at the OS level. Reduce LLM costs by up to 30% without changing agent code.</p>
-        </div>
-        <div class="bento-item span-6 reveal reveal-d3">
-          <div class="bento-icon">!</div>
-          <div class="bento-h">AgentSecCore</div>
-          <p class="bento-p">Security kernel for agent runtimes. Traditional OS security asks "can it run?" &mdash; AgentSecCore asks "is it running correctly?"</p>
-        </div>
-        <div class="bento-item span-6 reveal reveal-d4">
-          <div class="bento-icon">^^</div>
-          <div class="bento-h">Unified CLI</div>
-          <p class="bento-p">One tool to enable, disable, update, and diagnose every component. Declarative manifests, idempotent operations.</p>
-        </div>
+      <div class="wb reveal reveal-d1">
+        <div class="wb-modules" id="wb-modules" aria-label="Capability modules"></div>
+        <div class="wb-components" id="wb-components" aria-live="polite" aria-label="Components"></div>
       </div>
 
     </div>
   </section>
 
-  <section id="anolisa-cli-changelog">
-    <div class="wrap">
-      <div class="changelog-head reveal">
-        <div class="changelog-copy">
-          <div class="cap-label">Changelog</div>
-          <h2 class="cap-title">ANOLISA component release notes.</h2>
-          <p class="changelog-sub">Stable updates across the CLI, runtime components, adapters, and agent operating layer.</p>
-        </div>
-        <a class="source-link" id="source-link" href="https://github.com/alibaba/anolisa/blob/main/src/anolisa/CHANGELOG.md" target="_blank" rel="noopener">Source changelog</a>
-      </div>
-
-      <div class="changelog-controls">
-        <div class="component-tabs" id="component-tabs" role="tablist" aria-label="Component changelog"></div>
-        <div class="lang-toggle" aria-label="Changelog language">
-          <button class="lang-btn active" type="button" data-lang="en">EN</button>
-          <button class="lang-btn" type="button" data-lang="zh">中文</button>
-        </div>
-      </div>
-
-      <p class="component-summary" id="component-summary">Command-line runtime, installer, and agent operating layer.</p>
-
+  <div hidden id="changelog-legacy" aria-hidden="true">
       <div class="release-list" id="release-list">
         <!-- ANOLISA_CLI_CHANGELOG_START -->
-        <article class="release reveal reveal-d1" id="anolisa-cli-0-1-19">
+        <article class="release reveal reveal-d1" id="anolisa-cli-0-1-20">
+          <div class="release-meta">
+            <div class="release-version">0.1.20</div>
+            <div class="release-date">2026-07-03</div>
+          </div>
+          <div class="release-body">
+          <div class="release-body-section">
+            <h3>Added</h3>
+            <ul>
+              <li>ANOLISA can now be distributed as <code>@anolisa/cli</code> with Linux x64 and arm64 binaries.</li>
+              <li><code>repo.toml</code> now enables the npm backend for component distribution.</li>
+            </ul>
+          </div>
+          <div class="release-body-section">
+            <h3>Changed</h3>
+            <ul>
+              <li><code>anolisa list</code> now shows local state, ownership, and next action for each component.</li>
+              <li><code>anolisa list --json</code> now includes RPM package, version, architecture, and source repository details.</li>
+            </ul>
+          </div>
+          <div class="release-body-section">
+            <h3>Fixed</h3>
+            <ul>
+              <li>RPM installs and updates now keep system repositories available for dependencies.</li>
+              <li>Adapter commands now distinguish missing component manifests from invalid manifests.</li>
+            </ul>
+          </div>
+          </div>
+        </article>
+
+        <article class="release reveal reveal-d2" id="anolisa-cli-0-1-19">
           <div class="release-meta">
             <div class="release-version">0.1.19</div>
             <div class="release-date">2026-07-02</div>
@@ -598,7 +834,7 @@ h1 span{color:var(--accent-light)}
           </div>
         </article>
 
-        <article class="release reveal reveal-d2" id="anolisa-cli-0-1-18">
+        <article class="release reveal reveal-d3" id="anolisa-cli-0-1-18">
           <div class="release-meta">
             <div class="release-version">0.1.18</div>
             <div class="release-date">2026-07-01</div>
@@ -637,7 +873,7 @@ h1 span{color:var(--accent-light)}
           </div>
         </article>
 
-        <article class="release reveal reveal-d3" id="anolisa-cli-0-1-17">
+        <article class="release reveal reveal-d4" id="anolisa-cli-0-1-17">
           <div class="release-meta">
             <div class="release-version">0.1.17</div>
             <div class="release-date">2026-06-30</div>
@@ -676,7 +912,7 @@ h1 span{color:var(--accent-light)}
           </div>
         </article>
 
-        <article class="release reveal reveal-d4" id="anolisa-cli-0-1-16">
+        <article class="release reveal reveal-d5" id="anolisa-cli-0-1-16">
           <div class="release-meta">
             <div class="release-version">0.1.16</div>
             <div class="release-date">2026-06-29</div>
@@ -720,38 +956,6 @@ h1 span{color:var(--accent-light)}
           </div>
           </div>
         </article>
-
-        <article class="release reveal reveal-d5" id="anolisa-cli-0-1-15">
-          <div class="release-meta">
-            <div class="release-version">0.1.15</div>
-            <div class="release-date">2026-06-25</div>
-          </div>
-          <div class="release-body">
-          <div class="release-body-section">
-            <h3>Added</h3>
-            <ul>
-              <li><code>anolisa doctor</code> now reports component health, dependency status, and suggested fixes.</li>
-              <li>Raw components can now declare runtime dependencies for install and update preflight checks.</li>
-              <li><code>anolisa install --dry-run</code> now previews runtime dependency status for raw components.</li>
-            </ul>
-          </div>
-          <div class="release-body-section">
-            <h3>Changed</h3>
-            <ul>
-              <li><code>anolisa install</code> and <code>update &lt;component&gt;</code> now refuse raw components with missing runtime dependencies before changing files.</li>
-              <li><code>anolisa restart &lt;component&gt;</code> now restarts service units shipped by RPM-backed components.</li>
-              <li><code>anolisa restart &lt;component&gt;</code> now shows guidance for RPM-backed template services instead of failing.</li>
-            </ul>
-          </div>
-          <div class="release-body-section">
-            <h3>Fixed</h3>
-            <ul>
-              <li><code>anolisa adapter enable</code> now expands <code>{datadir}</code> from the package that provided the adapter metadata.</li>
-              <li>After <code>anolisa uninstall</code> or <code>forget</code>, adapter commands no longer see stale component metadata.</li>
-            </ul>
-          </div>
-          </div>
-        </article>
         <!-- ANOLISA_CLI_CHANGELOG_END -->
       </div>
 
@@ -762,7 +966,7 @@ h1 span{color:var(--accent-light)}
         <!-- ANOLISA_CHANGELOG_DATA_START -->
         <script type="application/json" id="changelog-data">{
   "limit": 5,
-  "latestVersion": "0.1.19",
+  "latestVersion": "0.1.20",
   "components": [
     {
       "id": "anolisa",
@@ -773,6 +977,33 @@ h1 span{color:var(--accent-light)}
         "en": {
           "label": "EN",
           "releases": [
+            {
+              "version": "0.1.20",
+              "date": "2026-07-03",
+              "sections": [
+                {
+                  "title": "Added",
+                  "items": [
+                    "ANOLISA can now be distributed as `@anolisa/cli` with Linux x64 and arm64 binaries.",
+                    "`repo.toml` now enables the npm backend for component distribution."
+                  ]
+                },
+                {
+                  "title": "Changed",
+                  "items": [
+                    "`anolisa list` now shows local state, ownership, and next action for each component.",
+                    "`anolisa list --json` now includes RPM package, version, architecture, and source repository details."
+                  ]
+                },
+                {
+                  "title": "Fixed",
+                  "items": [
+                    "RPM installs and updates now keep system repositories available for dependencies.",
+                    "Adapter commands now distinguish missing component manifests from invalid manifests."
+                  ]
+                }
+              ]
+            },
             {
               "version": "0.1.19",
               "date": "2026-07-02",
@@ -844,14 +1075,14 @@ h1 span{color:var(--accent-light)}
                     "`anolisa list --enabled` is now a hidden alias for `--installed`.",
                     "`ANOLISA_CATALOG_URL` no longer changes list sources; configure `repo.toml` instead.",
                     "`anolisa install`, `status`, `adopt`, and `repair` now resolve RPM package aliases from `components.toml`.",
-                    "`anolisa status` now suggests `sudo anolisa adopt \u003ccomponent>` for untracked RPM components."
+                    "`anolisa status` now suggests `sudo anolisa adopt \u003ccomponent\u003e` for untracked RPM components."
                   ]
                 },
                 {
                   "title": "Fixed",
                   "items": [
-                    "`anolisa status \u003cRPM package>` now reports the canonical component row when an alias is installed.",
-                    "`anolisa repair \u003cRPM package>` now refreshes the canonical component row when an alias is used.",
+                    "`anolisa status \u003cRPM package\u003e` now reports the canonical component row when an alias is installed.",
+                    "`anolisa repair \u003cRPM package\u003e` now refreshes the canonical component row when an alias is used.",
                     "Non-root `anolisa osbase` mutations now reach the system helper instead of failing install-mode checks.",
                     "Commands now reject root `--install-mode user` before writing ambiguous user-mode state.",
                     "System-mode write commands now fail before changes when sudo is missing.",
@@ -902,41 +1133,39 @@ h1 span{color:var(--accent-light)}
                   ]
                 }
               ]
-            },
-            {
-              "version": "0.1.15",
-              "date": "2026-06-25",
-              "sections": [
-                {
-                  "title": "Added",
-                  "items": [
-                    "`anolisa doctor` now reports component health, dependency status, and suggested fixes.",
-                    "Raw components can now declare runtime dependencies for install and update preflight checks.",
-                    "`anolisa install --dry-run` now previews runtime dependency status for raw components."
-                  ]
-                },
-                {
-                  "title": "Changed",
-                  "items": [
-                    "`anolisa install` and `update \u003ccomponent>` now refuse raw components with missing runtime dependencies before changing files.",
-                    "`anolisa restart \u003ccomponent>` now restarts service units shipped by RPM-backed components.",
-                    "`anolisa restart \u003ccomponent>` now shows guidance for RPM-backed template services instead of failing."
-                  ]
-                },
-                {
-                  "title": "Fixed",
-                  "items": [
-                    "`anolisa adapter enable` now expands `{datadir}` from the package that provided the adapter metadata.",
-                    "After `anolisa uninstall` or `forget`, adapter commands no longer see stale component metadata."
-                  ]
-                }
-              ]
             }
           ]
         },
         "zh": {
           "label": "中文",
           "releases": [
+            {
+              "version": "0.1.20",
+              "date": "2026-07-03",
+              "sections": [
+                {
+                  "title": "新增",
+                  "items": [
+                    "ANOLISA 现可通过 `@anolisa/cli` 发布 Linux x64 和 arm64 二进制。",
+                    "`repo.toml` 现启用 npm 后端用于组件分发。"
+                  ]
+                },
+                {
+                  "title": "变更",
+                  "items": [
+                    "`anolisa list` 现显示本地状态、归属和下一步操作。",
+                    "`anolisa list --json` 现包含 RPM 包名、版本、架构和来源。"
+                  ]
+                },
+                {
+                  "title": "修复",
+                  "items": [
+                    "RPM 安装和更新现可继续使用系统软件源解析依赖。",
+                    "Adapter 命令现区分缺失清单和无效清单。"
+                  ]
+                }
+              ]
+            },
             {
               "version": "0.1.19",
               "date": "2026-07-02",
@@ -1014,8 +1243,8 @@ h1 span{color:var(--accent-light)}
                 {
                   "title": "修复",
                   "items": [
-                    "`status \u003cRPM 包>` 现显示规范组件行。",
-                    "`repair \u003cRPM 包>` 现刷新规范组件行。",
+                    "`status \u003cRPM 包\u003e` 现显示规范组件行。",
+                    "`repair \u003cRPM 包\u003e` 现刷新规范组件行。",
                     "非 root `osbase` 变更命令现可进入系统 helper。",
                     "root 用户模式现会在写入前被拒绝。",
                     "缺少 sudo 的系统模式写入现提前失败。",
@@ -1066,35 +1295,6 @@ h1 span{color:var(--accent-light)}
                   ]
                 }
               ]
-            },
-            {
-              "version": "0.1.15",
-              "date": "2026-06-25",
-              "sections": [
-                {
-                  "title": "新增",
-                  "items": [
-                    "`anolisa doctor` 现输出组件健康、依赖和修复建议。",
-                    "raw 组件现可声明运行依赖供安装和更新检查。",
-                    "`anolisa install --dry-run` 现预览 raw 组件依赖状态。"
-                  ]
-                },
-                {
-                  "title": "变更",
-                  "items": [
-                    "`anolisa install` 和 `update \u003ccomponent>` 缺依赖时先停止。",
-                    "`anolisa restart \u003ccomponent>` 现重启 RPM 组件服务。",
-                    "`anolisa restart \u003ccomponent>` 遇到 RPM 模板服务时给出指引。"
-                  ]
-                },
-                {
-                  "title": "修复",
-                  "items": [
-                    "`anolisa adapter enable` 现按包内元数据展开 `{datadir}`。",
-                    "`anolisa uninstall` 和 `forget` 后 adapter 不再见旧元数据。"
-                  ]
-                }
-              ]
             }
           ]
         }
@@ -1103,12 +1303,32 @@ h1 span{color:var(--accent-light)}
     {
       "id": "copilot-shell",
       "label": "Copilot Shell",
-      "summary": "Terminal-native agent shell and interactive CLI.",
+      "summary": "Product-level shell entry for cosh and cosh-ng.",
       "sourceUrl": "https://github.com/alibaba/anolisa/blob/main/src/copilot-shell/CHANGELOG.md",
       "languages": {
         "en": {
           "label": "EN",
           "releases": [
+            {
+              "version": "2.6.1",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "Added npm packaging support for CLI and cosh. (#1307)",
+                    "Added multi-hook toggles support. (#1206)",
+                    "Fixed tips banner to stay visible after initial login. (#1308)",
+                    "Fixed Ctrl+O to prioritize error details over compact mode. (#1202)",
+                    "Fixed system-profile BINDIR to follow PREFIX. (#1193)",
+                    "Fixed AfterModel hook non-blocking notifications not surfacing. (#1182)",
+                    "Updated component docs to migrate into user-guide and developer-guide. (#1295)",
+                    "Added copilot-shell zh/en user and developer docs. (#1236)",
+                    "Fixed CONTRIBUTING.md file mode from symlink to regular file. (65601f06)"
+                  ]
+                }
+              ]
+            },
             {
               "version": "2.6.0",
               "date": "",
@@ -1186,22 +1406,132 @@ h1 span{color:var(--accent-light)}
                   ]
                 }
               ]
-            },
+            }
+          ]
+        },
+        "zh": {
+          "label": "中文",
+          "releases": []
+        }
+      }
+    },
+    {
+      "id": "cosh-ng",
+      "label": "cosh-ng",
+      "summary": "Next-generation Copilot Shell implementation.",
+      "sourceUrl": "https://github.com/alibaba/anolisa/blob/main/src/cosh-ng/CHANGELOG.md",
+      "languages": {
+        "en": {
+          "label": "EN",
+          "releases": [
             {
-              "version": "2.3.0",
-              "date": "",
+              "version": "0.2.0",
+              "date": "2026-05-16",
               "sections": [
                 {
                   "title": "Release",
                   "items": [
-                    "**BREAKING** Removed qwen-oauth authentication support. (#455)",
-                    "Added auto memory background extraction system. (#465)",
-                    "Added full shell command display in hook-ask and exec confirm dialogs. (#452)",
-                    "Added esc key to cancel running slash commands. (#290)",
-                    "Fixed JavaScript heap out of memory during long sessions. (#462)",
-                    "Fixed missing allow decision reason in UI when systemMessage is absent. (#435)",
-                    "Improved test coverage with standalone tests for ExecCommandPreview. (#460)",
-                    "Updated hook docs to clarify difference between systemMessage and reason. (#436)"
+                    "Hardening + audit-subsystem release. Workspace versions bumped to `0.2.0` together with the release profile and lockfile commit."
+                  ]
+                },
+                {
+                  "title": "Added",
+                  "items": [
+                    "**`audit` subsystem** with PEP/PDP/log split: `cosh audit check` / `cosh audit log` for command-safety gating and per-session retrieval.",
+                    "**Workspace release profile** (`opt-level = 3`, `lto = true`, `strip = true`, `codegen-units = 1`), committed `Cargo.lock`, workspace-level dependency pinning, and native CA cert support.",
+                    "**Command timeouts, input validation, and panic-safe JSON output** across `cosh-cli` and `cosh-platform` so a panic still emits a `CoshResponse` envelope on stderr instead of an empty exit.",
+                    "**`forbid(unsafe_code)`** on `cosh-cli` / `cosh-platform`, plus `svc list --state` filter validation against an allow-list.",
+                    "**`pkg search` cross-references installed status** so results show which matches are already installed.",
+                    "**`ResponseMeta.warning`** field for non-fatal warnings; `audit` responses are explicitly marked as stub via this field.",
+                    "**LLM tool surface expansion** in cosh-tui: pkg / svc / checkpoint wrapper tools, plus `svc enable` / `svc disable --dry-run`.",
+                    "**Timeouts + exponential-backoff retries** on LLM and external command tools in cosh-tui; 60 s shell-tool timeout."
+                  ]
+                },
+                {
+                  "title": "Changed",
+                  "items": [
+                    "TUI `/help` aligned with the full command set; title bar version and markdown prefix stripping corrected.",
+                    "Clippy warnings resolved across the workspace; dead-code allowances dropped; test code aligned with production lint level.",
+                    "Build warnings eliminated and version detection improved across cosh-tui / cosh-platform."
+                  ]
+                },
+                {
+                  "title": "Fixed",
+                  "items": [
+                    "**Shell safety check tokenized** to close tab / newline / redirect / chain bypasses; substring matching on raw command strings replaced with whitespace (incl. `\\t` / `\\n` / `\\r`) tokenization and metacharacter rejection (`;` `|` `\u0026` `\u003e` `\u003c` `$` `` ` `` `(` `)` `{` `}`) — `is_safe_command` in `crates/cosh-tui/src/tools/shell.rs`.",
+                    "Forbidden tool calls are now blocked even under Yolo approval mode.",
+                    "`cosh-cli` wrapper tool output is bounded so a chatty subcommand cannot blow the LLM context window.",
+                    "Tool-call IDs synthesized via a process-wide counter to guarantee uniqueness across the agentic loop.",
+                    "`settings.json` and session files written atomically with `0600` permissions.",
+                    "Runtime bounds enforced for the agentic loop, history, config, and tool messages; scrollback bounded with UTF-8-safe truncation.",
+                    "Panic hook installed in the TUI; history navigation recovered after panic.",
+                    "ws-ckpt IPC response size bounded to 64 MiB.",
+                    "Nonexistent systemd services detected via `LoadState=not-found` instead of misclassifying them as \"inactive\"."
+                  ]
+                },
+                {
+                  "title": "Security",
+                  "items": [
+                    "Audit-stub `recoverable` / `hint` semantics surface clearly to agents via the standard `CoshError` envelope.",
+                    "Atomic-rename + `0600` perms on credential-bearing files."
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.1.0",
+              "date": "2026-05-10",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "Initial public-shaped release after renaming the workspace from `agos-core` to `cosh-ng` and adding the interactive TUI crate."
+                  ]
+                },
+                {
+                  "title": "Added",
+                  "items": [
+                    "**4-crate workspace**: `cosh-types`, `cosh-platform`, `cosh-cli`, `cosh-tui` with strict dependency direction `cosh-cli` / `cosh-tui` → `cosh-platform` → `cosh-types`.",
+                    "**`cosh` CLI binary** with dual-mode dispatch: `cosh` (no args) execs into `cosh-tui`, `cosh \u003csubsystem\u003e \u003caction\u003e` returns structured JSON.",
+                    "**Cross-distro `pkg` subsystem**: `install` / `remove` / `search` / `list` routed across `dnf` / `apt-get` (`apt-cache` for search) / `zypper` based on `Distro::detect()` reading `/etc/os-release`.",
+                    "**`svc` subsystem** over `systemctl`: `status` / `start` / `stop` / `restart` / `enable` / `disable` / `list`, with uptime and corrected column mapping in `list`.",
+                    "**`checkpoint` subsystem** talking to the `ws-ckpt` daemon over Unix-socket IPC; bincode wire format with 4-byte LE length prefix and explicit protocol versioning + error handling. Commands: `init` / `create` / `list` / `restore` / `recover` / `delete` / `diff` / `cleanup` / `status`.",
+                    "**`cosh-tui`** interactive TUI on `ratatui` + `crossterm`: slash-command system with auto-complete, session management, theming, custom border set, echo-on-submit.",
+                    "**Agentic loop with cosh-cli wrapper tools** in cosh-tui, bringing pkg / svc / checkpoint tooling to the LLM (initially shipped as `cosh-tui v0.4.0`).",
+                    "**LLM chat integration** with config-driven providers and UI surfacing.",
+                    "**Unified `settings.json` V2 config** consolidating prior scattered config files.",
+                    "**AES-256-GCM decryption** for encrypted credentials.",
+                    "**macOS detection + Homebrew backend** in `cosh-platform`, with unit tests.",
+                    "**Unified JSON envelope** `CoshResponse\u003cT\u003e` with `ok` / `data` / `error` / `meta`, classified `CoshError` carrying `recoverable` and `hint` for agent retry decisions.",
+                    "**Integration tests** for `pkg` and `checkpoint` CLI commands."
+                  ]
+                },
+                {
+                  "title": "Changed",
+                  "items": [
+                    "Workspace renamed from `agos-core` (with `agos-types` / `agos-platform` / `agos-cli`) to `cosh-ng` (with `cosh-*` crates); `agos-cli` and `agos-platform` removed in the same commit.",
+                    "`cosh-tui` checkpoint tooling adapted to the new daemon protocol."
+                  ]
+                },
+                {
+                  "title": "Fixed",
+                  "items": [
+                    "`cosh-cli` stdout validated as JSON before forwarding to the LLM, preventing parser confusion on malformed bytes."
+                  ]
+                },
+                {
+                  "title": "Release",
+                  "items": [
+                    "## [pre-0.1.0] - 2026-05-03 → 2026-05-08",
+                    "Pre-rename `agos-core` foundation."
+                  ]
+                },
+                {
+                  "title": "Added",
+                  "items": [
+                    "Initial 2-crate workspace `agos-types` + `agos-platform`.",
+                    "`agos-cli` cross-distro CLI prototype with `pkg`, `svc`, `checkpoint`, `audit` command shapes.",
+                    "MVP v2 CLI Gateway architecture document and bilingual (English / Chinese) usage guide."
                   ]
                 }
               ]
@@ -1264,7 +1594,7 @@ h1 span{color:var(--accent-light)}
                   ]
                 },
                 {
-                  "title": "Daemon & Telemetry",
+                  "title": "Daemon \u0026 Telemetry",
                   "items": [
                     "Added daemon service with systemd integration and RPM build support. (#1090)",
                     "Exposed SQL query endpoint at daemon for observability queries. (#1042)",
@@ -1272,7 +1602,7 @@ h1 span{color:var(--accent-light)}
                     "Added telemetry schema definition and SLS JSONL writer. (#977, #1008)",
                     "Passed agent_name to telemetry data for multi-agent identification. (#1032)",
                     "Added logging system for structured agent-sec-cli output. (#651)",
-                    "Added security daemon socket fallback under `/run/user/\u003cuid>` for user-scoped deployments. (#1129)"
+                    "Added security daemon socket fallback under `/run/user/\u003cuid\u003e` for user-scoped deployments. (#1129)"
                   ]
                 },
                 {
@@ -1294,7 +1624,7 @@ h1 span{color:var(--accent-light)}
                   ]
                 },
                 {
-                  "title": "Adapter & Build",
+                  "title": "Adapter \u0026 Build",
                   "items": [
                     "Added ANOLISA CLI component.toml for adapter manifest integration. (#1067)",
                     "Added systemd-rpm-macros as RPM build dependency. (#1156)"
@@ -1326,7 +1656,7 @@ h1 span{color:var(--accent-light)}
                   ]
                 },
                 {
-                  "title": "Adapter & Manifest",
+                  "title": "Adapter \u0026 Manifest",
                   "items": [
                     "Added standalone ANOLISA adapter entry `anolisa-for-openclaw` to package sec-core OpenClaw adapter scripts and drive install/detect/uninstall via the adapter manifest. (#549)",
                     "Added Hermes adapter runner: refactored the OpenClaw entry into a target-agnostic `anolisa-adapter-runner` and added `anolisa-for-hermes` wrapper, with per-agent adapter directory layout under sec-core. (#617)",
@@ -1355,7 +1685,7 @@ h1 span{color:var(--accent-light)}
                   ]
                 },
                 {
-                  "title": "Security Observability — Agent run metrics & posture insights",
+                  "title": "Security Observability — Agent run metrics \u0026 posture insights",
                   "items": [
                     "Added security observability schema, metrics definition, and CLI with jsonl writer for agent runs. (#488)",
                     "Added openclaw plugin for security observability. (#515)",
@@ -1380,7 +1710,7 @@ h1 span{color:var(--accent-light)}
                   ]
                 },
                 {
-                  "title": "Correlation & Tracing Context",
+                  "title": "Correlation \u0026 Tracing Context",
                   "items": [
                     "Unified caller tracing context across CLI, OpenClaw, and cosh with `--trace-context` JSON and SQLite schema v2. (#569)",
                     "Supported correlation context in hermes agent plugin. (#590)",
@@ -1410,7 +1740,7 @@ h1 span{color:var(--accent-light)}
                   ]
                 },
                 {
-                  "title": "Security Middleware & Event System",
+                  "title": "Security Middleware \u0026 Event System",
                   "items": [
                     "Fixed TOCTOU race condition at sqldb read path. (#546)",
                     "Made SQLAlchemy lazy import for non-DB subcommands. (#581)",
@@ -1426,7 +1756,7 @@ h1 span{color:var(--accent-light)}
                   ]
                 },
                 {
-                  "title": "Toolchain & CI",
+                  "title": "Toolchain \u0026 CI",
                   "items": [
                     "Added build-all support with local space install for sec-core. (#527)",
                     "Added hermes plugin install for rpmbuild and from-scratch build. (#577)",
@@ -1448,7 +1778,7 @@ h1 span{color:var(--accent-light)}
                   ]
                 },
                 {
-                  "title": "Security Middleware & Event System",
+                  "title": "Security Middleware \u0026 Event System",
                   "items": [
                     "Refactored security_events SQLite storage to SQLAlchemy ORM with multi-table extensibility and typed repositories. (#459)"
                   ]
@@ -1475,7 +1805,7 @@ h1 span{color:var(--accent-light)}
                   ]
                 },
                 {
-                  "title": "Toolchain & CI",
+                  "title": "Toolchain \u0026 CI",
                   "items": [
                     "Added coverage report for sec-core CI. (#431)",
                     "Enabled rpmbuild and e2e test CI for main branch. (#432)"
@@ -1488,7 +1818,7 @@ h1 span{color:var(--accent-light)}
               "date": "",
               "sections": [
                 {
-                  "title": "Prompt Scanner — Multi-layer prompt injection & jailbreak detection",
+                  "title": "Prompt Scanner — Multi-layer prompt injection \u0026 jailbreak detection",
                   "items": [
                     "Added prompt injection/jailbreak detection scanner architecture with L1 rule engine (YAML-based) and L2 ML classifier (Prompt Guard 2). (#253)",
                     "Integrated prompt scanner into cosh hook and openclaw plugin with security middleware lifecycle. (#261, #294)",
@@ -1525,10 +1855,10 @@ h1 span{color:var(--accent-light)}
                   ]
                 },
                 {
-                  "title": "Security Middleware & Event System",
+                  "title": "Security Middleware \u0026 Event System",
                   "items": [
                     "Added security middleware framework with unified CLI entry point and metrics integration. (#121, #220)",
-                    "Added sqldb writer & reader with query command at CLI interface for security event persistence. (#254)",
+                    "Added sqldb writer \u0026 reader with query command at CLI interface for security event persistence. (#254)",
                     "Fixed cross-process event loss in SecurityEventWriter. (#226)",
                     "Applied corruption whitelist to stop false-positive DB rebuilds. (#338)",
                     "Added e2e test and fixed bugs revealed during testing. (#330)"
@@ -1560,7 +1890,7 @@ h1 span{color:var(--accent-light)}
                   ]
                 },
                 {
-                  "title": "Toolchain & CI",
+                  "title": "Toolchain \u0026 CI",
                   "items": [
                     "Migrated Python toolchain to uv package manager and pinned Python 3.11.6. (#227)",
                     "Added sec-core RPM build CI and adapted nightly build pipeline. (#295)",
@@ -1597,6 +1927,20 @@ h1 span{color:var(--accent-light)}
         "en": {
           "label": "EN",
           "releases": [
+            {
+              "version": "0.7.1",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Fixes",
+                  "items": [
+                    "Improve severity labels and agent sidebar UX.",
+                    "Show all verdicts in the summary command.",
+                    "Sync component.toml version with package version."
+                  ]
+                }
+              ]
+            },
             {
               "version": "0.7.0",
               "date": "",
@@ -1649,7 +1993,7 @@ h1 span{color:var(--accent-light)}
                   ]
                 },
                 {
-                  "title": "CI & Quality",
+                  "title": "CI \u0026 Quality",
                   "items": [
                     "Add fmt, clippy, unit test coverage, and architecture boundary check CI gates.",
                     "Add `clippy.toml` + `cargo-deny` for lint and supply-chain auditing.",
@@ -1741,23 +2085,6 @@ h1 span{color:var(--accent-light)}
                   ]
                 }
               ]
-            },
-            {
-              "version": "0.4.0",
-              "date": "",
-              "sections": [
-                {
-                  "title": "Release",
-                  "items": [
-                    "Add HTTP/1.1 request body reassembly for fragmented SSL writes.",
-                    "Add skill metrics analysis with cosh filesystem-based discovery.",
-                    "Add SLS upload and Logtail file exporter for GenAI events.",
-                    "Add hermes agent matcher for LLM process discovery.",
-                    "Detect uv Python static OpenSSL in SSL sniffer.",
-                    "Remove AK/SK-based SLS direct upload, keep Logtail file export."
-                  ]
-                }
-              ]
             }
           ]
         },
@@ -1776,6 +2103,23 @@ h1 span{color:var(--accent-light)}
         "en": {
           "label": "EN",
           "releases": [
+            {
+              "version": "0.2.1",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "fix vector/hybrid search panic and empty index when an embedding provider is configured: the index worker ran on a std::thread with no tokio Handle so embeddings were never produced, and memory_search mode=vector|hybrid called Handle::block_on from a worker thread; the runtime handle is now captured at spawn and threaded through to the worker, and the search path uses block_in_place",
+                    "fix memory_get_context leaking .git internals (e.g. .git/logs/HEAD) into agent context by extending the reserved-path filter to cover .git/ via a shared is_under_git predicate in safe_fs",
+                    "fix full_scan (startup and inotify-overflow recovery) only building the BM25 index and never dense embeddings, so preexisting files were invisible to vector search until modified; a paths_without_vec query plus a backfill pass now embeds them, centralised in an embed_sync helper shared with flush",
+                    "fix memory_search returning zero hits for short CJK query terms (\u003c 3 chars, e.g. \"花名\"/\"小云\"): the trigram tokenizer emits no tokens for terms shorter than 3 characters, so such queries now fall back to a `body LIKE '%term%'` substring scan that preserves recall, agent-scope filtering, and cold/superseded exclusion",
+                    "resolve embedding dimensions from the first real response instead of hardcoding 1536 (DashScope text-embedding-v3 is 1024): dimensionality is stored in an AtomicUsize seeded with the estimate and overwritten on first embed",
+                    "add anolisa-cli adapter contract via .anolisa/component.toml so the CLI adapter manager can discover the openclaw plugin bundle through the [[adapters]] TOML schema"
+                  ]
+                }
+              ]
+            },
             {
               "version": "0.2.0",
               "date": "",
@@ -1807,7 +2151,7 @@ h1 span{color:var(--accent-light)}
                     "add time-decay ranking (exp(-λ×age_days)) applied to BM25/vector/hybrid scores",
                     "add cold archival of old never-accessed files with mem_compact tool",
                     "add conflict detection via BM25 similarity before writing new facts",
-                    "add category subdirectories (facts/\u003ccategory>/) with memory_search category filter",
+                    "add category subdirectories (facts/\u003ccategory\u003e/) with memory_search category filter",
                     "add token tracking (tokens field in AuditEntry)",
                     "add mem_consolidate tool for manual consolidation trigger",
                     "add corpus supplement registration for memory_search corpus=all",
@@ -1835,15 +2179,15 @@ h1 span{color:var(--accent-light)}
                   "title": "Release",
                   "items": [
                     "introduce filesystem memory MCP server for AI agents (Linux only) with 21 tools over stdio JSON-RPC 2.0 in three tiers (Tier A file ops, Tier B BM25 search, Tier C governance)",
-                    "add per-namespace mount under ~/.anolisa/memory/\u003cns>/ with optional user-namespace + private tmpfs isolation (auto/userland/userns strategies)",
+                    "add per-namespace mount under ~/.anolisa/memory/\u003cns\u003e/ with optional user-namespace + private tmpfs isolation (auto/userland/userns strategies)",
                     "enforce path sandbox via openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS) on every Tier A file open",
                     "add SQLite FTS5 BM25 background index with transactional upsert, schema migrations, trigram CJK tokenizer and inotify-driven debounced flush",
                     "add optional git versioning with auto-commit serialized under a per-handle mutex",
                     "add tar.gz snapshots with strict id whitelist, atomic rename swap on restore and rollback entries under .anolisa/trash/",
                     "add optional cgroup v2 memory.max self-limit applied before the tokio runtime starts",
-                    "add JSONL audit log (O_NOFOLLOW | O_CLOEXEC, Mutex\u003cFile>) with optional systemd-journald fan-out",
+                    "add JSONL audit log (O_NOFOLLOW | O_CLOEXEC, Mutex\u003cFile\u003e) with optional systemd-journald fan-out",
                     "enforce profile gating (basic/advanced/expert) at both tools/list and tools/call with deny_unknown_fields on config structs",
-                    "add per-session scratch and log under /run/anolisa/sessions/\u003csid>/ (0700) with tmpfiles.d snippet",
+                    "add per-session scratch and log under /run/anolisa/sessions/\u003csid\u003e/ (0700) with tmpfiles.d snippet",
                     "add systemd user template anolisa-memory@.service with hardening (ProtectKernelTunables/Modules/Logs, SystemCallFilter, MemoryDenyWriteExecute, RestrictNamespaces, RestrictAddressFamilies=AF_UNIX)",
                     "add RPM packaging with offline vendor tarball and single statically-linked binary (bundled SQLite + vendored libgit2)",
                     "add OpenClaw plugin memory-anolisa with install/detect/uninstall lifecycle and 4 memory contract tools routed to the MCP server as a stdio child",
@@ -1870,6 +2214,19 @@ h1 span{color:var(--accent-light)}
         "en": {
           "label": "EN",
           "releases": [
+            {
+              "version": "0.6.1",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "Rewrote `sysom-diagnosis` skill and removed legacy CLI. (#1241)",
+                    "Fixed OpenClaw gateway write scope verification in `install-openclaw` skill. (#1205)"
+                  ]
+                }
+              ]
+            },
             {
               "version": "0.6.0",
               "date": "",
@@ -1934,15 +2291,150 @@ h1 span{color:var(--accent-light)}
                   ]
                 }
               ]
-            },
+            }
+          ]
+        },
+        "zh": {
+          "label": "中文",
+          "releases": []
+        }
+      }
+    },
+    {
+      "id": "skillfs",
+      "label": "SkillFS",
+      "summary": "FUSE-backed skill filesystem and progressive disclosure views.",
+      "sourceUrl": "https://github.com/alibaba/anolisa/blob/main/src/skillfs/CHANGELOG.md",
+      "languages": {
+        "en": {
+          "label": "EN",
+          "releases": [
             {
-              "version": "0.2.2",
-              "date": "",
+              "version": "0.3.2",
+              "date": "2026-07-03",
               "sections": [
                 {
-                  "title": "Release",
+                  "title": "Fixed",
                   "items": [
-                    "Support enable AgentSight dashboard in `agentsight` skill. (#222)"
+                    "CLI SLS ops logging now records SkillFS mount and runtime operations.",
+                    "Runtime metrics now emit real-time deltas for SLS consumers."
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.3.1",
+              "date": "2026-07-03",
+              "sections": [
+                {
+                  "title": "Added",
+                  "items": [
+                    "Managed mount supervision can recover stale FUSE mounts and bound recovery retries during repeated starts."
+                  ]
+                },
+                {
+                  "title": "Changed",
+                  "items": [
+                    "English and Chinese README guidance now covers managed mounts, in-place operation, security boundaries, and troubleshooting."
+                  ]
+                },
+                {
+                  "title": "Fixed",
+                  "items": [
+                    "Post-publish grace reads fallback skill files from source paths after installers finish.",
+                    "`skillfs validate` now reports parse failures in the status summary.",
+                    "In-place authoring supports new skills and pending-install ownership changes.",
+                    "Managed stop and runtime-dir handling avoid stale ownership and unbounded recovery retries.",
+                    "Daemon-facing backing roots under PrivateTmp are rejected before mount startup.",
+                    "FUSE smoke cleanup handles leftover mounts and temporary paths more reliably."
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.3.0",
+              "date": "2026-06-26",
+              "sections": [
+                {
+                  "title": "Added",
+                  "items": [
+                    "Runtime security integration for agent skill directories. SkillFS can now consume activation decisions from `.skill-meta/activation.json` or the `user.agent_sec.skill_ledger.activation` xattr, then expose each skill as current, hidden, or a trusted fallback snapshot.",
+                    "File-change notification for external security daemons. With `--activation-mode file`, `--notify-socket`, `--activation-events-log`, and `--activation-reload-mode poll`, SkillFS reports skill mutations, reloads activation decisions, and keeps already-opened file handles pinned to their original target.",
+                    "Trusted control socket for activation writes. A daemon verified with `SO_PEERCRED`, executable identity, and start-time checks can update activation JSON or activation xattr through a bounded request API instead of writing `.skill-meta` through the agent-visible mount path.",
+                    "Installer compatibility for common skill installation flows. Staging directories, direct writes, quiet-timeout completion, and post-publish grace windows allow installers to finish writing a skill before SkillFS asks the security provider to scan and activate it.",
+                    "In-place mount support for security daemons. Ledger backing roots are bind mounted privately and validated at startup so scanners read the real source tree rather than the agent-facing FUSE view.",
+                    "Canonical skill identity based on the directory basename. Frontmatter `name:` remains display metadata and no longer changes the SkillFS store key or daemon-facing skill id."
+                  ]
+                },
+                {
+                  "title": "Changed",
+                  "items": [
+                    "`.skill-meta/**` is hidden from ordinary agents and remains accessible only through trusted metadata paths or the control socket.",
+                    "Skill mutation notify uses ordinary filesystem event kinds, including `create`, `write`, `rename`, `unlink`, `rmdir`, and truncate events, instead of a separate install-complete protocol event.",
+                    "POSIX passthrough behavior was expanded for symlink, hardlink, FIFO, path length fallback, open-after-unlink, xattr, and inode consistency cases."
+                  ]
+                },
+                {
+                  "title": "Fixed",
+                  "items": [
+                    "Prevented stale activation views by combining notify-triggered reload, polling, and activation watcher convergence.",
+                    "Hardened trusted-writer and trusted-peer checks against process reuse and executable replacement with start-time and file-identity validation.",
+                    "Avoided installer and daemon visibility bugs around hidden skills, fallback snapshots, staging paths, and backing-root propagation."
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.2.0",
+              "date": "2026-05-09",
+              "sections": [
+                {
+                  "title": "Added",
+                  "items": [
+                    "FUSE write passthrough for `write`, `create`, `mkdir`, `rename`, `unlink`, `rmdir`, and `setattr(size)` operations on skill directories.",
+                    "Background sync worker that reparses `SKILL.md` on write and `upsert`s the entry back into `SharedSkillStore`.",
+                    "Immediate visibility for newly created skill directories: `mkdir` inserts a `ParseStatus::Degraded` placeholder, then the sync worker overwrites it with the real entry once `SKILL.md` is written.",
+                    "in-place mount mode that accesses the underlying source via `/proc/self/fd/{n}` to avoid the over-mount self-loop.",
+                    "Integration suite `crates/skillfs-fuse/tests/write_guard_tests.rs` covering both normal and in-place write paths."
+                  ]
+                },
+                {
+                  "title": "Changed",
+                  "items": [
+                    "Directory name is now the authoritative store key. After `rename`, stale frontmatter `name:` no longer revives the old key.",
+                    "Read of `SKILL.md` still returns the compiled result; raw file is only used for writes and parsing.",
+                    "Architecture docs refactored into `docs/specs/skillfs-spec.md`, `docs/specs/core-spec.md`, `docs/specs/fuse-spec.md`."
+                  ]
+                },
+                {
+                  "title": "Removed",
+                  "items": [
+                    "Workspace-related code paths and the unused workspace config support from `skillfs-core` (commit 6d604c7).",
+                    "Legacy ad-hoc test scripts (kept only `scripts/build.sh` and `scripts/test.sh`)."
+                  ]
+                },
+                {
+                  "title": "Fixed",
+                  "items": [
+                    "CLI tracing timestamps now use the local timezone instead of UTC."
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.1.2",
+              "date": "2026-04-29",
+              "sections": [
+                {
+                  "title": "Added",
+                  "items": [
+                    "Read-only mount write protection: `mknod`, `symlink`, `link`, and write callbacks all return `EROFS`."
+                  ]
+                },
+                {
+                  "title": "Fixed",
+                  "items": [
+                    "Parser summary truncation now respects multi-byte character boundaries."
                   ]
                 }
               ]
@@ -1964,6 +2456,19 @@ h1 span{color:var(--accent-light)}
         "en": {
           "label": "EN",
           "releases": [
+            {
+              "version": "0.6.1",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "bundle tool_categories.json into dist for npm installs",
+                    "use node: prefix, eliminate shell subprocess in openclaw plugin"
+                  ]
+                }
+              ]
+            },
             {
               "version": "0.6.0",
               "date": "",
@@ -2068,24 +2573,97 @@ h1 span{color:var(--accent-light)}
                   ]
                 }
               ]
+            }
+          ]
+        },
+        "zh": {
+          "label": "中文",
+          "releases": []
+        }
+      }
+    },
+    {
+      "id": "anvil",
+      "label": "Anvil",
+      "summary": "Per-host sandbox daemon and lifecycle API.",
+      "sourceUrl": "https://github.com/alibaba/anolisa/blob/main/src/anvil/CHANGELOG.md",
+      "languages": {
+        "en": {
+          "label": "EN",
+          "releases": [
+            {
+              "version": "0.2.0",
+              "date": "2026-06-30",
+              "sections": [
+                {
+                  "title": "Added",
+                  "items": [
+                    "FirecrackerSpawner: Firecracker microVM backend, daemon auto-detects and selects strongest isolation at startup.",
+                    "TCP remote API: configurable `[listen].http_addr` enables TCP listener (port 14159) for platform calls.",
+                    "Prioritized backend selection: `build_spawner()` auto-selects by firecracker → linux-sandbox → mock priority.",
+                    "Storage section: `[storage].images_dir` unifies vmlinux/rootfs lookup path.",
+                    "Packaging skeleton: `dist/anvil.service` (systemd unit) + `anvil.spec` (RPM) + `tmpfiles-anvil.conf`.",
+                    "`[backends]` config section for direct backend binary path mapping."
+                  ]
+                }
+              ]
             },
             {
-              "version": "0.4.0",
-              "date": "",
+              "version": "0.1.3",
+              "date": "2026-06-24",
+              "sections": [
+                {
+                  "title": "Changed",
+                  "items": [
+                    "Sandbox processes now run with full namespace isolation (PID, network, filesystem)."
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.1.2",
+              "date": "2026-06-22",
+              "sections": [
+                {
+                  "title": "Added",
+                  "items": [
+                    "Sandbox processes are now managed by the daemon: auto-spawn on create, auto-kill on destroy.",
+                    "Daemon gracefully degrades when backend binary is unavailable (useful for dev environments)."
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.1.1",
+              "date": "2026-06-20",
+              "sections": [
+                {
+                  "title": "Added",
+                  "items": [
+                    "Policy validation rejects unsafe configurations before sandbox starts.",
+                    "Safe coordination with `osbase sandbox uninstall` (prevents removing in-use backends)."
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.1.0",
+              "date": "2026-06-18",
               "sections": [
                 {
                   "title": "Release",
                   "items": [
-                    "correct 5 bugs in stats, naming, SQL, paths and permissions",
-                    "align FHS paths, restructure adapter dir, remove install.sh",
-                    "address code review findings across schema, env-check, hooks, and plugin",
-                    "add hermes agent plugin",
-                    "security hardening & critical algorithm correctness",
-                    "behavioral correctness & logic fixes",
-                    "dedup, dead code removal & cosmetic cleanup",
-                    "support staged installs",
-                    "support Debian/Ubuntu FHS paths and harden binary resolution",
-                    "build OpenClaw plugin to dist/index.js"
+                    "Initial scaffold of ANOLISA Anvil per-host sandbox daemon."
+                  ]
+                },
+                {
+                  "title": "Added",
+                  "items": [
+                    "Create, list, inspect, checkpoint (state-only), reset, and destroy sandboxes via HTTP API.",
+                    "Policy-driven backend selection: assign workload class → get the right sandbox type automatically.",
+                    "Warm pool: pre-created sandboxes ready for instant allocation, configurable min/target/max.",
+                    "Template sharing: multiple sandboxes share one base memory image, reducing per-instance cost.",
+                    "Prometheus metrics endpoint for monitoring."
                   ]
                 }
               ]
@@ -2094,7 +2672,85 @@ h1 span{color:var(--accent-light)}
         },
         "zh": {
           "label": "中文",
-          "releases": []
+          "releases": [
+            {
+              "version": "0.2.0",
+              "date": "2026-06-30",
+              "sections": [
+                {
+                  "title": "新增",
+                  "items": [
+                    "FirecrackerSpawner：支持 Firecracker microVM 后端，daemon 启动时自动探测并选择最强隔离。",
+                    "TCP 远程 API：可配置 `[listen].http_addr` 开启 TCP 监听（端口 14159），供平台远程调用。",
+                    "优先级后端选择：`build_spawner()` 按 firecracker → linux-sandbox → mock 优先级自动选型。",
+                    "Storage section：`[storage].images_dir` 统一管理 vmlinux/rootfs 查找路径。",
+                    "打包骨架：`dist/anvil.service`（systemd unit）+ `anvil.spec`（RPM）+ `tmpfiles-anvil.conf`。",
+                    "`[backends]` 配置段，直接映射后端二进制路径。"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.1.3",
+              "date": "2026-06-24",
+              "sections": [
+                {
+                  "title": "变更",
+                  "items": [
+                    "sandbox 进程现在运行在完整 namespace 隔离中（PID、网络、文件系统）。"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.1.2",
+              "date": "2026-06-22",
+              "sections": [
+                {
+                  "title": "新增",
+                  "items": [
+                    "daemon 现在管理 sandbox 进程生命周期：创建时自动启动，销毁时自动终止。",
+                    "backend 二进制不可用时优雅降级（便于开发环境使用）。"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.1.1",
+              "date": "2026-06-20",
+              "sections": [
+                {
+                  "title": "新增",
+                  "items": [
+                    "Policy 校验在 sandbox 启动前拒绝不安全的配置。",
+                    "与 `osbase sandbox uninstall` 安全协调（防止移除正在使用的 backend）。"
+                  ]
+                }
+              ]
+            },
+            {
+              "version": "0.1.0",
+              "date": "2026-06-18",
+              "sections": [
+                {
+                  "title": "Release",
+                  "items": [
+                    "ANOLISA Anvil 首个骨架版本。"
+                  ]
+                },
+                {
+                  "title": "新增",
+                  "items": [
+                    "通过 HTTP API 创建、列出、查看、checkpoint（仅状态转换）、reset、销毁 sandbox。",
+                    "策略驱动的 backend 选型：指定 workload class 即可自动匹配合适的 sandbox 类型。",
+                    "Warm pool：预创建 sandbox 随时分配，可配置 min/target/max 容量。",
+                    "模板共享：多个 sandbox 共用一份 base 内存镜像，降低单实例内存开销。",
+                    "Prometheus metrics 端点，供监控系统采集。"
+                  ]
+                }
+              ]
+            }
+          ]
         }
       }
     },
@@ -2107,6 +2763,26 @@ h1 span{color:var(--accent-light)}
         "en": {
           "label": "EN",
           "releases": [
+            {
+              "version": "0.4.1",
+              "date": "",
+              "sections": [
+                {
+                  "title": "Features",
+                  "items": [
+                    "Added skip auto-checkpoint after rollback (#1263)"
+                  ]
+                },
+                {
+                  "title": "Bug Fixes",
+                  "items": [
+                    "Fixed workspace sync after config update (#1263)",
+                    "Fixed absolute path handling for ws-ckpt in crontab entries (#1263)",
+                    "Changed rollback -n offset, pass numAncestors as-is (#1263)"
+                  ]
+                }
+              ]
+            },
             {
               "version": "0.4.0",
               "date": "",
@@ -2193,23 +2869,6 @@ h1 span{color:var(--accent-light)}
                   ]
                 }
               ]
-            },
-            {
-              "version": "0.3.0",
-              "date": "",
-              "sections": [
-                {
-                  "title": "Release",
-                  "items": [
-                    "Added openclaw plugin scaffolding for ws-ckpt",
-                    "Added hermes plugin scaffolding for ws-ckpt",
-                    "Made ws-ckpt skill agent-agnostic and prompted for workspace at invocation",
-                    "Followed `make install` contract for build-all integration",
-                    "Fixed bugs in list and diff sub-commands",
-                    "Made daemon stateful"
-                  ]
-                }
-              ]
             }
           ]
         },
@@ -2222,200 +2881,701 @@ h1 span{color:var(--accent-light)}
   ]
 }</script>
         <!-- ANOLISA_CHANGELOG_DATA_END -->
-
-      <footer class="cap-footer">
-        <div class="foot-left">ANOLISA &mdash; Alibaba Cloud</div>
-        <ul class="foot-links">
-          <li><a href="https://github.com/alibaba/anolisa" target="_blank" rel="noopener">Source</a></li>
-          <li><a href="https://github.com/alibaba/anolisa/blob/main/LICENSE" target="_blank" rel="noopener">Apache-2.0 License</a></li>
-        </ul>
-      </footer>
-    </div>
-  </section>
+  </div>
 </main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="foot-left">ANOLISA &mdash; Alibaba Cloud</div>
+    <ul class="foot-links">
+      <li><a href="https://github.com/alibaba/anolisa" target="_blank" rel="noopener">Source</a></li>
+      <li><a href="https://github.com/alibaba/anolisa/blob/main/LICENSE" target="_blank" rel="noopener">Apache-2.0 License</a></li>
+    </ul>
+  </div>
+</footer>
+
+<div class="reader" id="reader" hidden aria-hidden="true">
+  <div class="reader-bar">
+    <div class="reader-bar-inner">
+      <button class="reader-back" id="reader-back" type="button"></button>
+      <div class="reader-crumb" id="reader-crumb"></div>
+      <div class="reader-switch" id="reader-switch" role="tablist" aria-label="Document type"></div>
+      <div class="lang-toggle" id="reader-lang" aria-label="Language">
+        <button class="lang-btn active" type="button" data-lang="en">EN</button>
+        <button class="lang-btn" type="button" data-lang="zh" lang="zh">中文</button>
+      </div>
+    </div>
+  </div>
+  <div class="reader-layout">
+    <aside class="reader-sidebar" id="reader-sidebar" aria-label="Documents"></aside>
+    <main class="reader-main"><article class="doc" id="reader-doc"></article></main>
+    <nav class="reader-toc" id="reader-toc" aria-label="On this page"></nav>
+  </div>
+</div>
 
 <button class="top-btn" id="top-btn" type="button" aria-label="Back to top">TOP</button>
 
 <script>
-const CMD='curl -fsSL https://agentic-os.sh/install.sh | bash';
-const btn=document.getElementById('copy-btn');
-const block=document.getElementById('cmd-block');
-const toast=document.getElementById('copy-toast');
-const hero=document.querySelector('.hero');
-const capabilities=document.getElementById('capabilities');
-const changelog=document.getElementById('anolisa-cli-changelog');
+/* ── data ── */
 const changelogDataEl=document.getElementById('changelog-data');
-const changelogData=JSON.parse(changelogDataEl?.textContent||'{"components":[]}');
-const tabsEl=document.getElementById('component-tabs');
-const releaseList=document.getElementById('release-list');
-const componentSummary=document.getElementById('component-summary');
-const sourceLink=document.getElementById('source-link');
-const moreLink=document.getElementById('more-link');
-const langButtons=[...document.querySelectorAll('.lang-btn')];
-const topBtn=document.getElementById('top-btn');
-let activeComponentId=changelogData.components?.[0]?.id||'';
-let activeLang='en';
-let toastTimer;
-let scrollLock=false;
+const CHANGELOG=JSON.parse(changelogDataEl?.textContent||'{"components":[]}');
 
-function fallbackCopy(t){const a=document.createElement('textarea');a.value=t;a.style.cssText='position:fixed;opacity:0';document.body.appendChild(a);a.select();document.execCommand('copy');document.body.removeChild(a)}
+const I18N={
+  en:{
+    heroSub:'Agent-native OS layer.<br>Sandbox isolation, kernel observability, token&nbsp;optimization.<br>Managed as one system, deployed in one command.',
+    heroTagline:"The operating system's user has changed. ANOLISA makes every agent a first-class citizen of the kernel.",
+    agentLabel:'TALK TO YOUR AGENT',
+    scroll:'SCROLL',
+    capLabel:'Documentation',
+    capTitle:'Every agent deserves an <em>operating system</em> that understands it.',
+    userGuide:'User Guide',
+    changelog:'Changelog',
+    guideUnavail:'User Guide unavailable',
+    changelogUnavail:'Changelog unavailable',
+    lastChangelog:'Last changelog',
+    noChangelog:'No published release notes are available.',
+    planned:'Planned',
+    back:'Docs overview',
+    onThisPage:'On this page',
+    emptyGuideTitle:'User Guide unavailable',
+    emptyGuideBody:'A user guide for this component is not yet published on this site.',
+    emptyChangelogTitle:'Changelog unavailable',
+    emptyChangelogBody:'Release notes for this component are not yet published on this site.',
+    changelogFallback:'Chinese release notes are not available for this component. English release notes are shown below.',
+    clEnBadge:'EN',
+    sourceDoc:'Source document',
+    agentPromptHtml:'Read <span class="hl">https://agentic-os.sh/agents/</span> to learn how to use ANOLISA, then help me set it up.',
+    agentPromptCopy:'Read https://agentic-os.sh/agents/ to learn how to use ANOLISA, then help me set it up.',
+    unit1:'component',
+    unitN:'components'
+  },
+  zh:{
+    heroSub:'Agent 原生的操作系统层。<br>沙箱隔离、内核可观测性、Token&nbsp;优化。<br>作为一个系统统一管理,一条命令完成部署。',
+    heroTagline:'操作系统的使用者已经改变。ANOLISA 让每一个 Agent 成为内核的一等公民。',
+    agentLabel:'让你的 AGENT 接入',
+    scroll:'向下滚动',
+    capLabel:'文档',
+    capTitle:'每一个 Agent 都值得一个<em>懂它的操作系统</em>。',
+    userGuide:'用户指南',
+    changelog:'变更日志',
+    guideUnavail:'用户指南暂不可用',
+    changelogUnavail:'变更日志暂不可用',
+    lastChangelog:'最新变更',
+    noChangelog:'暂无已发布的变更记录。',
+    planned:'规划中',
+    back:'文档概览',
+    onThisPage:'本页目录',
+    emptyGuideTitle:'用户指南暂不可用',
+    emptyGuideBody:'该组件的用户指南尚未在本站发布。',
+    emptyChangelogTitle:'变更日志暂不可用',
+    emptyChangelogBody:'该组件的变更日志尚未在本站发布。',
+    changelogFallback:'该组件暂无中文变更记录,以下展示英文变更记录。',
+    clEnBadge:'英文',
+    sourceDoc:'源文档',
+    agentPromptHtml:'阅读 <span class="hl">https://agentic-os.sh/agents/</span> 了解如何使用 ANOLISA,然后帮我完成安装。',
+    agentPromptCopy:'阅读 https://agentic-os.sh/agents/ 了解如何使用 ANOLISA,然后帮我完成安装。',
+    unit1:'个组件',
+    unitN:'个组件'
+  }
+};
 
+const MODULES=[
+  {id:'agent-observability',icon:'~$',name:{en:'Agent Observability',zh:'Agent 可观测性'},desc:{en:'Tracing and telemetry docs for agent activity.',zh:'Agent 活动追踪与遥测文档。'},components:['agentsight']},
+  {id:'runtime',icon:'[]',name:{en:'Runtime',zh:'Runtime'},desc:{en:'Runtime filesystem and workspace checkpoint docs.',zh:'运行时文件系统与工作区检查点文档。'},components:['skillfs','ws-ckpt']},
+  {id:'token-saving',icon:'%&lt;',name:{en:'Token Saving',zh:'Token 优化'},desc:{en:'Token reduction and persistent context docs.',zh:'Token 降耗与持久化上下文文档。'},components:['tokenless','agent-memory']},
+  {id:'user-entrypoint',icon:'&gt;_',name:{en:'User Entrypoint',zh:'用户入口'},desc:{en:'CLI, shell, and OS skill entrypoint docs.',zh:'CLI、Shell 与 OS Skills 入口文档。'},components:['anolisa','copilot-shell','os-skills']}
+];
+
+const COMPONENTS={
+  'anolisa':{changelogId:'anolisa',guidePaths:{en:'docs/user-guide/en/user-entrypoint/anolisa-cli.md',zh:'docs/user-guide/zh/user-entrypoint/anolisa-cli.md'},name:{en:'ANOLISA CLI',zh:'ANOLISA CLI'},intro:{en:'Unified command-line control plane for installing, inspecting, enabling, disabling, updating, and diagnosing ANOLISA components across user and system modes.',zh:'统一的命令行控制面,用于在用户态与系统态安装、查看、启用、禁用、更新和诊断 ANOLISA 组件。'}},
+  'copilot-shell':{changelogId:'copilot-shell',guidePaths:{en:'docs/user-guide/en/user-entrypoint/copilot-shell/QUICKSTART.md',zh:'docs/user-guide/zh/user-entrypoint/copilot-shell/QUICKSTART.md'},name:{en:'Copilot Shell',zh:'Copilot Shell'},intro:{en:'Terminal-native product entry point for agent workflows. Copilot Shell covers both the current cosh implementation and the next-generation cosh-ng implementation under one product surface.',zh:'面向 Agent 工作流的终端原生产品入口。Copilot Shell 在同一产品形态下同时涵盖当前的 cosh 实现与下一代 cosh-ng 实现。'}},
+  'agent-sec-core':{changelogId:'agent-sec-core',planned:true,name:{en:'AgentSecCore',zh:'AgentSecCore'},intro:{en:'Security kernel for agent runtimes covering policy checks, scanners, and enforcement adapters. User guide coverage is planned; only planning and changelog status are shown here.',zh:'面向 Agent 运行时的安全内核,涵盖策略校验、扫描器与执行适配器。用户指南仍在规划中,此处仅展示规划状态与变更日志状态。'}},
+  'anvil':{changelogId:'anvil',name:{en:'OS-level Sandbox',zh:'系统级沙箱'},intro:{en:'Per-host sandbox daemon providing namespace and policy-driven isolation with a lifecycle API for agent execution.',zh:'单机沙箱守护进程,提供命名空间与策略驱动的隔离,并通过生命周期 API 管理 Agent 执行。'}},
+  'agentsight':{changelogId:'agentsight',guidePaths:{en:'docs/user-guide/en/agent-observability/agentsight.md',zh:'docs/user-guide/zh/agent-observability/agentsight.md'},name:{en:'AgentSight',zh:'AgentSight'},intro:{en:'eBPF-based observability for agent activity, including kernel tracing, token accounting, interruption insight, and dashboard workflows.',zh:'基于 eBPF 的 Agent 可观测性,包含内核追踪、Token 计量、中断洞察与看板工作流。'}},
+  'tokenless':{changelogId:'tokenless',guidePaths:{en:'docs/user-guide/en/token-saving/tokenless.md',zh:'docs/user-guide/zh/token-saving/tokenless.md'},name:{en:'Tokenless',zh:'Tokenless'},intro:{en:'Reduces token consumption through prompt compression, schema optimization, and command rewriting without changes to agent code.',zh:'通过提示词压缩、结构优化与命令改写降低 Token 消耗,且无需改动 Agent 代码。'}},
+  'os-skills':{changelogId:'os-skills',guidePaths:{en:'docs/user-guide/en/user-entrypoint/os-skills.md',zh:'docs/user-guide/zh/user-entrypoint/os-skills.md'},name:{en:'OS Skills',zh:'OS Skills'},intro:{en:'Operating-system level skill bundles and agent workflows for system management and DevOps tasks.',zh:'面向系统管理与 DevOps 任务的操作系统级技能包与 Agent 工作流。'}},
+  'skillfs':{changelogId:'skillfs',guidePaths:{en:'docs/user-guide/en/runtime/skillfs.md',zh:'docs/user-guide/zh/runtime/skillfs.md'},name:{en:'SkillFS',zh:'SkillFS'},intro:{en:'FUSE-backed skill filesystem providing progressive disclosure views over installed skills.',zh:'基于 FUSE 的技能文件系统,为已安装技能提供渐进式披露视图。'}},
+  'agent-memory':{changelogId:'agent-memory',guidePaths:{en:'docs/user-guide/en/token-saving/agent-memory.md',zh:'docs/user-guide/zh/token-saving/agent-memory.md'},name:{en:'Agent Memory',zh:'Agent Memory'},intro:{en:'Filesystem-backed memory server with indexing, snapshots, and MCP tool integration for persistent agent context.',zh:'基于文件系统的记忆服务,提供索引、快照与 MCP 工具集成,用于持久化 Agent 上下文。'}},
+  'ws-ckpt':{changelogId:'ws-ckpt',guidePaths:{en:'docs/user-guide/en/runtime/ws-ckpt.md',zh:'docs/user-guide/zh/runtime/ws-ckpt.md'},name:{en:'WS Ckpt',zh:'WS Ckpt'},intro:{en:'Workspace checkpoint, rollback, and policy controls for reproducible agent working directories.',zh:'工作区检查点、回滚与策略控制,用于可复现的 Agent 工作目录。'}}
+};
+
+const GUIDES={
+  'anolisa':{
+    en:[
+      {h1:'ANOLISA CLI'},
+      {p:'ANOLISA is the command-line control plane for installing, inspecting, enabling, disabling, updating, and diagnosing ANOLISA components across user and system installation modes.'},
+      {h2:'Installation'},
+      {p:'Install the CLI and default components with a single command:'},
+      {code:'curl -fsSL https://agentic-os.sh/install.sh | bash'},
+      {h2:'Invocation'},
+      {code:'anolisa [global-options] <command> [args]'},
+      {p:'Installation mode is inferred from the effective user: root defaults to system mode under `/usr/local`; non-root defaults to user mode under `~/.local`.'},
+      {h2:'Global options'},
+      {ul:['`--install-mode user|system` — select the installation scope.','`--prefix PATH` — custom install prefix (system mode only).','`--json` — machine-readable JSON envelope output.','`--dry-run` — print the plan without executing.','`-v, --verbose` / `-q, --quiet` — adjust output detail.']},
+      {h2:'Common commands'},
+      {ul:['`anolisa list` — show components with local state, ownership, and next action.','`anolisa install <component>` — install a component; system-mode writes require `sudo`.','`anolisa status [component]` — report installation and health status.','`anolisa doctor [component]` — run diagnostics.','`anolisa update <component>` — update to the latest release.','`anolisa adapter scan` — discover adapters for installed agents.']},
+      {h2:'JSON envelope'},
+      {p:'Machine-readable output uses a unified envelope with `ok`, `command`, `data`, `warnings`, and `error` fields, suitable for agent automation.'}
+    ],
+    zh:[
+      {h1:'ANOLISA CLI'},
+      {p:'ANOLISA 是命令行控制面,用于在用户态与系统态两种安装模式下安装、查看、启用、禁用、更新和诊断 ANOLISA 组件。'},
+      {h2:'安装'},
+      {p:'使用一条命令安装 CLI 与默认组件:'},
+      {code:'curl -fsSL https://agentic-os.sh/install.sh | bash'},
+      {h2:'调用方式'},
+      {code:'anolisa [global-options] <command> [args]'},
+      {p:'安装模式根据有效用户推断:root 默认使用系统态(`/usr/local`);非 root 默认使用用户态(`~/.local`)。'},
+      {h2:'全局选项'},
+      {ul:['`--install-mode user|system` — 选择安装范围。','`--prefix PATH` — 自定义安装前缀(仅系统态)。','`--json` — 机器可读的 JSON envelope 输出。','`--dry-run` — 仅打印计划,不实际执行。','`-v, --verbose` / `-q, --quiet` — 调整输出详细程度。']},
+      {h2:'常用命令'},
+      {ul:['`anolisa list` — 展示组件的本地状态、归属与下一步操作。','`anolisa install <component>` — 安装组件;系统态写入需要 `sudo`。','`anolisa status [component]` — 查看安装与健康状态。','`anolisa doctor [component]` — 运行诊断。','`anolisa update <component>` — 更新到最新版本。','`anolisa adapter scan` — 发现已安装 Agent 的适配器。']},
+      {h2:'JSON envelope'},
+      {p:'机器可读输出采用统一 envelope,包含 `ok`、`command`、`data`、`warnings`、`error` 字段,适用于 Agent 自动化。'}
+    ]
+  },
+  'copilot-shell':{
+    en:[
+      {h1:'Copilot Shell'},
+      {p:'Copilot Shell is the terminal-native product entry point for agent workflows. It spans two implementations that share one product surface: the current `cosh` implementation and the next-generation `cosh-ng` implementation. Both are documented here while retaining separate source trees and changelogs.'},
+      {h2:'Scope'},
+      {ul:['`cosh` — the current Copilot Shell implementation.','`cosh-ng` — the next-generation implementation.']},
+      {p:'References to Copilot Shell across ANOLISA documentation and tooling include both implementations unless a specific one is named.'},
+      {h2:'Installation'},
+      {code:'anolisa install copilot-shell'},
+      {h2:'Usage'},
+      {p:'Copilot Shell provides streaming tool use, contextual command assistance, and model-provider integration inside the terminal. It integrates with the ANOLISA hook system for policy checks and approval flows.'}
+    ],
+    zh:[
+      {h1:'Copilot Shell'},
+      {p:'Copilot Shell 是面向 Agent 工作流的终端原生产品入口。它在同一产品形态下包含两个实现:当前的 `cosh` 实现与下一代 `cosh-ng` 实现。二者在此统一说明,同时保留各自的源码目录与变更日志。'},
+      {h2:'范围'},
+      {ul:['`cosh` — 当前的 Copilot Shell 实现。','`cosh-ng` — 下一代实现。']},
+      {p:'在 ANOLISA 文档与工具中,除非明确指定某一实现,Copilot Shell 同时指代上述两个实现。'},
+      {h2:'安装'},
+      {code:'anolisa install copilot-shell'},
+      {h2:'使用'},
+      {p:'Copilot Shell 在终端内提供流式工具调用、上下文命令辅助与模型提供方集成,并接入 ANOLISA 的 Hook 系统以支持策略校验与审批流程。'}
+    ]
+  },
+  'agentsight':{
+    en:[
+      {h1:'AgentSight'},
+      {p:'AgentSight provides eBPF-based observability for agent activity, including kernel-level syscall, file, and network tracing, token accounting, interruption insight, and dashboard workflows.'},
+      {h2:'Installation'},
+      {code:'anolisa install agentsight'},
+      {h2:'Capabilities'},
+      {ul:['Kernel tracing of syscalls, file access, and network activity with low overhead.','Token accounting across agent sessions.','Interruption insight for stalled or blocked operations.','Dashboard views for aggregated agent telemetry.']}
+    ],
+    zh:[
+      {h1:'AgentSight'},
+      {p:'AgentSight 基于 eBPF 提供 Agent 活动的可观测性,涵盖内核级系统调用、文件与网络追踪、Token 计量、中断洞察与看板工作流。'},
+      {h2:'安装'},
+      {code:'anolisa install agentsight'},
+      {h2:'能力'},
+      {ul:['以较低开销追踪系统调用、文件访问与网络活动。','跨 Agent 会话的 Token 计量。','针对停滞或阻塞操作的中断洞察。','聚合 Agent 遥测数据的看板视图。']}
+    ]
+  },
+  'tokenless':{
+    en:[
+      {h1:'Tokenless'},
+      {p:'Tokenless reduces token consumption for agent workloads through prompt compression, schema optimization, and command rewriting, without requiring changes to agent code.'},
+      {h2:'Installation'},
+      {code:'anolisa install tokenless'},
+      {h2:'How it works'},
+      {p:'Tokenless operates at the operating layer and integrates with agent adapters. It compresses prompts and shapes responses transparently, lowering LLM cost while preserving task behavior.'}
+    ],
+    zh:[
+      {h1:'Tokenless'},
+      {p:'Tokenless 通过提示词压缩、结构优化与命令改写降低 Agent 负载的 Token 消耗,且无需改动 Agent 代码。'},
+      {h2:'安装'},
+      {code:'anolisa install tokenless'},
+      {h2:'工作原理'},
+      {p:'Tokenless 运行在操作层并与 Agent 适配器集成,透明地压缩提示词并整形响应,在保持任务行为的同时降低 LLM 成本。'}
+    ]
+  },
+  'os-skills':{
+    en:[
+      {h1:'OS Skills'},
+      {p:'OS Skills is a system management and DevOps skill library for AI agents. It provides pre-built skills for common system administration, cloud integration, and automation tasks.'},
+      {h2:'Overview'},
+      {ul:['System administration skills for users, services, packages, processes, and filesystems.','Cloud integration skills for resource queries, instance management, and network configuration.','DevOps automation skills for containers, logs, networking diagnostics, cron, and deployment workflows.']},
+      {h2:'Installation'},
+      {code:'anolisa install os-skills'},
+      {h2:'Quick start'},
+      {p:'Once installed, OS Skills are available to ANOLISA-compatible agent runtimes. Agents invoke skills through natural language requests.'},
+      {code:'> "Check disk usage on all mounted filesystems"\n> "Restart the nginx service"\n> "Show running containers and their resource usage"'},
+      {h2:'Configuration'},
+      {p:'OS Skills can be configured through `~/.config/os-skills/config.toml` to enable skill categories and require confirmation for destructive operations.'}
+    ],
+    zh:[
+      {h1:'OS Skills'},
+      {p:'OS Skills 是面向 AI Agent 的系统管理与 DevOps 技能库,提供用于系统管理、云集成和自动化任务的预构建技能。'},
+      {h2:'概述'},
+      {ul:['系统管理技能覆盖用户、服务、包、进程与文件系统。','云集成技能覆盖资源查询、实例管理和网络配置。','DevOps 自动化技能覆盖容器、日志、网络诊断、cron 和部署工作流。']},
+      {h2:'安装'},
+      {code:'anolisa install os-skills'},
+      {h2:'快速开始'},
+      {p:'安装后,OS Skills 可供 ANOLISA 兼容的 Agent 运行时使用。Agent 通过自然语言请求调用技能。'},
+      {code:'> "检查所有已挂载文件系统的磁盘使用情况"\n> "重启 nginx 服务"\n> "显示运行中的容器及其资源使用"'},
+      {h2:'配置'},
+      {p:'OS Skills 可通过 `~/.config/os-skills/config.toml` 配置启用的技能类别,并对破坏性操作要求确认。'}
+    ]
+  },
+  'skillfs':{
+    en:[
+      {h1:'SkillFS'},
+      {p:'SkillFS is a FUSE-based virtual filesystem that exposes curated agent skills through a `/skills` view. It uses the default view and the `skill-discover` virtual skill to control which skills are visible to agents.'},
+      {h2:'Prerequisites'},
+      {ul:['Linux host with FUSE3 available.','`/dev/fuse` must be accessible.','Rust >= 1.86 is required only for source builds.']},
+      {h2:'Installation'},
+      {code:'anolisa install skillfs'},
+      {p:'Source builds are intended for developers:'},
+      {code:'cd src/skillfs && cargo build --release'},
+      {h2:'Quick start'},
+      {code:'skillfs validate /path/to/skills\nskillfs list /path/to/skills\nskillfs classify /path/to/skills\nskillfs mount /path/to/skills /mnt/skillfs --foreground'},
+      {p:'After mounting, agents read skills from `<MOUNTPOINT>/skills/<skill-name>/SKILL.md`. The `skill-discover` virtual skill is always available at `<MOUNTPOINT>/skills/skill-discover/SKILL.md`.'},
+      {h2:'Core commands'},
+      {ul:['`skillfs mount <SOURCE> <MOUNTPOINT>` exposes the virtual `/skills` view.','`skillfs classify <SOURCE>` generates `skillfs-views.toml` in the source directory.','`skillfs validate <SOURCE>` validates `SKILL.md` files and reports success, degraded, or error states.','`skillfs list <SOURCE>` lists discovered skills and metadata.']},
+      {h2:'Configuration'},
+      {p:'Skill visibility is controlled by `skillfs-views.toml` in the skills source directory, not in a global config path. The default view appears directly under `/skills`; secondary views are listed through `skill-discover`.'}
+    ],
+    zh:[
+      {h1:'SkillFS'},
+      {p:'SkillFS 是基于 FUSE 的虚拟文件系统,通过 `/skills` 视图暴露精选 Agent 技能。它使用默认视图和 `skill-discover` 虚拟技能控制哪些 Skill 对 Agent 可见。'},
+      {h2:'前置条件'},
+      {ul:['Linux 主机并可使用 FUSE3。','`/dev/fuse` 必须可访问。','Rust >= 1.86 仅源码编译时需要。']},
+      {h2:'安装'},
+      {code:'anolisa install skillfs'},
+      {p:'源码编译面向开发者:'},
+      {code:'cd src/skillfs && cargo build --release'},
+      {h2:'快速开始'},
+      {code:'skillfs validate /path/to/skills\nskillfs list /path/to/skills\nskillfs classify /path/to/skills\nskillfs mount /path/to/skills /mnt/skillfs --foreground'},
+      {p:'挂载后,Agent 从 `<MOUNTPOINT>/skills/<skill-name>/SKILL.md` 读取技能。`skill-discover` 虚拟技能始终位于 `<MOUNTPOINT>/skills/skill-discover/SKILL.md`。'},
+      {h2:'核心命令'},
+      {ul:['`skillfs mount <SOURCE> <MOUNTPOINT>` 暴露虚拟 `/skills` 视图。','`skillfs classify <SOURCE>` 在源目录生成 `skillfs-views.toml`。','`skillfs validate <SOURCE>` 验证 `SKILL.md` 文件并报告 success、degraded 或 error 状态。','`skillfs list <SOURCE>` 列出已发现的技能及元数据。']},
+      {h2:'配置'},
+      {p:'Skill 可见性由技能源目录中的 `skillfs-views.toml` 控制,不是全局配置路径。默认视图直接出现在 `/skills`; secondary views 通过 `skill-discover` 列出。'}
+    ]
+  },
+  'agent-memory':{
+    en:[
+      {h1:'Agent Memory'},
+      {p:'Agent Memory provides MCP-based persistent file memory for AI agents. It stores structured memories as files so agents can retain context across sessions.'},
+      {h2:'Prerequisites'},
+      {ul:['Linux host on x86_64 or aarch64.','An MCP-compatible agent runtime.']},
+      {h2:'Installation'},
+      {code:'anolisa install agent-memory'},
+      {p:'Alinux users can also install from RPM, and developers can build from source:'},
+      {code:'sudo yum install agent-memory\ncd src/agent-memory && make build'},
+      {h2:'Quick start'},
+      {code:'agent-memory serve'},
+      {p:'Configure the agent runtime to connect to the `agent-memory` MCP server over stdio.'},
+      {h2:'MCP tools'},
+      {ul:['File operations such as `mem_read`, `mem_write`, `mem_append`, `mem_edit`, `mem_list`, and `mem_grep`.','Session and context tools such as `memory_search`, `memory_observe`, and `memory_get_context`.','Maintenance tools for consolidation, compaction, indexing, snapshots, export, and import.']},
+      {h2:'Configuration'},
+      {p:'The optional config file is `~/.anolisa/memory.toml`. When it is absent, Agent Memory uses built-in defaults and stores memories under `~/.anolisa/memory/`.'}
+    ],
+    zh:[
+      {h1:'Agent Memory'},
+      {p:'Agent Memory 为 AI Agent 提供基于 MCP 的持久化文件记忆能力,通过结构化文件存储记忆,使 Agent 能跨会话保留上下文。'},
+      {h2:'前置条件'},
+      {ul:['Linux 主机,x86_64 或 aarch64。','兼容 MCP 的 Agent 运行时。']},
+      {h2:'安装'},
+      {code:'anolisa install agent-memory'},
+      {p:'Alinux 用户也可以通过 RPM 安装,开发者可从源码构建:'},
+      {code:'sudo yum install agent-memory\ncd src/agent-memory && make build'},
+      {h2:'快速开始'},
+      {code:'agent-memory serve'},
+      {p:'将 Agent 运行时配置为通过 stdio 连接 `agent-memory` MCP server。'},
+      {h2:'MCP 工具'},
+      {ul:['文件操作工具包括 `mem_read`、`mem_write`、`mem_append`、`mem_edit`、`mem_list` 和 `mem_grep`。','会话与上下文工具包括 `memory_search`、`memory_observe` 和 `memory_get_context`。','维护工具覆盖整合、压缩、索引、快照、导出和导入。']},
+      {h2:'配置'},
+      {p:'可选配置文件为 `~/.anolisa/memory.toml`。不存在时 Agent Memory 使用内置默认值,并将记忆存储在 `~/.anolisa/memory/`。'}
+    ]
+  },
+  'ws-ckpt':{
+    en:[
+      {h1:'Workspace Checkpoints'},
+      {p:'ws-ckpt provides millisecond-level workspace checkpoint and rollback for AI agents. It uses filesystem copy-on-write snapshots so agents can experiment safely and recover quickly.'},
+      {h2:'Prerequisites'},
+      {ul:['Linux host on x86_64 or aarch64.','btrfs workspace volume, or any filesystem where ws-ckpt can create a btrfs loop image.','OpenClaw or Hermes when using plugin mode.']},
+      {h2:'Installation'},
+      {code:'anolisa install ws-ckpt'},
+      {p:'Alinux users can also install from RPM, and developers can build from source:'},
+      {code:'sudo yum install ws-ckpt\ncd src/ws-ckpt && make build'},
+      {h2:'Plugin installation'},
+      {code:'ws-ckpt plugin install --runtime openclaw\nws-ckpt plugin install --runtime hermes'},
+      {h2:'Common commands'},
+      {ul:['`ws-ckpt init -w <workspace>` initializes a workspace.','`ws-ckpt checkpoint -w <workspace> -s <snapshot-id> -m <message>` creates a checkpoint.','`ws-ckpt rollback -w <workspace> -s <snapshot> [--preview]` restores or previews a checkpoint.','`ws-ckpt list`, `ws-ckpt diff`, `ws-ckpt delete`, and `ws-ckpt cleanup` manage checkpoint history.']},
+      {h2:'Important constraints'},
+      {p:'The configured workspace path must not be `/`, inside the daemon mount path, or the agent startup directory or one of its parents.'}
+    ],
+    zh:[
+      {h1:'工作区快照'},
+      {p:'ws-ckpt 为 AI Agent 提供毫秒级工作区快照和回滚能力,使用文件系统 copy-on-write 快照支持安全实验与快速恢复。'},
+      {h2:'前置条件'},
+      {ul:['Linux 主机,x86_64 或 aarch64。','工作区所在卷使用 btrfs,或使用可创建 btrfs loop image 的任意文件系统。','Plugin 模式需要 OpenClaw 或 Hermes。']},
+      {h2:'安装'},
+      {code:'anolisa install ws-ckpt'},
+      {p:'Alinux 用户也可以通过 RPM 安装,开发者可从源码构建:'},
+      {code:'sudo yum install ws-ckpt\ncd src/ws-ckpt && make build'},
+      {h2:'插件安装'},
+      {code:'ws-ckpt plugin install --runtime openclaw\nws-ckpt plugin install --runtime hermes'},
+      {h2:'常用命令'},
+      {ul:['`ws-ckpt init -w <workspace>` 初始化工作区。','`ws-ckpt checkpoint -w <workspace> -s <snapshot-id> -m <message>` 创建检查点。','`ws-ckpt rollback -w <workspace> -s <snapshot> [--preview]` 恢复或预览检查点。','`ws-ckpt list`、`ws-ckpt diff`、`ws-ckpt delete` 和 `ws-ckpt cleanup` 管理检查点历史。']},
+      {h2:'重要约束'},
+      {p:'配置的工作区路径不能是 `/`,不能位于 daemon mount path 内,也不能是 Agent 启动目录或其父目录。'}
+    ]
+  }
+};
+
+/* ── state ── */
+let lang=(function(){try{const s=localStorage.getItem('anolisa-lang');return s==='zh'?'zh':'en'}catch(_){return 'en'}})();
+let activeModule=MODULES[0].id;
+let readerState=null;
+
+const t=key=>(I18N[lang]&&I18N[lang][key])||I18N.en[key]||'';
+
+/* ── helpers ── */
 function escapeHtml(value){
-  return String(value)
-    .replaceAll('&','&amp;')
-    .replaceAll('<','&lt;')
-    .replaceAll('>','&gt;')
-    .replaceAll('"','&quot;');
+  return String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
 }
-
 function renderInline(markdown){
   let html=escapeHtml(markdown);
+  html=html.replace(/\[([^\]]+)\]\(([^)]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
   html=html.replace(/`([^`]+)`/g,'<code>$1</code>');
   html=html.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
   return html;
 }
+function slug(s){return String(s).toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'')||'section'}
+function clComp(id){const cid=COMPONENTS[id]&&COMPONENTS[id].changelogId;return CHANGELOG.components.find(c=>c.id===cid)||null}
+function clReleases(id){const c=clComp(id);if(!c)return null;const cur=c.languages&&c.languages[lang];if(cur&&cur.releases&&cur.releases.length)return{releases:cur.releases,fallback:false};const en=c.languages&&c.languages.en;if(en&&en.releases&&en.releases.length)return{releases:en.releases,fallback:lang!=='en'};return null}
+function guidePath(id){const paths=COMPONENTS[id]?.guidePaths;return paths&&(paths[lang]||paths.en)||''}
+function guideAvailable(id){return Boolean(guidePath(id)&&GUIDES[id])}
+function changelogAvailable(id){return Boolean(clReleases(id))}
+function compName(id){return COMPONENTS[id].name[lang]||COMPONENTS[id].name.en}
 
-function versionAnchor(component,version){
-  return `${component.id}-${version.replaceAll('.','-')}`;
+/* ── homepage i18n ── */
+function applyStaticText(){
+  document.documentElement.lang=lang==='zh'?'zh-CN':'en';
+  const set=(id,html)=>{const el=document.getElementById(id);if(el)el.innerHTML=html};
+  set('hero-sub',I18N[lang].heroSub);
+  set('hero-tagline',escapeHtml(I18N[lang].heroTagline));
+  set('agent-label',escapeHtml(I18N[lang].agentLabel));
+  set('scroll-label',escapeHtml(I18N[lang].scroll));
+  set('cap-label',escapeHtml(I18N[lang].capLabel));
+  set('cap-title',I18N[lang].capTitle);
+  set('agent-code',I18N[lang].agentPromptHtml);
+  document.querySelectorAll('.lang-toggle').forEach(tg=>{
+    tg.querySelectorAll('.lang-btn').forEach(b=>b.classList.toggle('active',b.dataset.lang===lang));
+  });
 }
 
-function renderRelease(component,release,index){
-  const delay=Math.min(index+1,5);
-  const sections=release.sections.map(section=>`          <div class="release-body-section">
-            <h3>${escapeHtml(section.title)}</h3>
-            <ul>
-${section.items.map(item=>`              <li>${renderInline(item)}</li>`).join('\n')}
-            </ul>
-          </div>`).join('\n');
-  return `        <article class="release reveal reveal-d${delay}" id="${versionAnchor(component,release.version)}">
-          <div class="release-meta">
-            <div class="release-version">${escapeHtml(release.version)}</div>
-            <div class="release-date">${escapeHtml(release.date)}</div>
-          </div>
-          <div class="release-body">
-${sections}
-          </div>
-        </article>`;
+/* ── workbench ── */
+const wbModules=document.getElementById('wb-modules');
+const wbComponents=document.getElementById('wb-components');
+
+function unit(n){return lang==='zh'?`${n} ${I18N.zh.unit1}`:`${n} ${n===1?I18N.en.unit1:I18N.en.unitN}`}
+
+function renderModules(){
+  wbModules.innerHTML=MODULES.map(m=>{
+    const active=m.id===activeModule;
+    return `<button class="mod-card${active?' active':''}" type="button" data-module="${m.id}" aria-pressed="${active}">
+      <div class="mod-ic">${m.icon}</div>
+      <div class="mod-body">
+        <div class="mod-name">${escapeHtml(m.name[lang])}</div>
+        <div class="mod-desc">${escapeHtml(m.desc[lang])}</div>
+        <div class="mod-count">${unit(m.components.length)}</div>
+      </div>
+    </button>`;
+  }).join('');
 }
 
-function activeComponent(){
-  return changelogData.components.find(component=>component.id===activeComponentId)||changelogData.components[0];
+function componentCard(id){
+  const c=COMPONENTS[id];
+  const ga=guideAvailable(id);
+  const info=changelogAvailable(id)?clReleases(id):null;
+  const ca=Boolean(info);
+  const rel=info?info.releases[0]:null;
+  let sum=I18N[lang].noChangelog;
+  let verLine='';
+  let badge='';
+  if(rel){
+    verLine=`<span class="comp-cl-ver">${escapeHtml(rel.version)}${rel.date?' · '+escapeHtml(rel.date):''}</span>`;
+    if(info.fallback)badge=`<span class="comp-cl-badge">${escapeHtml(t('clEnBadge'))}</span>`;
+    const first=rel.sections&&rel.sections[0]&&rel.sections[0].items&&rel.sections[0].items[0];
+    if(first)sum=renderInline(first);
+  }
+  return `<div class="comp-card">
+    <div class="comp-top">
+      <div class="comp-name">${escapeHtml(c.name[lang])}</div>
+      ${c.planned?`<span class="comp-tag planned">${escapeHtml(t('planned'))}</span>`:''}
+    </div>
+    <p class="comp-intro">${escapeHtml(c.intro[lang])}</p>
+    <div class="comp-cl">
+      <div class="comp-cl-head"><span class="comp-cl-label">${escapeHtml(t('lastChangelog'))}</span>${verLine}${badge}</div>
+      <p class="comp-cl-sum">${sum}</p>
+    </div>
+    <div class="comp-actions">
+      <button class="doc-btn" type="button" data-open="guide" data-comp="${id}"${ga?'':' disabled aria-disabled="true"'}>${escapeHtml(ga?t('userGuide'):t('guideUnavail'))}</button>
+      <button class="doc-btn" type="button" data-open="changelog" data-comp="${id}"${ca?'':' disabled aria-disabled="true"'}>${escapeHtml(ca?t('changelog'):t('changelogUnavail'))}</button>
+    </div>
+  </div>`;
 }
 
-function hasLanguage(component,lang){
-  return Boolean(component?.languages?.[lang]?.releases?.length);
+function renderComponents(){
+  const mod=MODULES.find(m=>m.id===activeModule)||MODULES[0];
+  wbComponents.innerHTML=mod.components.map(componentCard).join('');
 }
 
-function renderTabs(){
-  if(!tabsEl)return;
-  tabsEl.innerHTML=changelogData.components.map(component=>`<button class="component-tab${component.id===activeComponentId?' active':''}" type="button" role="tab" aria-selected="${component.id===activeComponentId}" data-component="${component.id}">${escapeHtml(component.label)}</button>`).join('');
-  tabsEl.querySelectorAll('.component-tab').forEach(tab=>{
-    tab.addEventListener('click',()=>{
-      activeComponentId=tab.dataset.component;
-      if(!hasLanguage(activeComponent(),'zh'))activeLang='en';
-      renderChangelog();
+wbModules.addEventListener('click',e=>{
+  const card=e.target.closest('.mod-card');
+  if(!card)return;
+  activeModule=card.dataset.module;
+  renderModules();
+  renderComponents();
+});
+wbComponents.addEventListener('click',e=>{
+  const btn=e.target.closest('.doc-btn');
+  if(!btn||btn.disabled)return;
+  openReader(btn.dataset.comp,btn.dataset.open);
+});
+
+/* ── doc rendering ── */
+function renderBlocks(blocks){
+  const parts=[];const toc=[];const used={};
+  const uid=b=>{let id=b;let n=1;while(used[id]){id=b+'-'+(n++)}used[id]=1;return id};
+  blocks.forEach(b=>{
+    if('h1'in b){parts.push(`<h1>${renderInline(b.h1)}</h1>`);}
+    else if('h2'in b){const id=uid('h-'+slug(b.h2));toc.push({level:2,id,text:b.h2});parts.push(`<h2 id="${id}">${renderInline(b.h2)}</h2>`);}
+    else if('h3'in b){const id=uid('h-'+slug(b.h3));toc.push({level:3,id,text:b.h3});parts.push(`<h3 id="${id}">${renderInline(b.h3)}</h3>`);}
+    else if('p'in b){parts.push(`<p>${renderInline(b.p)}</p>`);}
+    else if('code'in b){parts.push(`<pre><code>${escapeHtml(b.code)}</code></pre>`);}
+    else if('ul'in b){parts.push('<ul>'+b.ul.map(i=>`<li>${renderInline(i)}</li>`).join('')+'</ul>');}
+    else if('ol'in b){parts.push('<ol>'+b.ol.map(i=>`<li>${renderInline(i)}</li>`).join('')+'</ol>');}
+  });
+  return {html:parts.join('\n'),toc};
+}
+
+function emptyDoc(titleKey,bodyKey){
+  return {html:`<div class="doc-empty"><h2>${escapeHtml(t(titleKey))}</h2><p>${escapeHtml(t(bodyKey))}</p></div>`,toc:[]};
+}
+
+function guideDoc(id){
+  const g=GUIDES[id];
+  if(!g)return emptyDoc('emptyGuideTitle','emptyGuideBody');
+  const blocks=g[lang]||g.en;
+  const rendered=renderBlocks(blocks);
+  const kicker=`<div class="doc-kicker">${escapeHtml(compName(id))} · ${escapeHtml(t('userGuide'))}</div>`;
+  const source=guidePath(id);
+  const sourceLine=source?`<p class="doc-source">${escapeHtml(t('sourceDoc'))}: <a href="https://github.com/alibaba/anolisa/blob/main/${escapeHtml(source)}" target="_blank" rel="noopener">${escapeHtml(source)}</a></p>`:'';
+  return {html:kicker+sourceLine+rendered.html,toc:rendered.toc};
+}
+
+function changelogDoc(id){
+  const info=clReleases(id);
+  if(!info)return emptyDoc('emptyChangelogTitle','emptyChangelogBody');
+  const toc=[];const parts=[];
+  parts.push(`<div class="doc-kicker">${escapeHtml(compName(id))} · ${escapeHtml(t('changelog'))}</div>`);
+  parts.push(`<h1>${escapeHtml(compName(id))}</h1>`);
+  if(info.fallback)parts.push(`<p>${escapeHtml(t('changelogFallback'))}</p>`);
+  info.releases.forEach(r=>{
+    const id2='v-'+String(r.version).replace(/\./g,'-');
+    toc.push({level:2,id:id2,text:r.version});
+    parts.push(`<h2 id="${id2}">${escapeHtml(r.version)}</h2>`);
+    if(r.date)parts.push(`<p class="doc-release-date">${escapeHtml(r.date)}</p>`);
+    (r.sections||[]).forEach(s=>{
+      parts.push(`<h3>${escapeHtml(s.title)}</h3>`);
+      parts.push('<ul>'+(s.items||[]).map(i=>`<li>${renderInline(i)}</li>`).join('')+'</ul>');
     });
   });
+  return {html:parts.join('\n'),toc};
 }
 
-function updateLanguageButtons(component){
-  langButtons.forEach(button=>{
-    const lang=button.dataset.lang;
-    const available=hasLanguage(component,lang);
-    button.disabled=!available;
-    button.classList.toggle('active',lang===activeLang&&available);
+/* ── reader ── */
+const reader=document.getElementById('reader');
+const readerBack=document.getElementById('reader-back');
+const readerCrumb=document.getElementById('reader-crumb');
+const readerSwitch=document.getElementById('reader-switch');
+const readerSidebar=document.getElementById('reader-sidebar');
+const readerDoc=document.getElementById('reader-doc');
+const readerToc=document.getElementById('reader-toc');
+
+function moduleOf(compId){return MODULES.find(m=>m.components.includes(compId))||MODULES[0]}
+
+function renderReaderSidebar(){
+  readerSidebar.innerHTML=MODULES.map(m=>`<div class="rs-group">
+    <div class="rs-group-title">${escapeHtml(m.name[lang])}</div>
+    ${m.components.map(cid=>{
+      const ga=guideAvailable(cid);const ca=changelogAvailable(cid);
+      const link=(kind,label,avail)=>{
+        const active=readerState&&readerState.comp===cid&&readerState.kind===kind;
+        if(!avail)return `<span class="rs-link disabled" aria-disabled="true">${escapeHtml(label)}</span>`;
+        return `<a class="rs-link${active?' active':''}" href="#/reader/${cid}/${kind}">${escapeHtml(label)}</a>`;
+      };
+      return `<div class="rs-comp"><div class="rs-comp-name">${escapeHtml(compName(cid))}</div>
+        ${link('guide',t('userGuide'),ga)}
+        ${link('changelog',t('changelog'),ca)}
+      </div>`;
+    }).join('')}
+  </div>`).join('');
+}
+
+function renderReaderContent(){
+  if(!readerState)return;
+  const {comp,kind}=readerState;
+  const doc=kind==='changelog'?changelogDoc(comp):guideDoc(comp);
+  const kindLabel=kind==='changelog'?t('changelog'):t('userGuide');
+  readerCrumb.innerHTML=`${escapeHtml(moduleOf(comp).name[lang])} / <b>${escapeHtml(compName(comp))}</b> · ${escapeHtml(kindLabel)}`;
+  readerBack.textContent='← '+t('back');
+  const ga=guideAvailable(comp),ca=changelogAvailable(comp);
+  readerSwitch.innerHTML=[{k:'guide',label:t('userGuide'),avail:ga},{k:'changelog',label:t('changelog'),avail:ca}]
+    .map(o=>`<button type="button" role="tab" data-switch="${o.k}" aria-selected="${o.k===kind}"${o.k===kind?' class="active"':''}${o.avail?'':' disabled aria-disabled="true"'}>${escapeHtml(o.label)}</button>`).join('');
+  readerDoc.innerHTML=doc.html;
+  if(doc.toc.length){
+    readerToc.innerHTML=`<div class="toc-title">${escapeHtml(t('onThisPage'))}</div>`+doc.toc.map(h=>`<a class="toc-link${h.level===3?' lvl3':''}" data-target="${h.id}" href="javascript:void(0)">${escapeHtml(h.text)}</a>`).join('');
+  }else{
+    readerToc.innerHTML='';
+  }
+  renderReaderSidebar();
+  reader.querySelectorAll('#reader-lang .lang-btn').forEach(b=>b.classList.toggle('active',b.dataset.lang===lang));
+}
+
+function showReader(comp,kind){
+  readerState={comp,kind};
+  reader.hidden=false;
+  reader.setAttribute('aria-hidden','false');
+  document.body.style.overflow='hidden';
+  renderReaderContent();
+  reader.scrollTop=0;
+}
+function hideReader(){
+  readerState=null;
+  reader.hidden=true;
+  reader.setAttribute('aria-hidden','true');
+  document.body.style.overflow='';
+}
+function openReader(comp,kind){location.hash='/reader/'+comp+'/'+kind;}
+
+function returnToOverview(){
+  const targetModule=readerState?moduleOf(readerState.comp).id:activeModule;
+  activeModule=targetModule;
+  renderModules();
+  renderComponents();
+  hideReader();
+  history.replaceState(null,'',`${location.pathname}${location.search}#capabilities`);
+  document.getElementById('capabilities')?.scrollIntoView({block:'start'});
+}
+
+function route(){
+  const m=location.hash.match(/^#\/reader\/([a-z0-9-]+)\/(guide|changelog)$/i);
+  if(m&&COMPONENTS[m[1]]){showReader(m[1],m[2]);}
+  else{hideReader();}
+}
+window.addEventListener('hashchange',route);
+
+readerBack.addEventListener('click',()=>{
+  returnToOverview();
+});
+readerSwitch.addEventListener('click',e=>{
+  const b=e.target.closest('button');
+  if(!b||b.disabled||!readerState)return;
+  openReader(readerState.comp,b.dataset.switch);
+});
+readerToc.addEventListener('click',e=>{
+  const link=e.target.closest('.toc-link');
+  if(!link)return;
+  e.preventDefault();
+  const el=document.getElementById(link.dataset.target);
+  if(el)el.scrollIntoView({behavior:'smooth',block:'start'});
+});
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'&&!reader.hidden){
+    returnToOverview();
+  }
+});
+
+/* ── language toggles ── */
+function setLang(next){
+  if(next!==lang){
+    lang=next;
+    try{localStorage.setItem('anolisa-lang',lang)}catch(_){}
+  }
+  applyStaticText();
+  renderModules();
+  renderComponents();
+  if(!reader.hidden)renderReaderContent();
+}
+document.querySelectorAll('.lang-toggle').forEach(tg=>{
+  tg.addEventListener('click',e=>{
+    const b=e.target.closest('.lang-btn');
+    if(!b||b.disabled)return;
+    setLang(b.dataset.lang);
   });
-}
+});
 
-function renderChangelog(){
-  const component=activeComponent();
-  if(!component||!releaseList)return;
-  if(!hasLanguage(component,activeLang))activeLang='en';
-  const releases=component.languages[activeLang].releases;
-  renderTabs();
-  updateLanguageButtons(component);
-  componentSummary.textContent=component.summary;
-  sourceLink.href=component.sourceUrl;
-  moreLink.href=component.sourceUrl;
-  releaseList.innerHTML=`        <!-- ANOLISA_CLI_CHANGELOG_START -->\n${releases.map((release,index)=>renderRelease(component,release,index)).join('\n\n')}\n        <!-- ANOLISA_CLI_CHANGELOG_END -->`;
-  if(window.observeReveals)window.observeReveals(releaseList);
-}
-
-function scrollToSection(section){
-  scrollLock=true;
-  section.scrollIntoView({behavior:'smooth',block:'start'});
-  setTimeout(()=>{scrollLock=false},900);
-}
-
-function updateTopButton(){
-  topBtn.classList.toggle('visible',window.scrollY>window.innerHeight*0.45);
-}
-
+/* ── copy interactions ── */
+const CMD='curl -fsSL https://agentic-os.sh/install.sh | bash';
+const btn=document.getElementById('copy-btn');
+const block=document.getElementById('cmd-block');
+const toast=document.getElementById('copy-toast');
+let toastTimer;
+function fallbackCopy(text){const a=document.createElement('textarea');a.value=text;a.style.cssText='position:fixed;opacity:0';document.body.appendChild(a);a.select();document.execCommand('copy');document.body.removeChild(a);}
 async function doCopy(){
   try{navigator.clipboard?.writeText?await navigator.clipboard.writeText(CMD):fallbackCopy(CMD)}catch(_){fallbackCopy(CMD)}
-  btn.classList.add('copied');
-  toast.classList.add('show');
-  clearTimeout(toastTimer);
-  toastTimer=setTimeout(()=>{btn.classList.remove('copied');toast.classList.remove('show')},1600);
+  btn.classList.add('copied');toast.classList.add('show');
+  clearTimeout(toastTimer);toastTimer=setTimeout(()=>{btn.classList.remove('copied');toast.classList.remove('show')},1600);
 }
-
 btn.addEventListener('click',e=>{e.stopPropagation();doCopy()});
 block.addEventListener('click',doCopy);
 block.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();doCopy()}});
 
-const AGENT_PROMPT='Read https://agentic-os.sh/agents/ to learn how to use ANOLISA, then help me set it up.';
 const agentBtn=document.getElementById('agent-copy-btn');
 const agentBlock=document.getElementById('agent-block');
 const agentToast=document.getElementById('agent-toast');
 let agentToastTimer;
 async function doAgentCopy(){
+  const AGENT_PROMPT=I18N[lang].agentPromptCopy;
   try{navigator.clipboard?.writeText?await navigator.clipboard.writeText(AGENT_PROMPT):fallbackCopy(AGENT_PROMPT)}catch(_){fallbackCopy(AGENT_PROMPT)}
-  agentBtn.classList.add('copied');
-  agentToast.classList.add('show');
-  clearTimeout(agentToastTimer);
-  agentToastTimer=setTimeout(()=>{agentBtn.classList.remove('copied');agentToast.classList.remove('show')},1600);
+  agentBtn.classList.add('copied');agentToast.classList.add('show');
+  clearTimeout(agentToastTimer);agentToastTimer=setTimeout(()=>{agentBtn.classList.remove('copied');agentToast.classList.remove('show')},1600);
 }
 agentBtn.addEventListener('click',e=>{e.stopPropagation();doAgentCopy()});
 agentBlock.addEventListener('click',doAgentCopy);
 agentBlock.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();doAgentCopy()}});
 
+/* ── scroll + snap ── */
+const hero=document.querySelector('.hero');
+const capabilities=document.getElementById('capabilities');
+const topBtn=document.getElementById('top-btn');
+let scrollLock=false;
+function scrollToSection(section){scrollLock=true;section.scrollIntoView({behavior:'smooth',block:'start'});setTimeout(()=>{scrollLock=false},900);}
+function updateTopButton(){topBtn.classList.toggle('visible',window.scrollY>window.innerHeight*0.45)}
 document.getElementById('scroll-cue').addEventListener('click',()=>scrollToSection(capabilities));
-document.getElementById('scroll-cue').addEventListener('keydown',e=>{
-  if(e.key==='Enter'||e.key===' '){e.preventDefault();scrollToSection(capabilities)}
-});
+document.getElementById('scroll-cue').addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();scrollToSection(capabilities)}});
 topBtn.addEventListener('click',()=>scrollToSection(hero));
-
 window.addEventListener('wheel',e=>{
+  if(!reader.hidden)return;
   if(e.deltaY<=0||window.matchMedia('(max-width:768px)').matches)return;
-  const nextSection=capabilities.getBoundingClientRect().top>24
-    ? capabilities
-    : changelog.getBoundingClientRect().top>96
-      ? changelog
-      : null;
-  if(scrollLock||nextSection){
-    e.preventDefault();
-    if(!scrollLock&&nextSection)scrollToSection(nextSection);
-  }
+  const nextSection=capabilities.getBoundingClientRect().top>24?capabilities:null;
+  if(scrollLock||nextSection){e.preventDefault();if(!scrollLock&&nextSection)scrollToSection(nextSection)}
 },{passive:false});
 window.addEventListener('scroll',updateTopButton,{passive:true});
 updateTopButton();
 
-langButtons.forEach(button=>{
-  button.addEventListener('click',()=>{
-    if(button.disabled)return;
-    activeLang=button.dataset.lang;
-    renderChangelog();
-  });
-});
-
+/* ── reveal ── */
 const io=new IntersectionObserver(entries=>{
   entries.forEach(e=>{if(e.isIntersecting){e.target.classList.add('visible');io.unobserve(e.target)}})
 },{threshold:0.12,rootMargin:'0px 0px -60px 0px'});
-window.observeReveals=(root=document)=>{
-  root.querySelectorAll('.reveal').forEach(el=>io.observe(el));
-};
-renderChangelog();
+window.observeReveals=(root=document)=>{root.querySelectorAll('.reveal').forEach(el=>io.observe(el))};
+
+/* ── init ── */
+applyStaticText();
+renderModules();
+renderComponents();
 window.observeReveals();
+route();
 </script>
 </body>
 </html>
