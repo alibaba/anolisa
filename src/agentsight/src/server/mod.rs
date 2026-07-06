@@ -129,6 +129,8 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(handlers::list_traces_by_session)
                 .service(handlers::get_trace_detail)
                 .service(handlers::get_conversation_events)
+                .service(handlers::evaluate_grader)
+                .service(handlers::latest_grader)
                 .service(handlers::list_agent_names)
                 .service(handlers::get_timeseries)
                 .service(handlers::export_atif_trace)

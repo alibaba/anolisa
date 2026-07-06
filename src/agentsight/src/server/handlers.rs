@@ -9,6 +9,10 @@ use serde_json::{Value, json};
 
 use super::AppState;
 use crate::agent_sec::{AgentSecClient, AgentSecClientError, DaemonResponse};
+use crate::grader::{
+    EvaluationRequest, EvaluationResponse, EvaluationStore, GraderError, GraderType,
+    RULE_GRADER_VERSION, RuleGrader, TargetType, load_conversation_input,
+};
 use crate::health::AgentHealthStatus;
 use crate::storage::sqlite::GenAISqliteStore;
 use crate::storage::sqlite::genai::{ModelTimeseriesBucket, TimeseriesBucket};
@@ -151,6 +155,162 @@ pub async fn get_conversation_events(
         Err(e) => {
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
         }
+    }
+}
+
+// ─── Grader endpoints ────────────────────────────────────────────────────────
+
+/// Query parameters for GET /api/grader/latest.
+#[derive(Debug, Deserialize)]
+pub struct GraderLatestQuery {
+    pub target_type: String,
+    pub target_id: String,
+}
+
+/// POST /api/grader/evaluate
+///
+/// Manually evaluate a conversation snapshot with the rule-based grader.
+#[post("/grader/evaluate")]
+pub async fn evaluate_grader(
+    data: web::Data<AppState>,
+    body: web::Json<EvaluationRequest>,
+) -> impl Responder {
+    let target_type = match parse_grader_target_type(&body.target_type) {
+        Ok(target_type) => target_type,
+        Err(error) => return grader_error_response(error),
+    };
+
+    if body.target_id.trim().is_empty() {
+        return HttpResponse::BadRequest()
+            .json(json!({"error": "bad_request", "message": "target_id is required"}));
+    }
+
+    let input = match load_conversation_input(&data.storage_path, &body.target_id, body.force) {
+        Ok(input) => input,
+        Err(error) => return grader_error_response(error),
+    };
+    let store = match EvaluationStore::new_with_path(&data.storage_path) {
+        Ok(store) => store,
+        Err(error) => return grader_error_response(error),
+    };
+
+    match store.find_completed(
+        target_type,
+        &body.target_id,
+        &input.input_hash,
+        GraderType::Rule,
+        RULE_GRADER_VERSION,
+    ) {
+        Ok(Some(record)) => {
+            if let Some(result) = record.result {
+                return HttpResponse::Ok().json(EvaluationResponse {
+                    result,
+                    reused_existing_run: true,
+                });
+            }
+        }
+        Ok(None) => {}
+        Err(error) => return grader_error_response(error),
+    }
+
+    let result = RuleGrader::evaluate(&input);
+    match store.insert_completed(&result) {
+        Ok(true) => {}
+        Ok(false) => {
+            return match store.find_completed(
+                target_type,
+                &body.target_id,
+                &input.input_hash,
+                GraderType::Rule,
+                RULE_GRADER_VERSION,
+            ) {
+                Ok(Some(record)) => {
+                    if let Some(result) = record.result {
+                        HttpResponse::Ok().json(EvaluationResponse {
+                            result,
+                            reused_existing_run: true,
+                        })
+                    } else {
+                        grader_error_response(GraderError::Storage(
+                            "existing evaluation run is missing result_json".to_string(),
+                        ))
+                    }
+                }
+                Ok(None) => grader_error_response(GraderError::Storage(
+                    "evaluation insert was ignored but no completed run was found".to_string(),
+                )),
+                Err(error) => grader_error_response(error),
+            };
+        }
+        Err(error) => return grader_error_response(error),
+    }
+
+    HttpResponse::Ok().json(EvaluationResponse {
+        result,
+        reused_existing_run: false,
+    })
+}
+
+/// GET /api/grader/latest?target_type=conversation&target_id=<id>
+///
+/// Return the latest completed evaluation result for a conversation.
+#[get("/grader/latest")]
+pub async fn latest_grader(
+    data: web::Data<AppState>,
+    query: web::Query<GraderLatestQuery>,
+) -> impl Responder {
+    let target_type = match parse_grader_target_type(&query.target_type) {
+        Ok(target_type) => target_type,
+        Err(error) => return grader_error_response(error),
+    };
+
+    if query.target_id.trim().is_empty() {
+        return HttpResponse::BadRequest()
+            .json(json!({"error": "bad_request", "message": "target_id is required"}));
+    }
+
+    let store = match EvaluationStore::new_with_path(&data.storage_path) {
+        Ok(store) => store,
+        Err(error) => return grader_error_response(error),
+    };
+
+    match store.latest_completed(target_type, &query.target_id) {
+        Ok(Some(record)) => HttpResponse::Ok().json(record.result),
+        Ok(None) => HttpResponse::Ok().json(serde_json::Value::Null),
+        Err(error) => grader_error_response(error),
+    }
+}
+
+fn parse_grader_target_type(value: &str) -> Result<TargetType, GraderError> {
+    match value {
+        "conversation" => Ok(TargetType::Conversation),
+        other => Err(GraderError::UnsupportedTarget(other.to_string())),
+    }
+}
+
+fn grader_error_response(error: GraderError) -> HttpResponse {
+    match error {
+        GraderError::ConversationNotFound(id) => HttpResponse::NotFound().json(json!({
+            "error": "conversation_not_found",
+            "message": format!("Conversation not found: {id}"),
+        })),
+        GraderError::ConversationNotReady { pending_count } => HttpResponse::Conflict().json(json!({
+            "error": "conversation_not_ready",
+            "message": "Conversation still has pending LLM calls. Retry after completion or use force=true.",
+            "pending_call_count": pending_count,
+        })),
+        GraderError::UnsupportedTarget(target) => HttpResponse::BadRequest().json(json!({
+            "error": "unsupported_target",
+            "message": format!("Unsupported target_type: {target}. MVP supports only conversation."),
+        })),
+        GraderError::Storage(message) => HttpResponse::InternalServerError().json(json!({
+            "error": "storage_error",
+            "message": message,
+        })),
+        GraderError::Json(error) => HttpResponse::InternalServerError().json(json!({
+            "error": "json_error",
+            "message": error.to_string(),
+        })),
     }
 }
 

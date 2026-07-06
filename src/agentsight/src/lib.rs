@@ -52,6 +52,7 @@ pub mod discovery;
 pub mod event;
 pub mod ffi;
 pub mod genai;
+pub mod grader;
 pub mod health;
 pub mod interruption;
 pub mod parser;
