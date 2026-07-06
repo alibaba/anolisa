@@ -55,13 +55,12 @@ const mockAtifDoc = {
       tool_calls: [
         {
           tool_call_id: 'tc-1',
-          tool_name: 'search',
+          function_name: 'search',
           arguments: { query: 'greeting' },
-          result: 'found: hello',
         },
       ],
       observation: {
-        results: [{ output: 'search result' }],
+        results: [{ source_call_id: 'tc-1', content: 'search result' }],
       },
       metrics: {
         prompt_tokens: 100,
@@ -272,6 +271,17 @@ describe('AtifViewerPage', () => {
       renderPage('/atif?type=session&id=sess-from-url');
     });
     expect(mockFetchAtifBySession).toHaveBeenCalledWith('sess-from-url');
+  });
+
+  it('should expand highlighted evidence sections from URL params', async () => {
+    mockFetchAtifByConversation.mockResolvedValue(mockAtifDoc);
+    await act(async () => {
+      renderPage('/atif?type=conversation&id=conv-1&highlight_call_id=tc-1');
+    });
+
+    expect(mockFetchAtifByConversation).toHaveBeenCalledWith('conv-1');
+    expect(screen.getByText('search')).toBeInTheDocument();
+    expect(screen.getByText('search result')).toBeInTheDocument();
   });
 
   it('should show Token savings comparison card when savings data exists', async () => {

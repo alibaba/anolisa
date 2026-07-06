@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   LineChart, Line, BarChart, Bar,
@@ -6,6 +6,8 @@ import {
 } from 'recharts';
 import { InterruptionBadge } from '../components/InterruptionBadge';
 import { InterruptionPanel, ResolvedEventInfo } from '../components/InterruptionPanel';
+import { EvaluationBadge } from '../components/EvaluationBadge';
+import { EvaluationPanel } from '../components/EvaluationPanel';
 import { DateTimePicker } from '../components/DateTimePicker';
 import { SessionIdHelp } from '../components/SessionIdHelp';
 import {
@@ -18,6 +20,7 @@ import {
   fetchInterruptionStats,
   fetchInterruptionSessionCounts,
   fetchInterruptionConversationCounts,
+  fetchLatestEvaluation,
   fetchTokenSavings,
   SessionSummary,
   TraceSummary,
@@ -28,6 +31,7 @@ import {
   InterruptionTypeStat,
   SessionInterruptionCount,
   ConversationInterruptionCount,
+  EvaluationResult,
   INTERRUPTION_TYPE_CN,
 } from '../utils/apiClient';
 
@@ -316,15 +320,62 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(0); // 0-based
   const [expandedTracePanel, setExpandedTracePanel] = useState<string | null>(null);
+  const [expandedEvaluationPanel, setExpandedEvaluationPanel] = useState<string | null>(null);
+  const [evaluations, setEvaluations] = useState<Map<string, EvaluationResult>>(new Map());
+  const [evaluationLookupDone, setEvaluationLookupDone] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     setLoading(true);
     setPage(0);
+    setEvaluations(new Map());
+    setEvaluationLookupDone(new Set());
     fetchTraces(sessionId, startNs, endNs)
       .then(setTraces)
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false));
   }, [sessionId, startNs, endNs]);
+
+  const totalPages = Math.max(1, Math.ceil(traces.length / PAGE_SIZE));
+  const pageTraces = useMemo(
+    () => traces.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE),
+    [page, traces]
+  );
+
+  useEffect(() => {
+    if (loading || pageTraces.length === 0) return;
+
+    const missing = pageTraces.filter(
+      (trace) => !evaluationLookupDone.has(trace.conversation_id)
+    );
+    if (missing.length === 0) return;
+
+    let cancelled = false;
+    Promise.all(
+      missing.map((trace) =>
+        fetchLatestEvaluation(trace.conversation_id)
+          .then((result) => result ? [trace.conversation_id, result] as const : null)
+          .catch(() => null)
+      )
+    ).then((entries) => {
+      if (cancelled) return;
+      setEvaluations((prev) => {
+        const next = new Map(prev);
+        for (const entry of entries) {
+          if (entry) next.set(entry[0], entry[1]);
+        }
+        return next;
+      });
+      setEvaluationLookupDone((prev) => {
+        const next = new Set(prev);
+        for (const trace of missing) next.add(trace.conversation_id);
+        return next;
+      });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [evaluationLookupDone, loading, pageTraces]);
 
   if (loading)
     return (
@@ -343,21 +394,19 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
       </tr>
     );
 
-  const totalPages = Math.max(1, Math.ceil(traces.length / PAGE_SIZE));
-  const pageTraces = traces.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
-
   return (
     <>
       {/* Sub-header */}
       <tr className="bg-blue-50 border-t border-blue-100">
         <td colSpan={10} className="px-4 lg:px-8 py-2">
-          <div className="grid grid-cols-[260px_274px_120px_120px_160px_80px_100px] text-xs font-semibold text-blue-700 uppercase tracking-wide min-w-[800px]">
+          <div className="grid grid-cols-[230px_244px_110px_110px_150px_74px_100px_90px] text-xs font-semibold text-blue-700 uppercase tracking-wide min-w-[900px]">
             <div>Conversation ID</div>
             <div>用户请求</div>
             <div>输入 Token</div>
             <div>输出 Token</div>
             <div>开始时间</div>
             <div>操作</div>
+            <div>质量评估</div>
             <div>中断</div>
           </div>
         </td>
@@ -375,7 +424,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
         <React.Fragment key={tr.conversation_id}>
           <tr className="bg-blue-50 hover:bg-blue-100 transition-colors">
             <td colSpan={10} className="px-4 lg:px-8 py-2">
-              <div className="grid grid-cols-[260px_274px_120px_120px_160px_80px_100px] items-center text-sm min-w-[800px]">
+              <div className="grid grid-cols-[230px_244px_110px_110px_150px_74px_100px_90px] items-center text-sm min-w-[900px]">
                 {/* Col 1: Conversation ID */}
                 <div className="min-w-0 pr-2">
                   <div className="flex items-center gap-1">
@@ -417,6 +466,20 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
                   </button>
                 </div>
                 <div>
+                  <button
+                    onClick={() => setExpandedEvaluationPanel(
+                      expandedEvaluationPanel === tr.conversation_id ? null : tr.conversation_id
+                    )}
+                    className="inline-flex min-w-[72px] items-center justify-center rounded border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-50"
+                  >
+                    {evaluations.get(tr.conversation_id) ? (
+                      <EvaluationBadge result={evaluations.get(tr.conversation_id)!} />
+                    ) : (
+                      '评估'
+                    )}
+                  </button>
+                </div>
+                <div>
                   {(() => {
                     const ic = conversationInterruptionCounts.get(tr.conversation_id);
                     if (!ic || ic.total === 0) return <span className="text-xs text-gray-300">—</span>;
@@ -432,8 +495,24 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
                   })()}
                 </div>
               </div>
-            </td>
-          </tr>
+              </td>
+            </tr>
+          {/* Trace evaluation panel */}
+          {expandedEvaluationPanel === tr.conversation_id && (
+            <tr className="bg-blue-50">
+              <td colSpan={10} className="px-4 lg:px-8 pb-3 pt-0">
+                <EvaluationPanel
+                  conversationId={tr.conversation_id}
+                  initialResult={evaluations.get(tr.conversation_id) ?? null}
+                  onResult={(result) => setEvaluations((prev) => {
+                    const next = new Map(prev);
+                    next.set(tr.conversation_id, result);
+                    return next;
+                  })}
+                />
+              </td>
+            </tr>
+          )}
           {/* Trace interruption panel */}
           {expandedTracePanel === tr.trace_id && (
             <tr className="bg-blue-50">

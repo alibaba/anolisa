@@ -20,6 +20,9 @@ import {
   fetchAgentHealth,
   deleteAgentHealth,
   restartAgentHealth,
+  fetchLatestEvaluation,
+  evaluateConversation,
+  EvaluationNotReadyError,
   INTERRUPTION_TYPE_CN,
   fetchSkillMetrics,
   fetchSecurityStatus,
@@ -134,6 +137,58 @@ describe('apiClient', () => {
       mockFetch.mockResolvedValueOnce(mockJsonResponse([]));
       await fetchConversationDetail('conv-1');
       expect(mockFetch.mock.calls[0][0]).toContain('/api/conversations/conv-1');
+    });
+  });
+
+  describe('Grader APIs', () => {
+    it('fetchLatestEvaluation should fetch latest conversation evaluation', async () => {
+      mockFetch.mockResolvedValueOnce(mockJsonResponse(null));
+      const result = await fetchLatestEvaluation('conv-1');
+
+      expect(result).toBeNull();
+      const url = mockFetch.mock.calls[0][0];
+      expect(url).toContain('/api/grader/latest');
+      expect(url).toContain('target_type=conversation');
+      expect(url).toContain('target_id=conv-1');
+    });
+
+    it('evaluateConversation should post a manual evaluation request', async () => {
+      const response = { result: { target_id: 'conv-1', verdict: 'pass' }, reused_existing_run: false };
+      mockFetch.mockResolvedValueOnce(mockJsonResponse(response));
+      const result = await evaluateConversation('conv-1', true);
+
+      expect(result).toEqual(response);
+      expect(mockFetch.mock.calls[0][0]).toContain('/api/grader/evaluate');
+      expect(mockFetch.mock.calls[0][1]).toMatchObject({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toEqual({
+        target_type: 'conversation',
+        target_id: 'conv-1',
+        force: true,
+      });
+    });
+
+    it('evaluateConversation should expose pending conflicts as EvaluationNotReadyError', async () => {
+      mockFetch.mockResolvedValueOnce(mockJsonResponse({
+        error: 'conversation_not_ready',
+        pending_call_count: 2,
+        message: 'pending',
+      }, 409));
+
+      let caught: unknown;
+      try {
+        await evaluateConversation('conv-1');
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toMatchObject({
+        name: 'EvaluationNotReadyError',
+        pendingCallCount: 2,
+      });
+      expect(caught).toBeInstanceOf(EvaluationNotReadyError);
     });
   });
 

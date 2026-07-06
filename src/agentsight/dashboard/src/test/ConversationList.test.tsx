@@ -29,6 +29,16 @@ vi.mock('../utils/apiClient', () => ({
   fetchInterruptionSessionCounts: vi.fn(),
   fetchInterruptionConversationCounts: vi.fn(),
   fetchTokenSavings: vi.fn(),
+  fetchLatestEvaluation: vi.fn(),
+  evaluateConversation: vi.fn(),
+  EvaluationNotReadyError: class EvaluationNotReadyError extends Error {
+    pendingCallCount: number;
+    constructor(message: string, pendingCallCount: number) {
+      super(message);
+      this.name = 'EvaluationNotReadyError';
+      this.pendingCallCount = pendingCallCount;
+    }
+  },
   INTERRUPTION_TYPE_CN: {
     llm_error: 'LLM 错误',
     sse_truncated: 'SSE 中断',
@@ -54,6 +64,14 @@ vi.mock('../components/InterruptionPanel', () => ({
   ResolvedEventInfo: undefined,
 }));
 
+vi.mock('../components/EvaluationBadge', () => ({
+  EvaluationBadge: ({ result }: any) => result ? <span data-testid="evaluation-badge">{result.verdict}</span> : null,
+}));
+
+vi.mock('../components/EvaluationPanel', () => ({
+  EvaluationPanel: ({ conversationId }: any) => <div data-testid="evaluation-panel">质量评估 {conversationId}</div>,
+}));
+
 import {
   fetchSessions,
   fetchAgentNames,
@@ -64,6 +82,7 @@ import {
   fetchInterruptionConversationCounts,
   fetchTokenSavings,
   fetchTraces,
+  fetchLatestEvaluation,
 } from '../utils/apiClient';
 import { ConversationList } from '../pages/ConversationList';
 
@@ -76,6 +95,7 @@ const mockFetchInterruptionSessionCounts = fetchInterruptionSessionCounts as Ret
 const mockFetchInterruptionConversationCounts = fetchInterruptionConversationCounts as ReturnType<typeof vi.fn>;
 const mockFetchTokenSavings = fetchTokenSavings as ReturnType<typeof vi.fn>;
 const mockFetchTraces = fetchTraces as ReturnType<typeof vi.fn>;
+const mockFetchLatestEvaluation = fetchLatestEvaluation as ReturnType<typeof vi.fn>;
 
 function setupMocks() {
   mockFetchAgentNames.mockResolvedValue(['agent-a', 'agent-b']);
@@ -87,6 +107,7 @@ function setupMocks() {
   mockFetchInterruptionConversationCounts.mockResolvedValue([]);
   mockFetchTokenSavings.mockResolvedValue({ sessions: [], summary: null, stats_available: false });
   mockFetchTraces.mockResolvedValue([]);
+  mockFetchLatestEvaluation.mockResolvedValue(null);
 }
 
 function renderPage(route = '/') {
@@ -249,6 +270,52 @@ describe('ConversationList', () => {
     });
     // Should show trace sub-table content
     expect(screen.getByText('Conversation ID')).toBeInTheDocument();
+  });
+
+  it('should show latest grader badge and panel for a conversation', async () => {
+    mockFetchSessions.mockResolvedValue([
+      {
+        session_id: 'sess-graded',
+        agent_name: 'GradeAgent',
+        model: 'gpt-4o',
+        conversation_count: 1,
+        total_input_tokens: 500,
+        total_output_tokens: 300,
+        last_seen_ns: Date.now() * 1_000_000,
+      },
+    ]);
+    mockFetchTraces.mockResolvedValue([
+      {
+        trace_id: 'trace-graded',
+        conversation_id: 'conv-graded',
+        user_query: 'grade this',
+        total_input_tokens: 300,
+        total_output_tokens: 200,
+        start_ns: Date.now() * 1_000_000,
+        end_ns: Date.now() * 1_000_000,
+        model: 'gpt-4o',
+      },
+    ]);
+    mockFetchLatestEvaluation.mockResolvedValue({
+      target_id: 'conv-graded',
+      verdict: 'warn',
+      score: 0.7,
+    });
+
+    await act(async () => { renderPage(); });
+    await act(async () => {
+      fireEvent.click(screen.getByText('查询'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('GradeAgent').closest('tr')!);
+    });
+
+    expect(mockFetchLatestEvaluation).toHaveBeenCalledWith('conv-graded');
+    const badge = await screen.findByTestId('evaluation-badge');
+    expect(badge).toHaveTextContent('warn');
+
+    fireEvent.click(badge.closest('button')!);
+    expect(screen.getByTestId('evaluation-panel')).toHaveTextContent('conv-graded');
   });
 
   it('should show agent dropdown with loaded names', async () => {
