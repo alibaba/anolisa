@@ -1,8 +1,8 @@
 {
   "id": "ws-ckpt",
   "kind": "tool",
-  "activation": { 
-    "onStartup": true 
+  "activation": {
+    "onStartup": true
   },
   "install": {
     "npmSpec": "@openclaw/ws-ckpt"
@@ -10,6 +10,26 @@
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
-    "properties": {}
+    "properties": {
+      "autoCheckpoint": {
+        "type": "boolean",
+        "description": "Automatically create a checkpoint before each tool call (default: false)"
+      },
+      "workspace": {
+        "type": "string",
+        "description": "Default workspace absolute path used by every ws-ckpt command without -w."
+      },
+      "cronSchedules": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Cron expressions for scheduled checkpoint snapshots"
+      },
+      "retentionDays": {
+        "type": "integer",
+        "description": "Number of days to retain scheduled checkpoint snapshots (0 = no auto-cleanup)"
+      }
+    }
   }
 }
