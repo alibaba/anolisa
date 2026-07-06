@@ -909,6 +909,8 @@ impl AgentSight {
                 self.flush_expired_pending_genai();
                 // Drain orphaned connections from dead PIDs and persist as pending
                 self.drain_and_persist_dead_connections();
+                // Drain idle in-flight streams whose owning process is still alive.
+                self.drain_and_persist_idle_connections();
                 // Check if config watcher deposited a new LogtailExporter
                 self.check_pending_logtail();
                 // Periodically purge old/oversized interruption DB entries
@@ -1274,6 +1276,56 @@ impl AgentSight {
                         "[CrashDetect] Failed to mark pending interrupted for pid={pid}: {e}"
                     );
                 }
+            }
+        }
+    }
+
+    /// Drain idle in-flight streams and persist them as `pending` records.
+    ///
+    /// This covers manual output interruption where the agent process stays
+    /// alive, so dead-PID draining cannot discover the abandoned stream.
+    fn drain_and_persist_idle_connections(&mut self) {
+        let drained = self.aggregator.drain_idle_connections();
+        if drained.is_empty() {
+            return;
+        }
+
+        use crate::aggregator::ConnectionState;
+
+        for (conn_id, state) in drained {
+            let (_state_name, request) = match state {
+                ConnectionState::RequestPending { request } => ("RequestPending", request),
+                ConnectionState::SseActive {
+                    request: Some(req), ..
+                } => ("SseActive", req),
+                _ => continue,
+            };
+
+            if let Some(pending) = self.genai_builder.build_pending_from_request(
+                &request,
+                &conn_id,
+                &self.pid_agent_name_cache,
+            ) {
+                if let Some(ref store) = self.genai_sqlite_store {
+                    let call_id = pending.call_id.clone();
+                    if let Err(e) = store.insert_pending(&pending) {
+                        log::warn!("[IdleDrain] Failed to persist pending call: {e}");
+                        continue;
+                    }
+                    log::info!(
+                        "[IdleDrain] persisted idle in-flight call as pending: call_id={} pid={} path={}",
+                        call_id,
+                        conn_id.pid,
+                        request.path,
+                    );
+                }
+            } else {
+                log::debug!(
+                    "[IdleDrain] build_pending returned None: pid={} path={} body_len={}",
+                    conn_id.pid,
+                    request.path,
+                    request.body_len
+                );
             }
         }
     }
