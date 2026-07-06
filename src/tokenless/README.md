@@ -38,6 +38,23 @@ Three integration paths are available:
 | Codex plugin | — | Tool Ready ✅, Command rewriting ✅, Response compression ✅, TOON ✅ |
 | Zero runtime deps | — | Pure Rust, single static binary |
 
+## Applicable Scenarios & Expected Effects
+
+**tokenless optimizes tokens in tool call responses, not the entire session.** In a typical Agent session, LLM reasoning output and conversation history account for the bulk of consumption; tool responses are only a fraction:
+
+| Component | Typical Share | tokenless Can Optimize |
+|-----------|-------------|----------------------|
+| LLM reasoning output (text generation) | ~35% | ❌ Not involved |
+| LLM input (system prompt + conversation history) | ~40% | ❌ Not involved |
+| Tool call arguments | ~5% | ❌ Not involved |
+| **Tool responses (API returns + command output)** | **~20%** | **✅ Optimization scope** |
+
+**Actual savings rate = reported compression rate × tool response share**
+
+Example: dashboard shows 60% compression rate, but if tool responses account for 20% of total consumption, the actual savings rate is 60% × 20% = **12%**. This is why savings feel "lighter than a feather" in experiments consuming 15 million tokens — tokenless only optimizes the ~3 million tokens of tool responses.
+
+> See [user manual](docs/tokenless-user-manual-en.md) for per-strategy trigger conditions.
+
 ## Architecture
 
 ```

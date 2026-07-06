@@ -5,8 +5,29 @@ use std::collections::{BTreeMap, HashMap};
 use crate::record::StatsRecord;
 use crate::recorder::StatsSummary;
 
+/// Format a number with thousands separators for readability.
+fn format_num(n: usize) -> String {
+    let s = n.to_string();
+    let mut result = String::with_capacity(s.len() + (s.len() - 1) / 3);
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            result.push(',');
+        }
+        result.push(ch);
+    }
+    result
+}
+
 /// Format a summary report with overall stats and breakdown by operation type.
-pub fn format_summary(records: &[StatsRecord], title: Option<&str>) -> String {
+///
+/// When `session_total_tokens` is provided, adds an "Actual Savings Rate"
+/// section showing the percentage of the entire session's token consumption
+/// that tokenless saved — not just the tool-response portion.
+pub fn format_summary(
+    records: &[StatsRecord],
+    title: Option<&str>,
+    session_total_tokens: Option<usize>,
+) -> String {
     let total = StatsSummary::from_records(records);
 
     let mut output = String::new();
@@ -73,6 +94,42 @@ pub fn format_summary(records: &[StatsRecord], title: Option<&str>) -> String {
         ));
     }
 
+    // Actual savings rate vs total session consumption
+    if let Some(session_total) = session_total_tokens {
+        let tool_share = if session_total > 0 {
+            (total.total_before_tokens as f64 / session_total as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        output.push('\n');
+        output.push_str("Overall Savings vs Total Consumption:\n");
+        output.push_str(&format!(
+            "  Session Total:      {} tokens\n",
+            format_num(session_total)
+        ));
+        output.push_str(&format!(
+            "  Tool Response:      {} tokens ({:.1}% of session)\n",
+            format_num(total.total_before_tokens),
+            tool_share,
+        ));
+        output.push_str(&format!(
+            "  Tokenless Saved:    {} tokens\n",
+            format_num(total.tokens_saved())
+        ));
+        output.push('\n');
+        output.push_str(&format!(
+            "  Compression Rate:   {:.1}%  (within tool responses only)\n",
+            total.tokens_percent()
+        ));
+        output.push_str(&format!(
+            "  Actual Savings:     {:.1}%  ({:.1}% x {:.1}%) of total session\n",
+            total.actual_savings_percent(session_total),
+            total.tokens_percent(),
+            tool_share,
+        ));
+    }
+
     output
 }
 
@@ -86,7 +143,10 @@ pub fn format_summary(records: &[StatsRecord], title: Option<&str>) -> String {
 ///   "by_operation": { "compress-response": { "records": N, ... }, ... }
 /// }
 /// ```
-pub fn format_summary_json(records: &[StatsRecord]) -> String {
+/// When `session_total_tokens` is provided, extra fields
+/// (`session_total_tokens`, `actual_savings_tokens`, `actual_savings_percent`)
+/// are added to the "total" object.
+pub fn format_summary_json(records: &[StatsRecord], session_total_tokens: Option<usize>) -> String {
     let total = StatsSummary::from_records(records);
 
     let mut by_op: BTreeMap<&str, StatsSummary> = BTreeMap::new();
@@ -137,6 +197,21 @@ pub fn format_summary_json(records: &[StatsRecord]) -> String {
             "tokens_saved_percent".to_string(),
             serde_json::json!(total.tokens_percent()),
         );
+
+        if let Some(session_total) = session_total_tokens {
+            obj.insert(
+                "session_total_tokens".to_string(),
+                serde_json::json!(session_total),
+            );
+            obj.insert(
+                "actual_savings_tokens".to_string(),
+                serde_json::json!(total.tokens_saved()),
+            );
+            obj.insert(
+                "actual_savings_percent".to_string(),
+                serde_json::json!(total.actual_savings_percent(session_total)),
+            );
+        }
     }
 
     let output = serde_json::json!({
@@ -349,7 +424,7 @@ mod tests {
     #[test]
     fn test_format_summary() {
         let records = vec![test_record()];
-        let output = format_summary(&records, Some("Test Summary"));
+        let output = format_summary(&records, Some("Test Summary"), None);
 
         assert!(output.contains("Test Summary"));
         assert!(output.contains("Total Records: 1"));
@@ -418,7 +493,7 @@ mod tests {
     #[test]
     fn test_format_summary_json_valid() {
         let records = vec![test_record()];
-        let output = format_summary_json(&records);
+        let output = format_summary_json(&records, None);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
         // schema_version
@@ -449,7 +524,7 @@ mod tests {
     #[test]
     fn test_format_summary_json_empty() {
         let records: Vec<StatsRecord> = vec![];
-        let output = format_summary_json(&records);
+        let output = format_summary_json(&records, None);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
         let total = parsed.get("total").unwrap();
@@ -470,7 +545,7 @@ mod tests {
     #[test]
     fn test_format_summary_json_field_consistency() {
         let records = vec![test_record()];
-        let output = format_summary_json(&records);
+        let output = format_summary_json(&records, None);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
         let total_keys: std::collections::BTreeSet<String> = parsed
@@ -501,7 +576,7 @@ mod tests {
         r3.operation = OperationType::CompressSchema;
 
         let records = vec![r2, r1, r3]; // intentionally unordered
-        let output = format_summary_json(&records);
+        let output = format_summary_json(&records, None);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
         let ops = parsed.get("by_operation").unwrap().as_object().unwrap();
@@ -511,6 +586,52 @@ mod tests {
             keys,
             vec!["compress-response", "compress-schema", "rewrite-command"]
         );
+    }
+
+    #[test]
+    fn test_format_summary_with_session_total() {
+        let records = vec![test_record()];
+        let output = format_summary(&records, Some("Test Summary"), Some(10_000));
+        assert!(output.contains("Overall Savings vs Total Consumption"));
+        assert!(output.contains("10,000 tokens"));
+        assert!(output.contains("Tool Response:"));
+        assert!(output.contains("Compression Rate:"));
+        assert!(output.contains("Actual Savings:"));
+        assert!(output.contains("within tool responses"));
+    }
+
+    #[test]
+    fn test_format_summary_without_session_total() {
+        let records = vec![test_record()];
+        let output = format_summary(&records, Some("Test Summary"), None);
+        assert!(!output.contains("Overall Savings vs Total Consumption"));
+    }
+
+    #[test]
+    fn test_format_summary_json_with_session_total() {
+        let records = vec![test_record()];
+        let output = format_summary_json(&records, Some(10_000));
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let total = parsed.get("total").unwrap();
+        assert_eq!(total.get("session_total_tokens").unwrap(), 10_000);
+        assert_eq!(total.get("actual_savings_tokens").unwrap(), 200);
+        // 200 / 10000 = 2.0%
+        let pct = total
+            .get("actual_savings_percent")
+            .unwrap()
+            .as_f64()
+            .unwrap();
+        assert!((pct - 2.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_format_summary_json_without_session_total() {
+        let records = vec![test_record()];
+        let output = format_summary_json(&records, None);
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let total = parsed.get("total").unwrap();
+        assert!(total.get("session_total_tokens").is_none());
+        assert!(total.get("actual_savings_percent").is_none());
     }
 
     #[test]

@@ -624,11 +624,11 @@ fn run() -> Result<(), (String, i32)> {
                         .all_records(limit)
                         .map_err(|e| (format!("Failed to query records: {}", e), 1))?;
                     if json {
-                        println!("{}", tokenless_stats::format_summary_json(&records));
+                        println!("{}", tokenless_stats::format_summary_json(&records, None));
                     } else {
                         println!(
                             "{}",
-                            format_summary(&records, Some("Tokenless Statistics Summary"))
+                            format_summary(&records, Some("Tokenless Statistics Summary"), None)
                         );
                     }
                 }

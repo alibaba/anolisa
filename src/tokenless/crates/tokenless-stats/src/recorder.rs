@@ -362,6 +362,23 @@ impl StatsSummary {
         }
     }
 
+    /// Actual savings rate against total session consumption.
+    ///
+    /// This is the number users actually perceive: saved tokens as a
+    /// percentage of the entire session's token spend (LLM input + output +
+    /// tool responses), not just the tool-response portion that tokenless
+    /// touches.
+    ///
+    /// Example: if tokenless saved 1.8M tokens and the session consumed
+    /// 15M tokens total, the actual savings rate is 12.0%.
+    pub fn actual_savings_percent(&self, session_total_tokens: usize) -> f64 {
+        if session_total_tokens > 0 {
+            (self.tokens_saved() as f64 / session_total_tokens as f64) * 100.0
+        } else {
+            0.0
+        }
+    }
+
     /// Build summary from a slice of records
     pub fn from_records(records: &[StatsRecord]) -> Self {
         let mut summary = Self {
