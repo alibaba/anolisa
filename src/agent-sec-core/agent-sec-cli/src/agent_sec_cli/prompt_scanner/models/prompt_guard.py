@@ -14,7 +14,6 @@ separate INJECTION label; the model flags any malicious prompt
 """
 
 import logging
-import threading
 
 from agent_sec_cli.prompt_scanner.models.model_manager import (
     ClassifierResult,
@@ -116,12 +115,6 @@ class PromptGuardClassifier:
         self._model_name = model_name
         self._temperature = temperature
         self._manager = manager or ModelManager(device=device)
-        # The HuggingFace tokenizer (Rust-backed) uses RefCell internally
-        # and is NOT thread-safe.  Concurrent calls from scan_batch's
-        # ThreadPoolExecutor cause "Already borrowed" panics.  We
-        # serialise inference with a lock; L1 (regex) still runs in
-        # parallel so overall throughput is barely affected.
-        self._inference_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Public inference API
@@ -143,9 +136,11 @@ class PromptGuardClassifier:
     def classify(self, text: str) -> ClassifierResult:
         """Classify a single prompt and return a ``ClassifierResult``.
 
-        Lazy-loads the model on the first call.  Thread-safe: concurrent
-        calls are serialised via ``_inference_lock`` because the Rust-backed
-        tokenizer is not re-entrant.
+        Lazy-loads the model on first call.  Thread-safe: inference is
+        serialised via ``ModelManager.inference_context`` so all classifier
+        instances sharing one tokenizer (e.g. the daemon, which rebuilds a
+        ``PromptScanner`` per request) share one lock — the Rust-backed
+        tokenizer is not re-entrant and would panic with "Already borrowed".
 
         Args:
             text: Raw prompt text to classify.
@@ -157,8 +152,10 @@ class PromptGuardClassifier:
         Raises:
             ModelLoadError: if the model cannot be loaded.
         """
-        model, tokenizer = self._manager.load_model(self._model_name)
-        with self._inference_lock:
+        with self._manager.inference_context(self._model_name) as (
+            model,
+            tokenizer,
+        ):
             probs = self._get_probabilities(text, model, tokenizer)
         return self._probs_to_result(probs)
 
@@ -176,12 +173,14 @@ class PromptGuardClassifier:
         """
         if not texts:
             return []
-        model, tokenizer = self._manager.load_model(self._model_name)
 
         import torch  # lazy import: only needed when actually running ML inference
         from torch.nn.functional import softmax  # lazy import
 
-        with self._inference_lock:
+        with self._manager.inference_context(self._model_name) as (
+            model,
+            tokenizer,
+        ):
             preprocessed = [self._preprocess(t, tokenizer) for t in texts]
             inputs = tokenizer(
                 preprocessed,

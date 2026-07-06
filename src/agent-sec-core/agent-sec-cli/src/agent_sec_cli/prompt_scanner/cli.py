@@ -266,7 +266,8 @@ def scan_prompt(
     # single trace_id, losing that granularity without any performance benefit:
     # under STANDARD/STRICT mode scan_batch() is sequential anyway because the
     # HuggingFace tokenizer (Rust-backed, uses RefCell internally) is NOT
-    # thread-safe — all inference is serialised behind _inference_lock.
+    # thread-safe — all inference is serialised behind the shared
+    # ModelManager.inference_context (keyed by model_name).
     for t in texts:
         if use_daemon:
             try:

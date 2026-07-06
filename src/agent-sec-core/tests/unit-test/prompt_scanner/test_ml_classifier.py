@@ -25,6 +25,25 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+
+def _make_handle(model: Any, tokenizer: Any) -> Any:
+    """Build a ``_ModelHandle`` with a fresh inference lock for tests.
+
+    Tests that inject pre-loaded models bypass ``_do_load`` by writing
+    directly into ``ModelManager._handles``; this helper keeps the
+    construction site consistent with the production layout.
+    """
+    from agent_sec_cli.prompt_scanner.models.model_manager import (  # noqa: PLC0415
+        _ModelHandle,
+    )
+
+    return _ModelHandle(
+        model=model,
+        tokenizer=tokenizer,
+        inference_lock=threading.Lock(),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Helpers to build minimal torch / transformers fakes
 # ---------------------------------------------------------------------------
@@ -247,9 +266,9 @@ class TestModelManagerCache(unittest.TestCase):
 
     def test_clear_cache_empties_store(self) -> None:
         mgr = self._make_manager()
-        mgr._loaded_models["dummy"] = (object(), object())  # type: ignore[union-attr]
+        mgr._handles["dummy"] = _make_handle(object(), object())  # type: ignore[union-attr]
         mgr.clear_cache()  # type: ignore[union-attr]
-        self.assertEqual(len(mgr._loaded_models), 0)  # type: ignore[union-attr]
+        self.assertEqual(len(mgr._handles), 0)  # type: ignore[union-attr]
 
     def test_device_property(self) -> None:
         from agent_sec_cli.prompt_scanner.models.model_manager import (
@@ -280,10 +299,10 @@ class TestModelManagerCache(unittest.TestCase):
         )
 
         mgr = ModelManager(device="cpu")
-        fake_pair = (object(), object())
-        mgr._loaded_models["cached-model"] = fake_pair
+        fake_model, fake_tokenizer = object(), object()
+        mgr._handles["cached-model"] = _make_handle(fake_model, fake_tokenizer)
         result = mgr.load_model("cached-model")
-        self.assertIs(result, fake_pair)
+        self.assertEqual(result, (fake_model, fake_tokenizer))
 
 
 # ---------------------------------------------------------------------------
@@ -328,15 +347,15 @@ class TestPromptGuardClassifier(unittest.TestCase):
 
         fake_probs = self._make_mock_probs(benign, jailbreak)
 
-        # Inject mocked (model, tokenizer) into cache
-        mgr._loaded_models["test-model"] = (MagicMock(), MagicMock())
+        # Inject mocked (model, tokenizer) into registry
+        mgr._handles["test-model"] = _make_handle(MagicMock(), MagicMock())
         clf._get_probabilities = MagicMock(return_value=fake_probs)  # type: ignore[method-assign]
         return clf
 
     def _classify_with_mock(self, clf, text: str):
         """Call classify() with load_model patched out to avoid actual downloads."""
         mgr = clf._manager
-        mgr._loaded_models[clf._model_name] = (MagicMock(), MagicMock())
+        mgr._handles[clf._model_name] = _make_handle(MagicMock(), MagicMock())
         return clf.classify(text)
 
     def test_classify_injection_as_jailbreak_label(self) -> None:
@@ -650,7 +669,7 @@ class TestPromptGuardConcurrentSharedManager(unittest.TestCase):
     def test_concurrent_classify_serializes_tokenizer(self) -> None:
         mgr = self.ModelManager(device="cpu")
         tokenizer = _RefCellTokenizer()
-        mgr._loaded_models["test-model"] = (
+        mgr._handles["test-model"] = _make_handle(
             _make_fake_model(self.fake_torch),
             tokenizer,
         )
@@ -717,7 +736,7 @@ class TestMLClassifierConcurrentSharedManager(unittest.TestCase):
         # manager so every layer's classifier hits the same instance.
         shared_manager = self.MLClassifier._shared_manager
         tokenizer = _RefCellTokenizer()
-        shared_manager._loaded_models["LLM-Research/Llama-Prompt-Guard-2-86M"] = (
+        shared_manager._handles["LLM-Research/Llama-Prompt-Guard-2-86M"] = _make_handle(
             _make_fake_model(self.fake_torch),
             tokenizer,
         )
