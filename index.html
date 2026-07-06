@@ -691,6 +691,12 @@ h1 span{color:var(--accent-light)}
 .doc code{font-family:var(--mono);font-size:0.82em;color:var(--accent-light);background:rgba(10,110,92,0.1);border:1px solid var(--border);border-radius:4px;padding:1px 5px}
 .doc pre{background:rgba(0,0,0,0.45);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:8px;padding:14px 16px;overflow-x:auto;margin:0 0 16px}
 .doc pre code{background:none;border:none;padding:0;color:var(--text);font-size:0.8rem;line-height:1.6}
+.doc-callout{
+  margin:22px 0 28px;padding:18px 20px;border:1px solid var(--border-hover);
+  border-left:3px solid var(--accent);border-radius:8px;background:var(--accent-dim);
+}
+.doc-callout-title{font-size:0.92rem;font-weight:700;color:var(--text);margin:0 0 4px}
+.doc-callout p{font-size:0.85rem;margin:0;line-height:1.65}
 .doc-release-date{font-family:var(--mono);font-size:0.72rem;color:var(--text-3);margin:-6px 0 16px}
 .doc-empty{color:var(--text-2);border:1px solid var(--border);border-radius:12px;background:rgba(10,20,27,0.5);padding:28px}
 .doc-empty h2{border:none;margin:0 0 8px;padding:0;font-size:1.15rem}
@@ -2953,7 +2959,9 @@ const I18N={
     changelogTitle:'Changelog',
     changelogSub:'Review project-level release notes first, then drill into component release history by capability.',
     rootChangelog:'ANOLISA Release Notes',
-    rootChangelogIntro:'Project-level release notes covering the 1.0 line, component versions, highlights, and cross-component changes.',
+    rootChangelogIntro:'Project-level release notes covering the full release line, component versions, highlights, and cross-component changes.',
+    componentChangelogHintTitle:'Component changes are organized by capability',
+    componentChangelogHintBody:'Select a component from the capability groups on the left to review its changelog.',
     readUserGuide:'Read guide',
     readChangelog:'Read changelog',
     home:'Home',
@@ -2991,7 +2999,9 @@ const I18N={
     changelogTitle:'变更日志',
     changelogSub:'先阅读项目级 Release Notes,再按能力域查看各组件的版本变化。',
     rootChangelog:'ANOLISA Release Notes',
-    rootChangelogIntro:'项目级变更日志,覆盖 1.0 版本线、组件版本、重点能力与跨组件变化。',
+    rootChangelogIntro:'项目级变更日志,覆盖全量版本线、组件版本、重点能力与跨组件变化。',
+    componentChangelogHintTitle:'组件变更按能力域归类',
+    componentChangelogHintBody:'可在左侧能力分组中选择组件,查看对应组件的 Changelog。',
     readUserGuide:'阅读指南',
     readChangelog:'阅读变更',
     home:'首页',
@@ -3580,6 +3590,7 @@ function rootChangelogDoc(){
   parts.push(`<p class="doc-source">${escapeHtml(t('sourceDoc'))}: <a href="https://github.com/alibaba/anolisa/blob/main/${escapeHtml(source)}" target="_blank" rel="noopener">${escapeHtml(source)}</a></p>`);
   parts.push(`<h1>${escapeHtml(t('rootChangelog'))}</h1>`);
   parts.push(`<p>${escapeHtml(t('rootChangelogIntro'))}</p>`);
+  parts.push(`<div class="doc-callout"><div class="doc-callout-title">${escapeHtml(t('componentChangelogHintTitle'))}</div><p>${escapeHtml(t('componentChangelogHintBody'))}</p></div>`);
   releases.forEach(r=>{
     const id2='root-v-'+String(r.version).replace(/[^a-z0-9]+/gi,'-');
     toc.push({level:2,id:id2,text:r.version});
