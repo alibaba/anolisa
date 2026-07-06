@@ -60,12 +60,24 @@ fn shell_host_run_guard() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+fn shell_host_test_config(config: &ShellHostConfig) -> ShellHostConfig {
+    let mut config = config.clone();
+    if !config.env_overrides.iter().any(|(key, _)| key == "HOME") {
+        config.env_overrides.push((
+            "HOME".to_string(),
+            config.work_dir.join("home").display().to_string(),
+        ));
+    }
+    config
+}
+
 fn run_scripted_bash(
     config: &ShellHostConfig,
     inputs: &[ScriptedInput],
 ) -> io::Result<ShellHostOutput> {
     let _guard = shell_host_run_guard();
-    shell_run_scripted_bash(config, inputs)
+    let config = shell_host_test_config(config);
+    shell_run_scripted_bash(&config, inputs)
 }
 
 fn run_scripted_zsh(
@@ -73,7 +85,8 @@ fn run_scripted_zsh(
     inputs: &[ScriptedInput],
 ) -> io::Result<ShellHostOutput> {
     let _guard = shell_host_run_guard();
-    shell_run_scripted_zsh(config, inputs)
+    let config = shell_host_test_config(config);
+    shell_run_scripted_zsh(&config, inputs)
 }
 
 fn run_line_interactive_bash<R, W>(
@@ -86,7 +99,8 @@ where
     W: Write,
 {
     let _guard = shell_host_run_guard();
-    shell_run_line_interactive_bash(config, input, output)
+    let config = shell_host_test_config(config);
+    shell_run_line_interactive_bash(&config, input, output)
 }
 
 fn run_raw_relay_bash<R, W>(
@@ -99,7 +113,8 @@ where
     W: Write,
 {
     let _guard = shell_host_run_guard();
-    shell_run_raw_relay_bash(config, input, output)
+    let config = shell_host_test_config(config);
+    shell_run_raw_relay_bash(&config, input, output)
 }
 
 fn run_raw_relay_bash_with_observer<R, W, F>(
@@ -114,7 +129,8 @@ where
     F: FnMut(&[ShellEvent], &mut W) -> io::Result<()>,
 {
     let _guard = shell_host_run_guard();
-    shell_run_raw_relay_bash_with_observer(config, input, output, event_observer)
+    let config = shell_host_test_config(config);
+    shell_run_raw_relay_bash_with_observer(&config, input, output, event_observer)
 }
 
 fn run_raw_relay_bash_with_actions<W>(
@@ -126,7 +142,8 @@ where
     W: Write,
 {
     let _guard = shell_host_run_guard();
-    shell_run_raw_relay_bash_with_actions(config, actions, output)
+    let config = shell_host_test_config(config);
+    shell_run_raw_relay_bash_with_actions(&config, actions, output)
 }
 
 fn run_raw_relay_zsh_with_actions<W>(
@@ -138,7 +155,8 @@ where
     W: Write,
 {
     let _guard = shell_host_run_guard();
-    shell_run_raw_relay_zsh_with_actions(config, actions, output)
+    let config = shell_host_test_config(config);
+    shell_run_raw_relay_zsh_with_actions(&config, actions, output)
 }
 
 fn run_raw_relay_bash_with_actions_output_control<W, F>(
@@ -152,7 +170,8 @@ where
     F: FnMut(&[ShellEvent], &mut W) -> io::Result<RawObserverAction>,
 {
     let _guard = shell_host_run_guard();
-    shell_run_raw_relay_bash_with_actions_output_control(config, actions, output, event_observer)
+    let config = shell_host_test_config(config);
+    shell_run_raw_relay_bash_with_actions_output_control(&config, actions, output, event_observer)
 }
 
 fn run_raw_relay_zsh_with_output_control<R, W, F>(
@@ -167,5 +186,6 @@ where
     F: FnMut(&[ShellEvent], &mut W) -> io::Result<RawObserverAction>,
 {
     let _guard = shell_host_run_guard();
-    shell_run_raw_relay_zsh_with_output_control(config, input, output, event_observer)
+    let config = shell_host_test_config(config);
+    shell_run_raw_relay_zsh_with_output_control(&config, input, output, event_observer)
 }
