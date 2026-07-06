@@ -121,11 +121,18 @@ impl MountHandle {
                     // lazy). Best-effort force cleanup so we never leave the
                     // mountpoint dangling, but still surface the original
                     // failure to the caller for explicit `unmount()`.
+                    //
+                    // Detach the session thread first so a later `Drop` sees
+                    // `session == None` and skips a second `unmount_inner`
+                    // (which would run `force_unmount_path` again — up to a
+                    // full 5s each on a genuinely stuck mount).
                     let stderr = String::from_utf8_lossy(&output.stderr);
+                    self.session.take();
                     Self::force_unmount_path(&self.mountpoint);
                     return Err(FuseError::UnmountFailed(stderr.to_string()));
                 }
                 Err(e) => {
+                    self.session.take();
                     Self::force_unmount_path(&self.mountpoint);
                     return Err(FuseError::IoError(e));
                 }
@@ -360,16 +367,19 @@ mod tests {
     }
 
     #[test]
-    fn unmount_inner_skips_join_when_fusermount_fails() {
+    fn unmount_inner_detaches_session_when_fusermount_fails() {
         let mut handle = MountHandle {
             mountpoint: PathBuf::from("/nonexistent/mount/point"),
             session: Some(std::thread::spawn(|| {})),
         };
         let result = handle.unmount_inner();
         assert!(result.is_err(), "bogus mountpoint must produce an error");
+        // The error path detaches the session (takes it without joining) so a
+        // subsequent `Drop` sees `session == None` and does not run a second
+        // `unmount_inner` / `force_unmount_path` pass.
         assert!(
-            handle.session.is_some(),
-            "session must remain when fusermount3 fails (join skipped)"
+            handle.session.is_none(),
+            "session must be detached when fusermount3 fails so Drop skips re-unmount"
         );
     }
 
