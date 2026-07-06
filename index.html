@@ -527,6 +527,11 @@ h1 span{color:var(--accent-light)}
 }
 .nav-ext:hover{color:var(--text)}
 .nav-ext:focus-visible{outline:2px solid var(--accent);outline-offset:4px;border-radius:2px}
+.nav-ext.nav-doc{
+  color:var(--text);border:1px solid var(--border);border-radius:6px;
+  padding:7px 10px;background:rgba(10,110,92,0.08);
+}
+.nav-ext.nav-doc:hover{color:var(--accent-light);border-color:var(--border-hover);background:var(--accent-dim)}
 
 /* ── docs workbench (second screen) ── */
 .wb{
@@ -590,6 +595,11 @@ h1 span{color:var(--accent-light)}
 .doc-btn[disabled]{
   color:var(--text-3);background:rgba(255,255,255,0.02);
   border-color:rgba(255,255,255,0.05);cursor:not-allowed;
+}
+
+.root-card{
+  border-color:var(--border);
+  background:linear-gradient(135deg,rgba(10,110,92,0.13),rgba(10,20,27,0.6));
 }
 
 /* ── in-site doc reader (third layer) ── */
@@ -705,6 +715,11 @@ h1 span{color:var(--accent-light)}
   .reader-sidebar{order:1;position:static;max-height:none;padding:20px 0 40px;border-top:1px solid var(--border)}
 }
 @media(max-width:600px){
+  nav .wrap{gap:10px;flex-wrap:wrap}
+  .nav-right{margin-left:auto;max-width:100%;flex-wrap:wrap;justify-content:flex-end;gap:6px}
+  .nav-ext{font-size:0.64rem}
+  .nav-ext.nav-doc{padding:6px 7px}
+  .lang-btn{min-width:38px;padding:6px 8px}
   .reader-bar-inner{gap:8px 10px;flex-wrap:wrap}
   .reader-crumb{display:none}
   .reader-back{order:-1}
@@ -718,6 +733,8 @@ h1 span{color:var(--accent-light)}
   <div class="wrap">
     <a href="./" class="nav-logo"><span>&gt;_</span> ANOLISA</a>
     <div class="nav-right">
+      <a class="nav-ext nav-doc" href="#/user-guide/anolisa">USER GUIDE</a>
+      <a class="nav-ext nav-doc" href="#/changelog/root">CHANGELOG</a>
       <a class="nav-ext" href="https://github.com/alibaba/anolisa" target="_blank" rel="noopener">GitHub</a>
       <div class="lang-toggle" id="nav-lang" aria-label="Language">
         <button class="lang-btn active" type="button" data-lang="en">EN</button>
@@ -776,7 +793,7 @@ h1 span{color:var(--accent-light)}
 
       <div class="wb reveal reveal-d1">
         <div class="wb-modules" id="wb-modules" aria-label="Capability modules"></div>
-        <div class="wb-components" id="wb-components" aria-live="polite" aria-label="Components"></div>
+        <div class="wb-components" id="wb-components" aria-live="polite" aria-label="Documents"></div>
       </div>
 
     </div>
@@ -2928,8 +2945,18 @@ const I18N={
     scroll:'SCROLL',
     capLabel:'Documentation',
     capTitle:'Every agent deserves an <em>operating system</em> that understands it.',
+    capabilityMap:'Capability Map',
     userGuide:'User Guide',
     changelog:'Changelog',
+    userGuideTitle:'User Guide',
+    userGuideSub:'Read task-oriented guides by capability, then open each component guide in a focused documentation reader.',
+    changelogTitle:'Changelog',
+    changelogSub:'Review project-level release notes first, then drill into component release history by capability.',
+    rootChangelog:'ANOLISA Release Notes',
+    rootChangelogIntro:'Project-level release notes covering the 1.0 line, component versions, highlights, and cross-component changes.',
+    readUserGuide:'Read guide',
+    readChangelog:'Read changelog',
+    home:'Home',
     guideUnavail:'User Guide unavailable',
     changelogUnavail:'Changelog unavailable',
     lastChangelog:'Last changelog',
@@ -2956,8 +2983,18 @@ const I18N={
     scroll:'向下滚动',
     capLabel:'文档',
     capTitle:'每一个 Agent 都值得一个<em>懂它的操作系统</em>。',
+    capabilityMap:'能力地图',
     userGuide:'用户指南',
     changelog:'变更日志',
+    userGuideTitle:'用户指南',
+    userGuideSub:'按能力域阅读面向任务的使用指南,再进入具体组件的专注阅读界面。',
+    changelogTitle:'变更日志',
+    changelogSub:'先阅读项目级 Release Notes,再按能力域查看各组件的版本变化。',
+    rootChangelog:'ANOLISA Release Notes',
+    rootChangelogIntro:'项目级变更日志,覆盖 1.0 版本线、组件版本、重点能力与跨组件变化。',
+    readUserGuide:'阅读指南',
+    readChangelog:'阅读变更',
+    home:'首页',
     guideUnavail:'用户指南暂不可用',
     changelogUnavail:'变更日志暂不可用',
     lastChangelog:'最新变更',
@@ -2980,12 +3017,72 @@ const I18N={
 };
 
 const MODULES=[
-  {id:'agent-observability',icon:'~$',name:{en:'Agent Observability',zh:'Agent 可观测性'},desc:{en:'Trace agent execution from the kernel boundary to session-level telemetry, so operators can see what an agent did and where it stalled.',zh:'从内核边界到会话遥测追踪 Agent 执行过程,让运维者清楚看到 Agent 做了什么、卡在何处。'},components:['agentsight']},
-  {id:'agent-security',icon:'#!',name:{en:'Agent Security',zh:'Agent 安全'},desc:{en:'Keep agent execution local, auditable, and policy-aware with scanners, integrity checks, hardening, and sandbox isolation.',zh:'通过扫描、完整性校验、系统加固与沙箱隔离,让 Agent 执行保持本地、可审计、可受控。'},components:['agent-sec-core']},
-  {id:'runtime',icon:'[]',name:{en:'Runtime',zh:'Runtime'},desc:{en:'Provide the filesystem views and workspace recovery primitives agents need to explore safely without losing operational context.',zh:'提供 Agent 运行优化所需的文件系统视图与工作区恢复能力,在试错中保留关键上下文。'},components:['skillfs','ws-ckpt']},
+  {id:'user-entrypoint',icon:'&gt;_',name:{en:'User Entrypoint',zh:'用户入口'},desc:{en:'Give users and agents a consistent command surface for installation, terminal collaboration, and reusable OS skills.',zh:'为用户与 Agent 提供一致的命令入口,覆盖安装管理、终端协作与可复用 OS Skills。'},components:['anolisa','copilot-shell','os-skills']},
   {id:'token-saving',icon:'%&lt;',name:{en:'Token Saving',zh:'Token 优化'},desc:{en:'Reduce context cost and preserve useful memory so long-running agents spend tokens on decisions rather than repeated state.',zh:'降低上下文成本并保留有价值的记忆,让长程 Agent 将 Token 用在决策上,而非反复重述状态。'},components:['tokenless','agent-memory']},
-  {id:'user-entrypoint',icon:'&gt;_',name:{en:'User Entrypoint',zh:'用户入口'},desc:{en:'Give users and agents a consistent command surface for installation, terminal collaboration, and reusable OS skills.',zh:'为用户与 Agent 提供一致的命令入口,覆盖安装管理、终端协作与可复用 OS Skills。'},components:['anolisa','copilot-shell','os-skills']}
+  {id:'runtime',icon:'[]',name:{en:'Runtime',zh:'Runtime'},desc:{en:'Provide the filesystem views and workspace recovery primitives agents need to explore safely without losing operational context.',zh:'提供 Agent 运行优化所需的文件系统视图与工作区恢复能力,在试错中保留关键上下文。'},components:['skillfs','ws-ckpt']},
+  {id:'agent-observability',icon:'~$',name:{en:'Agent Observability',zh:'Agent 可观测性'},desc:{en:'Trace agent execution from the kernel boundary to session-level telemetry, so operators can see what an agent did and where it stalled.',zh:'从内核边界到会话遥测追踪 Agent 执行过程,让运维者清楚看到 Agent 做了什么、卡在何处。'},components:['agentsight']},
+  {id:'agent-security',icon:'#!',name:{en:'Agent Security',zh:'Agent 安全'},desc:{en:'Keep agent execution local, auditable, and policy-aware with scanners, integrity checks, hardening, and sandbox isolation.',zh:'通过扫描、完整性校验、系统加固与沙箱隔离,让 Agent 执行保持本地、可审计、可受控。'},components:['agent-sec-core']}
 ];
+
+const ROOT_CHANGELOG={
+  guidePaths:{en:'CHANGELOG.md',zh:'CHANGELOG_zh.md'},
+  name:{en:'ANOLISA Release Notes',zh:'ANOLISA Release Notes'},
+  intro:{en:'Project-level release notes for ANOLISA, covering component versions, release highlights, and cross-component documentation or governance changes.',zh:'ANOLISA 项目级变更日志,覆盖组件版本、版本重点以及跨组件文档与治理变化。'},
+  releases:{
+    en:[
+      {version:'1.0',date:'',sections:[
+        {title:'Component Versions',items:['copilot-shell 2.6.1, agent-sec-core 0.7.0, agentsight 0.7.1, tokenless 0.6.1, agent-memory 0.2.1, os-skills 0.6.1, anolisa 0.1.20, skillfs 0.3.2, ws-ckpt 0.4.1, cosh-ng 0.11.0.']},
+        {title:'Highlights',items:['ANOLISA CLI delivers a unified gateway for component lifecycle management and adapter orchestration.','cosh-ng completes Core/Shell separation and an AI-augmented terminal for deterministic cross-distribution OS operations.','Agent Memory adds user data sovereignty and four-type memory classification.','Tokenless adds compression toggles, A/B testing, and the QwenCode adapter for measurable Token savings.']},
+        {title:'New Components',items:['anolisa first release builds the unified CLI gateway with RPM and Raw backends.','cosh-ng first release implements the deterministic Agent-OS interface.','skillfs first release provides a FUSE virtual filesystem for view-based skill exposure.']},
+        {title:'Changed',items:['Documentation governance is established through `specs/documentation-standard.md`.','Bilingual naming is unified to `_zh.md`, replacing the legacy `_CN.md` convention.']}
+      ]},
+      {version:'0.6',date:'2026-06-12',sections:[
+        {title:'Highlights',items:['Agent Memory first release delivers a sandboxed filesystem MCP memory server for cross-session context.','Tokenless adds the Hermes Agent plugin and Tool Ready environment pre-checks.','AgentSight adds Skill-level Token metrics and Hermes support.']}
+      ]},
+      {version:'0.5',date:'2026-05-28',sections:[
+        {title:'Highlights',items:['Tokenless adds the Hermes plugin and Tool Ready environment mechanism.','AgentSecCore delivers the first PIIChecker and Skill Scanner versions.']}
+      ]},
+      {version:'0.4',date:'2026-05-13',sections:[
+        {title:'Highlights',items:['AgentSecCore establishes Skill security lifecycle management with Prompt Scanner ask policy.','Tokenless builds benchmark baselines for measuring Token savings.','WS Ckpt expands snapshot management commands.']}
+      ]},
+      {version:'0.3',date:'2026-04-30',sections:[
+        {title:'Highlights',items:['Tokenless delivers command rewriting and TOON context compression.','AgentSight adds the Token saving dashboard and Agent anomaly diagnostics.','WS Ckpt first release introduces btrfs-based workspace checkpoints.']}
+      ]},
+      {version:'0.2',date:'2026-04-15',sections:[
+        {title:'Updated',items:['AgentSight adds precise Token consumption observability.','Copilot Shell adds independent authentication and Skill marketplace browsing.','Tokenless first release provides Skill-level benchmark test cases.']}
+      ]},
+      {version:'0.1',date:'2026-03-30',sections:[
+        {title:'New Components',items:['Copilot Shell first release provides an AI-powered terminal assistant.','AgentSecCore first release provides Skill signature verification, security sandbox, and system hardening.','AgentSight first release provides eBPF-based zero-intrusion observability.','OS Skills curates system administration, SysOM, DevOps, and cloud skills.']}
+      ]}
+    ],
+    zh:[
+      {version:'1.0',date:'',sections:[
+        {title:'组件版本',items:['copilot-shell 2.6.1、agent-sec-core 0.7.0、agentsight 0.7.1、tokenless 0.6.1、agent-memory 0.2.1、os-skills 0.6.1、anolisa 0.1.20、skillfs 0.3.2、ws-ckpt 0.4.1、cosh-ng 0.11.0。']},
+        {title:'重点特性',items:['ANOLISA CLI 交付统一组件生命周期管理与适配器编排入口。','cosh-ng 完成 Core/Shell 分离,提供面向跨发行版确定性 OS 操作的 AI 增强终端。','Agent Memory 新增用户数据主权与四类记忆分类。','Tokenless 新增压缩开关、A/B 对比与 QwenCode 适配器,用于量化 Token 节省效果。']},
+        {title:'新增组件',items:['anolisa 首次发布,提供基于 RPM 与 Raw 后端的统一 CLI 网关。','cosh-ng 首次发布,实现确定性 Agent-OS 接口。','skillfs 首次发布,提供基于视图暴露 Skill 的 FUSE 虚拟文件系统。']},
+        {title:'变更',items:['通过 `specs/documentation-standard.md` 建立文档治理规范。','双语命名统一为 `_zh.md`,替代旧的 `_CN.md` 约定。']}
+      ]},
+      {version:'0.6',date:'2026-06-12',sections:[
+        {title:'重点特性',items:['Agent Memory 首次发布,提供跨会话上下文的沙箱化文件系统 MCP 记忆服务器。','Tokenless 新增 Hermes Agent 插件与 Tool Ready 环境预检。','AgentSight 新增 Skill 维度 Token 指标与 Hermes 支持。']}
+      ]},
+      {version:'0.5',date:'2026-05-28',sections:[
+        {title:'重点特性',items:['Tokenless 新增 Hermes 插件与 Tool Ready 环境机制。','AgentSecCore 交付 PIIChecker 与 Skill Scanner 首版。']}
+      ]},
+      {version:'0.4',date:'2026-05-13',sections:[
+        {title:'重点特性',items:['AgentSecCore 建立含 Prompt Scanner ask 策略的 Skill 安全生命周期管理。','Tokenless 建立用于衡量 Token 节省的 Benchmark 基线。','WS Ckpt 扩展快照管理命令集。']}
+      ]},
+      {version:'0.3',date:'2026-04-30',sections:[
+        {title:'重点特性',items:['Tokenless 交付命令重写与 TOON 上下文压缩。','AgentSight 新增 Token 节省 Dashboard 与 Agent 异常诊断。','WS Ckpt 首次发布,引入基于 btrfs 的工作区检查点。']}
+      ]},
+      {version:'0.2',date:'2026-04-15',sections:[
+        {title:'组件更新',items:['AgentSight 新增精确 Token 消耗可观测能力。','Copilot Shell 新增独立鉴权与 Skill 市场浏览。','Tokenless 首次发布 Skill 级 Benchmark 测试用例。']}
+      ]},
+      {version:'0.1',date:'2026-03-30',sections:[
+        {title:'新增组件',items:['Copilot Shell 首次发布,提供 AI 驱动终端助手。','AgentSecCore 首次发布,提供 Skill 签名校验、安全沙箱与系统加固。','AgentSight 首次发布,提供基于 eBPF 的零侵入可观测探针。','OS Skills 整理系统管理、SysOM 运维、DevOps 与云技能库。']}
+      ]}
+    ]
+  }
+};
 
 const COMPONENTS={
   'anolisa':{changelogId:'anolisa',guidePaths:{en:'docs/user-guide/en/user-entrypoint/anolisa-cli.md',zh:'docs/user-guide/zh/user-entrypoint/anolisa-cli.md'},name:{en:'ANOLISA CLI',zh:'ANOLISA CLI'},intro:{en:'The system control plane for ANOLISA. It installs components, reports local state, runs diagnostics, and keeps user-mode and system-mode operations under one command model.',zh:'ANOLISA 的系统控制面,统一完成组件安装、状态查看、诊断与更新,并以同一套命令模型覆盖用户态和系统态。'}},
@@ -3320,6 +3417,7 @@ const GUIDES={
 /* ── state ── */
 let lang=(function(){try{const s=localStorage.getItem('anolisa-lang');return s==='zh'?'zh':'en'}catch(_){return 'en'}})();
 let activeModule=MODULES[0].id;
+let docMode='guide';
 let readerState=null;
 
 const t=key=>(I18N[lang]&&I18N[lang][key])||I18N.en[key]||'';
@@ -3339,9 +3437,9 @@ function slug(s){return String(s).toLowerCase().replace(/[^a-z0-9]+/g,'-').repla
 function clComp(id){const cid=COMPONENTS[id]&&COMPONENTS[id].changelogId;return CHANGELOG.components.find(c=>c.id===cid)||null}
 function clReleases(id){const c=clComp(id);if(!c)return null;const cur=c.languages&&c.languages[lang];if(cur&&cur.releases&&cur.releases.length)return{releases:cur.releases,fallback:false};const en=c.languages&&c.languages.en;if(en&&en.releases&&en.releases.length)return{releases:en.releases,fallback:lang!=='en'};return null}
 function guidePath(id){const paths=COMPONENTS[id]?.guidePaths;return paths&&(paths[lang]||paths.en)||''}
-function guideAvailable(id){return Boolean(guidePath(id)&&GUIDES[id])}
-function changelogAvailable(id){return Boolean(clReleases(id))}
-function compName(id){return COMPONENTS[id].name[lang]||COMPONENTS[id].name.en}
+function guideAvailable(id){return id!=='root'&&Boolean(guidePath(id)&&GUIDES[id])}
+function changelogAvailable(id){return id==='root'||Boolean(clReleases(id))}
+function compName(id){return id==='root'?(ROOT_CHANGELOG.name[lang]||ROOT_CHANGELOG.name.en):(COMPONENTS[id].name[lang]||COMPONENTS[id].name.en)}
 
 /* ── homepage i18n ── */
 function applyStaticText(){
@@ -3351,7 +3449,7 @@ function applyStaticText(){
   set('hero-tagline',escapeHtml(I18N[lang].heroTagline));
   set('agent-label',escapeHtml(I18N[lang].agentLabel));
   set('scroll-label',escapeHtml(I18N[lang].scroll));
-  set('cap-label',escapeHtml(I18N[lang].capLabel));
+  set('cap-label',escapeHtml(docMode==='changelog'?I18N[lang].changelog:I18N[lang].userGuide));
   set('cap-title',I18N[lang].capTitle);
   set('agent-code',I18N[lang].agentPromptHtml);
   document.querySelectorAll('.lang-toggle').forEach(tg=>{
@@ -3359,13 +3457,14 @@ function applyStaticText(){
   });
 }
 
-/* ── workbench ── */
+/* ── second-screen document workbench ── */
 const wbModules=document.getElementById('wb-modules');
 const wbComponents=document.getElementById('wb-components');
 
 function unit(n){return lang==='zh'?`${n} ${I18N.zh.unit1}`:`${n} ${n===1?I18N.en.unit1:I18N.en.unitN}`}
 
 function renderModules(){
+  if(!wbModules)return;
   wbModules.innerHTML=MODULES.map(m=>{
     const active=m.id===activeModule;
     return `<button class="mod-card${active?' active':''}" type="button" data-module="${m.id}" aria-pressed="${active}">
@@ -3412,8 +3511,21 @@ function componentCard(id){
 }
 
 function renderComponents(){
+  if(!wbComponents)return;
   const mod=MODULES.find(m=>m.id===activeModule)||MODULES[0];
-  wbComponents.innerHTML=mod.components.map(componentCard).join('');
+  wbComponents.innerHTML=mod.components.map(id=>componentCard(id)).join('');
+}
+function openDoc(comp,kind){
+  if(kind==='guide')location.hash='/user-guide/'+comp;
+  else location.hash='/changelog/'+comp;
+}
+
+function showWorkbench(mode){
+  docMode=mode;
+  applyStaticText();
+  renderModules();
+  renderComponents();
+  document.getElementById('capabilities')?.scrollIntoView({block:'start'});
 }
 
 wbModules.addEventListener('click',e=>{
@@ -3426,7 +3538,7 @@ wbModules.addEventListener('click',e=>{
 wbComponents.addEventListener('click',e=>{
   const btn=e.target.closest('.doc-btn');
   if(!btn||btn.disabled)return;
-  openReader(btn.dataset.comp,btn.dataset.open);
+  openDoc(btn.dataset.comp,btn.dataset.open);
 });
 
 /* ── doc rendering ── */
@@ -3460,7 +3572,29 @@ function guideDoc(id){
   return {html:kicker+sourceLine+rendered.html,toc:rendered.toc};
 }
 
+function rootChangelogDoc(){
+  const releases=ROOT_CHANGELOG.releases[lang]||ROOT_CHANGELOG.releases.en;
+  const toc=[];const parts=[];
+  parts.push(`<div class="doc-kicker">${escapeHtml(t('changelog'))}</div>`);
+  const source=ROOT_CHANGELOG.guidePaths[lang]||ROOT_CHANGELOG.guidePaths.en;
+  parts.push(`<p class="doc-source">${escapeHtml(t('sourceDoc'))}: <a href="https://github.com/alibaba/anolisa/blob/main/${escapeHtml(source)}" target="_blank" rel="noopener">${escapeHtml(source)}</a></p>`);
+  parts.push(`<h1>${escapeHtml(t('rootChangelog'))}</h1>`);
+  parts.push(`<p>${escapeHtml(t('rootChangelogIntro'))}</p>`);
+  releases.forEach(r=>{
+    const id2='root-v-'+String(r.version).replace(/[^a-z0-9]+/gi,'-');
+    toc.push({level:2,id:id2,text:r.version});
+    parts.push(`<h2 id="${id2}">${escapeHtml(r.version)}</h2>`);
+    if(r.date)parts.push(`<p class="doc-release-date">${escapeHtml(r.date)}</p>`);
+    (r.sections||[]).forEach(s=>{
+      parts.push(`<h3>${escapeHtml(s.title)}</h3>`);
+      parts.push('<ul>'+(s.items||[]).map(i=>`<li>${renderInline(i)}</li>`).join('')+'</ul>');
+    });
+  });
+  return {html:parts.join('\n'),toc};
+}
+
 function changelogDoc(id){
+  if(id==='root')return rootChangelogDoc();
   const info=clReleases(id);
   if(!info)return emptyDoc('emptyChangelogTitle','emptyChangelogBody');
   const toc=[];const parts=[];
@@ -3489,22 +3623,23 @@ const readerSidebar=document.getElementById('reader-sidebar');
 const readerDoc=document.getElementById('reader-doc');
 const readerToc=document.getElementById('reader-toc');
 
-function moduleOf(compId){return MODULES.find(m=>m.components.includes(compId))||MODULES[0]}
+function moduleOf(compId){return compId==='root'?null:(MODULES.find(m=>m.components.includes(compId))||MODULES[0])}
 
 function renderReaderSidebar(){
-  readerSidebar.innerHTML=MODULES.map(m=>`<div class="rs-group">
+  const kind=readerState?.kind||'guide';
+  const rootGroup=kind==='changelog'?`<div class="rs-group">
+    <div class="rs-group-title">${escapeHtml(t('changelog'))}</div>
+    <a class="rs-link${readerState&&readerState.comp==='root'?' active':''}" href="#/changelog/root">${escapeHtml(t('rootChangelog'))}</a>
+  </div>`:'';
+  readerSidebar.innerHTML=rootGroup+MODULES.map(m=>`<div class="rs-group">
     <div class="rs-group-title">${escapeHtml(m.name[lang])}</div>
     ${m.components.map(cid=>{
       const ga=guideAvailable(cid);const ca=changelogAvailable(cid);
-      const link=(kind,label,avail)=>{
-        const active=readerState&&readerState.comp===cid&&readerState.kind===kind;
-        if(!avail)return `<span class="rs-link disabled" aria-disabled="true">${escapeHtml(label)}</span>`;
-        return `<a class="rs-link${active?' active':''}" href="#/reader/${cid}/${kind}">${escapeHtml(label)}</a>`;
-      };
-      return `<div class="rs-comp"><div class="rs-comp-name">${escapeHtml(compName(cid))}</div>
-        ${link('guide',t('userGuide'),ga)}
-        ${link('changelog',t('changelog'),ca)}
-      </div>`;
+      const avail=kind==='guide'?ga:ca;
+      const href=kind==='guide'?`#/user-guide/${cid}`:`#/changelog/${cid}`;
+      const active=readerState&&readerState.comp===cid&&readerState.kind===kind;
+      if(!avail)return `<span class="rs-link disabled" aria-disabled="true">${escapeHtml(compName(cid))}</span>`;
+      return `<a class="rs-link${active?' active':''}" href="${href}">${escapeHtml(compName(cid))}</a>`;
     }).join('')}
   </div>`).join('');
 }
@@ -3514,11 +3649,10 @@ function renderReaderContent(){
   const {comp,kind}=readerState;
   const doc=kind==='changelog'?changelogDoc(comp):guideDoc(comp);
   const kindLabel=kind==='changelog'?t('changelog'):t('userGuide');
-  readerCrumb.innerHTML=`${escapeHtml(moduleOf(comp).name[lang])} / <b>${escapeHtml(compName(comp))}</b> · ${escapeHtml(kindLabel)}`;
-  readerBack.textContent='← '+t('back');
-  const ga=guideAvailable(comp),ca=changelogAvailable(comp);
-  readerSwitch.innerHTML=[{k:'guide',label:t('userGuide'),avail:ga},{k:'changelog',label:t('changelog'),avail:ca}]
-    .map(o=>`<button type="button" role="tab" data-switch="${o.k}" aria-selected="${o.k===kind}"${o.k===kind?' class="active"':''}${o.avail?'':' disabled aria-disabled="true"'}>${escapeHtml(o.label)}</button>`).join('');
+  const mod=moduleOf(comp);
+  readerCrumb.innerHTML=`${escapeHtml(kindLabel)} / ${mod?escapeHtml(mod.name[lang])+' / ':''}<b>${escapeHtml(compName(comp))}</b>`;
+  readerBack.textContent='← '+(kind==='changelog'?t('changelog'):t('userGuide'));
+  readerSwitch.innerHTML='';
   readerDoc.innerHTML=doc.html;
   if(doc.toc.length){
     readerToc.innerHTML=`<div class="toc-title">${escapeHtml(t('onThisPage'))}</div>`+doc.toc.map(h=>`<a class="toc-link${h.level===3?' lvl3':''}" data-target="${h.id}" href="javascript:void(0)">${escapeHtml(h.text)}</a>`).join('');
@@ -3543,22 +3677,36 @@ function hideReader(){
   reader.setAttribute('aria-hidden','true');
   document.body.style.overflow='';
 }
-function openReader(comp,kind){location.hash='/reader/'+comp+'/'+kind;}
+function openReader(comp,kind){openDoc(comp,kind);}
 
 function returnToOverview(){
-  const targetModule=readerState?moduleOf(readerState.comp).id:activeModule;
+  const targetModule=readerState&&moduleOf(readerState.comp)?moduleOf(readerState.comp).id:activeModule;
+  const mode=readerState?.kind==='changelog'?'changelog':'guide';
   activeModule=targetModule;
-  renderModules();
-  renderComponents();
   hideReader();
-  history.replaceState(null,'',`${location.pathname}${location.search}#capabilities`);
-  document.getElementById('capabilities')?.scrollIntoView({block:'start'});
+  location.hash=mode==='changelog'?'/changelog':'/user-guide';
 }
 
 function route(){
-  const m=location.hash.match(/^#\/reader\/([a-z0-9-]+)\/(guide|changelog)$/i);
-  if(m&&COMPONENTS[m[1]]){showReader(m[1],m[2]);}
-  else{hideReader();}
+  const guide=location.hash.match(/^#\/user-guide(?:\/([a-z0-9-]+))?$/i);
+  const changelog=location.hash.match(/^#\/changelog(?:\/([a-z0-9-]+))?$/i);
+  const legacy=location.hash.match(/^#\/reader\/([a-z0-9-]+)\/(guide|changelog)$/i);
+  if(guide){
+    hideReader();
+    showWorkbench('guide');
+    if(guide[1]&&COMPONENTS[guide[1]])showReader(guide[1],'guide');
+  }else if(changelog){
+    hideReader();
+    showWorkbench('changelog');
+    if(changelog[1]&&(changelog[1]==='root'||COMPONENTS[changelog[1]]))showReader(changelog[1],'changelog');
+  }else if(legacy&&COMPONENTS[legacy[1]]){
+    showReader(legacy[1],legacy[2]);
+  }else{
+    hideReader();
+    docMode='guide';
+    applyStaticText();
+    renderComponents();
+  }
 }
 window.addEventListener('hashchange',route);
 
