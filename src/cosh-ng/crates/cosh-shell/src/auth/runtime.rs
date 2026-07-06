@@ -6,6 +6,7 @@ use serde::Deserialize;
 use crate::auth::ecs;
 use crate::auth::providers::{
     builtin_auth_providers, builtin_base_url_for_provider, default_model_for_provider,
+    normalize_provider_order, ALIYUN_PROVIDER_LABEL,
 };
 use crate::runtime::dispatcher::stable_event_key;
 use crate::runtime::prelude::{
@@ -60,7 +61,7 @@ pub(crate) struct ExistingProvider {
 fn label_for_provider_type(provider_type: &str) -> &'static str {
     match provider_type {
         "dashscope" => "DashScope (\u{767e}\u{70bc})",
-        "aliyun" => "Aliyun Authentication",
+        "aliyun" => ALIYUN_PROVIDER_LABEL,
         _ => "OpenAI Compatible",
     }
 }
@@ -202,7 +203,7 @@ pub(crate) fn record_auth_required(
                 id: id.clone(),
                 request_id: request_id.clone(),
                 phase: AuthPhase::SelectingProvider,
-                providers: providers.clone(),
+                providers: normalize_provider_order(providers.clone()),
                 selected_provider: 0,
                 current_field: 0,
                 collected_values: HashMap::new(),
