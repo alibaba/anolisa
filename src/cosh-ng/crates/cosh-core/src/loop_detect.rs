@@ -19,7 +19,7 @@ impl LoopDetector {
         let fingerprint = format!(
             "{}:{}",
             tool_name,
-            &tool_input[..tool_input.len().min(FINGERPRINT_PREFIX_LEN)]
+            utf8_prefix(tool_input, FINGERPRINT_PREFIX_LEN)
         );
 
         self.history.push_back(fingerprint.clone());
@@ -38,6 +38,22 @@ impl LoopDetector {
     pub fn loop_warning() -> &'static str {
         "You appear to be repeating the same action. Please try a different approach or ask the user for guidance."
     }
+}
+
+fn utf8_prefix(input: &str, max_bytes: usize) -> &str {
+    if input.len() <= max_bytes {
+        return input;
+    }
+
+    let mut end = 0;
+    for (idx, ch) in input.char_indices() {
+        let next = idx + ch.len_utf8();
+        if next > max_bytes {
+            break;
+        }
+        end = next;
+    }
+    &input[..end]
 }
 
 #[cfg(test)]
@@ -76,6 +92,16 @@ mod tests {
         let slightly_different = format!("{}y", "x".repeat(499));
         assert!(!d.record_action("shell", &long_input));
         assert!(!d.record_action("shell", &slightly_different));
+        assert!(d.record_action("shell", &long_input));
+    }
+
+    #[test]
+    fn fingerprint_does_not_split_utf8() {
+        let mut d = LoopDetector::new();
+        let long_input = "最近一次 OOM 事件 ".repeat(50);
+
+        assert!(!d.record_action("shell", &long_input));
+        assert!(!d.record_action("shell", &long_input));
         assert!(d.record_action("shell", &long_input));
     }
 }
