@@ -41,7 +41,9 @@ mod types;
 mod ui;
 
 use runtime::cli_args::{configured_raw_invocation, should_start_default_raw};
-use runtime::startup::{passthrough_non_interactive, print_usage_help};
+use runtime::startup::{
+    passthrough_non_interactive, passthrough_raw_non_interactive, print_usage_help,
+};
 
 #[allow(unused_imports)]
 mod binary_compat {
@@ -93,6 +95,9 @@ fn main() {
         args.get(1).map(String::as_str),
         Some("demo" | "host-demo" | "raw" | "interactive" | "interactive-demo" | "adapter-demo")
     );
+    if let Some(status) = passthrough_raw_non_interactive(&args) {
+        std::process::exit(status);
+    }
     if !has_subcommand {
         if let Some(status) = passthrough_non_interactive(&args) {
             std::process::exit(status);

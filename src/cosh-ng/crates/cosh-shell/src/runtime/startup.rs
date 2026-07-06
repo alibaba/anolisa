@@ -323,6 +323,61 @@ pub(crate) fn passthrough_non_interactive(args: &[String]) -> Option<i32> {
     None
 }
 
+pub(crate) fn passthrough_raw_non_interactive(args: &[String]) -> Option<i32> {
+    let passthrough_args = raw_passthrough_args(args)?;
+    passthrough_non_interactive(&passthrough_args)
+}
+
+fn raw_passthrough_args(args: &[String]) -> Option<Vec<String>> {
+    if args.get(1).map(String::as_str) != Some("raw") {
+        return None;
+    }
+
+    let mut out = vec![args[0].clone()];
+    let mut skipped_adapter = false;
+    let mut idx = 2;
+    while idx < args.len() {
+        let arg = &args[idx];
+        match arg.as_str() {
+            "--" => {
+                out.push(arg.clone());
+                out.extend(args[idx + 1..].iter().cloned());
+                break;
+            }
+            "-c" => {
+                out.extend(args[idx..].iter().cloned());
+                break;
+            }
+            "--shell" => {
+                out.push(arg.clone());
+                if let Some(value) = args.get(idx + 1) {
+                    out.push(value.clone());
+                    idx += 2;
+                } else {
+                    idx += 1;
+                }
+            }
+            "--isolated" | "--login" | "-l" => {
+                out.push(arg.clone());
+                idx += 1;
+            }
+            _ if arg.starts_with("--shell=") => {
+                out.push(arg.clone());
+                idx += 1;
+            }
+            _ if !arg.starts_with('-') && !skipped_adapter => {
+                skipped_adapter = true;
+                idx += 1;
+            }
+            _ => return None,
+        }
+    }
+
+    let has_dash_c = out.iter().any(|arg| arg == "-c");
+    let has_double_dash = out.get(1).map(String::as_str) == Some("--");
+    (has_dash_c || has_double_dash).then_some(out)
+}
+
 fn detect_passthrough_shell(args: &[String]) -> String {
     for (i, arg) in args.iter().enumerate() {
         if arg == "--shell" {
@@ -405,7 +460,7 @@ fn merge_path_lists(paths: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_bootstrap_path, merge_path_lists};
+    use super::{extract_bootstrap_path, merge_path_lists, raw_passthrough_args};
 
     #[test]
     fn bootstrap_path_extracts_last_marked_value() {
@@ -423,6 +478,46 @@ mod tests {
                 "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
             ]),
             "/opt/homebrew/bin:/usr/bin:/bin:/usr/local/bin:/usr/sbin:/sbin"
+        );
+    }
+
+    #[test]
+    fn raw_passthrough_args_strips_raw_adapter_for_dash_c() {
+        assert_eq!(
+            raw_passthrough_args(&[
+                "cosh-shell".to_string(),
+                "raw".to_string(),
+                "cosh-core".to_string(),
+                "-c".to_string(),
+                "echo ok".to_string()
+            ]),
+            Some(vec![
+                "cosh-shell".to_string(),
+                "-c".to_string(),
+                "echo ok".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn raw_passthrough_args_preserves_shell_option() {
+        assert_eq!(
+            raw_passthrough_args(&[
+                "cosh-shell".to_string(),
+                "raw".to_string(),
+                "--shell".to_string(),
+                "bash".to_string(),
+                "cosh-core".to_string(),
+                "-c".to_string(),
+                "echo ok".to_string()
+            ]),
+            Some(vec![
+                "cosh-shell".to_string(),
+                "--shell".to_string(),
+                "bash".to_string(),
+                "-c".to_string(),
+                "echo ok".to_string()
+            ])
         );
     }
 }

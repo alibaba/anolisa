@@ -148,6 +148,62 @@ fn raw_cli_dash_c_passthrough_filters_wrapper_shell_option() {
 }
 
 #[test]
+fn raw_cli_raw_adapter_dash_c_passthrough_executes_without_agent_ui() {
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+    let output = raw_cli_command(binary)
+        .args(["raw", "cosh-core", "-c", "echo raw-adapter-c-ok"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run raw adapter dash-c passthrough");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stdout={stdout}\nstderr={stderr}");
+    assert!(
+        stdout.contains("raw-adapter-c-ok"),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("Agent:"),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("Thinking..."),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+}
+
+#[test]
+fn raw_cli_raw_adapter_dash_c_passthrough_preserves_exit_status() {
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+    let output = raw_cli_command(binary)
+        .args(["raw", "cosh-core", "-c", "exit 48"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run raw adapter dash-c passthrough with nonzero exit");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(48),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("Agent:"),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("Thinking..."),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+}
+
+#[test]
 fn raw_cli_stdin_passthrough_preserves_exit_status() {
     let binary = env!("CARGO_BIN_EXE_cosh-shell");
     let mut child = raw_cli_command(binary)
