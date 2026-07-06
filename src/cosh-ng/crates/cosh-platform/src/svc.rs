@@ -535,8 +535,12 @@ mod tests {
         }
         let sys_uptime = sys_uptime.unwrap();
 
-        // Pretend service started 120 seconds ago
-        let active_enter_mono = (sys_uptime.saturating_sub(120)) * 1_000_000;
+        if sys_uptime <= 1 {
+            return;
+        }
+
+        let expected_age = 120.min(sys_uptime - 1);
+        let active_enter_mono = (sys_uptime - expected_age) * 1_000_000;
         let mut props = std::collections::HashMap::new();
         props.insert(
             "ActiveEnterTimestampMonotonic".to_string(),
@@ -545,9 +549,12 @@ mod tests {
 
         let uptime = parse_uptime_secs(&props);
         assert!(uptime.is_some());
-        // Allow 2 second tolerance for timing drift
         let val = uptime.unwrap();
-        assert!((119..=122).contains(&val), "unexpected uptime: {}", val);
+        assert!(
+            (expected_age..=expected_age + 2).contains(&val),
+            "unexpected uptime: {}",
+            val
+        );
     }
 
     #[test]
