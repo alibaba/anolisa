@@ -101,10 +101,15 @@ impl InterruptionDetector {
             .and_then(|s| s.parse().ok())
             .unwrap_or(200);
 
-        // 修复：从 call.response.raw_body 读取响应体，而非 call.metadata（builder 不会写入 metadata）
         let error_text = call.error.as_deref().unwrap_or("");
         let response_body = call.response.raw_body.as_deref().unwrap_or("");
-        let combined_error = format!("{error_text} {response_body}").to_ascii_lowercase();
+        let structured_error = error_text.to_ascii_lowercase();
+        let response_error_body = if status_code >= 400 {
+            response_body
+        } else {
+            ""
+        };
+        let combined_error = format!("{error_text} {response_error_body}").to_ascii_lowercase();
 
         let is_context_overflow = combined_error.contains("context_length_exceeded")
             || combined_error.contains("maximum context length")
@@ -174,9 +179,9 @@ impl InterruptionDetector {
         // ── 3. NetworkTimeout (408/504 / timeout) ─────────────────────────────
         if status_code == 408
             || status_code == 504
-            || combined_error.contains("timeout")
-            || combined_error.contains("timed out")
-            || combined_error.contains("deadline exceeded")
+            || structured_error.contains("timeout")
+            || structured_error.contains("timed out")
+            || structured_error.contains("deadline exceeded")
         {
             let detail = serde_json::json!({
                 "model": call.model,
@@ -752,6 +757,76 @@ mod tests {
             events[0].interruption_type,
             InterruptionType::NetworkTimeout
         );
+    }
+
+    #[test]
+    fn test_ignores_timeout_text_in_successful_response_body() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.response.raw_body = Some(
+            r#"{"content":"Run journalctl -u app | grep -i \"timeout\" to inspect timeout logs."}"#
+                .to_string(),
+        );
+
+        let events = detector.detect(&call);
+
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_ignores_auth_text_in_successful_response_body() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.response.raw_body = Some(
+            r#"{"content":"Use rejectUnauthorized:false only for local TLS smoke tests."}"#
+                .to_string(),
+        );
+
+        let events = detector.detect(&call);
+
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_ignores_rate_limit_text_in_successful_response_body() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.response.raw_body = Some(
+            r#"{"content":"Document rate limit and too many requests troubleshooting steps."}"#
+                .to_string(),
+        );
+
+        let events = detector.detect(&call);
+
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_ignores_service_unavailable_text_in_successful_response_body() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.response.raw_body = Some(
+            r#"{"content":"Explain service_unavailable and overloaded model symptoms."}"#
+                .to_string(),
+        );
+
+        let events = detector.detect(&call);
+
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_ignores_context_overflow_text_in_successful_response_body() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.response.raw_body = Some(
+            r#"{"content":"Compare context window, input is too long, and prompt is too long errors."}"#
+                .to_string(),
+        );
+
+        let events = detector.detect(&call);
+
+        assert!(events.is_empty());
     }
 
     #[test]
