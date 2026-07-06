@@ -1,6 +1,5 @@
 use super::*;
 
-const MEMORY_SKILL: &str = "memory-analysis";
 const HIGH_MEMORY_CLI_HINT: &str =
     "ps -eo pid,ppid,comm,%mem,%cpu,rss,vsz,args --sort=-%mem | head -20";
 const MEMORY_PRESSURE_CLI_HINT: &str =
@@ -51,9 +50,9 @@ pub(super) fn high_memory_finding(rows: &[ProcessMemoryRow]) -> Option<HookFindi
         description: format!(
             "Process-level memory candidates from command output. Top matches: {summary}"
         ),
-        suggestion: "Use memory-analysis to inspect memory pressure and high %MEM processes."
+        suggestion: "Use available memory diagnosis skills or focused read-only commands to inspect pressure and high %MEM processes."
             .into(),
-        skill: Some(MEMORY_SKILL.into()),
+        skill: None,
         cli_hint: Some(HIGH_MEMORY_CLI_HINT.into()),
         context_refs: Vec::new(),
     })
@@ -114,10 +113,9 @@ pub(super) fn memory_pressure_finding(metrics: Option<&MemoryMetrics>) -> Option
             available_ratio * 100.0,
             swap_note
         ),
-        suggestion:
-            "Use memory-analysis to inspect memory pressure, swap usage, and high %MEM processes."
-                .into(),
-        skill: Some(MEMORY_SKILL.into()),
+        suggestion: "Use available memory diagnosis skills or focused read-only commands to inspect memory pressure, swap usage, and high %MEM processes."
+            .into(),
+        skill: None,
         cli_hint: Some(MEMORY_PRESSURE_CLI_HINT.into()),
         context_refs: Vec::new(),
     })

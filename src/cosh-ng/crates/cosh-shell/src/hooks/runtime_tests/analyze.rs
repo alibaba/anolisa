@@ -31,10 +31,7 @@ fn hook_hint_analyze_starts_agent_without_pending_queue() {
             .map(|finding| finding.hook_id.as_str()),
         Some("memory-pressure")
     );
-    assert_eq!(
-        request.recommended_skill.as_deref(),
-        Some("memory-analysis")
-    );
+    assert!(request.recommended_skill.is_none());
     assert_eq!(request.mode, AgentMode::RecommendOnly);
     assert!(request.user_confirmed);
     assert!(state.hooks.display_events.iter().any(|event| {

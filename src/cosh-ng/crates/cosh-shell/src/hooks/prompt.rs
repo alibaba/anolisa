@@ -77,7 +77,7 @@ fn hook_analysis_evidence_excerpt(block: &CommandBlock, output_id: &str) -> Stri
 pub(crate) fn prompt_hint_for_finding(
     block: &CommandBlock,
     aggregate: &AggregatedHookFinding,
-    recommended_skill: Option<&str>,
+    _recommended_skill: Option<&str>,
 ) -> String {
     let output_id = command_output_id(block);
     let mut parts = vec![
@@ -89,9 +89,6 @@ pub(crate) fn prompt_hint_for_finding(
         aggregate.primary.title.clone(),
         format!("output_id={output_id}"),
     ];
-    if let Some(skill) = recommended_skill {
-        parts.push(format!("recommended_skill={skill}"));
-    }
     if let Some(cli_hint) = aggregate.primary.cli_hint.as_ref() {
         parts.push(format!("read_only_cli_hint={cli_hint}"));
     }

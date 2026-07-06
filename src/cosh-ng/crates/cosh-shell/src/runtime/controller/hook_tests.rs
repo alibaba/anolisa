@@ -265,10 +265,7 @@ fn analyze_consultation_starts_agent_with_hook_finding() {
         hook_hint.suppression_key,
         "memory:system-memory:memory-pressure:top:user_interactive"
     );
-    assert_eq!(
-        hook_hint.recommended_skill.as_deref(),
-        Some("memory-analysis")
-    );
+    assert!(hook_hint.recommended_skill.is_none());
     assert_eq!(hook_hint.output_ref.as_deref(), Some(output_ref.as_str()));
 }
 

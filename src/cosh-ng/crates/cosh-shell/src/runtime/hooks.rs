@@ -2,9 +2,9 @@ use std::io::Write;
 
 use super::prelude::{
     agent_request_after_confirmation, build_related_history_index, context_blocks_from_entries,
-    findings_from_blocks, AdapterInstance, AgentMode, CommandBlock, CommandOrigin, FindingSeverity,
-    MessageId, NoticePanelModel, RatatuiInlineRenderer, RelatedHistoryConfig, ShellEvent,
-    ShellEventKind,
+    findings_from_blocks, AdapterInstance, AgentContextBinding, AgentMode, CommandBlock,
+    CommandOrigin, FindingSeverity, MessageId, NoticePanelModel, RatatuiInlineRenderer,
+    RelatedHistoryConfig, ShellEvent, ShellEventKind,
 };
 #[cfg(test)]
 use super::prelude::{
@@ -557,6 +557,7 @@ pub(crate) fn start_agent_for_hook_consultation<W: Write>(
     request.user_input = Some(hook_analysis_user_input(block, consultation));
     request.mode = AgentMode::RecommendOnly;
     request.user_confirmed = true;
+    crate::types::set_request_context_binding(&mut request, AgentContextBinding::HookConsultation);
     request.hook_finding = consultation.hook_finding.clone();
     request.recommended_skill = consultation.recommended_skill.clone();
     state.agent_run.needs_prompt_after_run = true;
