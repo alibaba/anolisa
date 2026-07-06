@@ -441,6 +441,20 @@ curl http://127.0.0.1:7396/api/export/atif/session/{session_id}
 curl http://127.0.0.1:7396/api/export/atif/conversation/{conversation_id}
 ```
 
+### 10.4 Conversation Grader
+
+Conversation Grader 对指定 `conversation_id` 执行手动质量评估，并将结果持久化到 SQLite。当前版本只支持 `target_type=conversation`，评估器为规则版 `rule-v3`。
+
+```bash
+curl -X POST http://127.0.0.1:7396/api/grader/evaluate \
+  -H 'Content-Type: application/json' \
+  -d '{"target_type":"conversation","target_id":"{conversation_id}","force":false}'
+
+curl "http://127.0.0.1:7396/api/grader/latest?target_type=conversation&target_id={conversation_id}"
+```
+
+如果 conversation 仍有 pending LLM 调用，评估接口返回 HTTP 409。确认需要评估当前不完整快照时，可以将 `force` 设置为 `true`，结果会标记 `evaluated_with_pending=true`。
+
 ---
 
 ## 11. 支持的 LLM 提供商
@@ -466,6 +480,8 @@ AgentSight 自动识别并解析以下 LLM API 格式：
 | `/api/sessions/{id}/traces` | GET | 会话下的对话列表 |
 | `/api/traces/{id}` | GET | Trace 详情 |
 | `/api/conversations/{id}` | GET | 对话详情 |
+| `/api/grader/evaluate` | POST | 手动评估 Conversation 质量 |
+| `/api/grader/latest` | GET | 查询最新 Conversation 评估结果 |
 | `/api/agent-names` | GET | Agent 名称列表 |
 | `/api/agent-health` | GET | Agent 健康状态 |
 | `/api/interruptions` | GET | 中断事件列表 |

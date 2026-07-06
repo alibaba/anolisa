@@ -11,6 +11,7 @@
 - Add `call_kind` classification (chat / completion / embedding / tool_use) to GenAI semantic events.
 - Add `--exclude` filter to `agentsight audit` CLI for noise reduction, and show non-streaming LLM calls in audit output.
 - Add unified `agentsight summary` command for one-shot status overview.
+- Add manual conversation grader with persisted quality verdicts in the dashboard.
 - Enhance token savings page with baseline comparison, strategy breakdown, line-level diff highlighting and optimization tips.
 - Upload skill metrics via SLS Logtail exporter.
 - Improve agent health UX: role badges (P1/P2), TTL-based cleanup, process-ancestry grouping, and Session ID help tooltip.
@@ -33,6 +34,8 @@
 - Respect dynamic sysom path in SLS exporter mode selection; replace removed `sysom_logtail_path` with `logtail_path` filter.
 - Validate ring buffer size is power-of-two at startup.
 - Wire feature flags and runtime limits to actual runtime code paths.
+- Avoid treating historical raw event context as a current tool failure in conversation quality evaluation.
+- Avoid treating successful assistant text that mentions timeout as a network timeout interruption.
 
 ### Refactoring
 - Split `genai/builder.rs` into 4 focused modules and `genai.rs` into 5 submodules.

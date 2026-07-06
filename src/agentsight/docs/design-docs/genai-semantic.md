@@ -144,10 +144,30 @@ graph LR
 
 - **By trace**: `/api/export/atif/trace/{trace_id}`
 - **By session**: `/api/export/atif/session/{session_id}`
+- **By conversation**: `/api/export/atif/conversation/{conversation_id}`
 
 **ATIF structure**: `AtifAgent` → `Vec<AtifStep>` → `AtifToolCall` + `AtifObservation`
 
 **Source**: `src/atif/converter.rs`, `src/atif/schema.rs`
+
+## Conversation Grader
+
+The conversation grader is a manual post-run evaluation layer over the GenAI SQLite evidence. The MVP only supports `target_type = "conversation"` and uses deterministic `rule-v3` scoring.
+
+Inputs:
+
+- GenAI LLM call rows from `GenAISqliteStore::get_events_by_conversation()`.
+- Interruption rows from `InterruptionStore::list_by_conversation()`.
+- A stable input hash derived from the conversation evidence and grader version.
+
+Outputs are stored in `evaluation_runs` in the GenAI SQLite database. The idempotency key is `target_type`, `target_id`, `input_hash`, `grader_type`, and `grader_version`, so repeated evaluation of the same snapshot reuses the completed run.
+
+Manual APIs:
+
+- `POST /api/grader/evaluate`
+- `GET /api/grader/latest?target_type=conversation&target_id={conversation_id}`
+
+If the conversation still has pending LLM calls, `POST /api/grader/evaluate` returns HTTP 409 unless `force=true` is provided. Forced snapshots are marked with `metadata.evaluated_with_pending = true`.
 
 ## Session & Trace Model
 
