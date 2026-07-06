@@ -12,6 +12,7 @@ pub(crate) mod evidence_requests;
 mod evidence_requests_tests;
 pub(crate) mod evidence_state;
 pub(crate) mod hooks;
+pub(crate) mod logging;
 pub(crate) mod mode;
 #[cfg(test)]
 mod mvp_loop_tests;

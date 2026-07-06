@@ -1,6 +1,6 @@
 use tracing_subscriber::EnvFilter;
 
-pub fn init_logging(config_log_level: &str) {
+pub(crate) fn init_logging(config_log_level: &str) {
     let log_dir = log_directory();
 
     let filter = if let Ok(cosh_log) = std::env::var("COSH_LOG") {
@@ -47,7 +47,7 @@ fn cleanup_old_logs(dir: &std::path::Path, keep_days: u64) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().is_none_or(|e| e.len() != 10) {
+        if !path.extension().map_or(false, |e| e.len() == 10) {
             continue;
         }
         if let Ok(meta) = path.metadata() {

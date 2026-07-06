@@ -34,7 +34,7 @@ classification_for_symbol() {
 
 classification_for_owner_entry() {
   case "$1" in
-    adapter::adapter_for_kind|adapter::AdapterError|adapter::AdapterInstance|adapter::AdapterKind|adapter::AgentAdapter|adapter::AgentBackendCapabilities|adapter::AgentRunHandle|adapter::AgentRunPoll|adapter::ApprovalDecision|adapter::ApprovalResponse|adapter::AuthFieldInfo|adapter::AuthProviderInfo|adapter::AuthResponse|adapter::ControlProtocolCapabilities|adapter::HostExecutedShellMetadata|adapter::HostExecutedShellResult)
+    adapter::adapter_for_kind|adapter::AdapterError|adapter::AdapterInstance|adapter::AdapterKind|adapter::AgentAdapter|adapter::AgentBackendCapabilities|adapter::AgentRunHandle|adapter::AgentRunPoll|adapter::ApprovalDecision|adapter::ApprovalResponse|adapter::AuthFieldInfo|adapter::AuthProviderInfo|adapter::AuthResponse|adapter::ControlProtocolCapabilities|adapter::HostExecutedShellMetadata|adapter::HostExecutedShellResult|adapter::ShellEvidenceAction)
       echo "support-api-review-before-freeze"
       ;;
     adapter::ClaudeCodeAdapter|adapter::CoshCoreAdapter|adapter::FakeAgentAdapter|adapter::QwenCliAdapter|adapter::ProviderCancellationArtifact|adapter::ProviderCancellationArtifactKind|adapter::ProviderCancellationArtifactStore)
