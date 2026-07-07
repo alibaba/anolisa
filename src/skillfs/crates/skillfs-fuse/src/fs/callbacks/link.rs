@@ -149,6 +149,10 @@ impl SkillFs {
                 name,
                 relative_path,
             }
+            | PathType::CategoryPassthrough {
+                name,
+                relative_path,
+            }
             | PathType::NestedPassthrough {
                 category: name,
                 skill_name: _,

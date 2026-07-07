@@ -898,6 +898,7 @@ impl SkillFs {
             }
             PathType::HermesMeta { .. }
             | PathType::HermesMetaChild { .. }
+            | PathType::CategoryPassthrough { .. }
             | PathType::CategoryDir { .. }
             | PathType::NestedSkillDir { .. }
             | PathType::NestedSkillMd { .. }

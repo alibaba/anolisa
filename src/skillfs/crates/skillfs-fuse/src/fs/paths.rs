@@ -179,6 +179,10 @@ impl SkillFs {
             PathType::HermesMetaChild {
                 name,
                 relative_path,
+            }
+            | PathType::CategoryPassthrough {
+                name,
+                relative_path,
             } => Some(self.source_base().join(&name).join(&relative_path)),
             PathType::CategoryDir { category } => Some(self.source_base().join(&category)),
             PathType::NestedSkillDir {
@@ -253,6 +257,10 @@ impl SkillFs {
             } => self.source_base().join(&skill_name).join(&relative_path),
             PathType::HermesMeta { name } => self.source_base().join(&name),
             PathType::HermesMetaChild {
+                name,
+                relative_path,
+            }
+            | PathType::CategoryPassthrough {
                 name,
                 relative_path,
             } => self.source_base().join(&name).join(&relative_path),
@@ -373,6 +381,20 @@ impl SkillFs {
         self.hermes_skill_physical_dir(category, skill_name)
             .join("SKILL.md")
             .exists()
+    }
+
+    /// Whether the direct category child `<category>/<name>` physically
+    /// exists and is NOT a directory (a plain file or symlink).
+    ///
+    /// A skill is always a directory, so a non-directory child under a
+    /// category (e.g. `apple/README.md`) can never be a nested skill and
+    /// must be served as ordinary passthrough. A missing child returns
+    /// `false` so it stays on the nested-skill path (surfacing `ENOENT`
+    /// via the normal directory checks rather than being mis-served).
+    pub(super) fn hermes_category_child_is_file(&self, category: &str, name: &str) -> bool {
+        std::fs::symlink_metadata(self.source_base().join(category).join(name))
+            .map(|m| !m.is_dir())
+            .unwrap_or(false)
     }
 
     /// Whether `<name>` is a real top-level Hermes skill — i.e. a

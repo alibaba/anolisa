@@ -458,6 +458,27 @@ impl SkillFs {
                 skill_name: category,
                 relative_path: std::path::Path::new(&skill_name).join(relative_path),
             },
+            // A plain *file* directly under a category (e.g.
+            // `apple/README.md`) is lexically labelled `NestedSkillDir`
+            // even though it is not a directory. Rewrite it to
+            // `CategoryPassthrough` so `lookup`/`open`/`read` treat it as an
+            // ordinary passthrough file instead of a (broken) skill dir.
+            //
+            // Non-skill *directories* (`apple/docs`) and their descendants
+            // are intentionally NOT reclassified: they stay
+            // `NestedSkillDir` / `NestedPassthrough` and are ungated via
+            // `resolve_hermes_nested_read`. This keeps brand-new install /
+            // staging directories (which have no `SKILL.md` yet) on the
+            // nested-skill code path the installer machinery depends on.
+            PathType::NestedSkillDir {
+                category,
+                skill_name,
+            } if self.hermes_category_child_is_file(&category, &skill_name) => {
+                PathType::CategoryPassthrough {
+                    name: category,
+                    relative_path: std::path::PathBuf::from(skill_name),
+                }
+            }
             other => other,
         }
     }

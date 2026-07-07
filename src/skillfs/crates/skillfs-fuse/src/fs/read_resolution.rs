@@ -225,11 +225,14 @@ impl SkillFs {
         category: &str,
         skill_name: &str,
     ) -> ReadResolution {
-        // Non-skill children of a category (no `SKILL.md`) are plain
-        // passthrough — they are never gated by activation. Without this,
-        // an attached resolver has no entry for `category/child` and
-        // would (incorrectly) map the child to `Hidden`, making files
-        // like `apple/docs/readme.txt` disappear from the mount.
+        // Non-skill children of a category (a directory without `SKILL.md`,
+        // e.g. `apple/docs`) are plain passthrough — never gated by
+        // activation. Without this, an attached resolver has no entry for
+        // `category/child` and would (incorrectly) map it to `Hidden`,
+        // hiding files like `apple/docs/readme.txt`. Category-child *files*
+        // are reclassified to `CategoryPassthrough` earlier and never reach
+        // here; this guard covers the directory case (including brand-new
+        // install/staging dirs that have no `SKILL.md` yet).
         if !self.hermes_nested_is_skill(category, skill_name) {
             return ReadResolution::Source;
         }

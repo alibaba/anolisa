@@ -176,6 +176,7 @@ impl SkillFs {
             | PathType::InboxPassthrough { .. }
             | PathType::HermesMeta { .. }
             | PathType::HermesMetaChild { .. }
+            | PathType::CategoryPassthrough { .. }
             | PathType::NestedPassthrough { .. } => {
                 // Use fd-backed read via handle
                 let result = self.handles.with_handle(fh, |entry| {

@@ -799,6 +799,8 @@ fn hermes_non_skill_subdir_accessible() {
         let docs = dir.join("apple/docs");
         std::fs::create_dir_all(&docs).unwrap();
         std::fs::write(docs.join("readme.txt"), "documentation").unwrap();
+        // A file living directly under the category (not in a subdir).
+        std::fs::write(dir.join("apple/README.md"), "category readme").unwrap();
     });
 
     let docs = fix.mountpoint().join("apple/docs");
@@ -808,6 +810,22 @@ fn hermes_non_skill_subdir_accessible() {
     let readme = fix.mountpoint().join("apple/docs/readme.txt");
     let content = std::fs::read_to_string(&readme).expect("read readme.txt");
     assert_eq!(content, "documentation");
+
+    // A plain file directly under the category must not be a ghost entry:
+    // it must appear in the listing, stat as a file, and read back.
+    let entries = list_dir_names(&fix.mountpoint().join("apple"));
+    assert!(
+        entries.contains(&"README.md".to_string()),
+        "category direct-child file must be listed, got: {:?}",
+        entries
+    );
+    let cat_file = fix.mountpoint().join("apple/README.md");
+    let file_meta = std::fs::metadata(&cat_file).expect("stat apple/README.md");
+    assert!(file_meta.is_file(), "apple/README.md must stat as a file");
+    assert_eq!(
+        std::fs::read_to_string(&cat_file).expect("read apple/README.md"),
+        "category readme"
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -830,6 +848,7 @@ fn hermes_non_skill_subdir_accessible_with_resolver() {
     let docs = source.path().join("apple/docs");
     std::fs::create_dir_all(&docs).unwrap();
     std::fs::write(docs.join("readme.txt"), "documentation").unwrap();
+    std::fs::write(source.path().join("apple/README.md"), "category readme").unwrap();
 
     let mut store = SkillStore::new();
     store.load_from_directory(source.path(), &ParseConfig::default());
@@ -881,11 +900,26 @@ fn hermes_non_skill_subdir_accessible_with_resolver() {
         .expect("read apple/docs/readme.txt with resolver");
     assert_eq!(content, "documentation");
 
-    // apple/ listing must still contain the non-skill child.
+    // A category direct-child file must also stay accessible with a
+    // resolver attached (it must not be gated as a nested skill).
+    let cat_file = mp.join("apple/README.md");
+    let file_meta = std::fs::metadata(&cat_file).expect("stat apple/README.md with resolver");
+    assert!(file_meta.is_file(), "apple/README.md must stat as a file");
+    assert_eq!(
+        std::fs::read_to_string(&cat_file).expect("read apple/README.md with resolver"),
+        "category readme"
+    );
+
+    // apple/ listing must still contain the non-skill children.
     let entries = list_dir_names(&mp.join("apple"));
     assert!(
         entries.contains(&"docs".to_string()),
         "non-skill child must remain listed under its category, got: {:?}",
+        entries
+    );
+    assert!(
+        entries.contains(&"README.md".to_string()),
+        "category direct-child file must remain listed, got: {:?}",
         entries
     );
 }
@@ -1297,6 +1331,11 @@ fn hermes_enumerate_skill_ids_matches_mixed_layout() {
         "---\nname: weather\n---\n",
     )
     .unwrap();
+    // A subdir under the top-level skill that itself contains a SKILL.md
+    // file. The mount treats this as a passthrough of the `weather` skill,
+    // NOT a nested skill, so enumeration must not register `weather/scripts`.
+    std::fs::create_dir_all(dir.path().join("weather/scripts")).unwrap();
+    std::fs::write(dir.path().join("weather/scripts/SKILL.md"), "decoy").unwrap();
     // Non-skill category child must be excluded.
     std::fs::create_dir_all(dir.path().join("apple/docs")).unwrap();
     std::fs::write(dir.path().join("apple/docs/readme.txt"), "x").unwrap();
@@ -1310,7 +1349,8 @@ fn hermes_enumerate_skill_ids_matches_mixed_layout() {
             "apple/apple-notes".to_string(),
             "weather".to_string(),
         ],
-        "enumeration must cover top-level and nested skills, excluding non-skill children"
+        "enumeration must cover top-level and nested skills, excluding non-skill \
+         children and top-level skill subtrees"
     );
 }
 

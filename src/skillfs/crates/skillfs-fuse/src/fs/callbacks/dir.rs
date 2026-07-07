@@ -417,10 +417,14 @@ impl SkillFs {
                 entries
             }
             PathType::HermesMetaChild {
-                name: meta_name,
+                name: dir_name,
+                relative_path,
+            }
+            | PathType::CategoryPassthrough {
+                name: dir_name,
                 relative_path,
             } => {
-                let phys_dir = self.source_base().join(&meta_name).join(&relative_path);
+                let phys_dir = self.source_base().join(&dir_name).join(&relative_path);
                 let parent_ino = {
                     let parent_path = Path::new(&path)
                         .parent()
@@ -454,31 +458,32 @@ impl SkillFs {
                 if let Ok(dir_iter) = std::fs::read_dir(&phys_dir) {
                     for entry in dir_iter.flatten() {
                         let name = entry.file_name().to_string_lossy().to_string();
-                        if !entry.path().is_dir() {
-                            continue;
-                        }
-                        // H3: staging roots inside category are hidden
-                        // from listing.
-                        if self.is_staging_skill_root(&name) {
-                            continue;
-                        }
-                        let nested_id = Self::hermes_skill_id(category, &name);
-                        // H3: pending installs hidden from listing.
-                        if self.is_pending_install(&nested_id) {
-                            continue;
-                        }
-                        if has_resolver {
-                            let is_skill_leaf = entry.path().join("SKILL.md").exists();
-                            if is_skill_leaf {
+                        let is_dir = entry.path().is_dir();
+                        // Activation gating applies only to real nested
+                        // skill leaves (directories with SKILL.md). Plain
+                        // files/dirs under the category are passthrough and
+                        // are always listed with their true file type.
+                        if is_dir {
+                            // H3: staging roots inside category are hidden.
+                            if self.is_staging_skill_root(&name) {
+                                continue;
+                            }
+                            let nested_id = Self::hermes_skill_id(category, &name);
+                            // H3: pending installs hidden from listing.
+                            if self.is_pending_install(&nested_id) {
+                                continue;
+                            }
+                            if has_resolver && entry.path().join("SKILL.md").exists() {
                                 let resolution = self.resolve_hermes_nested_read(category, &name);
                                 if matches!(resolution, ReadResolution::Hidden) {
                                     continue;
                                 }
                             }
                         }
+                        let kind = dir_entry_file_type(&entry);
                         let entry_path = format!("{}/{}", path, name);
                         let entry_ino = self.inodes.readdir_ino(&entry_path);
-                        entries.push((entry_ino, FileType::Directory, name));
+                        entries.push((entry_ino, kind, name));
                     }
                 }
                 entries
@@ -1054,7 +1059,9 @@ impl SkillFs {
                 };
                 (entries, dir_file)
             }
-            PathType::HermesMeta { .. } | PathType::HermesMetaChild { .. } => {
+            PathType::HermesMeta { .. }
+            | PathType::HermesMetaChild { .. }
+            | PathType::CategoryPassthrough { .. } => {
                 let phys_dir = match self.resolve_physical_path(&path) {
                     Some(p) => p,
                     None => return reply.error(libc::ENOENT),
@@ -1412,6 +1419,7 @@ impl SkillFs {
             }
             PathType::HermesMeta { .. }
             | PathType::HermesMetaChild { .. }
+            | PathType::CategoryPassthrough { .. }
             | PathType::CategoryDir { .. }
             | PathType::NestedSkillDir { .. }
             | PathType::NestedPassthrough { .. } => {

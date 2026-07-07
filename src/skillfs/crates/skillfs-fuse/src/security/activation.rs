@@ -625,6 +625,14 @@ pub fn enumerate_hermes_skill_leaves(source_root: &Path) -> Vec<String> {
         if !entry.path().is_dir() {
             continue;
         }
+        // A first-level directory that carries its own SKILL.md is a
+        // top-level skill, not a category. The mount serves it (and its
+        // whole subtree) as a flat skill, so descending into it here would
+        // register `skill/subdir` as a phantom nested skill and diverge
+        // from mount discovery.
+        if entry.path().join("SKILL.md").exists() {
+            continue;
+        }
         let cat_entries = match std::fs::read_dir(entry.path()) {
             Ok(e) => e,
             Err(_) => continue,

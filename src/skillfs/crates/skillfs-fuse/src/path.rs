@@ -104,6 +104,22 @@ pub enum PathType {
     /// Category container directory in Hermes layout
     /// (e.g. `apple/`). Not a skill.
     CategoryDir { category: String },
+    /// Physical passthrough of a non-skill child directly under a Hermes
+    /// category (e.g. `apple/README.md` or `apple/docs/readme.txt`).
+    ///
+    /// The lexical parser cannot tell a real nested skill leaf from a
+    /// plain file/dir that happens to live under a category, so
+    /// [`crate::fs::SkillFs::parse_fuse_path`] probes the source for
+    /// `SKILL.md` and rewrites non-skill children into this variant.
+    /// `name` is the category component and `relative_path` is everything
+    /// below it, so the physical path is `source/name/relative_path` —
+    /// identical in shape to [`PathType::HermesMetaChild`], which is why
+    /// the two share callback handling. These paths carry no skill
+    /// semantics: no compilation, no activation gating, no notify.
+    CategoryPassthrough {
+        name: String,
+        relative_path: PathBuf,
+    },
     /// Nested skill directory in Hermes layout
     /// (e.g. `apple/apple-notes/`).
     NestedSkillDir {

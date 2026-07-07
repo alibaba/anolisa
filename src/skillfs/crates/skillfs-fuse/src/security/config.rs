@@ -360,12 +360,12 @@ impl SecurityConfig {
         }
         if let Some(value) = self.skills.as_ref().and_then(|s| s.layout.as_deref()) {
             match value {
-                "flat" | "hermes" => {}
+                "auto" | "flat" | "hermes" => {}
                 other => {
                     return Err(ConfigError::InvalidValue {
                         field: "skills.layout",
                         value: other.to_string(),
-                        allowed: "flat, hermes",
+                        allowed: "auto, flat, hermes",
                     });
                 }
             }
@@ -1671,6 +1671,27 @@ post_publish_write_patterns = [".openclaw/**"]
         let cfg: SecurityConfig = toml::from_str("").unwrap();
         assert!(cfg.post_publish_grace_ms().is_none());
         assert!(cfg.post_publish_write_patterns().is_none());
+    }
+
+    #[test]
+    fn skills_layout_accepts_auto_flat_hermes() {
+        let dir = tempfile::tempdir().unwrap();
+        for value in ["auto", "flat", "hermes"] {
+            let path = dir.path().join(format!("{value}.toml"));
+            std::fs::write(&path, format!("[skills]\nlayout = \"{value}\"\n")).unwrap();
+            let cfg = SecurityConfig::load(&path)
+                .unwrap_or_else(|e| panic!("layout '{value}' must validate: {e}"));
+            assert_eq!(cfg.skills_layout(), Some(value));
+        }
+    }
+
+    #[test]
+    fn skills_layout_rejects_unknown_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(&path, "[skills]\nlayout = \"categorized\"\n").unwrap();
+        let result = SecurityConfig::load(&path);
+        assert!(matches!(result, Err(ConfigError::InvalidValue { .. })));
     }
 
     #[test]

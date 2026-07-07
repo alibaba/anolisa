@@ -385,6 +385,10 @@ impl SkillFs {
             PathType::HermesMetaChild {
                 name,
                 relative_path,
+            }
+            | PathType::CategoryPassthrough {
+                name,
+                relative_path,
             } => {
                 let physical = self.source_base().join(&name).join(&relative_path);
                 match std::fs::symlink_metadata(&physical) {
@@ -852,6 +856,10 @@ impl SkillFs {
             PathType::HermesMetaChild {
                 name,
                 relative_path,
+            }
+            | PathType::CategoryPassthrough {
+                name,
+                relative_path,
             } => {
                 let physical = self.source_base().join(&name).join(&relative_path);
                 match std::fs::symlink_metadata(&physical) {
@@ -1215,6 +1223,7 @@ impl SkillFs {
             }
             PathType::HermesMeta { .. }
             | PathType::HermesMetaChild { .. }
+            | PathType::CategoryPassthrough { .. }
             | PathType::CategoryDir { .. } => {
                 let physical = match self.resolve_physical_path(&path) {
                     Some(p) => p,
