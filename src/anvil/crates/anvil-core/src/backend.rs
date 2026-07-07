@@ -10,6 +10,9 @@ use crate::error::{AnvilError, Result};
 
 /// All backends that anvil v0.1 knows about. Each backend maps to a
 /// binary path configured in the daemon `[backends]` section.
+///
+/// `LinuxSandbox` and `Landlock` are recognized for policy deserialization
+/// but are not yet backed by a [`BackendSpawner`] implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BackendKind {
@@ -22,6 +25,8 @@ pub enum BackendKind {
     KataQemu,
     Runc,
     Bubblewrap,
+    LinuxSandbox,
+    Landlock,
 }
 
 impl BackendKind {
@@ -37,6 +42,8 @@ impl BackendKind {
             BackendKind::KataQemu => "kata-qemu",
             BackendKind::Runc => "runc",
             BackendKind::Bubblewrap => "bubblewrap",
+            BackendKind::LinuxSandbox => "linux-sandbox",
+            BackendKind::Landlock => "landlock",
         }
     }
 }
@@ -61,6 +68,8 @@ impl FromStr for BackendKind {
             "kata-qemu" => Ok(BackendKind::KataQemu),
             "runc" => Ok(BackendKind::Runc),
             "bubblewrap" => Ok(BackendKind::Bubblewrap),
+            "linux-sandbox" => Ok(BackendKind::LinuxSandbox),
+            "landlock" => Ok(BackendKind::Landlock),
             other => Err(AnvilError::PolicyEvalError {
                 reason: format!("unknown backend kind: {other}"),
             }),
@@ -123,6 +132,8 @@ mod tests {
             BackendKind::KataQemu,
             BackendKind::Runc,
             BackendKind::Bubblewrap,
+            BackendKind::LinuxSandbox,
+            BackendKind::Landlock,
         ] {
             let s = kind.as_str();
             let parsed: BackendKind = s.parse().expect("round-trip");

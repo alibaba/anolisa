@@ -13,7 +13,7 @@ use std::sync::Arc;
 use anvil_core::backend::{BackendKind, BackendStatus, select_backend};
 use anvil_core::kernel::HookKind;
 use anvil_core::lifecycle::{SandboxInstance, SandboxState, StartPath};
-use anvil_core::policy::{ImageMetadata, RuntimeDecision, WorkloadClass};
+use anvil_core::policy::{ImageMetadata, RuntimeDecision, WorkloadClass, parse_duration};
 use anvil_core::pool::{PoolConfig, PoolKey};
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
@@ -290,7 +290,16 @@ async fn create_instance(state: &Arc<ServerState>, body: &[u8]) -> Result<Respon
     };
     let work_dir = state.state_dir.join(instance.id.to_string());
     let spawner = state.spawner.clone();
-    match spawner.spawn(&instance, &binary_path, &work_dir).await {
+    match spawner
+        .spawn(
+            &instance,
+            &binary_path,
+            &work_dir,
+            &decision.backend,
+            decision.vm.as_ref(),
+        )
+        .await
+    {
         Ok(handle) => {
             let mut handles = state
                 .spawn_handles
@@ -640,25 +649,6 @@ fn list_hooks(state: &Arc<ServerState>) -> Result<Response<Full<Bytes>>> {
 
 fn parse_uuid(s: &str) -> Result<Uuid> {
     Uuid::parse_str(s).map_err(|e| AnvilDaemonError::BadRequest(format!("invalid uuid: {e}")))
-}
-
-/// Parse a humantime-ish duration: `30m`, `1h`, `7d`, `45s`. Returns
-/// `None` on unknown shapes — caller falls back to a default.
-fn parse_duration(s: &str) -> Option<std::time::Duration> {
-    let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-    let (num, unit) = s.split_at(s.len() - 1);
-    let n: u64 = num.parse().ok()?;
-    let secs = match unit {
-        "s" => n,
-        "m" => n * 60,
-        "h" => n * 3600,
-        "d" => n * 86_400,
-        _ => return None,
-    };
-    Some(std::time::Duration::from_secs(secs))
 }
 
 fn json_ok<T: Serialize>(value: &T) -> Result<Response<Full<Bytes>>> {
