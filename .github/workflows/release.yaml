@@ -18,6 +18,10 @@ permissions:
   contents: write
   actions: read
 
+env:
+  RUSTUP_DIST_SERVER: https://static.rust-lang.org
+  RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
+
 jobs:
   # =========================================================================
   # Step 1: Parse tag and package
@@ -25,7 +29,7 @@ jobs:
   # =========================================================================
   package:
     name: Package ${{ github.ref_name }}
-    runs-on: ubuntu-22.04
+    runs-on: anolisa-k8s-amd-release
     outputs:
       component: ${{ steps.parse.outputs.component }}
       version: ${{ steps.parse.outputs.version }}
@@ -100,7 +104,7 @@ jobs:
     name: Publish ${{ needs.package.outputs.tag }}
     needs: package
     environment: release
-    runs-on: ubuntu-22.04
+    runs-on: anolisa-k8s-amd-release
     steps:
       - uses: actions/checkout@v4
         with:

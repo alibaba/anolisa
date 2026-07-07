@@ -127,6 +127,7 @@ runs:
             skill_dir=$(dirname "$skillmd")
             cp -rp "$skill_dir" /tmp/build/${ARCHIVE_NAME}/skills/
           done
+
         elif [ "${{ inputs.component }}" = "agent-sec-core" ]; then
           cp -r ${SRC_DIR}/. /tmp/build/${ARCHIVE_NAME}/
           # Replace example keys in trusted-keys with the real GPG public key
@@ -148,14 +149,41 @@ runs:
           cp -p "${LICENSE_REAL_PATH}" "/tmp/build/${ARCHIVE_NAME}/${LICENSE_BUILD_TARGET}"
         fi
 
+    - name: Vendor rtk source (tokenless)
+      if: inputs.component == 'tokenless'
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd /tmp/build/${ARCHIVE_NAME}
+
+        RTK_TAG="$(sed -n 's/^rtk_tag[[:space:]]*:=[[:space:]]*"\(.*\)"/\1/p' justfile)"
+        if [ -z "$RTK_TAG" ]; then
+          echo "ERROR: Could not resolve rtk_tag from justfile"
+          exit 1
+        fi
+
+        rm -rf third_party/rtk
+        git clone --depth 1 --branch "$RTK_TAG" \
+          https://github.com/rtk-ai/rtk.git third_party/rtk
+
+        patch --forward -p1 --no-backup-if-mismatch \
+          -d third_party/rtk < third_party/patches/rtk-tokenless-stats.patch
+        patch --forward -p1 --no-backup-if-mismatch \
+          -d third_party/rtk < third_party/patches/rtk-pytest-error-report.patch
+
+        rm -rf third_party/rtk/.git
+
     # -----------------------------------------------------------------
-    # Step 3.2: Install plugin npm dependencies (ws-ckpt only)
+    # Step 3.2: Prepare generated plugin assets
     #
     # The source archive for ws-ckpt ships pre-installed node_modules
     # so downstream consumers can use plugins without running npm.
+    # agent-memory ships a pre-built OpenClaw plugin bundle because the
+    # RPM build verifies the bundle exists but intentionally does not
+    # run npm inside rpmbuild.
     # -----------------------------------------------------------------
-    - name: Setup Node.js (ws-ckpt)
-      if: inputs.component == 'ws-ckpt'
+    - name: Setup Node.js (plugins)
+      if: inputs.component == 'ws-ckpt' || inputs.component == 'agent-memory'
       uses: actions/setup-node@v4
       with:
         node-version: '20'
@@ -184,6 +212,16 @@ runs:
         else
           echo "Installed npm dependencies for $found plugin(s)"
         fi
+
+    - name: Build OpenClaw plugin (agent-memory)
+      if: inputs.component == 'agent-memory'
+      shell: bash
+      run: |
+        if ! command -v jq >/dev/null; then
+          sudo apt-get update
+          sudo apt-get install -y jq
+        fi
+        make -C /tmp/build/${ARCHIVE_NAME} build-openclaw-plugin
 
     # -----------------------------------------------------------------
     # Step 3.3: Continue Create source archive

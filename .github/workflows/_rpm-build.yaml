@@ -30,10 +30,14 @@ on:
         type: string
         default: ""
 
+env:
+  RUSTUP_DIST_SERVER: https://static.rust-lang.org
+  RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
+
 jobs:
   build-rpm:
     name: "Build"
-    runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-22.04' }}
+    runs-on: ${{ inputs.arch == 'arm64' && 'anolisa-k8s-arm2204-nightly' || 'anolisa-k8s-amd-nightly' }}
     container:
       image: alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4:latest
     steps:
@@ -42,37 +46,43 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          dnf install -y rpm-build rpmdevtools dnf-plugins-core tar gzip \
+          dnf_install() {
+            dnf --setopt=timeout=120 --setopt=retries=5 --setopt=minrate=1 install -y "$@"
+          }
+
+          dnf_install rpm-build rpmdevtools dnf-plugins-core tar gzip \
             make gcc gcc-c++ findutils sed coreutils
 
           # Component-specific dependencies
           case "${{ inputs.component }}" in
             copilot-shell)
-              dnf install -y nodejs npm
+              dnf_install nodejs npm
               ;;
             cosh-ng)
               dnf install -y rust cargo openssl-devel pkgconfig
               ;;
             agent-sec-core)
-              dnf install -y clang llvm openssl-devel libseccomp-devel bubblewrap python3-pip systemd-rpm-macros
+              dnf_install clang llvm openssl-devel libseccomp-devel bubblewrap python3-pip systemd-rpm-macros
               ;;
             agentsight)
-              dnf install -y rust cargo clang-devel elfutils-libelf-devel zlib-devel
+              dnf_install rust cargo make gcc nodejs npm perl perl-IPC-Cmd perl-core perl-FindBin \
+                clang clang-devel llvm libbpf-devel elfutils-libelf-devel \
+                zlib-devel openssl-devel pkgconf-pkg-config systemd-rpm-macros
               ;;
             tokenless)
-              dnf install -y rust cargo jq
+              dnf_install rust cargo jq nodejs npm
               ;;
             ws-ckpt)
-              dnf install -y rust cargo btrfs-progs rsync systemd-rpm-macros
+              dnf_install rust cargo nodejs npm btrfs-progs rsync systemd-rpm-macros
               ;;
             agent-memory)
               # rusqlite (bundled) + git2 (vendored libgit2) need a C toolchain
               # and cmake; systemd-devel provides libsystemd headers for the
               # journald fan-out feature.
-              dnf install -y rust cargo cmake systemd-devel
+              dnf_install rust cargo cmake systemd-devel
               ;;
             skillfs)
-              dnf install -y rust cargo gcc make pkgconfig fuse3-devel
+              dnf_install rust cargo gcc make pkgconfig fuse3-devel
               ;;
             os-skills)
               # noarch, no extra build deps
@@ -92,6 +102,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.86.0'
+
+      - name: "Setup Rust toolchain (tokenless)"
+        if: inputs.component == 'tokenless'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.91.0'
 
       - name: "Setup Python + uv (agent-sec-core)"
         if: inputs.component == 'agent-sec-core'
@@ -155,8 +171,45 @@ jobs:
           EXTRACT_DIR=$(mktemp -d)
           tar -xzf "$SOURCE_TAR" -C "$EXTRACT_DIR"
 
+          # agentsight's spec packages a prebuilt binary, service file and docs.
+          # Build it from the full source archive, then replace Source0 with the
+          # compact payload expected by agentsight.spec.
+          if [ "$COMPONENT" = "agentsight" ]; then
+            SOURCE_ROOT=$(find "$EXTRACT_DIR" -mindepth 1 -maxdepth 1 -type d | head -1)
+            if [ -z "$SOURCE_ROOT" ]; then
+              echo "ERROR: agentsight source root not found"
+              exit 1
+            fi
+
+            if [ -d "/tmp/vendor/" ]; then
+              VENDOR_TAR=$(find /tmp/vendor/ -name "*.tar.gz" | head -1)
+              if [ -n "$VENDOR_TAR" ]; then
+                tar -xzf "$VENDOR_TAR" -C "$SOURCE_ROOT"
+              fi
+            fi
+
+            (
+              cd "$SOURCE_ROOT"
+              make build-all NPM_REGISTRY=https://registry.npmmirror.com
+            )
+
+            PACKAGE_DIR=$(mktemp -d)
+            mkdir -p "$PACKAGE_DIR/${COMPONENT}-${VERSION}"
+            cp -p "$SOURCE_ROOT/target/release/agentsight" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
+            cp -p "$SOURCE_ROOT/scripts/agentsight-start.sh" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/agentsight-start"
+            cp -p "$SOURCE_ROOT/scripts/agentsight.service" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
+            cp -p "$SOURCE_ROOT/component.toml" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
+            cp -p "$SOURCE_ROOT/README.md" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
+            cp -p "$SOURCE_ROOT/README_CN.md" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
+            cp -p "$SOURCE_ROOT/LICENSE" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
+            tar -czf ~/rpmbuild/SOURCES/"${EXPECTED_TAR}" -C "$PACKAGE_DIR" "${COMPONENT}-${VERSION}"
+          fi
+
           # Find and process spec template
-          SPEC_IN=$(find "$EXTRACT_DIR" -name "*.spec.in" | head -1)
+          SPEC_IN=$(find "$EXTRACT_DIR" -name "${COMPONENT}.spec.in" | head -1)
+          if [ -z "$SPEC_IN" ]; then
+            SPEC_IN=$(find "$EXTRACT_DIR" -name "*.spec.in" | head -1)
+          fi
           if [ -n "$SPEC_IN" ]; then
             SPEC_OUT="${SPEC_IN%.in}"
             sed "s/@VERSION@/${VERSION}/g" "$SPEC_IN" > "$SPEC_OUT"

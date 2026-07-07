@@ -17,6 +17,8 @@ permissions:
 
 env:
   GHCR_IMAGE: ghcr.io/alibaba/anolisa
+  RUSTUP_DIST_SERVER: https://static.rust-lang.org
+  RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
 
 jobs:
   # ===========================================================================
@@ -24,14 +26,13 @@ jobs:
   # ===========================================================================
   versions:
     name: Calculate Versions
-    runs-on: ubuntu-22.04
+    runs-on: anolisa-k8s-amd-nightly
     outputs:
       cosh-version: ${{ steps.cosh.outputs.version }}
       skill-version: ${{ steps.skill.outputs.version }}
       sec-core-ref: ${{ steps.detect-sec-core.outputs.ref }}
       sec-core-version: ${{ steps.sec-core.outputs.version }}
-      # TODO: uncomment when agentsight is integrated
-      # sight-version: ${{ steps.sight.outputs.version }}
+      sight-version: ${{ steps.sight.outputs.version }}
       tokenless-version: ${{ steps.tokenless.outputs.version }}
       ws-ckpt-version: ${{ steps.ws-ckpt.outputs.version }}
       agent-memory-version: ${{ steps.agent-memory.outputs.version }}
@@ -89,6 +90,12 @@ jobs:
         with:
           tag-match: "os-release/v*"
 
+      - name: "Version: agentsight"
+        id: sight
+        uses: ./.github/actions/calculate-version
+        with:
+          tag-match: "sight/v*"
+
       - name: "Version: tokenless"
         id: tokenless
         uses: ./.github/actions/calculate-version
@@ -121,7 +128,7 @@ jobs:
           echo "| copilot-shell | \`${{ steps.cosh.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| os-skills | \`${{ steps.skill.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| agent-sec-core | \`${{ steps.sec-core.outputs.version || '_skipped (no release branch)_' }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| agentsight | _TODO_ |" >> $GITHUB_STEP_SUMMARY
+          echo "| agentsight | \`${{ steps.sight.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| tokenless | \`${{ steps.tokenless.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| ws-ckpt | \`${{ steps.ws-ckpt.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| agent-memory | \`${{ steps.agent-memory.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
@@ -137,7 +144,7 @@ jobs:
   # ===========================================================================
   package-cosh:
     name: "Package: copilot-shell"
-    runs-on: ubuntu-22.04
+    runs-on: anolisa-k8s-amd-nightly
     needs: versions
     steps:
       - uses: actions/checkout@v4
@@ -152,7 +159,7 @@ jobs:
 
   package-skill:
     name: "Package: os-skills"
-    runs-on: ubuntu-22.04
+    runs-on: anolisa-k8s-amd-nightly
     needs: versions
     steps:
       - uses: actions/checkout@v4
@@ -169,7 +176,7 @@ jobs:
 
   package-tokenless:
     name: "Package: tokenless"
-    runs-on: ubuntu-22.04
+    runs-on: anolisa-k8s-amd-nightly
     needs: versions
     steps:
       - uses: actions/checkout@v4
@@ -184,7 +191,7 @@ jobs:
 
   package-ws-ckpt:
     name: "Package: ws-ckpt"
-    runs-on: ubuntu-22.04
+    runs-on: anolisa-k8s-amd-nightly
     needs: versions
     steps:
       - uses: actions/checkout@v4
@@ -207,7 +214,7 @@ jobs:
 
   package-agent-memory:
     name: "Package: agent-memory"
-    runs-on: ubuntu-22.04
+    runs-on: anolisa-k8s-amd-nightly
     needs: versions
     steps:
       - uses: actions/checkout@v4
@@ -230,7 +237,7 @@ jobs:
 
   package-skillfs:
     name: "Package: skillfs"
-    runs-on: ubuntu-22.04
+    runs-on: anolisa-k8s-amd-nightly
     needs: versions
     steps:
       - uses: actions/checkout@v4
@@ -251,25 +258,31 @@ jobs:
           artifact-suffix: ".nightly"
           retention-days: "7"
 
-  # TODO: uncomment when agentsight is integrated
-  # package-sight:
-  #   name: "Package: agentsight"
-  #   runs-on: ubuntu-22.04
-  #   needs: versions
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #       with:
-  #         fetch-depth: 0
-  #     - uses: ./.github/actions/package-source
-  #       with:
-  #         component: agentsight
-  #         version: ${{ needs.versions.outputs.sight-version }}
-  #         artifact-suffix: ".nightly"
-  #         retention-days: "7"
+  package-sight:
+    name: "Package: agentsight"
+    runs-on: anolisa-k8s-amd-nightly
+    needs: versions
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/package-source
+        with:
+          component: agentsight
+          version: ${{ needs.versions.outputs.sight-version }}
+          artifact-suffix: ".nightly"
+          retention-days: "7"
+      - name: Package vendor archive
+        uses: ./.github/actions/package-vendor
+        with:
+          component: agentsight
+          version: ${{ needs.versions.outputs.sight-version }}
+          artifact-suffix: ".nightly"
+          retention-days: "7"
 
   package-sec-core:
     name: "Package: agent-sec-core"
-    runs-on: ubuntu-22.04
+    runs-on: anolisa-k8s-amd-nightly
     needs: versions
     if: needs.versions.outputs.sec-core-ref != ''
     steps:
@@ -321,21 +334,20 @@ jobs:
       source-artifact: "os-skills-${{ needs.versions.outputs.skill-version }}.nightly"
       artifact-suffix: ".nightly"
 
-  # TODO: uncomment when agentsight is integrated
-  # rpm-sight:
-  #   name: "RPM: agentsight (${{ matrix.arch }})"
-  #   needs: [versions, package-sight]
-  #   strategy:
-  #     matrix:
-  #       arch: [amd64, arm64]
-  #   uses: ./.github/workflows/_rpm-build.yaml
-  #   with:
-  #     component: agentsight
-  #     version: ${{ needs.versions.outputs.sight-version }}
-  #     arch: ${{ matrix.arch }}
-  #     source-artifact: "agentsight-${{ needs.versions.outputs.sight-version }}.nightly"
-  #     vendor-artifact: "agentsight-vendor-${{ needs.versions.outputs.sight-version }}.nightly"
-  #     artifact-suffix: ".nightly"
+  rpm-sight:
+    name: "RPM: agentsight (${{ matrix.arch }})"
+    needs: [versions, package-sight]
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    uses: ./.github/workflows/_rpm-build.yaml
+    with:
+      component: agentsight
+      version: ${{ needs.versions.outputs.sight-version }}
+      arch: ${{ matrix.arch }}
+      source-artifact: "agentsight-${{ needs.versions.outputs.sight-version }}.nightly"
+      vendor-artifact: "agentsight-${{ needs.versions.outputs.sight-version }}.nightly-vendor"
+      artifact-suffix: ".nightly"
 
   rpm-sec-core:
     name: "RPM: agent-sec-core (${{ matrix.arch }})"
@@ -416,7 +428,7 @@ jobs:
   # ===========================================================================
   docker-build-push:
     name: Build & Push Docker Image
-    runs-on: ubuntu-22.04
+    runs-on: anolisa-k8s-amd-nightly
     needs:
       - versions
       - rpm-cosh
@@ -426,8 +438,7 @@ jobs:
       - rpm-ws-ckpt
       - rpm-agent-memory
       - rpm-skillfs
-      # TODO: uncomment when agentsight is integrated
-      # - rpm-sight
+      - rpm-sight
     steps:
       - uses: actions/checkout@v4
 
@@ -528,7 +539,7 @@ jobs:
           echo "| copilot-shell | \`${{ needs.versions.outputs.cosh-version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| os-skills | \`${{ needs.versions.outputs.skill-version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| agent-sec-core | \`${{ needs.versions.outputs.sec-core-version || '_skipped_' }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| agentsight | _TODO_ |" >> $GITHUB_STEP_SUMMARY
+          echo "| agentsight | \`${{ needs.versions.outputs.sight-version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| tokenless | \`${{ needs.versions.outputs.tokenless-version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| ws-ckpt | \`${{ needs.versions.outputs.ws-ckpt-version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| agent-memory | \`${{ needs.versions.outputs.agent-memory-version }}\` |" >> $GITHUB_STEP_SUMMARY

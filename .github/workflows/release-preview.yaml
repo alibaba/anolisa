@@ -32,6 +32,10 @@ on:
 permissions:
   contents: read
 
+env:
+  RUSTUP_DIST_SERVER: https://static.rust-lang.org
+  RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
+
 jobs:
   # =========================================================================
   # Package (preview) → triggered by workflow_dispatch
@@ -40,7 +44,7 @@ jobs:
   # =========================================================================
   package-preview:
     name: Packaging Preview ${{ inputs.component }}-${{ inputs.version }}
-    runs-on: ubuntu-22.04
+    runs-on: anolisa-k8s-amd-release
     steps:
       - uses: actions/checkout@v4
 

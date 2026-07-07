@@ -13,11 +13,15 @@ on:
 permissions:
   contents: read
 
+env:
+  RUSTUP_DIST_SERVER: https://static.rust-lang.org
+  RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
+
 jobs:
   build-rpm:
     name: Build agent-sec-core RPM
-    # workflow_dispatch (手动触发/fork) → GitHub-hosted; pull_request → self-hosted
-    runs-on: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["ubuntu-22.04"]' || '["self-hosted", "ubuntu"]') }}
+    # workflow_dispatch (manual/fork) -> GitHub-hosted; pull_request -> ARC runner.
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && 'ubuntu-22.04' || 'anolisa-k8s-general-ci-x64' }}
     container:
       image: alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4:latest
     steps:

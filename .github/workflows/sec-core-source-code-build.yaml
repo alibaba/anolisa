@@ -14,6 +14,10 @@ on:
 permissions:
   contents: read
 
+env:
+  RUSTUP_DIST_SERVER: https://static.rust-lang.org
+  RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
+
 jobs:
   build:
     strategy:
@@ -21,13 +25,11 @@ jobs:
       matrix:
         include:
           - name: Ubuntu 22.04
-            runner: self-22.04
             container: ''
           - name: Alinux4
-            runner: ubuntu
             container: alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4:latest
     name: Source Build (${{ matrix.name }})
-    runs-on: [self-hosted, Linux, X64, "${{ matrix.runner }}"]
+    runs-on: anolisa-k8s-general-ci-x64
     container: ${{ matrix.container || '' }}
     steps:
       - name: Configure mirrors and install base tools (Alinux4)
@@ -47,7 +49,9 @@ jobs:
         with:
           components: clippy, rustfmt, rust-src
       - name: Build and install
-        run: ./scripts/build-all.sh --component sec-core
+        run: |
+          ./scripts/build-all.sh --component sec-core
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Verify CLI
         run: |
           agent-sec-cli --version
