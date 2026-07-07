@@ -2123,6 +2123,7 @@ mod tests {
                 owner: None,
                 license: None,
                 repository: None,
+                conflicts: Vec::new(),
             },
             contract: ContractSpec::default(),
             artifact: ArtifactSpec::default(),

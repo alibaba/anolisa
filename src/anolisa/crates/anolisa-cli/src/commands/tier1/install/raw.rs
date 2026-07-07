@@ -254,6 +254,7 @@ impl InstallContractSource {
 pub(crate) fn build_install_preview(
     ctx: &CliContext,
     layout: &FsLayout,
+    installed: &anolisa_core::state::InstalledState,
     mut resolution: RawResolution,
 ) -> Result<InstallPreview, CliError> {
     if resolution.entry.sha256.is_none() {
@@ -277,6 +278,10 @@ pub(crate) fn build_install_preview(
             provision_plan: None,
         });
     };
+
+    // Conflict check: surface the same mutual-exclusion error that execute_raw
+    // would produce, so `--dry-run` never shows a plan that cannot succeed.
+    check_component_conflicts(&contract.manifest, installed, COMMAND)?;
 
     let (files, services, capabilities) = match resolve_manifest_contract(
         &contract.manifest,
@@ -951,6 +956,37 @@ pub(crate) fn resolve_install_hooks(
     })
 }
 
+/// Check that no component declared in the manifest's `conflicts` list is
+/// already installed. Returns `Ok(())` when no conflict exists, or an
+/// actionable error with a remediation hint otherwise.
+///
+/// This is the raw-backend equivalent of RPM's `Conflicts:` tag. Because the
+/// conflict declaration lives in the embedded manifest (published alongside
+/// the artifact), it is authoritative for the *incoming* component's view of
+/// mutual exclusion. A symmetric declaration on the *installed* component's
+/// manifest is NOT required — a one-sided `conflicts` suffices.
+fn check_component_conflicts(
+    manifest: &ComponentManifest,
+    state: &anolisa_core::state::InstalledState,
+    command: &str,
+) -> Result<(), CliError> {
+    use anolisa_core::state::ObjectKind;
+
+    for conflict_name in &manifest.component.conflicts {
+        if let Some(installed) = state.find_object(ObjectKind::Component, conflict_name) {
+            return Err(CliError::InvalidArgument {
+                command: command.to_string(),
+                reason: format!(
+                    "component '{}' conflicts with installed component '{}' (v{}) — \
+                     uninstall '{}' first, then retry",
+                    manifest.component.name, conflict_name, installed.version, conflict_name,
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Execute the resolved install: download+verify, copy files under the
 /// install lock, persist state, and append the audit record. Files already
 /// on disk are rolled back when a later step fails, so no phantom install
@@ -1007,6 +1043,14 @@ pub(crate) fn execute_raw(
             command: command.to_string(),
             reason: format!("failed to parse component manifest for hook resolution: {err}"),
         })?;
+
+    // Component-level mutual exclusion: refuse to install when a declared
+    // conflicting component is already present. This check runs before any
+    // host mutation (provisioning, hooks, file layout) so the user gets a
+    // clear actionable error without side effects. The RPM backend handles
+    // this via its native `Conflicts:` tag; the raw backend must enforce it
+    // here explicitly.
+    check_component_conflicts(&manifest, &state, command)?;
 
     // Validate hook declarations before any host mutation (contract authoring
     // errors must be caught before provisioning installs system packages).

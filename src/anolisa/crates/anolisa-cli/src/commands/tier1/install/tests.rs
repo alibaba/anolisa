@@ -66,12 +66,26 @@ pub fn toml_string_array(values: &[&str]) -> String {
 }
 
 pub fn component_manifest_toml(component: &str, version: &str, modes: &[&str]) -> String {
+    component_manifest_toml_with_conflicts(component, version, modes, &[])
+}
+
+pub fn component_manifest_toml_with_conflicts(
+    component: &str,
+    version: &str,
+    modes: &[&str],
+    conflicts: &[&str],
+) -> String {
     let modes = toml_string_array(modes);
+    let conflicts_line = if conflicts.is_empty() {
+        String::new()
+    } else {
+        format!("conflicts = {}\n", toml_string_array(conflicts))
+    };
     format!(
         r#"[component]
 name = "{component}"
 version = "{version}"
-
+{conflicts_line}
 [component.layout]
 modes = {modes}
 

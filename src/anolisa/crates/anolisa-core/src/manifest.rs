@@ -162,6 +162,14 @@ pub struct ComponentMeta {
     /// Upstream repository URL (minimal schema `repository`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
+    /// Component names that cannot coexist with this component.
+    ///
+    /// The raw backend checks this list against the installed state before
+    /// laying files. If any listed component is already installed, the
+    /// install is refused with a diagnostic pointing at the conflict. The
+    /// RPM backend ignores this field — rpm `Conflicts:` handles it natively.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<String>,
 }
 
 /// `[component.contract]` — schema/version compatibility envelope (minimal
@@ -864,6 +872,10 @@ struct ComponentMetaRaw {
     license: Option<String>,
     #[serde(default)]
     repository: Option<String>,
+    /// Component-level mutual exclusion list. Names listed here cannot
+    /// coexist with this component when installed via the raw backend.
+    #[serde(default)]
+    conflicts: Vec<String>,
     // Minimal-schema nested sub-tables (`[component.contract]`, etc.). When
     // present they take precedence over the legacy top-level sections.
     #[serde(default)]
@@ -1146,6 +1158,7 @@ impl From<ComponentManifestRaw> for ComponentManifest {
             owner,
             license,
             repository,
+            conflicts,
             contract: contract_raw,
             platform: platform_raw,
             artifact: artifact_raw,
@@ -1166,6 +1179,7 @@ impl From<ComponentManifestRaw> for ComponentManifest {
             owner,
             license,
             repository,
+            conflicts,
         };
 
         let contract = contract_raw

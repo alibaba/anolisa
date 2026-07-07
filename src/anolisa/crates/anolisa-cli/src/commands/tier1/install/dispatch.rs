@@ -329,7 +329,7 @@ pub(crate) fn handle_raw_install(
     )?;
 
     if ctx.dry_run {
-        let preview = build_install_preview(ctx, layout, resolved)?;
+        let preview = build_install_preview(ctx, layout, installed, resolved)?;
         render_plan(ctx, &preview)?;
         return Ok(InstallOutcome::Installed);
     }

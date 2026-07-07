@@ -79,7 +79,8 @@ fn install_dry_run_reads_version_meta_without_downloading_artifact() {
         },
     )
     .expect("resolve");
-    let preview = build_install_preview(&ctx, &layout, resolution).expect("preview");
+    let preview =
+        build_install_preview(&ctx, &layout, &Default::default(), resolution).expect("preview");
 
     assert_eq!(preview.files.len(), 1);
     assert_eq!(preview.files[0].dest, layout.bin_dir.join("remote-only"));
@@ -647,4 +648,162 @@ fn install_unpublished_version_is_invalid_argument() {
         .expect_err("must fail to resolve");
     assert_eq!(err.code(), "INVALID_ARGUMENT");
     assert!(err.reason().contains("9.9.9"), "got: {}", err.reason());
+}
+
+// ---------------------------------------------------------------------------
+// Component-level mutual-exclusion (conflicts) tests
+// ---------------------------------------------------------------------------
+
+/// Build a local file:// repo with a single component whose manifest declares
+/// `conflicts = [...]`. Returns the repo URL.
+fn write_local_repo_with_conflicts(
+    root: &std::path::Path,
+    component: &str,
+    version: &str,
+    modes: &[&str],
+    conflicts: &[&str],
+) -> String {
+    let v1 = root.join("v1");
+    std::fs::create_dir_all(&v1).expect("create repo dirs");
+
+    let manifest = component_manifest_toml_with_conflicts(component, version, modes, conflicts);
+    let bin_path = format!("bin/{component}");
+    let payload = format!("#!/bin/sh\necho {component}\n");
+    let artifact = build_tar_gz(&[
+        (".anolisa/component.toml", manifest.as_bytes()),
+        (bin_path.as_str(), payload.as_bytes()),
+    ]);
+    let artifact_name = format!("{component}.tar.gz");
+    std::fs::write(v1.join(&artifact_name), &artifact).expect("write artifact");
+    let sha = format!("{:x}", Sha256::digest(&artifact));
+    let modes_str = toml_string_array(modes);
+
+    let env = anolisa_env::EnvService::detect();
+    let index = format!(
+        r#"schema_version = 1
+channel = "stable"
+publisher = "test"
+
+[[entries]]
+component = "{component}"
+version = "{version}"
+channel = "stable"
+artifact_type = "tar_gz"
+backend = "raw"
+url = "{artifact_name}"
+os = "{os}"
+arch = "{arch}"
+install_modes = {modes_str}
+sha256 = "{sha}"
+"#,
+        os = env.os,
+        arch = env.arch,
+    );
+    std::fs::write(v1.join("index.toml"), index).expect("write index");
+    format!("file://{}", v1.display())
+}
+
+#[test]
+fn install_conflict_blocks_when_conflicting_component_is_installed() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let layout = FsLayout::system(Some(prefix.clone()));
+
+    // Pre-seed state: cosh v2.6.0 is already installed.
+    std::fs::create_dir_all(&layout.state_dir).expect("create state dir");
+    let mut state = anolisa_core::InstalledState {
+        install_mode: StateInstallMode::System,
+        prefix: layout.prefix.clone(),
+        ..Default::default()
+    };
+    state.upsert_object(InstalledObject {
+        kind: ObjectKind::Component,
+        name: "cosh".to_string(),
+        version: "2.6.0".to_string(),
+        status: ObjectStatus::Installed,
+        manifest_digest: None,
+        distribution_source: Some("file:///repo/v1/cosh.tar.gz".to_string()),
+        raw_package: Some("cosh".to_string()),
+        install_backend: Some("raw".to_string()),
+        ownership: None,
+        rpm_metadata: None,
+        installed_at: "2026-06-01T10:00:00Z".to_string(),
+        last_operation_id: Some("op-prior".to_string()),
+        managed: true,
+        adopted: false,
+        subscription_scope: Default::default(),
+        enabled_features: Vec::new(),
+        component_refs: Vec::new(),
+        files: Vec::new(),
+        external_modified_files: Vec::new(),
+        services: Vec::new(),
+        health: Vec::new(),
+        provisioned_packages: Vec::new(),
+    });
+    state
+        .save(&layout.state_dir.join("installed.toml"))
+        .expect("save state");
+
+    // Write a repo with cosh-ng that declares conflicts = ["cosh"].
+    let repo_url = write_local_repo_with_conflicts(
+        &tmp.path().join("repo"),
+        "cosh-ng",
+        "0.11.0",
+        &["system"],
+        &["cosh"],
+    );
+
+    let mut a = args("cosh-ng");
+    a.repo = Some(repo_url);
+    let err = handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix)))
+        .expect_err("install must fail due to conflict");
+
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert!(
+        err.reason()
+            .contains("conflicts with installed component 'cosh'"),
+        "error must identify the conflicting component: {}",
+        err.reason()
+    );
+    assert!(
+        err.reason().contains("v2.6.0"),
+        "error must show the installed version: {}",
+        err.reason()
+    );
+    assert!(
+        err.reason().contains("uninstall 'cosh' first"),
+        "error must provide remediation: {}",
+        err.reason()
+    );
+}
+
+#[test]
+fn install_no_conflict_when_conflicting_component_not_installed() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+
+    // Write a repo with cosh-ng that declares conflicts = ["cosh"], but cosh
+    // is NOT installed — install should succeed.
+    let repo_url = write_local_repo_with_conflicts(
+        &tmp.path().join("repo"),
+        "cosh-ng",
+        "0.11.0",
+        &["system"],
+        &["cosh"],
+    );
+
+    let mut a = args("cosh-ng");
+    a.repo = Some(repo_url);
+    handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+        .expect("install must succeed when no conflict");
+
+    // Verify cosh-ng is recorded in state.
+    let layout = FsLayout::system(Some(prefix));
+    let state = anolisa_core::InstalledState::load(&layout.state_dir.join("installed.toml"))
+        .expect("state must load");
+    let obj = state
+        .find_object(ObjectKind::Component, "cosh-ng")
+        .expect("cosh-ng must be recorded");
+    assert_eq!(obj.version, "0.11.0");
+    assert_eq!(obj.status, ObjectStatus::Installed);
 }
