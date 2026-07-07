@@ -231,6 +231,7 @@ impl ToChromeTraceEvent for AggregatedProcess {
 }
 
 const SESSION_ENV_VARS: &[&str] = &[
+    "COSH_SESSION_ID",
     "CLAUDE_CODE_SESSION_ID",
     "HERMES_SESSION_ID",
     "AGENT_SEC_SESSION_ID",

@@ -597,6 +597,28 @@ describe('loadCliConfig', () => {
     expect(lspInstance?.start).toHaveBeenCalledTimes(1);
   });
 
+  it('adopts COSH_SESSION_ID from env when not resuming', async () => {
+    vi.stubEnv('COSH_SESSION_ID', 'sight-corr-abc-123');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv);
+    // Discriminating: without the env-adopt block, sessionId stays undefined and
+    // Config mints a random uuid, so this exact-match assertion fails.
+    expect(config.getSessionId()).toBe('sight-corr-abc-123');
+  });
+
+  it('ignores an empty COSH_SESSION_ID and mints a fresh id', async () => {
+    vi.stubEnv('COSH_SESSION_ID', '');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv);
+    // Empty value must be treated as absent (guards the `.length > 0` check).
+    expect(config.getSessionId()).not.toBe('');
+    expect(config.getSessionId().length).toBeGreaterThan(0);
+  });
+
   describe('Proxy configuration', () => {
     const originalProxyEnv: { [key: string]: string | undefined } = {};
     const proxyEnvVars = [

@@ -20,4 +20,12 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
+# ── Correlation session id for observability ──
+# Export a session id into the environment BEFORE exec so it lands in this
+# process's /proc/<pid>/environ snapshot (which AgentSight scrapes for
+# per-run attribution) and is inherited by child tool processes. Idempotent:
+# an inherited value is preserved so nested/parent runs share one id.
+# This is an UNAUTHENTICATED observability hint only — never used for authz.
+export COSH_SESSION_ID="${COSH_SESSION_ID:-$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)}"
+
 exec node "$LIBDIR/cli.js" "$@"
