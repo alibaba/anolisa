@@ -289,7 +289,7 @@ pub fn mount(
 ) -> Result<(), FuseError> {
     mount_inner(
         mountpoint, source, store, options, in_place, None, None, None, None, None, None, None,
-        None, None, None, None, None,
+        None, None, None, None, None, None,
     )
 }
 
@@ -319,7 +319,7 @@ pub fn mount_with_security(
 ) -> Result<(), FuseError> {
     mount_inner(
         mountpoint, source, store, options, in_place, event_sink, policy, None, None, None, None,
-        None, None, None, None, None, None,
+        None, None, None, None, None, None, None,
     )
 }
 
@@ -354,6 +354,7 @@ pub fn mount_with_security_and_active_resolver(
         event_sink,
         policy,
         active_resolver,
+        None,
         None,
         None,
         None,
@@ -406,6 +407,7 @@ pub fn mount_with_security_active_resolver_and_demo_refresh(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -448,6 +450,7 @@ pub fn mount_with_security_active_resolver_demo_refresh_and_trusted_writer(
         refresh_controller,
         None,
         trusted_writer,
+        None,
         None,
         None,
         None,
@@ -613,6 +616,7 @@ pub fn mount_background_with_security_active_resolver_demo_refresh_and_trusted_w
             refresh_controller,
             None,
             trusted_writer,
+            None,
             None,
             None,
             None,
