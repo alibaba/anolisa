@@ -141,6 +141,7 @@ pub struct ControlResponseBody {
     pub selected_options: Option<Vec<usize>>,
     // Auth response fields
     pub provider_id: Option<String>,
+    pub provider_type: Option<String>,
     #[serde(default)]
     pub values: Option<HashMap<String, String>>,
     pub persist: Option<bool>,

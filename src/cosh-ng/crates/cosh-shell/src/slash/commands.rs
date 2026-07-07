@@ -20,7 +20,7 @@ pub(super) fn render_slash_command<W: Write>(
     match command {
         SlashCommand::Noop => Ok(true),
         SlashCommand::Auth => {
-            crate::auth::runtime::trigger_auth_from_slash(state, output)?;
+            crate::auth::runtime::trigger_auth_from_slash(adapter, state, output)?;
             Ok(false)
         }
         SlashCommand::Help => {

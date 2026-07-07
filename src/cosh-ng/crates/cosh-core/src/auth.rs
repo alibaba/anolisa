@@ -111,15 +111,20 @@ pub fn builtin_auth_providers() -> Vec<AuthProvider> {
 /// Response from the auth flow.
 pub struct AuthResponse {
     pub provider_id: String,
+    pub provider_type: Option<String>,
     pub values: HashMap<String, String>,
     pub persist: bool,
 }
 
 /// Apply auth credentials to the config, rebuilding provider settings.
 pub fn apply_auth_credentials(config: &mut CoreConfig, response: &AuthResponse) {
+    let template_id = response
+        .provider_type
+        .as_deref()
+        .unwrap_or(response.provider_id.as_str());
     let template = builtin_auth_providers()
         .into_iter()
-        .find(|p| p.id == response.provider_id);
+        .find(|p| p.id == template_id);
 
     let (base_url, provider_type, default_model) = match template {
         Some(ref t) => (
@@ -152,12 +157,14 @@ pub fn apply_auth_credentials(config: &mut CoreConfig, response: &AuthResponse) 
     let access_key_id = response.values.get("access_key_id").cloned();
     let access_key_secret = response.values.get("access_key_secret").cloned();
     let security_token = response.values.get("security_token").cloned();
+    let auth_source = response.values.get("auth_source").cloned();
 
     config.ai.active_provider = Some(response.provider_id.clone());
     config.ai.providers.insert(
         response.provider_id.clone(),
         ProviderConfig {
             provider_type: Some(provider_type),
+            auth_source,
             base_url: Some(base_url),
             api_key: Some(api_key),
             model: final_model,
@@ -245,6 +252,7 @@ fn parse_auth_response(body: &ControlResponseBody) -> Option<AuthResponse> {
 
     Some(AuthResponse {
         provider_id: provider_id.clone(),
+        provider_type: body.provider_type.clone(),
         values,
         persist: body.persist.unwrap_or(true),
     })
@@ -294,6 +302,7 @@ mod tests {
         let mut config = CoreConfig::default();
         let response = AuthResponse {
             provider_id: "dashscope".to_string(),
+            provider_type: None,
             values: HashMap::from([("api_key".to_string(), "sk-test123".to_string())]),
             persist: true,
         };
@@ -315,6 +324,7 @@ mod tests {
         let mut config = CoreConfig::default();
         let response = AuthResponse {
             provider_id: "openai_compat".to_string(),
+            provider_type: None,
             values: HashMap::from([
                 (
                     "base_url".to_string(),
@@ -331,6 +341,30 @@ mod tests {
         assert_eq!(p.api_key.as_deref(), Some("sk-openai"));
         assert_eq!(p.base_url.as_deref(), Some("https://api.openai.com/v1"));
         assert_eq!(p.provider_type.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    fn apply_credentials_uses_provider_id_as_config_key_and_type_as_template() {
+        let mut config = CoreConfig::default();
+        let response = AuthResponse {
+            provider_id: "qwen-prod".to_string(),
+            provider_type: Some("dashscope".to_string()),
+            values: HashMap::from([("api_key".to_string(), "sk-prod".to_string())]),
+            persist: true,
+        };
+
+        apply_auth_credentials(&mut config, &response);
+
+        assert_eq!(config.ai.active_provider.as_deref(), Some("qwen-prod"));
+        assert!(config.ai.providers.contains_key("qwen-prod"));
+        assert!(!config.ai.providers.contains_key("dashscope"));
+        let provider = config.ai.providers.get("qwen-prod").unwrap();
+        assert_eq!(provider.provider_type.as_deref(), Some("dashscope"));
+        assert_eq!(provider.api_key.as_deref(), Some("sk-prod"));
+        assert_eq!(
+            provider.base_url.as_deref(),
+            Some("https://dashscope.aliyuncs.com/compatible-mode/v1")
+        );
     }
 
     #[test]
@@ -352,6 +386,7 @@ mod tests {
             answer: None,
             selected_options: None,
             provider_id: None,
+            provider_type: None,
             values: None,
             persist: None,
         };
@@ -369,6 +404,7 @@ mod tests {
             answer: None,
             selected_options: None,
             provider_id: Some("dashscope".to_string()),
+            provider_type: None,
             values: Some(HashMap::from([(
                 "api_key".to_string(),
                 "sk-xxx".to_string(),
@@ -377,6 +413,7 @@ mod tests {
         };
         let resp = parse_auth_response(&body).unwrap();
         assert_eq!(resp.provider_id, "dashscope");
+        assert_eq!(resp.provider_type, None);
         assert_eq!(resp.values.get("api_key").unwrap(), "sk-xxx");
         assert!(resp.persist);
     }

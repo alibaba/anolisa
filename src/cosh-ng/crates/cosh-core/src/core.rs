@@ -1304,7 +1304,10 @@ impl CoshCore {
         // Rebuild provider
         let resolved = self.config.resolve_provider();
         if resolved.provider_type == "aliyun" {
-            if !resolved.access_key_id.is_empty() && !resolved.access_key_secret.is_empty() {
+            if resolved.auth_source.as_deref() == Some("ecs_ram_role") {
+                self.provider =
+                    Box::new(crate::provider::sysom::SysomProvider::from_ecs_ram_role());
+            } else if !resolved.access_key_id.is_empty() && !resolved.access_key_secret.is_empty() {
                 self.provider = Box::new(crate::provider::sysom::SysomProvider::new(
                     &resolved.access_key_id,
                     &resolved.access_key_secret,

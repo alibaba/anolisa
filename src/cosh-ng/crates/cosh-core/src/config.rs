@@ -35,6 +35,8 @@ pub struct ProviderConfig {
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub provider_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
@@ -212,6 +214,14 @@ impl CoreConfig {
                 if let Ok(content) = std::fs::read_to_string(candidate) {
                     match toml::from_str::<CoreConfig>(&content) {
                         Ok(mut config) => {
+                            let normalized = config.normalize_legacy_sts_auth_sources();
+                            if normalized && *candidate == config_dir().join("config.toml") {
+                                if let Err(e) = persist_config(&config) {
+                                    eprintln!(
+                                        "[cosh-core] Warning: failed to normalize STS provider config: {e}"
+                                    );
+                                }
+                            }
                             config.apply_env_overrides();
                             return config;
                         }
@@ -252,6 +262,21 @@ impl CoreConfig {
         }
     }
 
+    pub fn normalize_legacy_sts_auth_sources(&mut self) -> bool {
+        let mut changed = false;
+        for provider in self.ai.providers.values_mut() {
+            let is_aliyun = provider.provider_type.as_deref() == Some("aliyun");
+            if is_aliyun && provider.security_token.is_some() {
+                provider.auth_source = Some("ecs_ram_role".to_string());
+                provider.access_key_id = None;
+                provider.access_key_secret = None;
+                provider.security_token = None;
+                changed = true;
+            }
+        }
+        changed
+    }
+
     pub fn resolve_provider(&self) -> ResolvedProvider {
         let provider_name = self
             .ai
@@ -287,6 +312,8 @@ impl CoreConfig {
 
         let extra_params = provider_cfg.and_then(|p| p.extra_params.clone());
 
+        let auth_source = provider_cfg.and_then(|p| p.auth_source.clone());
+
         let access_key_id = provider_cfg
             .and_then(|p| p.access_key_id.as_deref())
             .map(expand_env_vars)
@@ -309,6 +336,7 @@ impl CoreConfig {
             api_key,
             model,
             provider_type,
+            auth_source,
             extra_params,
             access_key_id,
             access_key_secret,
@@ -323,6 +351,7 @@ pub struct ResolvedProvider {
     pub api_key: String,
     pub model: String,
     pub provider_type: String,
+    pub auth_source: Option<String>,
     pub extra_params: Option<Value>,
     pub access_key_id: String,
     pub access_key_secret: String,
@@ -383,6 +412,12 @@ pub fn persist_config(config: &CoreConfig) -> Result<(), String> {
         preserved.push_str(&format!("[ai.providers.{}]\n", name));
         if let Some(ref t) = provider.provider_type {
             preserved.push_str(&format!("type = \"{}\"\n", escape_toml_value(t)));
+        }
+        if let Some(ref source) = provider.auth_source {
+            preserved.push_str(&format!(
+                "auth_source = \"{}\"\n",
+                escape_toml_value(source)
+            ));
         }
         if let Some(ref url) = provider.base_url {
             preserved.push_str(&format!("base_url = \"{}\"\n", escape_toml_value(url)));
@@ -479,6 +514,52 @@ max_tool_calls_per_turn = 20
 
         assert_eq!(config.agent.approval_mode, "trust");
         assert_eq!(config.agent.max_turns, 50);
+    }
+
+    #[test]
+    fn parse_ecs_ram_role_auth_source() {
+        let toml_str = r#"
+[ai]
+active_provider = "aliyun-ecs"
+
+[ai.providers.aliyun-ecs]
+type = "aliyun"
+auth_source = "ecs_ram_role"
+model = "qwen3.7-plus"
+"#;
+
+        let config: CoreConfig = toml::from_str(toml_str).unwrap();
+        let provider = config.ai.providers.get("aliyun-ecs").unwrap();
+        assert_eq!(provider.provider_type.as_deref(), Some("aliyun"));
+        assert_eq!(provider.auth_source.as_deref(), Some("ecs_ram_role"));
+        assert!(provider.access_key_id.is_none());
+        assert!(provider.access_key_secret.is_none());
+        assert!(provider.security_token.is_none());
+    }
+
+    #[test]
+    fn normalize_legacy_aliyun_sts_provider_to_ecs_auth_source() {
+        let toml_str = r#"
+[ai]
+active_provider = "aliyun"
+
+[ai.providers.aliyun]
+type = "aliyun"
+access_key_id = "legacy-ak"
+access_key_secret = "legacy-sk"
+security_token = "legacy-token"
+model = "qwen3.7-plus"
+"#;
+
+        let mut config: CoreConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.normalize_legacy_sts_auth_sources());
+
+        let provider = config.ai.providers.get("aliyun").unwrap();
+        assert_eq!(provider.auth_source.as_deref(), Some("ecs_ram_role"));
+        assert!(provider.access_key_id.is_none());
+        assert!(provider.access_key_secret.is_none());
+        assert!(provider.security_token.is_none());
+        assert_eq!(provider.model.as_deref(), Some("qwen3.7-plus"));
     }
 
     #[test]

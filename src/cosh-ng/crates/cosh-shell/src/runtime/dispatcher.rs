@@ -105,8 +105,13 @@ fn render_inline_guidance_from_batch<W: Write>(
     let question_actions =
         QuestionConsumer::consume(action_events, adapter, state, output, event_index_base)?;
     RuntimeDispatcher::apply_actions(question_actions, state);
-    crate::auth::runtime::render_auth_card_actions(action_events, state, output, event_index_base)?;
-    crate::auth::runtime::check_aliyun_poll_result(state, output)?;
+    crate::auth::runtime::render_auth_card_actions(
+        action_events,
+        adapter,
+        state,
+        output,
+        event_index_base,
+    )?;
     let evidence_actions = EvidenceRequestConsumer::consume(
         action_events,
         &ledger.blocks,

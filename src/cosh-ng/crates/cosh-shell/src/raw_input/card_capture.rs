@@ -177,16 +177,21 @@ impl CardInputState {
                     }
                     idx += 1;
                 }
-                0x1b if input.get(idx + 1) == Some(&b'[') || input.get(idx + 1) == Some(&b'O') => {
+                0x1b if input.get(idx + 1) == Some(&b'[') => {
+                    let Some(next_idx) =
+                        self.consume_csi_sequence(capture, &input, idx, &mut events)
+                    else {
+                        self.pending_escape.extend_from_slice(&input[idx..]);
+                        break;
+                    };
+                    idx = next_idx;
+                }
+                0x1b if input.get(idx + 1) == Some(&b'O') => {
                     if input.get(idx + 2).is_none() {
                         self.pending_escape.extend_from_slice(&input[idx..]);
                         break;
                     }
-                    if input.get(idx + 1) == Some(&b'[') && input.get(idx + 2) == Some(&b'Z') {
-                        if let Some(event) = self.apply_shift_tab(capture) {
-                            events.push(event);
-                        }
-                    } else if let Some(event) = self.apply_arrow(capture, input[idx + 2]) {
+                    if let Some(event) = self.apply_arrow(capture, input[idx + 2]) {
                         events.push(event);
                     }
                     idx += 3;
@@ -321,6 +326,39 @@ impl CardInputState {
             }
         }
         events
+    }
+
+    fn consume_csi_sequence(
+        &mut self,
+        capture: &RawInputCapture,
+        input: &[u8],
+        idx: usize,
+        events: &mut Vec<RawInputEvent>,
+    ) -> Option<usize> {
+        let final_idx = (idx + 2..input.len()).find(|pos| is_csi_final_byte(input[*pos]))?;
+        let params = &input[idx + 2..final_idx];
+        let final_byte = input[final_idx];
+
+        match (params, final_byte) {
+            (b"", b'A' | b'B' | b'C' | b'D') => {
+                if let Some(event) = self.apply_arrow(capture, final_byte) {
+                    events.push(event);
+                }
+            }
+            (b"", b'Z') => {
+                if let Some(event) = self.apply_shift_tab(capture) {
+                    events.push(event);
+                }
+            }
+            (_, b'~') => {
+                // Bracketed paste and keypad sequences such as Delete end with
+                // '~'. The sequence itself is terminal control data; any pasted
+                // payload arrives as normal bytes between 200~ and 201~.
+            }
+            _ => {}
+        }
+
+        Some(final_idx + 1)
     }
 
     fn apply_arrow(&mut self, capture: &RawInputCapture, code: u8) -> Option<RawInputEvent> {
@@ -596,6 +634,10 @@ impl CardInputState {
             _ => None,
         }
     }
+}
+
+fn is_csi_final_byte(byte: u8) -> bool {
+    (0x40..=0x7e).contains(&byte)
 }
 
 fn approval_action_max_index() -> usize {

@@ -28,6 +28,80 @@ fn question_capture_custom_option_waits_for_text_before_submit() {
 }
 
 #[test]
+fn question_capture_strips_bracketed_paste_wrappers() {
+    let capture = RawInputCapture::Question {
+        id: "q-1".to_string(),
+        option_count: 0,
+        allow_free_text: true,
+        multiple: false,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    assert_eq!(
+        state.consume(&capture, b"\x1b[200~sk-test\x1b[201~\n"),
+        vec![
+            RawInputEvent::CardInput("q-1".to_string(), "s".to_string()),
+            RawInputEvent::CardInput("q-1".to_string(), "sk".to_string()),
+            RawInputEvent::CardInput("q-1".to_string(), "sk-".to_string()),
+            RawInputEvent::CardInput("q-1".to_string(), "sk-t".to_string()),
+            RawInputEvent::CardInput("q-1".to_string(), "sk-te".to_string()),
+            RawInputEvent::CardInput("q-1".to_string(), "sk-tes".to_string()),
+            RawInputEvent::CardInput("q-1".to_string(), "sk-test".to_string()),
+            RawInputEvent::CardAnswer("sk-test".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn question_capture_strips_split_bracketed_paste_wrappers() {
+    let capture = RawInputCapture::Question {
+        id: "q-1".to_string(),
+        option_count: 0,
+        allow_free_text: true,
+        multiple: false,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    assert!(state.consume(&capture, b"\x1b[20").is_empty());
+    assert!(state.consume(&capture, b"0~").is_empty());
+    assert_eq!(
+        state.consume(&capture, b"sk"),
+        vec![
+            RawInputEvent::CardInput("q-1".to_string(), "s".to_string()),
+            RawInputEvent::CardInput("q-1".to_string(), "sk".to_string()),
+        ]
+    );
+    assert!(state.consume(&capture, b"\x1b[201").is_empty());
+    assert_eq!(
+        state.consume(&capture, b"~\n"),
+        vec![RawInputEvent::CardAnswer("sk".to_string())]
+    );
+}
+
+#[test]
+fn question_capture_ignores_tilde_control_sequences() {
+    let capture = RawInputCapture::Question {
+        id: "q-1".to_string(),
+        option_count: 0,
+        allow_free_text: true,
+        multiple: false,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    assert_eq!(
+        state.consume(&capture, b"sk\x1b[3~\n"),
+        vec![
+            RawInputEvent::CardInput("q-1".to_string(), "s".to_string()),
+            RawInputEvent::CardInput("q-1".to_string(), "sk".to_string()),
+            RawInputEvent::CardAnswer("sk".to_string()),
+        ]
+    );
+}
+
+#[test]
 fn question_capture_ignores_removed_answer_slash() {
     let capture = RawInputCapture::Question {
         id: "q-1".to_string(),

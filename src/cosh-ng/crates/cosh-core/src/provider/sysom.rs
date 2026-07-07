@@ -29,6 +29,8 @@ const API_VERSION: &str = "2023-12-30";
 const API_ACTION: &str = "GenerateCopilotStreamResponse";
 const ECS_METADATA_ENDPOINT: &str = "http://100.100.100.200";
 const ECS_RAM_ROLE_NAME: &str = "AliyunECSInstanceForSysomRole";
+const CONSOLE_URL_TEMPLATE: &str =
+    "https://alinux.console.aliyun.com/{regionId}/guide/cosh?instance={instanceId}";
 
 /// Cache TTL for instance_id (3 hours).
 const INSTANCE_ID_CACHE_TTL_SECS: u64 = 3 * 3600;
@@ -36,6 +38,12 @@ const INSTANCE_ID_CACHE_TTL_SECS: u64 = 3 * 3600;
 const METADATA_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 /// Read timeout for ECS metadata service.
 const METADATA_READ_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EcsAuthChallenge {
+    pub instance_id: String,
+    pub console_url: String,
+}
 
 /// Credentials that can be refreshed at runtime (for STS).
 #[derive(Debug, Clone)]
@@ -66,6 +74,21 @@ impl SysomProvider {
                 security_token: security_token.map(|s| s.to_string()),
             }),
             is_sts,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            instance_id,
+        }
+    }
+
+    pub fn from_ecs_ram_role() -> Self {
+        let instance_id = resolve_instance_id();
+        Self {
+            endpoint: DEFAULT_ENDPOINT.to_string(),
+            credentials: RwLock::new(SysomCredentials {
+                access_key_id: String::new(),
+                access_key_secret: String::new(),
+                security_token: None,
+            }),
+            is_sts: true,
             cancelled: Arc::new(AtomicBool::new(false)),
             instance_id,
         }
@@ -199,6 +222,13 @@ impl ContentGenerator for SysomProvider {
 
         let body = self.build_request_body(messages, tools, config);
         let body_bytes = serde_json::to_vec(&body).map_err(|e| format!("JSON serialize: {e}"))?;
+
+        if self.is_sts
+            && self.credentials.read().unwrap().security_token.is_none()
+            && !self.refresh_sts_credentials().await
+        {
+            return Err("failed to refresh ECS RAM Role credentials".to_string());
+        }
 
         // First attempt
         match self.do_streaming_request(&body_bytes).await {
@@ -608,6 +638,60 @@ fn resolve_instance_id() -> Option<String> {
 /// Fetch instance-id from ECS metadata service via raw TCP.
 /// Returns None if not running on ECS or if the request fails.
 fn fetch_instance_id_from_metadata() -> Option<String> {
+    fetch_ecs_metadata_text("/latest/meta-data/instance-id").and_then(|body| {
+        let instance_id = body.trim();
+        if instance_id.starts_with("i-") {
+            Some(instance_id.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+pub fn detect_ecs_auth_challenge() -> Option<EcsAuthChallenge> {
+    let instance_id = fetch_instance_id_from_metadata()?;
+    let region_id = fetch_ecs_region_id().unwrap_or_else(|| "cn-hangzhou".to_string());
+    Some(EcsAuthChallenge {
+        console_url: generate_console_url(&instance_id, &region_id),
+        instance_id,
+    })
+}
+
+pub fn ecs_ram_role_credentials_available() -> bool {
+    let path = format!(
+        "/latest/meta-data/ram/security-credentials/{}",
+        ECS_RAM_ROLE_NAME
+    );
+    fetch_ecs_metadata_text(&path)
+        .map(|body| body.contains("AccessKeyId") && body.contains("SecurityToken"))
+        .unwrap_or(false)
+}
+
+fn fetch_ecs_region_id() -> Option<String> {
+    let zone_id = fetch_ecs_metadata_text("/latest/meta-data/zone-id")?;
+    region_id_from_zone_id(zone_id.trim())
+}
+
+fn region_id_from_zone_id(zone_id: &str) -> Option<String> {
+    if zone_id.is_empty() {
+        return None;
+    }
+    if let Some(pos) = zone_id.rfind('-') {
+        let suffix = &zone_id[pos + 1..];
+        if suffix.len() == 1 && suffix.chars().all(|c| c.is_ascii_lowercase()) {
+            return Some(zone_id[..pos].to_string());
+        }
+    }
+    Some(zone_id.to_string())
+}
+
+fn generate_console_url(instance_id: &str, region_id: &str) -> String {
+    CONSOLE_URL_TEMPLATE
+        .replace("{regionId}", region_id)
+        .replace("{instanceId}", instance_id)
+}
+
+fn fetch_ecs_metadata_text(path: &str) -> Option<String> {
     let addr: SocketAddr = "100.100.100.200:80".parse().ok()?;
     let mut stream = TcpStream::connect_timeout(&addr, METADATA_CONNECT_TIMEOUT).ok()?;
     stream.set_read_timeout(Some(METADATA_READ_TIMEOUT)).ok()?;
@@ -615,21 +699,13 @@ fn fetch_instance_id_from_metadata() -> Option<String> {
         .set_write_timeout(Some(METADATA_CONNECT_TIMEOUT))
         .ok()?;
 
-    let request = "GET /latest/meta-data/instance-id HTTP/1.0\r\nHost: 100.100.100.200\r\n\r\n";
+    let request = format!("GET {path} HTTP/1.0\r\nHost: 100.100.100.200\r\n\r\n");
     stream.write_all(request.as_bytes()).ok()?;
 
     let mut response = String::new();
     stream.read_to_string(&mut response).ok()?;
 
-    // Parse HTTP response: skip headers (separated by \r\n\r\n)
-    let body = response.split("\r\n\r\n").nth(1)?;
-    let instance_id = body.trim();
-
-    if instance_id.starts_with("i-") {
-        Some(instance_id.to_string())
-    } else {
-        None
-    }
+    response.split("\r\n\r\n").nth(1).map(str::to_string)
 }
 
 // ---------------------------------------------------------------------------
@@ -646,4 +722,30 @@ fn hex_hmac_sha256(key: &[u8], data: &[u8]) -> String {
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC can take key of any size");
     mac.update(data);
     hex::encode(mac.finalize().into_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn region_id_strips_single_zone_suffix() {
+        assert_eq!(
+            region_id_from_zone_id("cn-hangzhou-j").as_deref(),
+            Some("cn-hangzhou")
+        );
+        assert_eq!(
+            region_id_from_zone_id("cn-beijing").as_deref(),
+            Some("cn-beijing")
+        );
+        assert_eq!(region_id_from_zone_id(""), None);
+    }
+
+    #[test]
+    fn generate_console_url_uses_region_and_instance_id() {
+        assert_eq!(
+            generate_console_url("i-test123", "cn-hangzhou"),
+            "https://alinux.console.aliyun.com/cn-hangzhou/guide/cosh?instance=i-test123"
+        );
+    }
 }

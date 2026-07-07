@@ -101,7 +101,9 @@ pub struct AuthFieldInfo {
 
 #[derive(Debug, Clone)]
 pub struct AuthResponse {
+    pub request_id: String,
     pub provider_id: String,
+    pub provider_type: Option<String>,
     pub values: HashMap<String, String>,
     pub persist: bool,
 }
@@ -845,6 +847,7 @@ pub fn serialize_answer(request_id: &str, answer: &str) -> String {
 pub fn serialize_auth_response(
     request_id: &str,
     provider_id: &str,
+    provider_type: Option<&str>,
     values: &HashMap<String, String>,
     persist: bool,
 ) -> String {
@@ -860,6 +863,7 @@ pub fn serialize_auth_response(
             "request_id": request_id,
             "response": {
                 "provider_id": provider_id,
+                "provider_type": provider_type,
                 "values": values_json,
                 "persist": persist
             }

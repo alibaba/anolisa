@@ -852,12 +852,13 @@ fn parse_auth_required() {
 fn serialize_auth_response_format() {
     let mut values = HashMap::new();
     values.insert("api_key".to_string(), "sk-test".to_string());
-    let s = serialize_auth_response("auth-init", "dashscope", &values, true);
+    let s = serialize_auth_response("auth-init", "qwen-prod", Some("dashscope"), &values, true);
     let v: Value = serde_json::from_str(&s).unwrap();
     assert_eq!(v["type"], "control_response");
     assert_eq!(v["response"]["subtype"], "success");
     assert_eq!(v["response"]["request_id"], "auth-init");
-    assert_eq!(v["response"]["response"]["provider_id"], "dashscope");
+    assert_eq!(v["response"]["response"]["provider_id"], "qwen-prod");
+    assert_eq!(v["response"]["response"]["provider_type"], "dashscope");
     assert_eq!(v["response"]["response"]["values"]["api_key"], "sk-test");
     assert_eq!(v["response"]["response"]["persist"], true);
 }

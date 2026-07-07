@@ -35,6 +35,9 @@ fn create_provider(config: &CoreConfig) -> Box<dyn provider::ContentGenerator> {
     let resolved = config.resolve_provider();
     // Aliyun provider uses AK/SK, not API key
     if resolved.provider_type == "aliyun" {
+        if resolved.auth_source.as_deref() == Some("ecs_ram_role") {
+            return Box::new(provider::sysom::SysomProvider::from_ecs_ram_role());
+        }
         if resolved.access_key_id.is_empty() || resolved.access_key_secret.is_empty() {
             tracing::warn!("no AK/SK configured for aliyun, using mock provider");
             return Box::new(provider::mock::MockProvider::text_only(
@@ -71,6 +74,9 @@ fn create_provider_from_resolved(
 fn needs_auth(config: &CoreConfig) -> bool {
     let resolved = config.resolve_provider();
     if resolved.provider_type == "aliyun" {
+        if resolved.auth_source.as_deref() == Some("ecs_ram_role") {
+            return false;
+        }
         return resolved.access_key_id.is_empty() || resolved.access_key_secret.is_empty();
     }
     resolved.api_key.is_empty()
@@ -91,5 +97,53 @@ async fn main() {
         headless::run(&args, config).await;
     } else {
         interactive::run(&args, config).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AiConfig, CoreConfig, ProviderConfig};
+    use std::collections::HashMap;
+
+    #[test]
+    fn ecs_ram_role_aliyun_provider_does_not_need_static_auth() {
+        let old_ak = std::env::var("ALIBABA_CLOUD_ACCESS_KEY_ID").ok();
+        let old_sk = std::env::var("ALIBABA_CLOUD_ACCESS_KEY_SECRET").ok();
+        let old_token = std::env::var("ALIBABA_CLOUD_SECURITY_TOKEN").ok();
+        std::env::remove_var("ALIBABA_CLOUD_ACCESS_KEY_ID");
+        std::env::remove_var("ALIBABA_CLOUD_ACCESS_KEY_SECRET");
+        std::env::remove_var("ALIBABA_CLOUD_SECURITY_TOKEN");
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            "aliyun-ecs".to_string(),
+            ProviderConfig {
+                provider_type: Some("aliyun".to_string()),
+                auth_source: Some("ecs_ram_role".to_string()),
+                model: Some("qwen3.7-plus".to_string()),
+                ..Default::default()
+            },
+        );
+        let config = CoreConfig {
+            ai: AiConfig {
+                active_provider: Some("aliyun-ecs".to_string()),
+                providers,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert!(!needs_auth(&config));
+
+        if let Some(value) = old_ak {
+            std::env::set_var("ALIBABA_CLOUD_ACCESS_KEY_ID", value);
+        }
+        if let Some(value) = old_sk {
+            std::env::set_var("ALIBABA_CLOUD_ACCESS_KEY_SECRET", value);
+        }
+        if let Some(value) = old_token {
+            std::env::set_var("ALIBABA_CLOUD_SECURITY_TOKEN", value);
+        }
     }
 }

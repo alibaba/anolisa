@@ -1,13 +1,9 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::mpsc;
 
 use serde::Deserialize;
+use serde_json::{json, Value};
 
-use crate::auth::ecs;
-use crate::auth::providers::{
-    builtin_auth_providers, builtin_base_url_for_provider, default_model_for_provider,
-    normalize_provider_order, ALIYUN_PROVIDER_LABEL,
-};
+use crate::adapter::{AdapterInstance, CoshCoreAdapter};
 use crate::runtime::dispatcher::stable_event_key;
 use crate::runtime::prelude::{
     AgentEvent, AuthFieldInfo, AuthProviderInfo, AuthResponse, GovernedEvent, NoticePanelModel,
@@ -15,38 +11,6 @@ use crate::runtime::prelude::{
     ShellEventKind,
 };
 use crate::runtime::state::InlineState;
-
-// ─── Minimal config parsing for reading existing providers ───
-
-#[derive(Debug, Deserialize, Default)]
-struct MiniConfig {
-    #[serde(default)]
-    ai: MiniAiConfig,
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct MiniAiConfig {
-    active_provider: Option<String>,
-    #[allow(dead_code)]
-    active_model: Option<String>,
-    #[serde(default)]
-    providers: HashMap<String, MiniProviderConfig>,
-    // Preserve these fields during incremental writes
-    output_language: Option<String>,
-    thinking: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Default, Clone)]
-struct MiniProviderConfig {
-    #[serde(rename = "type")]
-    provider_type: Option<String>,
-    base_url: Option<String>,
-    api_key: Option<String>,
-    model: Option<String>,
-    access_key_id: Option<String>,
-    access_key_secret: Option<String>,
-    security_token: Option<String>,
-}
 
 /// An existing provider loaded from config.toml for the ManagingProviders phase.
 #[derive(Debug, Clone)]
@@ -56,71 +20,24 @@ pub(crate) struct ExistingProvider {
     pub(crate) label: String,         // display name based on type
     pub(crate) model: String,         // current model
     pub(crate) is_active: bool,       // whether this is the active_provider
+    pub(crate) base_url: Option<String>,
+    pub(crate) api_key_mask: Option<String>,
+    pub(crate) access_key_id_mask: Option<String>,
+    pub(crate) access_key_secret_mask: Option<String>,
+    pub(crate) security_token_mask: Option<String>,
+    pub(crate) auth_source: Option<String>,
+}
+
+fn secret_mask(len: usize) -> String {
+    "•".repeat(len)
 }
 
 fn label_for_provider_type(provider_type: &str) -> &'static str {
     match provider_type {
         "dashscope" => "DashScope (\u{767e}\u{70bc})",
-        "aliyun" => ALIYUN_PROVIDER_LABEL,
+        "aliyun" => "Aliyun Authentication",
         _ => "OpenAI Compatible",
     }
-}
-
-fn load_existing_providers() -> (Vec<ExistingProvider>, String) {
-    let config_path = config_file_path();
-    let content = std::fs::read_to_string(&config_path).unwrap_or_default();
-    let config: MiniConfig = toml::from_str(&content).unwrap_or_default();
-    let active = config.ai.active_provider.unwrap_or_default();
-
-    let mut providers: Vec<ExistingProvider> = config
-        .ai
-        .providers
-        .iter()
-        .map(|(name, p)| {
-            let ptype = p.provider_type.as_deref().unwrap_or("openai");
-            ExistingProvider {
-                name: name.clone(),
-                provider_type: ptype.to_string(),
-                label: label_for_provider_type(ptype).to_string(),
-                model: p.model.clone().unwrap_or_default(),
-                is_active: name == &active,
-            }
-        })
-        .collect();
-
-    // Sort: active first, then alphabetical
-    providers.sort_by(|a, b| b.is_active.cmp(&a.is_active).then(a.name.cmp(&b.name)));
-
-    (providers, active)
-}
-
-fn config_file_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(home)
-        .join(".copilot-shell")
-        .join("config.toml")
-}
-
-/// Set a provider as active without editing its configuration.
-fn activate_provider(provider_name: &str) {
-    let config_path = config_file_path();
-    let existing_content = std::fs::read_to_string(&config_path).unwrap_or_default();
-    let mut config: MiniConfig = toml::from_str(&existing_content).unwrap_or_default();
-
-    // Look up the model from the provider being activated
-    let model = config
-        .ai
-        .providers
-        .get(provider_name)
-        .and_then(|p| p.model.clone());
-
-    config.ai.active_provider = Some(provider_name.to_string());
-    if let Some(m) = model {
-        config.ai.active_model = Some(m);
-    }
-
-    let config_dir = config_path.parent().unwrap().to_path_buf();
-    write_config_incremental(&config_path, &config_dir, &existing_content, &config.ai);
 }
 
 #[derive(Debug, Clone)]
@@ -138,6 +55,13 @@ pub(crate) struct RuntimeAuthState {
     pub(crate) existing_providers: Vec<ExistingProvider>,
     /// The section name of the provider being edited (None = new provider)
     pub(crate) editing_provider_name: Option<String>,
+    backend: AuthBackend,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthBackend {
+    ActiveRun,
+    CoreRegistry,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,8 +74,7 @@ pub(crate) enum AuthPhase {
     },
     SelectingProvider,
     FillingField,
-    /// Aliyun: ECS detected, showing console URL + QR code, polling in background
-    AliyunPolling {
+    AliyunEcsChallenge {
         instance_id: String,
         console_url: String,
     },
@@ -176,8 +99,6 @@ pub(crate) struct AuthState {
     pub(crate) state: Option<RuntimeAuthState>,
     pub(crate) handled_card_events: HashSet<String>,
     pub(crate) completed_ids: HashSet<String>,
-    /// Channel for receiving ECS polling results from background thread.
-    pub(crate) ecs_poll_rx: Option<mpsc::Receiver<ecs::EcsTaskResult>>,
 }
 
 pub(crate) fn record_auth_required(
@@ -203,13 +124,14 @@ pub(crate) fn record_auth_required(
                 id: id.clone(),
                 request_id: request_id.clone(),
                 phase: AuthPhase::SelectingProvider,
-                providers: normalize_provider_order(providers.clone()),
+                providers: providers.clone(),
                 selected_provider: 0,
                 current_field: 0,
                 collected_values: HashMap::new(),
                 field_input: String::new(),
                 existing_providers: Vec::new(),
                 editing_provider_name: None,
+                backend: AuthBackend::ActiveRun,
             });
             ids.push(id);
         }
@@ -271,15 +193,12 @@ pub(crate) fn pending_auth_capture(state: &InlineState) -> Option<RawInputCaptur
             allow_free_text: true,
             multiple: false,
         }),
-        AuthPhase::AliyunPolling { .. } => {
-            // During polling, capture Esc to allow cancellation
-            Some(RawInputCapture::Question {
-                id: auth.id.clone(),
-                option_count: 0,
-                allow_free_text: false,
-                multiple: false,
-            })
-        }
+        AuthPhase::AliyunEcsChallenge { .. } => Some(RawInputCapture::Question {
+            id: auth.id.clone(),
+            option_count: 1,
+            allow_free_text: false,
+            multiple: false,
+        }),
     }
 }
 
@@ -287,94 +206,52 @@ pub(crate) fn has_pending_auth(state: &InlineState) -> bool {
     state.auth.state.is_some()
 }
 
-/// Check if a background ECS polling task has completed.
-/// Should be called from the event loop on each iteration.
-pub(crate) fn check_aliyun_poll_result<W: std::io::Write>(
-    state: &mut InlineState,
-    output: &mut W,
-) -> std::io::Result<()> {
-    // Only check if we're in AliyunPolling phase
-    let is_polling = state
-        .auth
-        .state
-        .as_ref()
-        .map(|a| matches!(a.phase, AuthPhase::AliyunPolling { .. }))
-        .unwrap_or(false);
-    if !is_polling {
-        return Ok(());
-    }
-
-    // Non-blocking check on the channel
-    let result = state
-        .auth
-        .ecs_poll_rx
-        .as_ref()
-        .and_then(|rx| rx.try_recv().ok());
-
-    let Some(result) = result else {
-        return Ok(()); // Not ready yet
-    };
-
-    // Polling completed — drop the receiver
-    state.auth.ecs_poll_rx = None;
-
-    match result {
-        ecs::EcsTaskResult::Authorized(creds) => {
-            // Auto-submit with STS credentials
-            if let Some(auth) = state.auth.state.as_mut() {
-                auth.collected_values
-                    .insert("access_key_id".to_string(), creds.access_key_id);
-                auth.collected_values
-                    .insert("access_key_secret".to_string(), creds.access_key_secret);
-                auth.collected_values
-                    .insert("security_token".to_string(), creds.security_token);
-            }
-            send_auth_response(state, output)?;
-        }
-        ecs::EcsTaskResult::NotOnEcs => {
-            // Shouldn't happen (we detected ECS before starting poll), but handle gracefully
-            if let Some(auth) = state.auth.state.as_mut() {
-                auth.phase = AuthPhase::FillingField;
-                auth.current_field = 0;
-                auth.collected_values.clear();
-                auth.field_input.clear();
-            }
-            render_current_auth_panel(state, output)?;
-        }
-        ecs::EcsTaskResult::AuthorizationFailed(msg) => {
-            let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
-            renderer.write_notice_panel(
-                output,
-                NoticePanelModel {
-                    title: "Aliyun Auth Failed",
-                    body: vec![msg, "Falling back to manual AK/SK input.".to_string()],
-                    footer: None,
-                },
-            )?;
-            // Fall back to AK/SK input
-            if let Some(auth) = state.auth.state.as_mut() {
-                auth.phase = AuthPhase::FillingField;
-                auth.current_field = 0;
-                auth.collected_values.clear();
-                auth.field_input.clear();
-            }
-            render_current_auth_panel(state, output)?;
-        }
-    }
-    Ok(())
-}
-
 /// Trigger auth panel from `/auth` slash command.
 /// Now starts in ManagingProviders phase to show existing providers.
 pub(crate) fn trigger_auth_from_slash<W: std::io::Write>(
+    adapter: &AdapterInstance,
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {
     if state.auth.state.is_some() {
         return Ok(());
     }
+    let AdapterInstance::CoshCore(cosh_core) = adapter else {
+        let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
+        renderer.write_notice_panel(
+            output,
+            NoticePanelModel {
+                title: "Auth unavailable",
+                body: vec![
+                    "Authentication is managed by cosh-core.".to_string(),
+                    "Switch to the cosh-core backend before running /auth.".to_string(),
+                ],
+                footer: None,
+            },
+        )?;
+        return Ok(());
+    };
 
-    let providers = builtin_auth_providers();
+    let core_state = match load_core_auth_state(cosh_core) {
+        Ok(state) => state,
+        Err(message) => {
+            let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
+            renderer.write_notice_panel(
+                output,
+                NoticePanelModel {
+                    title: "Auth unavailable",
+                    body: vec![
+                        "Unable to read auth state from cosh-core.".to_string(),
+                        message,
+                    ],
+                    footer: None,
+                },
+            )?;
+            return Ok(());
+        }
+    };
+
+    let providers = providers_with_provider_id_field(core_state.templates);
     let request_id = format!(
         "slash-auth-{}",
         std::time::SystemTime::now()
@@ -384,8 +261,12 @@ pub(crate) fn trigger_auth_from_slash<W: std::io::Write>(
     );
     let id = format!("auth-{request_id}");
 
-    // Load existing providers from config.toml
-    let (existing_providers, _active) = load_existing_providers();
+    let mut existing_providers: Vec<ExistingProvider> = core_state
+        .saved_providers
+        .into_iter()
+        .map(ExistingProvider::from)
+        .collect();
+    existing_providers.sort_by(|a, b| b.is_active.cmp(&a.is_active).then(a.name.cmp(&b.name)));
 
     // If there are existing providers, start in ManagingProviders phase
     let phase = if existing_providers.is_empty() {
@@ -405,10 +286,155 @@ pub(crate) fn trigger_auth_from_slash<W: std::io::Write>(
         field_input: String::new(),
         existing_providers,
         editing_provider_name: None,
+        backend: AuthBackend::CoreRegistry,
     });
 
     render_current_auth_panel(state, output)?;
     Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct CoreAuthState {
+    templates: Vec<AuthProviderInfo>,
+    #[serde(default)]
+    saved_providers: Vec<CoreSavedProvider>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CoreSavedProvider {
+    provider_id: String,
+    provider_type: Option<String>,
+    model: Option<String>,
+    base_url: Option<String>,
+    auth_source: Option<String>,
+    active: bool,
+    #[serde(default)]
+    api_key_len: usize,
+    #[serde(default)]
+    access_key_id_len: usize,
+    #[serde(default)]
+    access_key_secret_len: usize,
+    #[serde(default)]
+    security_token_len: usize,
+}
+
+fn load_core_auth_state(cosh_core: &CoshCoreAdapter) -> Result<CoreAuthState, String> {
+    let value = cosh_core.registry_query("auth", "state", Value::Null)?;
+    serde_json::from_value(value).map_err(|e| format!("invalid auth state: {e}"))
+}
+
+fn core_auth_activate(adapter: &AdapterInstance, provider_id: &str) -> Result<(), String> {
+    let AdapterInstance::CoshCore(cosh_core) = adapter else {
+        return Err("auth registry requires cosh-core backend".to_string());
+    };
+    cosh_core
+        .registry_query("auth", "activate", json!({ "provider_id": provider_id }))
+        .map(|_| ())
+}
+
+fn core_auth_configure(adapter: &AdapterInstance, response: &AuthResponse) -> Result<(), String> {
+    let AdapterInstance::CoshCore(cosh_core) = adapter else {
+        return Err("auth registry requires cosh-core backend".to_string());
+    };
+    cosh_core
+        .registry_query(
+            "auth",
+            "configure",
+            json!({
+                "provider_id": response.provider_id,
+                "provider_type": response.provider_type,
+                "values": response.values,
+            }),
+        )
+        .map(|_| ())
+}
+
+#[derive(Debug, Deserialize)]
+struct CoreAuthVerify {
+    authorized: bool,
+}
+
+fn core_auth_verify_aliyun_ecs(adapter: &AdapterInstance) -> Result<bool, String> {
+    let AdapterInstance::CoshCore(cosh_core) = adapter else {
+        return Err("auth registry requires cosh-core backend".to_string());
+    };
+    let value = cosh_core.registry_query(
+        "auth",
+        "verify",
+        json!({
+            "provider_type": "aliyun",
+            "auth_source": "ecs_ram_role"
+        }),
+    )?;
+    let verify: CoreAuthVerify =
+        serde_json::from_value(value).map_err(|e| format!("invalid auth verify response: {e}"))?;
+    Ok(verify.authorized)
+}
+
+#[derive(Debug, Deserialize)]
+struct CoreAuthPrepare {
+    mode: String,
+    instance_id: Option<String>,
+    console_url: Option<String>,
+    #[serde(default)]
+    values: HashMap<String, String>,
+}
+
+fn core_auth_prepare(
+    adapter: &AdapterInstance,
+    provider_type: &str,
+) -> Result<CoreAuthPrepare, String> {
+    let AdapterInstance::CoshCore(cosh_core) = adapter else {
+        return Err("auth registry requires cosh-core backend".to_string());
+    };
+    let value =
+        cosh_core.registry_query("auth", "prepare", json!({ "provider_type": provider_type }))?;
+    serde_json::from_value(value).map_err(|e| format!("invalid auth prepare response: {e}"))
+}
+
+impl From<CoreSavedProvider> for ExistingProvider {
+    fn from(provider: CoreSavedProvider) -> Self {
+        let provider_type = provider
+            .provider_type
+            .unwrap_or_else(|| "openai_compat".to_string());
+        let model = provider.model.unwrap_or_default();
+        ExistingProvider {
+            name: provider.provider_id,
+            label: label_for_provider_type(&provider_type).to_string(),
+            provider_type,
+            model,
+            is_active: provider.active,
+            base_url: provider.base_url,
+            api_key_mask: (provider.api_key_len > 0).then(|| secret_mask(provider.api_key_len)),
+            access_key_id_mask: (provider.access_key_id_len > 0)
+                .then(|| secret_mask(provider.access_key_id_len)),
+            access_key_secret_mask: (provider.access_key_secret_len > 0)
+                .then(|| secret_mask(provider.access_key_secret_len)),
+            security_token_mask: (provider.security_token_len > 0)
+                .then(|| secret_mask(provider.security_token_len)),
+            auth_source: provider.auth_source,
+        }
+    }
+}
+
+fn providers_with_provider_id_field(providers: Vec<AuthProviderInfo>) -> Vec<AuthProviderInfo> {
+    providers
+        .into_iter()
+        .map(|mut provider| {
+            provider.fields.insert(
+                0,
+                AuthFieldInfo {
+                    name: "provider_id".to_string(),
+                    label: "Provider ID".to_string(),
+                    hint: Some("Unique config id, e.g. qwen-prod".to_string()),
+                    secret: false,
+                    required: true,
+                    placeholder: Some(provider.id.clone()),
+                },
+            );
+            provider
+        })
+        .collect()
 }
 
 fn handle_auth_focus<W: std::io::Write>(
@@ -466,6 +492,7 @@ fn handle_auth_input<W: std::io::Write>(
 }
 
 fn handle_auth_answer<W: std::io::Write>(
+    adapter: &AdapterInstance,
     state: &mut InlineState,
     id: &str,
     raw_answer: &str,
@@ -522,8 +549,7 @@ fn handle_auth_answer<W: std::io::Write>(
 
             match action {
                 "activate" => {
-                    // Just update active_provider in config, no editing
-                    activate_provider(&existing.name);
+                    core_auth_activate(adapter, &existing.name).map_err(std::io::Error::other)?;
                     // Clear and show confirmation
                     state.auth.state.take();
                     clear_active_auth_panel(state, output)?;
@@ -564,48 +590,48 @@ fn handle_auth_answer<W: std::io::Write>(
                     auth.selected_provider = template_idx;
                     auth.editing_provider_name = Some(existing.name.clone());
 
-                    // Pre-fill collected_values from existing config
-                    let config_path = config_file_path();
-                    let content = std::fs::read_to_string(&config_path).unwrap_or_default();
-                    let config: MiniConfig = toml::from_str(&content).unwrap_or_default();
-                    if let Some(pcfg) = config.ai.providers.get(&existing.name) {
-                        if let Some(ref v) = pcfg.api_key {
-                            auth.collected_values
-                                .insert("api_key".to_string(), v.clone());
-                        }
-                        if let Some(ref v) = pcfg.base_url {
-                            auth.collected_values
-                                .insert("base_url".to_string(), v.clone());
-                        }
-                        if let Some(ref v) = pcfg.model {
-                            auth.collected_values.insert("model".to_string(), v.clone());
-                        }
-                        if let Some(ref v) = pcfg.access_key_id {
-                            auth.collected_values
-                                .insert("access_key_id".to_string(), v.clone());
-                        }
-                        if let Some(ref v) = pcfg.access_key_secret {
-                            auth.collected_values
-                                .insert("access_key_secret".to_string(), v.clone());
-                        }
-                        if let Some(ref v) = pcfg.security_token {
-                            auth.collected_values
-                                .insert("security_token".to_string(), v.clone());
-                        }
+                    auth.collected_values
+                        .insert("provider_id".to_string(), existing.name.clone());
+                    if let Some(ref v) = existing.api_key_mask {
+                        auth.collected_values
+                            .insert("api_key".to_string(), v.clone());
+                    }
+                    if let Some(ref v) = existing.base_url {
+                        auth.collected_values
+                            .insert("base_url".to_string(), v.clone());
+                    }
+                    if !existing.model.is_empty() {
+                        auth.collected_values
+                            .insert("model".to_string(), existing.model.clone());
+                    }
+                    if let Some(ref v) = existing.access_key_id_mask {
+                        auth.collected_values
+                            .insert("access_key_id".to_string(), v.clone());
+                    }
+                    if let Some(ref v) = existing.access_key_secret_mask {
+                        auth.collected_values
+                            .insert("access_key_secret".to_string(), v.clone());
+                    }
+                    if let Some(ref v) = existing.security_token_mask {
+                        auth.collected_values
+                            .insert("security_token".to_string(), v.clone());
+                    }
+                    if let Some(ref v) = existing.auth_source {
+                        auth.collected_values
+                            .insert("auth_source".to_string(), v.clone());
+                    }
+
+                    if provider_type == "aliyun"
+                        && apply_aliyun_prepare(adapter, auth).map_err(std::io::Error::other)?
+                    {
+                        clear_active_auth_panel(state, output)?;
+                        render_current_auth_panel(state, output)?;
+                        return Ok(true);
                     }
 
                     auth.phase = AuthPhase::FillingField;
-                    auth.current_field = 0;
-                    let first_field_name = auth.current_field_info().map(|f| f.name.clone());
-                    if let Some(name) = first_field_name {
-                        auth.field_input = auth
-                            .collected_values
-                            .get(&name)
-                            .cloned()
-                            .unwrap_or_default();
-                    } else {
-                        auth.field_input.clear();
-                    }
+                    auth.current_field = 1.min(auth.current_provider().fields.len());
+                    load_current_field_input(auth);
                     clear_active_auth_panel(state, output)?;
                     render_current_auth_panel(state, output)?;
                 }
@@ -620,63 +646,19 @@ fn handle_auth_answer<W: std::io::Write>(
             Ok(true)
         }
         AuthPhase::SelectingProvider => {
-            let selected_id = auth.current_provider().id.clone();
-
-            if selected_id == "aliyun" {
-                // Aliyun flow: synchronously detect ECS (fast: 0.5s timeout)
-                clear_active_auth_panel(state, output)?;
-
-                let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
-                renderer.write_notice_panel(
-                    output,
-                    NoticePanelModel {
-                        title: "Aliyun Authentication",
-                        body: vec!["Detecting ECS environment...".to_string()],
-                        footer: None,
-                    },
-                )?;
-                output.flush()?;
-
-                if let Some(ecs_info) = ecs::detect_ecs_environment() {
-                    // On ECS: show console URL + QR code, start polling in background
-                    let console_url = ecs_info.console_url.clone();
-                    let instance_id = ecs_info.instance_id.clone();
-
-                    // Start background polling thread
-                    let (tx, rx) = mpsc::channel();
-                    std::thread::spawn(move || {
-                        let result = ecs::poll_and_get_credentials();
-                        let _ = tx.send(result);
-                    });
-                    state.auth.ecs_poll_rx = Some(rx);
-
-                    let auth = state.auth.state.as_mut().unwrap();
-                    auth.phase = AuthPhase::AliyunPolling {
-                        instance_id,
-                        console_url,
-                    };
-                    // Clear the "Detecting..." notice and render polling panel
-                    clear_active_auth_panel(state, output)?;
-                    render_current_auth_panel(state, output)?;
-                } else {
-                    // Not on ECS: enter AK/SK input (uses the standard FillingField flow)
-                    let auth = state.auth.state.as_mut().unwrap();
-                    auth.phase = AuthPhase::FillingField;
-                    auth.current_field = 0;
-                    auth.collected_values.clear();
-                    auth.field_input.clear();
-                    clear_active_auth_panel(state, output)?;
-                    render_current_auth_panel(state, output)?;
-                }
-            } else {
-                // DashScope / OpenAI: standard field-filling flow
-                auth.phase = AuthPhase::FillingField;
-                auth.current_field = 0;
-                auth.collected_values.clear();
-                auth.field_input.clear();
+            if auth.current_provider().id == "aliyun"
+                && apply_aliyun_prepare(adapter, auth).map_err(std::io::Error::other)?
+            {
                 clear_active_auth_panel(state, output)?;
                 render_current_auth_panel(state, output)?;
+                return Ok(true);
             }
+            auth.phase = AuthPhase::FillingField;
+            auth.current_field = 0;
+            auth.collected_values.clear();
+            auth.field_input.clear();
+            clear_active_auth_panel(state, output)?;
+            render_current_auth_panel(state, output)?;
             Ok(true)
         }
         AuthPhase::FillingField => {
@@ -685,25 +667,27 @@ fn handle_auth_answer<W: std::io::Write>(
             } else {
                 raw_answer.to_string()
             };
-            if let Some(field) = auth.current_field_info().cloned() {
+            let field = auth.current_field_info().cloned();
+            if let Some(field) = field.clone() {
                 auth.collected_values.insert(field.name.clone(), value);
+            }
+            if auth.backend == AuthBackend::CoreRegistry
+                && auth.editing_provider_name.is_none()
+                && auth.current_provider().id == "aliyun"
+                && field.as_ref().map(|f| f.name.as_str()) == Some("provider_id")
+                && apply_aliyun_prepare(adapter, auth).map_err(std::io::Error::other)?
+            {
+                clear_active_auth_panel(state, output)?;
+                render_current_auth_panel(state, output)?;
+                return Ok(true);
             }
             auth.current_field += 1;
             // Load next field's pre-filled value (for edit mode)
-            let next_field_name = auth.current_field_info().map(|f| f.name.clone());
-            if let Some(name) = next_field_name {
-                auth.field_input = auth
-                    .collected_values
-                    .get(&name)
-                    .cloned()
-                    .unwrap_or_default();
-            } else {
-                auth.field_input.clear();
-            }
+            load_current_field_input(auth);
 
             if auth.all_fields_collected() {
                 clear_active_auth_panel(state, output)?;
-                send_auth_response(state, output)?;
+                send_auth_response(Some(adapter), state, output)?;
                 Ok(true)
             } else {
                 clear_active_auth_panel(state, output)?;
@@ -711,33 +695,114 @@ fn handle_auth_answer<W: std::io::Write>(
                 Ok(true)
             }
         }
-        AuthPhase::AliyunPolling { .. } => {
-            // During polling, user input is ignored (Esc/cancel handled elsewhere)
-            Ok(false)
+        AuthPhase::AliyunEcsChallenge { .. } => {
+            if !core_auth_verify_aliyun_ecs(adapter).map_err(std::io::Error::other)? {
+                clear_active_auth_panel(state, output)?;
+                let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
+                renderer.write_notice_panel(
+                    output,
+                    NoticePanelModel {
+                        title: "Aliyun authorization pending",
+                        body: vec![
+                            "ECS RAM Role credentials are not available yet.".to_string(),
+                            "Open the authorization link or scan the QR code, then confirm again."
+                                .to_string(),
+                        ],
+                        footer: None,
+                    },
+                )?;
+                render_current_auth_panel(state, output)?;
+                return Ok(true);
+            }
+            clear_active_auth_panel(state, output)?;
+            send_auth_response(Some(adapter), state, output)?;
+            Ok(true)
         }
     }
 }
 
+fn load_current_field_input(auth: &mut RuntimeAuthState) {
+    let field_name = auth.current_field_info().map(|f| f.name.clone());
+    if let Some(name) = field_name {
+        auth.field_input = auth
+            .collected_values
+            .get(&name)
+            .cloned()
+            .unwrap_or_default();
+    } else {
+        auth.field_input.clear();
+    }
+}
+
+fn apply_aliyun_prepare(
+    adapter: &AdapterInstance,
+    auth: &mut RuntimeAuthState,
+) -> Result<bool, String> {
+    let prepare = core_auth_prepare(adapter, "aliyun")?;
+    if prepare.mode != "ecs_ram_role" {
+        return Ok(false);
+    }
+    for (key, value) in prepare.values {
+        auth.collected_values.insert(key, value);
+    }
+    auth.collected_values.remove("access_key_id");
+    auth.collected_values.remove("access_key_secret");
+    auth.collected_values.remove("security_token");
+    auth.phase = AuthPhase::AliyunEcsChallenge {
+        instance_id: prepare.instance_id.unwrap_or_default(),
+        console_url: prepare.console_url.unwrap_or_default(),
+    };
+    Ok(true)
+}
+
 fn send_auth_response<W: std::io::Write>(
+    adapter: Option<&AdapterInstance>,
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {
     let auth = state.auth.state.take().expect("auth state present");
     state.auth.completed_ids.insert(auth.id.clone());
     let provider = &auth.providers[auth.selected_provider];
-    let editing_name = auth.editing_provider_name.clone();
+    let provider_id = auth
+        .editing_provider_name
+        .clone()
+        .or_else(|| auth.collected_values.get("provider_id").cloned())
+        .unwrap_or_else(|| provider.id.clone());
     let response = AuthResponse {
-        provider_id: provider.id.clone(),
+        request_id: auth.request_id.clone(),
+        provider_id: provider_id.clone(),
+        provider_type: Some(provider.id.clone()),
         values: auth.collected_values,
         persist: true,
     };
 
     if let Some(active_run) = state.agent_run.active.as_ref() {
         if active_run.handle.respond_auth(response.clone()).is_err() {
-            persist_auth_credentials(&response, editing_name.as_deref());
+            let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
+            renderer.write_notice_panel(
+                output,
+                NoticePanelModel {
+                    title: "Auth failed",
+                    body: vec![
+                        "Unable to send credentials to cosh-core.".to_string(),
+                        "Run /auth again after the current run finishes.".to_string(),
+                    ],
+                    footer: None,
+                },
+            )?;
+            output.flush()?;
+            return Ok(());
         }
     } else {
-        persist_auth_credentials(&response, editing_name.as_deref());
+        match auth.backend {
+            AuthBackend::CoreRegistry => {
+                let adapter = adapter.ok_or_else(|| {
+                    std::io::Error::other("missing adapter for cosh-core auth registry")
+                })?;
+                core_auth_configure(adapter, &response).map_err(std::io::Error::other)?;
+            }
+            AuthBackend::ActiveRun => {}
+        }
     }
 
     let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
@@ -762,159 +827,6 @@ fn send_auth_response<W: std::io::Write>(
 
     output.flush()?;
     Ok(())
-}
-
-/// Directly persist auth credentials to cosh-core's config file.
-/// Uses INCREMENTAL update: reads existing config, inserts/updates the provider, preserves others.
-fn persist_auth_credentials(response: &AuthResponse, editing_name: Option<&str>) {
-    let config_path = config_file_path();
-    let config_dir = config_path.parent().unwrap().to_path_buf();
-    if std::fs::create_dir_all(&config_dir).is_err() {
-        return;
-    }
-
-    // Read and parse existing config
-    let existing_content = std::fs::read_to_string(&config_path).unwrap_or_default();
-    let mut config: MiniConfig = toml::from_str(&existing_content).unwrap_or_default();
-
-    // Determine the section name for this provider
-    let section_name = editing_name.map(|s| s.to_string()).unwrap_or_else(|| {
-        // For new providers, generate a section name based on type
-        match response.provider_id.as_str() {
-            "dashscope" => "dashscope".to_string(),
-            "aliyun" => "aliyun".to_string(),
-            "openai_compat" => "openai_compat".to_string(),
-            other => other.to_string(),
-        }
-    });
-
-    // Build the provider config
-    let provider_type = match response.provider_id.as_str() {
-        "dashscope" => "dashscope",
-        "aliyun" => "aliyun",
-        _ => "openai",
-    };
-    let default_model = match response.provider_id.as_str() {
-        "dashscope" | "aliyun" => "qwen3.7-plus",
-        _ => "gpt-4o",
-    };
-    let user_model = response.values.get("model").filter(|m| !m.is_empty());
-    let final_model = user_model
-        .map(|m| m.as_str())
-        .or_else(|| default_model_for_provider(&response.provider_id))
-        .unwrap_or(default_model);
-
-    let mut pcfg = MiniProviderConfig {
-        provider_type: Some(provider_type.to_string()),
-        model: Some(final_model.to_string()),
-        ..Default::default()
-    };
-
-    if response.provider_id == "aliyun" {
-        pcfg.access_key_id = response.values.get("access_key_id").cloned();
-        pcfg.access_key_secret = response.values.get("access_key_secret").cloned();
-        pcfg.security_token = response.values.get("security_token").cloned();
-    } else {
-        let base_url =
-            response.values.get("base_url").cloned().or_else(|| {
-                builtin_base_url_for_provider(&response.provider_id).map(str::to_string)
-            });
-        pcfg.base_url = base_url;
-        pcfg.api_key = response.values.get("api_key").cloned();
-    }
-
-    // Insert/update this provider (preserves all others)
-    config.ai.providers.insert(section_name.clone(), pcfg);
-
-    // Update active_provider and active_model
-    config.ai.active_provider = Some(section_name);
-    config.ai.active_model = Some(final_model.to_string());
-
-    // Serialize back: preserve non-[ai] sections, rewrite [ai] section
-    write_config_incremental(&config_path, &config_dir, &existing_content, &config.ai);
-}
-
-/// Write config.toml preserving non-[ai] sections and rewriting [ai] + providers.
-fn write_config_incremental(
-    config_path: &std::path::Path,
-    config_dir: &std::path::Path,
-    existing_content: &str,
-    ai: &MiniAiConfig,
-) {
-    let mut preserved = String::new();
-    let mut in_ai_section = false;
-    for line in existing_content.lines() {
-        if line.trim().starts_with("[ai") {
-            in_ai_section = true;
-            continue;
-        }
-        if in_ai_section && line.trim().starts_with('[') && !line.trim().starts_with("[ai") {
-            in_ai_section = false;
-        }
-        if !in_ai_section {
-            preserved.push_str(line);
-            preserved.push('\n');
-        }
-    }
-
-    // Write [ai] section
-    preserved.push_str("[ai]\n");
-    if let Some(ref active) = ai.active_provider {
-        preserved.push_str(&format!("active_provider = \"{}\"\n", escape_toml(active)));
-    }
-    if let Some(ref model) = ai.active_model {
-        preserved.push_str(&format!("active_model = \"{}\"\n", escape_toml(model)));
-    }
-    if let Some(ref lang) = ai.output_language {
-        preserved.push_str(&format!("output_language = \"{}\"\n", escape_toml(lang)));
-    }
-    if let Some(ref thinking) = ai.thinking {
-        preserved.push_str(&format!("thinking = \"{}\"\n", escape_toml(thinking)));
-    }
-    preserved.push('\n');
-
-    // Write all providers
-    for (name, provider) in &ai.providers {
-        preserved.push_str(&format!("[ai.providers.{}]\n", name));
-        if let Some(ref t) = provider.provider_type {
-            preserved.push_str(&format!("type = \"{}\"\n", escape_toml(t)));
-        }
-        if let Some(ref url) = provider.base_url {
-            preserved.push_str(&format!("base_url = \"{}\"\n", escape_toml(url)));
-        }
-        if let Some(ref key) = provider.api_key {
-            preserved.push_str(&format!("api_key = \"{}\"\n", escape_toml(key)));
-        }
-        if let Some(ref m) = provider.model {
-            preserved.push_str(&format!("model = \"{}\"\n", escape_toml(m)));
-        }
-        if let Some(ref ak) = provider.access_key_id {
-            preserved.push_str(&format!("access_key_id = \"{}\"\n", escape_toml(ak)));
-        }
-        if let Some(ref sk) = provider.access_key_secret {
-            preserved.push_str(&format!("access_key_secret = \"{}\"\n", escape_toml(sk)));
-        }
-        if let Some(ref st) = provider.security_token {
-            preserved.push_str(&format!("security_token = \"{}\"\n", escape_toml(st)));
-        }
-        preserved.push('\n');
-    }
-
-    // Atomic write
-    let pid = std::process::id();
-    let tmp_path = config_dir.join(format!("config.toml.tmp.{pid}"));
-    if std::fs::write(&tmp_path, &preserved).is_err() {
-        return;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        let _ = std::fs::set_permissions(&tmp_path, perms);
-    }
-    if std::fs::rename(&tmp_path, config_path).is_err() {
-        let _ = std::fs::remove_file(&tmp_path);
-    }
 }
 
 fn render_current_auth_panel<W: std::io::Write>(
@@ -1044,38 +956,30 @@ fn render_current_auth_panel<W: std::io::Write>(
             state.questions.active_panel_height = height;
             state.questions.active_panel_id = Some(auth.id.clone());
         }
-        AuthPhase::AliyunPolling {
-            ref console_url,
+        AuthPhase::AliyunEcsChallenge {
             ref instance_id,
+            ref console_url,
         } => {
-            let mut body = vec![
-                "Please open the URL below in your browser to authorize:".to_string(),
-                String::new(),
-                console_url.clone(),
-                String::new(),
-                format!("ECS Instance ID: {}", instance_id),
-            ];
-
-            // Generate QR code text (plain Unicode, no ANSI codes)
-            if let Some(qr_string) = generate_qr_text(console_url) {
-                body.push(String::new());
-                body.push("Or scan the QR code:".to_string());
-                for line in qr_string.lines() {
-                    body.push(line.to_string());
-                }
+            let mut question = format!(
+                "\u{1f511} Aliyun Authentication \u{2014} Authorize ECS RAM Role\n  ECS Instance ID: {instance_id}\n  URL: {console_url}"
+            );
+            if let Some(qr) = generate_qr_text(console_url) {
+                question.push_str("\n\n");
+                question.push_str(&qr);
             }
-
-            body.push(String::new());
-            body.push("Waiting for authorization... (Press Esc to cancel)".to_string());
-
-            let notice = NoticePanelModel {
-                title: "\u{1f511} Aliyun Authentication",
-                body,
-                footer: None,
+            let options = vec!["I have authorized this ECS instance".to_string()];
+            let model = QuestionPanelModel {
+                id: &auth.id,
+                question: &question,
+                options: &options,
+                selected_option: 0,
+                selected_options: &[],
+                custom_answer: "",
+                allow_free_text: false,
+                selection_mode: QuestionSelectionMode::Single,
             };
-            renderer.write_notice_panel(output, notice)?;
-            // Set a minimal height for clear; notice panels don't return height
-            state.questions.active_panel_height = 0;
+            let height = renderer.write_question_panel(output, model)?;
+            state.questions.active_panel_height = height;
             state.questions.active_panel_id = Some(auth.id.clone());
         }
     }
@@ -1140,6 +1044,7 @@ fn cancel_auth_panel<W: std::io::Write>(
 
 pub(crate) fn render_auth_card_actions<W: std::io::Write>(
     events: &[ShellEvent],
+    adapter: &AdapterInstance,
     state: &mut InlineState,
     output: &mut W,
     event_index_base: usize,
@@ -1174,7 +1079,7 @@ pub(crate) fn render_auth_card_actions<W: std::io::Write>(
                 if let Some(answer) = event.input.as_deref() {
                     let auth_id = state.auth.state.as_ref().map(|a| a.id.clone());
                     if let Some(id) = auth_id {
-                        handle_auth_answer(state, &id, answer, output)?;
+                        handle_auth_answer(adapter, state, &id, answer, output)?;
                         let key = stable_event_key("question-answer", event_index, event);
                         state.questions.handled_answers.insert(key);
                     }
@@ -1205,22 +1110,6 @@ fn parse_card_id_text(event: &ShellEvent) -> Option<(String, String)> {
     Some((id.trim().to_string(), text.to_string()))
 }
 
-fn escape_toml(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-}
-
-/// Generate a plain-text QR code using Unicode half-block characters.
-///
-/// Uses `█`, `▀`, `▄`, and space to render the QR code without ANSI escape
-/// codes. This avoids issues with the notice panel renderer stripping ANSI.
-///
-/// On a dark terminal (light foreground on dark background):
-/// - `█` (full block) → foreground/light → QR "light" module
-/// - ` ` (space)      → background/dark  → QR "dark" module
-/// - `▀` (upper half) → top light, bottom dark
-/// - `▄` (lower half) → top dark, bottom light
 fn generate_qr_text(data: &str) -> Option<String> {
     use qrcode::QrCode;
 
@@ -1229,25 +1118,19 @@ fn generate_qr_text(data: &str) -> Option<String> {
     let colors = code.to_colors();
     let margin = 2usize;
     let total_width = width + 2 * margin;
-
+    let light_row: String = "\u{2588}".repeat(total_width);
     let mut result = String::new();
 
-    let light_row: String = "\u{2588}".repeat(total_width);
-
-    // Quiet zone top
     for _ in 0..margin {
         result.push_str(&light_row);
         result.push('\n');
     }
 
-    // QR data rows (two module rows per text line)
     let mut y = 0;
     while y < width {
-        // Left margin
         for _ in 0..margin {
             result.push('\u{2588}');
         }
-
         for x in 0..width {
             let top_dark = colors[y * width + x] == qrcode::Color::Dark;
             let bottom_dark = if y + 1 < width {
@@ -1255,16 +1138,13 @@ fn generate_qr_text(data: &str) -> Option<String> {
             } else {
                 false
             };
-
             result.push(match (top_dark, bottom_dark) {
                 (true, true) => ' ',
-                (true, false) => '\u{2584}',  // ▄
-                (false, true) => '\u{2580}',  // ▀
-                (false, false) => '\u{2588}', // █
+                (true, false) => '\u{2584}',
+                (false, true) => '\u{2580}',
+                (false, false) => '\u{2588}',
             });
         }
-
-        // Right margin
         for _ in 0..margin {
             result.push('\u{2588}');
         }
@@ -1272,7 +1152,6 @@ fn generate_qr_text(data: &str) -> Option<String> {
         y += 2;
     }
 
-    // Quiet zone bottom
     for _ in 0..margin {
         result.push_str(&light_row);
         result.push('\n');

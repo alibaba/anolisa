@@ -14,7 +14,7 @@ use super::cosh_core::commit_pending_session_for_scope;
 use super::{
     agent_event_is_provider_progress, control_protocol, record_cancellation_pending_session,
     run_provider_process_loop, spawn_provider_child, AdapterError, AgentRunHandle,
-    ApprovalDecision, ApprovalResponse, ClaudeStreamParser, PreparedInvocation,
+    ApprovalDecision, ApprovalResponse, AuthResponse, ClaudeStreamParser, PreparedInvocation,
     ProviderCancellationArtifactStore, ProviderLineProgress, ProviderPromptArgMode,
     ProviderRunOutcome, ProviderStdinMode,
 };
@@ -28,6 +28,7 @@ pub(super) fn start_control_protocol_cosh_core_process(
 ) -> AgentRunHandle {
     let (event_tx, event_rx) = mpsc::channel();
     let (approval_tx, approval_rx) = mpsc::channel::<ApprovalResponse>();
+    let (auth_tx, auth_rx) = mpsc::channel::<AuthResponse>();
     let cancelled = Arc::new(AtomicBool::new(false));
     let writer_done = Arc::new(AtomicBool::new(false));
     let child_pid = Arc::new(Mutex::new(None::<u32>));
@@ -113,33 +114,45 @@ pub(super) fn start_control_protocol_cosh_core_process(
             while !writer_done_for_thread.load(Ordering::SeqCst)
                 && !writer_cancelled.load(Ordering::SeqCst)
             {
-                let response = match approval_rx.recv_timeout(Duration::from_millis(100)) {
-                    Ok(response) => response,
-                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                let msg = match approval_rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(response) => match &response.decision {
+                        ApprovalDecision::Allow => {
+                            control_protocol::serialize_co_allow(&response.request_id)
+                        }
+                        ApprovalDecision::Deny { message } => {
+                            control_protocol::serialize_deny(&response.request_id, message)
+                        }
+                        ApprovalDecision::HostExecutedShell { result } => {
+                            control_protocol::serialize_host_executed_shell_result(
+                                &response.request_id,
+                                result,
+                            )
+                        }
+                        ApprovalDecision::Answer { answer } => {
+                            control_protocol::serialize_answer(&response.request_id, answer)
+                        }
+                        ApprovalDecision::ShellEvidence { result } => {
+                            control_protocol::serialize_shell_evidence_result(
+                                &response.request_id,
+                                result,
+                            )
+                        }
+                    },
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        let response = match auth_rx.try_recv() {
+                            Ok(response) => response,
+                            Err(mpsc::TryRecvError::Empty) => continue,
+                            Err(mpsc::TryRecvError::Disconnected) => break,
+                        };
+                        control_protocol::serialize_auth_response(
+                            &response.request_id,
+                            &response.provider_id,
+                            response.provider_type.as_deref(),
+                            &response.values,
+                            response.persist,
+                        )
+                    }
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                };
-                let msg = match &response.decision {
-                    ApprovalDecision::Allow => {
-                        control_protocol::serialize_co_allow(&response.request_id)
-                    }
-                    ApprovalDecision::Deny { message } => {
-                        control_protocol::serialize_deny(&response.request_id, message)
-                    }
-                    ApprovalDecision::HostExecutedShell { result } => {
-                        control_protocol::serialize_host_executed_shell_result(
-                            &response.request_id,
-                            result,
-                        )
-                    }
-                    ApprovalDecision::Answer { answer } => {
-                        control_protocol::serialize_answer(&response.request_id, answer)
-                    }
-                    ApprovalDecision::ShellEvidence { result } => {
-                        control_protocol::serialize_shell_evidence_result(
-                            &response.request_id,
-                            result,
-                        )
-                    }
                 };
                 if writeln!(writer, "{msg}").is_err() {
                     break;
@@ -358,7 +371,7 @@ pub(super) fn start_control_protocol_cosh_core_process(
         receiver: event_rx,
         cancel,
         approval_sender: Some(approval_tx),
-        auth_sender: None,
+        auth_sender: Some(auth_tx),
         control_capabilities,
         pending_provider_session: Some(pending_session),
         cancellation_artifacts,

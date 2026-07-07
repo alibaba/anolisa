@@ -18,23 +18,30 @@ const CREDENTIAL_PASSWORD: &[u8] = b"copilot-credential-encrypt";
 
 pub fn try_migrate() {
     let dir = config_dir();
+    try_migrate_from_dir(&dir);
+}
+
+fn try_migrate_from_dir(dir: &Path) {
     let settings_path = dir.join("settings.json");
     let config_path = dir.join("config.toml");
 
-    if !settings_path.exists() || config_path.exists() {
-        // Even if settings.json migration is skipped, try aliyun creds migration
-        try_migrate_aliyun_credentials(&dir, &config_path);
+    if config_path.exists() {
+        return;
+    }
+
+    if !settings_path.exists() {
+        try_migrate_aliyun_credentials(dir, &config_path);
         return;
     }
 
     tracing::info!("Migrating settings.json → config.toml ...");
 
-    match migrate_settings(&settings_path, &config_path, &dir) {
+    match migrate_settings(&settings_path, &config_path, dir) {
         Ok(()) => tracing::info!("Migration complete: {}", config_path.display()),
         Err(e) => tracing::warn!("Migration warning: {e} (continuing with defaults)"),
     }
 
-    try_migrate_aliyun_credentials(&dir, &config_path);
+    try_migrate_aliyun_credentials(dir, &config_path);
 }
 
 /// Migrate Aliyun credentials from copilot-shell's encrypted aliyun_creds.json
@@ -433,6 +440,42 @@ mod tests {
     }
 
     #[test]
+    fn existing_config_skips_legacy_aliyun_credentials() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        let creds_path = tmp.path().join("aliyun_creds.json");
+        let salt_path = tmp.path().join(".encryption-salt");
+
+        std::fs::write(
+            &config_path,
+            r#"[ai]
+active_provider = "qwen"
+
+[ai.providers.qwen]
+type = "dashscope"
+api_key = "sk-current"
+"#,
+        )
+        .unwrap();
+
+        let salt = [0x23u8; 32];
+        std::fs::write(&salt_path, salt).unwrap();
+        let encrypted = encrypt_test_credential(
+            r#"{"accessKeyId":"legacy-ak","accessKeySecret":"legacy-sk","securityToken":"legacy-token"}"#,
+            &salt,
+        );
+        std::fs::write(&creds_path, encrypted).unwrap();
+
+        try_migrate_from_dir(tmp.path());
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("[ai.providers.qwen]"));
+        assert!(!content.contains("[ai.providers.aliyun]"));
+        assert!(!content.contains("legacy-ak"));
+        assert!(!content.contains("legacy-token"));
+    }
+
+    #[test]
     fn full_migration_without_encryption() {
         let tmp = tempfile::TempDir::new().unwrap();
         let settings_path = tmp.path().join("settings.json");
@@ -479,5 +522,24 @@ mod tests {
 
     fn hex_encode(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn encrypt_test_credential(plaintext: &str, salt: &[u8; 32]) -> String {
+        let mut key = [0u8; 32];
+        let params = Params::new(14, 8, 1, 32).unwrap();
+        scrypt(CREDENTIAL_PASSWORD, salt, &params, &mut key).unwrap();
+
+        let cipher = Aes256Gcm16::new_from_slice(&key).unwrap();
+        let iv = [0xCDu8; 16];
+        let nonce = aes_gcm::aead::generic_array::GenericArray::from_slice(&iv);
+        let ciphertext_with_tag = cipher.encrypt(nonce, plaintext.as_bytes()).unwrap();
+        let (ct, tag) = ciphertext_with_tag.split_at(ciphertext_with_tag.len() - 16);
+
+        format!(
+            "enc:{}:{}:{}",
+            hex_encode(&iv),
+            hex_encode(tag),
+            hex_encode(ct)
+        )
     }
 }
