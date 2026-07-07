@@ -272,8 +272,7 @@ fn openat2_rejects_starting_dotdot() {
     assert!(
         matches!(
             err,
-            agent_memory::MemoryError::PathOutsideMount(_)
-                | agent_memory::MemoryError::Other(_)
+            agent_memory::MemoryError::PathOutsideMount(_) | agent_memory::MemoryError::Other(_)
         ),
         "starting .. should be rejected, got {err:?}"
     );
@@ -384,8 +383,7 @@ fn assert_no_symlink_traversal_catches_mid_path_symlink() {
     let root = safe_fs::open_root(tmp.path()).unwrap();
     let fd = root.as_fd();
 
-    let err =
-        safe_fs::assert_no_symlink_traversal(fd, Path::new("a/b/c.txt")).unwrap_err();
+    let err = safe_fs::assert_no_symlink_traversal(fd, Path::new("a/b/c.txt")).unwrap_err();
     assert!(
         matches!(err, agent_memory::MemoryError::PathOutsideMount(_)),
         "mid-path symlink should be caught, got {err:?}"
@@ -638,7 +636,7 @@ mod resolve_path_tests {
 
     use agent_memory::{
         MemoryError,
-        ns::{Namespace, MountPoint, paths},
+        ns::{MountPoint, Namespace, paths},
     };
     use tempfile::tempdir;
 
