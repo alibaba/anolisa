@@ -28,9 +28,12 @@ pub(crate) fn record_shell_handoff_completion(
                 .active
                 .as_ref()
                 .map(|run| run.request.id.clone());
-            state
-                .shell_evidence
-                .record_host_executed_shell_output(output_id, run_id);
+            let summary_complete = delivery.provider_preview_complete;
+            state.shell_evidence.record_host_executed_shell_output(
+                output_id,
+                run_id,
+                summary_complete,
+            );
         }
     }
     evidence.apply_provider_result_delivery(delivery);
@@ -83,6 +86,7 @@ fn deliver_host_executed_shell_result_if_supported(
             delivered: false,
             status: "not_provider_tool_request",
             recovery_reason: Some("no provider request id; shell evidence continuation required"),
+            provider_preview_complete: false,
         };
     };
     let Some(capabilities) = state
@@ -97,6 +101,7 @@ fn deliver_host_executed_shell_result_if_supported(
             recovery_reason: Some(
                 "provider run was not active when shell completed; shell evidence continuation required",
             ),
+            provider_preview_complete: false,
         };
     };
     if !capabilities.can_handle_host_executed_shell_tool_result {
@@ -106,6 +111,7 @@ fn deliver_host_executed_shell_result_if_supported(
             recovery_reason: Some(
                 "provider did not advertise host-executed shell result support; shell evidence continuation required",
             ),
+            provider_preview_complete: false,
         };
     }
 
@@ -118,10 +124,13 @@ fn deliver_host_executed_shell_result_if_supported(
             delivered: true,
             status: "duplicate_already_delivered",
             recovery_reason: None,
+            provider_preview_complete: false,
         };
     };
 
-    let result = host_executed_shell_result(handoff, evidence);
+    let view = EvidenceState::provider_visible_view(evidence);
+    let provider_preview_complete = view.provider_preview_complete;
+    let result = host_executed_shell_result_from_view(handoff, evidence, view);
     let delivered = match state.agent_run.active.as_mut() {
         Some(run) => {
             let delivered = run
@@ -153,6 +162,7 @@ fn deliver_host_executed_shell_result_if_supported(
             delivered: true,
             status: "delivered",
             recovery_reason: None,
+            provider_preview_complete,
         }
     } else {
         ShellEvidenceDelivery {
@@ -161,15 +171,25 @@ fn deliver_host_executed_shell_result_if_supported(
             recovery_reason: Some(
                 "provider approval channel closed before host-executed shell result was delivered; shell evidence continuation required",
             ),
+            provider_preview_complete,
         }
     }
 }
 
+#[cfg(test)]
 fn host_executed_shell_result(
     handoff: &ShellHandoffRequest,
     evidence: &RuntimeShellCommandCompleted,
 ) -> HostExecutedShellResult {
     let view = EvidenceState::provider_visible_view(evidence);
+    host_executed_shell_result_from_view(handoff, evidence, view)
+}
+
+fn host_executed_shell_result_from_view(
+    handoff: &ShellHandoffRequest,
+    evidence: &RuntimeShellCommandCompleted,
+    view: crate::evidence::output_policy::EvidenceView,
+) -> HostExecutedShellResult {
     let llm_content = format!(
         "ShellCommandCompleted evidence\n\
          {}",
@@ -177,7 +197,7 @@ fn host_executed_shell_result(
     );
     HostExecutedShellResult {
         llm_content,
-        return_display: view.return_display,
+        return_display: None,
         metadata: HostExecutedShellMetadata {
             command: redact_provider_command_text(&evidence.command),
             status: evidence.status.to_string(),
@@ -292,6 +312,7 @@ mod tests {
         OutputRefs, RatatuiInlineRenderer,
     };
 
+    use crate::adapter::serialize_host_executed_shell_result;
     use crate::agent::run::ActiveAgentRun;
 
     #[test]
@@ -384,14 +405,146 @@ mod tests {
             result.llm_content
         );
         assert_eq!(result.metadata.tool_use_id.as_deref(), Some("toolu-1"));
+        assert_eq!(result.return_display, None);
+        let serialized = serialize_host_executed_shell_result("ctrl-1", &result);
+        assert!(!serialized.contains("provider_visible_complete"));
+        assert!(!serialized.contains("provider_visible_truncated"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn host_executed_shell_result_budget_does_not_duplicate_preview() {
+        let dir = std::env::temp_dir().join(format!(
+            "cosh-shell-host-executed-budget-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let output_ref = dir.join("cmd-budget.txt");
+        const PROVIDER_PREVIEW_MAX_CHARS: usize = 6_000;
+        let preview = "a".repeat(PROVIDER_PREVIEW_MAX_CHARS);
+        std::fs::write(&output_ref, &preview).expect("write output ref");
+        let output_ref_str = output_ref.to_str().expect("utf8 output ref");
+
+        let mut handoff = ShellHandoffRequest::new(
+            "printf budget",
+            "$ printf budget",
+            "provider-tool-call",
+            "agent",
+            "req-budget",
+            "run-budget",
+            10,
+        )
+        .expect("handoff");
+        handoff.request_id = Some("ctrl-budget".to_string());
+        handoff.tool_use_id = Some("toolu-budget".to_string());
+        let block = CommandBlock {
+            id: "cmd-budget".to_string(),
+            session_id: "raw-session".to_string(),
+            command: "printf budget".to_string(),
+            origin: Default::default(),
+            cwd: "/repo".to_string(),
+            end_cwd: "/repo".to_string(),
+            started_at_ms: 10,
+            ended_at_ms: 20,
+            duration_ms: 10,
+            exit_code: 0,
+            status: CommandStatus::Completed,
+            output: OutputRefs {
+                terminal_output_ref: Some(output_ref_str.to_string()),
+                terminal_output_bytes: preview.len() as u64,
+            },
+        };
+        let evidence =
+            RuntimeShellCommandCompleted::from_shell_handoff(&handoff, &block, "completed");
+        let result = host_executed_shell_result(&handoff, &evidence);
+
+        assert_eq!(result.return_display, None);
+        let serialized = serialize_host_executed_shell_result("ctrl-budget", &result);
+        assert!(!serialized.contains("provider_visible_complete"));
+        assert!(!serialized.contains("provider_visible_truncated"));
+        assert!(!serialized.contains("provider_visible_chars"));
+        let preview_count = serialized.matches(&preview).count();
+        assert_eq!(preview_count, 1, "{serialized}");
         assert!(
-            !result
-                .return_display
-                .as_deref()
-                .unwrap_or("")
-                .contains(output_ref_str),
-            "{:?}",
-            result.return_display
+            serialized.len() <= 8_500,
+            "serialized_len={} must stay bounded",
+            serialized.len()
+        );
+
+        let baseline = serialized.replace(&preview, "");
+        assert!(
+            serialized.len() <= baseline.len() + 6_500,
+            "serialized_len={} baseline_len={}",
+            serialized.len(),
+            baseline.len()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn host_executed_shell_result_escaped_preview_stays_within_delta_budget() {
+        let dir = std::env::temp_dir().join(format!(
+            "cosh-shell-host-executed-escaped-budget-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let output_ref = dir.join("cmd-escaped.txt");
+        let mut preview = "a".repeat(5_990);
+        preview.push_str("\"\\\nend");
+        std::fs::write(&output_ref, &preview).expect("write output ref");
+        let output_ref_str = output_ref.to_str().expect("utf8 output ref");
+
+        let mut handoff = ShellHandoffRequest::new(
+            "printf escaped",
+            "$ printf escaped",
+            "provider-tool-call",
+            "agent",
+            "req-escaped",
+            "run-escaped",
+            10,
+        )
+        .expect("handoff");
+        handoff.request_id = Some("ctrl-escaped".to_string());
+        handoff.tool_use_id = Some("toolu-escaped".to_string());
+        let block = CommandBlock {
+            id: "cmd-escaped".to_string(),
+            session_id: "raw-session".to_string(),
+            command: "printf escaped".to_string(),
+            origin: Default::default(),
+            cwd: "/repo".to_string(),
+            end_cwd: "/repo".to_string(),
+            started_at_ms: 10,
+            ended_at_ms: 20,
+            duration_ms: 10,
+            exit_code: 0,
+            status: CommandStatus::Completed,
+            output: OutputRefs {
+                terminal_output_ref: Some(output_ref_str.to_string()),
+                terminal_output_bytes: preview.len() as u64,
+            },
+        };
+        let evidence =
+            RuntimeShellCommandCompleted::from_shell_handoff(&handoff, &block, "completed");
+        let result = host_executed_shell_result(&handoff, &evidence);
+
+        let serialized = serialize_host_executed_shell_result("ctrl-escaped", &result);
+        assert_eq!(result.return_display, None);
+        assert!(!serialized.contains("provider_visible_complete"));
+        assert!(!serialized.contains("provider_visible_truncated"));
+        assert!(!serialized.contains("provider_visible_chars"));
+        let mut baseline_result = result.clone();
+        baseline_result.llm_content = baseline_result.llm_content.replace(&preview, "");
+        let baseline = serialize_host_executed_shell_result("ctrl-escaped", &baseline_result);
+
+        assert!(
+            serialized.len() <= baseline.len() + 6_500,
+            "serialized_len={} baseline_len={}",
+            serialized.len(),
+            baseline.len()
         );
 
         let _ = std::fs::remove_dir_all(&dir);

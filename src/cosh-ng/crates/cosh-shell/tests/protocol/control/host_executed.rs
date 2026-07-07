@@ -31,7 +31,7 @@ fn cosh_core_host_executed_shell_result_uses_control_response() {
                         llm_content:
                             "ShellCommandCompleted evidence\ncommand: df -h\nstatus: completed"
                                 .to_string(),
-                        return_display: Some("df -h completed".to_string()),
+                        return_display: None,
                         metadata: HostExecutedShellMetadata {
                             command: "df -h".to_string(),
                             status: "completed".to_string(),
@@ -199,7 +199,7 @@ fn respond_host_executed(
                         llm_content: format!(
                             "ShellCommandCompleted evidence\ncommand: {command}\nstatus: {status}"
                         ),
-                        return_display: Some(format!("{command} {status}")),
+                        return_display: None,
                         metadata: HostExecutedShellMetadata {
                             command: command.to_string(),
                             status: status.to_string(),

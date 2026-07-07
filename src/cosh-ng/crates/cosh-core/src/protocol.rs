@@ -775,6 +775,28 @@ mod tests {
     }
 
     #[test]
+    fn parse_control_response_host_executed_shell_with_null_return_display() {
+        let json = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-3","response":{"behavior":"host_executed_shell","result":{"llmContent":"ShellCommandCompleted evidence\ncommand: df -h","returnDisplay":null,"metadata":{"command":"df -h","status":"completed","exit_code":0}}}}}"#;
+        let msg: InputMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            InputMessage::ControlResponse { response } => {
+                let result = response.response.result.expect("host result");
+                assert!(result.llm_content.contains("ShellCommandCompleted"));
+                assert_eq!(result.return_display, None);
+                assert_eq!(
+                    result
+                        .metadata
+                        .as_ref()
+                        .and_then(|m| m.get("exit_code"))
+                        .and_then(Value::as_i64),
+                    Some(0)
+                );
+            }
+            _ => panic!("expected ControlResponse"),
+        }
+    }
+
+    #[test]
     fn serialize_system_init() {
         let msg = OutputMessage::system_init(
             "sess-1",

@@ -127,6 +127,7 @@ pub(crate) struct ShellEvidenceDelivery {
     pub(crate) delivered: bool,
     pub(crate) status: &'static str,
     pub(crate) recovery_reason: Option<&'static str>,
+    pub(crate) provider_preview_complete: bool,
 }
 
 impl ShellEvidenceDelivery {
@@ -135,6 +136,7 @@ impl ShellEvidenceDelivery {
             delivered: false,
             status: "not_attempted",
             recovery_reason: None,
+            provider_preview_complete: false,
         }
     }
 }
@@ -294,6 +296,7 @@ mod tests {
             delivered: true,
             status: "delivered",
             recovery_reason: None,
+            provider_preview_complete: true,
         });
 
         assert!(evidence.provider_result_delivered);

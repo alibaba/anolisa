@@ -363,9 +363,9 @@ fn serialize_deny_format() {
 #[test]
 fn serialize_host_executed_shell_result_format() {
     let result = HostExecutedShellResult {
-        llm_content: "command: df -h\nstatus: completed\nbounded_output:\nFilesystem ..."
+        llm_content: "ShellCommandCompleted evidence\ncommand: df -h\nstatus: completed\nbounded_output_summary:\nFilesystem ..."
             .to_string(),
-        return_display: Some("df -h completed".to_string()),
+        return_display: None,
         metadata: HostExecutedShellMetadata {
             command: "df -h".to_string(),
             status: "completed".to_string(),
@@ -392,7 +392,7 @@ fn serialize_host_executed_shell_result_format() {
     );
     assert_eq!(
         v["response"]["response"]["result"]["returnDisplay"],
-        "df -h completed"
+        Value::Null
     );
     assert_eq!(
         v["response"]["response"]["result"]["metadata"]["command"],
@@ -406,6 +406,18 @@ fn serialize_host_executed_shell_result_format() {
     assert_eq!(
         v["response"]["response"]["result"]["metadata"]["tool_use_id"],
         "toolu-1"
+    );
+    assert_eq!(
+        v["response"]["response"]["result"]["metadata"].get("provider_visible_complete"),
+        None
+    );
+    assert_eq!(
+        v["response"]["response"]["result"]["metadata"].get("provider_visible_truncated"),
+        None
+    );
+    assert_eq!(
+        v["response"]["response"]["result"]["metadata"].get("provider_visible_chars"),
+        None
     );
 }
 

@@ -2,20 +2,29 @@ use std::path::Path;
 
 use crate::evidence::model::OutputExcerptDirection;
 
-pub(super) const PROVIDER_PREVIEW_MAX_CHARS: usize = 2_000;
+pub(super) const PROVIDER_PREVIEW_MAX_CHARS: usize = 6_000;
+const PROVIDER_PREVIEW_HEAD_CHARS: usize = 4_000;
+const PROVIDER_PREVIEW_TAIL_CHARS: usize = 1_500;
 
 pub(super) struct ProviderOutputPreview {
     pub(super) text: Option<String>,
     pub(super) redaction_status: &'static str,
     pub(super) reason: &'static str,
+    pub(super) truncated: bool,
+    pub(super) complete: bool,
 }
 
-pub(super) fn provider_output_preview(output_ref: Option<&str>) -> ProviderOutputPreview {
+pub(super) fn provider_output_preview(
+    output_ref: Option<&str>,
+    output_id: &str,
+) -> ProviderOutputPreview {
     let Some(output_ref) = output_ref else {
         return ProviderOutputPreview {
             text: None,
             redaction_status: "preview_unavailable",
             reason: "<none>",
+            truncated: false,
+            complete: false,
         };
     };
     let Ok(text) = std::fs::read_to_string(Path::new(output_ref)) else {
@@ -23,12 +32,14 @@ pub(super) fn provider_output_preview(output_ref: Option<&str>) -> ProviderOutpu
             text: None,
             redaction_status: "preview_unavailable",
             reason: "<unavailable>",
+            truncated: false,
+            complete: false,
         };
     };
 
     let text = clean_terminal_control_sequences(&text);
     let (redacted, found_sensitive) = redact_sensitive_output(&text);
-    let (bounded, truncated) = truncate_preview(&redacted, PROVIDER_PREVIEW_MAX_CHARS);
+    let (bounded, truncated) = truncate_preview(&redacted, PROVIDER_PREVIEW_MAX_CHARS, output_id);
     let redaction_status = if found_sensitive || truncated {
         "preview_redacted"
     } else {
@@ -39,6 +50,8 @@ pub(super) fn provider_output_preview(output_ref: Option<&str>) -> ProviderOutpu
         text: Some(bounded),
         redaction_status,
         reason: "<preview omitted>",
+        truncated,
+        complete: !truncated,
     }
 }
 
@@ -153,14 +166,35 @@ fn push_redacted_token(output: &mut String, token: &str, changed: &mut bool) {
     }
 }
 
-fn truncate_preview(value: &str, max_chars: usize) -> (String, bool) {
-    let mut chars = value.chars();
-    let truncated = chars.by_ref().take(max_chars).collect::<String>();
-    if chars.next().is_some() {
-        (format!("{truncated}... <truncated>"), true)
-    } else {
-        (truncated, false)
+fn truncate_preview(value: &str, max_chars: usize, output_id: &str) -> (String, bool) {
+    let total_chars = value.chars().count();
+    if total_chars <= max_chars {
+        return (value.to_string(), false);
     }
+
+    let full_marker = format!(
+        "\n\n... <truncated; for more output use cosh_shell_evidence action=read_output output_id={output_id} direction=tail lines=300>\n\n"
+    );
+    let marker = if full_marker.chars().count() < max_chars {
+        full_marker
+    } else {
+        "\n\n... <truncated; for more output use cosh_shell_evidence read_output with output_id from metadata>\n\n".to_string()
+    };
+    let marker_chars = marker.chars().count();
+    let available_chars = max_chars.saturating_sub(marker_chars);
+    let head_chars = PROVIDER_PREVIEW_HEAD_CHARS.min(available_chars);
+    let tail_chars = PROVIDER_PREVIEW_TAIL_CHARS.min(available_chars.saturating_sub(head_chars));
+    let head = value.chars().take(head_chars).collect::<String>();
+    let tail = value
+        .chars()
+        .rev()
+        .take(tail_chars)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+
+    (format!("{head}{marker}{tail}"), true)
 }
 
 pub(super) fn select_output_lines(

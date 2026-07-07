@@ -544,12 +544,27 @@ printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-ho
 read -r user_message
 case "$user_message" in
   *cosh-core-provider-host-executed-large*)
-    printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-large","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"printf %08000d 0"},"tool_use_id":"toolu-cosh-core-large"}}'
+    printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-large","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"printf \"%b\" \"\\110\\105\\101\\104\\137\\123\\105\\116\\124\\111\\116\\105\\114\"; printf %08000d 0; printf \"%b\" \"\\124\\101\\111\\114\\137\\123\\105\\116\\124\\111\\116\\105\\114\""},"tool_use_id":"toolu-cosh-core-large"}}'
     if IFS= read -r response; then
       response_len=${#response}
       case "$response" in
         *'"behavior":"host_executed_shell"'*'bounded_output_summary'*)
-          if [ "$response_len" -gt 7000 ]; then
+          case "$response" in
+            *'"returnDisplay":null'*) ;;
+            *) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-host-executed-large","is_error":true,"result":"host result carried returnDisplay preview"}'; exit 1 ;;
+          esac
+          case "$response" in
+            *HEAD_SENTINEL*) ;;
+            *) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-host-executed-large","is_error":true,"result":"host result missing head sentinel"}'; exit 1 ;;
+          esac
+          case "$response" in
+            *TAIL_SENTINEL*) ;;
+            *) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-host-executed-large","is_error":true,"result":"host result missing tail sentinel"}'; exit 1 ;;
+          esac
+          case "$response" in
+            *HEAD_SENTINEL*HEAD_SENTINEL*) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-host-executed-large","is_error":true,"result":"host result duplicated preview"}'; exit 1 ;;
+          esac
+          if [ "$response_len" -gt 10000 ]; then
             printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-host-executed-large","is_error":true,"result":"host result was not bounded"}'
             exit 1
           fi
@@ -590,7 +605,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
 
     assert!(output.contains("Approved req-1"), "{output}");
     assert!(output.contains("Bash tool sent to shell"), "{output}");
-    assert!(output.contains("$ printf %08000d 0"), "{output}");
+    assert!(output.contains("printf %08000d 0"), "{output}");
     assert!(
         output.contains("Cosh-core large host-executed output was bounded for provider."),
         "{output}"
@@ -605,6 +620,10 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
         "{output}"
     );
     assert!(!output.contains("host result was not bounded"), "{output}");
+    assert!(
+        !output.contains("host result duplicated preview"),
+        "{output}"
+    );
     assert!(!output.contains("Agent timed out:"), "{output}");
 }
 
@@ -659,9 +678,9 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
             ),
             (
                 b"echo AFTER_COSH_CORE_PROVIDER_INPUT\n".to_vec(),
-                Duration::from_millis(1_500),
+                Duration::from_millis(4_000),
             ),
-            (b"exit\n".to_vec(), Duration::from_millis(3_500)),
+            (b"exit\n".to_vec(), Duration::from_millis(1_000)),
         ],
     );
     let _ = fs::remove_dir_all(&home);

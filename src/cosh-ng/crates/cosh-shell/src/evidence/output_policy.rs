@@ -17,8 +17,10 @@ use crate::evidence::prelude::{CommandStatus, OutputRefs};
 pub(crate) struct EvidenceView {
     pub(crate) provider_summary: String,
     pub(crate) provider_preview: Option<String>,
-    pub(crate) return_display: Option<String>,
     pub(crate) redaction_status: &'static str,
+    pub(crate) provider_preview_truncated: bool,
+    pub(crate) provider_preview_complete: bool,
+    pub(crate) provider_preview_chars: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -178,13 +180,19 @@ fn unavailable_excerpt() -> EvidenceExcerpt {
 }
 
 pub(crate) fn shell_evidence_view(facts: EvidenceFacts<'_>) -> EvidenceView {
-    let preview = provider_output_preview(facts.output_ref);
     let output_id = facts
         .output_ref
         .map(|_| terminal_output_id(facts.shell_session_id, facts.command_id))
         .unwrap_or_else(|| "<none>".to_string());
+    let preview = provider_output_preview(facts.output_ref, &output_id);
     let provider_preview = preview.text;
     let redaction_status = preview.redaction_status;
+    let provider_preview_truncated = preview.truncated;
+    let provider_preview_complete = preview.complete;
+    let provider_preview_chars = provider_preview
+        .as_deref()
+        .map(|text| text.chars().count())
+        .unwrap_or(0);
     let bounded_output = provider_preview.as_deref().unwrap_or(preview.reason);
     let provider_summary = format!(
         "command: {command}\n\
@@ -206,9 +214,11 @@ pub(crate) fn shell_evidence_view(facts: EvidenceFacts<'_>) -> EvidenceView {
 
     EvidenceView {
         provider_summary,
-        return_display: provider_preview.clone(),
         provider_preview,
         redaction_status,
+        provider_preview_truncated,
+        provider_preview_complete,
+        provider_preview_chars,
     }
 }
 
@@ -241,6 +251,8 @@ mod tests {
         });
 
         assert_eq!(view.redaction_status, "preview_redacted");
+        assert!(!view.provider_preview_truncated);
+        assert!(view.provider_preview_complete);
         assert!(view.provider_summary.contains("command: cat secret.txt"));
         assert!(view
             .provider_summary
@@ -299,10 +311,111 @@ mod tests {
 
         let provider_preview = view.provider_preview.expect("provider preview");
         assert_eq!(view.redaction_status, "preview_redacted");
-        assert!(provider_preview.ends_with("... <truncated>"));
+        assert!(view.provider_preview_truncated);
+        assert!(!view.provider_preview_complete);
+        assert!(view.provider_preview_chars <= PROVIDER_PREVIEW_MAX_CHARS);
+        assert!(provider_preview.contains("... <truncated"));
+        assert!(provider_preview.contains("cosh_shell_evidence action=read_output"));
+        assert!(provider_preview.contains("terminal-output://raw-test/cmd-2"));
+        assert!(provider_preview.ends_with(&"x".repeat(100)));
         assert!(view
             .provider_summary
             .contains("redaction_status: preview_redacted"));
+    }
+
+    #[test]
+    fn evidence_view_truncated_json_preview_keeps_tail() {
+        let dir = std::env::temp_dir().join(format!(
+            "cosh-shell-evidence-policy-json-tail-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let output = dir.join("output.txt");
+        let body = format!(
+            "{{\"findings\":\"{}\",\"next_steps\":[\"sysom-osops memory filecache\"],\"summary\":\"tail kept\"}}",
+            "x".repeat(PROVIDER_PREVIEW_MAX_CHARS)
+        );
+        std::fs::write(&output, body).expect("write output");
+
+        let view = shell_evidence_view(EvidenceFacts {
+            shell_session_id: "raw-test",
+            command_id: "cmd-json",
+            command: "sysom-osops memory classify",
+            cwd: "/tmp",
+            end_cwd: "/tmp",
+            status: "completed",
+            exit_code: 0,
+            duration_ms: 12,
+            output_ref: Some(output.to_str().expect("utf8 output path")),
+        });
+
+        let provider_preview = view.provider_preview.expect("provider preview");
+        assert!(view.provider_preview_truncated);
+        assert!(!view.provider_preview_complete);
+        assert!(view.provider_preview_chars <= PROVIDER_PREVIEW_MAX_CHARS);
+        assert!(provider_preview.starts_with("{\"findings\""));
+        assert!(provider_preview.contains("\"next_steps\""));
+        assert!(provider_preview.contains("\"summary\":\"tail kept\"}"));
+    }
+
+    #[test]
+    fn evidence_view_truncated_preview_stays_bounded_with_long_output_id() {
+        let dir = std::env::temp_dir().join(format!(
+            "cosh-shell-evidence-policy-long-output-id-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let output = dir.join("output.txt");
+        std::fs::write(&output, "x".repeat(PROVIDER_PREVIEW_MAX_CHARS + 10)).expect("write output");
+
+        let view = shell_evidence_view(EvidenceFacts {
+            shell_session_id: &"s".repeat(PROVIDER_PREVIEW_MAX_CHARS),
+            command_id: "cmd-long",
+            command: "yes",
+            cwd: "/tmp",
+            end_cwd: "/tmp",
+            status: "completed",
+            exit_code: 0,
+            duration_ms: 12,
+            output_ref: Some(output.to_str().expect("utf8 output path")),
+        });
+
+        assert!(view.provider_preview_truncated);
+        assert!(view.provider_preview_chars <= PROVIDER_PREVIEW_MAX_CHARS);
+        assert!(view
+            .provider_preview
+            .as_deref()
+            .expect("provider preview")
+            .contains("output_id from metadata"));
+    }
+
+    #[test]
+    fn evidence_view_unavailable_preview_is_not_complete() {
+        let dir = std::env::temp_dir().join(format!(
+            "cosh-shell-evidence-policy-invalid-utf8-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let output = dir.join("output.txt");
+        std::fs::write(&output, [0xff, 0xfe, 0xfd]).expect("write output");
+
+        let view = shell_evidence_view(EvidenceFacts {
+            shell_session_id: "raw-test",
+            command_id: "cmd-invalid",
+            command: "cat output.txt",
+            cwd: "/tmp",
+            end_cwd: "/tmp",
+            status: "completed",
+            exit_code: 0,
+            duration_ms: 12,
+            output_ref: Some(output.to_str().expect("utf8 output path")),
+        });
+
+        assert_eq!(view.provider_preview, None);
+        assert_eq!(view.redaction_status, "preview_unavailable");
+        assert!(!view.provider_preview_truncated);
+        assert!(!view.provider_preview_complete);
+        assert_eq!(view.provider_preview_chars, 0);
     }
 
     #[test]

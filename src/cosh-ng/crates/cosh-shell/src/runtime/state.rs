@@ -190,7 +190,7 @@ struct ShellEvidenceActionSignature {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EvidenceCoverage {
-    Summary,
+    Summary { complete: bool },
     Excerpt { direction: String, lines: u16 },
 }
 
@@ -203,8 +203,15 @@ impl ShellEvidenceState {
         &mut self,
         output_id: String,
         run_id: Option<String>,
+        summary_complete: bool,
     ) {
-        self.push_recent_shell_tool_output(output_id, run_id, EvidenceCoverage::Summary);
+        self.push_recent_shell_tool_output(
+            output_id,
+            run_id,
+            EvidenceCoverage::Summary {
+                complete: summary_complete,
+            },
+        );
     }
 
     pub(crate) fn record_shell_evidence_read_output(
@@ -294,7 +301,7 @@ impl ShellEvidenceState {
 impl EvidenceCoverage {
     fn covers(&self, direction: &str, lines: u16) -> bool {
         match self {
-            Self::Summary => true,
+            Self::Summary { complete } => *complete,
             Self::Excerpt {
                 direction: delivered_direction,
                 lines: delivered_lines,
@@ -313,6 +320,7 @@ mod shell_evidence_recent_tests {
         state.record_host_executed_shell_output(
             "terminal-output://session-1/cmd-1".to_string(),
             Some("run-1".to_string()),
+            true,
         );
 
         assert!(state.read_output_recently_delivered(
@@ -348,14 +356,15 @@ mod shell_evidence_recent_tests {
     }
 
     #[test]
-    fn recent_shell_evidence_summary_suppresses_default_read_even_when_incomplete() {
+    fn recent_shell_evidence_incomplete_summary_does_not_suppress_default_read() {
         let mut state = ShellEvidenceState::default();
         state.record_host_executed_shell_output(
             "terminal-output://session-1/cmd-1".to_string(),
             Some("run-1".to_string()),
+            false,
         );
 
-        assert!(state.read_output_recently_delivered(
+        assert!(!state.read_output_recently_delivered(
             "terminal-output://session-1/cmd-1",
             Some("run-1"),
             "tail",
@@ -393,6 +402,7 @@ mod shell_evidence_recent_tests {
         state.record_host_executed_shell_output(
             "terminal-output://session-1/cmd-1".to_string(),
             Some("run-1".to_string()),
+            true,
         );
 
         assert!(state.read_output_recently_delivered(
@@ -429,6 +439,7 @@ mod shell_evidence_recent_tests {
             state.record_host_executed_shell_output(
                 format!("terminal-output://session-1/cmd-{index}"),
                 Some("run-1".to_string()),
+                true,
             );
         }
 

@@ -153,7 +153,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
             ),
             (
                 b"?? cosh-core-evidence-agent-split\n".to_vec(),
-                Duration::from_millis(300),
+                Duration::from_millis(800),
             ),
             (b"exit 0\n".to_vec(), Duration::from_millis(2_000)),
         ],
@@ -183,7 +183,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
 }
 
 #[test]
-fn raw_cli_cosh_core_duplicate_read_after_host_executed_is_already_delivered() {
+fn raw_cli_cosh_core_read_after_truncated_host_executed_returns_output() {
     let home = temp_shell_home("cosh-core-shell-evidence-duplicate-read");
     let bin_dir = home.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
@@ -206,14 +206,10 @@ output_id=${output_tail%%\\n*}
 printf '%s\n' "{\"type\":\"control_request\",\"request_id\":\"evidence-duplicate-read\",\"request\":{\"subtype\":\"shell_evidence\",\"tool_use_id\":\"toolu-evidence-duplicate-read\",\"action\":\"read_output\",\"output_id\":\"$output_id\",\"direction\":\"tail\",\"lines\":120}}"
 IFS= read -r response2 || exit 2
 case "$response2" in
-  *'"behavior":"shell_evidence"'*'excerpt_status: already_delivered'*'already_delivered_recent_shell_tool_output'*)
-    case "$response2" in
-      *'bounded_output_excerpt:'*|*'duplicate-read-line-120'*) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-duplicate-read","is_error":true,"result":"duplicate read returned output body"}'; exit 1 ;;
-    esac
-    ;;
-  *) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-duplicate-read","is_error":true,"result":"duplicate read was not suppressed"}'; exit 1 ;;
+  *'"behavior":"shell_evidence"'*'ShellEvidenceExcerpt'*'action: read_output'*'bounded_output_excerpt:'*'duplicate-read-line-120'*) ;;
+  *) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-duplicate-read","is_error":true,"result":"truncated host-executed read did not return output body"}'; exit 1 ;;
 esac
-printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-duplicate-read","message":{"content":[{"type":"text","text":"DUPLICATE READ ALREADY DELIVERED FINAL"}]}}'
+printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-duplicate-read","message":{"content":[{"type":"text","text":"TRUNCATED HOST EXECUTED READ FINAL"}]}}'
 printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-duplicate-read","is_error":false,"result":"done"}'
 exit 0
 "#,
@@ -240,22 +236,19 @@ exit 0
     let _ = fs::remove_dir_all(&home);
 
     assert!(
-        output.contains("DUPLICATE READ ALREADY DELIVERED FINAL"),
+        output.contains("TRUNCATED HOST EXECUTED READ FINAL"),
         "{output}"
     );
     assert!(output.contains("Activity details evidence-1"), "{output}");
     assert!(output.contains("Shell evidence completed"), "{output}");
     assert!(
-        output.contains("recent output already delivered; body not repeated"),
+        output.contains("shell output excerpt delivered to Agent"),
         "{output}"
     );
+    assert!(output.contains("duplicate-read-line-120"), "{output}");
     assert!(output.contains("Status: success"), "{output}");
     assert!(
-        !output.contains("duplicate read was not suppressed"),
-        "{output}"
-    );
-    assert!(
-        !output.contains("duplicate read returned output body"),
+        !output.contains("truncated host-executed read did not return output body"),
         "{output}"
     );
     assert!(
@@ -650,11 +643,11 @@ exit 0
             (b"printf 'same-command-line\\n'\n".to_vec(), Duration::ZERO),
             (
                 b"printf 'same-command-line\\n'\n".to_vec(),
-                Duration::from_millis(300),
+                Duration::from_millis(800),
             ),
             (
                 b"?? cosh-core-same-command-text\n".to_vec(),
-                Duration::from_millis(500),
+                Duration::from_millis(1_200),
             ),
             (b"exit 0\n".to_vec(), Duration::from_millis(5_000)),
         ],
@@ -1034,7 +1027,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
                 b"?? \xe6\x9c\x80\xe8\xbf\x91\xe5\x9c\xa8\xe5\xb9\xb2\xe5\x98\x9b evidence-activity-recap\n".to_vec(),
                 Duration::from_millis(300),
             ),
-            (b"/details evidence-1\n".to_vec(), Duration::from_millis(3_000)),
+            (b"/details evidence-1\n".to_vec(), Duration::from_millis(5_000)),
             (b"exit 0\n".to_vec(), Duration::from_millis(500)),
         ],
     );
