@@ -326,14 +326,14 @@ pub enum ClaimResourceKind {
         /// Absolute external path.
         path: PathBuf,
     },
-    /// A symlink ANOLISA created and took over. Both the `link` location
-    /// and its `target` are validated against the driver's static
-    /// external roots (a symlink can otherwise redirect a later removal
-    /// outside the allowed boundary).
+    /// A symlink ANOLISA created and took over. The `link` location is
+    /// validated against the driver's static external roots, while the
+    /// `target` must live under ANOLISA-owned roots (including trusted
+    /// datadir roots supplied by the Manager for packaged bundles).
     Symlink {
         /// Absolute path of the link ANOLISA created.
         link: PathBuf,
-        /// Absolute path the link points at.
+        /// Absolute ANOLISA-owned path the link points at.
         target: PathBuf,
     },
     /// A record in a framework's plugin registry. `plugin_id` is
