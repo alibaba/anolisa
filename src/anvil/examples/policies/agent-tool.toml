@@ -86,3 +86,21 @@ memory_max = "4G"
 
 # Maximum number of PIDs (processes + threads).
 pids_max = 4096
+
+# ---------------------------------------------------------------------------
+# VM generic resource spec. Only consumed by VM backends.
+# ---------------------------------------------------------------------------
+[vm]
+vcpus = 1
+memory = "1G"
+
+# ---------------------------------------------------------------------------
+# Firecracker-specific knobs.
+# Override [vm] for this backend: guest gets 2 vCPUs / 2G.
+# ---------------------------------------------------------------------------
+[backend.firecracker]
+boot_args = "console=ttyS0 reboot=k panic=1 pci=off"
+enable_vsock = false  # parsed but not yet wired (Phase 2+)
+memory = "2G"
+vcpus = 2
+serial_log = true

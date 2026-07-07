@@ -101,6 +101,21 @@ memory_max = "4G"
 pids_max = 4096
 
 # ---------------------------------------------------------------------------
+# VM generic resource spec. Only consumed by VM backends.
+# ---------------------------------------------------------------------------
+[vm]
+vcpus = 4
+memory = "4G"
+
+# ---------------------------------------------------------------------------
+# Firecracker-specific knobs.
+# ---------------------------------------------------------------------------
+[backend.firecracker]
+boot_args = "console=ttyS0 reboot=k panic=1 pci=off"
+enable_vsock = true   # parsed but not yet wired (Phase 2+)
+serial_log = true
+
+# ---------------------------------------------------------------------------
 # Lifecycle hook sequences (Phase 3 — not yet active in v0.1).
 # Each hook is a string of format "<provider>:<action>".
 # ---------------------------------------------------------------------------

@@ -26,6 +26,9 @@ use std::sync::Arc;
 use anvil_core::AnvilError;
 use anvil_core::backend::BackendKind;
 use anvil_core::lifecycle::SandboxInstance;
+use anvil_core::policy::{
+    BackendConfigs, FirecrackerConfig, VmConfig, parse_memory_value, to_mib_ceil,
+};
 use async_trait::async_trait;
 use uuid::Uuid;
 
@@ -63,6 +66,8 @@ pub trait BackendSpawner: Send + Sync {
         instance: &SandboxInstance,
         binary_path: &Path,
         work_dir: &Path,
+        backend_config: &BackendConfigs,
+        vm_config: Option<&VmConfig>,
     ) -> Result<SpawnHandle, AnvilError>;
 
     /// Wait for the process to exit. v0.1 stub returns immediately;
@@ -95,6 +100,8 @@ impl BackendSpawner for BubblewrapSpawner {
         instance: &SandboxInstance,
         binary_path: &Path,
         work_dir: &Path,
+        _backend_config: &BackendConfigs,
+        _vm_config: Option<&VmConfig>,
     ) -> Result<SpawnHandle, AnvilError> {
         // v0.1: spawn a minimal bwrap sandbox running `/bin/sleep 3600`
         // so the lifecycle (Running -> Destroyed via SIGTERM) can be
@@ -190,6 +197,38 @@ impl BackendSpawner for BubblewrapSpawner {
 // FirecrackerSpawner
 // ---------------------------------------------------------------------------
 
+/// Resolve vCPUs for a Firecracker microVM using the fallback chain:
+/// `backend.firecracker.vcpus` > `[vm].vcpus` > code default (1).
+fn resolve_firecracker_vcpus(fc: &FirecrackerConfig, vm: Option<&VmConfig>) -> u32 {
+    fc.vcpus.or(vm.map(|v| v.vcpus)).unwrap_or(1)
+}
+
+/// Resolve memory for a Firecracker microVM using the fallback chain:
+/// `backend.firecracker.memory` > `[vm].memory` > code default ("256Mi").
+/// Returns the value in MiB, rounded up to the nearest integer.
+fn resolve_firecracker_memory(
+    fc: &FirecrackerConfig,
+    vm: Option<&VmConfig>,
+) -> Result<u64, AnvilError> {
+    let source = if fc.memory.is_some() {
+        "backend.firecracker.memory"
+    } else if vm.is_some() {
+        "[vm].memory"
+    } else {
+        "code default"
+    };
+    let memory_str = fc
+        .memory
+        .as_deref()
+        .or(vm.map(|v| v.memory.as_str()))
+        .unwrap_or("256Mi");
+    Ok(to_mib_ceil(parse_memory_value(memory_str).map_err(
+        |e| AnvilError::BackendError {
+            msg: format!("invalid firecracker memory value \"{memory_str}\" from {source}: {e}"),
+        },
+    )?))
+}
+
 /// Firecracker microVM spawner: launches the `firecracker` binary with a
 /// JSON vmconfig generated from the instance metadata + images_dir.
 ///
@@ -210,7 +249,20 @@ impl BackendSpawner for FirecrackerSpawner {
         instance: &SandboxInstance,
         binary_path: &Path,
         work_dir: &Path,
+        backend_config: &BackendConfigs,
+        vm_config: Option<&VmConfig>,
     ) -> Result<SpawnHandle, AnvilError> {
+        let fc_cfg = backend_config
+            .firecracker
+            .as_ref()
+            .cloned()
+            .unwrap_or_default();
+
+        // Resolve vCPU/memory via the fallback chain:
+        // backend.firecracker > [vm] > code default.
+        let resolved_vcpus = resolve_firecracker_vcpus(&fc_cfg, vm_config);
+        let resolved_memory_mib = resolve_firecracker_memory(&fc_cfg, vm_config)?;
+
         // Derive paths from images_dir
         let vmlinux = self.images_dir.join("vmlinux");
         let rootfs = self.images_dir.join("rootfs.ext4");
@@ -233,44 +285,79 @@ impl BackendSpawner for FirecrackerSpawner {
         let api_socket = instance_dir.join("api.sock");
         let log_file = instance_dir.join("firecracker.log");
 
+        // Pre-compute UTF-8 path strings; Linux allows non-UTF-8 paths, so fail
+        // explicitly rather than unwrap() inside the vmconfig builder.
+        let vmlinux_str = vmlinux.to_str().ok_or_else(|| AnvilError::BackendError {
+            msg: format!("vmlinux path is not valid UTF-8: {}", vmlinux.display()),
+        })?;
+        let rootfs_str = rootfs.to_str().ok_or_else(|| AnvilError::BackendError {
+            msg: format!("rootfs path is not valid UTF-8: {}", rootfs.display()),
+        })?;
+        let log_path_str = log_file.to_str().ok_or_else(|| AnvilError::BackendError {
+            msg: format!(
+                "firecracker log path is not valid UTF-8: {}",
+                log_file.display()
+            ),
+        })?;
+
         // Generate vmconfig JSON
         let vmconfig = serde_json::json!({
             "boot-source": {
-                "kernel_image_path": vmlinux.to_str().unwrap(),
-                "boot_args": "console=ttyS0 reboot=k panic=1 pci=off"
+                "kernel_image_path": vmlinux_str,
+                "boot_args": fc_cfg.boot_args
             },
             "drives": [{
                 "drive_id": "rootfs",
-                "path_on_host": rootfs.to_str().unwrap(),
+                "path_on_host": rootfs_str,
                 "is_root_device": true,
                 "is_read_only": false
             }],
             "machine-config": {
-                "vcpu_count": 1,
-                "mem_size_mib": 256
+                "vcpu_count": resolved_vcpus,
+                "mem_size_mib": resolved_memory_mib
+            },
+            "logger": {
+                "log_path": log_path_str,
+                "level": "Info",
+                "show_level": true,
+                "show_log_origin": true
             }
         });
 
         let config_path = instance_dir.join("vmconfig.json");
-        std::fs::write(
-            &config_path,
-            serde_json::to_string_pretty(&vmconfig).unwrap(),
-        )
-        .map_err(|source| AnvilError::IoError { source })?;
+        let vmconfig_json =
+            serde_json::to_string_pretty(&vmconfig).map_err(|e| AnvilError::BackendError {
+                msg: format!("failed to serialize firecracker vmconfig JSON: {e}"),
+            })?;
+        std::fs::write(&config_path, vmconfig_json)
+            .map_err(|source| AnvilError::IoError { source })?;
 
         // Spawn firecracker process
-        let child = tokio::process::Command::new(binary_path)
-            .arg("--api-sock")
+        let mut cmd = tokio::process::Command::new(binary_path);
+        cmd.arg("--api-sock")
             .arg(&api_socket)
             .arg("--config-file")
             .arg(&config_path)
-            .arg("--log-path")
-            .arg(&log_file)
-            .arg("--level")
-            .arg("Info")
-            .env("ANVIL_INSTANCE_ID", instance.id.to_string())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .env("ANVIL_INSTANCE_ID", instance.id.to_string());
+
+        // Guest ttyS0 output is emitted on Firecracker's stdout. When
+        // serial_log is enabled, persist it to serial.log for debugging.
+        if fc_cfg.serial_log {
+            let serial_log = instance_dir.join("serial.log");
+            let file = std::fs::File::create(&serial_log)
+                .map_err(|source| AnvilError::IoError { source })?;
+            cmd.stdout(file);
+            tracing::info!(
+                instance_id = %instance.id,
+                serial_log = %serial_log.display(),
+                "firecracker serial log enabled",
+            );
+        } else {
+            cmd.stdout(std::process::Stdio::null());
+        }
+        cmd.stderr(std::process::Stdio::null());
+
+        let child = cmd
             .spawn()
             .map_err(|source| AnvilError::IoError { source })?;
 
@@ -356,6 +443,8 @@ impl BackendSpawner for MockSpawner {
         instance: &SandboxInstance,
         _binary_path: &Path,
         _work_dir: &Path,
+        _backend_config: &BackendConfigs,
+        _vm_config: Option<&VmConfig>,
     ) -> Result<SpawnHandle, AnvilError> {
         tracing::info!(
             instance_id = %instance.id,
@@ -394,7 +483,7 @@ mod tests {
 
     use anvil_core::backend::BackendKind;
     use anvil_core::lifecycle::{SandboxInstance, StartPath};
-    use anvil_core::policy::WorkloadClass;
+    use anvil_core::policy::{VmConfig, WorkloadClass};
 
     use super::*;
 
@@ -413,7 +502,13 @@ mod tests {
         let spawner = MockSpawner;
         let instance = fixture_instance(BackendKind::Bubblewrap);
         let handle = spawner
-            .spawn(&instance, &PathBuf::from("/fake"), &PathBuf::from("/tmp"))
+            .spawn(
+                &instance,
+                &PathBuf::from("/fake"),
+                &PathBuf::from("/tmp"),
+                &BackendConfigs::default(),
+                None,
+            )
             .await
             .expect("mock spawn never fails");
         assert!(handle.pid.is_none(), "mock must not produce real PIDs");
@@ -453,5 +548,39 @@ mod tests {
         };
         // Should be a clean no-op rather than an io error.
         spawner.kill(&handle).await.expect("kill no-op");
+    }
+
+    #[test]
+    fn firecracker_fallback_chain_priority() {
+        let vm = VmConfig {
+            vcpus: 2,
+            memory: "1G".into(),
+        };
+
+        // backend override > [vm]
+        let override_cfg = FirecrackerConfig {
+            vcpus: Some(4),
+            memory: Some("2G".into()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_firecracker_vcpus(&override_cfg, Some(&vm)), 4);
+        // "2G" = 2_000_000_000 bytes -> ceil(2_000_000_000 / 1_048_576) = 1908 MiB.
+        assert_eq!(
+            resolve_firecracker_memory(&override_cfg, Some(&vm)).unwrap(),
+            2_000_000_000u64.div_ceil(1 << 20)
+        );
+
+        // [vm] > code default
+        let no_override = FirecrackerConfig::default();
+        assert_eq!(resolve_firecracker_vcpus(&no_override, Some(&vm)), 2);
+        // "1G" = 1_000_000_000 bytes -> ceil(1_000_000_000 / 1_048_576) = 954 MiB.
+        assert_eq!(
+            resolve_firecracker_memory(&no_override, Some(&vm)).unwrap(),
+            1_000_000_000u64.div_ceil(1 << 20)
+        );
+
+        // default when neither
+        assert_eq!(resolve_firecracker_vcpus(&no_override, None), 1);
+        assert_eq!(resolve_firecracker_memory(&no_override, None).unwrap(), 256);
     }
 }
