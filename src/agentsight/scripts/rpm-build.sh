@@ -121,9 +121,23 @@ fi
 npm run build:embed
 
 # Build Rust binary
+# Temporarily inject [patch.crates-io] to use the hf-hub fork with mirror fixes.
 log_info "Building Rust binary..."
 cd "$PROJECT_ROOT"
+
+CARGO_TOML_SIZE=$(wc -c < Cargo.toml)
+
+HF_PATCH='[patch.crates-io]
+hf-hub = { git = "https://github.com/chengshuyi/hf-hub.git", rev = "05f5134f40dbb5dc9f1617df1aaef628d49e951f" }'
+
+echo "" >> Cargo.toml
+echo "$HF_PATCH" >> Cargo.toml
+trap 'truncate -s "$CARGO_TOML_SIZE" Cargo.toml' EXIT
+
 cargo build --release
+
+# Restore Cargo.toml (remove appended patch)
+truncate -s "$CARGO_TOML_SIZE" Cargo.toml
 
 # Verify binary exists
 if [[ ! -f "target/release/agentsight" ]]; then

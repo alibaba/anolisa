@@ -89,9 +89,6 @@ notify = "6"
 [profile.dev]
 debug-assertions = false
 
-[patch.crates-io]
-hf-hub = { git = "https://github.com/chengshuyi/hf-hub.git", rev = "05f5134f40dbb5dc9f1617df1aaef628d49e951f" }
-
 [build-dependencies]
 libbpf-cargo = "0.23.3"
 bindgen = "0.69.4"
