@@ -342,6 +342,38 @@ impl SkillFs {
         !self.is_post_publish_grace_allowed(skill_name, relative_path)
     }
 
+    /// Hidden-write gate for a Hermes nested path (`category/skill/...`).
+    ///
+    /// Mirrors [`Self::should_reject_hidden_write`] but resolves through
+    /// [`Self::resolve_hermes_nested_read`] so it honors nested-skill
+    /// activation. Crucially, non-skill category children (a directory
+    /// without `SKILL.md`, e.g. `apple/docs`) are plain passthrough and are
+    /// never rejected — otherwise the flat resolver would treat the synthetic
+    /// id `apple/docs` as an unknown (hidden) skill and block creating new
+    /// files like `apple/docs/new.txt` while still allowing reads/appends.
+    pub(super) fn should_reject_hermes_nested_hidden_write(
+        &self,
+        category: &str,
+        skill_name: &str,
+        relative_path: Option<&std::path::Path>,
+    ) -> bool {
+        use crate::fs::read_resolution::ReadResolution;
+        if !self.hermes_nested_is_skill(category, skill_name) {
+            return false;
+        }
+        if !matches!(
+            self.resolve_hermes_nested_read(category, skill_name),
+            ReadResolution::Hidden
+        ) {
+            return false;
+        }
+        let nid = Self::hermes_skill_id(category, skill_name);
+        if self.is_staging_skill_root(&nid) || self.is_pending_install(&nid) {
+            return false;
+        }
+        !self.is_post_publish_grace_allowed(&nid, relative_path)
+    }
+
     pub(super) fn is_post_publish_grace_allowed(
         &self,
         skill_name: &str,

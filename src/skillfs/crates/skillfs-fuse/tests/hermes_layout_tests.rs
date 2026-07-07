@@ -910,6 +910,16 @@ fn hermes_non_skill_subdir_accessible_with_resolver() {
         "category readme"
     );
 
+    // Creating a NEW file inside a non-skill category subdir must succeed:
+    // it is plain passthrough, not a hidden skill, so the write-path
+    // hidden-write gate must not reject it.
+    std::fs::write(mp.join("apple/docs/new.txt"), "created via mount")
+        .expect("create apple/docs/new.txt with resolver");
+    assert_eq!(
+        std::fs::read_to_string(mp.join("apple/docs/new.txt")).expect("read back new.txt"),
+        "created via mount"
+    );
+
     // apple/ listing must still contain the non-skill children.
     let entries = list_dir_names(&mp.join("apple"));
     assert!(

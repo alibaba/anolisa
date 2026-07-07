@@ -351,17 +351,19 @@ impl SkillFs {
                     category,
                     skill_name,
                     relative_path,
-                } => {
-                    let nid = Self::hermes_skill_id(category, skill_name);
-                    self.should_reject_hidden_write(&nid, Some(relative_path))
-                }
+                } => self.should_reject_hermes_nested_hidden_write(
+                    category,
+                    skill_name,
+                    Some(relative_path),
+                ),
                 PathType::NestedSkillMd {
                     category,
                     skill_name,
-                } => {
-                    let nid = Self::hermes_skill_id(category, skill_name);
-                    self.should_reject_hidden_write(&nid, Some(Path::new("SKILL.md")))
-                }
+                } => self.should_reject_hermes_nested_hidden_write(
+                    category,
+                    skill_name,
+                    Some(Path::new("SKILL.md")),
+                ),
                 _ => false,
             };
             if reject {
@@ -951,17 +953,19 @@ impl SkillFs {
                     category,
                     skill_name,
                     relative_path,
-                } => {
-                    let nested_id = Self::hermes_skill_id(category, skill_name);
-                    self.should_reject_hidden_write(&nested_id, Some(relative_path))
-                }
+                } => self.should_reject_hermes_nested_hidden_write(
+                    category,
+                    skill_name,
+                    Some(relative_path),
+                ),
                 PathType::NestedSkillMd {
                     category,
                     skill_name,
-                } => {
-                    let nested_id = Self::hermes_skill_id(category, skill_name);
-                    self.should_reject_hidden_write(&nested_id, Some(Path::new("SKILL.md")))
-                }
+                } => self.should_reject_hermes_nested_hidden_write(
+                    category,
+                    skill_name,
+                    Some(Path::new("SKILL.md")),
+                ),
                 _ => false,
             };
             if reject {
