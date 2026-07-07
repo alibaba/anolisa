@@ -124,7 +124,12 @@ install -m 0644 manifests/repo.toml %{buildroot}%{_sysconfdir}/anolisa/repo.toml
 #%%doc %%{_docdir}/%%{name}/README.md
 
 %changelog
-* Fri Jul 03 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Tue Jul 07 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Raw components can now declare `conflicts` to block incompatible raw installs.
+- `anolisa install` now rejects raw component conflicts before changing the host.
+- `anolisa install --dry-run` now reports raw component conflicts instead of showing an invalid plan.
+
+* Fri Jul 03 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.1.20-1
 - ANOLISA can now be distributed as `@anolisa/cli` with Linux x64 and arm64 binaries.
 - `repo.toml` now enables the npm backend for component distribution.
 - `anolisa list` now shows local state, ownership, and next action for each component.

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-07
+
+### Added
+
+- Raw components can now declare `conflicts` to block incompatible raw installs.
+
+### Fixed
+
+- `anolisa install` now rejects raw component conflicts before changing the host.
+- `anolisa install --dry-run` now reports raw component conflicts instead of showing an invalid plan.
+
 ## [0.1.20] - 2026-07-03
 
 ### Added
@@ -414,6 +425,17 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.2.0] - 2026-07-07
+
+### 新增
+
+- Raw 组件现可声明 `conflicts` 阻止不兼容安装。
+
+### 修复
+
+- `anolisa install` 现会在变更主机前拒绝 Raw 组件冲突。
+- `anolisa install --dry-run` 现报告 Raw 组件冲突，不再显示无效计划。
 
 ## [0.1.20] - 2026-07-03
 
