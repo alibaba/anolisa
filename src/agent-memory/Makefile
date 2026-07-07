@@ -16,9 +16,22 @@ REMOTE_BRANCH ?= memory
 REMOTE_REPO ?= shiloong
 
 # Install paths
-PREFIX ?= /usr/local
+# INSTALL_PROFILE selects the install layout, matching the contract used by
+# the other Rust components (tokenless, ws-ckpt): in user mode every writable
+# path is rooted at $(HOME)/.local so `make install` runs without root; in
+# system mode paths go under /usr. DATADIR/SHARE_DIR derive from $(PREFIX) so
+# they follow the profile instead of being hardcoded to /usr/share/anolisa
+# (which caused Permission denied under INSTALL_PROFILE=user).
+INSTALL_PROFILE ?= user
+
+ifeq ($(INSTALL_PROFILE),user)
+PREFIX ?= $(HOME)/.local
+else
+PREFIX ?= /usr
+endif
+
 BINDIR ?= $(PREFIX)/bin
-DATADIR ?= /usr/share/anolisa
+DATADIR ?= $(PREFIX)/share/anolisa
 DOCDIR ?= $(PREFIX)/share/doc/$(NAME)
 SHARE_DIR ?= $(DATADIR)/adapters/agent-memory
 
