@@ -63,8 +63,8 @@
     "claude-code": {
       "compatibleVersions": ">=2.0.0",
       "method": "plugin",
-      "marketplace": "anolisa",
-      "pluginId": "tokenless@anolisa",
+      "marketplace": "anolisa-tokenless",
+      "pluginId": "tokenless@anolisa-tokenless",
       "capabilities": {
         "hooks": [
           "rewrite",

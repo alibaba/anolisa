@@ -125,7 +125,26 @@ fn stage(framework: &str, adapter_type: &str, dest: &str, stage_bundle: impl Fn(
     std::fs::create_dir_all(&resource_root).expect("resource root");
     stage_bundle(&resource_root);
 
-    // Seed installed.toml + component contract.
+    seed_component(&layout, &prefix, framework, adapter_type, dest);
+
+    World {
+        _root: root,
+        prefix,
+        layout,
+        user_home,
+        resource_root,
+    }
+}
+
+/// Seed `installed.toml` (component installed) plus the component contract
+/// declaring one adapter with the given `framework`/`adapter_type`/`dest`.
+fn seed_component(
+    layout: &FsLayout,
+    prefix: &Path,
+    framework: &str,
+    adapter_type: &str,
+    dest: &str,
+) {
     let state_path = layout.state_dir.join("installed.toml");
     std::fs::create_dir_all(state_path.parent().unwrap()).expect("state dir");
     std::fs::write(
@@ -174,14 +193,6 @@ dest = "{dest}"
         ),
     )
     .expect("seed contract");
-
-    World {
-        _root: root,
-        prefix,
-        layout,
-        user_home,
-        resource_root,
-    }
 }
 
 /// Minimal `{datadir}`/`{component}` expansion for staging (the manager's
@@ -673,15 +684,84 @@ fn codex_disable_keeps_receipt_when_cli_removal_fails() {
     assert_eq!(claim.status, ClaimStatus::CleanupFailed);
 }
 
+/// Regression: when the resource bundle is resolved from a packaged datadir
+/// registered via `push_primary_datadir_root` (exe-sibling `/usr/share`
+/// differing from the install prefix's `{datadir}`), the codex plugin
+/// symlink target lives outside the primary layout roots. Enable must still
+/// succeed — the Manager trusts its configured datadir roots for symlink
+/// target validation.
+#[test]
+fn codex_enable_succeeds_with_bundle_under_packaged_datadir() {
+    let guard = EnvGuard::acquire();
+    let root = tempfile::tempdir().expect("tempdir");
+    let prefix = root.path().to_path_buf();
+    // Install prefix layout (its datadir is prefix/usr/local/share/anolisa).
+    let layout = FsLayout::system(Some(prefix.join("install")));
+    let user_home = prefix.join("home");
+    std::fs::create_dir_all(&user_home).expect("home");
+
+    // Packaged datadir distinct from layout.datadir — where the bundle lives.
+    let packaged_datadir = prefix.join("pkg").join("usr").join("share").join("anolisa");
+    let resource_root = packaged_datadir
+        .join("adapters")
+        .join(COMPONENT)
+        .join("codex");
+    std::fs::create_dir_all(&resource_root).expect("resource root");
+    stage_codex_bundle(&resource_root);
+
+    // Contract dest expands against {datadir}; the bundle exists only under
+    // the packaged datadir, so resolution lands there.
+    seed_component(
+        &layout,
+        &prefix,
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+    );
+
+    let fake = write_fake_codex(&prefix);
+    let xdg = prefix.join("xdg-data");
+    std::fs::create_dir_all(&xdg).expect("xdg");
+    guard.set("CODEX_BIN", &fake);
+    guard.set("XDG_DATA_HOME", &xdg);
+    guard.set("FAKE_CODEX_LOG", &prefix.join("codex.log"));
+    guard.set("FAKE_CODEX_STATE", &prefix.join("codex-state"));
+
+    let mut manager = AdapterManager::new(layout, Some(user_home), "tester".to_string());
+    manager.push_primary_datadir_root(packaged_datadir);
+
+    let claim = match manager
+        .enable(COMPONENT, Some("codex"), false)
+        .expect("enable must succeed with bundle under a packaged datadir")
+    {
+        EnableOutcome::Enabled(c) => *c,
+        EnableOutcome::Planned(_) => panic!("expected enabled"),
+    };
+    // The symlink target points at the packaged-datadir bundle, outside the
+    // install-prefix layout roots — the very case that previously failed.
+    assert!(claim.resources.iter().any(|r| matches!(
+        &r.kind,
+        ClaimResourceKind::Symlink { target, .. } if target == &resource_root
+    )));
+
+    // status re-validates the receipt; it must not reject the packaged-datadir
+    // symlink target either.
+    let status = manager.status(Some(COMPONENT)).expect("status");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Healthy);
+}
+
 // ---------------------------------------------------------------------------
 // Claude Code
 // ---------------------------------------------------------------------------
 
 fn stage_claude_bundle(root: &Path) {
     std::fs::create_dir_all(root.join(".claude-plugin")).expect("claude-plugin");
+    // Written multi-line with the top-level name on its own line so the
+    // fake CLI's line-based `sed` reads the marketplace name (not the nested
+    // plugin name) — mirrors the real multi-line manifest.
     std::fs::write(
         root.join(".claude-plugin/marketplace.json"),
-        br#"{"name":"anolisa","plugins":[{"name":"tokenless","source":"./"}]}"#,
+        b"{\n  \"name\": \"anolisa-tokenless\",\n  \"plugins\": [{ \"name\": \"tokenless\", \"source\": \"./\" }]\n}\n",
     )
     .expect("marketplace.json");
     std::fs::write(
@@ -704,7 +784,9 @@ if [ "$1" = "plugin" ]; then
     validate) exit 0 ;;
     marketplace)
       case "$3" in
-        add) echo "anolisa" >> "$st/marketplaces" ;;
+        add)
+          name=$(sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$4/.claude-plugin/marketplace.json" | head -n1)
+          echo "$name" >> "$st/marketplaces" ;;
         remove) [ -f "$st/marketplaces" ] && { grep -vx "$4" "$st/marketplaces" > "$st/m.tmp" 2>/dev/null || true; mv "$st/m.tmp" "$st/marketplaces" 2>/dev/null || true; } ;;
         list) cat "$st/marketplaces" 2>/dev/null || true ;;
       esac ;;
@@ -767,7 +849,7 @@ fn claude_code_enable_records_validate_marketplace_and_install() {
     assert!(
         log_text
             .lines()
-            .any(|l| l == "plugin install tokenless@anolisa"),
+            .any(|l| l == "plugin install tokenless@anolisa-tokenless"),
         "must install the plugin: {log_text}"
     );
 
@@ -782,13 +864,13 @@ fn claude_code_enable_records_validate_marketplace_and_install() {
     assert!(
         log_text
             .lines()
-            .any(|l| l == "plugin uninstall tokenless@anolisa"),
+            .any(|l| l == "plugin uninstall tokenless@anolisa-tokenless"),
         "disable must uninstall the plugin: {log_text}"
     );
     assert!(
         log_text
             .lines()
-            .any(|l| l == "plugin marketplace remove anolisa"),
+            .any(|l| l == "plugin marketplace remove anolisa-tokenless"),
         "disable must remove the marketplace: {log_text}"
     );
 }
@@ -824,4 +906,66 @@ fn claude_code_disable_without_cli_keeps_receipt() {
         .cloned()
         .expect("receipt kept");
     assert_eq!(claim.status, ClaimStatus::CleanupFailed);
+}
+
+/// A receipt missing its marketplace resource (malformed/forged) must not
+/// drive `plugin uninstall` / `marketplace remove` against a name derived
+/// from context: status degrades and disable keeps the receipt without
+/// running any CLI.
+#[test]
+fn claude_code_fails_closed_without_marketplace_resource() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "claude-code",
+        "plugin",
+        "{datadir}/adapters/{component}/claude-code/",
+        stage_claude_bundle,
+    );
+    let fake = write_fake_claude(&world.prefix);
+    let log = apply_claude_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("claude-code"), false)
+        .expect("enable");
+
+    // Tamper: drop the FrameworkMarketplace resource, leaving the payload's
+    // dangling reference — as a forged/malformed receipt would.
+    let state_path = world.layout.state_dir.join("installed.toml");
+    let mut state = world.load_state();
+    {
+        let claim = state
+            .adapter_claims
+            .iter_mut()
+            .find(|c| c.component == COMPONENT)
+            .expect("claim");
+        claim
+            .resources
+            .retain(|r| !matches!(r.kind, ClaimResourceKind::FrameworkMarketplace { .. }));
+    }
+    state.save(&state_path).expect("save tampered state");
+
+    // status must not report healthy, and must not run the CLI.
+    let log_before = std::fs::read_to_string(&log).unwrap_or_default();
+    let status = manager.status(Some(COMPONENT)).expect("status");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Degraded);
+
+    // disable must keep the receipt and run no CLI removal.
+    let disabled = manager
+        .disable(COMPONENT, Some("claude-code"), false)
+        .expect("disable runs");
+    assert!(!disabled.claim_removed, "malformed receipt must be kept");
+    assert!(!disabled.report.cleanup_complete);
+    let log_after = std::fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(
+        log_before, log_after,
+        "no framework CLI must run for a receipt with no marketplace resource"
+    );
+    assert!(
+        world
+            .load_state()
+            .find_adapter_claim(COMPONENT, "claude-code")
+            .is_some(),
+        "receipt kept for manual resolution"
+    );
 }

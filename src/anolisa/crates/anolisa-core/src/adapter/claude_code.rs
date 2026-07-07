@@ -3,14 +3,22 @@
 //! Claude Code v2 installs plugins from a registered marketplace. ANOLISA
 //! exposes the component's resource root (which ships
 //! `.claude-plugin/marketplace.json` + `.claude-plugin/plugin.json`) as a
-//! single-plugin marketplace named `anolisa`, then installs the plugin via
-//! the official CLI:
+//! single-plugin marketplace, then installs the plugin via the official CLI:
 //!
 //! ```text
 //! claude plugin validate <resource_root>
 //! claude plugin marketplace add <resource_root>
-//! claude plugin install <plugin>@anolisa
+//! claude plugin install <plugin>@anolisa-<component>
 //! ```
+//!
+//! **Marketplace name is component-scoped** (`anolisa-<component>`), so two
+//! ANOLISA components can each register their own Claude Code marketplace
+//! without one's disable removing or shadowing another's. Claude Code names
+//! a marketplace after the `name` field in the bundle's
+//! `.claude-plugin/marketplace.json` (ANOLISA cannot rename it via the CLI),
+//! so `read_bundle` enforces that the bundle declares exactly
+//! `anolisa-<component>` — a bundle that still uses the bare shared
+//! `anolisa` name is rejected with an actionable error.
 //!
 //! `disable` reverses this with `claude plugin uninstall` /
 //! `claude plugin marketplace remove`. ANOLISA never edits
@@ -40,17 +48,11 @@ use super::util::{bool_status, cli_failure_reason, digest_tree, display_command,
 /// Default timeout for a Claude Code CLI invocation.
 const CLI_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Marketplace name ANOLISA registers with Claude Code. Matches the name
-/// declared in every component's `.claude-plugin/marketplace.json`.
-///
-/// Ownership constraint: `anolisa` is a shared, ANOLISA-owned marketplace
-/// by convention — all ANOLISA components publish into it, and this driver
-/// assumes any marketplace of that name is ANOLISA's to add/remove. If a
-/// user has an unrelated marketplace also named `anolisa`, enable would
-/// re-point it and disable would remove it. That collision is accepted as
-/// out of scope: the name is reserved for ANOLISA. A future multi-owner
-/// design would need to verify the marketplace *source* before removal.
-const MARKETPLACE_NAME: &str = "anolisa";
+/// Prefix for the component-scoped Claude Code marketplace name. The full
+/// name is `anolisa-<component>` (see [`marketplace_name`]), so each
+/// component owns a distinct marketplace and disable never touches another
+/// component's registration.
+const MARKETPLACE_PREFIX: &str = "anolisa";
 
 /// Native marketplace manifest inside a Claude Code plugin bundle.
 const MARKETPLACE_MANIFEST: &str = ".claude-plugin/marketplace.json";
@@ -127,6 +129,32 @@ impl FrameworkDriver for ClaudeCodeDriver {
                 ),
             });
         }
+        // Claude Code names the marketplace after the manifest's `name`
+        // field (ANOLISA cannot rename it via the CLI), so the bundle MUST
+        // declare the component-scoped name; otherwise two components would
+        // collide on a shared marketplace and one's disable would remove the
+        // other's. Enforce it here so the mismatch fails before any state is
+        // written.
+        let expected = marketplace_name(&ctx.component);
+        match read_marketplace_manifest_name(root)? {
+            Some(name) if name == expected => {}
+            Some(name) => {
+                return Err(AdapterError::BundleInvalid {
+                    root: root.clone(),
+                    reason: format!(
+                        "Claude Code marketplace name '{name}' in {MARKETPLACE_MANIFEST} must be component-scoped as '{expected}'"
+                    ),
+                });
+            }
+            None => {
+                return Err(AdapterError::BundleInvalid {
+                    root: root.clone(),
+                    reason: format!(
+                        "Claude Code {MARKETPLACE_MANIFEST} declares no 'name'; expected '{expected}'"
+                    ),
+                });
+            }
+        }
         let plugin_id = Some(
             ctx.declared_plugin_id
                 .clone()
@@ -146,7 +174,8 @@ impl FrameworkDriver for ClaudeCodeDriver {
         ctx: &DriverCtx,
     ) -> Result<DriverPlan, AdapterError> {
         let plugin = plugin_name(bundle, ctx);
-        let plugin_ref = plugin_ref(&plugin);
+        let marketplace = marketplace_name(&ctx.component);
+        let plugin_ref = plugin_ref(&plugin, &marketplace);
         let install_cmd = build_plugin_install_cmd(&plugin_ref);
         let actions = vec![
             format!(
@@ -154,7 +183,7 @@ impl FrameworkDriver for ClaudeCodeDriver {
                 bundle.resource_root.display()
             ),
             format!(
-                "register Claude Code marketplace '{MARKETPLACE_NAME}' from {}",
+                "register Claude Code marketplace '{marketplace}' from {}",
                 bundle.resource_root.display()
             ),
             format!("install Claude Code plugin '{plugin_ref}'"),
@@ -173,8 +202,9 @@ impl FrameworkDriver for ClaudeCodeDriver {
         ctx: &DriverCtx,
     ) -> Result<AdapterClaim, AdapterError> {
         let plugin = plugin_name(bundle, ctx);
+        let marketplace = marketplace_name(&ctx.component);
         validate_plugin_id(&plugin)?;
-        validate_marketplace_name(MARKETPLACE_NAME)?;
+        validate_marketplace_name(&marketplace)?;
 
         let resources = vec![
             ClaimResource {
@@ -182,7 +212,7 @@ impl FrameworkDriver for ClaudeCodeDriver {
                 purpose: "claude_code_marketplace".to_string(),
                 kind: ClaimResourceKind::FrameworkMarketplace {
                     framework: self.name().to_string(),
-                    marketplace: MARKETPLACE_NAME.to_string(),
+                    marketplace: marketplace.clone(),
                 },
             },
             ClaimResource {
@@ -219,6 +249,14 @@ impl FrameworkDriver for ClaudeCodeDriver {
             root: claim.resource_root.clone(),
             reason: "claude-code receipt has no plugin resource".to_string(),
         })?;
+        // Read the marketplace strictly from the receipt's validated
+        // resource — never fall back to a name derived from ctx, so a
+        // malformed/forged receipt missing the marketplace resource cannot
+        // drive `marketplace add` / `plugin install`.
+        let marketplace = claim_marketplace(claim).ok_or_else(|| AdapterError::BundleInvalid {
+            root: claim.resource_root.clone(),
+            reason: "claude-code receipt has no marketplace resource".to_string(),
+        })?;
 
         // 1. Validate the bundle via the official CLI — same gate `install`
         //    hits, but surfaces a cleaner error here.
@@ -234,7 +272,7 @@ impl FrameworkDriver for ClaudeCodeDriver {
 
         // 2. Register the marketplace (idempotent: skip when already listed
         //    so a re-enable does not error on a duplicate source).
-        if !marketplace_registered(ctx) {
+        if !marketplace_registered(&marketplace, ctx) {
             let add_cmd = build_marketplace_add_cmd(&claim.resource_root);
             let program = add_cmd.program.clone();
             let output = ctx.ops.run_framework_cli(add_cmd)?;
@@ -247,7 +285,7 @@ impl FrameworkDriver for ClaudeCodeDriver {
         }
 
         // 3. Install the plugin from the marketplace.
-        let install_cmd = build_plugin_install_cmd(&plugin_ref(&plugin));
+        let install_cmd = build_plugin_install_cmd(&plugin_ref(&plugin, &marketplace));
         let program = install_cmd.program.clone();
         let output = ctx.ops.run_framework_cli(install_cmd)?;
         if !output.success() {
@@ -277,6 +315,9 @@ impl FrameworkDriver for ClaudeCodeDriver {
         conditions.push(bundle_match_condition(claim));
 
         let plugin = claim_plugin(claim);
+        // Read strictly from the receipt; a receipt with no marketplace
+        // resource is malformed and must not be treated as healthy.
+        let marketplace = claim_marketplace(claim);
         let (mkt_status, plugin_status) = if !detect.detected {
             conditions.push(AdapterCondition {
                 kind: AdapterConditionKind::MarketplaceRegistered,
@@ -301,11 +342,11 @@ impl FrameworkDriver for ClaudeCodeDriver {
                 resource: None,
             });
             (ConditionStatus::Unknown, ConditionStatus::Unknown)
-        } else {
-            let mkt = marketplace_registered(ctx);
+        } else if let Some(marketplace) = marketplace {
+            let mkt = marketplace_registered(&marketplace, ctx);
             let plugin_ok = plugin
                 .as_deref()
-                .map(|p| plugin_registered(p, ctx))
+                .map(|p| plugin_registered(p, &marketplace, ctx))
                 .unwrap_or(false);
             conditions.push(AdapterCondition {
                 kind: AdapterConditionKind::MarketplaceRegistered,
@@ -330,6 +371,32 @@ impl FrameworkDriver for ClaudeCodeDriver {
                 resource: None,
             });
             (bool_status(mkt), bool_status(plugin_ok))
+        } else {
+            // Receipt has no marketplace resource: malformed. Do not run the
+            // CLI; report a degraded, unverifiable state.
+            conditions.push(AdapterCondition {
+                kind: AdapterConditionKind::MarketplaceRegistered,
+                status: ConditionStatus::False,
+                reason: Some("receipt has no marketplace resource".to_string()),
+                resource: Some(ClaimResourceRef {
+                    id: RES_MARKETPLACE.to_string(),
+                }),
+            });
+            conditions.push(AdapterCondition {
+                kind: AdapterConditionKind::PluginRegistered,
+                status: ConditionStatus::Unknown,
+                reason: Some("cannot verify plugin without a marketplace resource".to_string()),
+                resource: Some(ClaimResourceRef {
+                    id: RES_PLUGIN.to_string(),
+                }),
+            });
+            conditions.push(AdapterCondition {
+                kind: AdapterConditionKind::VerificationSupported,
+                status: ConditionStatus::False,
+                reason: Some("receipt has no marketplace resource".to_string()),
+                resource: None,
+            });
+            (ConditionStatus::False, ConditionStatus::Unknown)
         };
 
         let summary = summarize(claim.status, detect.detected, mkt_status, plugin_status);
@@ -357,17 +424,29 @@ impl FrameworkDriver for ClaudeCodeDriver {
             });
         }
 
+        // Fail closed: act only on the marketplace the receipt recorded. A
+        // malformed/forged receipt without a marketplace resource must not
+        // trigger `plugin uninstall` / `marketplace remove` against a name
+        // derived from ctx — keep the receipt for manual resolution instead.
+        let Some(marketplace) = claim_marketplace(claim) else {
+            return Ok(DisableReport {
+                cleanup_complete: false,
+                messages: vec![
+                    "claude-code receipt has no marketplace resource; receipt kept (nothing safely removable)"
+                        .to_string(),
+                ],
+            });
+        };
+
         let mut messages = Vec::new();
         let mut cleanup_complete = true;
 
         if let Some(plugin) = claim_plugin(claim) {
-            let cmd = build_plugin_uninstall_cmd(&plugin_ref(&plugin));
+            let plugin_ref = plugin_ref(&plugin, &marketplace);
+            let cmd = build_plugin_uninstall_cmd(&plugin_ref);
             let output = ctx.ops.run_framework_cli(cmd)?;
             if output.success() {
-                messages.push(format!(
-                    "uninstalled claude-code plugin '{}'",
-                    plugin_ref(&plugin)
-                ));
+                messages.push(format!("uninstalled claude-code plugin '{plugin_ref}'"));
             } else {
                 cleanup_complete = false;
                 messages.push(format!(
@@ -379,12 +458,10 @@ impl FrameworkDriver for ClaudeCodeDriver {
             messages.push("receipt records no plugin to uninstall".to_string());
         }
 
-        let cmd = build_marketplace_remove_cmd();
+        let cmd = build_marketplace_remove_cmd(&marketplace);
         let output = ctx.ops.run_framework_cli(cmd)?;
         if output.success() {
-            messages.push(format!(
-                "removed claude-code marketplace '{MARKETPLACE_NAME}'"
-            ));
+            messages.push(format!("removed claude-code marketplace '{marketplace}'"));
         } else {
             cleanup_complete = false;
             messages.push(format!(
@@ -412,6 +489,11 @@ fn claude_bin() -> String {
         .unwrap_or_else(|| "claude".to_string())
 }
 
+/// Component-scoped marketplace name: `anolisa-<component>`.
+fn marketplace_name(component: &str) -> String {
+    format!("{MARKETPLACE_PREFIX}-{component}")
+}
+
 /// Plugin name for the receipt: declared plugin id, else component.
 fn plugin_name(bundle: &AdapterBundle, ctx: &DriverCtx) -> String {
     bundle
@@ -420,9 +502,40 @@ fn plugin_name(bundle: &AdapterBundle, ctx: &DriverCtx) -> String {
         .unwrap_or_else(|| ctx.component.clone())
 }
 
-/// `<plugin>@anolisa` argument for `claude plugin install/uninstall`.
-fn plugin_ref(plugin: &str) -> String {
-    format!("{plugin}@{MARKETPLACE_NAME}")
+/// `<plugin>@<marketplace>` argument for `claude plugin install/uninstall`.
+/// Both halves are validated separately (no `@` inside either token), so the
+/// composed ref cannot smuggle a metacharacter into the argv.
+fn plugin_ref(plugin: &str, marketplace: &str) -> String {
+    format!("{plugin}@{marketplace}")
+}
+
+/// Read the `name` field from the bundle's `.claude-plugin/marketplace.json`.
+/// Returns `None` when the field is absent/empty.
+///
+/// # Errors
+///
+/// [`AdapterError::BundleInvalid`] when the manifest cannot be parsed;
+/// [`AdapterError::Io`] on a read failure other than not-found.
+fn read_marketplace_manifest_name(root: &Path) -> Result<Option<String>, AdapterError> {
+    #[derive(serde::Deserialize)]
+    struct MarketplaceManifest {
+        name: Option<String>,
+    }
+    let path = root.join(MARKETPLACE_MANIFEST);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(AdapterError::Io { path, source }),
+    };
+    let manifest: MarketplaceManifest =
+        serde_json::from_slice(&bytes).map_err(|source| AdapterError::BundleInvalid {
+            root: root.to_path_buf(),
+            reason: format!(
+                "failed to parse {} as a Claude Code marketplace manifest: {source}",
+                path.display()
+            ),
+        })?;
+    Ok(manifest.name.filter(|n| !n.is_empty()))
 }
 
 /// Extract the plugin name from a receipt's plugin resource.
@@ -434,6 +547,14 @@ fn claim_plugin(claim: &AdapterClaim) -> Option<String> {
             _ => None,
         })
         .or_else(|| claim.plugin_id.clone())
+}
+
+/// Extract the marketplace name from a receipt's marketplace resource.
+fn claim_marketplace(claim: &AdapterClaim) -> Option<String> {
+    claim.resource(RES_MARKETPLACE).and_then(|r| match &r.kind {
+        ClaimResourceKind::FrameworkMarketplace { marketplace, .. } => Some(marketplace.clone()),
+        _ => None,
+    })
 }
 
 fn base_cmd(args: Vec<String>) -> FrameworkCommand {
@@ -464,12 +585,12 @@ fn build_marketplace_add_cmd(resource_root: &Path) -> FrameworkCommand {
     ])
 }
 
-fn build_marketplace_remove_cmd() -> FrameworkCommand {
+fn build_marketplace_remove_cmd(marketplace: &str) -> FrameworkCommand {
     base_cmd(vec![
         "plugin".to_string(),
         "marketplace".to_string(),
         "remove".to_string(),
-        MARKETPLACE_NAME.to_string(),
+        marketplace.to_string(),
     ])
 }
 
@@ -501,22 +622,21 @@ fn build_plugin_list_cmd() -> FrameworkCommand {
     base_cmd(vec!["plugin".to_string(), "list".to_string()])
 }
 
-/// True when `claude plugin marketplace list` reports the ANOLISA
-/// marketplace.
-fn marketplace_registered(ctx: &DriverCtx) -> bool {
+/// True when `claude plugin marketplace list` reports `marketplace`.
+fn marketplace_registered(marketplace: &str, ctx: &DriverCtx) -> bool {
     match ctx.ops.run_framework_cli(build_marketplace_list_cmd()) {
-        Ok(output) if output.success() => list_contains_token(&output.stdout, MARKETPLACE_NAME),
+        Ok(output) if output.success() => list_contains_token(&output.stdout, marketplace),
         _ => false,
     }
 }
 
 /// True when `claude plugin list` reports the plugin (bare name or
-/// `plugin@anolisa` ref).
-fn plugin_registered(plugin: &str, ctx: &DriverCtx) -> bool {
+/// `plugin@<marketplace>` ref).
+fn plugin_registered(plugin: &str, marketplace: &str, ctx: &DriverCtx) -> bool {
     match ctx.ops.run_framework_cli(build_plugin_list_cmd()) {
         Ok(output) if output.success() => {
             list_contains_token(&output.stdout, plugin)
-                || list_contains_token(&output.stdout, &plugin_ref(plugin))
+                || list_contains_token(&output.stdout, &plugin_ref(plugin, marketplace))
         }
         _ => false,
     }
@@ -581,8 +701,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plugin_ref_uses_anolisa_marketplace() {
-        assert_eq!(plugin_ref("tokenless"), "tokenless@anolisa");
+    fn marketplace_name_and_plugin_ref_are_component_scoped() {
+        assert_eq!(marketplace_name("tokenless"), "anolisa-tokenless");
+        assert_eq!(
+            plugin_ref("tokenless", "anolisa-tokenless"),
+            "tokenless@anolisa-tokenless"
+        );
     }
 
     #[test]
@@ -596,16 +720,16 @@ mod tests {
             vec!["plugin", "marketplace", "add", "/data/cc"]
         );
         assert_eq!(
-            build_plugin_install_cmd("tokenless@anolisa").args,
-            vec!["plugin", "install", "tokenless@anolisa"]
+            build_plugin_install_cmd("tokenless@anolisa-tokenless").args,
+            vec!["plugin", "install", "tokenless@anolisa-tokenless"]
         );
         assert_eq!(
-            build_plugin_uninstall_cmd("tokenless@anolisa").args,
-            vec!["plugin", "uninstall", "tokenless@anolisa"]
+            build_plugin_uninstall_cmd("tokenless@anolisa-tokenless").args,
+            vec!["plugin", "uninstall", "tokenless@anolisa-tokenless"]
         );
         assert_eq!(
-            build_marketplace_remove_cmd().args,
-            vec!["plugin", "marketplace", "remove", "anolisa"]
+            build_marketplace_remove_cmd("anolisa-tokenless").args,
+            vec!["plugin", "marketplace", "remove", "anolisa-tokenless"]
         );
     }
 
@@ -658,15 +782,79 @@ mod tests {
         let driver = ClaudeCodeDriver::new();
 
         // marketplace.json only -> still missing plugin.json.
-        std::fs::write(root.join(MARKETPLACE_MANIFEST), b"{}").expect("write");
+        std::fs::write(
+            root.join(MARKETPLACE_MANIFEST),
+            br#"{"name":"anolisa-tokenless"}"#,
+        )
+        .expect("write");
         let err = driver
             .read_bundle(&mk_ctx(&root))
             .expect_err("plugin.json missing must fail");
         assert!(matches!(err, AdapterError::BundleInvalid { .. }));
 
-        // Both present -> ok.
+        // Both present, component-scoped marketplace name -> ok.
         std::fs::write(root.join(PLUGIN_MANIFEST), b"{}").expect("write");
         let bundle = driver.read_bundle(&mk_ctx(&root)).expect("both present");
         assert_eq!(bundle.plugin_id.as_deref(), Some("tokenless"));
+    }
+
+    #[test]
+    fn read_bundle_rejects_shared_marketplace_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("claude-code");
+        std::fs::create_dir_all(root.join(".claude-plugin")).expect("mkdir");
+        // Bare shared "anolisa" name (the pre-scoping value) must be rejected.
+        std::fs::write(root.join(MARKETPLACE_MANIFEST), br#"{"name":"anolisa"}"#).expect("write");
+        std::fs::write(root.join(PLUGIN_MANIFEST), b"{}").expect("write");
+        let layout = anolisa_platform::fs_layout::FsLayout::user(PathBuf::from("/tmp/cc-home2"));
+
+        struct StubOps;
+        impl super::super::driver::AdapterOps for StubOps {
+            fn run_framework_cli(
+                &self,
+                _: FrameworkCommand,
+            ) -> Result<super::super::driver::CliOutput, AdapterError> {
+                unimplemented!()
+            }
+            fn copy_tree(&self, _: &Path, _: &Path) -> Result<(), AdapterError> {
+                unimplemented!()
+            }
+            fn copy_file(&self, _: &Path, _: &Path) -> Result<(), AdapterError> {
+                unimplemented!()
+            }
+            fn remove_tree(&self, _: &Path) -> Result<bool, AdapterError> {
+                unimplemented!()
+            }
+            fn write_file(&self, _: &Path, _: &[u8]) -> Result<(), AdapterError> {
+                unimplemented!()
+            }
+            fn create_symlink(&self, _: &Path, _: &Path) -> Result<(), AdapterError> {
+                unimplemented!()
+            }
+        }
+        let ops = StubOps;
+        let ctx = DriverCtx {
+            component: "tokenless".to_string(),
+            framework: "claude-code".to_string(),
+            layout: &layout,
+            resource_root: root.clone(),
+            user_home: Some(PathBuf::from("/tmp/cc-home2")),
+            declared_plugin_id: Some("tokenless".to_string()),
+            adapter_type: Some("plugin".to_string()),
+            declared_skills: Vec::new(),
+            declared_config: Vec::new(),
+            declared_bundle_entry: None,
+            dry_run: true,
+            ops: &ops,
+        };
+        let err = ClaudeCodeDriver::new()
+            .read_bundle(&ctx)
+            .expect_err("bare 'anolisa' marketplace name must be rejected");
+        match err {
+            AdapterError::BundleInvalid { reason, .. } => {
+                assert!(reason.contains("anolisa-tokenless"), "reason: {reason}");
+            }
+            other => panic!("expected BundleInvalid, got {other:?}"),
+        }
     }
 }

@@ -392,8 +392,8 @@ impl AdapterManager {
             self.load_visible_component_manifest(component, &state)?;
         let framework = self.resolve_framework(component, framework, &manifest)?;
 
-        // Fail-closed: only `plugin`, `skill_bundle`, or an absent value
-        // (legacy plugin default) is supported.
+        // Fail-closed in two steps. First reject a value no driver
+        // implements at all (`service`, typos, …).
         let adapter_type = declared_adapter_type(&manifest, &framework);
         if let Some(ref at) = adapter_type
             && !is_supported_adapter_type(at)
@@ -404,6 +404,10 @@ impl AdapterManager {
                 adapter_type: at.clone(),
             });
         }
+        // Then reject an implemented type used with a framework that does
+        // not support it (e.g. `openclaw` + `extension`, `cosh` + `plugin`),
+        // so the wrong driver code path can never run.
+        validate_adapter_type_for_framework(component, &framework, adapter_type.as_deref())?;
 
         let declared_plugin_id = declared_plugin_id(&manifest, &framework);
         let skill_specs = declared_skills(&manifest, &framework);
@@ -555,7 +559,11 @@ impl AdapterManager {
         let claim = driver.prepare_enable(&bundle, &ctx)?;
         // Defense in depth: the driver must not emit a claim that points
         // outside its own declared roots. Reject before persisting.
-        claim.validate(&self.layout, &driver.allowed_external_roots(&ctx))?;
+        claim.validate_with_owned_roots(
+            &self.layout,
+            &driver.allowed_external_roots(&ctx),
+            &self.all_datadir_roots,
+        )?;
 
         state.upsert_adapter_claim(claim.clone());
         state.save(&self.state_path)?;
@@ -736,7 +744,11 @@ impl AdapterManager {
         };
 
         // Re-validate the receipt before acting on it (forged-state guard).
-        claim.validate(&self.layout, &driver.allowed_external_roots(&ctx))?;
+        claim.validate_with_owned_roots(
+            &self.layout,
+            &driver.allowed_external_roots(&ctx),
+            &self.all_datadir_roots,
+        )?;
 
         if dry_run {
             let report = plan_disable_report(&claim);
@@ -841,7 +853,11 @@ impl AdapterManager {
                 ops: &ops,
             };
 
-            claim.validate(&self.layout, &driver.allowed_external_roots(&ctx))?;
+            claim.validate_with_owned_roots(
+                &self.layout,
+                &driver.allowed_external_roots(&ctx),
+                &self.all_datadir_roots,
+            )?;
             let report = driver.status(claim, &ctx)?;
             entries.push(StatusEntry {
                 component: claim.component.clone(),
@@ -1818,6 +1834,69 @@ fn is_supported_adapter_type(adapter_type: &str) -> bool {
     matches!(adapter_type, "plugin" | "skill_bundle" | "extension")
 }
 
+/// The adapter types each built-in framework accepts, in declaration order.
+///
+/// A framework whose list contains `"plugin"` also accepts an absent
+/// `adapter_type` (the legacy default). A framework without `"plugin"` (e.g.
+/// `cosh`, which is extension-only) requires an explicit `adapter_type`.
+///
+/// Returns `None` for frameworks with no built-in driver; enable resolves
+/// that into the more specific [`AdapterError::UnknownFramework`] later, so
+/// this gate stays silent for them.
+fn allowed_adapter_types(framework: &str) -> Option<&'static [&'static str]> {
+    match framework {
+        // Plugin frameworks that also deliver skills.
+        "openclaw" | "hermes" => Some(&["plugin", "skill_bundle"]),
+        // Marketplace-plugin frameworks: plugin only.
+        "codex" | "claude-code" => Some(&["plugin"]),
+        // Filesystem-extension framework: extension only, no plugin default.
+        "cosh" => Some(&["extension"]),
+        _ => None,
+    }
+}
+
+/// Reject a framework/`adapter_type` pair the framework does not support,
+/// even when the type is implemented by *some other* driver.
+///
+/// This is distinct from [`AdapterError::UnsupportedAdapterType`], which is
+/// reserved for a value no driver implements at all (e.g. `service`). Here
+/// the value is a real adapter type used with the wrong framework — for
+/// example `openclaw` + `extension` (which would otherwise silently run the
+/// plugin path) or `cosh` + `plugin` (which would mis-handle a filesystem
+/// extension as a CLI plugin).
+///
+/// # Errors
+///
+/// [`AdapterError::InvalidAdapterInput`] when the declared (or defaulted)
+/// type is not in the framework's allowed set.
+fn validate_adapter_type_for_framework(
+    component: &str,
+    framework: &str,
+    adapter_type: Option<&str>,
+) -> Result<(), AdapterError> {
+    let Some(allowed) = allowed_adapter_types(framework) else {
+        // No built-in driver; let enable surface UnknownFramework instead.
+        return Ok(());
+    };
+    let accepts_default = allowed.contains(&"plugin");
+    let ok = match adapter_type {
+        Some(at) => allowed.contains(&at),
+        None => accepts_default,
+    };
+    if ok {
+        return Ok(());
+    }
+    let declared = adapter_type.unwrap_or("<absent> (defaults to plugin)");
+    Err(AdapterError::InvalidAdapterInput {
+        component: component.to_string(),
+        framework: framework.to_string(),
+        reason: format!(
+            "framework '{framework}' does not support adapter_type '{declared}'; it accepts: {}",
+            allowed.join(", ")
+        ),
+    })
+}
+
 /// Whether a component status makes it visible to adapter scan/enable.
 /// Both fully-installed and adopted components should be adapter-visible.
 fn is_adapter_visible_status(status: ObjectStatus) -> bool {
@@ -2357,6 +2436,68 @@ mod tests {
         let at = declared_adapter_type(&manifest, "openclaw");
         let should_reject = at.as_ref().is_some_and(|t| !is_supported_adapter_type(t));
         assert!(!should_reject, "skill_bundle must pass the gate");
+    }
+
+    // -- validate_adapter_type_for_framework ---------------------------------
+
+    #[test]
+    fn framework_type_matrix_accepts_valid_pairs() {
+        let ok = |fw: &str, at: Option<&str>| {
+            validate_adapter_type_for_framework("tokenless", fw, at).is_ok()
+        };
+        assert!(ok("openclaw", Some("plugin")));
+        assert!(ok("openclaw", Some("skill_bundle")));
+        assert!(ok("openclaw", None), "openclaw defaults to plugin");
+        assert!(ok("hermes", Some("skill_bundle")));
+        assert!(ok("codex", Some("plugin")));
+        assert!(ok("codex", None), "codex defaults to plugin");
+        assert!(ok("claude-code", Some("plugin")));
+        assert!(ok("claude-code", None));
+        assert!(ok("cosh", Some("extension")));
+    }
+
+    #[test]
+    fn framework_type_matrix_rejects_extension_on_plugin_frameworks() {
+        for fw in ["openclaw", "hermes", "codex", "claude-code"] {
+            let err = validate_adapter_type_for_framework("tokenless", fw, Some("extension"))
+                .expect_err(&format!("{fw} + extension must be rejected"));
+            assert!(
+                matches!(err, AdapterError::InvalidAdapterInput { .. }),
+                "{fw}: got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn framework_type_matrix_rejects_skill_bundle_on_marketplace_frameworks() {
+        for fw in ["codex", "claude-code"] {
+            let err = validate_adapter_type_for_framework("tokenless", fw, Some("skill_bundle"))
+                .expect_err(&format!("{fw} + skill_bundle must be rejected"));
+            assert!(matches!(err, AdapterError::InvalidAdapterInput { .. }));
+        }
+    }
+
+    #[test]
+    fn cosh_requires_extension_type() {
+        // cosh + plugin, cosh + skill_bundle, and cosh with no adapter_type
+        // (which would default to plugin) must all be rejected.
+        for at in [Some("plugin"), Some("skill_bundle"), None] {
+            let err = validate_adapter_type_for_framework("tokenless", "cosh", at)
+                .expect_err(&format!("cosh + {at:?} must be rejected"));
+            assert!(
+                matches!(err, AdapterError::InvalidAdapterInput { .. }),
+                "cosh + {at:?}: got {err:?}"
+            );
+        }
+        validate_adapter_type_for_framework("tokenless", "cosh", Some("extension"))
+            .expect("cosh + extension must pass");
+    }
+
+    #[test]
+    fn framework_type_matrix_is_silent_for_unknown_framework() {
+        // No built-in driver: this gate defers to UnknownFramework.
+        validate_adapter_type_for_framework("tokenless", "qoder", Some("extension"))
+            .expect("unknown framework must not be rejected by the type gate");
     }
 
     #[test]

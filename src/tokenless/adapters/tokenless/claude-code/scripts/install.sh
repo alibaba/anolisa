@@ -13,7 +13,9 @@
 #
 # Claude Code v2 requires plugins to be sourced from a registered marketplace.
 # We expose the adapter's claude-code/ directory itself as a single-plugin
-# marketplace ("anolisa"), then install tokenless@anolisa from it.
+# marketplace ("anolisa-tokenless"), then install tokenless@anolisa-tokenless
+# from it. The marketplace name is component-scoped so multiple ANOLISA
+# components can each register their own without colliding.
 set -euo pipefail
 
 AGENT="${ANOLISA_TARGET:-claude-code}"
@@ -21,8 +23,8 @@ COMPONENT="${ANOLISA_COMPONENT:-tokenless}"
 ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 
 PLUGIN_SRC="$ADAPTER_DIR/claude-code"
-MARKETPLACE_NAME="anolisa"
-PLUGIN_ID="tokenless@${MARKETPLACE_NAME}"
+MARKETPLACE_NAME="anolisa-${COMPONENT}"
+PLUGIN_ID="${COMPONENT}@${MARKETPLACE_NAME}"
 
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
 export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"

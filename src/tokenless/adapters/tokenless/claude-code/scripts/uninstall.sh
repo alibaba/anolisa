@@ -8,8 +8,8 @@ set -euo pipefail
 AGENT="${ANOLISA_TARGET:-claude-code}"
 COMPONENT="${ANOLISA_COMPONENT:-tokenless}"
 
-MARKETPLACE_NAME="anolisa"
-PLUGIN_ID="tokenless@${MARKETPLACE_NAME}"
+MARKETPLACE_NAME="anolisa-${COMPONENT}"
+PLUGIN_ID="${COMPONENT}@${MARKETPLACE_NAME}"
 
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
 export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"

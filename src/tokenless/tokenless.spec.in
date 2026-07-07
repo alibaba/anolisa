@@ -443,7 +443,7 @@ if [ $1 -eq 0 ]; then
     if [ -f "$CLAUDE_CODE_SCRIPT" ]; then
         bash "$CLAUDE_CODE_SCRIPT" || true
         echo "WARN: per-user Claude Code plugin entries are not removed by RPM %preun." >&2
-        echo "WARN: each user running claude should run: claude plugin uninstall tokenless@anolisa" >&2
+        echo "WARN: each user running claude should run: claude plugin uninstall tokenless@anolisa-tokenless" >&2
     fi
 fi
 

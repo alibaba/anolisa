@@ -120,11 +120,46 @@ impl AdapterClaim {
         layout: &FsLayout,
         allowed_external_roots: &[PathBuf],
     ) -> Result<(), ClaimValidationError> {
+        self.validate_with_owned_roots(layout, allowed_external_roots, &[])
+    }
+
+    /// Like [`Self::validate`], but additionally trusts `extra_owned_roots`
+    /// as ANOLISA-owned locations for symlink *targets*.
+    ///
+    /// A symlink target (e.g. Codex's plugin symlink pointing back at the
+    /// resource bundle) is normally validated against the primary layout's
+    /// owned roots. When the bundle is resolved from a packaged datadir that
+    /// differs from `layout.datadir` (registered via
+    /// [`push_primary_datadir_root`](super::manager::AdapterManager::push_primary_datadir_root)),
+    /// that target lives outside the layout roots yet is still legitimately
+    /// ANOLISA-owned. The Manager passes its trusted datadir roots here so
+    /// such targets validate.
+    ///
+    /// `extra_owned_roots` MUST come from Manager configuration (visible
+    /// datadir roots), never from receipt fields such as `resource_root` —
+    /// otherwise a forged receipt could authorize its own symlink target.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first [`ClaimValidationError`] encountered: an owned
+    /// path outside ANOLISA roots, an external path outside every
+    /// `allowed_external_roots` entry, a traversal/symlink escape, or an
+    /// invalid plugin id.
+    pub fn validate_with_owned_roots(
+        &self,
+        layout: &FsLayout,
+        allowed_external_roots: &[PathBuf],
+        extra_owned_roots: &[PathBuf],
+    ) -> Result<(), ClaimValidationError> {
         if let Some(pid) = &self.plugin_id {
             validate_plugin_id(pid)?;
         }
         for resource in &self.resources {
-            resource.validate(layout, allowed_external_roots)?;
+            resource.validate_with_owned_roots(
+                layout,
+                allowed_external_roots,
+                extra_owned_roots,
+            )?;
             match &resource.kind {
                 ClaimResourceKind::FrameworkPlugin { framework, .. }
                 | ClaimResourceKind::FrameworkMarketplace { framework, .. }
@@ -180,6 +215,22 @@ impl ClaimResource {
         layout: &FsLayout,
         allowed_external_roots: &[PathBuf],
     ) -> Result<(), ClaimValidationError> {
+        self.validate_with_owned_roots(layout, allowed_external_roots, &[])
+    }
+
+    /// Like [`Self::validate`], but trusts `extra_owned_roots` as additional
+    /// ANOLISA-owned locations for a symlink *target*. See
+    /// [`AdapterClaim::validate_with_owned_roots`] for the trust contract.
+    ///
+    /// # Errors
+    ///
+    /// See [`AdapterClaim::validate`].
+    pub fn validate_with_owned_roots(
+        &self,
+        layout: &FsLayout,
+        allowed_external_roots: &[PathBuf],
+        extra_owned_roots: &[PathBuf],
+    ) -> Result<(), ClaimValidationError> {
         match &self.kind {
             ClaimResourceKind::OwnedPath { path } => {
                 validate_owned_path(layout, path).map_err(|source| {
@@ -205,9 +256,10 @@ impl ClaimResource {
                 // would follow it to its (owned) target and wrongly reject
                 // an in-boundary link. The `target` must be an
                 // ANOLISA-owned path (validated against the *trusted layout*
-                // roots, never the receipt-derived external roots): a forged
-                // receipt must not be able to point a claimed symlink at,
-                // say, `/etc` and have it validate. Owned-path validation is
+                // roots plus any Manager-supplied trusted datadir roots,
+                // never the receipt-derived external roots): a forged receipt
+                // must not be able to point a claimed symlink at, say,
+                // `/etc` and have it validate. Owned-path validation is
                 // independent of the receipt, closing the self-authorization
                 // hole.
                 validate_external_link_location(link, allowed_external_roots).map_err(
@@ -216,7 +268,7 @@ impl ClaimResource {
                         source,
                     },
                 )?;
-                validate_owned_path(layout, target).map_err(|source| {
+                validate_owned_symlink_target(layout, target, extra_owned_roots).map_err(|source| {
                     ClaimValidationError::OwnedPath {
                         id: self.id.clone(),
                         source,
@@ -592,6 +644,39 @@ pub fn validate_external_link_location(
         }
     }
     Ok(())
+}
+
+/// Validate a symlink `target` as an ANOLISA-owned path.
+///
+/// A target is accepted when it lives under one of the primary layout's
+/// owned roots ([`validate_owned_path`]) **or** under one of
+/// `extra_owned_roots` — trusted datadir roots supplied by the Manager for
+/// bundles resolved from a packaged datadir that differs from
+/// `layout.datadir`. `extra_owned_roots` must be Manager configuration, not
+/// receipt data, so a forged target (e.g. `/etc`) that is under neither is
+/// rejected.
+///
+/// # Errors
+///
+/// The [`PathBoundaryError`] from the layout check when the target is under
+/// neither the layout roots nor any extra trusted root.
+fn validate_owned_symlink_target(
+    layout: &FsLayout,
+    target: &Path,
+    extra_owned_roots: &[PathBuf],
+) -> Result<(), PathBoundaryError> {
+    match validate_owned_path(layout, target) {
+        Ok(()) => Ok(()),
+        Err(owned_err) => {
+            if !extra_owned_roots.is_empty()
+                && validate_external_path(target, extra_owned_roots).is_ok()
+            {
+                Ok(())
+            } else {
+                Err(owned_err)
+            }
+        }
+    }
 }
 
 /// Reject a plugin id unless it is a non-empty string of argv-safe

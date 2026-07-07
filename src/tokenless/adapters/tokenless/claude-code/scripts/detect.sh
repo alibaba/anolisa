@@ -10,7 +10,7 @@ COMPONENT="${ANOLISA_COMPONENT:-tokenless}"
 AGENT="${ANOLISA_TARGET:-claude-code}"
 ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 
-PLUGIN_ID="tokenless@anolisa"
+PLUGIN_ID="${COMPONENT}@anolisa-${COMPONENT}"
 PLUGIN_SRC="$ADAPTER_DIR/claude-code"
 
 CLAUDE_BIN="${CLAUDE_BIN:-}"

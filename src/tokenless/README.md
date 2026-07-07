@@ -279,7 +279,7 @@ The plugin registers hooks at two Claude Code events, covering four strategies:
 | Response compression | `PostToolUse` | Compresses tool responses and encodes to TOON format | ✅ Active |
 | TOON encoding | `PostToolUse` | Pipeline step after response compression — encodes JSON to TOON format | ✅ Active |
 
-Claude Code v2 requires plugins to be sourced from a registered marketplace. We expose the adapter's `claude-code/` directory as a single-plugin marketplace (`anolisa`), then install `tokenless@anolisa` from it.
+Claude Code v2 requires plugins to be sourced from a registered marketplace. We expose the adapter's `claude-code/` directory as a single-plugin marketplace (`anolisa-tokenless`), then install `tokenless@anolisa-tokenless` from it. The marketplace name is component-scoped so multiple ANOLISA components can each register their own without colliding.
 
 ### Install
 
