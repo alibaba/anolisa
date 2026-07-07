@@ -130,6 +130,14 @@ impl StashStore for SqliteStore {
         // have uppercased by lowercasing the lookup (case-insensitive retrieve).
         let key = hash.to_ascii_lowercase();
         let conn = self.lock_conn();
+        // Lazy purge sweep: physically drop expired rows on every retrieve so
+        // the DB file does not grow unbounded by stale entries that the
+        // `expires_at >= ?` filter only hides, never deletes. Mirrors headroom's
+        // `SqliteCcrStore::get`. Best-effort — a purge failure must not block
+        // the lookup; it falls through to the SELECT below.
+        if let Err(e) = conn.execute("DELETE FROM stash WHERE expires_at < ?", [now as i64]) {
+            eprintln!("[tokenless-ccr] WARNING: stash lazy-purge failed: {}", e);
+        }
         match conn.query_row(
             "SELECT payload FROM stash WHERE hash = ? AND expires_at >= ?",
             rusqlite::params![key, now as i64],
@@ -258,5 +266,22 @@ mod tests {
             h.join().unwrap();
         }
         assert!(store.len() <= 10_000);
+    }
+
+    #[test]
+    fn expired_rows_physically_deleted_after_retrieve() {
+        // Lazy purge: a retrieve must physically DELETE expired rows, not
+        // merely filter them via the WHERE clause. Mirrors headroom's
+        // `SqliteCcrStore::get` lazy-purge sweep.
+        let (store, _dir) = tmp_store(1, 100);
+        store.stash("a").unwrap();
+        store.stash("b").unwrap();
+        assert_eq!(store.len(), 2);
+        thread::sleep(std::time::Duration::from_secs(2));
+        // Both rows are now expired. A retrieve for any (absent) key triggers
+        // the purge sweep; `len()` must then read 0 because the rows were
+        // physically deleted, not just hidden.
+        assert_eq!(store.retrieve("000000000000000000000000").unwrap(), None);
+        assert_eq!(store.len(), 0);
     }
 }

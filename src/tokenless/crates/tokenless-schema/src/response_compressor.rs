@@ -4,6 +4,21 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokenless_ccr::{StashStore, marker_for};
 
+/// Build the stash-augmented truncation suffix for `key`:
+/// `… (truncated, retrieve with <<tokenless:KEY>>)`.
+pub(crate) fn stash_suffix(key: &str) -> String {
+    format!("… (truncated, retrieve with {})", marker_for(key))
+}
+
+/// Char-length of [`stash_suffix`]. Constant because the key is always 24
+/// hex chars, so the budget for the suffix can be reserved before stashing.
+/// Derived from [`stash_suffix`] so the two cannot drift out of sync.
+/// Shared with `schema_compressor` for description truncation.
+pub(crate) fn stash_suffix_char_len() -> usize {
+    // 24-char stand-in; marker_for is `<<tokenless:` + key + `>>`.
+    stash_suffix("000000000000000000000000").chars().count()
+}
+
 /// ResponseCompressor compresses API responses by truncating strings,
 /// limiting array sizes, removing null values, and dropping debug fields.
 pub struct ResponseCompressor {
@@ -166,7 +181,20 @@ impl ResponseCompressor {
                 Value::Array(_) => "array",
                 Value::Object(_) => "object",
             };
-            return Value::String(format!("<{} truncated at depth {}>", type_name, depth));
+            // Try to stash the original subtree so the LLM can retrieve the
+            // verbatim original via the embedded marker. On any failure (no
+            // store, serialization error, stash backend error) fall back to
+            // the plain lossy depth marker.
+            if let Some(store) = self.stash_store.as_ref()
+                && let Ok(serialized) = serde_json::to_string(value)
+                && let Ok(key) = store.stash(&serialized)
+            {
+                return Value::String(format!(
+                    "<{type_name} truncated at depth {depth}, retrieve with {}>",
+                    marker_for(&key)
+                ));
+            }
+            return Value::String(format!("<{type_name} truncated at depth {depth}>"));
         }
 
         match value {
@@ -189,20 +217,48 @@ impl ResponseCompressor {
     /// final output stays within `truncate_strings_at` characters. If the
     /// configured limit is too small to fit both the marker and a content
     /// character, the marker is dropped so the output never exceeds the limit.
+    ///
+    /// When a stash store is attached, the suffix carries a `<<tokenless:KEY>>`
+    /// marker and the ORIGINAL full string is stashed so truncation is
+    /// reversible. On stash failure the suffix degrades to the plain lossy
+    /// `… (truncated)` marker (or hard truncation if even that won't fit).
     fn compress_string(&self, s: &str) -> Value {
         let char_count = s.chars().count();
         if char_count <= self.truncate_strings_at {
             return Value::String(s.to_string());
         }
 
-        const MARKER: &str = "… (truncated)";
-        let marker_len = MARKER.chars().count();
-        // Only attach the marker when the limit can fit it plus at least one
-        // content character; otherwise dropping the marker is the only way to
-        // honor truncate_strings_at.
-        let attach_marker = self.add_truncation_marker && self.truncate_strings_at > marker_len;
+        const LOSSY_MARKER: &str = "… (truncated)";
+        let lossy_marker_len = LOSSY_MARKER.chars().count();
+
+        // Reversible path: a stash store is attached, truncation markers are
+        // enabled, and the limit can fit the stash suffix plus at least one
+        // content character. Stash the ORIGINAL full string (not the truncated
+        // form) so retrieval yields the verbatim original. Fit is checked
+        // BEFORE stashing so a too-small limit (or disabled markers) does not
+        // orphan a stash entry with no embedded marker — a stash without a
+        // reachable marker is unretrievable.
+        if self.add_truncation_marker
+            && self.truncate_strings_at > stash_suffix_char_len()
+            && let Some(store) = self.stash_store.as_ref()
+            && let Ok(key) = store.stash(s)
+        {
+            let target = self.truncate_strings_at - stash_suffix_char_len();
+            let truncate_pos = s
+                .char_indices()
+                .nth(target)
+                .map(|(i, _)| i)
+                .unwrap_or(s.len());
+            return Value::String(format!("{}{}", &s[..truncate_pos], stash_suffix(&key)));
+        }
+
+        // Lossy path: existing behavior. Only attach the marker when the
+        // limit can fit it plus at least one content character; otherwise
+        // dropping the marker is the only way to honor truncate_strings_at.
+        let attach_marker =
+            self.add_truncation_marker && self.truncate_strings_at > lossy_marker_len;
         let target = if attach_marker {
-            self.truncate_strings_at - marker_len
+            self.truncate_strings_at - lossy_marker_len
         } else {
             self.truncate_strings_at
         };
@@ -216,7 +272,7 @@ impl ResponseCompressor {
         let truncated = &s[..truncate_pos];
 
         if attach_marker {
-            Value::String(format!("{}{}", truncated, MARKER))
+            Value::String(format!("{}{}", truncated, LOSSY_MARKER))
         } else {
             Value::String(truncated.to_string())
         }

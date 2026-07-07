@@ -1,6 +1,9 @@
 use regex::Regex;
 use serde_json::Value;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
+use tokenless_ccr::StashStore;
+
+use crate::response_compressor::{stash_suffix, stash_suffix_char_len};
 
 static CODE_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"```[\s\S]*?```").unwrap());
 static INLINE_CODE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`[^`]+`").unwrap());
@@ -22,6 +25,12 @@ pub struct SchemaCompressor {
     drop_titles: bool,
     drop_markdown: bool,
     max_depth: usize,
+    /// Optional reversible stash. When present, truncated descriptions are
+    /// stashed (verbatim original, including markdown) and a
+    /// `<<tokenless:KEY>>` marker is appended so the LLM can retrieve the
+    /// full original. When `None`, truncation is lossy — the pre-stash
+    /// behavior. Mirrors `ResponseCompressor::stash_store`.
+    stash_store: Option<Arc<dyn StashStore>>,
 }
 
 impl Default for SchemaCompressor {
@@ -41,6 +50,7 @@ impl Default for SchemaCompressor {
             // descriptions. 32 keeps a wide safety margin below the
             // ~1024-frame default stack while leaving real schemas intact.
             max_depth: 32,
+            stash_store: None,
         }
     }
 }
@@ -49,6 +59,15 @@ impl SchemaCompressor {
     /// Create a new SchemaCompressor with default settings
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Attach a reversible stash store. When set, truncated descriptions
+    /// carry a `<<tokenless:KEY>>` marker and the verbatim original is
+    /// stashed for retrieval; when unset (the default), truncation stays
+    /// lossy.
+    pub fn with_stash_store(mut self, store: Arc<dyn StashStore>) -> Self {
+        self.stash_store = Some(store);
+        self
     }
 
     /// Set the maximum length for function-level descriptions
@@ -236,7 +255,13 @@ impl SchemaCompressor {
         }
     }
 
-    /// Intelligently truncate a description string
+    /// Intelligently truncate a description string. When a stash store is
+    /// attached, the verbatim original `desc` (including markdown, before
+    /// stripping) is stashed and a `<<tokenless:KEY>>` marker is appended so
+    /// the LLM can retrieve the full original; the stash suffix length is
+    /// reserved from `max_len` so the result still honors the limit. On stash
+    /// failure the suffix is dropped (lossy truncation, the pre-stash
+    /// behavior).
     pub fn truncate_description(&self, desc: &str, max_len: usize) -> String {
         // Trim whitespace
         let mut text = desc.trim().to_string();
@@ -249,20 +274,43 @@ impl SchemaCompressor {
         text = WHITESPACE_RE.replace_all(&text, " ").to_string();
         text = text.trim().to_string();
 
-        // If already within limit, return as-is (use char count, not byte length)
-        if text.chars().count() <= max_len {
+        // When stash is attached, reserve room for the retrievable suffix so
+        // the final string still fits `max_len`. Fit is checked before any
+        // stash call so a too-small `max_len` cannot orphan a stash entry
+        // whose marker never reaches the LLM.
+        let stash_active = self.stash_store.is_some() && max_len > stash_suffix_char_len();
+        let effective_max = if stash_active {
+            max_len - stash_suffix_char_len()
+        } else {
+            max_len
+        };
+
+        // If already within limit, return as-is (use char count, not byte length).
+        // No truncation → nothing stashed (markdown stripping's loss is
+        // pre-existing behavior, out of scope for the reversible-truncation path).
+        if text.chars().count() <= effective_max {
             return text;
         }
 
-        // Try to find a sentence boundary in the range [max_len*0.5, max_len]
-        // Convert char counts to byte positions via char_index so the search
-        // range and hard-truncation fallback use correct byte offsets even for
-        // multi-byte text (CJK, emoji, etc.). Previously max_len was passed
-        // directly as a byte position, truncating CJK text far more
-        // aggressively than expected (e.g. 300 chars cut to ~85 instead of 256).
-        let min_target = (max_len as f64 * 0.5) as usize;
+        // Truncation will happen. Stash the ORIGINAL desc (verbatim, with
+        // markdown) so retrieval yields the unredacted original — matching
+        // ResponseCompressor's "retrieval yields the original content
+        // verbatim" contract.
+        let stash_key = if stash_active {
+            self.stash_store
+                .as_ref()
+                .and_then(|store| store.stash(desc).ok())
+        } else {
+            None
+        };
+
+        // Try to find a sentence boundary in the range [effective_max*0.5,
+        // effective_max]. Convert char counts to byte positions via
+        // char_index so the search range and hard-truncation fallback use
+        // correct byte offsets even for multi-byte text (CJK, emoji, etc.).
+        let min_target = (effective_max as f64 * 0.5) as usize;
         let min_pos = char_index(&text, min_target);
-        let max_pos = char_index(&text, max_len.min(text.chars().count()));
+        let max_pos = char_index(&text, effective_max.min(text.chars().count()));
         let search_range = &text[min_pos..max_pos];
 
         // Look for sentence endings: . 。 ！ ？
@@ -276,13 +324,18 @@ impl SchemaCompressor {
             }
         }
 
-        if let Some(pos) = best_pos {
-            return text[..pos].trim().to_string();
-        }
+        let truncated = if let Some(pos) = best_pos {
+            text[..pos].trim().to_string()
+        } else {
+            // No sentence boundary found, hard truncate at effective_max.
+            let truncate_pos = char_index(&text, effective_max);
+            text[..truncate_pos].trim().to_string()
+        };
 
-        // No sentence boundary found, hard truncate at max_len characters
-        let truncate_pos = char_index(&text, max_len);
-        text[..truncate_pos].trim().to_string()
+        match stash_key {
+            Some(key) => format!("{}{}", truncated, stash_suffix(&key)),
+            None => truncated,
+        }
     }
 }
 

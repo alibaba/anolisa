@@ -46,6 +46,15 @@ enum Commands {
         /// Tool use ID
         #[arg(long)]
         tool_use_id: Option<String>,
+        /// Disable reversible stash. By default, truncated descriptions are
+        /// stashed so they can be retrieved via `tokenless retrieve`; this
+        /// flag makes truncation lossy (the pre-stash behavior).
+        #[arg(long)]
+        no_stash: bool,
+        /// Override the stash database path (default ~/.tokenless/stash.db).
+        /// Resolved under the trusted home directory; rejected if outside.
+        #[arg(long)]
+        stash_db: Option<String>,
     },
     /// Compress API responses
     CompressResponse {
@@ -398,12 +407,29 @@ fn run() -> Result<(), (String, i32)> {
             agent_id,
             session_id,
             tool_use_id,
+            no_stash,
+            stash_db,
         } => {
             let input = read_input(&file).map_err(|e| (e, 2))?;
             let value: serde_json::Value = serde_json::from_str(&input)
                 .map_err(|e| (format!("JSON parse error: {}", e), 2))?;
 
-            let compressor = SchemaCompressor::new();
+            // Load config before deciding on the stash so we can skip it
+            // entirely when compression is disabled (dry-run). Attaching the
+            // stash in dry-run would write entries whose `<<tokenless:KEY>>`
+            // markers never reach the LLM (the original input is emitted),
+            // orphaning them.
+            let config = TokenlessConfig::load();
+            let compression_on = config.is_compression_enabled();
+            let stash = if no_stash || !compression_on {
+                None
+            } else {
+                open_stash_store(stash_db.as_deref())
+            };
+            let mut compressor = SchemaCompressor::new();
+            if let Some(ref store) = stash {
+                compressor = compressor.with_stash_store(store.clone());
+            }
 
             let after_compact = if batch || value.is_array() {
                 let arr = value
@@ -424,13 +450,16 @@ fn run() -> Result<(), (String, i32)> {
                     "tokenless: schema compression did not reduce size ({} -> {} est. tokens), outputting original",
                     before_tokens, after_tokens
                 );
+                // No-savings discard edge: if a stash was attached and a
+                // description was truncated, those writes orphan (markers
+                // live in `after_compact`, which is discarded). Truncation
+                // almost always yields savings, so this is rare; orphaned
+                // entries are TTL-cleaned.
                 input.clone()
             } else {
                 after_compact.clone()
             };
 
-            let config = TokenlessConfig::load();
-            let compression_on = config.is_compression_enabled();
             let mode = resolve_mode(compression_on, before_tokens, after_tokens);
             let emit_text = if compression_on {
                 output_text.clone()
