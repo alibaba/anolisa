@@ -225,6 +225,14 @@ impl SkillFs {
         category: &str,
         skill_name: &str,
     ) -> ReadResolution {
+        // Non-skill children of a category (no `SKILL.md`) are plain
+        // passthrough — they are never gated by activation. Without this,
+        // an attached resolver has no entry for `category/child` and
+        // would (incorrectly) map the child to `Hidden`, making files
+        // like `apple/docs/readme.txt` disappear from the mount.
+        if !self.hermes_nested_is_skill(category, skill_name) {
+            return ReadResolution::Source;
+        }
         let nested_id = Self::hermes_skill_id(category, skill_name);
         let resolver = match self.active_resolver.as_ref() {
             Some(r) => r,
@@ -245,7 +253,6 @@ impl SkillFs {
     }
 
     /// Compiled SKILL.md for a Hermes nested skill.
-    #[allow(dead_code)]
     pub(super) fn compiled_hermes_nested_skill_md(
         &self,
         category: &str,

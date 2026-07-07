@@ -358,4 +358,31 @@ impl SkillFs {
     pub(super) fn hermes_skill_physical_dir(&self, category: &str, skill_name: &str) -> PathBuf {
         self.source_base().join(category).join(skill_name)
     }
+
+    /// Whether `<category>/<skill_name>` is a real Hermes nested skill
+    /// leaf — i.e. a directory that physically contains `SKILL.md`.
+    ///
+    /// The Hermes parser is purely lexical and classifies *every*
+    /// second-level entry as a nested skill, but only directories with a
+    /// `SKILL.md` are actual skills. Plain files/dirs under a category
+    /// (e.g. `apple/docs/readme.txt`) are category passthrough and must
+    /// never enter activation gating. The probe hits the physical source
+    /// via `source_base()` so it bypasses the FUSE over-mount in in-place
+    /// mode.
+    pub(super) fn hermes_nested_is_skill(&self, category: &str, skill_name: &str) -> bool {
+        self.hermes_skill_physical_dir(category, skill_name)
+            .join("SKILL.md")
+            .exists()
+    }
+
+    /// Whether `<name>` is a real top-level Hermes skill — i.e. a
+    /// directory directly under the source root that physically contains
+    /// `SKILL.md`. Real Hermes workspaces mix top-level skills
+    /// (`skill/SKILL.md`) with categorized nested skills
+    /// (`category/skill/SKILL.md`); the lexical parser classifies every
+    /// top-level entry as a category container, so callers reclassify a
+    /// top-level skill back into the flat skill path types.
+    pub(super) fn hermes_is_top_level_skill(&self, name: &str) -> bool {
+        self.source_base().join(name).join("SKILL.md").exists()
+    }
 }

@@ -407,8 +407,59 @@ impl SkillFs {
     }
 
     /// Parse a FUSE path using this filesystem's layout and in-place mode.
+    ///
+    /// For [`SkillLayout::Hermes`] the lexical parser cannot tell a
+    /// top-level skill (`skill/SKILL.md`) from a category container
+    /// (`category/skill/SKILL.md`) — it classifies every top-level entry
+    /// as a category. Real Hermes workspaces mix both, so this wrapper
+    /// probes the physical source and rewrites a top-level skill and its
+    /// descendants back into the flat [`PathType`] variants
+    /// (`SkillDir` / `SkillMd` / `Passthrough`) that the flat code paths
+    /// already handle. Categorized nested skills are left untouched.
     pub(super) fn parse_fuse_path(&self, path: &std::path::Path) -> crate::path::PathType {
-        crate::path::parse_path_with_layout(path, self.in_place, self.skill_layout)
+        use crate::path::PathType;
+        let parsed = crate::path::parse_path_with_layout(path, self.in_place, self.skill_layout);
+        if self.skill_layout != SkillLayout::Hermes {
+            return parsed;
+        }
+        match parsed {
+            PathType::CategoryDir { category } if self.hermes_is_top_level_skill(&category) => {
+                PathType::SkillDir {
+                    skill_name: category,
+                }
+            }
+            PathType::NestedSkillDir {
+                category,
+                skill_name,
+            } if self.hermes_is_top_level_skill(&category) => {
+                if skill_name == "SKILL.md" {
+                    PathType::SkillMd {
+                        skill_name: category,
+                    }
+                } else {
+                    PathType::Passthrough {
+                        skill_name: category,
+                        relative_path: std::path::PathBuf::from(skill_name),
+                    }
+                }
+            }
+            PathType::NestedSkillMd {
+                category,
+                skill_name,
+            } if self.hermes_is_top_level_skill(&category) => PathType::Passthrough {
+                skill_name: category,
+                relative_path: std::path::Path::new(&skill_name).join("SKILL.md"),
+            },
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } if self.hermes_is_top_level_skill(&category) => PathType::Passthrough {
+                skill_name: category,
+                relative_path: std::path::Path::new(&skill_name).join(relative_path),
+            },
+            other => other,
+        }
     }
 
     fn virtual_file_attr(&self, size: u64) -> FileAttr {

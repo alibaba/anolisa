@@ -642,6 +642,49 @@ pub fn enumerate_hermes_skill_leaves(source_root: &Path) -> Vec<String> {
     leaves
 }
 
+/// Enumerate top-level Hermes skills under `source_root`.
+///
+/// A top-level skill is a non-management directory directly under the
+/// source root that contains its own `SKILL.md`. Real Hermes workspaces
+/// mix these flat skills with categorized nested skills, so activation
+/// discovery must cover both.
+pub fn enumerate_hermes_top_level_skills(source_root: &Path) -> Vec<String> {
+    use crate::path::is_hermes_management_path;
+
+    let mut skills = Vec::new();
+    let entries = match std::fs::read_dir(source_root) {
+        Ok(e) => e,
+        Err(_) => return skills,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if is_hermes_management_path(&name) || name.starts_with('.') {
+            continue;
+        }
+        if !entry.path().is_dir() {
+            continue;
+        }
+        if entry.path().join("SKILL.md").exists() {
+            skills.push(name);
+        }
+    }
+    skills
+}
+
+/// Enumerate every activatable Hermes skill id under `source_root`:
+/// top-level skills (`skill`) and categorized nested skills
+/// (`category/skill`).
+///
+/// This mirrors exactly what the FUSE mount treats as a skill — top-level
+/// directories with `SKILL.md` become flat skills, and second-level
+/// directories with `SKILL.md` become nested skills — so activation
+/// bootstrap consumes the same set the mount exposes and cannot diverge.
+pub fn enumerate_hermes_skill_ids(source_root: &Path) -> Vec<String> {
+    let mut ids = enumerate_hermes_top_level_skills(source_root);
+    ids.extend(enumerate_hermes_skill_leaves(source_root));
+    ids
+}
+
 /// Load activation state for every skill in `skill_names` and install
 /// into the given resolver. Errors are non-fatal: each failing skill is
 /// mapped to hidden with a diagnostic log line.

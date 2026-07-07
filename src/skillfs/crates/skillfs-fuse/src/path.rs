@@ -45,6 +45,21 @@ pub fn is_hermes_management_path(name: &str) -> bool {
     HERMES_MANAGEMENT_PATHS.contains(&name)
 }
 
+/// Conservatively auto-detect the skill layout for a source root.
+///
+/// A source is Hermes only when it carries an unambiguous Hermes hub
+/// marker: a `.bundled_manifest` file or a `.hub/` directory. Everything
+/// else — including a bare `.no-bundled-skills` sentinel, which a flat
+/// workspace can also carry — is treated as [`SkillLayout::Flat`]. This
+/// keeps the default safe: a normal flat tree is never misread as Hermes.
+pub fn detect_skill_layout(source: &Path) -> SkillLayout {
+    if source.join(".bundled_manifest").exists() || source.join(".hub").is_dir() {
+        SkillLayout::Hermes
+    } else {
+        SkillLayout::Flat
+    }
+}
+
 /// Types of paths in the SkillFS filesystem.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PathType {

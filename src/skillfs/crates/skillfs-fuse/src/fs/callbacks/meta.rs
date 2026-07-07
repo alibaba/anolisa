@@ -446,37 +446,64 @@ impl SkillFs {
                 ref skill_name,
             } => {
                 let nested_id = Self::hermes_skill_id(category, skill_name);
-                if !self.is_staging_skill_root(&nested_id)
-                    && !self.is_pending_install(&nested_id)
-                    && matches!(
-                        self.resolve_hermes_nested_read(category, skill_name),
-                        crate::fs::read_resolution::ReadResolution::Hidden
-                    )
-                {
-                    reply.error(libc::ENOENT);
-                    return;
-                }
-                let physical = match self.resolve_hermes_nested_read(category, skill_name) {
-                    crate::fs::read_resolution::ReadResolution::Snapshot { dir, .. } => {
-                        dir.join("SKILL.md")
-                    }
-                    _ => self
+                // Staging / pending nested SKILL.md is a raw physical file.
+                if self.is_staging_skill_root(&nested_id) || self.is_pending_install(&nested_id) {
+                    let physical = self
                         .source_base()
                         .join(category)
                         .join(skill_name)
-                        .join("SKILL.md"),
-                };
-                match std::fs::symlink_metadata(&physical) {
-                    Ok(meta) => {
-                        let mut attr = file_attr_from_metadata(&meta);
+                        .join("SKILL.md");
+                    match std::fs::symlink_metadata(&physical) {
+                        Ok(meta) => {
+                            let ino =
+                                self.inodes
+                                    .allocate(&path_str, FileType::RegularFile, parent);
+                            self.inodes.remember(ino);
+                            let mut attr = file_attr_from_metadata(&meta);
+                            attr.ino = ino;
+                            reply.entry(&Duration::from_secs(1), &attr, 0);
+                        }
+                        Err(e) => reply.error(errno(&e)),
+                    }
+                    return;
+                }
+                if matches!(
+                    self.resolve_hermes_nested_read(category, skill_name),
+                    crate::fs::read_resolution::ReadResolution::Hidden
+                ) {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+                // Size must match the compiled payload the kernel will see
+                // on `read`; take mtime/type from the physical SKILL.md but
+                // project the compiled length over the raw size.
+                match self.compiled_hermes_nested_skill_md(category, skill_name) {
+                    Some(compiled) => {
+                        let md_phys = self
+                            .hermes_nested_skill_read_dir(category, skill_name)
+                            .map(|d| d.join("SKILL.md"))
+                            .unwrap_or_else(|| {
+                                self.source_base()
+                                    .join(category)
+                                    .join(skill_name)
+                                    .join("SKILL.md")
+                            });
                         let ino = self
                             .inodes
                             .allocate(&path_str, FileType::RegularFile, parent);
                         self.inodes.remember(ino);
+                        let mut attr = match std::fs::metadata(&md_phys) {
+                            Ok(meta) => {
+                                let mut a = file_attr_from_metadata(&meta);
+                                a.size = compiled.len() as u64;
+                                a
+                            }
+                            Err(_) => self.virtual_file_attr(compiled.len() as u64),
+                        };
                         attr.ino = ino;
                         reply.entry(&Duration::from_secs(1), &attr, 0);
                     }
-                    Err(e) => reply.error(errno(&e)),
+                    None => reply.error(libc::ENOENT),
                 }
             }
             PathType::NestedPassthrough {
@@ -879,33 +906,53 @@ impl SkillFs {
                 ref skill_name,
             } => {
                 let nid = Self::hermes_skill_id(category, skill_name);
-                if !self.is_staging_skill_root(&nid)
-                    && !self.is_pending_install(&nid)
-                    && matches!(
-                        self.resolve_hermes_nested_read(category, skill_name),
-                        crate::fs::read_resolution::ReadResolution::Hidden
-                    )
-                {
-                    reply.error(libc::ENOENT);
-                    return;
-                }
-                let physical = match self.resolve_hermes_nested_read(category, skill_name) {
-                    crate::fs::read_resolution::ReadResolution::Snapshot { dir, .. } => {
-                        dir.join("SKILL.md")
-                    }
-                    _ => self
+                // Staging / pending nested SKILL.md is a raw physical file.
+                if self.is_staging_skill_root(&nid) || self.is_pending_install(&nid) {
+                    let physical = self
                         .source_base()
                         .join(category)
                         .join(skill_name)
-                        .join("SKILL.md"),
-                };
-                match std::fs::symlink_metadata(&physical) {
-                    Ok(meta) => {
-                        let mut attr = file_attr_from_metadata(&meta);
+                        .join("SKILL.md");
+                    match std::fs::metadata(&physical) {
+                        Ok(meta) => {
+                            let mut attr = file_attr_from_metadata(&meta);
+                            attr.ino = ino;
+                            reply.attr(&Duration::from_secs(1), &attr);
+                        }
+                        Err(e) => reply.error(errno(&e)),
+                    }
+                    return;
+                }
+                if matches!(
+                    self.resolve_hermes_nested_read(category, skill_name),
+                    crate::fs::read_resolution::ReadResolution::Hidden
+                ) {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+                match self.compiled_hermes_nested_skill_md(category, skill_name) {
+                    Some(compiled) => {
+                        let md_phys = self
+                            .hermes_nested_skill_read_dir(category, skill_name)
+                            .map(|d| d.join("SKILL.md"))
+                            .unwrap_or_else(|| {
+                                self.source_base()
+                                    .join(category)
+                                    .join(skill_name)
+                                    .join("SKILL.md")
+                            });
+                        let mut attr = match std::fs::metadata(&md_phys) {
+                            Ok(meta) => {
+                                let mut a = file_attr_from_metadata(&meta);
+                                a.size = compiled.len() as u64;
+                                a
+                            }
+                            Err(_) => self.virtual_file_attr(compiled.len() as u64),
+                        };
                         attr.ino = ino;
                         reply.attr(&Duration::from_secs(1), &attr);
                     }
-                    Err(e) => reply.error(errno(&e)),
+                    None => reply.error(libc::ENOENT),
                 }
             }
             PathType::NestedPassthrough {

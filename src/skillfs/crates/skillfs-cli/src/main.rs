@@ -255,11 +255,13 @@ enum Commands {
 
         /// Skill directory layout mode.
         ///
-        /// `flat` (default): each top-level directory under SOURCE is a
-        /// skill containing SKILL.md. `hermes`: SOURCE is a Hermes hub
-        /// workspace — management paths (.hub, .bundled_manifest,
-        /// .no-bundled-skills) are passthrough; skills live at
-        /// category/skill/SKILL.md.
+        /// `auto` (default): detect Hermes from source-root markers
+        /// (`.bundled_manifest` or `.hub/`), otherwise flat. `flat`: each
+        /// top-level directory under SOURCE is a skill containing
+        /// SKILL.md. `hermes`: SOURCE is a Hermes hub workspace —
+        /// management paths (.hub, .bundled_manifest, .no-bundled-skills)
+        /// are passthrough; skills live at category/skill/SKILL.md (and
+        /// top-level skill/SKILL.md).
         ///
         /// Hermes mode supports --security --activation-mode file
         /// for nested skill activation and notify. Incompatible with
@@ -648,20 +650,22 @@ async fn cmd_mount(
             .unwrap_or_default(),
     };
 
-    // Parse skill layout: CLI flag overrides config file.
-    let skill_layout = match skill_layout_raw.as_deref() {
+    // Parse skill layout: CLI flag overrides config file; the default is
+    // `auto`, which conservatively detects Hermes from source-root markers
+    // (`.bundled_manifest` / `.hub/`) and otherwise falls back to flat.
+    // Explicit `flat` / `hermes` always win over detection.
+    let layout_intent = skill_layout_raw
+        .as_deref()
+        .or_else(|| file_config.as_ref().and_then(|c| c.skills_layout()));
+    let skill_layout = match layout_intent {
         Some("flat") => Some(skillfs_fuse::SkillLayout::Flat),
         Some("hermes") => Some(skillfs_fuse::SkillLayout::Hermes),
+        Some("auto") | None => Some(skillfs_fuse::detect_skill_layout(&source)),
         Some(other) => {
-            return Err(format!("invalid --skill-layout '{other}'; allowed: flat, hermes").into());
+            return Err(
+                format!("invalid --skill-layout '{other}'; allowed: auto, flat, hermes").into(),
+            );
         }
-        None => file_config
-            .as_ref()
-            .and_then(|c| c.skills_layout())
-            .map(|s| match s {
-                "hermes" => skillfs_fuse::SkillLayout::Hermes,
-                _ => skillfs_fuse::SkillLayout::Flat,
-            }),
     };
 
     // Parse reload mode: CLI flag (if present) overrides config file.
@@ -1295,7 +1299,7 @@ async fn cmd_mount(
         // missing activation files map to hidden (fail-safe).
         let resolver = ActiveSkillResolver::new(source.clone());
         let skill_names: Vec<String> = if skill_layout == Some(skillfs_fuse::SkillLayout::Hermes) {
-            skillfs_fuse::security::enumerate_hermes_skill_leaves(&daemon_root)
+            skillfs_fuse::security::enumerate_hermes_skill_ids(&daemon_root)
         } else {
             shared_store
                 .read()
@@ -1907,7 +1911,7 @@ async fn cmd_mount(
     let reconcile_skill_names: Option<Vec<String>> =
         if activation_mode == ActivationMode::File && notify_controller.is_some() {
             let names: Vec<String> = if skill_layout == Some(skillfs_fuse::SkillLayout::Hermes) {
-                skillfs_fuse::security::enumerate_hermes_skill_leaves(&daemon_root)
+                skillfs_fuse::security::enumerate_hermes_skill_ids(&daemon_root)
             } else {
                 shared_store
                     .read()

@@ -137,6 +137,25 @@ impl SkillFs {
             PathType::SkillDir { skill_name } | PathType::InboxSkillDir { skill_name } => {
                 (Some(skill_name.clone()), None)
             }
+            PathType::NestedSkillDir {
+                category,
+                skill_name,
+            } => (Some(Self::hermes_skill_id(category, skill_name)), None),
+            PathType::NestedSkillMd {
+                category,
+                skill_name,
+            } => (
+                Some(Self::hermes_skill_id(category, skill_name)),
+                Some(PathBuf::from("SKILL.md")),
+            ),
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } => (
+                Some(Self::hermes_skill_id(category, skill_name)),
+                Some(relative_path.clone()),
+            ),
             _ => (None, None),
         };
         let mut event = SkillEvent::new(kind)
@@ -181,6 +200,25 @@ impl SkillFs {
                 (Some(skill_name.clone()), Some(PathBuf::from("SKILL.md")))
             }
             PathType::SkillDir { skill_name } => (Some(skill_name.clone()), None),
+            PathType::NestedSkillDir {
+                category,
+                skill_name,
+            } => (Some(Self::hermes_skill_id(category, skill_name)), None),
+            PathType::NestedSkillMd {
+                category,
+                skill_name,
+            } => (
+                Some(Self::hermes_skill_id(category, skill_name)),
+                Some(PathBuf::from("SKILL.md")),
+            ),
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } => (
+                Some(Self::hermes_skill_id(category, skill_name)),
+                Some(relative_path.clone()),
+            ),
             _ => (None, None),
         };
         let display_name = name.to_string_lossy();

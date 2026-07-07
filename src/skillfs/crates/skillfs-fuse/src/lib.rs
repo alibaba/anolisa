@@ -27,7 +27,7 @@ mod xattr;
 
 pub use fs::SkillFs;
 pub use mount::{MountConfig, mount_background_configured, mount_configured};
-pub use path::SkillLayout;
+pub use path::{SkillLayout, detect_skill_layout};
 
 #[allow(deprecated)]
 pub use mount::{

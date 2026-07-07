@@ -118,8 +118,9 @@ pub mod trusted_writer;
 pub use activation::{
     ACTIVATION_FILE, ACTIVATION_SCHEMA_VERSION, ACTIVATION_XATTR, ActivationError, ActivationMode,
     ActivationRecord, XattrReadOutcome, bootstrap_activation, classify_xattr_errno,
-    enumerate_hermes_skill_leaves, fail_safe_hidden, load_activation, load_activation_prefer_xattr,
-    read_activation_xattr, resolve_activation,
+    enumerate_hermes_skill_ids, enumerate_hermes_skill_leaves, enumerate_hermes_top_level_skills,
+    fail_safe_hidden, load_activation, load_activation_prefer_xattr, read_activation_xattr,
+    resolve_activation,
 };
 pub use activation_reload::{
     ActivationFreshness, ActivationReloadController, DEFAULT_RELOAD_INTERVAL_MS,

@@ -115,11 +115,67 @@ impl SkillFs {
                     }
                 }
             }
+            PathType::NestedSkillMd {
+                ref category,
+                ref skill_name,
+            } if self.is_staging_skill_root(&Self::hermes_skill_id(category, skill_name))
+                || self.is_pending_install(&Self::hermes_skill_id(category, skill_name)) =>
+            {
+                // Staging / pending nested SKILL.md is served raw from the
+                // physical handle, mirroring the flat SkillMd behavior.
+                let result = self.handles.with_handle(fh, |entry| {
+                    if let Some(ref file) = entry.file {
+                        let mut buf = vec![0u8; size as usize];
+                        match file.read_at(&mut buf, offset as u64) {
+                            Ok(n) => Ok(buf[..n].to_vec()),
+                            Err(e) => Err(errno(&e)),
+                        }
+                    } else {
+                        Err(libc::EBADF)
+                    }
+                });
+                match result {
+                    Some(Ok(data)) => {
+                        reply.data(&data);
+                        return;
+                    }
+                    Some(Err(e)) => {
+                        reply.error(e);
+                        return;
+                    }
+                    None => {
+                        reply.error(libc::EBADF);
+                        return;
+                    }
+                }
+            }
+            PathType::NestedSkillMd {
+                ref category,
+                ref skill_name,
+            } => {
+                // Nested SKILL.md is compiled just like the flat SkillMd:
+                // frontmatter is stripped and env placeholders resolved, so
+                // the agent-visible content matches the flat contract.
+                match self.compiled_hermes_nested_skill_md(category, skill_name) {
+                    Some(c) => c,
+                    None => {
+                        self.emit_op_event(
+                            req,
+                            &path_type,
+                            SkillEventKind::Read,
+                            SkillEventAction::Failed,
+                            Some(libc::ENOENT),
+                            None,
+                        );
+                        reply.error(libc::ENOENT);
+                        return;
+                    }
+                }
+            }
             PathType::Passthrough { .. }
             | PathType::InboxPassthrough { .. }
             | PathType::HermesMeta { .. }
             | PathType::HermesMetaChild { .. }
-            | PathType::NestedSkillMd { .. }
             | PathType::NestedPassthrough { .. } => {
                 // Use fd-backed read via handle
                 let result = self.handles.with_handle(fh, |entry| {
@@ -650,6 +706,88 @@ impl SkillFs {
                 let fh = self
                     .handles
                     .allocate(ino, flags, None, pinned_target.clone());
+                self.emit_op_event(
+                    req,
+                    &path_type,
+                    SkillEventKind::Open,
+                    SkillEventAction::Allowed,
+                    None,
+                    None,
+                );
+                reply.opened(fh, 0);
+            }
+            return;
+        }
+
+        // Nested SKILL.md: virtual compiled read, physical write. Mirrors
+        // the flat SkillMd handling so nested skills strip frontmatter on
+        // read while writes still target the live source file.
+        if let PathType::NestedSkillMd {
+            ref category,
+            ref skill_name,
+        } = path_type
+        {
+            let nested_id = Self::hermes_skill_id(category, skill_name);
+            let is_trunc = (flags & libc::O_TRUNC) != 0;
+
+            if is_trunc {
+                if let Err(e) = std::fs::OpenOptions::new()
+                    .write(true)
+                    .truncate(true)
+                    .open(&physical)
+                {
+                    warn!(op = "open", ?physical, error = %e, "nested SKILL.md O_TRUNC failed");
+                    reply.error(errno(&e));
+                    return;
+                }
+                self.observe_mutation(
+                    &nested_id,
+                    Some(Path::new("SKILL.md")),
+                    crate::security::MutationKind::SetattrTruncate,
+                );
+            }
+
+            if is_write {
+                match open_options_from_flags(flags).open(&physical) {
+                    Ok(file) => {
+                        let fh = self.handles.allocate(ino, flags, Some(file), None);
+                        self.emit_op_event(
+                            req,
+                            &path_type,
+                            SkillEventKind::Open,
+                            SkillEventAction::Allowed,
+                            None,
+                            None,
+                        );
+                        reply.opened(fh, 0);
+                    }
+                    Err(e) => {
+                        warn!(op = "open", ?physical, error = %e, "open failed");
+                        let err = errno(&e);
+                        self.emit_op_event(
+                            req,
+                            &path_type,
+                            SkillEventKind::Open,
+                            SkillEventAction::Failed,
+                            Some(err),
+                            None,
+                        );
+                        reply.error(err);
+                    }
+                }
+            } else if self.is_staging_skill_root(&nested_id) || self.is_pending_install(&nested_id)
+            {
+                // Staging / pending nested SKILL.md is served raw.
+                match open_options_from_flags(flags).open(&physical) {
+                    Ok(file) => {
+                        let fh = self.handles.allocate(ino, flags, Some(file), None);
+                        reply.opened(fh, 0);
+                    }
+                    Err(e) => reply.error(errno(&e)),
+                }
+            } else {
+                // Read-only: compiled content served virtually, no fd.
+                let fh = self.handles.allocate(ino, flags, None, None);
                 self.emit_op_event(
                     req,
                     &path_type,
