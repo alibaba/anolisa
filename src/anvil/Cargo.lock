@@ -72,7 +72,7 @@ dependencies = [
 
 [[package]]
 name = "anvil"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anvil-core",
  "anyhow",
@@ -95,7 +95,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "semver",
