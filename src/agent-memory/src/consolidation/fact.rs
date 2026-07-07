@@ -106,12 +106,12 @@ impl ConsolidatedFact {
         out.push_str(&format!("id: {}\n", self.id));
         out.push_str(&format!("session_id: {}\n", self.session_id));
         out.push_str(&format!("category: {}\n", self.category));
-        out.push_str(&format!("title: {}\n", yaml_quote(&self.title)));
+        out.push_str(&format!("title: {}\n", sanitize_hint(&self.title)));
         out.push_str(&format!("source_tool: {}\n", self.source_tool));
         if !self.related_paths.is_empty() {
             out.push_str("related_paths:\n");
             for p in &self.related_paths {
-                out.push_str(&format!("  - {}\n", yaml_quote(p)));
+                out.push_str(&format!("  - {}\n", sanitize_hint(p)));
             }
         }
         out.push_str(&format!("created_at: {}\n", self.created_at));
@@ -131,15 +131,27 @@ impl ConsolidatedFact {
     }
 }
 
-/// Emit a YAML double-quoted scalar. Escapes `\`, `"`, and newlines so
-/// user-controlled values (file paths, search queries, error messages)
-/// cannot break frontmatter parsing.
-fn yaml_quote(s: &str) -> String {
-    let escaped: String = s
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', " ");
-    format!("\"{escaped}\"")
+/// Sanitize a value for safe frontmatter inclusion.
+///
+/// The hand-rolled frontmatter readers (parse_frontmatter_flat /
+/// extract_title_and_description) use split_once(": ") +
+/// trim_matches('"') and do NOT interpret YAML escapes or double-quoting.
+/// YAML-style escaping would be asymmetric and cause round-trip
+/// regression on Windows paths containing backslashes.
+///
+/// Strategy:
+/// - Replace newlines (\n, \r) with spaces to prevent premature
+///   termination of the "---" frontmatter block marker.
+/// - Replace other ASCII control characters (\x00-\x1F) with spaces.
+/// - Keep all other characters unchanged, including #, :, ", and \.
+fn sanitize_hint(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\n' | '\r' => ' ',
+            c if c.is_ascii_control() => ' ',
+            other => other,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -201,5 +213,85 @@ mod tests {
     fn category_display() {
         assert_eq!(FactCategory::WorkingContext.to_string(), "working-context");
         assert_eq!(FactCategory::Lesson.to_string(), "lesson");
+    }
+
+    #[test]
+    fn sanitize_hint_preserves_normal_text() {
+        let result = sanitize_hint("a simple title");
+        assert_eq!(result, "a simple title");
+    }
+
+    #[test]
+    fn sanitize_hint_preserves_hashes() {
+        let result = sanitize_hint("fix #123 and #456");
+        assert_eq!(result, "fix #123 and #456");
+    }
+
+    #[test]
+    fn sanitize_hint_preserves_colons() {
+        let result = sanitize_hint("note: has a colon");
+        assert_eq!(result, "note: has a colon");
+    }
+
+    #[test]
+    fn sanitize_hint_preserves_quotes_and_backslashes() {
+        let result = sanitize_hint("she said \"hello\"");
+        assert_eq!(result, "she said \"hello\"");
+        let result2 = sanitize_hint("C:\\Users\\admin");
+        assert_eq!(result2, "C:\\Users\\admin");
+    }
+
+    #[test]
+    fn sanitize_hint_replaces_newlines() {
+        let result = sanitize_hint("line1\nline2");
+        assert_eq!(result, "line1 line2");
+    }
+
+    #[test]
+    fn sanitize_hint_crlf() {
+        let result = sanitize_hint("line1\r\nline2");
+        assert_eq!(result, "line1  line2");
+    }
+
+    #[test]
+    fn sanitize_hint_empty() {
+        let result = sanitize_hint("");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn sanitize_hint_control_chars() {
+        let result = sanitize_hint("pre\x00mid\x1Fpost");
+        assert_eq!(result, "pre mid post");
+    }
+
+    #[test]
+    fn fact_title_with_special_chars() {
+        let f = ConsolidatedFact::new(
+            "sid",
+            FactCategory::Lesson,
+            "Use const\nnot var".into(),
+            "Details".into(),
+            "mem_edit".into(),
+            vec![],
+            0.7,
+        );
+        let md = f.to_markdown();
+        assert!(md.contains("title: Use const not var"));
+    }
+
+    #[test]
+    fn fact_path_with_backslashes() {
+        let f = ConsolidatedFact::new(
+            "sid",
+            FactCategory::WorkingContext,
+            "Work".into(),
+            "Details".into(),
+            "mem_write".into(),
+            vec!["C:\\Users\\admin\\file.txt".into()],
+            0.5,
+        );
+        let md = f.to_markdown();
+        assert!(md.contains("C:\\Users\\admin\\file.txt"));
     }
 }
