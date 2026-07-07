@@ -18,10 +18,9 @@
 #   6. openclaw-plugin/openclaw.plugin.json  ("version" field)
 #   7. cosh-extension/cosh-extension.json    ("version" field)
 #   8. hermes-plugin/src/plugin.yaml        (version field)
-#   9. adapters/adapter-manifest.json        ("version" field)
-#  10. adapters/component.toml              (component.version)
-#  11. codex-plugin/hooks-plugin/.codex-plugin/plugin.json ("version" field)
-#  12. Lock files: Cargo.lock, uv.lock, package-lock.json (auto-regenerated)
+#   9. adapters/component.toml              (component.version)
+#  10. codex-plugin/hooks-plugin/.codex-plugin/plugin.json ("version" field)
+#  11. Lock files: Cargo.lock, uv.lock, package-lock.json (auto-regenerated)
 #
 # Manual update required (not automated):
 #   - agent-sec-core.spec.in  (%changelog entry)
@@ -184,15 +183,7 @@ bump_file "$PROJECT_ROOT/hermes-plugin/src/plugin.yaml" \
     "hermes-plugin/src/plugin.yaml"
 
 # -----------------------------------------------------------------------------
-# 9. adapters/adapter-manifest.json
-# -----------------------------------------------------------------------------
-bump_file "$PROJECT_ROOT/adapters/adapter-manifest.json" \
-    "\"version\": \"$OLD_VERSION\"" \
-    "\"version\": \"$NEW_VERSION\"" \
-    "adapters/adapter-manifest.json"
-
-# -----------------------------------------------------------------------------
-# 10. adapters/component.toml
+# 9. adapters/component.toml
 # -----------------------------------------------------------------------------
 bump_file "$PROJECT_ROOT/adapters/component.toml" \
     "^version = \"$OLD_VERSION\"" \
@@ -200,7 +191,7 @@ bump_file "$PROJECT_ROOT/adapters/component.toml" \
     "adapters/component.toml"
 
 # -----------------------------------------------------------------------------
-# 11. codex-plugin/hooks-plugin/.codex-plugin/plugin.json
+# 10. codex-plugin/hooks-plugin/.codex-plugin/plugin.json
 # -----------------------------------------------------------------------------
 bump_file "$PROJECT_ROOT/codex-plugin/hooks-plugin/.codex-plugin/plugin.json" \
     "\"version\": \"$OLD_VERSION\"" \

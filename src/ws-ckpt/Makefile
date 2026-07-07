@@ -46,7 +46,6 @@ else
 	install -p -m 0644 component.toml "$(DESTDIR)$(COMPONENT_DIR)/component.toml"
 	install -d -m 0755 "$(DESTDIR)$(ADAPTER_DIR)"
 	rm -rf "$(DESTDIR)$(ADAPTER_DIR)/scripts" 2>/dev/null || true
-	install -p -m 0644 adapter-manifest.json "$(DESTDIR)$(ADAPTER_DIR)/manifest.json"
 	install -d -m 0755 "$(DESTDIR)$(ADAPTER_DIR)/openclaw"
 	install -p -m 0644 scripts/openclaw/lib-discover.sh "$(DESTDIR)$(ADAPTER_DIR)/openclaw/"
 	install -p -m 0755 scripts/openclaw/detect-openclaw.sh "$(DESTDIR)$(ADAPTER_DIR)/openclaw/"

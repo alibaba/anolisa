@@ -11,8 +11,6 @@ URL:            https://github.com/alibaba/anolisa
 Source0:        %{name}-%{version}.tar.gz
 Source1:        %{name}-%{version}-vendor.tar.gz
 
-ExcludeArch:    aarch64
-
 # Build dependencies
 # Rust edition 2024 needs >=1.85; cmake is required by the git2 crate's
 # vendored libgit2 build; systemd-devel ships libsystemd headers for the

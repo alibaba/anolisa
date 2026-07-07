@@ -13,7 +13,6 @@ DATADIR ?= $(PREFIX)/share
 ifeq ($(INSTALL_PROFILE),system)
 SKILLS_DIR ?= $(DATADIR)/anolisa/skills
 endif
-ADAPTER_DIR ?= $(DATADIR)/anolisa/adapters/os-skills
 COMPONENT_DIR ?= $(DATADIR)/anolisa/components/os-skills
 
 .PHONY: build install uninstall clean help
@@ -29,18 +28,8 @@ install:
 		install -d -m 0755 "$(DESTDIR)$(SKILLS_DIR)/$$skill_name"; \
 		cp -pr "$$skill_dir/." "$(DESTDIR)$(SKILLS_DIR)/$$skill_name/"; \
 	done
-	install -d -m 0755 "$(DESTDIR)$(ADAPTER_DIR)"
-	install -p -m 0644 adapters/adapter-manifest.json "$(DESTDIR)$(ADAPTER_DIR)/manifest.json"
 	install -d -m 0755 "$(DESTDIR)$(COMPONENT_DIR)"
 	install -p -m 0644 component.toml "$(DESTDIR)$(COMPONENT_DIR)/component.toml"
-	install -d -m 0755 "$(DESTDIR)$(ADAPTER_DIR)/openclaw/scripts"
-	install -p -m 0755 adapters/openclaw/scripts/detect.sh "$(DESTDIR)$(ADAPTER_DIR)/openclaw/scripts/"
-	install -p -m 0755 adapters/openclaw/scripts/install.sh "$(DESTDIR)$(ADAPTER_DIR)/openclaw/scripts/"
-	install -p -m 0755 adapters/openclaw/scripts/uninstall.sh "$(DESTDIR)$(ADAPTER_DIR)/openclaw/scripts/"
-	install -d -m 0755 "$(DESTDIR)$(ADAPTER_DIR)/hermes/scripts"
-	install -p -m 0755 adapters/hermes/scripts/detect.sh "$(DESTDIR)$(ADAPTER_DIR)/hermes/scripts/"
-	install -p -m 0755 adapters/hermes/scripts/install.sh "$(DESTDIR)$(ADAPTER_DIR)/hermes/scripts/"
-	install -p -m 0755 adapters/hermes/scripts/uninstall.sh "$(DESTDIR)$(ADAPTER_DIR)/hermes/scripts/"
 
 uninstall:
 	@echo "==> Removing os-skills from $(DESTDIR)$(SKILLS_DIR)"
@@ -49,7 +38,6 @@ uninstall:
 		skill_name=$$(basename "$$skill_dir"); \
 		rm -rf "$(DESTDIR)$(SKILLS_DIR)/$$skill_name"; \
 	done
-	rm -rf "$(DESTDIR)$(ADAPTER_DIR)"
 	rm -rf "$(DESTDIR)$(COMPONENT_DIR)"
 
 clean:

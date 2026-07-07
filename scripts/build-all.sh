@@ -319,17 +319,6 @@ remove_skill_dirs_flat() {
     done < <(find "$src_root" -name "SKILL.md" -type f | sort)
 }
 
-stage_adapter_manifest() {
-    local comp="$1" src="$2"
-    [[ -f "$src" ]] || return 0
-    if $DRY_RUN; then
-        echo "DRY-RUN: stage adapter manifest $src -> target/$comp"
-        return 0
-    fi
-    copy_file "$src" "$(component_target_dir "$comp")/share/anolisa/adapters/$comp/manifest.json" 0644
-    copy_file "$src" "$(component_target_dir "$comp")/adapter-manifest.json" 0644
-}
-
 # Run a command, redirect all output (stdout+stderr) to LOG_FILE.
 # Shows an animated spinner on the same line while the command runs,
 # then replaces it with ok / FAILED.
@@ -1473,7 +1462,6 @@ build_skills() {
         return 0
     fi
 
-    stage_adapter_manifest "os-skills" "$PROJECT_ROOT/src/os-skills/adapters/adapter-manifest.json"
     ok "os-skills staged to $(component_target_dir os-skills)"
 }
 
@@ -1583,7 +1571,6 @@ build_tokenless() {
         if [[ ! -d "$component_root/share/anolisa/extensions/tokenless" ]]; then
             warn "tokenless cosh extension staged empty"
         fi
-        stage_adapter_manifest "tokenless" "$PROJECT_ROOT/src/tokenless/adapters/tokenless/manifest.json"
         ok "tokenless, rtk, and toon built successfully"
     else
         [[ -f "$bin" ]]     || warn "Expected artifact $bin not found"
@@ -1608,7 +1595,6 @@ build_wsckpt() {
     component_root="$(component_target_dir ws-ckpt)"
     bin="$component_root/bin/ws-ckpt"
     if [[ -f "$bin" ]]; then
-        stage_adapter_manifest "ws-ckpt" "$PROJECT_ROOT/src/ws-ckpt/adapter-manifest.json"
         ok "ws-ckpt built successfully"
     else
         warn "Expected artifact $bin not found"

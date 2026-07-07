@@ -62,7 +62,7 @@ environment pre-check) is available under /usr/share/anolisa/adapters/tokenless/
 Register it with `qwen extensions link`, or run the install script: qwencode/scripts/install.sh
 
 %prep
-%setup -q -n tokenless
+%setup -q -n %{name}-%{version}
 
 # rtk source in tarball is already patched (rtk-tokenless-stats.patch
 # applied during tarball creation via justfile setup-rtk).

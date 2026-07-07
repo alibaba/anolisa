@@ -42,7 +42,6 @@ find "${STAGE_ROOT}/src/plugins" -type d -name '*-musl' -prune -exec rm -rf {} +
 find "${STAGE_ROOT}/src/plugins" -type f -name '*.musl.node' -delete 2>/dev/null || true
 cp -f "${SCRIPT_DIR}/LICENSE" "${STAGE_ROOT}/"
 cp -f "${SCRIPT_DIR}/README.md" "${STAGE_ROOT}/"
-cp -f "${SCRIPT_DIR}/adapter-manifest.json" "${STAGE_ROOT}/"
 cp -f "${SCRIPT_DIR}/component.toml" "${STAGE_ROOT}/"
 cp -a "${SCRIPT_DIR}/scripts" "${STAGE_ROOT}/"
 

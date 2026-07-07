@@ -331,8 +331,6 @@ build_agentic_os_skills() {
 
     # component.toml — spec %install installs it to %{_datadir}/anolisa/components/os-skills/
     [ -f "${SKILLS_DIR}/component.toml" ] && cp "${SKILLS_DIR}/component.toml" "$pkg_dir/"
-    # adapters/ — spec %install installs adapter-manifest.json + openclaw/hermes scripts
-    [ -d "${SKILLS_DIR}/adapters" ] && cp -rp "${SKILLS_DIR}/adapters" "$pkg_dir/"
 
     tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
     rm -rf "$tmp_dir"
@@ -478,7 +476,7 @@ build_tokenless() {
     log "Step 2/3: Creating source tarball ${tarball_name}..."
     local tmp_dir
     tmp_dir=$(mktemp -d)
-    local pkg_dir="${tmp_dir}/${pkg_name}"
+    local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
     mkdir -p "$pkg_dir"
 
     # Copy full source tree (including vendored rtk), excluding build artifacts and VCS
@@ -502,7 +500,7 @@ build_tokenless() {
         --exclude='adapters/tokenless/qwencode/qwen-extension.json' \
         . | tar -xf - -C "$pkg_dir"
 
-    tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}"
+    tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
     rm -rf "$tmp_dir"
 
     log "Step 3/3: Running rpmbuild..."

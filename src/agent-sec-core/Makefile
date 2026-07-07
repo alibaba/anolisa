@@ -217,21 +217,6 @@ stage-tools: ## Stage tools (sign-skill.sh) to BUILD_DIR
 	install -d -m 0755 $(BUILD_DIR)/tools
 	cp -p tools/sign-skill.sh $(BUILD_DIR)/tools/
 
-.PHONY: stage-adapter-manifest
-stage-adapter-manifest: ## Stage adapter-manifest.json to BUILD_DIR
-	install -d -m 0755 $(ADAPTER_STAGE_DIR)
-	install -p -m 0644 adapters/adapter-manifest.json $(ADAPTER_STAGE_DIR)/manifest.json
-	install -d -m 0755 $(ADAPTER_STAGE_DIR)/common
-	install -p -m 0644 adapters/common/manifest.sh $(ADAPTER_STAGE_DIR)/common/
-	install -d -m 0755 $(ADAPTER_STAGE_DIR)/openclaw/scripts
-	install -p -m 0755 adapters/openclaw/scripts/detect.sh $(ADAPTER_STAGE_DIR)/openclaw/scripts/
-	install -p -m 0755 adapters/openclaw/scripts/install.sh $(ADAPTER_STAGE_DIR)/openclaw/scripts/
-	install -p -m 0755 adapters/openclaw/scripts/uninstall.sh $(ADAPTER_STAGE_DIR)/openclaw/scripts/
-	install -d -m 0755 $(ADAPTER_STAGE_DIR)/hermes/scripts
-	install -p -m 0755 adapters/hermes/scripts/detect.sh $(ADAPTER_STAGE_DIR)/hermes/scripts/
-	install -p -m 0755 adapters/hermes/scripts/install.sh $(ADAPTER_STAGE_DIR)/hermes/scripts/
-	install -p -m 0755 adapters/hermes/scripts/uninstall.sh $(ADAPTER_STAGE_DIR)/hermes/scripts/
-
 .PHONY: stage-component-manifest
 stage-component-manifest: ## Stage component.toml into BUILD_DIR
 	install -d -m 0755 $(BUILD_DIR)/share/anolisa/components/sec-core
@@ -239,7 +224,7 @@ stage-component-manifest: ## Stage component.toml into BUILD_DIR
 		$(BUILD_DIR)/share/anolisa/components/sec-core/component.toml
 
 .PHONY: build-all
-build-all: build-sandbox build-cli build-openclaw-plugin build-hermes-plugin stage-codex-plugin stage-cosh-extension stage-skills stage-adapter-manifest stage-component-manifest ## Build all components
+build-all: build-sandbox build-cli build-openclaw-plugin build-hermes-plugin stage-codex-plugin stage-cosh-extension stage-skills stage-component-manifest ## Build all components
 	@echo "📦 All artifacts collected to $(BUILD_DIR)/"
 
 .PHONY: export-requirements
@@ -289,8 +274,6 @@ else
   CODEX_PLUGIN_DIR    ?= $(LIBDIR)/codex-plugin
 endif
 
-ADAPTER_DIR         ?= $(ANOLISA_DATADIR)/adapters/sec-core
-ADAPTER_STAGE_DIR   ?= $(BUILD_DIR)/share/anolisa/adapters/sec-core
 COMPONENT_DIR       ?= $(ANOLISA_DATADIR)/components/sec-core
 
 BINDIR              ?= $(PREFIX)/bin
@@ -390,22 +373,6 @@ install-cosh-hook: ## Install cosh hooks (linux-sandbox + extension)
 	install -d -m 0755 $(DESTDIR)$(EXTENSIONDIR)
 	cp -rp $(BUILD_DIR)/cosh-extension/. $(DESTDIR)$(EXTENSIONDIR)/
 
-.PHONY: install-adapter-manifest
-install-adapter-manifest: ## Install adapter-manifest.json from staged copy
-	test -f $(ADAPTER_STAGE_DIR)/manifest.json
-	install -d -m 0755 $(DESTDIR)$(ADAPTER_DIR)
-	install -p -m 0644 $(ADAPTER_STAGE_DIR)/manifest.json $(DESTDIR)$(ADAPTER_DIR)/manifest.json
-	install -d -m 0755 $(DESTDIR)$(ADAPTER_DIR)/common
-	install -p -m 0644 $(ADAPTER_STAGE_DIR)/common/manifest.sh $(DESTDIR)$(ADAPTER_DIR)/common/
-	install -d -m 0755 $(DESTDIR)$(ADAPTER_DIR)/openclaw/scripts
-	install -p -m 0755 $(ADAPTER_STAGE_DIR)/openclaw/scripts/detect.sh $(DESTDIR)$(ADAPTER_DIR)/openclaw/scripts/
-	install -p -m 0755 $(ADAPTER_STAGE_DIR)/openclaw/scripts/install.sh $(DESTDIR)$(ADAPTER_DIR)/openclaw/scripts/
-	install -p -m 0755 $(ADAPTER_STAGE_DIR)/openclaw/scripts/uninstall.sh $(DESTDIR)$(ADAPTER_DIR)/openclaw/scripts/
-	install -d -m 0755 $(DESTDIR)$(ADAPTER_DIR)/hermes/scripts
-	install -p -m 0755 $(ADAPTER_STAGE_DIR)/hermes/scripts/detect.sh $(DESTDIR)$(ADAPTER_DIR)/hermes/scripts/
-	install -p -m 0755 $(ADAPTER_STAGE_DIR)/hermes/scripts/install.sh $(DESTDIR)$(ADAPTER_DIR)/hermes/scripts/
-	install -p -m 0755 $(ADAPTER_STAGE_DIR)/hermes/scripts/uninstall.sh $(DESTDIR)$(ADAPTER_DIR)/hermes/scripts/
-
 .PHONY: install-component-manifest
 install-component-manifest: ## Install component.toml to DESTDIR
 	install -d -m 0755 $(DESTDIR)$(COMPONENT_DIR)
@@ -418,13 +385,13 @@ install-systemd-user: ## Install agent-sec-core systemd user service
 	install -p -m 0644 $(SYSTEMD_USER_UNIT_SOURCE) $(DESTDIR)$(SYSTEMD_USER_UNIT_DIR)/agent-sec-core.service
 
 .PHONY: install-all
-install-all: install-cli-venv install-cosh-hook install-codex-plugin install-openclaw-plugin install-hermes-plugin install-skills install-adapter-manifest ## Install all (user source build)
+install-all: install-cli-venv install-cosh-hook install-codex-plugin install-openclaw-plugin install-hermes-plugin install-skills ## Install all (user source build)
 
 .PHONY: install-all-for-rpmbuild
 install-all-for-rpmbuild: OPENCLAW_PLUGIN_DIR := $(RPM_OPENCLAW_PLUGIN_DIR)
 install-all-for-rpmbuild: HERMES_PLUGIN_DIR := $(RPM_HERMES_PLUGIN_DIR)
 install-all-for-rpmbuild: CODEX_PLUGIN_DIR := $(RPM_CODEX_PLUGIN_DIR)
-install-all-for-rpmbuild: install-cli-site install-cosh-hook install-codex-plugin install-openclaw-plugin install-hermes-plugin install-skills install-adapter-manifest install-component-manifest install-systemd-user ## Install all (RPM build)
+install-all-for-rpmbuild: install-cli-site install-cosh-hook install-codex-plugin install-openclaw-plugin install-hermes-plugin install-skills install-component-manifest install-systemd-user ## Install all (RPM build)
 
 # =============================================================================
 # UNINSTALL
@@ -469,16 +436,12 @@ uninstall-skills: ## Remove sec-core's own skill subdirs from SKILLDIR
 		rm -rf "$(DESTDIR)$(SKILLDIR)/$$name"; \
 	done
 
-.PHONY: uninstall-adapter-manifest
-uninstall-adapter-manifest: ## Remove installed adapter manifest directory
-	rm -rf $(DESTDIR)$(ADAPTER_DIR)
-
 .PHONY: uninstall-component-manifest
 uninstall-component-manifest: ## Remove component manifest
 	rm -rf $(DESTDIR)$(COMPONENT_DIR)
 
 .PHONY: uninstall
-uninstall: uninstall-cli-venv uninstall-cosh-hook uninstall-codex-plugin uninstall-openclaw-plugin uninstall-hermes-plugin uninstall-skills uninstall-adapter-manifest ## Uninstall everything install-all installed
+uninstall: uninstall-cli-venv uninstall-cosh-hook uninstall-codex-plugin uninstall-openclaw-plugin uninstall-hermes-plugin uninstall-skills ## Uninstall everything install-all installed
 
 .PHONY: help
 help: ## Show this help message

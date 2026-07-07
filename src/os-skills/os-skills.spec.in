@@ -43,16 +43,6 @@ find %{buildroot}%{_datadir}/anolisa/skills -type f -name '*.py' -exec chmod 075
 find %{buildroot}%{_datadir}/anolisa/skills -type f \
     ! -name '*.sh' ! -name '*.py' -exec chmod 0644 {} +
 
-install -d -m 0755 %{buildroot}%{_datadir}/anolisa/adapters/os-skills
-install -p -m 0644 adapters/adapter-manifest.json \
-    %{buildroot}%{_datadir}/anolisa/adapters/os-skills/manifest.json
-install -d -m 0755 %{buildroot}%{_datadir}/anolisa/adapters/os-skills/openclaw/scripts
-install -p -m 0755 adapters/openclaw/scripts/*.sh \
-    %{buildroot}%{_datadir}/anolisa/adapters/os-skills/openclaw/scripts/
-install -d -m 0755 %{buildroot}%{_datadir}/anolisa/adapters/os-skills/hermes/scripts
-install -p -m 0755 adapters/hermes/scripts/*.sh \
-    %{buildroot}%{_datadir}/anolisa/adapters/os-skills/hermes/scripts/
-
 %files
 %license LICENSE
 %dir %{_datadir}/anolisa
@@ -61,15 +51,6 @@ install -p -m 0755 adapters/hermes/scripts/*.sh \
 %{_datadir}/anolisa/components/os-skills/component.toml
 %dir %{_datadir}/anolisa/skills
 %{_datadir}/anolisa/skills/*
-%dir %{_datadir}/anolisa/adapters
-%dir %{_datadir}/anolisa/adapters/os-skills
-%{_datadir}/anolisa/adapters/os-skills/manifest.json
-%dir %{_datadir}/anolisa/adapters/os-skills/openclaw
-%dir %{_datadir}/anolisa/adapters/os-skills/openclaw/scripts
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/os-skills/openclaw/scripts/*.sh
-%dir %{_datadir}/anolisa/adapters/os-skills/hermes
-%dir %{_datadir}/anolisa/adapters/os-skills/hermes/scripts
-%attr(0755,root,root) %{_datadir}/anolisa/adapters/os-skills/hermes/scripts/*.sh
 
 %changelog
 * Wed Mar 18 2026 Shenglong Zhu <shenglongzhu@linux.alibaba.com> - 0.0.1-1
