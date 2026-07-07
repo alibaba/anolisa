@@ -47,3 +47,9 @@ impl From<rusqlite::Error> for StashError {
         StashError::Backend(e.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    include!("tests/store_tests.rs");
+}

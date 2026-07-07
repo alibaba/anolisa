@@ -749,6 +749,7 @@ dependencies = [
  "regex",
  "rusqlite",
  "serde_json",
+ "tempfile",
  "tokenless-ccr",
  "tokenless-schema",
  "tokenless-stats",

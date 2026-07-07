@@ -22,3 +22,6 @@ rusqlite.workspace = true
 libc.workspace = true
 regex.workspace = true
 
+[dev-dependencies]
+tempfile = "3"
+
