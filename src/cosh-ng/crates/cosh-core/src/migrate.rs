@@ -82,7 +82,9 @@ fn try_migrate_aliyun_credentials(cfg_dir: &Path, config_path: &Path) {
     if ak.is_empty() || sk.is_empty() {
         return;
     }
-    let st = creds["securityToken"].as_str();
+    let st = creds["securityToken"]
+        .as_str()
+        .filter(|token| !token.is_empty());
 
     let mut existing = if config_path.exists() {
         std::fs::read_to_string(config_path).unwrap_or_default()
@@ -90,20 +92,23 @@ fn try_migrate_aliyun_credentials(cfg_dir: &Path, config_path: &Path) {
         String::new()
     };
 
+    if !existing.contains("[ai]") {
+        existing.push_str("[ai]\n");
+        existing.push_str("active_provider = \"aliyun\"\n\n");
+    }
+
     existing.push_str("\n[ai.providers.aliyun]\n");
     existing.push_str("type = \"aliyun\"\n");
-    existing.push_str(&format!(
-        "access_key_id = \"{}\"\n",
-        escape_toml_migrate(ak)
-    ));
-    existing.push_str(&format!(
-        "access_key_secret = \"{}\"\n",
-        escape_toml_migrate(sk)
-    ));
-    if let Some(token) = st {
+    if st.is_some() {
+        existing.push_str("auth_source = \"ecs_ram_role\"\n");
+    } else {
         existing.push_str(&format!(
-            "security_token = \"{}\"\n",
-            escape_toml_migrate(token)
+            "access_key_id = \"{}\"\n",
+            escape_toml_migrate(ak)
+        ));
+        existing.push_str(&format!(
+            "access_key_secret = \"{}\"\n",
+            escape_toml_migrate(sk)
         ));
     }
     existing.push_str("model = \"qwen3.7-plus\"\n");
@@ -173,9 +178,10 @@ fn migrate_settings(
 
     let active_model = model["name"].as_str().unwrap_or(provider_model);
 
-    let provider_type = match selected_type {
-        "openai" | "aliyun" => "dashscope",
-        other => other,
+    let (active_provider, provider_id, provider_type, auth_source) = match selected_type {
+        "aliyun" => ("aliyun", "aliyun", "aliyun", Some("ecs_ram_role")),
+        "openai" => ("default", "default", "dashscope", None),
+        other => ("default", "default", other, None),
     };
 
     let session_token_limit = model["sessionTokenLimit"].as_i64().filter(|&v| v > 0);
@@ -189,7 +195,10 @@ fn migrate_settings(
         .filter(|&v| v != "auto" && !v.is_empty());
 
     let toml = build_toml(&MigratedFields {
+        active_provider,
+        provider_id,
         provider_type,
+        auth_source,
         base_url: &base_url,
         api_key: &api_key,
         provider_model,
@@ -267,7 +276,10 @@ fn map_approval_mode(mode: &str) -> &str {
 }
 
 struct MigratedFields<'a> {
+    active_provider: &'a str,
+    provider_id: &'a str,
     provider_type: &'a str,
+    auth_source: Option<&'a str>,
     base_url: &'a str,
     api_key: &'a str,
     provider_model: &'a str,
@@ -280,7 +292,10 @@ struct MigratedFields<'a> {
 
 fn build_toml(fields: &MigratedFields<'_>) -> String {
     let MigratedFields {
+        active_provider,
+        provider_id,
         provider_type,
+        auth_source,
         base_url,
         api_key,
         provider_model,
@@ -297,7 +312,7 @@ fn build_toml(fields: &MigratedFields<'_>) -> String {
     out.push_str("# Original: ~/.copilot-shell/settings.json\n\n");
 
     out.push_str("[ai]\n");
-    out.push_str("active_provider = \"default\"\n");
+    out.push_str(&format!("active_provider = \"{active_provider}\"\n"));
     if !active_model.is_empty() {
         out.push_str(&format!("active_model = \"{active_model}\"\n"));
     }
@@ -306,8 +321,11 @@ fn build_toml(fields: &MigratedFields<'_>) -> String {
     }
     out.push('\n');
 
-    out.push_str("[ai.providers.default]\n");
+    out.push_str(&format!("[ai.providers.{provider_id}]\n"));
     out.push_str(&format!("type = \"{provider_type}\"\n"));
+    if let Some(source) = auth_source {
+        out.push_str(&format!("auth_source = \"{source}\"\n"));
+    }
     if !base_url.is_empty() {
         out.push_str(&format!("base_url = \"{base_url}\"\n"));
     }
@@ -393,7 +411,10 @@ mod tests {
     #[test]
     fn build_toml_output_parseable() {
         let toml_str = build_toml(&MigratedFields {
+            active_provider: "default",
+            provider_id: "default",
             provider_type: "dashscope",
+            auth_source: None,
             base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
             api_key: "sk-test",
             provider_model: "qwen3-plus",
@@ -518,6 +539,142 @@ api_key = "sk-current"
 
         let provider = config.ai.providers.get("default").unwrap();
         assert_eq!(provider.api_key.as_deref(), Some("sk-plain-key"));
+    }
+
+    #[test]
+    fn aliyun_settings_migration_selects_aliyun_ecs_provider() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let settings_path = tmp.path().join("settings.json");
+        let config_path = tmp.path().join("config.toml");
+
+        let json = r#"{
+            "security": {
+                "auth": {
+                    "selectedType": "aliyun",
+                    "aliyunModel": "qwen3.7-plus",
+                    "aliyunModels": ["qwen3.7-plus"]
+                }
+            },
+            "model": {
+                "name": "qwen3.7-plus"
+            }
+        }"#;
+        std::fs::write(&settings_path, json).unwrap();
+
+        migrate_settings(&settings_path, &config_path, tmp.path()).unwrap();
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        let config: crate::config::CoreConfig = toml::from_str(&content).unwrap();
+
+        assert_eq!(config.ai.active_provider.as_deref(), Some("aliyun"));
+        assert_eq!(config.ai.active_model.as_deref(), Some("qwen3.7-plus"));
+        assert!(!config.ai.providers.contains_key("default"));
+
+        let provider = config.ai.providers.get("aliyun").unwrap();
+        assert_eq!(provider.provider_type.as_deref(), Some("aliyun"));
+        assert_eq!(provider.auth_source.as_deref(), Some("ecs_ram_role"));
+        assert_eq!(provider.model.as_deref(), Some("qwen3.7-plus"));
+        assert!(provider.access_key_id.is_none());
+        assert!(provider.access_key_secret.is_none());
+        assert!(provider.security_token.is_none());
+        assert!(provider.api_key.is_none());
+    }
+
+    #[test]
+    fn aliyun_settings_migration_does_not_persist_legacy_sts_credentials() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let settings_path = tmp.path().join("settings.json");
+        let config_path = tmp.path().join("config.toml");
+        let creds_path = tmp.path().join("aliyun_creds.json");
+        let salt_path = tmp.path().join(".encryption-salt");
+
+        std::fs::write(
+            &settings_path,
+            r#"{"security":{"auth":{"selectedType":"aliyun","aliyunModel":"qwen3.7-plus"}}}"#,
+        )
+        .unwrap();
+
+        let salt = [0x34u8; 32];
+        std::fs::write(&salt_path, salt).unwrap();
+        let encrypted = encrypt_test_credential(
+            r#"{"accessKeyId":"legacy-ak","accessKeySecret":"legacy-sk","securityToken":"legacy-token"}"#,
+            &salt,
+        );
+        std::fs::write(&creds_path, encrypted).unwrap();
+
+        try_migrate_from_dir(tmp.path());
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        let config: crate::config::CoreConfig = toml::from_str(&content).unwrap();
+        let provider = config.ai.providers.get("aliyun").unwrap();
+
+        assert_eq!(config.ai.active_provider.as_deref(), Some("aliyun"));
+        assert_eq!(provider.auth_source.as_deref(), Some("ecs_ram_role"));
+        assert!(provider.access_key_id.is_none());
+        assert!(provider.access_key_secret.is_none());
+        assert!(provider.security_token.is_none());
+        assert!(!content.contains("legacy-ak"));
+        assert!(!content.contains("legacy-token"));
+    }
+
+    #[test]
+    fn legacy_aliyun_sts_credentials_migrate_to_ecs_auth_source() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        let creds_path = tmp.path().join("aliyun_creds.json");
+        let salt_path = tmp.path().join(".encryption-salt");
+
+        let salt = [0x45u8; 32];
+        std::fs::write(&salt_path, salt).unwrap();
+        let encrypted = encrypt_test_credential(
+            r#"{"accessKeyId":"legacy-ak","accessKeySecret":"legacy-sk","securityToken":"legacy-token"}"#,
+            &salt,
+        );
+        std::fs::write(&creds_path, encrypted).unwrap();
+
+        try_migrate_from_dir(tmp.path());
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        let config: crate::config::CoreConfig = toml::from_str(&content).unwrap();
+        let provider = config.ai.providers.get("aliyun").unwrap();
+
+        assert_eq!(config.ai.active_provider.as_deref(), Some("aliyun"));
+        assert_eq!(provider.provider_type.as_deref(), Some("aliyun"));
+        assert_eq!(provider.auth_source.as_deref(), Some("ecs_ram_role"));
+        assert!(provider.access_key_id.is_none());
+        assert!(provider.access_key_secret.is_none());
+        assert!(provider.security_token.is_none());
+        assert!(!content.contains("legacy-ak"));
+        assert!(!content.contains("legacy-token"));
+    }
+
+    #[test]
+    fn legacy_aliyun_static_credentials_keep_ak_sk() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        let creds_path = tmp.path().join("aliyun_creds.json");
+        let salt_path = tmp.path().join(".encryption-salt");
+
+        let salt = [0x56u8; 32];
+        std::fs::write(&salt_path, salt).unwrap();
+        let encrypted = encrypt_test_credential(
+            r#"{"accessKeyId":"legacy-ak","accessKeySecret":"legacy-sk"}"#,
+            &salt,
+        );
+        std::fs::write(&creds_path, encrypted).unwrap();
+
+        try_migrate_from_dir(tmp.path());
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        let config: crate::config::CoreConfig = toml::from_str(&content).unwrap();
+        let provider = config.ai.providers.get("aliyun").unwrap();
+
+        assert_eq!(config.ai.active_provider.as_deref(), Some("aliyun"));
+        assert_eq!(provider.provider_type.as_deref(), Some("aliyun"));
+        assert_eq!(provider.auth_source.as_deref(), None);
+        assert_eq!(provider.access_key_id.as_deref(), Some("legacy-ak"));
+        assert_eq!(provider.access_key_secret.as_deref(), Some("legacy-sk"));
+        assert!(provider.security_token.is_none());
     }
 
     fn hex_encode(bytes: &[u8]) -> String {

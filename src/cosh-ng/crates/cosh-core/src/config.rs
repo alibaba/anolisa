@@ -8,6 +8,9 @@ use serde_json::Value;
 pub struct CoreConfig {
     #[serde(default)]
     pub ai: AiConfig,
+    // Keeps user-layer AI preferences out of project override persistence.
+    #[serde(skip)]
+    pub(crate) user_ai: AiConfig,
     #[serde(default)]
     pub agent: AgentConfig,
     #[serde(default)]
@@ -178,6 +181,72 @@ pub fn config_dir() -> PathBuf {
         .join(".copilot-shell")
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialCoreConfig {
+    ai: Option<PartialAiConfig>,
+    agent: Option<PartialAgentConfig>,
+    hooks: Option<PartialHooksConfig>,
+    skills: Option<PartialSkillsConfig>,
+    session: Option<PartialSessionConfig>,
+    logging: Option<PartialLoggingConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialAiConfig {
+    active_provider: Option<String>,
+    active_model: Option<String>,
+    output_language: Option<String>,
+    thinking: Option<String>,
+    #[serde(default)]
+    providers: HashMap<String, ProviderConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialAgentConfig {
+    approval_mode: Option<String>,
+    max_turns: Option<u32>,
+    session_token_limit: Option<u64>,
+    max_tool_calls_per_turn: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialHooksConfig {
+    enabled: Option<bool>,
+    #[serde(rename = "PreToolUse")]
+    pre_tool_use: Option<Vec<HookDefinition>>,
+    #[serde(rename = "PostToolUse")]
+    post_tool_use: Option<Vec<HookDefinition>>,
+    #[serde(rename = "PostToolUseFailure")]
+    post_tool_use_failure: Option<Vec<HookDefinition>>,
+    #[serde(rename = "UserPromptSubmit")]
+    user_prompt_submit: Option<Vec<HookDefinition>>,
+    #[serde(rename = "SessionStart")]
+    session_start: Option<Vec<HookDefinition>>,
+    #[serde(rename = "Stop")]
+    stop: Option<Vec<HookDefinition>>,
+    #[serde(rename = "BeforeModel")]
+    before_model: Option<Vec<HookDefinition>>,
+    #[serde(rename = "AfterModel")]
+    after_model: Option<Vec<HookDefinition>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialSkillsConfig {
+    enabled: Option<bool>,
+    custom_paths: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialSessionConfig {
+    auto_persist: Option<bool>,
+    persist_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialLoggingConfig {
+    level: Option<String>,
+}
+
 fn expand_env_vars(s: &str) -> String {
     let mut result = s.to_string();
     while let Some(start) = result.find("${") {
@@ -197,39 +266,235 @@ fn expand_env_vars(s: &str) -> String {
     result
 }
 
+fn read_partial_config(path: &std::path::Path) -> Option<PartialCoreConfig> {
+    if !path.exists() {
+        return None;
+    }
+
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) => {
+            eprintln!(
+                "[cosh-core] Warning: failed to read {}: {}",
+                path.display(),
+                e
+            );
+            return None;
+        }
+    };
+
+    match toml::from_str::<PartialCoreConfig>(&content) {
+        Ok(config) => Some(config),
+        Err(e) => {
+            eprintln!(
+                "[cosh-core] Warning: failed to parse {}: {}",
+                path.display(),
+                e
+            );
+            None
+        }
+    }
+}
+
+fn apply_user_layer(config: &mut CoreConfig, layer: &PartialCoreConfig) {
+    if let Some(ref ai) = layer.ai {
+        if let Some(ref value) = ai.active_provider {
+            config.ai.active_provider = Some(value.clone());
+        }
+        apply_ai_preferences(&mut config.ai, ai);
+        for (provider_id, provider) in &ai.providers {
+            config
+                .ai
+                .providers
+                .insert(provider_id.clone(), provider.clone());
+        }
+    }
+    apply_common_layers(config, layer);
+}
+
+fn apply_project_layer(config: &mut CoreConfig, layer: &PartialCoreConfig, path: &std::path::Path) {
+    if let Some(ref ai) = layer.ai {
+        if ai.active_provider.is_some() {
+            eprintln!(
+                "[cosh-core] Warning: ignoring active_provider from project config {}",
+                path.display()
+            );
+        }
+        if !ai.providers.is_empty() {
+            eprintln!(
+                "[cosh-core] Warning: ignoring ai.providers from project config {}",
+                path.display()
+            );
+        }
+        apply_ai_preferences(&mut config.ai, ai);
+    }
+    apply_common_layers(config, layer);
+}
+
+fn apply_ai_preferences(ai: &mut AiConfig, layer: &PartialAiConfig) {
+    if let Some(ref value) = layer.active_model {
+        ai.active_model = Some(value.clone());
+    }
+    if let Some(ref value) = layer.output_language {
+        ai.output_language = Some(value.clone());
+    }
+    if let Some(ref value) = layer.thinking {
+        ai.thinking = Some(value.clone());
+    }
+}
+
+fn apply_common_layers(config: &mut CoreConfig, layer: &PartialCoreConfig) {
+    if let Some(ref agent) = layer.agent {
+        apply_agent_layer(&mut config.agent, agent);
+    }
+    if let Some(ref hooks) = layer.hooks {
+        apply_hooks_layer(&mut config.hooks, hooks);
+    }
+    if let Some(ref skills) = layer.skills {
+        apply_skills_layer(&mut config.skills, skills);
+    }
+    if let Some(ref session) = layer.session {
+        apply_session_layer(&mut config.session, session);
+    }
+    if let Some(ref logging) = layer.logging {
+        apply_logging_layer(&mut config.logging, logging);
+    }
+}
+
+fn apply_agent_layer(config: &mut AgentConfig, layer: &PartialAgentConfig) {
+    if let Some(ref value) = layer.approval_mode {
+        config.approval_mode = value.clone();
+    }
+    if let Some(value) = layer.max_turns {
+        config.max_turns = value;
+    }
+    if let Some(value) = layer.session_token_limit {
+        config.session_token_limit = value;
+    }
+    if let Some(value) = layer.max_tool_calls_per_turn {
+        config.max_tool_calls_per_turn = value;
+    }
+}
+
+fn apply_hooks_layer(config: &mut HooksConfig, layer: &PartialHooksConfig) {
+    if let Some(value) = layer.enabled {
+        config.enabled = value;
+    }
+    if let Some(ref value) = layer.pre_tool_use {
+        config.pre_tool_use = value.clone();
+    }
+    if let Some(ref value) = layer.post_tool_use {
+        config.post_tool_use = value.clone();
+    }
+    if let Some(ref value) = layer.post_tool_use_failure {
+        config.post_tool_use_failure = value.clone();
+    }
+    if let Some(ref value) = layer.user_prompt_submit {
+        config.user_prompt_submit = value.clone();
+    }
+    if let Some(ref value) = layer.session_start {
+        config.session_start = value.clone();
+    }
+    if let Some(ref value) = layer.stop {
+        config.stop = value.clone();
+    }
+    if let Some(ref value) = layer.before_model {
+        config.before_model = value.clone();
+    }
+    if let Some(ref value) = layer.after_model {
+        config.after_model = value.clone();
+    }
+}
+
+fn apply_skills_layer(config: &mut SkillsConfig, layer: &PartialSkillsConfig) {
+    if let Some(value) = layer.enabled {
+        config.enabled = value;
+    }
+    if let Some(ref value) = layer.custom_paths {
+        config.custom_paths = value.clone();
+    }
+}
+
+fn apply_session_layer(config: &mut SessionConfig, layer: &PartialSessionConfig) {
+    if let Some(value) = layer.auto_persist {
+        config.auto_persist = value;
+    }
+    if let Some(ref value) = layer.persist_dir {
+        config.persist_dir = value.clone();
+    }
+}
+
+fn apply_logging_layer(config: &mut LoggingConfig, layer: &PartialLoggingConfig) {
+    if let Some(ref value) = layer.level {
+        config.level = Some(value.clone());
+    }
+}
+
+fn normalize_partial_legacy_sts_auth_sources(config: &mut PartialCoreConfig) -> bool {
+    let Some(ref mut ai) = config.ai else {
+        return false;
+    };
+
+    let mut changed = false;
+    for provider in ai.providers.values_mut() {
+        let is_aliyun = provider.provider_type.as_deref() == Some("aliyun");
+        if is_aliyun && provider.security_token.is_some() {
+            provider.auth_source = Some("ecs_ram_role".to_string());
+            provider.access_key_id = None;
+            provider.access_key_secret = None;
+            provider.security_token = None;
+            changed = true;
+        }
+    }
+    changed
+}
+
 impl CoreConfig {
     pub fn load() -> Self {
         crate::migrate::try_migrate();
 
-        let candidates = [
-            std::env::current_dir()
-                .ok()
-                .map(|p| p.join(".copilot-shell/config.toml")),
-            Some(config_dir().join("config.toml")),
-            Some(PathBuf::from("/etc/copilot-shell/config.toml")),
-        ];
+        let project_path = std::env::current_dir()
+            .ok()
+            .map(|p| p.join(".copilot-shell/config.toml"));
+        let user_path = config_dir().join("config.toml");
+        let system_path = PathBuf::from("/etc/copilot-shell/config.toml");
 
-        for candidate in candidates.iter().flatten() {
-            if candidate.exists() {
-                if let Ok(content) = std::fs::read_to_string(candidate) {
-                    match toml::from_str::<CoreConfig>(&content) {
-                        Ok(mut config) => {
-                            let normalized = config.normalize_legacy_sts_auth_sources();
-                            if normalized && *candidate == config_dir().join("config.toml") {
-                                if let Err(e) = persist_config(&config) {
-                                    eprintln!(
-                                        "[cosh-core] Warning: failed to normalize STS provider config: {e}"
-                                    );
-                                }
-                            }
-                            config.apply_env_overrides();
-                            return config;
-                        }
-                        Err(e) => {
+        let mut config = Self::load_from_paths(
+            Some(&system_path),
+            Some(&user_path),
+            project_path.as_deref(),
+        );
+        config.apply_env_overrides();
+        config
+    }
+
+    fn load_from_paths(
+        system_path: Option<&std::path::Path>,
+        user_path: Option<&std::path::Path>,
+        project_path: Option<&std::path::Path>,
+    ) -> Self {
+        let mut config = CoreConfig::default();
+
+        if let Some(system_path) = system_path {
+            if let Some(system) = read_partial_config(system_path) {
+                apply_user_layer(&mut config, &system);
+            }
+        }
+
+        if let Some(user_path) = user_path {
+            if let Some(mut user) = read_partial_config(user_path) {
+                let normalized = normalize_partial_legacy_sts_auth_sources(&mut user);
+                apply_user_layer(&mut config, &user);
+                let mut user_snapshot = CoreConfig::default();
+                apply_user_layer(&mut user_snapshot, &user);
+                user_snapshot.user_ai = user_snapshot.ai.clone();
+                config.user_ai = user_snapshot.ai.clone();
+
+                if normalized {
+                    if let Some(parent) = user_path.parent() {
+                        if let Err(e) = persist_config_to_dir(&user_snapshot, parent) {
                             eprintln!(
-                                "[cosh-core] Warning: failed to parse {}: {}",
-                                candidate.display(),
-                                e
+                                "[cosh-core] Warning: failed to normalize STS provider config: {e}"
                             );
                         }
                     }
@@ -237,8 +502,12 @@ impl CoreConfig {
             }
         }
 
-        let mut config = CoreConfig::default();
-        config.apply_env_overrides();
+        if let Some(project_path) = project_path {
+            if let Some(project) = read_partial_config(project_path) {
+                apply_project_layer(&mut config, &project, project_path);
+            }
+        }
+
         config
     }
 
@@ -362,7 +631,11 @@ pub struct ResolvedProvider {
 /// Only writes the [ai] section to avoid overwriting other settings.
 pub fn persist_config(config: &CoreConfig) -> Result<(), String> {
     let dir = config_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create config dir: {e}"))?;
+    persist_config_to_dir(config, &dir)
+}
+
+fn persist_config_to_dir(config: &CoreConfig, dir: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create config dir: {e}"))?;
 
     let config_path = dir.join("config.toml");
 
@@ -391,19 +664,19 @@ pub fn persist_config(config: &CoreConfig) -> Result<(), String> {
             escape_toml_value(active)
         ));
     }
-    if let Some(ref model) = config.ai.active_model {
+    if let Some(ref model) = config.user_ai.active_model {
         preserved.push_str(&format!(
             "active_model = \"{}\"\n",
             escape_toml_value(model)
         ));
     }
-    if let Some(ref lang) = config.ai.output_language {
+    if let Some(ref lang) = config.user_ai.output_language {
         preserved.push_str(&format!(
             "output_language = \"{}\"\n",
             escape_toml_value(lang)
         ));
     }
-    if let Some(ref thinking) = config.ai.thinking {
+    if let Some(ref thinking) = config.user_ai.thinking {
         preserved.push_str(&format!("thinking = \"{}\"\n", escape_toml_value(thinking)));
     }
     preserved.push('\n');
@@ -636,5 +909,155 @@ active_model = "test-model"
         std::env::remove_var("COSH_MODEL");
         std::env::remove_var("COSH_MAX_TURNS");
         std::env::remove_var("COSH_OUTPUT_LANGUAGE");
+    }
+
+    #[test]
+    fn layered_config_preserves_user_provider_and_project_model() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user_path = tmp.path().join("user-config.toml");
+        let project_path = tmp.path().join("project-config.toml");
+
+        std::fs::write(
+            &user_path,
+            r#"
+[ai]
+active_provider = "dashscope"
+active_model = "user-model"
+
+[ai.providers.dashscope]
+type = "dashscope"
+api_key = "sk-user"
+model = "provider-model"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &project_path,
+            r#"
+[ai]
+active_model = "project-model"
+"#,
+        )
+        .unwrap();
+
+        let config = CoreConfig::load_from_paths(None, Some(&user_path), Some(&project_path));
+        let resolved = config.resolve_provider();
+
+        assert_eq!(config.ai.active_provider.as_deref(), Some("dashscope"));
+        assert_eq!(config.ai.active_model.as_deref(), Some("project-model"));
+        assert_eq!(resolved.api_key, "sk-user");
+        assert_eq!(resolved.model, "project-model");
+    }
+
+    #[test]
+    fn project_auth_fields_are_ignored() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_path = tmp.path().join("project-config.toml");
+
+        std::fs::write(
+            &project_path,
+            r#"
+[ai]
+active_provider = "project-provider"
+active_model = "project-model"
+
+[ai.providers.project-provider]
+type = "dashscope"
+api_key = "sk-project"
+auth_source = "ecs_ram_role"
+"#,
+        )
+        .unwrap();
+
+        let config = CoreConfig::load_from_paths(None, None, Some(&project_path));
+        assert!(config.ai.active_provider.is_none());
+        assert!(config.ai.providers.is_empty());
+        assert_eq!(config.ai.active_model.as_deref(), Some("project-model"));
+    }
+
+    #[test]
+    fn user_provider_overrides_system_provider_atomically() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let system_path = tmp.path().join("system-config.toml");
+        let user_path = tmp.path().join("user-config.toml");
+
+        std::fs::write(
+            &system_path,
+            r#"
+[ai]
+active_provider = "shared"
+
+[ai.providers.shared]
+type = "dashscope"
+base_url = "https://system.example/v1"
+api_key = "sk-system"
+model = "system-model"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &user_path,
+            r#"
+[ai]
+active_provider = "shared"
+
+[ai.providers.shared]
+type = "openai_compat"
+api_key = "sk-user"
+"#,
+        )
+        .unwrap();
+
+        let config = CoreConfig::load_from_paths(Some(&system_path), Some(&user_path), None);
+        let provider = config.ai.providers.get("shared").unwrap();
+
+        assert_eq!(provider.provider_type.as_deref(), Some("openai_compat"));
+        assert_eq!(provider.api_key.as_deref(), Some("sk-user"));
+        assert!(provider.base_url.is_none());
+        assert!(provider.model.is_none());
+    }
+
+    #[test]
+    fn persist_user_config_does_not_write_project_overrides() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user_dir = tmp.path().join("home-config");
+        let user_path = user_dir.join("config.toml");
+        let project_path = tmp.path().join("project-config.toml");
+        std::fs::create_dir_all(&user_dir).unwrap();
+
+        std::fs::write(
+            &user_path,
+            r#"
+[ai]
+active_provider = "dashscope"
+active_model = "user-model"
+output_language = "en-US"
+
+[ai.providers.dashscope]
+type = "dashscope"
+api_key = "sk-user"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &project_path,
+            r#"
+[ai]
+active_model = "project-model"
+output_language = "zh-CN"
+"#,
+        )
+        .unwrap();
+
+        let mut config = CoreConfig::load_from_paths(None, Some(&user_path), Some(&project_path));
+        config.ai.active_provider = Some("dashscope".to_string());
+        persist_config_to_dir(&config, &user_dir).unwrap();
+
+        let content = std::fs::read_to_string(&user_path).unwrap();
+        assert!(content.contains("active_model = \"user-model\""));
+        assert!(content.contains("output_language = \"en-US\""));
+        assert!(!content.contains("project-model"));
+        assert!(!content.contains("zh-CN"));
+        assert!(content.contains("api_key = \"sk-user\""));
     }
 }

@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde_json::Value;
@@ -16,8 +17,18 @@ fn binary_path() -> std::path::PathBuf {
 }
 
 fn run_registry_request(domain: &str, action: &str, params: Value) -> Value {
-    let bin = binary_path();
     let home = tempfile::tempdir().expect("temp home");
+    run_registry_request_with_context(domain, action, params, home.path(), None)
+}
+
+fn run_registry_request_with_context(
+    domain: &str,
+    action: &str,
+    params: Value,
+    home: &Path,
+    cwd: Option<&Path>,
+) -> Value {
+    let bin = binary_path();
     let request = serde_json::json!({
         "type": "registry_request",
         "request_id": "test-1",
@@ -26,12 +37,17 @@ fn run_registry_request(domain: &str, action: &str, params: Value) -> Value {
         "params": params,
     });
 
-    let mut child = Command::new(&bin)
+    let mut command = Command::new(&bin);
+    command
         .arg("--registry")
-        .env("HOME", home.path())
+        .env("HOME", home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let mut child = command
         .spawn()
         .unwrap_or_else(|e| panic!("Failed to spawn {}: {e}", bin.display()));
 
@@ -76,6 +92,108 @@ fn registry_hooks_list_returns_success() {
     assert_eq!(resp["request_id"], "test-1");
     assert_eq!(resp["success"], true);
     assert!(resp["data"].is_array(), "data should be array: {resp}");
+}
+
+#[test]
+fn registry_auth_state_merges_user_auth_with_project_preferences() {
+    let home = tempfile::tempdir().expect("temp home");
+    let project = tempfile::tempdir().expect("temp project");
+    let home_config_dir = home.path().join(".copilot-shell");
+    let project_config_dir = project.path().join(".copilot-shell");
+    std::fs::create_dir_all(&home_config_dir).unwrap();
+    std::fs::create_dir_all(&project_config_dir).unwrap();
+    std::fs::write(
+        home_config_dir.join("config.toml"),
+        r#"
+[ai]
+active_provider = "user-dashscope"
+
+[ai.providers.user-dashscope]
+type = "dashscope"
+api_key = "sk-user"
+model = "user-model"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project_config_dir.join("config.toml"),
+        r#"
+[ai]
+active_provider = "project-provider"
+active_model = "project-model"
+
+[ai.providers.project-provider]
+type = "dashscope"
+api_key = "sk-project"
+"#,
+    )
+    .unwrap();
+
+    let resp = run_registry_request_with_context(
+        "auth",
+        "state",
+        Value::Null,
+        home.path(),
+        Some(project.path()),
+    );
+    assert_eq!(resp["type"], "registry_response");
+    assert_eq!(resp["success"], true);
+    assert_eq!(resp["data"]["active_provider"], "user-dashscope");
+
+    let saved = resp["data"]["saved_providers"].as_array().unwrap();
+    assert_eq!(saved.len(), 1, "project provider must be ignored: {resp}");
+    assert_eq!(saved[0]["provider_id"], "user-dashscope");
+    assert_eq!(saved[0]["api_key_len"], 7);
+    assert_eq!(saved[0]["model"], "user-model");
+}
+
+#[test]
+fn registry_auth_configure_writes_home_config_only() {
+    let home = tempfile::tempdir().expect("temp home");
+    let project = tempfile::tempdir().expect("temp project");
+    let home_config_dir = home.path().join(".copilot-shell");
+    let project_config_dir = project.path().join(".copilot-shell");
+    std::fs::create_dir_all(&home_config_dir).unwrap();
+    std::fs::create_dir_all(&project_config_dir).unwrap();
+    let project_config_path = project_config_dir.join("config.toml");
+    std::fs::write(
+        &project_config_path,
+        r#"
+[ai]
+active_model = "project-model"
+
+[ai.providers.project-provider]
+type = "dashscope"
+api_key = "sk-project"
+"#,
+    )
+    .unwrap();
+
+    let resp = run_registry_request_with_context(
+        "auth",
+        "configure",
+        serde_json::json!({
+            "provider_id": "home-provider",
+            "provider_type": "dashscope",
+            "values": {
+                "api_key": "sk-home",
+                "model": "home-model"
+            }
+        }),
+        home.path(),
+        Some(project.path()),
+    );
+    assert_eq!(resp["success"], true);
+
+    let home_config = std::fs::read_to_string(home_config_dir.join("config.toml")).unwrap();
+    let project_config = std::fs::read_to_string(project_config_path).unwrap();
+
+    assert!(home_config.contains("[ai.providers.home-provider]"));
+    assert!(home_config.contains("api_key = \"sk-home\""));
+    assert!(!home_config.contains("project-model"));
+    assert!(!home_config.contains("project-provider"));
+    assert!(project_config.contains("project-model"));
+    assert!(project_config.contains("sk-project"));
 }
 
 #[test]
