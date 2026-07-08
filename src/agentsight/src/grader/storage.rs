@@ -76,13 +76,14 @@ impl EvaluationStore {
         grader_type: GraderType,
         grader_version: &str,
     ) -> Result<Option<EvaluationRunRecord>, GraderError> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|error| GraderError::Storage(error.to_string()))?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, run_id, target_type, target_id, input_hash, grader_type,
+        let raw = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|error| GraderError::Storage(error.to_string()))?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, run_id, target_type, target_id, input_hash, grader_type,
                         grader_version, status, verdict, score, root_cause, created_at,
                         completed_at, result_json
                  FROM evaluation_runs
@@ -93,38 +94,40 @@ impl EvaluationStore {
                    AND grader_version=?5
                    AND status='completed'
                  LIMIT 1",
-            )
-            .map_err(|error| GraderError::Storage(error.to_string()))?;
-        let mut rows = stmt
-            .query(params![
-                target_type.as_str(),
-                target_id,
-                input_hash,
-                grader_type.as_str(),
-                grader_version,
-            ])
-            .map_err(|error| GraderError::Storage(error.to_string()))?;
-        match rows
-            .next()
-            .map_err(|error| GraderError::Storage(error.to_string()))?
-        {
-            Some(row) => raw_to_record(
-                read_raw_record(row).map_err(|error| GraderError::Storage(error.to_string()))?,
-            )
-            .map(Some),
-            None => Ok(None),
-        }
+                )
+                .map_err(|error| GraderError::Storage(error.to_string()))?;
+            let mut rows = stmt
+                .query(params![
+                    target_type.as_str(),
+                    target_id,
+                    input_hash,
+                    grader_type.as_str(),
+                    grader_version,
+                ])
+                .map_err(|error| GraderError::Storage(error.to_string()))?;
+            match rows
+                .next()
+                .map_err(|error| GraderError::Storage(error.to_string()))?
+            {
+                Some(row) => Some(
+                    read_raw_record(row)
+                        .map_err(|error| GraderError::Storage(error.to_string()))?,
+                ),
+                None => None,
+            }
+        };
+        raw.map(raw_to_record).transpose()
     }
 
     /// Insert a completed evaluation result.
     ///
     /// Returns `false` when an equivalent completed run already exists.
     pub fn insert_completed(&self, result: &EvaluationResult) -> Result<bool, GraderError> {
+        let result_json = serde_json::to_string(result)?;
         let conn = self
             .conn
             .lock()
             .map_err(|error| GraderError::Storage(error.to_string()))?;
-        let result_json = serde_json::to_string(result)?;
         let inserted = conn
             .execute(
                 "INSERT OR IGNORE INTO evaluation_runs (
@@ -160,13 +163,14 @@ impl EvaluationStore {
         target_type: TargetType,
         target_id: &str,
     ) -> Result<Option<EvaluationRunRecord>, GraderError> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|error| GraderError::Storage(error.to_string()))?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, run_id, target_type, target_id, input_hash, grader_type,
+        let raw = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|error| GraderError::Storage(error.to_string()))?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, run_id, target_type, target_id, input_hash, grader_type,
                         grader_version, status, verdict, score, root_cause, created_at,
                         completed_at, result_json
                  FROM evaluation_runs
@@ -175,21 +179,23 @@ impl EvaluationStore {
                    AND status='completed'
                  ORDER BY created_at DESC, id DESC
                  LIMIT 1",
-            )
-            .map_err(|error| GraderError::Storage(error.to_string()))?;
-        let mut rows = stmt
-            .query(params![target_type.as_str(), target_id])
-            .map_err(|error| GraderError::Storage(error.to_string()))?;
-        match rows
-            .next()
-            .map_err(|error| GraderError::Storage(error.to_string()))?
-        {
-            Some(row) => raw_to_record(
-                read_raw_record(row).map_err(|error| GraderError::Storage(error.to_string()))?,
-            )
-            .map(Some),
-            None => Ok(None),
-        }
+                )
+                .map_err(|error| GraderError::Storage(error.to_string()))?;
+            let mut rows = stmt
+                .query(params![target_type.as_str(), target_id])
+                .map_err(|error| GraderError::Storage(error.to_string()))?;
+            match rows
+                .next()
+                .map_err(|error| GraderError::Storage(error.to_string()))?
+            {
+                Some(row) => Some(
+                    read_raw_record(row)
+                        .map_err(|error| GraderError::Storage(error.to_string()))?,
+                ),
+                None => None,
+            }
+        };
+        raw.map(raw_to_record).transpose()
     }
 }
 
