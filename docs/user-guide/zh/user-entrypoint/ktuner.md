@@ -22,7 +22,13 @@ cargo build --release
 # 二进制在 target/release/ktuner
 ```
 
-将 `target/release/` 加入 `PATH`，或直接运行 `./target/release/ktuner`——下面的示例假设 `ktuner` 已在 `PATH` 中。
+只读使用可直接运行二进制（`./target/release/ktuner check`）。若要让 `ktuner` 全局可用——`ktuner tune`（需 root）以及 cosh 首次运行集成（只运行可信路径下 root 拥有的二进制）都要求如此——请安装到系统路径：
+
+```bash
+sudo install -o root -g root -m 755 target/release/ktuner /usr/local/bin/ktuner
+```
+
+下面的示例假设 `ktuner` 已在 `PATH` 中。
 
 > 打包分发方式（`anolisa install ktuner` / RPM）仍在与维护者规划中；在此之前请从源码构建。
 

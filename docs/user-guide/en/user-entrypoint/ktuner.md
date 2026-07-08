@@ -22,7 +22,13 @@ cargo build --release
 # binary at target/release/ktuner
 ```
 
-Add `target/release/` to your `PATH`, or run the binary directly as `./target/release/ktuner` — the examples below assume `ktuner` is on your `PATH`.
+For read-only use you can run the binary directly (`./target/release/ktuner check`). To make `ktuner` available system-wide — required for `ktuner tune` (needs root) and for the cosh first-run integration (which only runs a root-owned binary from a trusted path) — install it to a system path:
+
+```bash
+sudo install -o root -g root -m 755 target/release/ktuner /usr/local/bin/ktuner
+```
+
+The examples below assume `ktuner` is on your `PATH`.
 
 > Packaged distribution (`anolisa install ktuner` / RPM) is still being planned with the maintainers; until then, build from source.
 
