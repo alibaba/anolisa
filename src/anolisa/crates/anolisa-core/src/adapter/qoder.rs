@@ -19,14 +19,14 @@
 //! private tempdir. The symlink is install-time only (qodercli copies the
 //! plugin into its own cache) and is removed immediately after install.
 //!
-//! **settings.json is edited in place, never rewritten wholesale.** All
+//! **settings.json is merged, then atomically swapped in via rename.** All
 //! reads and writes go through the Manager's controlled
 //! [`AdapterOps`](super::driver::AdapterOps); the driver only ever adds or
-//! removes ANOLISA-managed entries (hooks whose name starts with
-//! `<plugin>-`, and the `<plugin>@local` plugin entry). A settings file that
-//! exists but cannot be parsed is left untouched: enable fails closed and
-//! disable reports cleanup incomplete, so ANOLISA never clobbers a config it
-//! cannot safely merge.
+//! removes ANOLISA-managed entries (the exact hook entries resolved from the
+//! bundle at enable time and persisted in the receipt, plus the
+//! `<plugin>@local` plugin entry). A settings file that exists but cannot be
+//! parsed is left untouched: enable fails closed and disable reports cleanup
+//! incomplete, so ANOLISA never clobbers a config it cannot safely merge.
 //!
 //! `qodercli plugins list` has been observed to omit freshly installed
 //! plugins, so `status` does **not** trust it: plugin registration is
@@ -48,7 +48,7 @@ use serde_json::Value;
 use super::AdapterError;
 use super::claim::{
     AdapterClaim, CLAIM_SCHEMA_VERSION, ClaimResource, ClaimResourceKind, ClaimStatus,
-    DRIVER_SCHEMA_VERSION, DriverPayload, QoderClaim, validate_plugin_id,
+    DRIVER_SCHEMA_VERSION, DriverPayload, QoderClaim, QoderManagedHook, validate_plugin_id,
 };
 use super::driver::{
     AdapterBundle, AdapterCondition, AdapterConditionKind, AdapterStatusReport, AdapterSummary,
@@ -60,8 +60,8 @@ use super::util::{bool_status, cli_failure_reason, digest_tree, display_command,
 mod settings;
 
 use settings::{
-    SettingsProbe, collect_expected_hook_names, load_resolved_hooks, load_settings_for_merge,
-    merge_managed, probe_settings, prune_settings_via_ops,
+    SettingsProbe, collect_expected_hook_names, collect_managed_hook_specs,
+    load_settings_for_merge, merge_managed, probe_settings, prune_settings_via_ops,
 };
 
 /// Default timeout for a `qodercli` invocation.
@@ -229,9 +229,10 @@ impl FrameworkDriver for QoderDriver {
                 program: "qodercli".to_string(),
                 reason: "cannot resolve ~/.qoder/settings.json (no home directory)".to_string(),
             })?;
-        // Record the hook names we will merge so status can require each one
-        // present later without re-reading the bundle.
+        // Persist the exact hook entries we will merge so status/disable do
+        // not depend on the resource root still existing later.
         let managed_hooks = collect_expected_hook_names(&bundle.resource_root)?;
+        let managed_hook_specs = collect_managed_hook_specs(&bundle.resource_root)?;
 
         let resources = vec![
             ClaimResource {
@@ -265,6 +266,7 @@ impl FrameworkDriver for QoderDriver {
                 plugin_resource: RES_PLUGIN.to_string(),
                 settings_resource: RES_SETTINGS.to_string(),
                 managed_hooks,
+                managed_hook_specs,
             }),
         })
     }
@@ -282,6 +284,19 @@ impl FrameworkDriver for QoderDriver {
                 root: claim.resource_root.clone(),
                 reason: "qoder receipt settings resource is missing or not ~/.qoder/settings.json"
                     .to_string(),
+            }
+        })?;
+        let managed_hooks =
+            managed_hook_specs(claim).ok_or_else(|| AdapterError::BundleInvalid {
+                root: claim.resource_root.clone(),
+                reason: "qoder receipt has no managed hook specs".to_string(),
+            })?;
+        let existing = ctx.ops.read_file(&settings)?;
+        let mut root = load_settings_for_merge(existing, &settings)?;
+        merge_managed(&mut root, managed_hooks, &plugin_entry(&plugin)).map_err(|reason| {
+            AdapterError::SettingsUnparseable {
+                path: settings.clone(),
+                reason,
             }
         })?;
         let program = qodercli_program(ctx.user_home.as_deref()).ok_or_else(|| {
@@ -315,11 +330,7 @@ impl FrameworkDriver for QoderDriver {
             });
         }
 
-        // 2. Merge our hooks + `<plugin>@local` into settings.json in place.
-        let resolved = load_resolved_hooks(&claim.resource_root)?;
-        let existing = ctx.ops.read_file(&settings)?;
-        let mut root = load_settings_for_merge(existing, &settings)?;
-        merge_managed(&mut root, &resolved, &plugin_entry(&plugin));
+        // 2. Write the already-validated merged settings.
         let bytes = serde_json::to_vec_pretty(&Value::Object(root)).map_err(|source| {
             AdapterError::SettingsUnparseable {
                 path: settings.clone(),
@@ -381,7 +392,8 @@ impl FrameworkDriver for QoderDriver {
                 conditions,
             });
         };
-        let probe = probe_settings(ctx, &settings, &plugin, managed_hook_names(claim));
+        let managed_hooks = managed_hook_specs(claim).unwrap_or(&[]);
+        let probe = probe_settings(ctx, &settings, managed_hooks, &plugin_entry(&plugin));
         let (settings_status, settings_reason) = match probe {
             SettingsProbe::Present {
                 hooks_present: true,
@@ -393,7 +405,11 @@ impl FrameworkDriver for QoderDriver {
             } => {
                 let mut missing: Vec<String> = Vec::new();
                 if !hooks_present {
-                    missing.push(format!("'{}' hooks", hook_prefix(&plugin)));
+                    if managed_hooks.is_empty() {
+                        missing.push("managed hook spec".to_string());
+                    } else {
+                        missing.push(format!("managed hooks for '{plugin}'"));
+                    }
                 }
                 if !plugin_enabled {
                     missing.push(format!("'{}'", plugin_entry(&plugin)));
@@ -517,7 +533,13 @@ impl FrameworkDriver for QoderDriver {
         };
 
         // 2. Prune only ANOLISA-managed entries from settings.json.
-        let settings_ok = prune_settings_via_ops(ctx, &settings, &plugin, &mut messages);
+        let settings_ok = prune_settings_via_ops(
+            ctx,
+            &settings,
+            &plugin,
+            managed_hook_specs(claim).unwrap_or(&[]),
+            &mut messages,
+        );
 
         Ok(DisableReport {
             cleanup_complete: plugin_ok && settings_ok,
@@ -536,11 +558,6 @@ fn plugin_name(bundle: &AdapterBundle, ctx: &DriverCtx) -> String {
         .plugin_id
         .clone()
         .unwrap_or_else(|| ctx.component.clone())
-}
-
-/// Managed-hook name prefix for a plugin (`<plugin>-`).
-fn hook_prefix(plugin: &str) -> String {
-    format!("{plugin}-")
 }
 
 /// Managed plugin entry in `plugins.enabled` (`<plugin>@local`).
@@ -652,11 +669,9 @@ fn resolve_settings(claim: &AdapterClaim, user_home: Option<&Path>) -> Option<Pa
     (recorded == expected).then_some(recorded)
 }
 
-/// Hook names ANOLISA recorded as managed in the receipt payload.
-fn managed_hook_names(claim: &AdapterClaim) -> &[String] {
-    qoder_payload(claim)
-        .map(|q| q.managed_hooks.as_slice())
-        .unwrap_or(&[])
+/// Exact Qoder hook entries ANOLISA owns, persisted in the receipt payload.
+fn managed_hook_specs(claim: &AdapterClaim) -> Option<&[QoderManagedHook]> {
+    qoder_payload(claim).map(|q| q.managed_hook_specs.as_slice())
 }
 
 // ---------------------------------------------------------------------------
@@ -695,9 +710,12 @@ fn qodercli_program(user_home: Option<&Path>) -> Option<String> {
     resolve_qodercli(user_home).map(|p| p.to_string_lossy().into_owned())
 }
 
-/// Highest-versioned `qodercli-X.Y.Z` under `dir` (semver-aware: 10 > 9).
+/// Highest-versioned `qodercli-X.Y.Z` under `dir`.
+///
+/// Numeric components sort semver-ish (`10 > 9`), and a stable suffix wins
+/// over a prerelease with the same numeric core (`1.0.0 > 1.0.0-rc1`).
 fn highest_versioned_qodercli(dir: &Path) -> Option<PathBuf> {
-    let mut best: Option<(Vec<u64>, String, PathBuf)> = None;
+    let mut best: Option<(Vec<u64>, bool, String, PathBuf)> = None;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
@@ -712,24 +730,36 @@ fn highest_versioned_qodercli(dir: &Path) -> Option<PathBuf> {
             continue;
         }
         let key = version_key(suffix);
+        let stable = is_stable_version_suffix(suffix);
         let better = match &best {
             None => true,
-            Some((bk, bs, _)) => key > *bk || (key == *bk && suffix > bs.as_str()),
+            Some((bk, bstable, bs, _)) => {
+                key > *bk
+                    || (key == *bk && stable && !*bstable)
+                    || (key == *bk && stable == *bstable && suffix > bs.as_str())
+            }
         };
         if better {
-            best = Some((key, suffix.to_string(), path));
+            best = Some((key, stable, suffix.to_string(), path));
         }
     }
-    best.map(|(_, _, p)| p)
+    best.map(|(_, _, _, p)| p)
 }
 
-/// Numeric components of a version suffix, for semver-ish ordering.
+/// Numeric components of the stable core of a version suffix.
 fn version_key(suffix: &str) -> Vec<u64> {
-    suffix
-        .split(|c: char| !c.is_ascii_digit())
+    let core = suffix
+        .split_once('-')
+        .map(|(core, _)| core)
+        .unwrap_or(suffix);
+    core.split(|c: char| !c.is_ascii_digit())
         .filter(|s| !s.is_empty())
         .filter_map(|s| s.parse::<u64>().ok())
         .collect()
+}
+
+fn is_stable_version_suffix(suffix: &str) -> bool {
+    suffix.chars().all(|c| c.is_ascii_digit() || c == '.')
 }
 
 #[cfg(unix)]
@@ -838,7 +868,6 @@ mod tests {
 
     #[test]
     fn identifiers_are_plugin_scoped() {
-        assert_eq!(hook_prefix("tokenless"), "tokenless-");
         assert_eq!(plugin_entry("tokenless"), "tokenless@local");
     }
 
@@ -858,6 +887,27 @@ mod tests {
     fn version_key_orders_semver_numerically() {
         assert!(version_key("10.0.0") > version_key("9.9.9"));
         assert!(version_key("1.2.0") > version_key("1.1.9"));
+        assert_eq!(version_key("1.0.0-rc1"), version_key("1.0.0"));
+        assert!(is_stable_version_suffix("1.0.0"));
+        assert!(!is_stable_version_suffix("1.0.0-rc1"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn highest_versioned_qodercli_prefers_stable_over_prerelease() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in ["qodercli-1.0.0-rc1", "qodercli-1.0.0", "qodercli-0.9.9"] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, b"#!/bin/sh\n").expect("write fake cli");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod fake cli");
+        }
+        assert_eq!(
+            highest_versioned_qodercli(dir.path()),
+            Some(dir.path().join("qodercli-1.0.0"))
+        );
     }
 
     #[test]

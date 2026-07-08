@@ -27,6 +27,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::path_safety::{PathBoundaryError, canonicalize_nearest_existing, validate_owned_path};
 use anolisa_platform::fs_layout::FsLayout;
@@ -467,11 +468,26 @@ pub struct ClaudeCodeClaim {
     pub plugin_resource: String,
 }
 
-/// Qoder driver payload. Holds only [`ClaimResource::id`] references — never
-/// argv, script paths, or the settings path itself. The qodercli invocation
-/// is rebuilt by the built-in driver, and the driver recomputes the
-/// `settings.json` path from the caller's home directory rather than reading
-/// it back from the receipt, so a forged payload cannot redirect the write.
+/// One Qoder hook entry ANOLISA manages in `settings.json`.
+///
+/// The `entry` is the fully-resolved JSON object written under
+/// `settings.hooks.<event>[]` at enable time. Persisting it in the receipt
+/// makes status/disable independent of `resource_root` still existing and
+/// keeps cleanup ownership tied to validated receipt data.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QoderManagedHook {
+    /// Qoder hook event key, e.g. `PreToolUse`.
+    pub event: String,
+    /// Full hook entry written to `settings.json`.
+    pub entry: Value,
+}
+
+/// Qoder driver payload. Holds [`ClaimResource::id`] references and the
+/// exact hook specs ANOLISA wrote — never argv, script paths, or the settings
+/// path itself. The qodercli invocation is rebuilt by the built-in driver,
+/// and the driver recomputes the `settings.json` path from the caller's home
+/// directory rather than reading it back from the receipt, so a forged
+/// payload cannot redirect the write.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QoderClaim {
     /// Resource id of the installed plugin
@@ -481,14 +497,15 @@ pub struct QoderClaim {
     /// ([`ClaimResourceKind::ExternalPath`]).
     pub settings_resource: String,
     /// Hook names ANOLISA merged into `settings.json` at enable time.
-    /// `status` requires *every* one to still be present, so removing a
-    /// single managed hook (partial drift) degrades rather than staying
-    /// healthy. Recorded here so verification does not re-read the bundle,
-    /// which may be gone by status time. These are **not** a path/argv
-    /// boundary — `disable` prunes by the argv-safe `<plugin>-` name prefix,
-    /// never by these strings, so a forged list cannot delete a user hook.
+    /// These names are metadata for human/debug visibility; lifecycle logic
+    /// uses [`Self::managed_hook_specs`]. `disable` prunes only exact hook
+    /// entries from that list, so a forged or user-defined `tokenless-*` name
+    /// cannot delete a user hook.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub managed_hooks: Vec<String>,
+    /// Full hook entries ANOLISA owns in `settings.json`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub managed_hook_specs: Vec<QoderManagedHook>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1302,6 +1319,16 @@ mod tests {
                 plugin_resource: "qoder_plugin".to_string(),
                 settings_resource: "qoder_settings".to_string(),
                 managed_hooks: vec!["tokenless-rewrite".to_string()],
+                managed_hook_specs: vec![QoderManagedHook {
+                    event: "PreToolUse".to_string(),
+                    entry: serde_json::json!({
+                        "hooks": [{
+                            "type": "command",
+                            "name": "tokenless-rewrite",
+                            "command": "python3 /opt/anolisa/rewrite.py"
+                        }]
+                    }),
+                }],
             }),
         }
     }

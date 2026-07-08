@@ -1,14 +1,14 @@
 //! Qoder `settings.json` merge, prune, and verification helpers.
 
-use std::collections::HashSet;
 use std::path::Path;
 
 use serde_json::{Map, Value};
 
 use crate::adapter::AdapterError;
+use crate::adapter::claim::QoderManagedHook;
 use crate::adapter::driver::DriverCtx;
 
-use super::{HOOKS_PLACEHOLDER, QODER_HOOKS_FILE, common_hooks_dir, hook_prefix, plugin_entry};
+use super::{HOOKS_PLACEHOLDER, QODER_HOOKS_FILE, common_hooks_dir, plugin_entry};
 
 /// Outcome of reading and inspecting `settings.json` for `status`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,19 +28,15 @@ pub(super) enum SettingsProbe {
 pub(super) fn probe_settings(
     ctx: &DriverCtx,
     settings: &Path,
-    plugin: &str,
-    expected_hooks: &[String],
+    managed_hooks: &[QoderManagedHook],
+    plugin_entry: &str,
 ) -> SettingsProbe {
     match ctx.ops.read_file(settings) {
         Ok(None) => SettingsProbe::Absent,
         Ok(Some(bytes)) => match serde_json::from_slice::<Value>(&bytes) {
             Ok(Value::Object(root)) => {
-                let (hooks_present, plugin_enabled) = settings_managed_present(
-                    &root,
-                    expected_hooks,
-                    &hook_prefix(plugin),
-                    &plugin_entry(plugin),
-                );
+                let (hooks_present, plugin_enabled) =
+                    settings_managed_present(&root, managed_hooks, plugin_entry);
                 SettingsProbe::Present {
                     hooks_present,
                     plugin_enabled,
@@ -61,6 +57,7 @@ pub(super) fn prune_settings_via_ops(
     ctx: &DriverCtx,
     settings: &Path,
     plugin: &str,
+    managed_hooks: &[QoderManagedHook],
     messages: &mut Vec<String>,
 ) -> bool {
     let bytes = match ctx.ops.read_file(settings) {
@@ -85,8 +82,8 @@ pub(super) fn prune_settings_via_ops(
             return false;
         }
     };
-    if !prune_managed(&mut root, &hook_prefix(plugin), &plugin_entry(plugin)) {
-        messages.push("settings.json already free of tokenless entries".to_string());
+    if !prune_managed(&mut root, managed_hooks, &plugin_entry(plugin)) {
+        messages.push("settings.json already free of ANOLISA qoder entries".to_string());
         return true;
     }
     let out = match serde_json::to_vec_pretty(&Value::Object(root)) {
@@ -98,7 +95,7 @@ pub(super) fn prune_settings_via_ops(
     };
     match ctx.ops.write_file(settings, &out) {
         Ok(()) => {
-            messages.push("pruned tokenless entries from settings.json".to_string());
+            messages.push("pruned ANOLISA qoder entries from settings.json".to_string());
             true
         }
         Err(err) => {
@@ -116,8 +113,19 @@ pub(super) fn load_settings_for_merge(
     match existing {
         None => Ok(Map::new()),
         Some(bytes) => match serde_json::from_slice::<Value>(&bytes) {
-            Ok(Value::Object(root)) => Ok(root),
-            Ok(_) => Ok(Map::new()),
+            Ok(Value::Object(root)) => {
+                validate_settings_shape(&root).map_err(|reason| {
+                    AdapterError::SettingsUnparseable {
+                        path: path.to_path_buf(),
+                        reason,
+                    }
+                })?;
+                Ok(root)
+            }
+            Ok(_) => Err(AdapterError::SettingsUnparseable {
+                path: path.to_path_buf(),
+                reason: "settings.json must be a JSON object".to_string(),
+            }),
             Err(source) => Err(AdapterError::SettingsUnparseable {
                 path: path.to_path_buf(),
                 reason: source.to_string(),
@@ -146,19 +154,13 @@ pub(super) fn load_resolved_hooks(resource_root: &Path) -> Result<Value, Adapter
 pub(super) fn collect_expected_hook_names(
     resource_root: &Path,
 ) -> Result<Vec<String>, AdapterError> {
-    let resolved = load_resolved_hooks(resource_root)?;
+    let specs = collect_managed_hook_specs(resource_root)?;
     let mut names = Vec::new();
-    if let Some(hooks) = resolved.get("hooks").and_then(Value::as_object) {
-        for entries in hooks.values() {
-            if let Some(arr) = entries.as_array() {
-                for entry in arr {
-                    if let Some(hs) = entry.get("hooks").and_then(Value::as_array) {
-                        for h in hs {
-                            if let Some(name) = h.get("name").and_then(Value::as_str) {
-                                names.push(name.to_string());
-                            }
-                        }
-                    }
+    for spec in specs {
+        if let Some(hs) = spec.entry.get("hooks").and_then(Value::as_array) {
+            for h in hs {
+                if let Some(name) = h.get("name").and_then(Value::as_str) {
+                    names.push(name.to_string());
                 }
             }
         }
@@ -166,46 +168,91 @@ pub(super) fn collect_expected_hook_names(
     Ok(names)
 }
 
+/// Full managed hook specs declared in the bundle's `hooks.json`.
+pub(super) fn collect_managed_hook_specs(
+    resource_root: &Path,
+) -> Result<Vec<QoderManagedHook>, AdapterError> {
+    let resolved = load_resolved_hooks(resource_root)?;
+    Ok(resolved_hook_entries(&resolved))
+}
+
 /// Add managed hooks and `<plugin>@local` to a settings object.
-pub(super) fn merge_managed(root: &mut Map<String, Value>, resolved: &Value, plugin_entry: &str) {
-    if let Some(resolved_hooks) = resolved.get("hooks").and_then(Value::as_object) {
+pub(super) fn merge_managed(
+    root: &mut Map<String, Value>,
+    managed_hooks: &[QoderManagedHook],
+    plugin_entry: &str,
+) -> Result<(), String> {
+    validate_settings_shape(root)?;
+    for spec in managed_hooks {
         let hooks_slot = root
             .entry("hooks")
             .or_insert_with(|| Value::Object(Map::new()));
-        let hooks = ensure_object(hooks_slot);
-        for (event, entries) in resolved_hooks {
-            let Some(entries) = entries.as_array() else {
-                continue;
-            };
-            let slot = hooks
-                .entry(event.clone())
-                .or_insert_with(|| Value::Array(Vec::new()));
-            let arr = ensure_array(slot);
-            let existing_names = collect_hook_names(arr);
-            for entry in entries {
-                if let Some(name) = primary_hook_name(entry)
-                    && !existing_names.contains(&name)
-                {
-                    arr.push(entry.clone());
-                }
+        let hooks = hooks_slot
+            .as_object_mut()
+            .expect("settings shape validated: hooks is an object");
+        let slot = hooks
+            .entry(spec.event.clone())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        let arr = slot
+            .as_array_mut()
+            .expect("settings shape validated: hook event is an array");
+        let Some(name) = primary_hook_name(&spec.entry) else {
+            continue;
+        };
+        if let Some(pos) = arr
+            .iter()
+            .position(|existing| primary_hook_name(existing).as_deref() == Some(name.as_str()))
+        {
+            if arr[pos] != spec.entry {
+                arr[pos] = spec.entry.clone();
             }
+        } else {
+            arr.push(spec.entry.clone());
         }
     }
 
     let plugins_slot = root
         .entry("plugins")
         .or_insert_with(|| Value::Object(Map::new()));
-    let plugins = ensure_object(plugins_slot);
+    let plugins = plugins_slot
+        .as_object_mut()
+        .expect("settings shape validated: plugins is an object");
     let enabled_slot = plugins
         .entry("enabled")
         .or_insert_with(|| Value::Array(Vec::new()));
-    let enabled = ensure_array(enabled_slot);
+    let enabled = enabled_slot
+        .as_array_mut()
+        .expect("settings shape validated: plugins.enabled is an array");
     if !enabled.iter().any(|v| v.as_str() == Some(plugin_entry)) {
         enabled.push(Value::String(plugin_entry.to_string()));
     }
+    Ok(())
 }
 
-fn prune_managed(root: &mut Map<String, Value>, hook_prefix: &str, plugin_entry: &str) -> bool {
+fn resolved_hook_entries(resolved: &Value) -> Vec<QoderManagedHook> {
+    let mut out = Vec::new();
+    if let Some(resolved_hooks) = resolved.get("hooks").and_then(Value::as_object) {
+        for (event, entries) in resolved_hooks {
+            if let Some(entries) = entries.as_array() {
+                for entry in entries {
+                    if primary_hook_name(entry).is_some() {
+                        out.push(QoderManagedHook {
+                            event: event.clone(),
+                            entry: entry.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn prune_managed(
+    root: &mut Map<String, Value>,
+    managed_hooks: &[QoderManagedHook],
+    plugin_entry: &str,
+) -> bool {
     let mut removed = false;
 
     if let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) {
@@ -213,7 +260,11 @@ fn prune_managed(root: &mut Map<String, Value>, hook_prefix: &str, plugin_entry:
         for event in events {
             if let Some(arr) = hooks.get_mut(&event).and_then(Value::as_array_mut) {
                 let before = arr.len();
-                arr.retain(|entry| !entry_is_owned(entry, hook_prefix));
+                arr.retain(|entry| {
+                    !managed_hooks
+                        .iter()
+                        .any(|managed| managed.event == event && entry == &managed.entry)
+                });
                 if arr.len() != before {
                     removed = true;
                 }
@@ -249,16 +300,13 @@ fn prune_managed(root: &mut Map<String, Value>, hook_prefix: &str, plugin_entry:
 
 fn settings_managed_present(
     root: &Map<String, Value>,
-    expected_hooks: &[String],
-    hook_prefix: &str,
+    managed_hooks: &[QoderManagedHook],
     plugin_entry: &str,
 ) -> (bool, bool) {
-    let present = present_hook_names(root);
-    let hooks_present = if expected_hooks.is_empty() {
-        present.iter().any(|n| n.starts_with(hook_prefix))
-    } else {
-        expected_hooks.iter().all(|n| present.contains(n))
-    };
+    let hooks_present = !managed_hooks.is_empty()
+        && managed_hooks
+            .iter()
+            .all(|spec| hook_entry_present(root, &spec.event, &spec.entry));
     let plugin_enabled = root
         .get("plugins")
         .and_then(Value::as_object)
@@ -269,30 +317,12 @@ fn settings_managed_present(
     (hooks_present, plugin_enabled)
 }
 
-fn present_hook_names(root: &Map<String, Value>) -> HashSet<String> {
-    let mut names = HashSet::new();
-    if let Some(hooks) = root.get("hooks").and_then(Value::as_object) {
-        for entries in hooks.values() {
-            if let Some(arr) = entries.as_array() {
-                names.extend(collect_hook_names(arr));
-            }
-        }
-    }
-    names
-}
-
-fn entry_is_owned(entry: &Value, prefix: &str) -> bool {
-    entry
-        .get("hooks")
+fn hook_entry_present(root: &Map<String, Value>, event: &str, expected: &Value) -> bool {
+    root.get("hooks")
+        .and_then(Value::as_object)
+        .and_then(|hooks| hooks.get(event))
         .and_then(Value::as_array)
-        .map(|hooks| {
-            hooks.iter().any(|h| {
-                h.get("name")
-                    .and_then(Value::as_str)
-                    .map(|n| n.starts_with(prefix))
-                    .unwrap_or(false)
-            })
-        })
+        .map(|entries| entries.iter().any(|entry| entry == expected))
         .unwrap_or(false)
 }
 
@@ -307,38 +337,29 @@ fn primary_hook_name(entry: &Value) -> Option<String> {
         })
 }
 
-fn collect_hook_names(entries: &[Value]) -> HashSet<String> {
-    let mut names = HashSet::new();
-    for entry in entries {
-        if let Some(hooks) = entry.get("hooks").and_then(Value::as_array) {
-            for h in hooks {
-                if let Some(name) = h.get("name").and_then(Value::as_str) {
-                    names.insert(name.to_string());
-                }
+fn validate_settings_shape(root: &Map<String, Value>) -> Result<(), String> {
+    if let Some(hooks) = root.get("hooks") {
+        let hooks = hooks
+            .as_object()
+            .ok_or_else(|| "settings.json field 'hooks' must be an object".to_string())?;
+        for (event, entries) in hooks {
+            if !entries.is_array() {
+                return Err(format!("settings.json hooks.{event} must be an array"));
             }
         }
     }
-    names
-}
-
-fn ensure_object(v: &mut Value) -> &mut Map<String, Value> {
-    if !v.is_object() {
-        *v = Value::Object(Map::new());
+    if let Some(plugins) = root.get("plugins") {
+        let plugins = plugins
+            .as_object()
+            .ok_or_else(|| "settings.json field 'plugins' must be an object".to_string())?;
+        if plugins
+            .get("enabled")
+            .is_some_and(|enabled| !enabled.is_array())
+        {
+            return Err("settings.json plugins.enabled must be an array".to_string());
+        }
     }
-    match v.as_object_mut() {
-        Some(m) => m,
-        None => unreachable!("value coerced to object cannot fail as_object_mut"),
-    }
-}
-
-fn ensure_array(v: &mut Value) -> &mut Vec<Value> {
-    if !v.is_array() {
-        *v = Value::Array(Vec::new());
-    }
-    match v.as_array_mut() {
-        Some(a) => a,
-        None => unreachable!("value coerced to array cannot fail as_array_mut"),
-    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -361,20 +382,30 @@ mod tests {
             r#"{
               "hooks": {
                 "PreToolUse": [
-                  { "hooks": [ { "type": "command", "name": "tokenless-rewrite" } ] }
+                  { "hooks": [
+                    { "type": "command", "name": "tokenless-rewrite",
+                      "command": "python3 /anolisa/rewrite.py" }
+                  ] }
                 ],
                 "PostToolUse": [
-                  { "hooks": [ { "type": "command", "name": "tokenless-compress" } ] }
+                  { "hooks": [
+                    { "type": "command", "name": "tokenless-compress",
+                      "command": "python3 /anolisa/compress.py" }
+                  ] }
                 ]
               }
             }"#,
         )
     }
 
+    fn managed_specs() -> Vec<QoderManagedHook> {
+        resolved_hook_entries(&resolved_hooks())
+    }
+
     #[test]
     fn merge_into_empty_adds_hooks_and_plugin() {
         let mut root = Map::new();
-        merge_managed(&mut root, &resolved_hooks(), "tokenless@local");
+        merge_managed(&mut root, &managed_specs(), "tokenless@local").expect("merge");
         let v = Value::Object(root);
         assert_eq!(
             v["hooks"]["PreToolUse"][0]["hooks"][0]["name"],
@@ -396,7 +427,7 @@ mod tests {
               "plugins": { "enabled": ["other@local"], "registry": "corp" }
             }"#,
         ));
-        merge_managed(&mut root, &resolved_hooks(), "tokenless@local");
+        merge_managed(&mut root, &managed_specs(), "tokenless@local").expect("merge");
         let v = Value::Object(root);
         assert_eq!(v["theme"], "dark");
         assert_eq!(v["plugins"]["registry"], "corp");
@@ -415,8 +446,8 @@ mod tests {
     #[test]
     fn merge_is_idempotent() {
         let mut root = Map::new();
-        merge_managed(&mut root, &resolved_hooks(), "tokenless@local");
-        merge_managed(&mut root, &resolved_hooks(), "tokenless@local");
+        merge_managed(&mut root, &managed_specs(), "tokenless@local").expect("merge");
+        merge_managed(&mut root, &managed_specs(), "tokenless@local").expect("merge");
         let v = Value::Object(root);
         assert_eq!(
             v["hooks"]["PreToolUse"].as_array().expect("array").len(),
@@ -431,6 +462,29 @@ mod tests {
     }
 
     #[test]
+    fn merge_replaces_same_named_hook_with_managed_body() {
+        let mut root = obj(json(
+            r#"{
+              "hooks": {
+                "PreToolUse": [
+                  { "hooks": [
+                    { "type": "command", "name": "tokenless-rewrite",
+                      "command": "python3 /user/rewrite.py" }
+                  ] }
+                ]
+              }
+            }"#,
+        ));
+
+        merge_managed(&mut root, &managed_specs(), "tokenless@local").expect("merge");
+
+        let v = Value::Object(root);
+        let pre = v["hooks"]["PreToolUse"].as_array().expect("array");
+        assert_eq!(pre.len(), 1, "same name is replaced, not duplicated");
+        assert_eq!(pre[0]["hooks"][0]["command"], "python3 /anolisa/rewrite.py");
+    }
+
+    #[test]
     fn prune_removes_only_managed_entries() {
         let mut root = obj(json(
             r#"{
@@ -438,16 +492,22 @@ mod tests {
               "hooks": {
                 "PreToolUse": [
                   { "hooks": [ { "type": "command", "name": "user-audit" } ] },
-                  { "hooks": [ { "type": "command", "name": "tokenless-rewrite" } ] }
+                  { "hooks": [
+                    { "type": "command", "name": "tokenless-rewrite",
+                      "command": "python3 /anolisa/rewrite.py" }
+                  ] }
                 ],
                 "PostToolUse": [
-                  { "hooks": [ { "type": "command", "name": "tokenless-compress" } ] }
+                  { "hooks": [
+                    { "type": "command", "name": "tokenless-compress",
+                      "command": "python3 /anolisa/compress.py" }
+                  ] }
                 ]
               },
               "plugins": { "enabled": ["other@local", "tokenless@local"] }
             }"#,
         ));
-        let changed = prune_managed(&mut root, "tokenless-", "tokenless@local");
+        let changed = prune_managed(&mut root, &managed_specs(), "tokenless@local");
         assert!(changed);
         let v = Value::Object(root);
         assert_eq!(v["theme"], "dark");
@@ -472,10 +532,33 @@ mod tests {
               }
             }"#,
         ));
-        let changed = prune_managed(&mut root, "tokenless-", "tokenless@local");
+        let changed = prune_managed(&mut root, &managed_specs(), "tokenless@local");
         assert!(!changed, "no managed entries present");
         let v = Value::Object(root);
         assert_eq!(v["hooks"]["PreToolUse"][0]["hooks"][0]["name"], "my-hook");
+    }
+
+    #[test]
+    fn prune_does_not_match_user_hook_by_tokenless_prefix() {
+        let mut root = obj(json(
+            r#"{
+              "hooks": {
+                "PreToolUse": [
+                  { "hooks": [
+                    { "type": "command", "name": "tokenless-my-custom-audit",
+                      "command": "python3 /user/audit.py" }
+                  ] }
+                ]
+              }
+            }"#,
+        ));
+        let changed = prune_managed(&mut root, &managed_specs(), "tokenless@local");
+        assert!(!changed, "prefix-only hook is user-owned");
+        let v = Value::Object(root);
+        assert_eq!(
+            v["hooks"]["PreToolUse"][0]["hooks"][0]["name"],
+            "tokenless-my-custom-audit"
+        );
     }
 
     #[test]
@@ -484,80 +567,116 @@ mod tests {
             r#"{
               "hooks": {
                 "PreToolUse": [
-                  { "hooks": [ { "type": "command", "name": "tokenless-rewrite" } ] }
+                  { "hooks": [
+                    { "type": "command", "name": "tokenless-rewrite",
+                      "command": "python3 /anolisa/rewrite.py" }
+                  ] }
                 ]
               },
               "plugins": { "enabled": ["tokenless@local"] }
             }"#,
         ));
-        assert!(prune_managed(&mut root, "tokenless-", "tokenless@local"));
+        assert!(prune_managed(
+            &mut root,
+            &managed_specs(),
+            "tokenless@local"
+        ));
         assert!(root.get("hooks").is_none());
         assert!(root.get("plugins").is_none());
-        assert!(!prune_managed(&mut root, "tokenless-", "tokenless@local"));
+        assert!(!prune_managed(
+            &mut root,
+            &managed_specs(),
+            "tokenless@local"
+        ));
+    }
+
+    #[test]
+    fn prune_with_empty_specs_removes_plugin_entry_only() {
+        let mut root = obj(json(
+            r#"{
+              "hooks": {
+                "PreToolUse": [
+                  { "hooks": [
+                    { "type": "command", "name": "tokenless-rewrite",
+                      "command": "python3 /user/rewrite.py" }
+                  ] }
+                ]
+              },
+              "plugins": { "enabled": ["other@local", "tokenless@local"] }
+            }"#,
+        ));
+        assert!(prune_managed(&mut root, &[], "tokenless@local"));
+        let v = Value::Object(root);
+        assert_eq!(
+            v["hooks"]["PreToolUse"][0]["hooks"][0]["name"],
+            "tokenless-rewrite"
+        );
+        let enabled = v["plugins"]["enabled"].as_array().expect("enabled");
+        assert_eq!(enabled, &vec![Value::String("other@local".to_string())]);
     }
 
     #[test]
     fn settings_managed_present_detects_both_signals() {
-        let expected = vec![
-            "tokenless-rewrite".to_string(),
-            "tokenless-compress-response".to_string(),
-        ];
         let root = obj(json(
             r#"{
               "hooks": {
-                "PreToolUse": [ { "hooks": [ { "name": "tokenless-rewrite" } ] } ],
-                "PostToolUse": [ { "hooks": [ { "name": "tokenless-compress-response" } ] } ]
+                "PreToolUse": [ { "hooks": [
+                  { "type": "command", "name": "tokenless-rewrite",
+                    "command": "python3 /anolisa/rewrite.py" }
+                ] } ],
+                "PostToolUse": [ { "hooks": [
+                  { "type": "command", "name": "tokenless-compress",
+                    "command": "python3 /anolisa/compress.py" }
+                ] } ]
               },
               "plugins": { "enabled": ["tokenless@local"] }
             }"#,
         ));
         assert_eq!(
-            settings_managed_present(&root, &expected, "tokenless-", "tokenless@local"),
+            settings_managed_present(&root, &managed_specs(), "tokenless@local"),
             (true, true)
         );
 
         let partial = obj(json(r#"{ "plugins": { "enabled": ["tokenless@local"] } }"#));
         assert_eq!(
-            settings_managed_present(&partial, &expected, "tokenless-", "tokenless@local"),
+            settings_managed_present(&partial, &managed_specs(), "tokenless@local"),
             (false, true)
         );
 
         let none = obj(json(r#"{ "theme": "dark" }"#));
         assert_eq!(
-            settings_managed_present(&none, &expected, "tokenless-", "tokenless@local"),
+            settings_managed_present(&none, &managed_specs(), "tokenless@local"),
             (false, false)
         );
     }
 
     #[test]
-    fn settings_managed_present_requires_all_expected_hooks() {
-        let expected = vec![
-            "tokenless-rewrite".to_string(),
-            "tokenless-compress-response".to_string(),
-        ];
+    fn settings_managed_present_requires_full_expected_hooks() {
         let root = obj(json(
             r#"{
               "hooks": { "PreToolUse": [
-                { "hooks": [ { "name": "tokenless-rewrite" } ] } ] },
+                { "hooks": [
+                  { "type": "command", "name": "tokenless-rewrite",
+                    "command": "python3 /user/rewrite.py" }
+                ] } ] },
               "plugins": { "enabled": ["tokenless@local"] }
             }"#,
         ));
         assert_eq!(
-            settings_managed_present(&root, &expected, "tokenless-", "tokenless@local"),
+            settings_managed_present(&root, &managed_specs(), "tokenless@local"),
             (false, true),
-            "a missing managed hook must not read as present"
+            "a same-name hook with a different body must not read as present"
         );
     }
 
     #[test]
-    fn settings_managed_present_falls_back_to_prefix_when_no_expected() {
+    fn settings_managed_present_fails_closed_without_bundle_spec() {
         let root = obj(json(
             r#"{ "hooks": { "PreToolUse": [
                 { "hooks": [ { "name": "tokenless-rewrite" } ] } ] } }"#,
         ));
-        let (hooks_present, _) =
-            settings_managed_present(&root, &[], "tokenless-", "tokenless@local");
-        assert!(hooks_present);
+        let (hooks_present, _) = settings_managed_present(&root, &[], "tokenless@local");
+        assert!(!hooks_present);
     }
 
     #[test]
@@ -582,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn load_settings_for_merge_fails_closed_on_malformed_json() {
+    fn load_settings_for_merge_fails_closed_on_unmergeable_json() {
         let path = Path::new("/home/u/.qoder/settings.json");
         assert!(
             load_settings_for_merge(None, path)
@@ -590,13 +709,48 @@ mod tests {
                 .is_empty()
         );
         assert!(
-            load_settings_for_merge(Some(b"[1,2,3]".to_vec()), path)
-                .expect("array ok")
-                .is_empty()
+            matches!(
+                load_settings_for_merge(Some(b"[1,2,3]".to_vec()), path),
+                Err(AdapterError::SettingsUnparseable { .. })
+            ),
+            "non-object JSON must be left untouched by enable"
         );
         let err = load_settings_for_merge(Some(b"{not json".to_vec()), path)
             .expect_err("malformed must fail closed");
         assert!(matches!(err, AdapterError::SettingsUnparseable { .. }));
+    }
+
+    #[test]
+    fn load_settings_for_merge_fails_closed_on_bad_nested_shapes() {
+        let path = Path::new("/home/u/.qoder/settings.json");
+        for bad in [
+            br#"{ "hooks": "disabled" }"#.as_slice(),
+            br#"{ "hooks": { "PreToolUse": "disabled" } }"#.as_slice(),
+            br#"{ "plugins": "disabled" }"#.as_slice(),
+            br#"{ "plugins": { "enabled": "tokenless@local" } }"#.as_slice(),
+        ] {
+            let err = load_settings_for_merge(Some(bad.to_vec()), path)
+                .expect_err("bad shape must fail closed");
+            assert!(
+                matches!(err, AdapterError::SettingsUnparseable { .. }),
+                "{err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_managed_rejects_bad_nested_shapes() {
+        for mut root in [
+            obj(json(r#"{ "hooks": "disabled" }"#)),
+            obj(json(r#"{ "hooks": { "PreToolUse": "disabled" } }"#)),
+            obj(json(r#"{ "plugins": "disabled" }"#)),
+            obj(json(r#"{ "plugins": { "enabled": "tokenless@local" } }"#)),
+        ] {
+            assert!(
+                merge_managed(&mut root, &managed_specs(), "tokenless@local").is_err(),
+                "merge must not coerce malformed settings fields"
+            );
+        }
     }
 
     #[test]

@@ -1549,7 +1549,7 @@ impl AdapterOps for ManagerOps {
         // `read_file`/`copy_file` guard against). A symlink swapped in after
         // this check is still defeated by the rename below, which replaces the
         // link atomically rather than writing through it.
-        match std::fs::symlink_metadata(path) {
+        let target_meta = match std::fs::symlink_metadata(path) {
             Ok(meta) if meta.file_type().is_symlink() => {
                 return Err(AdapterError::Io {
                     path: path.to_path_buf(),
@@ -1559,8 +1559,15 @@ impl AdapterOps for ManagerOps {
                     ),
                 });
             }
-            _ => {}
-        }
+            Ok(meta) => Some(meta),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => None,
+            Err(source) => {
+                return Err(AdapterError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        };
         let parent = path.parent().ok_or_else(|| AdapterError::Io {
             path: path.to_path_buf(),
             source: std::io::Error::new(
@@ -1613,6 +1620,13 @@ impl AdapterOps for ManagerOps {
                 std::io::ErrorKind::AlreadyExists,
                 "could not create a unique temp file for atomic write",
             ),
+        })?;
+        set_atomic_write_permissions(&file, target_meta.as_ref()).map_err(|source| {
+            let _ = std::fs::remove_file(&tmp);
+            AdapterError::Io {
+                path: tmp.clone(),
+                source,
+            }
         })?;
         file.write_all(contents).map_err(|source| {
             let _ = std::fs::remove_file(&tmp);
@@ -1791,6 +1805,28 @@ fn create_new_file(path: &Path) -> std::io::Result<std::fs::File> {
         .write(true)
         .create_new(true)
         .open(path)
+}
+
+/// Match atomic-write temp permissions to the existing target mode, or use a
+/// private default for a newly-created target.
+#[cfg(unix)]
+fn set_atomic_write_permissions(
+    file: &std::fs::File,
+    target_meta: Option<&std::fs::Metadata>,
+) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = target_meta
+        .map(|meta| meta.permissions().mode() & 0o7777)
+        .unwrap_or(0o600);
+    file.set_permissions(std::fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+fn set_atomic_write_permissions(
+    _file: &std::fs::File,
+    _target_meta: Option<&std::fs::Metadata>,
+) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Monotonic counter making atomic-write temp names unique within a process.
@@ -3964,6 +4000,52 @@ source = "{datadir}/skills/code-scanner/"
                     .starts_with(".settings.json.anolisa-tmp")
             });
         assert!(!leftover, "temp file should be renamed away");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_file_preserves_mode_and_defaults_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path().canonicalize().expect("canonicalize");
+        let allowed = base.join("allowed");
+        std::fs::create_dir_all(&allowed).expect("mkdir");
+        let target = allowed.join("settings.json");
+        std::fs::write(&target, b"old").expect("seed");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))
+            .expect("chmod target");
+
+        let ops = ManagerOps::new(
+            CentralLog::open(base.join("log.jsonl")),
+            "test".into(),
+            "user".into(),
+            "comp".into(),
+            "test".into(),
+            vec![allowed.clone()],
+        );
+        ops.write_file(&target, b"new").expect("overwrite");
+        assert_eq!(
+            std::fs::metadata(&target)
+                .expect("target meta")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "atomic rename must preserve an existing private mode"
+        );
+
+        let created = allowed.join("new-settings.json");
+        ops.write_file(&created, b"new").expect("create");
+        assert_eq!(
+            std::fs::metadata(&created)
+                .expect("created meta")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "new adapter-managed files default to a private mode"
+        );
     }
 
     // -- skill source allowed_roots integration ---------------------------------

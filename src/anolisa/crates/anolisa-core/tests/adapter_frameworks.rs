@@ -1076,6 +1076,17 @@ fn hook_names(settings: &serde_json::Value, event: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn hook_command(settings: &serde_json::Value, event: &str, name: &str) -> Option<String> {
+    settings["hooks"][event].as_array().and_then(|arr| {
+        arr.iter().find_map(|entry| {
+            let hook = entry["hooks"].as_array()?.first()?;
+            (hook["name"].as_str()? == name)
+                .then(|| hook["command"].as_str().map(str::to_string))
+                .flatten()
+        })
+    })
+}
+
 fn enabled_plugins(settings: &serde_json::Value) -> Vec<String> {
     settings["plugins"]["enabled"]
         .as_array()
@@ -1188,7 +1199,10 @@ fn qoder_enable_preserves_existing_user_settings() {
         br#"{
   "theme": "dark",
   "hooks": { "PreToolUse": [
-    { "hooks": [ { "type": "command", "name": "user-audit" } ] } ] },
+    { "hooks": [ { "type": "command", "name": "user-audit" } ] },
+    { "hooks": [
+      { "type": "command", "name": "tokenless-my-custom-audit",
+        "command": "python3 /user/audit.py" } ] } ] },
   "plugins": { "enabled": ["other@local"], "registry": "corp" }
 }"#,
     )
@@ -1207,6 +1221,10 @@ fn qoder_enable_preserves_existing_user_settings() {
     );
     let pre = hook_names(&cfg, "PreToolUse");
     assert!(pre.contains(&"user-audit".to_string()), "user hook kept");
+    assert!(
+        pre.contains(&"tokenless-my-custom-audit".to_string()),
+        "user hook with tokenless prefix kept"
+    );
     assert!(
         pre.contains(&"tokenless-rewrite".to_string()),
         "our hook added"
@@ -1228,11 +1246,100 @@ fn qoder_enable_preserves_existing_user_settings() {
         "user hook survives prune"
     );
     assert!(
+        pre.contains(&"tokenless-my-custom-audit".to_string()),
+        "user tokenless-prefix hook survives prune"
+    );
+    assert!(
         !pre.contains(&"tokenless-rewrite".to_string()),
         "our hook pruned"
     );
     assert!(enabled_plugins(&cfg).contains(&"other@local".to_string()));
     assert!(!enabled_plugins(&cfg).contains(&"tokenless@local".to_string()));
+}
+
+#[test]
+fn qoder_enable_replaces_same_named_hook_body() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (_log, settings, _cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+
+    std::fs::create_dir_all(settings.parent().unwrap()).expect("mkdir .qoder");
+    std::fs::write(
+        &settings,
+        br#"{
+  "hooks": { "PreToolUse": [
+    { "matcher": "", "hooks": [
+      { "type": "command", "name": "tokenless-rewrite",
+        "command": "python3 /user/rewrite.py" } ] } ] },
+  "plugins": { "enabled": [] }
+}"#,
+    )
+    .expect("seed settings");
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("enable");
+
+    let cfg = read_json(&settings);
+    let pre = hook_names(&cfg, "PreToolUse");
+    assert_eq!(
+        pre.iter()
+            .filter(|name| *name == "tokenless-rewrite")
+            .count(),
+        1,
+        "same-name hook is replaced instead of duplicated"
+    );
+    let command = hook_command(&cfg, "PreToolUse", "tokenless-rewrite").expect("command");
+    assert!(
+        command.contains("rewrite_hook.py"),
+        "managed hook body restored: {command}"
+    );
+    assert_eq!(
+        manager.status(Some(COMPONENT)).expect("status").entries[0]
+            .report
+            .summary,
+        AdapterSummary::Healthy
+    );
+}
+
+#[test]
+fn qoder_enable_leaves_non_object_settings_untouched() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, settings, _cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+
+    std::fs::create_dir_all(settings.parent().unwrap()).expect("mkdir .qoder");
+    std::fs::write(&settings, br#"["user-placeholder"]"#).expect("seed settings");
+
+    let manager = world.manager();
+    let err = manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect_err("non-object settings must fail closed");
+    assert!(
+        matches!(err, AdapterError::SettingsUnparseable { .. }),
+        "{err:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&settings).expect("settings untouched"),
+        r#"["user-placeholder"]"#
+    );
+    assert!(
+        !log.exists(),
+        "enable must fail before invoking qodercli when settings cannot be merged"
+    );
 }
 
 #[test]
@@ -1626,6 +1733,123 @@ fn qoder_disable_fails_closed_when_settings_resource_missing() {
         .cloned()
         .expect("receipt kept");
     assert_eq!(claim.status, ClaimStatus::CleanupFailed);
+}
+
+#[test]
+fn qoder_disable_uses_receipt_hook_specs_when_bundle_removed() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (_log, settings, _cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("enable");
+
+    std::fs::remove_dir_all(&world.resource_root).expect("remove bundle");
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable runs");
+    assert!(
+        disabled.claim_removed,
+        "receipt removed after complete cleanup"
+    );
+    assert!(disabled.report.cleanup_complete);
+
+    let cfg = read_json(&settings);
+    assert!(!hook_names(&cfg, "PreToolUse").contains(&"tokenless-rewrite".to_string()));
+    assert!(!hook_names(&cfg, "PostToolUse").contains(&"tokenless-compress-response".to_string()));
+    assert!(!enabled_plugins(&cfg).contains(&"tokenless@local".to_string()));
+}
+
+#[test]
+fn qoder_forged_resource_root_does_not_change_hook_ownership() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (_log, settings, _cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("enable");
+
+    let forged_root = world.prefix.join("forged-qoder-root");
+    std::fs::create_dir_all(&forged_root).expect("forged root");
+    std::fs::write(
+        forged_root.join("hooks.json"),
+        br#"{
+  "hooks": {
+    "PreToolUse": [
+      { "hooks": [
+        { "type": "command", "name": "tokenless-my-custom-audit",
+          "command": "python3 /attacker/audit.py" } ] }
+    ]
+  }
+}"#,
+    )
+    .expect("forged hooks");
+
+    let mut cfg = read_json(&settings);
+    cfg["hooks"]["PreToolUse"]
+        .as_array_mut()
+        .expect("pre hooks")
+        .push(serde_json::json!({
+            "hooks": [{
+                "type": "command",
+                "name": "tokenless-my-custom-audit",
+                "command": "python3 /attacker/audit.py"
+            }]
+        }));
+    std::fs::write(&settings, serde_json::to_vec_pretty(&cfg).unwrap()).expect("rewrite settings");
+
+    let state_path = world.layout.state_dir.join("installed.toml");
+    let mut state = world.load_state();
+    {
+        let claim = state
+            .adapter_claims
+            .iter_mut()
+            .find(|c| c.component == COMPONENT)
+            .expect("claim");
+        claim.resource_root = forged_root;
+    }
+    state.save(&state_path).expect("save tampered state");
+
+    let status = manager.status(Some(COMPONENT)).expect("status");
+    assert!(
+        status.entries[0]
+            .report
+            .conditions
+            .iter()
+            .any(|c| c.kind == AdapterConditionKind::JsonKeysPresent
+                && c.status == ConditionStatus::True),
+        "settings verification must use receipt specs, not forged resource_root hooks.json"
+    );
+
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable runs");
+    assert!(disabled.claim_removed);
+    assert!(disabled.report.cleanup_complete);
+
+    let cfg = read_json(&settings);
+    let pre = hook_names(&cfg, "PreToolUse");
+    assert!(
+        pre.contains(&"tokenless-my-custom-audit".to_string()),
+        "forged resource_root hook is not treated as ANOLISA-owned"
+    );
+    assert!(!pre.contains(&"tokenless-rewrite".to_string()));
 }
 
 #[test]
