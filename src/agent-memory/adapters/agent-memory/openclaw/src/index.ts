@@ -333,11 +333,11 @@ export default definePluginEntry({
     api.on(
       "agent_end",
       async (
-        event: { messages?: Array<{ role: string; content: string }> },
+        event: { messages?: unknown[] },
         _ctx: Record<string, unknown>,
       ) => {
         try {
-          const messages = event.messages;
+          const messages = event.messages as Array<{ role: string; content: unknown }>;
           if (!messages || messages.length === 0) return;
 
           // Find the last assistant message.
@@ -346,9 +346,25 @@ export default definePluginEntry({
             .find((m) => m.role === "assistant");
           if (!lastAsst?.content) return;
 
+          // Normalize content: OpenClaw sends content as an array of
+          // content blocks ({type:"text", text:"..."}), but the trigger
+          // regexes expect a string. Without normalization,
+          // re.test(lastAsst.content) coerces the array to
+          // "[object Object]" and no trigger ever matches.
+          const rawContent = lastAsst.content;
+          const contentStr = typeof rawContent === "string"
+            ? rawContent
+            : Array.isArray(rawContent)
+              ? rawContent
+                  .map((b: Record<string, unknown>) =>
+                    typeof b === "string" ? b : (b?.text as string ?? ""))
+                  .join("\n")
+              : String(rawContent);
+          if (!contentStr) return;
+
           // Dedup by content hash to avoid re-capturing across turns.
           const hash = createHash("sha256")
-            .update(lastAsst.content)
+            .update(contentStr)
             .digest("hex")
             .slice(0, 16);
           if (hash === lastCaptureHash) return;
@@ -363,9 +379,9 @@ export default definePluginEntry({
             /\b(important|critical|key|notable|significant)\b/i,
             /\b(I should note|I should remember|notable observation)\b/i,
           ];
-          if (!triggers.some((re) => re.test(lastAsst.content))) return;
+          if (!triggers.some((re) => re.test(contentStr))) return;
 
-          const content = lastAsst.content.slice(0, 2000);
+          const content = contentStr.slice(0, 2000);
 
           // Refuse to persist content that looks like a prompt injection —
           // an attacker could coerce the agent into emitting a message

@@ -401,6 +401,66 @@ impl BM25Store {
             .collect()
         };
 
+        // OR fallback: FTS5 implicit-AND semantics return 0 results
+        // when any single query term is absent from the corpus.
+        // Natural-language prompts (e.g. auto-recall queries) routinely
+        // contain common words ("What", "is", "Answer") that don't
+        // appear in any memory file, causing every AND query to fail.
+        // When the AND path returns nothing and we have multiple tokens,
+        // retry with OR-joined quoted tokens so partial matches still
+        // surface.
+        let rows: Vec<(String, String, f64, String, i64)> = if rows.is_empty() && tokens.len() > 1 {
+            let or_q = tokens
+                .iter()
+                .map(|t| format!("\"{}\"", t))
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            let or_sql = format!(
+                r#"
+                SELECT f.path,
+                       snippet(files_fts, 1, '«', '»', '…', 16) AS snip,
+                       bm25(files_fts) AS rank,
+                       body,
+                       f.mtime_ms
+                FROM files_fts
+                JOIN files f ON f.rowid = files_fts.rowid
+                WHERE files_fts MATCH ?1 {cold_filter} {superseded_filter} {agent_filter}
+                ORDER BY rank
+                LIMIT ?2
+                "#,
+                cold_filter = cold_filter,
+                superseded_filter = superseded_filter,
+                agent_filter = agent_filter,
+            );
+            let mut or_stmt = self.conn.prepare(&or_sql)?;
+            if let Some(ref agent_id) = agent_param {
+                or_stmt.query_map(params![or_q, top_k as i64, agent_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, f64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                })?
+                .flatten()
+                .collect()
+            } else {
+                or_stmt.query_map(params![or_q, top_k as i64], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, f64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                })?
+                .flatten()
+                .collect()
+            }
+        } else {
+            rows
+        };
         let mut out: Vec<SearchHit> = rows
             .into_iter()
             .map(|(path, snippet, bm25_score, _body, mtime_ms)| {
