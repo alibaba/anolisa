@@ -273,9 +273,11 @@ impl CliOutput {
 ///
 /// The boundary grows one reviewed method at a time rather than shipping
 /// unused surface: `run_framework_cli` plus the tree-copy helpers landed
-/// with OpenClaw/Hermes, and [`write_file`](AdapterOps::write_file) /
+/// with OpenClaw/Hermes, [`write_file`](AdapterOps::write_file) /
 /// [`create_symlink`](AdapterOps::create_symlink) landed with the
-/// Codex/Claude Code drivers.
+/// Codex/Claude Code drivers, and [`read_file`](AdapterOps::read_file)
+/// landed with the Qoder driver (which must read the user's
+/// `settings.json` back before merging into it).
 pub trait AdapterOps {
     /// Spawn a framework CLI with a timeout, capture and truncate its
     /// output, and record the invocation in the central log. The argv is
@@ -344,6 +346,19 @@ pub trait AdapterOps {
     /// is not a symlink; [`AdapterError::ClaimValidation`] if either path
     /// fails boundary check.
     fn create_symlink(&self, link: &Path, target: &Path) -> Result<(), AdapterError>;
+
+    /// Read `path`, returning `Ok(None)` when it does not exist (so a
+    /// caller merging into a possibly-absent config file can treat "absent"
+    /// distinctly from "unreadable"). The Manager validates that `path` is
+    /// under an allowed external root before reading, so a driver cannot use
+    /// this to exfiltrate an arbitrary file (e.g. `~/.ssh/id_rsa`); a
+    /// symlink at `path` is refused rather than followed out of the boundary.
+    ///
+    /// # Errors
+    ///
+    /// [`AdapterError::Io`] on a read failure other than not-found;
+    /// [`AdapterError::ClaimValidation`] if `path` fails boundary check.
+    fn read_file(&self, path: &Path) -> Result<Option<Vec<u8>>, AdapterError>;
 }
 
 // ---------------------------------------------------------------------------

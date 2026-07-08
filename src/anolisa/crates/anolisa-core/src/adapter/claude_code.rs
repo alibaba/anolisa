@@ -763,6 +763,9 @@ mod tests {
             fn create_symlink(&self, _: &Path, _: &Path) -> Result<(), AdapterError> {
                 unimplemented!()
             }
+            fn read_file(&self, _: &Path) -> Result<Option<Vec<u8>>, AdapterError> {
+                unimplemented!()
+            }
         }
         let ops = StubOps;
         let mk_ctx = |root: &Path| DriverCtx {
@@ -829,6 +832,9 @@ mod tests {
                 unimplemented!()
             }
             fn create_symlink(&self, _: &Path, _: &Path) -> Result<(), AdapterError> {
+                unimplemented!()
+            }
+            fn read_file(&self, _: &Path) -> Result<Option<Vec<u8>>, AdapterError> {
                 unimplemented!()
             }
         }

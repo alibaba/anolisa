@@ -385,6 +385,9 @@ pub enum DriverPayload {
     /// Claude Code driver payload.
     #[serde(rename = "claude_code")]
     ClaudeCode(ClaudeCodeClaim),
+    /// Qoder (qodercli) driver payload.
+    #[serde(rename = "qoder")]
+    Qoder(QoderClaim),
 }
 
 /// OpenClaw driver payload. Holds only [`ClaimResource::id`] references —
@@ -462,6 +465,30 @@ pub struct ClaudeCodeClaim {
     /// Resource id of the installed plugin
     /// ([`ClaimResourceKind::FrameworkPlugin`]).
     pub plugin_resource: String,
+}
+
+/// Qoder driver payload. Holds only [`ClaimResource::id`] references — never
+/// argv, script paths, or the settings path itself. The qodercli invocation
+/// is rebuilt by the built-in driver, and the driver recomputes the
+/// `settings.json` path from the caller's home directory rather than reading
+/// it back from the receipt, so a forged payload cannot redirect the write.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QoderClaim {
+    /// Resource id of the installed plugin
+    /// ([`ClaimResourceKind::FrameworkPlugin`]).
+    pub plugin_resource: String,
+    /// Resource id of the user's `settings.json` ANOLISA edits in place
+    /// ([`ClaimResourceKind::ExternalPath`]).
+    pub settings_resource: String,
+    /// Hook names ANOLISA merged into `settings.json` at enable time.
+    /// `status` requires *every* one to still be present, so removing a
+    /// single managed hook (partial drift) degrades rather than staying
+    /// healthy. Recorded here so verification does not re-read the bundle,
+    /// which may be gone by status time. These are **not** a path/argv
+    /// boundary — `disable` prunes by the argv-safe `<plugin>-` name prefix,
+    /// never by these strings, so a forged list cannot delete a user hook.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub managed_hooks: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1240,6 +1267,98 @@ mod tests {
         let json = serde_json::to_string(&claim).expect("serialize Claude Code JSON");
         let back: AdapterClaim = serde_json::from_str(&json).expect("parse Claude Code JSON");
         assert_eq!(claim, back);
+    }
+
+    fn sample_qoder_claim() -> AdapterClaim {
+        AdapterClaim {
+            claim_schema: CLAIM_SCHEMA_VERSION,
+            component: "tokenless".to_string(),
+            framework: "qoder".to_string(),
+            plugin_id: Some("tokenless".to_string()),
+            adapter_type: Some("plugin".to_string()),
+            enabled_at: "2026-07-08T10:30:45Z".to_string(),
+            resource_root: PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/qoder"),
+            bundle_digest: Some("sha256:90de".to_string()),
+            driver_schema: DRIVER_SCHEMA_VERSION,
+            status: ClaimStatus::Enabled,
+            resources: vec![
+                ClaimResource {
+                    id: "qoder_plugin".to_string(),
+                    purpose: "qoder_plugin".to_string(),
+                    kind: ClaimResourceKind::FrameworkPlugin {
+                        framework: "qoder".to_string(),
+                        plugin_id: "tokenless".to_string(),
+                    },
+                },
+                ClaimResource {
+                    id: "qoder_settings".to_string(),
+                    purpose: "qoder_settings".to_string(),
+                    kind: ClaimResourceKind::ExternalPath {
+                        path: PathBuf::from("/home/alice/.qoder/settings.json"),
+                    },
+                },
+            ],
+            driver_payload: DriverPayload::Qoder(QoderClaim {
+                plugin_resource: "qoder_plugin".to_string(),
+                settings_resource: "qoder_settings".to_string(),
+                managed_hooks: vec!["tokenless-rewrite".to_string()],
+            }),
+        }
+    }
+
+    #[test]
+    fn qoder_claim_toml_and_json_round_trip() {
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct Wrapper {
+            adapter_claims: Vec<AdapterClaim>,
+        }
+        let wrapper = Wrapper {
+            adapter_claims: vec![sample_qoder_claim()],
+        };
+        let text = toml::to_string_pretty(&wrapper).expect("serialize Qoder to TOML");
+        let parsed: Wrapper = toml::from_str(&text).expect("parse Qoder from TOML");
+        assert_eq!(wrapper, parsed, "Qoder round-trip mismatch; TOML:\n{text}");
+
+        let claim = sample_qoder_claim();
+        let json = serde_json::to_string(&claim).expect("serialize Qoder JSON");
+        let back: AdapterClaim = serde_json::from_str(&json).expect("parse Qoder JSON");
+        assert_eq!(claim, back);
+    }
+
+    #[test]
+    fn qoder_claim_validates_under_allowed_roots() {
+        let layout = FsLayout::system(None);
+        let allowed = vec![PathBuf::from("/home/alice/.qoder")];
+        sample_qoder_claim()
+            .validate(&layout, &allowed)
+            .expect("qoder claim under allowed roots must pass");
+    }
+
+    /// A forged qoder receipt pointing its settings resource at `~/.ssh` or
+    /// `/etc` must be rejected: the settings path is an external resource
+    /// validated against the driver's allowed roots, not a root the receipt
+    /// names for itself.
+    #[test]
+    fn qoder_forged_settings_path_rejected() {
+        let layout = FsLayout::system(None);
+        let allowed = vec![PathBuf::from("/home/alice/.qoder")];
+        for forged in ["/home/alice/.ssh/authorized_keys", "/etc/cron.d/evil"] {
+            let mut claim = sample_qoder_claim();
+            for res in &mut claim.resources {
+                if res.id == "qoder_settings" {
+                    res.kind = ClaimResourceKind::ExternalPath {
+                        path: PathBuf::from(forged),
+                    };
+                }
+            }
+            let err = claim
+                .validate(&layout, &allowed)
+                .expect_err("forged settings path must be rejected");
+            assert!(
+                matches!(err, ClaimValidationError::ExternalPath { .. }),
+                "got {err:?} for {forged}"
+            );
+        }
     }
 
     #[test]

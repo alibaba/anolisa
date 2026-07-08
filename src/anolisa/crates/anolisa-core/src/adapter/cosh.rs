@@ -555,6 +555,9 @@ mod tests {
         fn create_symlink(&self, _: &Path, _: &Path) -> Result<(), AdapterError> {
             panic!("cosh driver must not create symlinks");
         }
+        fn read_file(&self, _: &Path) -> Result<Option<Vec<u8>>, AdapterError> {
+            unimplemented!()
+        }
     }
 
     fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {

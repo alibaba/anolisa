@@ -1,5 +1,5 @@
-//! End-to-end adapter manager tests for the Cosh, Codex, and Claude Code
-//! drivers.
+//! End-to-end adapter manager tests for the Cosh, Codex, Claude Code, and
+//! Qoder drivers.
 //!
 //! Each test drives the real [`AdapterManager`] against a staged component
 //! contract + resource bundle. Codex and Claude Code use shell-script fake
@@ -42,6 +42,10 @@ const MANAGED_ENV: &[&str] = &[
     "FAKE_CODEX_FAIL",
     "FAKE_CLAUDE_LOG",
     "FAKE_CLAUDE_STATE",
+    "QODERCLI_BIN",
+    "FAKE_QODER_LOG",
+    "FAKE_QODER_CACHE",
+    "FAKE_QODER_FAIL",
 ];
 
 struct EnvGuard {
@@ -967,5 +971,724 @@ fn claude_code_fails_closed_without_marketplace_resource() {
             .find_adapter_claim(COMPONENT, "claude-code")
             .is_some(),
         "receipt kept for manual resolution"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Qoder
+// ---------------------------------------------------------------------------
+
+fn stage_qoder_bundle(root: &Path) {
+    std::fs::create_dir_all(root.join(".qoder-plugin")).expect("qoder-plugin");
+    std::fs::write(
+        root.join(".qoder-plugin/plugin.json"),
+        br#"{"name":"tokenless","version":"0.6.0"}"#,
+    )
+    .expect("plugin.json");
+    // Hooks carry the ${QODER_TOKENLESS_HOOKS} placeholder and tokenless-*
+    // hook names, mirroring the shipped bundle.
+    std::fs::write(
+        root.join("hooks.json"),
+        br#"{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "", "hooks": [
+        { "type": "command", "name": "tokenless-rewrite",
+          "command": "python3 ${QODER_TOKENLESS_HOOKS}/rewrite_hook.py" } ] }
+    ],
+    "PostToolUse": [
+      { "matcher": "", "hooks": [
+        { "type": "command", "name": "tokenless-compress-response",
+          "command": "python3 ${QODER_TOKENLESS_HOOKS}/compress_response_hook.py" } ] }
+    ]
+  }
+}
+"#,
+    )
+    .expect("hooks.json");
+}
+
+/// Fake `qodercli`: records each argv line to `$FAKE_QODER_LOG` and mirrors
+/// qodercli's plugin cache under `$FAKE_QODER_CACHE` so the driver's
+/// cache-based removal check reflects prior install/uninstall calls.
+/// `$FAKE_QODER_FAIL=uninstall` fails the uninstall without clearing the
+/// cache, so the driver cannot confirm removal.
+fn write_fake_qodercli(dir: &Path) -> PathBuf {
+    let path = dir.join("qodercli");
+    write_exec(
+        &path,
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_QODER_LOG"
+cache="$FAKE_QODER_CACHE"
+if [ "$1" = "plugins" ]; then
+  case "$2" in
+    install) mkdir -p "$cache/tokenless" 2>/dev/null ;;
+    uninstall)
+      [ "$FAKE_QODER_FAIL" = "uninstall" ] && { echo "uninstall boom" >&2; exit 1; }
+      rm -rf "$cache/$3" 2>/dev/null || true ;;
+    list) ;;
+  esac
+  exit 0
+fi
+exit 0
+"#,
+    );
+    path
+}
+
+/// Returns `(log, settings_path, cache_dir, staging_symlink)`.
+fn apply_qoder_env(
+    guard: &EnvGuard,
+    world: &World,
+    fake_bin: &Path,
+) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+    let xdg = world.prefix.join("xdg-data");
+    std::fs::create_dir_all(&xdg).expect("xdg");
+    let log = world.prefix.join("qoder.log");
+    let cache = world
+        .user_home
+        .join(".qoder")
+        .join("plugins")
+        .join("cache")
+        .join("local");
+    guard.set("QODERCLI_BIN", fake_bin);
+    guard.set("XDG_DATA_HOME", &xdg);
+    guard.set("FAKE_QODER_LOG", &log);
+    guard.set("FAKE_QODER_CACHE", &cache);
+    let settings = world.user_home.join(".qoder").join("settings.json");
+    let staging = xdg.join("anolisa").join("qoder-plugins").join("tokenless");
+    (log, settings, cache, staging)
+}
+
+fn read_json(path: &Path) -> serde_json::Value {
+    let text = std::fs::read_to_string(path).expect("read settings.json");
+    serde_json::from_str(&text).expect("parse settings.json")
+}
+
+fn hook_names(settings: &serde_json::Value, event: &str) -> Vec<String> {
+    settings["hooks"][event]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| e["hooks"][0]["name"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn enabled_plugins(settings: &serde_json::Value) -> Vec<String> {
+    settings["plugins"]["enabled"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn qoder_enable_installs_writes_receipt_and_merges_settings() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, settings, _cache, staging) = apply_qoder_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    let claim = match manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("enable")
+    {
+        EnableOutcome::Enabled(c) => *c,
+        EnableOutcome::Planned(_) => panic!("expected enabled"),
+    };
+    assert_eq!(claim.plugin_id.as_deref(), Some("tokenless"));
+
+    // Recorded argv: install from the plugin-named staging symlink.
+    let log_text = std::fs::read_to_string(&log).expect("qoder log");
+    assert!(
+        log_text
+            .lines()
+            .any(|l| l == format!("plugins install {}", staging.display())),
+        "must run `plugins install <staging>`: {log_text}"
+    );
+
+    // settings.json merged: our hooks + tokenless@local, and the placeholder
+    // was expanded to an absolute path.
+    let cfg = read_json(&settings);
+    assert!(hook_names(&cfg, "PreToolUse").contains(&"tokenless-rewrite".to_string()));
+    assert!(hook_names(&cfg, "PostToolUse").contains(&"tokenless-compress-response".to_string()));
+    assert!(enabled_plugins(&cfg).contains(&"tokenless@local".to_string()));
+    let cmd = cfg["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .expect("command");
+    assert!(
+        !cmd.contains("${QODER_TOKENLESS_HOOKS}"),
+        "placeholder expanded: {cmd}"
+    );
+
+    // Receipt carries the plugin + settings resources, no argv/script.
+    assert!(claim.resources.iter().any(|r| matches!(
+        &r.kind,
+        ClaimResourceKind::FrameworkPlugin { framework, plugin_id }
+            if framework == "qoder" && plugin_id == "tokenless"
+    )));
+    assert!(claim.resources.iter().any(|r| matches!(
+        &r.kind,
+        ClaimResourceKind::ExternalPath { path } if path == &settings
+    )));
+
+    let status = manager.status(Some(COMPONENT)).expect("status");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Healthy);
+
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable");
+    assert!(disabled.claim_removed);
+    let log_text = std::fs::read_to_string(&log).expect("qoder log");
+    assert!(
+        log_text.lines().any(|l| l == "plugins uninstall tokenless"),
+        "disable must run `plugins uninstall tokenless`: {log_text}"
+    );
+    // settings.json pruned of our entries; file itself preserved.
+    let cfg = read_json(&settings);
+    assert!(!enabled_plugins(&cfg).contains(&"tokenless@local".to_string()));
+    assert!(hook_names(&cfg, "PreToolUse").is_empty());
+    assert!(
+        world
+            .load_state()
+            .find_adapter_claim(COMPONENT, "qoder")
+            .is_none(),
+        "receipt gone after disable"
+    );
+}
+
+#[test]
+fn qoder_enable_preserves_existing_user_settings() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (_log, settings, _cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+
+    // Pre-existing user settings.json with the user's own theme, hook, and
+    // enabled plugin.
+    std::fs::create_dir_all(settings.parent().unwrap()).expect("mkdir .qoder");
+    std::fs::write(
+        &settings,
+        br#"{
+  "theme": "dark",
+  "hooks": { "PreToolUse": [
+    { "hooks": [ { "type": "command", "name": "user-audit" } ] } ] },
+  "plugins": { "enabled": ["other@local"], "registry": "corp" }
+}"#,
+    )
+    .expect("seed settings");
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("enable");
+
+    let cfg = read_json(&settings);
+    assert_eq!(cfg["theme"], "dark", "user setting preserved");
+    assert_eq!(
+        cfg["plugins"]["registry"], "corp",
+        "user plugin cfg preserved"
+    );
+    let pre = hook_names(&cfg, "PreToolUse");
+    assert!(pre.contains(&"user-audit".to_string()), "user hook kept");
+    assert!(
+        pre.contains(&"tokenless-rewrite".to_string()),
+        "our hook added"
+    );
+    let enabled = enabled_plugins(&cfg);
+    assert!(enabled.contains(&"other@local".to_string()));
+    assert!(enabled.contains(&"tokenless@local".to_string()));
+
+    // Disable prunes only ANOLISA-managed entries.
+    manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable");
+    let cfg = read_json(&settings);
+    assert_eq!(cfg["theme"], "dark");
+    assert_eq!(cfg["plugins"]["registry"], "corp");
+    let pre = hook_names(&cfg, "PreToolUse");
+    assert!(
+        pre.contains(&"user-audit".to_string()),
+        "user hook survives prune"
+    );
+    assert!(
+        !pre.contains(&"tokenless-rewrite".to_string()),
+        "our hook pruned"
+    );
+    assert!(enabled_plugins(&cfg).contains(&"other@local".to_string()));
+    assert!(!enabled_plugins(&cfg).contains(&"tokenless@local".to_string()));
+}
+
+#[test]
+fn qoder_dry_run_enable_writes_nothing() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, settings, _cache, staging) = apply_qoder_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    let outcome = manager
+        .enable(COMPONENT, Some("qoder"), true)
+        .expect("dry-run");
+    assert!(matches!(outcome, EnableOutcome::Planned(_)));
+    assert!(!log.exists(), "dry-run must not invoke qodercli (no log)");
+    assert!(!settings.exists(), "dry-run must not write settings.json");
+    assert!(
+        !staging.exists(),
+        "dry-run must not create the staging symlink"
+    );
+    assert!(
+        world
+            .load_state()
+            .find_adapter_claim(COMPONENT, "qoder")
+            .is_none(),
+        "dry-run must not persist a receipt"
+    );
+}
+
+#[test]
+fn qoder_status_degraded_when_managed_entry_missing() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (_log, settings, _cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("enable");
+    assert_eq!(
+        manager.status(Some(COMPONENT)).expect("status").entries[0]
+            .report
+            .summary,
+        AdapterSummary::Healthy
+    );
+
+    // Drop tokenless@local from plugins.enabled: status must degrade, not
+    // stay healthy off the (unreliable) plugin registry.
+    let mut cfg = read_json(&settings);
+    cfg["plugins"]["enabled"] = serde_json::json!([]);
+    std::fs::write(&settings, serde_json::to_vec_pretty(&cfg).unwrap()).expect("rewrite settings");
+
+    let status = manager.status(Some(COMPONENT)).expect("status");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Degraded);
+    // Plugin registration is reported Unknown (never faked from qodercli list).
+    assert!(
+        status.entries[0]
+            .report
+            .conditions
+            .iter()
+            .any(|c| c.kind == AdapterConditionKind::PluginRegistered
+                && c.status == ConditionStatus::Unknown)
+    );
+}
+
+#[test]
+fn qoder_disable_is_idempotent() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    apply_qoder_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("enable");
+
+    let first = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("first disable");
+    assert!(first.claim_removed);
+    assert!(first.report.cleanup_complete);
+
+    // Second disable with no receipt is a clean no-op.
+    let second = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("second disable");
+    assert!(!second.claim_removed);
+    assert!(second.report.cleanup_complete, "idempotent no-op");
+}
+
+#[test]
+fn qoder_disable_keeps_receipt_when_uninstall_fails() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    apply_qoder_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("enable");
+
+    // Fail uninstall without clearing the cache: the driver cannot confirm
+    // removal, so cleanup is incomplete and the receipt is kept.
+    guard.set("FAKE_QODER_FAIL", Path::new("uninstall"));
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable runs");
+    assert!(!disabled.claim_removed);
+    assert!(!disabled.report.cleanup_complete);
+    let claim = world
+        .load_state()
+        .find_adapter_claim(COMPONENT, "qoder")
+        .cloned()
+        .expect("receipt kept");
+    assert_eq!(claim.status, ClaimStatus::CleanupFailed);
+}
+
+#[test]
+fn qoder_disable_without_cli_keeps_receipt() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    apply_qoder_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("enable");
+
+    // Point QODERCLI_BIN at a missing binary: disable cannot deregister, so
+    // it keeps the receipt rather than pruning settings and faking success.
+    guard.set("QODERCLI_BIN", &world.prefix.join("no-such-qodercli"));
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable runs");
+    assert!(!disabled.claim_removed, "receipt kept when CLI absent");
+    assert!(!disabled.report.cleanup_complete);
+    let claim = world
+        .load_state()
+        .find_adapter_claim(COMPONENT, "qoder")
+        .cloned()
+        .expect("receipt kept");
+    assert_eq!(claim.status, ClaimStatus::CleanupFailed);
+}
+
+#[test]
+fn qoder_disable_fails_closed_on_unparseable_settings() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (_log, settings, _cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("enable");
+
+    // Corrupt settings.json: disable must not overwrite it and must report
+    // cleanup incomplete, keeping the receipt.
+    std::fs::write(&settings, b"{ this is not json").expect("corrupt settings");
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable runs");
+    assert!(!disabled.claim_removed);
+    assert!(!disabled.report.cleanup_complete);
+    // The unparseable file was left byte-for-byte untouched.
+    assert_eq!(
+        std::fs::read_to_string(&settings).expect("read"),
+        "{ this is not json"
+    );
+    let claim = world
+        .load_state()
+        .find_adapter_claim(COMPONENT, "qoder")
+        .cloned()
+        .expect("receipt kept");
+    assert_eq!(claim.status, ClaimStatus::CleanupFailed);
+}
+
+#[test]
+fn qoder_forged_settings_path_rejected_by_status() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    apply_qoder_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("enable");
+
+    // Tamper: repoint the settings resource at ~/.ssh, then /etc. Both are
+    // outside the driver's allowed roots, so claim validation must reject the
+    // receipt before status can act on it.
+    for forged in ["/home/attacker/.ssh/authorized_keys", "/etc/cron.d/evil"] {
+        let state_path = world.layout.state_dir.join("installed.toml");
+        let mut state = world.load_state();
+        {
+            let claim = state
+                .adapter_claims
+                .iter_mut()
+                .find(|c| c.component == COMPONENT)
+                .expect("claim");
+            for res in &mut claim.resources {
+                if let ClaimResourceKind::ExternalPath { path } = &mut res.kind {
+                    *path = PathBuf::from(forged);
+                }
+            }
+        }
+        state.save(&state_path).expect("save tampered state");
+
+        let err = manager
+            .status(Some(COMPONENT))
+            .expect_err("forged settings path must be rejected");
+        assert!(
+            matches!(err, AdapterError::ClaimValidation(_)),
+            "got {err:?} for {forged}"
+        );
+    }
+}
+
+#[test]
+fn qoder_status_degraded_when_one_managed_hook_removed() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (_log, settings, _cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("enable");
+    assert_eq!(
+        manager.status(Some(COMPONENT)).expect("status").entries[0]
+            .report
+            .summary,
+        AdapterSummary::Healthy
+    );
+
+    // Remove one of the two managed hooks (tokenless-compress-response) while
+    // keeping tokenless-rewrite and tokenless@local. Status must degrade:
+    // partial hook drift is not healthy.
+    let mut cfg = read_json(&settings);
+    cfg["hooks"]
+        .as_object_mut()
+        .expect("hooks obj")
+        .remove("PostToolUse");
+    std::fs::write(&settings, serde_json::to_vec_pretty(&cfg).unwrap()).expect("rewrite settings");
+
+    let status = manager.status(Some(COMPONENT)).expect("status");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Degraded);
+    // The still-present tokenless@local means plugin entry is fine; the
+    // JsonKeysPresent condition is what flipped to False.
+    assert!(
+        status.entries[0]
+            .report
+            .conditions
+            .iter()
+            .any(|c| c.kind == AdapterConditionKind::JsonKeysPresent
+                && c.status == ConditionStatus::False)
+    );
+}
+
+#[test]
+fn qoder_status_degraded_when_plugin_resource_missing() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    apply_qoder_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("enable");
+
+    // Drop the FrameworkPlugin resource, leaving the payload's dangling
+    // reference — as a forged/malformed receipt would. Status must fail
+    // closed (degraded), never healthy.
+    let state_path = world.layout.state_dir.join("installed.toml");
+    let mut state = world.load_state();
+    {
+        let claim = state
+            .adapter_claims
+            .iter_mut()
+            .find(|c| c.component == COMPONENT)
+            .expect("claim");
+        claim
+            .resources
+            .retain(|r| !matches!(r.kind, ClaimResourceKind::FrameworkPlugin { .. }));
+    }
+    state.save(&state_path).expect("save tampered state");
+
+    let status = manager.status(Some(COMPONENT)).expect("status");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Degraded);
+}
+
+#[test]
+fn qoder_disable_fails_closed_when_settings_resource_missing() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, _settings, _cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("enable");
+
+    // Drop the settings ExternalPath resource: disable must not run the CLI
+    // or touch settings against a ctx-derived default; it keeps the receipt.
+    let state_path = world.layout.state_dir.join("installed.toml");
+    let mut state = world.load_state();
+    {
+        let claim = state
+            .adapter_claims
+            .iter_mut()
+            .find(|c| c.component == COMPONENT)
+            .expect("claim");
+        claim
+            .resources
+            .retain(|r| !matches!(r.kind, ClaimResourceKind::ExternalPath { .. }));
+    }
+    state.save(&state_path).expect("save tampered state");
+
+    let log_before = std::fs::read_to_string(&log).unwrap_or_default();
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable runs");
+    assert!(!disabled.claim_removed, "malformed receipt must be kept");
+    assert!(!disabled.report.cleanup_complete);
+    let log_after = std::fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(
+        log_before, log_after,
+        "no qodercli command may run for a receipt missing its settings resource"
+    );
+    let claim = world
+        .load_state()
+        .find_adapter_claim(COMPONENT, "qoder")
+        .cloned()
+        .expect("receipt kept");
+    assert_eq!(claim.status, ClaimStatus::CleanupFailed);
+}
+
+#[test]
+fn qoder_forged_settings_redirect_within_qoder_home_rejected() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, _settings, _cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("enable");
+
+    // Forge the settings resource to another file *inside* ~/.qoder. It still
+    // passes the Manager's allowed-root check (the whole ~/.qoder is allowed),
+    // so the driver must reject it by pinning the path to settings.json.
+    let decoy = world.user_home.join(".qoder").join("other.json");
+    std::fs::write(&decoy, b"{\"user\":\"data\"}").expect("seed decoy");
+    let state_path = world.layout.state_dir.join("installed.toml");
+    let mut state = world.load_state();
+    {
+        let claim = state
+            .adapter_claims
+            .iter_mut()
+            .find(|c| c.component == COMPONENT)
+            .expect("claim");
+        for res in &mut claim.resources {
+            if let ClaimResourceKind::ExternalPath { path } = &mut res.kind {
+                *path = decoy.clone();
+            }
+        }
+    }
+    state.save(&state_path).expect("save tampered state");
+
+    // status: the redirect is not an outright validation error (same root),
+    // but the driver must fail closed to Degraded, never Healthy.
+    let status = manager.status(Some(COMPONENT)).expect("status");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Degraded);
+
+    // disable: must not run the CLI or touch the decoy file.
+    let log_before = std::fs::read_to_string(&log).unwrap_or_default();
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable runs");
+    assert!(
+        !disabled.claim_removed,
+        "receipt kept for redirected settings"
+    );
+    assert!(!disabled.report.cleanup_complete);
+    let log_after = std::fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(
+        log_before, log_after,
+        "no qodercli command may run for a redirected settings resource"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&decoy).expect("read decoy"),
+        "{\"user\":\"data\"}",
+        "the redirected file must be left untouched"
     );
 }

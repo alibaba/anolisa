@@ -10,6 +10,7 @@ use super::cosh::CoshDriver;
 use super::driver::FrameworkDriver;
 use super::hermes::HermesDriver;
 use super::openclaw::OpenClawDriver;
+use super::qoder::QoderDriver;
 
 /// Immutable collection of the built-in framework drivers.
 pub struct DriverRegistry {
@@ -26,6 +27,7 @@ impl DriverRegistry {
                 Box::new(CoshDriver::new()),
                 Box::new(CodexDriver::new()),
                 Box::new(ClaudeCodeDriver::new()),
+                Box::new(QoderDriver::new()),
             ],
         }
     }
@@ -67,17 +69,26 @@ mod tests {
         assert!(reg.contains("cosh"));
         assert!(reg.contains("codex"));
         assert!(reg.contains("claude-code"));
+        assert!(reg.contains("qoder"));
         assert_eq!(
             reg.names(),
-            vec!["openclaw", "hermes", "cosh", "codex", "claude-code"]
+            vec![
+                "openclaw",
+                "hermes",
+                "cosh",
+                "codex",
+                "claude-code",
+                "qoder"
+            ]
         );
     }
 
     #[test]
     fn get_unknown_framework_is_none() {
         let reg = DriverRegistry::builtin();
-        // `qoder` ships an adapter bundle but no built-in driver yet.
-        assert!(reg.get("qoder").is_none());
+        // `qoder` now ships a built-in driver; only genuinely unshipped
+        // frameworks resolve to none.
         assert!(reg.get("qwencode").is_none());
+        assert!(reg.get("nonexistent").is_none());
     }
 }

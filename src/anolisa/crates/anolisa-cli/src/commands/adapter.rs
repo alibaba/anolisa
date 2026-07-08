@@ -491,7 +491,8 @@ fn map_err(command: &str, err: AdapterError) -> CliError {
         | AdapterError::Lock(_)
         | AdapterError::State(_)
         | AdapterError::Log(_)
-        | AdapterError::Io { .. } => CliError::Runtime {
+        | AdapterError::Io { .. }
+        | AdapterError::SettingsUnparseable { .. } => CliError::Runtime {
             command: command.to_string(),
             reason: err.to_string(),
         },

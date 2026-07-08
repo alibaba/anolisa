@@ -29,6 +29,7 @@ pub mod driver;
 pub mod hermes;
 pub mod manager;
 pub mod openclaw;
+pub mod qoder;
 pub mod registry;
 mod util;
 
@@ -220,6 +221,18 @@ pub enum AdapterError {
         /// Underlying IO error.
         #[source]
         source: std::io::Error,
+    },
+
+    /// A framework config file ANOLISA must merge into (e.g. Qoder's
+    /// `~/.qoder/settings.json`) exists but is not valid JSON. Merging into
+    /// it would clobber the user's other settings, so the driver fails
+    /// closed rather than overwriting a file it cannot safely edit.
+    #[error("cannot parse framework settings at {path}: {reason}")]
+    SettingsUnparseable {
+        /// Settings file that could not be parsed.
+        path: PathBuf,
+        /// Parse failure detail.
+        reason: String,
     },
 }
 

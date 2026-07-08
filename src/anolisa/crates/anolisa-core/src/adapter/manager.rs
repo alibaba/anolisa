@@ -830,13 +830,45 @@ impl AdapterManager {
                 .map(|(path, _)| path)
                 .unwrap_or_else(|| claim.resource_root.clone());
             let label = format!("adapter status {} {framework}", claim.component);
+            // Two-phase ops mirroring enable/disable: probe to learn the
+            // driver's external roots, then rebuild so a driver that verifies
+            // read-only state through the controlled IO boundary (e.g. Qoder
+            // reading ~/.qoder/settings.json) is not confined to the resource
+            // root. status remains read-only by trait contract.
+            let probe_ops = ManagerOps::new(
+                self.central_log(),
+                self.actor.clone(),
+                install_mode_str(self.layout.mode).to_string(),
+                claim.component.clone(),
+                label.clone(),
+                vec![resource_root.clone()],
+            );
+            let probe_ctx = DriverCtx {
+                component: claim.component.clone(),
+                framework: framework.clone(),
+                layout: &self.layout,
+                resource_root: resource_root.clone(),
+                user_home: self.user_home.clone(),
+                declared_plugin_id: None,
+                adapter_type: claim.adapter_type.clone(),
+                declared_skills: Vec::new(),
+                declared_config: Vec::new(),
+                declared_bundle_entry: None,
+                dry_run: false,
+                ops: &probe_ops,
+            };
+            let mut allowed_roots = driver.allowed_external_roots(&probe_ctx);
+            allowed_roots.push(resource_root.clone());
+            drop(probe_ctx);
+            drop(probe_ops);
+
             let ops = ManagerOps::new(
                 self.central_log(),
                 self.actor.clone(),
                 install_mode_str(self.layout.mode).to_string(),
                 claim.component.clone(),
                 label,
-                vec![resource_root.clone()],
+                allowed_roots,
             );
             let ctx = DriverCtx {
                 component: claim.component.clone(),
@@ -1512,15 +1544,90 @@ impl AdapterOps for ManagerOps {
 
     fn write_file(&self, path: &Path, contents: &[u8]) -> Result<(), AdapterError> {
         validate_ops_path(path, &self.allowed_roots)?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| AdapterError::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
+        // Refuse to write through an existing symlink at `path`: following it
+        // could land the write outside the allowed roots (the same escape
+        // `read_file`/`copy_file` guard against). A symlink swapped in after
+        // this check is still defeated by the rename below, which replaces the
+        // link atomically rather than writing through it.
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(AdapterError::Io {
+                    path: path.to_path_buf(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "refusing to write through a symlink at the adapter target path",
+                    ),
+                });
+            }
+            _ => {}
         }
-        std::fs::write(path, contents).map_err(|source| AdapterError::Io {
+        let parent = path.parent().ok_or_else(|| AdapterError::Io {
             path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "adapter target path has no parent directory",
+            ),
+        })?;
+        std::fs::create_dir_all(parent).map_err(|source| AdapterError::Io {
+            path: parent.to_path_buf(),
             source,
+        })?;
+        // Atomic write: stage a sibling temp file then rename over the target.
+        // rename replaces a symlink target with our regular file instead of
+        // following it, closing the read/modify/write TOCTOU window, and never
+        // leaves a truncated file if the process dies mid-write.
+        //
+        // Each temp candidate is opened with O_EXCL (`create_new`), which
+        // fails rather than following a symlink a hostile user may have
+        // planted at the temp path — so the write can never escape through the
+        // temp path either. Candidate names are unique (pid + sequence), so an
+        // occupied name (unrelated file or planted symlink) is skipped for a
+        // fresh one rather than deleted: write_file is generic ManagerOps and
+        // must not remove a sibling it does not own.
+        use std::io::Write;
+        const MAX_TEMP_ATTEMPTS: u32 = 16;
+        let mut opened: Option<(std::fs::File, PathBuf)> = None;
+        let mut last_occupied: Option<PathBuf> = None;
+        for _ in 0..MAX_TEMP_ATTEMPTS {
+            let candidate = temp_sibling(path);
+            match create_new_file(&candidate) {
+                Ok(file) => {
+                    opened = Some((file, candidate));
+                    break;
+                }
+                Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+                    last_occupied = Some(candidate);
+                    continue;
+                }
+                Err(source) => {
+                    return Err(AdapterError::Io {
+                        path: candidate,
+                        source,
+                    });
+                }
+            }
+        }
+        let (mut file, tmp) = opened.ok_or_else(|| AdapterError::Io {
+            path: last_occupied.unwrap_or_else(|| path.to_path_buf()),
+            source: std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "could not create a unique temp file for atomic write",
+            ),
+        })?;
+        file.write_all(contents).map_err(|source| {
+            let _ = std::fs::remove_file(&tmp);
+            AdapterError::Io {
+                path: tmp.clone(),
+                source,
+            }
+        })?;
+        drop(file);
+        std::fs::rename(&tmp, path).map_err(|source| {
+            let _ = std::fs::remove_file(&tmp);
+            AdapterError::Io {
+                path: path.to_path_buf(),
+                source,
+            }
         })
     }
 
@@ -1558,6 +1665,21 @@ impl AdapterOps for ManagerOps {
             path: link.to_path_buf(),
             source,
         })
+    }
+
+    fn read_file(&self, path: &Path) -> Result<Option<Vec<u8>>, AdapterError> {
+        validate_ops_path(path, &self.allowed_roots)?;
+        // Refuse to follow a symlink at `path`: reading through it could
+        // escape the allowed roots (the same escape `copy_file` guards).
+        reject_symlink(path)?;
+        match std::fs::read(path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(AdapterError::Io {
+                path: path.to_path_buf(),
+                source,
+            }),
+        }
     }
 }
 
@@ -1659,6 +1781,39 @@ fn prepend_path_with_existing(
     // which our dirs do not; fall back to the prepend dirs alone.
     std::env::join_paths(&parts)
         .unwrap_or_else(|_| std::env::join_paths(prepend).unwrap_or_default())
+}
+
+/// Open `path` for writing, failing if it already exists. Uses `O_EXCL`
+/// semantics (`create_new`), which does not follow a symlink at `path` — the
+/// key guard against a pre-planted symlink at the temp path.
+fn create_new_file(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
+/// Monotonic counter making atomic-write temp names unique within a process.
+static WRITE_TEMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A fresh, unique sibling temp path for an atomic write in `path`'s
+/// directory: `.<name>.anolisa-tmp.<pid>.<seq>`. Unique per call (pid +
+/// process-monotonic sequence) so [`ManagerOps::write_file`] can create it
+/// with `O_EXCL` and never collide with — nor need to delete — an unrelated
+/// pre-existing file at a fixed name. Sibling placement keeps the final
+/// `rename` within one filesystem.
+fn temp_sibling(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "adapter".to_string());
+    let pid = std::process::id();
+    let seq = WRITE_TEMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp_name = format!(".{name}.anolisa-tmp.{pid}.{seq}");
+    match path.parent() {
+        Some(parent) => parent.join(tmp_name),
+        None => PathBuf::from(tmp_name),
+    }
 }
 
 /// Validate that `path` is under one of `allowed_roots` and contains no
@@ -1849,6 +2004,9 @@ fn allowed_adapter_types(framework: &str) -> Option<&'static [&'static str]> {
         "openclaw" | "hermes" => Some(&["plugin", "skill_bundle"]),
         // Marketplace-plugin frameworks: plugin only.
         "codex" | "claude-code" => Some(&["plugin"]),
+        // Qoder installs a directory-named plugin and activates it via
+        // settings.json entries: plugin only (no extension / skill_bundle).
+        "qoder" => Some(&["plugin"]),
         // Filesystem-extension framework: extension only, no plugin default.
         "cosh" => Some(&["extension"]),
         _ => None,
@@ -2142,11 +2300,29 @@ fn plan_disable_report(claim: &AdapterClaim) -> DisableReport {
             cleanup_ids.push(&c.marketplace_resource);
             None
         }
+        DriverPayload::Qoder(q) => {
+            cleanup_ids.push(&q.plugin_resource);
+            // settings.json is edited in place (ANOLISA-managed entries
+            // pruned), never removed, so it is not a cleanup_id; describe the
+            // prune explicitly rather than as a file removal.
+            let entry = claim
+                .plugin_id
+                .as_deref()
+                .map(|p| format!("{p}@local"))
+                .unwrap_or_else(|| "<plugin>@local".to_string());
+            messages.push(format!(
+                "would prune ANOLISA-managed hooks and '{entry}' from ~/.qoder/settings.json"
+            ));
+            None
+        }
     };
 
-    // Whether disable uninstalls (Claude Code semantics) rather than
+    // Whether disable uninstalls (Claude Code / Qoder semantics) rather than
     // unregisters (registry-only). Purely cosmetic for the plan text.
-    let plugin_verb = if matches!(claim.driver_payload, DriverPayload::ClaudeCode(_)) {
+    let plugin_verb = if matches!(
+        claim.driver_payload,
+        DriverPayload::ClaudeCode(_) | DriverPayload::Qoder(_)
+    ) {
         "uninstall"
     } else {
         "unregister"
@@ -2455,16 +2631,34 @@ mod tests {
         assert!(ok("claude-code", Some("plugin")));
         assert!(ok("claude-code", None));
         assert!(ok("cosh", Some("extension")));
+        assert!(ok("qoder", Some("plugin")));
+        assert!(ok("qoder", None), "qoder defaults to plugin");
     }
 
     #[test]
     fn framework_type_matrix_rejects_extension_on_plugin_frameworks() {
-        for fw in ["openclaw", "hermes", "codex", "claude-code"] {
+        for fw in ["openclaw", "hermes", "codex", "claude-code", "qoder"] {
             let err = validate_adapter_type_for_framework("tokenless", fw, Some("extension"))
                 .expect_err(&format!("{fw} + extension must be rejected"));
             assert!(
                 matches!(err, AdapterError::InvalidAdapterInput { .. }),
                 "{fw}: got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn qoder_accepts_plugin_rejects_extension_and_skill_bundle() {
+        validate_adapter_type_for_framework("tokenless", "qoder", Some("plugin"))
+            .expect("qoder + plugin must pass");
+        validate_adapter_type_for_framework("tokenless", "qoder", None)
+            .expect("qoder with no adapter_type defaults to plugin");
+        for at in [Some("extension"), Some("skill_bundle")] {
+            let err = validate_adapter_type_for_framework("tokenless", "qoder", at)
+                .expect_err(&format!("qoder + {at:?} must be rejected"));
+            assert!(
+                matches!(err, AdapterError::InvalidAdapterInput { .. }),
+                "qoder + {at:?}: got {err:?}"
             );
         }
     }
@@ -2497,7 +2691,7 @@ mod tests {
     #[test]
     fn framework_type_matrix_is_silent_for_unknown_framework() {
         // No built-in driver: this gate defers to UnknownFramework.
-        validate_adapter_type_for_framework("tokenless", "qoder", Some("extension"))
+        validate_adapter_type_for_framework("tokenless", "qwencode", Some("extension"))
             .expect("unknown framework must not be rejected by the type gate");
     }
 
@@ -3645,6 +3839,131 @@ source = "{datadir}/skills/code-scanner/"
         ops.copy_file(&allowed.join("real.txt"), &allowed.join("dst.txt"))
             .expect("regular file must succeed");
         assert!(allowed.join("dst.txt").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_file_refuses_to_write_through_symlink() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path().canonicalize().expect("canonicalize");
+        let allowed = base.join("allowed");
+        std::fs::create_dir_all(&allowed).expect("mkdir");
+        // A symlink whose target is *inside* the allowed roots (so the path
+        // boundary check passes) — the explicit symlink refusal is what must
+        // stop the write from following it. A symlink escaping the roots is
+        // already caught earlier by `validate_ops_path`.
+        let real = allowed.join("real-target");
+        std::fs::write(&real, b"original").expect("seed target");
+        let target = allowed.join("settings.json");
+        std::os::unix::fs::symlink(&real, &target).expect("symlink");
+
+        let ops = ManagerOps::new(
+            CentralLog::open(base.join("log.jsonl")),
+            "test".into(),
+            "user".into(),
+            "comp".into(),
+            "test".into(),
+            vec![allowed.clone()],
+        );
+        let err = ops
+            .write_file(&target, b"injected")
+            .expect_err("writing through a symlink must be rejected");
+        assert!(matches!(err, AdapterError::Io { .. }), "got {err:?}");
+        assert!(
+            err.to_string().contains("symlink"),
+            "error should mention symlink: {err}"
+        );
+        // The symlink target was not followed/overwritten.
+        assert_eq!(
+            std::fs::read_to_string(&real).expect("read target"),
+            "original",
+            "write must not have followed the symlink"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_file_leaves_unrelated_sibling_temp_files_untouched() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path().canonicalize().expect("canonicalize");
+        let allowed = base.join("allowed");
+        std::fs::create_dir_all(&allowed).expect("mkdir");
+        // Unrelated siblings a user might have next to the target: a plain
+        // file and a symlink pointing at a sentinel outside the roots. Because
+        // write_file uses unique temp names, it must neither delete these nor
+        // follow the symlink; the sentinel must stay intact.
+        let sentinel = base.join("sentinel");
+        std::fs::write(&sentinel, b"original").expect("seed sentinel");
+        let stale_file = allowed.join(".settings.json.anolisa-tmp.leftover");
+        std::fs::write(&stale_file, b"unrelated").expect("seed stale file");
+        let stale_link = allowed.join(".settings.json.anolisa-tmp.link");
+        std::os::unix::fs::symlink(&sentinel, &stale_link).expect("plant symlink");
+        let target = allowed.join("settings.json");
+
+        let ops = ManagerOps::new(
+            CentralLog::open(base.join("log.jsonl")),
+            "test".into(),
+            "user".into(),
+            "comp".into(),
+            "test".into(),
+            vec![allowed.clone()],
+        );
+        ops.write_file(&target, b"new content")
+            .expect("write must succeed via a unique temp");
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read target"),
+            "new content"
+        );
+        // Unrelated siblings survive untouched.
+        assert_eq!(
+            std::fs::read_to_string(&stale_file).expect("read stale file"),
+            "unrelated",
+            "an unrelated sibling file must not be deleted"
+        );
+        assert!(
+            stale_link
+                .symlink_metadata()
+                .expect("link meta")
+                .is_symlink(),
+            "an unrelated sibling symlink must not be deleted"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&sentinel).expect("read sentinel"),
+            "original",
+            "no sibling symlink may be followed"
+        );
+    }
+
+    #[test]
+    fn write_file_is_atomic_and_leaves_no_temp() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path().canonicalize().expect("canonicalize");
+        let allowed = base.join("allowed");
+        std::fs::create_dir_all(&allowed).expect("mkdir");
+        let target = allowed.join("settings.json");
+
+        let ops = ManagerOps::new(
+            CentralLog::open(base.join("log.jsonl")),
+            "test".into(),
+            "user".into(),
+            "comp".into(),
+            "test".into(),
+            vec![allowed.clone()],
+        );
+        ops.write_file(&target, b"first").expect("first write");
+        ops.write_file(&target, b"second").expect("overwrite");
+        assert_eq!(std::fs::read_to_string(&target).expect("read"), "second");
+        // No temp file (matched by the `.settings.json.anolisa-tmp` prefix)
+        // may linger after a successful write.
+        let leftover = std::fs::read_dir(&allowed)
+            .expect("read dir")
+            .filter_map(Result::ok)
+            .any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(".settings.json.anolisa-tmp")
+            });
+        assert!(!leftover, "temp file should be renamed away");
     }
 
     // -- skill source allowed_roots integration ---------------------------------
