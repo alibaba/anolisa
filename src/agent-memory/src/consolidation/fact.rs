@@ -277,7 +277,27 @@ mod tests {
             0.7,
         );
         let md = f.to_markdown();
+        // Verify the title is encoded without YAML quoting (round-trip compatible)
         assert!(md.contains("title: Use const not var"));
+        // Round-trip: extract title from frontmatter and confirm it matches sanitized input
+        let title_line = md
+            .lines()
+            .skip_while(|l| *l != "---")
+            .skip(1) // skip opening ---
+            .find(|l| l.starts_with("title: "))
+            .expect("title field missing in frontmatter");
+        let extracted_title = title_line
+            .strip_prefix("title: ")
+            .expect("title prefix missing");
+        assert_eq!(
+            extracted_title, "Use const not var",
+            "round-trip: special chars survive write->read"
+        );
+        // Verify no YAML double-quoting artifact
+        assert!(
+            !md.contains("title: \""),
+            "must not use YAML double-quoting"
+        );
     }
 
     #[test]
@@ -292,6 +312,32 @@ mod tests {
             0.5,
         );
         let md = f.to_markdown();
+        // Verify paths are kept verbatim (no YAML double-quoting)
         assert!(md.contains("C:\\Users\\admin\\file.txt"));
+        // Round-trip: extract related_paths from frontmatter and confirm
+        let mut paths = Vec::new();
+        let mut in_frontmatter = false;
+        for line in md.lines() {
+            if line == "---" {
+                if in_frontmatter {
+                    break;
+                }
+                in_frontmatter = true;
+                continue;
+            }
+            if in_frontmatter && line.starts_with("  - ") {
+                paths.push(line.strip_prefix("  - ").unwrap().to_string());
+            }
+        }
+        assert_eq!(
+            paths,
+            vec!["C:\\Users\\admin\\file.txt"],
+            "round-trip: Windows paths survive write->read without escaping artifacts"
+        );
+        // Verify no YAML double-quoting artifact
+        assert!(
+            !md.contains("C:\\\"Users"),
+            "must not use YAML double-quoting on paths"
+        );
     }
 }
