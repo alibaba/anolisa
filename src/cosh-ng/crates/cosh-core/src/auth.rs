@@ -154,26 +154,47 @@ pub fn apply_auth_credentials(config: &mut CoreConfig, response: &AuthResponse) 
     let api_key = response.values.get("api_key").cloned().unwrap_or_default();
 
     // Aliyun provider uses AK/SK instead of API key
-    let access_key_id = response.values.get("access_key_id").cloned();
-    let access_key_secret = response.values.get("access_key_secret").cloned();
-    let security_token = response.values.get("security_token").cloned();
     let auth_source = response.values.get("auth_source").cloned();
+    let is_ecs_ram_role = auth_source.as_deref() == Some("ecs_ram_role");
+    let access_key_id = if is_ecs_ram_role {
+        None
+    } else {
+        response.values.get("access_key_id").cloned()
+    };
+    let access_key_secret = if is_ecs_ram_role {
+        None
+    } else {
+        response.values.get("access_key_secret").cloned()
+    };
+    let security_token = if is_ecs_ram_role {
+        None
+    } else {
+        response.values.get("security_token").cloned()
+    };
 
     config.ai.active_provider = Some(response.provider_id.clone());
-    config.ai.providers.insert(
-        response.provider_id.clone(),
-        ProviderConfig {
-            provider_type: Some(provider_type),
-            auth_source,
-            base_url: Some(base_url),
-            api_key: Some(api_key),
-            model: final_model,
-            extra_params: None,
-            access_key_id,
-            access_key_secret,
-            security_token,
-        },
-    );
+    let provider = ProviderConfig {
+        provider_type: Some(provider_type),
+        auth_source,
+        base_url: Some(base_url),
+        api_key: Some(api_key),
+        model: final_model,
+        extra_params: None,
+        access_key_id,
+        access_key_secret,
+        security_token,
+    };
+    config
+        .ai
+        .providers
+        .insert(response.provider_id.clone(), provider.clone());
+    if response.persist {
+        config.user_ai.active_provider = Some(response.provider_id.clone());
+        config
+            .user_ai
+            .providers
+            .insert(response.provider_id.clone(), provider);
+    }
 }
 
 /// Result of waiting for auth, including any stdin lines consumed during the wait.
@@ -364,6 +385,43 @@ mod tests {
         assert_eq!(
             provider.base_url.as_deref(),
             Some("https://dashscope.aliyuncs.com/compatible-mode/v1")
+        );
+    }
+
+    #[test]
+    fn persisted_auth_credentials_update_user_layer_only_for_persistence() {
+        let mut config = CoreConfig::default();
+        config.ai.providers.insert(
+            "system-provider".to_string(),
+            ProviderConfig {
+                provider_type: Some("dashscope".to_string()),
+                api_key: Some("sk-system".to_string()),
+                ..Default::default()
+            },
+        );
+        let response = AuthResponse {
+            provider_id: "user-provider".to_string(),
+            provider_type: Some("dashscope".to_string()),
+            values: HashMap::from([("api_key".to_string(), "sk-user".to_string())]),
+            persist: true,
+        };
+
+        apply_auth_credentials(&mut config, &response);
+
+        assert!(config.ai.providers.contains_key("system-provider"));
+        assert!(config.ai.providers.contains_key("user-provider"));
+        assert!(!config.user_ai.providers.contains_key("system-provider"));
+        assert_eq!(
+            config.user_ai.active_provider.as_deref(),
+            Some("user-provider")
+        );
+        assert_eq!(
+            config
+                .user_ai
+                .providers
+                .get("user-provider")
+                .and_then(|provider| provider.api_key.as_deref()),
+            Some("sk-user")
         );
     }
 

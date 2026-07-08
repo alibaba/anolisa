@@ -8,9 +8,12 @@ use serde_json::Value;
 pub struct CoreConfig {
     #[serde(default)]
     pub ai: AiConfig,
-    // Keeps user-layer AI preferences out of project override persistence.
+    // User-layer AI state is the only source for writing ~/.copilot-shell/config.toml.
     #[serde(skip)]
     pub(crate) user_ai: AiConfig,
+    // System-layer AI state is used to expose provider ownership without persisting it.
+    #[serde(skip)]
+    pub(crate) system_ai: AiConfig,
     #[serde(default)]
     pub agent: AgentConfig,
     #[serde(default)]
@@ -430,25 +433,6 @@ fn apply_logging_layer(config: &mut LoggingConfig, layer: &PartialLoggingConfig)
     }
 }
 
-fn normalize_partial_legacy_sts_auth_sources(config: &mut PartialCoreConfig) -> bool {
-    let Some(ref mut ai) = config.ai else {
-        return false;
-    };
-
-    let mut changed = false;
-    for provider in ai.providers.values_mut() {
-        let is_aliyun = provider.provider_type.as_deref() == Some("aliyun");
-        if is_aliyun && provider.security_token.is_some() {
-            provider.auth_source = Some("ecs_ram_role".to_string());
-            provider.access_key_id = None;
-            provider.access_key_secret = None;
-            provider.security_token = None;
-            changed = true;
-        }
-    }
-    changed
-}
-
 impl CoreConfig {
     pub fn load() -> Self {
         crate::migrate::try_migrate();
@@ -478,27 +462,19 @@ impl CoreConfig {
         if let Some(system_path) = system_path {
             if let Some(system) = read_partial_config(system_path) {
                 apply_user_layer(&mut config, &system);
+                let mut system_snapshot = CoreConfig::default();
+                apply_user_layer(&mut system_snapshot, &system);
+                config.system_ai = system_snapshot.ai;
             }
         }
 
         if let Some(user_path) = user_path {
-            if let Some(mut user) = read_partial_config(user_path) {
-                let normalized = normalize_partial_legacy_sts_auth_sources(&mut user);
+            if let Some(user) = read_partial_config(user_path) {
                 apply_user_layer(&mut config, &user);
                 let mut user_snapshot = CoreConfig::default();
                 apply_user_layer(&mut user_snapshot, &user);
                 user_snapshot.user_ai = user_snapshot.ai.clone();
                 config.user_ai = user_snapshot.ai.clone();
-
-                if normalized {
-                    if let Some(parent) = user_path.parent() {
-                        if let Err(e) = persist_config_to_dir(&user_snapshot, parent) {
-                            eprintln!(
-                                "[cosh-core] Warning: failed to normalize STS provider config: {e}"
-                            );
-                        }
-                    }
-                }
             }
         }
 
@@ -529,21 +505,6 @@ impl CoreConfig {
                 self.agent.max_turns = n;
             }
         }
-    }
-
-    pub fn normalize_legacy_sts_auth_sources(&mut self) -> bool {
-        let mut changed = false;
-        for provider in self.ai.providers.values_mut() {
-            let is_aliyun = provider.provider_type.as_deref() == Some("aliyun");
-            if is_aliyun && provider.security_token.is_some() {
-                provider.auth_source = Some("ecs_ram_role".to_string());
-                provider.access_key_id = None;
-                provider.access_key_secret = None;
-                provider.security_token = None;
-                changed = true;
-            }
-        }
-        changed
     }
 
     pub fn resolve_provider(&self) -> ResolvedProvider {
@@ -658,7 +619,7 @@ fn persist_config_to_dir(config: &CoreConfig, dir: &std::path::Path) -> Result<(
     }
 
     preserved.push_str("[ai]\n");
-    if let Some(ref active) = config.ai.active_provider {
+    if let Some(ref active) = config.user_ai.active_provider {
         preserved.push_str(&format!(
             "active_provider = \"{}\"\n",
             escape_toml_value(active)
@@ -681,7 +642,7 @@ fn persist_config_to_dir(config: &CoreConfig, dir: &std::path::Path) -> Result<(
     }
     preserved.push('\n');
 
-    for (name, provider) in &config.ai.providers {
+    for (name, provider) in &config.user_ai.providers {
         preserved.push_str(&format!("[ai.providers.{}]\n", name));
         if let Some(ref t) = provider.provider_type {
             preserved.push_str(&format!("type = \"{}\"\n", escape_toml_value(t)));
@@ -811,28 +772,57 @@ model = "qwen3.7-plus"
     }
 
     #[test]
-    fn normalize_legacy_aliyun_sts_provider_to_ecs_auth_source() {
+    fn explicit_ecs_ram_role_auth_source_does_not_need_static_credentials() {
         let toml_str = r#"
 [ai]
 active_provider = "aliyun"
 
 [ai.providers.aliyun]
 type = "aliyun"
-access_key_id = "legacy-ak"
-access_key_secret = "legacy-sk"
-security_token = "legacy-token"
+auth_source = "ecs_ram_role"
 model = "qwen3.7-plus"
 "#;
 
-        let mut config: CoreConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.normalize_legacy_sts_auth_sources());
-
+        let config: CoreConfig = toml::from_str(toml_str).unwrap();
         let provider = config.ai.providers.get("aliyun").unwrap();
         assert_eq!(provider.auth_source.as_deref(), Some("ecs_ram_role"));
         assert!(provider.access_key_id.is_none());
         assert!(provider.access_key_secret.is_none());
         assert!(provider.security_token.is_none());
         assert_eq!(provider.model.as_deref(), Some("qwen3.7-plus"));
+    }
+
+    #[test]
+    fn user_config_preserves_manual_aliyun_sts_credentials() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user_path = tmp.path().join("user-config.toml");
+
+        std::fs::write(
+            &user_path,
+            r#"
+[ai]
+active_provider = "aliyun"
+
+[ai.providers.aliyun]
+type = "aliyun"
+access_key_id = "manual-ak"
+access_key_secret = "manual-sk"
+security_token = "manual-token"
+"#,
+        )
+        .unwrap();
+
+        let config = CoreConfig::load_from_paths(None, Some(&user_path), None);
+        let resolved = config.resolve_provider();
+        let persisted = std::fs::read_to_string(&user_path).unwrap();
+
+        assert_eq!(resolved.auth_source, None);
+        assert_eq!(resolved.access_key_id, "manual-ak");
+        assert_eq!(resolved.access_key_secret, "manual-sk");
+        assert_eq!(resolved.security_token.as_deref(), Some("manual-token"));
+        assert!(persisted.contains("access_key_id = \"manual-ak\""));
+        assert!(persisted.contains("access_key_secret = \"manual-sk\""));
+        assert!(persisted.contains("security_token = \"manual-token\""));
     }
 
     #[test]
@@ -1059,5 +1049,51 @@ output_language = "zh-CN"
         assert!(!content.contains("project-model"));
         assert!(!content.contains("zh-CN"));
         assert!(content.contains("api_key = \"sk-user\""));
+    }
+
+    #[test]
+    fn persist_user_config_does_not_write_system_providers() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let system_path = tmp.path().join("system-config.toml");
+        let user_dir = tmp.path().join("home-config");
+        let user_path = user_dir.join("config.toml");
+        std::fs::create_dir_all(&user_dir).unwrap();
+
+        std::fs::write(
+            &system_path,
+            r#"
+[ai]
+active_provider = "system-provider"
+
+[ai.providers.system-provider]
+type = "dashscope"
+api_key = "sk-system"
+model = "system-model"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &user_path,
+            r#"
+[ai]
+active_provider = "user-provider"
+
+[ai.providers.user-provider]
+type = "dashscope"
+api_key = "sk-user"
+"#,
+        )
+        .unwrap();
+
+        let mut config = CoreConfig::load_from_paths(Some(&system_path), Some(&user_path), None);
+        config.ai.active_provider = Some("system-provider".to_string());
+        persist_config_to_dir(&config, &user_dir).unwrap();
+
+        let content = std::fs::read_to_string(&user_path).unwrap();
+        assert!(content.contains("active_provider = \"user-provider\""));
+        assert!(content.contains("[ai.providers.user-provider]"));
+        assert!(content.contains("api_key = \"sk-user\""));
+        assert!(!content.contains("system-provider"));
+        assert!(!content.contains("sk-system"));
     }
 }

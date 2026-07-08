@@ -123,9 +123,19 @@ fn handle_auth(
                 .providers
                 .iter()
                 .map(|(provider_id, provider)| {
+                    let source = if config.user_ai.providers.contains_key(provider_id) {
+                        "user"
+                    } else if config.system_ai.providers.contains_key(provider_id) {
+                        "system"
+                    } else {
+                        "runtime"
+                    };
+                    let editable = source == "user";
                     serde_json::json!({
                         "provider_id": provider_id,
                         "provider_type": provider.provider_type,
+                        "source": source,
+                        "editable": editable,
                         "auth_source": provider.auth_source,
                         "model": provider.model,
                         "base_url": provider.base_url,
@@ -160,6 +170,7 @@ fn handle_auth(
                 return registry_error(request_id, "provider not found");
             }
             config.ai.active_provider = Some(provider_id.to_string());
+            config.user_ai.active_provider = Some(provider_id.to_string());
             if let Some(model) = config
                 .ai
                 .providers
@@ -291,13 +302,6 @@ fn handle_auth(
                 persist: true,
             };
             crate::auth::apply_auth_credentials(config, &response);
-            if let Some(provider) = config.ai.providers.get_mut(provider_id) {
-                if provider.auth_source.as_deref() == Some("ecs_ram_role") {
-                    provider.access_key_id = None;
-                    provider.access_key_secret = None;
-                    provider.security_token = None;
-                }
-            }
             if let Err(e) = crate::config::persist_config(config) {
                 return registry_error(request_id, &format!("failed to persist config: {e}"));
             }
@@ -768,5 +772,63 @@ fn emit<W: Write>(writer: &mut W, msg: &OutputMessage) {
     if let Ok(json) = serde_json::to_string(msg) {
         let _ = writeln!(writer, "{json}");
         let _ = writer.flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AiConfig, ProviderConfig};
+
+    #[test]
+    fn auth_state_marks_system_providers_as_not_editable() {
+        let mut config = CoreConfig::default();
+        config.ai.active_provider = Some("system-provider".to_string());
+        config.ai.providers.insert(
+            "system-provider".to_string(),
+            ProviderConfig {
+                provider_type: Some("dashscope".to_string()),
+                api_key: Some("sk-system".to_string()),
+                model: Some("system-model".to_string()),
+                ..Default::default()
+            },
+        );
+        config.system_ai = AiConfig {
+            providers: config.ai.providers.clone(),
+            ..Default::default()
+        };
+        config.user_ai.providers.insert(
+            "user-provider".to_string(),
+            ProviderConfig {
+                provider_type: Some("dashscope".to_string()),
+                api_key: Some("sk-user".to_string()),
+                ..Default::default()
+            },
+        );
+        config.ai.providers.extend(config.user_ai.providers.clone());
+
+        let response = handle_auth("test-1", "state", &Value::Null, &mut config);
+        let OutputMessage::RegistryResponse {
+            success: true,
+            data: Some(data),
+            ..
+        } = response
+        else {
+            panic!("unexpected response: {response:?}");
+        };
+        let saved = data["saved_providers"].as_array().unwrap();
+        let system = saved
+            .iter()
+            .find(|provider| provider["provider_id"] == "system-provider")
+            .unwrap();
+        let user = saved
+            .iter()
+            .find(|provider| provider["provider_id"] == "user-provider")
+            .unwrap();
+
+        assert_eq!(system["source"], "system");
+        assert_eq!(system["editable"], false);
+        assert_eq!(user["source"], "user");
+        assert_eq!(user["editable"], true);
     }
 }

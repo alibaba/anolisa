@@ -20,6 +20,8 @@ pub(crate) struct ExistingProvider {
     pub(crate) label: String,         // display name based on type
     pub(crate) model: String,         // current model
     pub(crate) is_active: bool,       // whether this is the active_provider
+    pub(crate) editable: bool,
+    pub(crate) source: String,
     pub(crate) base_url: Option<String>,
     pub(crate) api_key_mask: Option<String>,
     pub(crate) access_key_id_mask: Option<String>,
@@ -37,6 +39,29 @@ fn label_for_provider_type(provider_type: &str) -> &'static str {
         "dashscope" => "DashScope (\u{767e}\u{70bc})",
         "aliyun" => "Aliyun Authentication",
         _ => "OpenAI Compatible",
+    }
+}
+
+fn provider_action_options(is_active: bool, editable: bool) -> Vec<String> {
+    match (is_active, editable) {
+        (true, true) => vec!["Edit configuration".to_string(), "Cancel".to_string()],
+        (true, false) => vec!["Cancel".to_string()],
+        (false, true) => vec![
+            "Set as active provider".to_string(),
+            "Edit configuration".to_string(),
+            "Cancel".to_string(),
+        ],
+        (false, false) => vec!["Set as active provider".to_string(), "Cancel".to_string()],
+    }
+}
+
+fn provider_action_choice(is_active: bool, editable: bool, selected: usize) -> &'static str {
+    match (is_active, editable, selected) {
+        (true, true, 0) => "edit",
+        (true, _, _) => "cancel",
+        (false, _, 0) => "activate",
+        (false, true, 1) => "edit",
+        _ => "cancel",
     }
 }
 
@@ -120,11 +145,12 @@ pub(crate) fn record_auth_required(
             if state.auth.completed_ids.contains(&id) {
                 continue;
             }
+            let providers = auth_required_providers_for_display(providers);
             state.auth.state = Some(RuntimeAuthState {
                 id: id.clone(),
                 request_id: request_id.clone(),
                 phase: AuthPhase::SelectingProvider,
-                providers: providers.clone(),
+                providers,
                 selected_provider: 0,
                 current_field: 0,
                 collected_values: HashMap::new(),
@@ -137,6 +163,17 @@ pub(crate) fn record_auth_required(
         }
     }
     ids
+}
+
+fn auth_required_providers_for_display(providers: &[AuthProviderInfo]) -> Vec<AuthProviderInfo> {
+    let mut providers = providers.to_vec();
+    for provider in &mut providers {
+        if provider.id == "aliyun" && !provider.label.contains("免费可用") {
+            provider.label = format!("{} (免费可用)", provider.label);
+        }
+    }
+    providers.sort_by_key(|provider| if provider.id == "aliyun" { 0 } else { 1 });
+    providers
 }
 
 pub(crate) fn render_auth_panel<W: std::io::Write>(
@@ -167,13 +204,10 @@ pub(crate) fn pending_auth_capture(state: &InlineState) -> Option<RawInputCaptur
             multiple: false,
         }),
         AuthPhase::ProviderAction { provider_idx } => {
-            let is_active = auth
-                .existing_providers
-                .get(*provider_idx)
-                .map(|ep| ep.is_active)
-                .unwrap_or(false);
-            // "Set as active" (only if not active) + "Edit" + "Cancel"
-            let option_count = if is_active { 2 } else { 3 };
+            let existing = auth.existing_providers.get(*provider_idx);
+            let is_active = existing.map(|ep| ep.is_active).unwrap_or(false);
+            let editable = existing.map(|ep| ep.editable).unwrap_or(true);
+            let option_count = provider_action_options(is_active, editable).len();
             Some(RawInputCapture::Question {
                 id: auth.id.clone(),
                 option_count,
@@ -308,6 +342,10 @@ struct CoreSavedProvider {
     base_url: Option<String>,
     auth_source: Option<String>,
     active: bool,
+    #[serde(default = "default_provider_source")]
+    source: String,
+    #[serde(default = "default_provider_editable")]
+    editable: bool,
     #[serde(default)]
     api_key_len: usize,
     #[serde(default)]
@@ -316,6 +354,14 @@ struct CoreSavedProvider {
     access_key_secret_len: usize,
     #[serde(default)]
     security_token_len: usize,
+}
+
+fn default_provider_source() -> String {
+    "user".to_string()
+}
+
+fn default_provider_editable() -> bool {
+    true
 }
 
 fn load_core_auth_state(cosh_core: &CoshCoreAdapter) -> Result<CoreAuthState, String> {
@@ -404,6 +450,8 @@ impl From<CoreSavedProvider> for ExistingProvider {
             provider_type,
             model,
             is_active: provider.active,
+            editable: provider.editable,
+            source: provider.source,
             base_url: provider.base_url,
             api_key_mask: (provider.api_key_len > 0).then(|| secret_mask(provider.api_key_len)),
             access_key_id_mask: (provider.access_key_id_len > 0)
@@ -530,22 +578,9 @@ fn handle_auth_answer<W: std::io::Write>(
         AuthPhase::ProviderAction { provider_idx } => {
             let existing = auth.existing_providers[provider_idx].clone();
             let is_active = existing.is_active;
+            let editable = existing.editable;
 
-            // Determine which action was selected
-            let action = if is_active {
-                // Options: "Edit configuration" / "Cancel"
-                match auth.selected_provider {
-                    0 => "edit",
-                    _ => "cancel",
-                }
-            } else {
-                // Options: "Set as active" / "Edit configuration" / "Cancel"
-                match auth.selected_provider {
-                    0 => "activate",
-                    1 => "edit",
-                    _ => "cancel",
-                }
-            };
+            let action = provider_action_choice(is_active, editable, auth.selected_provider);
 
             match action {
                 "activate" => {
@@ -850,9 +885,14 @@ fn render_current_auth_panel<W: std::io::Write>(
                     } else {
                         format!(" - {}", ep.model)
                     };
+                    let source_info = if ep.source == "system" {
+                        " [system]"
+                    } else {
+                        ""
+                    };
                     format!(
-                        "{}{} - \"{}\"{}",
-                        active_mark, ep.label, ep.name, model_info
+                        "{}{} - \"{}\"{}{}",
+                        active_mark, ep.label, ep.name, model_info, source_info
                     )
                 })
                 .collect();
@@ -875,15 +915,7 @@ fn render_current_auth_panel<W: std::io::Write>(
         AuthPhase::ProviderAction { provider_idx } => {
             let ep = &auth.existing_providers[provider_idx];
             let title = format!("\u{1f511} {} \u{2014} \"{}\":", ep.label, ep.name);
-            let options: Vec<String> = if ep.is_active {
-                vec!["Edit configuration".to_string(), "Cancel".to_string()]
-            } else {
-                vec![
-                    "Set as active provider".to_string(),
-                    "Edit configuration".to_string(),
-                    "Cancel".to_string(),
-                ]
-            };
+            let options = provider_action_options(ep.is_active, ep.editable);
             let model = QuestionPanelModel {
                 id: &auth.id,
                 question: &title,
@@ -1158,4 +1190,36 @@ fn generate_qr_text(data: &str) -> Option<String> {
     }
 
     Some(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{provider_action_choice, provider_action_options};
+
+    #[test]
+    fn provider_action_options_hide_edit_for_non_editable_providers() {
+        assert_eq!(
+            provider_action_options(true, true),
+            vec!["Edit configuration", "Cancel"]
+        );
+        assert_eq!(provider_action_options(true, false), vec!["Cancel"]);
+        assert_eq!(
+            provider_action_options(false, true),
+            vec!["Set as active provider", "Edit configuration", "Cancel"]
+        );
+        assert_eq!(
+            provider_action_options(false, false),
+            vec!["Set as active provider", "Cancel"]
+        );
+    }
+
+    #[test]
+    fn provider_action_choice_never_edits_non_editable_providers() {
+        assert_eq!(provider_action_choice(true, true, 0), "edit");
+        assert_eq!(provider_action_choice(true, false, 0), "cancel");
+        assert_eq!(provider_action_choice(false, true, 0), "activate");
+        assert_eq!(provider_action_choice(false, true, 1), "edit");
+        assert_eq!(provider_action_choice(false, false, 0), "activate");
+        assert_eq!(provider_action_choice(false, false, 1), "cancel");
+    }
 }
