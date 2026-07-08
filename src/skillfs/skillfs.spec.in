@@ -1,10 +1,11 @@
+%define anolis_release 2
 %global         rustflags -C opt-level=3 -C codegen-units=1
 %global         debug_package %{nil}
 %global         _localbindir /usr/local/bin
 
 Name:           skillfs
 Version:        @VERSION@
-Release:        1%{?dist}
+Release:        %{anolis_release}%{?dist}
 Summary:        AI agent skill management via virtual filesystem
 
 License:        Apache-2.0
