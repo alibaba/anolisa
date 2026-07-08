@@ -10,8 +10,8 @@ use serde_json::{Value, json};
 use super::AppState;
 use crate::agent_sec::{AgentSecClient, AgentSecClientError, DaemonResponse};
 use crate::grader::{
-    EvaluationRequest, EvaluationResponse, EvaluationStore, GraderError, GraderType,
-    RULE_GRADER_VERSION, RuleGrader, TargetType, load_conversation_input,
+    EvaluationRequest, EvaluationResponse, GraderError, GraderType, RULE_GRADER_VERSION,
+    RuleGrader, TargetType, load_conversation_input,
 };
 use crate::health::AgentHealthStatus;
 use crate::storage::sqlite::GenAISqliteStore;
@@ -185,14 +185,16 @@ pub async fn evaluate_grader(
             .json(json!({"error": "bad_request", "message": "target_id is required"}));
     }
 
-    let input = match load_conversation_input(&data.storage_path, &body.target_id, body.force) {
+    let input = match load_conversation_input(
+        &data.storage_path,
+        data.interruption_store.as_deref(),
+        &body.target_id,
+        body.force,
+    ) {
         Ok(input) => input,
         Err(error) => return grader_error_response(error),
     };
-    let store = match EvaluationStore::new_with_path(&data.storage_path) {
-        Ok(store) => store,
-        Err(error) => return grader_error_response(error),
-    };
+    let store = &data.evaluation_store;
 
     match store.find_completed(
         target_type,
@@ -269,12 +271,10 @@ pub async fn latest_grader(
             .json(json!({"error": "bad_request", "message": "target_id is required"}));
     }
 
-    let store = match EvaluationStore::new_with_path(&data.storage_path) {
-        Ok(store) => store,
-        Err(error) => return grader_error_response(error),
-    };
-
-    match store.latest_completed(target_type, &query.target_id) {
+    match data
+        .evaluation_store
+        .latest_completed(target_type, &query.target_id)
+    {
         Ok(Some(record)) => HttpResponse::Ok().json(record.result),
         Ok(None) => HttpResponse::Ok().json(serde_json::Value::Null),
         Err(error) => grader_error_response(error),
@@ -769,6 +769,7 @@ mod tests {
     use actix_web::test as awtest;
 
     use crate::agent_sec::DaemonErrorPayload;
+    use crate::grader::EvaluationStore;
     use crate::health::HealthStore;
 
     use super::*;
@@ -982,6 +983,46 @@ mod tests {
         }
     }
 
+    #[actix_web::test]
+    async fn latest_grader_uses_shared_evaluation_store() {
+        let root = temp_root("latest_grader_shared_store");
+        let evaluation_path = root.join("evaluation.db");
+        let evaluation_store = Arc::new(EvaluationStore::new_with_path(&evaluation_path).unwrap());
+        let result = test_evaluation_result("conv-shared");
+        evaluation_store.insert_completed(&result).unwrap();
+
+        let blocked_parent = root.join("not-a-directory");
+        std::fs::write(&blocked_parent, b"file").unwrap();
+        let data = web::Data::new(AppState {
+            storage_path: blocked_parent.join("genai.db"),
+            start_time: Instant::now(),
+            health_store: Arc::new(RwLock::new(HealthStore::new())),
+            interruption_store: None,
+            evaluation_store: Arc::clone(&evaluation_store),
+            security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
+        });
+        let app = awtest::init_service(App::new().app_data(data).service(latest_grader)).await;
+
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/grader/latest?target_type=conversation&target_id=conv-shared")
+                .to_request(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &actix_web::body::to_bytes(response.into_body())
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["run_id"], "run-shared");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     async fn response_json(response: HttpResponse) -> Value {
         let body = to_bytes(response.into_body())
             .await
@@ -1004,12 +1045,52 @@ mod tests {
         }
     }
 
+    fn test_evaluation_result(target_id: &str) -> crate::grader::EvaluationResult {
+        crate::grader::EvaluationResult {
+            target_type: TargetType::Conversation,
+            target_id: target_id.to_string(),
+            run_id: "run-shared".to_string(),
+            input_hash: "input-hash-shared".to_string(),
+            verdict: crate::grader::Verdict::Pass,
+            score: 1.0,
+            summary: "ok".to_string(),
+            root_cause: crate::grader::RootCause::None,
+            recommended_action: "none".to_string(),
+            dimensions: Vec::new(),
+            findings: Vec::new(),
+            metadata: crate::grader::EvaluationMetadata {
+                evaluated_with_pending: false,
+                pending_call_count: 0,
+                input_event_count: 1,
+                grader_type: GraderType::Rule,
+                grader_version: RULE_GRADER_VERSION.to_string(),
+                rubric_version: None,
+                judge_model: None,
+                prompt_hash: None,
+                confidence: Some(1.0),
+            },
+        }
+    }
+
+    fn temp_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "agentsight_{label}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
     fn test_app_state(timeout_ms: u64) -> web::Data<AppState> {
         web::Data::new(AppState {
             storage_path: PathBuf::from(":memory:"),
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
             interruption_store: None,
+            evaluation_store: Arc::new(
+                EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
+            ),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms },
         })
     }

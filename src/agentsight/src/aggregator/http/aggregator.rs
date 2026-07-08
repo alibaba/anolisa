@@ -2456,4 +2456,44 @@ mod tests {
         assert_eq!(drained.len(), 1);
         assert!(matches!(drained[0].1, ConnectionState::SseActive { .. }));
     }
+
+    #[test]
+    fn test_oversized_request_body_pending_is_evicted() {
+        let mut agg = HttpConnectionAggregator::with_limits(10, 1024, Duration::from_secs(60));
+        let conn_id = ConnectionId {
+            pid: 1234,
+            ssl_ptr: 0x7100,
+        };
+        let event = create_mock_ssl_event(conn_id.pid, conn_id.ssl_ptr);
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/v1/messages".to_string(),
+            version: 11,
+            headers: HashMap::new(),
+            body_offset: 0,
+            body_len: 0,
+            source_event: event,
+            reassembled_body: None,
+        };
+
+        agg.connections.push(
+            conn_id,
+            ConnectionState::RequestBodyPending {
+                request,
+                expected_body_len: Some(4096),
+                body_buffer: vec![b'x'; 2048],
+            },
+        );
+        agg.last_activity.push(conn_id, Instant::now());
+        agg.sse_continuation_buffers
+            .push(conn_id, b"stale".to_vec());
+        agg.last_appended_src_ptr.push(conn_id, 42);
+
+        agg.evict_idle_and_oversized();
+
+        assert!(agg.connections.peek(&conn_id).is_none());
+        assert!(agg.last_activity.peek(&conn_id).is_none());
+        assert!(agg.sse_continuation_buffers.peek(&conn_id).is_none());
+        assert!(agg.last_appended_src_ptr.peek(&conn_id).is_none());
+    }
 }

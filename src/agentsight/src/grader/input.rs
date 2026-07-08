@@ -30,6 +30,7 @@ pub struct EvaluationInput {
 /// Load a conversation snapshot and compute its stable input hash.
 pub fn load_conversation_input(
     storage_path: &Path,
+    interruption_store: Option<&InterruptionStore>,
     conversation_id: &str,
     force: bool,
 ) -> Result<EvaluationInput, GraderError> {
@@ -55,7 +56,7 @@ pub fn load_conversation_input(
         });
     }
 
-    let interruptions = load_conversation_interruptions(storage_path, conversation_id)?;
+    let interruptions = load_conversation_interruptions(interruption_store, conversation_id)?;
     let input_hash = compute_input_hash(conversation_id, &events, &interruptions)?;
 
     Ok(EvaluationInput {
@@ -70,22 +71,15 @@ pub fn load_conversation_input(
 }
 
 fn load_conversation_interruptions(
-    storage_path: &Path,
+    interruption_store: Option<&InterruptionStore>,
     conversation_id: &str,
 ) -> Result<Vec<InterruptionRecord>, GraderError> {
-    if storage_path == Path::new(":memory:") {
-        return Ok(Vec::new());
+    match interruption_store {
+        Some(store) => store
+            .list_by_conversation(conversation_id)
+            .map_err(|error| GraderError::Storage(error.to_string())),
+        None => Ok(Vec::new()),
     }
-    let parent = storage_path
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let interruption_path = parent.join("interruption_events.db");
-    let store = InterruptionStore::new_with_path(&interruption_path)
-        .map_err(|error| GraderError::Storage(error.to_string()))?;
-    store
-        .list_by_conversation(conversation_id)
-        .map_err(|error| GraderError::Storage(error.to_string()))
 }
 
 fn compute_input_hash(
@@ -156,4 +150,108 @@ fn interruption_hash_value(record: &InterruptionRecord) -> serde_json::Value {
         "detail": &record.detail,
         "resolved": record.resolved,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::genai::GenAIExporter;
+    use crate::genai::semantic::{GenAISemanticEvent, LLMCall, LLMRequest};
+    use crate::interruption::{InterruptionEvent, InterruptionType};
+
+    use super::*;
+
+    #[test]
+    fn load_conversation_input_uses_injected_interruption_store() {
+        let root = temp_root("grader_input_interruption_store");
+        let genai_path = root.join("genai").join("events.db");
+        let interruption_path = root.join("interruptions").join("events.db");
+        write_conversation_event(&genai_path, "conv-injected");
+
+        let interruption_store = InterruptionStore::new_with_path(&interruption_path).unwrap();
+        let event = InterruptionEvent::new(
+            InterruptionType::NetworkTimeout,
+            Some("session-1".to_string()),
+            Some("trace-1".to_string()),
+            Some("conv-injected".to_string()),
+            Some("call-1".to_string()),
+            Some(1234),
+            Some("Codex".to_string()),
+            1_700_000_000_000_000_100,
+            None,
+        );
+        interruption_store.insert(&event).unwrap();
+
+        let input = load_conversation_input(
+            &genai_path,
+            Some(&interruption_store),
+            "conv-injected",
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(input.events.len(), 1);
+        assert_eq!(input.interruptions.len(), 1);
+        assert_eq!(
+            input.interruptions[0].interruption_type,
+            InterruptionType::NetworkTimeout.as_str()
+        );
+
+        cleanup_db(&genai_path);
+        cleanup_db(&interruption_path);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn write_conversation_event(path: &Path, conversation_id: &str) {
+        let store = GenAISqliteStore::new_with_path(path).unwrap();
+        let mut call = LLMCall::new(
+            "call-1".to_string(),
+            1_700_000_000_000_000_000,
+            "anthropic".to_string(),
+            "claude".to_string(),
+            LLMRequest {
+                messages: Vec::new(),
+                temperature: None,
+                max_tokens: None,
+                frequency_penalty: None,
+                presence_penalty: None,
+                top_p: None,
+                top_k: None,
+                seed: None,
+                stop_sequences: None,
+                stream: false,
+                tools: None,
+                raw_body: None,
+            },
+            1234,
+            "claude".to_string(),
+        );
+        call.metadata
+            .insert("conversation_id".to_string(), conversation_id.to_string());
+        call.metadata
+            .insert("response_id".to_string(), "trace-1".to_string());
+        call.metadata
+            .insert("user_query".to_string(), "hello".to_string());
+
+        store.export(&[GenAISemanticEvent::LLMCall(call)]);
+        store.flush();
+    }
+
+    fn temp_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "agentsight_{label}_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn cleanup_db(path: &Path) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
 }

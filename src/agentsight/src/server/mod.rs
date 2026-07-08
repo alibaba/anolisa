@@ -14,6 +14,7 @@ use actix_cors::Cors;
 use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, get, web};
 use include_dir::{Dir, include_dir};
 
+use crate::grader::EvaluationStore;
 use crate::health::{HealthChecker, HealthStore};
 use crate::storage::sqlite::InterruptionStore;
 
@@ -45,6 +46,8 @@ pub struct AppState {
     pub health_store: Arc<RwLock<HealthStore>>,
     /// Interruption events store
     pub interruption_store: Option<Arc<InterruptionStore>>,
+    /// Grader evaluation store
+    pub evaluation_store: Arc<EvaluationStore>,
     /// agent-sec security observability integration configuration
     pub security_observability: SecurityObservabilityConfig,
 }
@@ -196,6 +199,11 @@ async fn api_not_found() -> impl Responder {
 pub async fn run_server(host: &str, port: u16, storage_path: PathBuf) -> std::io::Result<()> {
     let security_observability = SecurityObservabilityConfig::default();
 
+    let evaluation_store = Arc::new(
+        EvaluationStore::new_with_path(&storage_path)
+            .map_err(|error| std::io::Error::other(error.to_string()))?,
+    );
+
     // Initialize GenAI SQLite store (needed for HealthChecker to query pending calls)
     let genai_store: Option<Arc<crate::storage::sqlite::GenAISqliteStore>> =
         match crate::storage::sqlite::GenAISqliteStore::new() {
@@ -244,6 +252,7 @@ pub async fn run_server(host: &str, port: u16, storage_path: PathBuf) -> std::io
         start_time: Instant::now(),
         health_store,
         interruption_store,
+        evaluation_store,
         security_observability,
     });
 
@@ -285,6 +294,7 @@ mod tests {
     use actix_web::test as awtest;
     use actix_web::{App, web};
 
+    use crate::grader::EvaluationStore;
     use crate::health::HealthStore;
 
     use super::{
@@ -343,6 +353,9 @@ mod tests {
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
             interruption_store: None,
+            evaluation_store: Arc::new(
+                EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
+            ),
             security_observability: SecurityObservabilityConfig { timeout_ms },
         })
     }
