@@ -219,3 +219,93 @@ fn summary_zero_before_returns_zero_percent() {
     assert_eq!(summary.chars_percent(), 0.0);
     assert_eq!(summary.tokens_percent(), 0.0);
 }
+
+#[test]
+fn actual_savings_percent_zero_session_total() {
+    let summary = StatsSummary {
+        total_records: 1,
+        total_before_chars: 1000,
+        total_after_chars: 500,
+        total_before_tokens: 400,
+        total_after_tokens: 200,
+    };
+    assert_eq!(summary.actual_savings_percent(0), 0.0);
+    let pct = summary.actual_savings_percent(2000);
+    assert!((pct - 10.0).abs() < 0.1);
+}
+
+#[test]
+fn schema_migration_adds_missing_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("migrate.db");
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                source_pid INTEGER,
+                session_id TEXT,
+                tool_use_id TEXT,
+                before_chars INTEGER NOT NULL,
+                before_tokens INTEGER NOT NULL,
+                after_chars INTEGER NOT NULL,
+                after_tokens INTEGER NOT NULL,
+                before_text TEXT,
+                after_text TEXT
+            )",
+        )
+        .unwrap();
+    }
+    let rec = StatsRecorder::new(&db_path).unwrap();
+    let mut record =
+        StatsRecord::new(OperationType::CompressSchema, "cli".into(), 100, 25, 50, 12)
+            .with_mode(CompressionMode::Active)
+            .with_stash(Some(1), Some(0), Some(5));
+    let id = rec.record(&record).unwrap();
+    let got = rec.record_by_id(id).unwrap().unwrap();
+    assert_eq!(got.mode, CompressionMode::Active);
+    assert_eq!(got.stash_writes, Some(1));
+}
+
+#[test]
+fn all_records_handles_corrupt_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("corrupt.db");
+    let rec = StatsRecorder::new(&db_path).unwrap();
+    rec.record(&sample(
+        OperationType::CompressSchema,
+        CompressionMode::Active,
+        "s1",
+    ))
+    .unwrap();
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO stats (timestamp, operation, agent_id, before_chars, before_tokens, after_chars, after_tokens)
+             VALUES ('not-a-date', 'compress_schema', 'cli', 100, 25, 50, 12)",
+            [],
+        )
+        .unwrap();
+    }
+    let records = rec.all_records(None).unwrap();
+    assert!(records.len() >= 1);
+}
+
+#[test]
+fn record_with_before_after_output() {
+    let (rec, _dir) = new_recorder();
+    let record =
+        StatsRecord::new(OperationType::CompressSchema, "cli".into(), 100, 25, 50, 12)
+            .with_before_text("before-text".to_string())
+            .with_after_text("after-text".to_string())
+            .with_output("before-output".to_string(), "after-output".to_string());
+    let id = rec.record(&record).unwrap();
+    let got = rec.record_by_id(id).unwrap().unwrap();
+    assert_eq!(got.before_text.as_deref(), Some("before-text"));
+    assert_eq!(got.after_text.as_deref(), Some("after-text"));
+    assert_eq!(got.before_output.as_deref(), Some("before-output"));
+    assert_eq!(got.after_output.as_deref(), Some("after-output"));
+}

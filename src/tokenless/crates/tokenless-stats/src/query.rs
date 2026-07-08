@@ -737,4 +737,47 @@ mod tests {
             serde_json::from_str(&format_compare_json(&[], &[])).unwrap();
         assert_eq!(parsed.get("saved_percent").unwrap().as_f64().unwrap(), 0.0);
     }
+
+    #[test]
+    fn test_format_summary_with_zero_session_total() {
+        let records = vec![test_record()];
+        let output = format_summary(&records, Some("Test"), Some(0));
+        assert!(output.contains("Overall Savings vs Total Consumption"));
+    }
+
+    #[test]
+    fn test_format_list_with_more_records_than_limit() {
+        let records: Vec<StatsRecord> = (0..5).map(|i| {
+            let mut r = test_record();
+            r.id = i + 1;
+            r
+        }).collect();
+        let output = format_list(&records, 3);
+        assert!(output.contains("Showing 3 record"));
+        assert!(output.contains("and 2 more"));
+    }
+
+    #[test]
+    fn test_format_compare_zero_baseline() {
+        let baseline = vec![compare_record(
+            OperationType::CompressSchema,
+            CompressionMode::DryRun,
+            0,
+            0,
+        )];
+        let tokenless = vec![compare_record(
+            OperationType::CompressSchema,
+            CompressionMode::Active,
+            0,
+            0,
+        )];
+        let out = format_compare(&baseline, &tokenless);
+        assert!(out.contains("0.0%"));
+    }
+
+    #[test]
+    fn test_format_list_empty() {
+        let output = format_list(&[], 10);
+        assert!(output.contains("No records found"));
+    }
 }

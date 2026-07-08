@@ -399,8 +399,11 @@ fn open_stash_store(override_path: Option<&str>) -> Option<Arc<dyn StashStore>> 
 
 fn run() -> Result<(), (String, i32)> {
     let cli = Cli::parse();
+    run_command(cli.command)
+}
 
-    match cli.command {
+fn run_command(command: Commands) -> Result<(), (String, i32)> {
+    match command {
         Commands::CompressSchema {
             file,
             batch,

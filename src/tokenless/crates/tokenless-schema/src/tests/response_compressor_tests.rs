@@ -490,3 +490,95 @@ fn test_is_empty_value() {
     assert!(!compressor.is_empty_value(&json!(0)));
     assert!(!compressor.is_empty_value(&json!(null)));
 }
+
+#[test]
+fn test_depth_truncation_with_stash() {
+    use std::sync::Arc;
+    use tokenless_ccr::{InMemoryStore, StashStore, extract_hash};
+
+    let store = Arc::new(InMemoryStore::new());
+    let compressor = ResponseCompressor::new()
+        .with_max_depth(1)
+        .with_stash_store(store.clone());
+    let deep = json!({"level1": {"level2": {"level3": "deep"}}});
+    let result = compressor.compress(&deep);
+    let truncated = result["level1"]["level2"].as_str().unwrap();
+    assert!(truncated.contains("truncated at depth"));
+    assert!(truncated.contains("tokenless:"));
+    let hash = extract_hash(truncated).unwrap();
+    let retrieved = store.retrieve(hash).unwrap().unwrap();
+    let recovered: Value = serde_json::from_str(&retrieved).unwrap();
+    assert_eq!(recovered["level3"], "deep");
+}
+
+#[test]
+fn test_depth_truncation_various_types() {
+    let compressor = ResponseCompressor::new().with_max_depth(0);
+    let arr = json!({"a": [1, 2, 3]});
+    let result = compressor.compress(&arr);
+    let t = result["a"].as_str().unwrap();
+    assert!(t.contains("array truncated at depth"));
+
+    let s = json!({"a": "hello"});
+    let result = compressor.compress(&s);
+    let t = result["a"].as_str().unwrap();
+    assert!(t.contains("string truncated at depth"));
+
+    let n = json!({"a": 42});
+    let result = compressor.compress(&n);
+    let t = result["a"].as_str().unwrap();
+    assert!(t.contains("number truncated at depth"));
+
+    let b = json!({"a": true});
+    let result = compressor.compress(&b);
+    let t = result["a"].as_str().unwrap();
+    assert!(t.contains("bool truncated at depth"));
+
+    let null_val = json!({"a": null});
+    let result = compressor.compress(&null_val);
+    let t = result["a"].as_str().unwrap();
+    assert!(t.contains("null truncated at depth"));
+}
+
+#[test]
+fn test_depth_truncation_without_stash() {
+    let compressor = ResponseCompressor::new().with_max_depth(1);
+    let deep = json!({"level1": {"level2": {"level3": "deep"}}});
+    let result = compressor.compress(&deep);
+    let truncated = result["level1"]["level2"].as_str().unwrap();
+    assert!(truncated.contains("truncated at depth"));
+    assert!(!truncated.contains("tokenless:"));
+}
+
+#[test]
+fn test_string_truncation_with_stash() {
+    use std::sync::Arc;
+    use tokenless_ccr::{InMemoryStore, StashStore, extract_hash};
+
+    let store = Arc::new(InMemoryStore::new());
+    let compressor = ResponseCompressor::new()
+        .with_truncate_strings_at(100)
+        .with_stash_store(store.clone());
+    let long = "x".repeat(500);
+    let result = compressor.compress(&json!(long));
+    let s = result.as_str().unwrap();
+    assert!(s.contains("tokenless:"));
+    let hash = extract_hash(s).unwrap();
+    let retrieved = store.retrieve(hash).unwrap().unwrap();
+    assert_eq!(retrieved, long);
+}
+
+#[test]
+fn test_stash_dropped_empty_not_engaged() {
+    use std::sync::Arc;
+    use tokenless_ccr::InMemoryStore;
+
+    let store = Arc::new(InMemoryStore::new());
+    let compressor = ResponseCompressor::new()
+        .with_truncate_arrays_at(5)
+        .with_stash_store(store.clone());
+    let arr = json!([1, 2, 3]);
+    let result = compressor.compress(&arr);
+    assert_eq!(result.as_array().unwrap().len(), 3);
+    assert_eq!(store.len(), 0);
+}

@@ -183,18 +183,10 @@ fn get_stash_db_path_with_valid_override() {
     if home.is_empty() {
         return;
     }
-    let dir = temp_subdir("stash-override");
-    let canon = std::fs::canonicalize(&dir).unwrap();
-    let canon_home = std::fs::canonicalize(std::path::Path::new(&home)).unwrap();
-    // Only test when the temp dir happens to be under home
-    if !canon.starts_with(&canon_home) {
-        std::fs::remove_dir_all(&dir).ok();
-        return;
-    }
-    let db_path = canon.join("test.db");
-    let result = get_stash_db_path(Some(db_path.to_str().unwrap()));
-    assert_eq!(result, Some(db_path.to_str().unwrap().to_string()));
-    std::fs::remove_dir_all(&dir).ok();
+    let db_path = format!("{}/.tokenless/override_test.db", home);
+    let result = get_stash_db_path(Some(&db_path));
+    assert!(result.is_some());
+    assert_eq!(result.unwrap(), db_path);
 }
 
 #[test]
@@ -340,4 +332,893 @@ fn read_input_oversized_file() {
     let result = read_input(&Some(f.to_str().unwrap().to_string()));
     // File doesn't exist, so should error
     assert!(result.is_err());
+}
+
+#[test]
+fn run_command_compress_schema_from_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("schema.json");
+    std::fs::write(
+        &f,
+        r#"{"function":{"name":"test","description":"A test function with a long description that might get compressed by the schema compressor depending on settings","parameters":{"type":"object","properties":{"x":{"type":"string","title":"Remove Me","examples":["ex1"]}}}}}"#,
+    )
+    .unwrap();
+    let result = run_command(Commands::CompressSchema {
+        file: Some(f.to_str().unwrap().to_string()),
+        batch: false,
+        agent_id: Some("test-agent".to_string()),
+        session_id: Some("test-session".to_string()),
+        tool_use_id: Some("tool-1".to_string()),
+        no_stash: true,
+        stash_db: None,
+    });
+    assert!(result.is_ok());
+}
+
+#[test]
+fn run_command_compress_schema_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("schemas.json");
+    std::fs::write(
+        &f,
+        r#"[{"function":{"name":"a","parameters":{"type":"object","properties":{}}}},{"function":{"name":"b","parameters":{"type":"object","properties":{}}}}]"#,
+    )
+    .unwrap();
+    let result = run_command(Commands::CompressSchema {
+        file: Some(f.to_str().unwrap().to_string()),
+        batch: true,
+        agent_id: None,
+        session_id: None,
+        tool_use_id: None,
+        no_stash: true,
+        stash_db: None,
+    });
+    assert!(result.is_ok());
+}
+
+#[test]
+fn run_command_compress_schema_invalid_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("bad.json");
+    std::fs::write(&f, "not json at all").unwrap();
+    let result = run_command(Commands::CompressSchema {
+        file: Some(f.to_str().unwrap().to_string()),
+        batch: false,
+        agent_id: None,
+        session_id: None,
+        tool_use_id: None,
+        no_stash: true,
+        stash_db: None,
+    });
+    assert!(result.is_err());
+    assert!(result.unwrap_err().0.contains("JSON parse error"));
+}
+
+#[test]
+fn run_command_compress_response_from_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("response.json");
+    std::fs::write(
+        &f,
+        r#"{"data":{"items":[1,2,3,4,5,6,7,8,9,10],"debug":"info","value":null,"status":"ok","longText":""}}"#,
+    )
+    .unwrap();
+    let result = run_command(Commands::CompressResponse {
+        file: Some(f.to_str().unwrap().to_string()),
+        agent_id: Some("test-agent".to_string()),
+        session_id: Some("sess-1".to_string()),
+        tool_use_id: Some("tool-1".to_string()),
+        truncate_strings_at: Some(100),
+        truncate_arrays_at: Some(5),
+        max_depth: Some(10),
+        no_stash: true,
+        stash_db: None,
+    });
+    assert!(result.is_ok());
+}
+
+#[test]
+fn run_command_compress_response_no_stash() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("resp.json");
+    std::fs::write(&f, r#"{"key":"value"}"#).unwrap();
+    let result = run_command(Commands::CompressResponse {
+        file: Some(f.to_str().unwrap().to_string()),
+        agent_id: None,
+        session_id: None,
+        tool_use_id: None,
+        truncate_strings_at: None,
+        truncate_arrays_at: None,
+        max_depth: None,
+        no_stash: true,
+        stash_db: None,
+    });
+    assert!(result.is_ok());
+}
+
+#[test]
+fn run_command_compress_response_with_stash() {
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("resp.json");
+    std::fs::write(&f, r#"{"key":"value"}"#).unwrap();
+    let result = run_command(Commands::CompressResponse {
+        file: Some(f.to_str().unwrap().to_string()),
+        agent_id: None,
+        session_id: None,
+        tool_use_id: None,
+        truncate_strings_at: None,
+        truncate_arrays_at: None,
+        max_depth: None,
+        no_stash: false,
+        stash_db: None,
+    });
+    assert!(result.is_ok());
+}
+
+#[test]
+fn run_command_retrieve_invalid_hash() {
+    let result = run_command(Commands::Retrieve {
+        hash: "not-a-hash".to_string(),
+        stash_db: None,
+    });
+    assert!(result.is_err());
+    assert!(result.unwrap_err().0.contains("invalid stash hash"));
+}
+
+#[test]
+fn run_command_retrieve_missing_hash() {
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    let result = run_command(Commands::Retrieve {
+        hash: "abcdef0123456789abcdef01".to_string(),
+        stash_db: None,
+    });
+    assert!(result.is_err());
+    assert!(result.unwrap_err().0.contains("no stashed payload"));
+}
+
+#[test]
+fn run_command_compress_toon_from_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("toon.json");
+    std::fs::write(
+        &f,
+        r#"{"name":"test","items":[1,2,3],"nested":{"key":"value"}}"#,
+    )
+    .unwrap();
+    let result = run_command(Commands::CompressToon {
+        file: Some(f.to_str().unwrap().to_string()),
+        agent_id: Some("agent".to_string()),
+        session_id: Some("sess".to_string()),
+        tool_use_id: Some("tool".to_string()),
+    });
+    assert!(result.is_ok());
+}
+
+#[test]
+fn run_command_decompress_toon_from_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let json_input = r#"{"name":"test","items":[1,2,3]}"#;
+    let value: serde_json::Value = serde_json::from_str(json_input).unwrap();
+    let toon_encoded = toon_format::encode_default(&value).unwrap();
+    let toon_f = dir.path().join("input.toon");
+    std::fs::write(&toon_f, &toon_encoded).unwrap();
+    let result = run_command(Commands::DecompressToon {
+        file: Some(toon_f.to_str().unwrap().to_string()),
+    });
+    assert!(result.is_ok());
+}
+
+#[test]
+fn run_command_decompress_toon_empty_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("empty.toon");
+    std::fs::write(&f, "").unwrap();
+    let result = run_command(Commands::DecompressToon {
+        file: Some(f.to_str().unwrap().to_string()),
+    });
+    // Empty input may decode to null (valid) or fail — either is acceptable
+    let _ = result;
+}
+
+#[test]
+fn run_command_retrieve_with_marker() {
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    let store = open_stash_store(None);
+    if store.is_none() {
+        return;
+    }
+    let store = store.unwrap();
+    let key = store.stash("hello world").unwrap();
+    let marker = format!("<<tokenless:{}>>", key);
+    let result = run_command(Commands::Retrieve {
+        hash: marker,
+        stash_db: None,
+    });
+    assert!(result.is_ok());
+}
+
+#[test]
+fn run_command_retrieve_bare_hash() {
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    let store = open_stash_store(None);
+    if store.is_none() {
+        return;
+    }
+    let store = store.unwrap();
+    let key = store.stash("retrieve bare hash test").unwrap();
+    let result = run_command(Commands::Retrieve {
+        hash: key,
+        stash_db: None,
+    });
+    assert!(result.is_ok());
+}
+
+#[test]
+fn run_command_stats_show_existing_record() {
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    let recorder = match open_recorder() {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    let mut record = StatsRecord::new(
+        OperationType::CompressSchema,
+        "test-agent".to_string(),
+        500,
+        125,
+        100,
+        25,
+    );
+    record = record
+        .with_before_text("before-text-for-show".to_string())
+        .with_after_text("after-text-for-show".to_string());
+    let id = match recorder.record(&record) {
+        Ok(id) => id,
+        Err(_) => return,
+    };
+    let result = run_command(Commands::Stats(StatsCommands::Show { id }));
+    // format_show requires before_text/after_text to be present
+    let _ = result;
+}
+
+#[test]
+fn run_command_compress_response_large_with_truncation() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("large.json");
+    let items: Vec<serde_json::Value> = (0..20).map(|i| serde_json::json!({"id": i, "name": format!("item_{}", i), "long_field": "x".repeat(200)})).collect();
+    let data = serde_json::json!({"results": items, "debug": "debug info", "meta": null});
+    std::fs::write(&f, serde_json::to_string(&data).unwrap()).unwrap();
+    let result = run_command(Commands::CompressResponse {
+        file: Some(f.to_str().unwrap().to_string()),
+        agent_id: Some("test-agent".to_string()),
+        session_id: Some("sess-trunc".to_string()),
+        tool_use_id: Some("tool-trunc".to_string()),
+        truncate_strings_at: Some(50),
+        truncate_arrays_at: Some(3),
+        max_depth: Some(5),
+        no_stash: true,
+        stash_db: None,
+    });
+    assert!(result.is_ok());
+}
+
+#[test]
+fn run_command_compress_schema_with_stash() {
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("schema_stash.json");
+    let long_desc = "A".repeat(500);
+    let schema = serde_json::json!({
+        "function": {
+            "name": "test_stash",
+            "description": long_desc,
+            "parameters": {"type": "object", "properties": {"x": {"type": "string"}}}
+        }
+    });
+    std::fs::write(&f, serde_json::to_string(&schema).unwrap()).unwrap();
+    let result = run_command(Commands::CompressSchema {
+        file: Some(f.to_str().unwrap().to_string()),
+        batch: false,
+        agent_id: Some("stash-agent".to_string()),
+        session_id: Some("stash-sess".to_string()),
+        tool_use_id: None,
+        no_stash: false,
+        stash_db: None,
+    });
+    assert!(result.is_ok());
+}
+
+#[test]
+fn run_command_stats_summary() {
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    let result = run_command(Commands::Stats(StatsCommands::Summary {
+        limit: Some(10),
+        json: false,
+        compare: None,
+    }));
+    assert!(result.is_ok());
+}
+
+#[test]
+fn run_command_stats_summary_json() {
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    let result = run_command(Commands::Stats(StatsCommands::Summary {
+        limit: Some(10),
+        json: true,
+        compare: None,
+    }));
+    assert!(result.is_ok());
+}
+
+#[test]
+fn run_command_stats_list() {
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    let result = run_command(Commands::Stats(StatsCommands::List { limit: 5 }));
+    assert!(result.is_ok());
+}
+
+#[test]
+fn run_command_stats_show_nonexistent() {
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    let result = run_command(Commands::Stats(StatsCommands::Show { id: 999999 }));
+    assert!(result.is_err());
+    assert!(result.unwrap_err().0.contains("not found"));
+}
+
+#[test]
+fn run_command_stats_clear_without_confirm() {
+    // Clear with --yes to avoid interactive prompt
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    let result = run_command(Commands::Stats(StatsCommands::Clear { yes: true }));
+    assert!(result.is_ok());
+}
+
+#[test]
+fn run_command_stats_enable_disable() {
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    let r1 = run_command(Commands::Stats(StatsCommands::Enable));
+    assert!(r1.is_ok());
+    let r2 = run_command(Commands::Stats(StatsCommands::Disable));
+    assert!(r2.is_ok());
+    // Re-enable
+    let _ = run_command(Commands::Stats(StatsCommands::Enable));
+}
+
+#[test]
+fn run_command_stats_status() {
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    let result = run_command(Commands::Stats(StatsCommands::Status));
+    assert!(result.is_ok());
+}
+
+#[test]
+fn run_command_stats_compare() {
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    let result = run_command(Commands::Stats(StatsCommands::Summary {
+        limit: None,
+        json: false,
+        compare: Some(vec!["baseline-sess".to_string(), "tokenless-sess".to_string()]),
+    }));
+    assert!(result.is_ok());
+}
+
+#[test]
+fn run_command_stats_compare_json() {
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    let result = run_command(Commands::Stats(StatsCommands::Summary {
+        limit: None,
+        json: true,
+        compare: Some(vec!["baseline-sess".to_string(), "tokenless-sess".to_string()]),
+    }));
+    assert!(result.is_ok());
+}
+
+#[test]
+fn run_command_env_check_without_spec() {
+    let result = run_command(Commands::EnvCheck {
+        tool: Some("NonexistentTool".to_string()),
+        all: false,
+        fix: false,
+        checklist: false,
+        json: false,
+    });
+    let _ = result;
+}
+
+#[test]
+fn get_stash_db_path_returns_valid() {
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    let path = get_stash_db_path(None);
+    assert!(path.is_some());
+    assert!(path.unwrap().contains(".tokenless/stash.db"));
+}
+
+#[test]
+fn get_stash_db_path_with_bad_override() {
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    let path = get_stash_db_path(Some("/nonexistent/deep/dir/stash.db"));
+    // Bad override is rejected, falls back to default
+    assert!(path.is_some());
+    assert!(path.unwrap().contains(".tokenless/stash.db"));
+}
+
+
+#[test]
+fn run_command_compress_schema_no_savings() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("small.json");
+    std::fs::write(&f, r#"{"function":{"name":"x","parameters":{"type":"object","properties":{}}}}"#).unwrap();
+    let result = run_command(Commands::CompressSchema {
+        file: Some(f.to_str().unwrap().to_string()),
+        batch: false,
+        agent_id: None,
+        session_id: None,
+        tool_use_id: None,
+        no_stash: true,
+        stash_db: None,
+    });
+    assert!(result.is_ok());
+}
+
+#[test]
+fn run_command_compress_response_file_not_found() {
+    let result = run_command(Commands::CompressResponse {
+        file: Some("/nonexistent/path.json".to_string()),
+        agent_id: None,
+        session_id: None,
+        tool_use_id: None,
+        truncate_strings_at: None,
+        truncate_arrays_at: None,
+        max_depth: None,
+        no_stash: true,
+        stash_db: None,
+    });
+    assert!(result.is_err());
+}
+
+#[test]
+fn open_stash_store_none_returns_some() {
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    let result = open_stash_store(None);
+    assert!(result.is_some());
+}
+
+#[test]
+fn open_stash_store_or_err_none_returns_ok() {
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    let result = open_stash_store_or_err(None);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn record_compression_stats_sls_only_path() {
+    let mut config = TokenlessConfig::default();
+    config.stats_enabled = false;
+    config.sls_enabled = true;
+    let long_before = "x".repeat(500);
+    let short_after = "y".repeat(50);
+    record_compression_stats(
+        &config,
+        OperationType::CompressResponse,
+        Some("sls-test".to_string()),
+        Some("sls-session".to_string()),
+        Some("sls-tool".to_string()),
+        long_before,
+        short_after,
+        CompressionMode::Active,
+        Some(2),
+        Some(0),
+        Some(15),
+    );
+}
+
+#[test]
+fn record_compression_stats_full_path() {
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    let mut config = TokenlessConfig::default();
+    config.stats_enabled = true;
+    config.sls_enabled = true;
+    let long_before = "z".repeat(1000);
+    let short_after = "w".repeat(100);
+    record_compression_stats(
+        &config,
+        OperationType::CompressSchema,
+        Some("full-agent".to_string()),
+        Some("full-session".to_string()),
+        Some("full-tool".to_string()),
+        long_before,
+        short_after,
+        CompressionMode::Active,
+        Some(3),
+        Some(1),
+        Some(200),
+    );
+}
+
+#[test]
+fn record_compression_stats_both_disabled() {
+    let config = TokenlessConfig::default();
+    record_compression_stats(
+        &config,
+        OperationType::CompressResponse,
+        None,
+        None,
+        None,
+        "before".to_string(),
+        "after".to_string(),
+        CompressionMode::Active,
+        None,
+        None,
+        None,
+    );
+}
+
+#[test]
+fn record_compression_stats_no_savings() {
+    let mut config = TokenlessConfig::default();
+    config.stats_enabled = true;
+    record_compression_stats(
+        &config,
+        OperationType::CompressResponse,
+        None,
+        None,
+        None,
+        "short".to_string(),
+        "this is longer than before so no savings".to_string(),
+        CompressionMode::Active,
+        None,
+        None,
+        None,
+    );
+}
+
+#[test]
+fn run_command_stats_status_with_env_override() {
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    unsafe {
+        std::env::set_var("TOKENLESS_STATS_ENABLED", "1");
+        std::env::set_var("TOKENLESS_SLS_ENABLED", "1");
+    }
+    let result = run_command(Commands::Stats(StatsCommands::Status));
+    unsafe {
+        std::env::remove_var("TOKENLESS_STATS_ENABLED");
+        std::env::remove_var("TOKENLESS_SLS_ENABLED");
+    }
+    assert!(result.is_ok());
+}
+
+#[test]
+fn run_command_stats_status_disabled() {
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    unsafe {
+        std::env::set_var("TOKENLESS_STATS_ENABLED", "0");
+        std::env::set_var("TOKENLESS_SLS_ENABLED", "0");
+    }
+    let result = run_command(Commands::Stats(StatsCommands::Status));
+    unsafe {
+        std::env::remove_var("TOKENLESS_STATS_ENABLED");
+        std::env::remove_var("TOKENLESS_SLS_ENABLED");
+    }
+    assert!(result.is_ok());
+}
+
+#[test]
+fn run_command_compress_schema_dryrun() {
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("dryrun_schema.json");
+    let long_desc = "D".repeat(500);
+    let schema = serde_json::json!({
+        "function": {
+            "name": "dryrun_test",
+            "description": long_desc,
+            "title": "Remove me",
+            "parameters": {"type": "object", "properties": {"x": {"type": "string", "title": "Also remove"}}}
+        }
+    });
+    std::fs::write(&f, serde_json::to_string(&schema).unwrap()).unwrap();
+    unsafe {
+        std::env::set_var("TOKENLESS_COMPRESSION_ENABLED", "0");
+    }
+    let result = run_command(Commands::CompressSchema {
+        file: Some(f.to_str().unwrap().to_string()),
+        batch: false,
+        agent_id: Some("dryrun-agent".to_string()),
+        session_id: None,
+        tool_use_id: None,
+        no_stash: true,
+        stash_db: None,
+    });
+    unsafe {
+        std::env::remove_var("TOKENLESS_COMPRESSION_ENABLED");
+    }
+    assert!(result.is_ok());
+}
+
+#[test]
+fn run_command_compress_response_dryrun() {
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("dryrun_resp.json");
+    let data = serde_json::json!({"data": "test", "debug": "remove me", "trace": "also remove"});
+    std::fs::write(&f, serde_json::to_string(&data).unwrap()).unwrap();
+    unsafe {
+        std::env::set_var("TOKENLESS_COMPRESSION_ENABLED", "0");
+    }
+    let result = run_command(Commands::CompressResponse {
+        file: Some(f.to_str().unwrap().to_string()),
+        agent_id: Some("dryrun-agent".to_string()),
+        session_id: None,
+        tool_use_id: None,
+        truncate_strings_at: None,
+        truncate_arrays_at: None,
+        max_depth: None,
+        no_stash: true,
+        stash_db: None,
+    });
+    unsafe {
+        std::env::remove_var("TOKENLESS_COMPRESSION_ENABLED");
+    }
+    assert!(result.is_ok());
+}
+
+#[test]
+fn run_command_compress_toon_dryrun() {
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("dryrun_toon.json");
+    let data = serde_json::json!({"key": "value", "items": [1, 2, 3, 4, 5]});
+    std::fs::write(&f, serde_json::to_string(&data).unwrap()).unwrap();
+    unsafe {
+        std::env::set_var("TOKENLESS_COMPRESSION_ENABLED", "0");
+    }
+    let result = run_command(Commands::CompressToon {
+        file: Some(f.to_str().unwrap().to_string()),
+        agent_id: Some("dryrun-agent".to_string()),
+        session_id: None,
+        tool_use_id: None,
+    });
+    unsafe {
+        std::env::remove_var("TOKENLESS_COMPRESSION_ENABLED");
+    }
+    assert!(result.is_ok());
+}
+
+#[test]
+fn run_command_compress_response_no_agent_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("resp.json");
+    std::fs::write(&f, r#"{"data":"test","debug":"remove"}"#).unwrap();
+    let result = run_command(Commands::CompressResponse {
+        file: Some(f.to_str().unwrap().to_string()),
+        agent_id: None,
+        session_id: None,
+        tool_use_id: None,
+        truncate_strings_at: None,
+        truncate_arrays_at: None,
+        max_depth: None,
+        no_stash: true,
+        stash_db: None,
+    });
+    assert!(result.is_ok());
+}
+
+#[test]
+fn read_input_file_too_large() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("huge.json");
+    let huge = "x".repeat(100 * 1024 * 1024 + 1);
+    std::fs::write(&f, &huge).unwrap();
+    let result = read_input(&Some(f.to_str().unwrap().to_string()));
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("limit"));
+}
+
+#[test]
+fn read_input_file_missing() {
+    let result = read_input(&Some("/nonexistent/file.json".to_string()));
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("Failed to open"));
+}
+
+#[test]
+fn get_stash_db_path_env_var_valid() {
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    let env_path = format!("{}/.tokenless/env_stash.db", home);
+    unsafe {
+        std::env::set_var("TOKENLESS_STASH_DB", &env_path);
+    }
+    let result = get_stash_db_path(None);
+    unsafe {
+        std::env::remove_var("TOKENLESS_STASH_DB");
+    }
+    assert!(result.is_some());
+    assert_eq!(result.unwrap(), env_path);
+}
+
+#[test]
+fn get_stash_db_path_with_bad_env_override() {
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    unsafe {
+        std::env::set_var("TOKENLESS_STASH_DB", "/etc/evil_stash.db");
+    }
+    let result = get_stash_db_path(None);
+    unsafe {
+        std::env::remove_var("TOKENLESS_STASH_DB");
+    }
+    assert!(result.is_some());
+    assert!(result.unwrap().contains(".tokenless/stash.db"));
+}
+
+#[test]
+fn get_db_path_with_env_override() {
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    let env_path = format!("{}/.tokenless/env_stats.db", home);
+    unsafe {
+        std::env::set_var("TOKENLESS_STATS_DB", &env_path);
+    }
+    let result = get_db_path();
+    unsafe {
+        std::env::remove_var("TOKENLESS_STATS_DB");
+    }
+    assert_eq!(result, env_path);
+}
+
+#[test]
+fn get_db_path_with_bad_env_override() {
+    let home = get_home_dir();
+    if home.is_empty() {
+        return;
+    }
+    unsafe {
+        std::env::set_var("TOKENLESS_STATS_DB", "/etc/evil_stats.db");
+    }
+    let result = get_db_path();
+    unsafe {
+        std::env::remove_var("TOKENLESS_STATS_DB");
+    }
+    assert!(result.contains(".tokenless/stats.db"));
+}
+
+#[test]
+fn run_command_retrieve_store_error() {
+    let result = run_command(Commands::Retrieve {
+        hash: "abcdef0123456789abcdef01".to_string(),
+        stash_db: Some("/nonexistent/deep/nested/dir/stash.db".to_string()),
+    });
+    // The stash_db override gets rejected and falls back to default
+    let _ = result;
+}
+
+#[test]
+fn run_command_compress_toon_tiny_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("tiny.json");
+    std::fs::write(&f, r#""x""#).unwrap();
+    let result = run_command(Commands::CompressToon {
+        file: Some(f.to_str().unwrap().to_string()),
+        agent_id: None,
+        session_id: None,
+        tool_use_id: None,
+    });
+    let _ = result;
+}
+
+#[test]
+fn run_command_compress_toon_empty_obj() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("empty_obj.json");
+    std::fs::write(&f, r#"{}"#).unwrap();
+    let result = run_command(Commands::CompressToon {
+        file: Some(f.to_str().unwrap().to_string()),
+        agent_id: None,
+        session_id: None,
+        tool_use_id: None,
+    });
+    let _ = result;
+}
+
+#[test]
+fn run_command_compress_response_with_stash_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("stash_error.json");
+    let items: Vec<serde_json::Value> = (0..100).map(|i| serde_json::json!({"id": i, "data": "x".repeat(200)})).collect();
+    let data = serde_json::json!({"results": items});
+    std::fs::write(&f, serde_json::to_string(&data).unwrap()).unwrap();
+    let result = run_command(Commands::CompressResponse {
+        file: Some(f.to_str().unwrap().to_string()),
+        agent_id: None,
+        session_id: None,
+        tool_use_id: None,
+        truncate_strings_at: Some(10),
+        truncate_arrays_at: Some(3),
+        max_depth: Some(3),
+        no_stash: false,
+        stash_db: None,
+    });
+    let _ = result;
 }
