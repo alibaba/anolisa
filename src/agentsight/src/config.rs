@@ -214,6 +214,45 @@ impl FromStr for TcpTarget {
     }
 }
 
+/// Server authentication configuration (JSON).
+#[derive(serde::Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct JsonServerAuth {
+    pub enabled: Option<bool>,
+    /// Fixed token string (overrides auto-generation when non-empty).
+    pub token: Option<String>,
+    /// Custom path for the token file.
+    pub token_file: Option<String>,
+}
+
+/// Server configuration block (JSON).
+#[derive(serde::Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct JsonServer {
+    pub auth: Option<JsonServerAuth>,
+}
+
+/// Runtime server authentication configuration.
+#[derive(Debug, Clone)]
+pub struct ServerAuthConfig {
+    /// Whether dashboard authentication is enabled.
+    pub enabled: bool,
+    /// Fixed token string (overrides auto-generation).
+    pub token: Option<String>,
+    /// Custom path for the token file.
+    pub token_file: Option<PathBuf>,
+}
+
+impl Default for ServerAuthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            token: None,
+            token_file: None,
+        }
+    }
+}
+
 /// Internal JSON structures for parsing the config file (same format as FFI).
 #[derive(serde::Deserialize)]
 struct JsonFullConfig {
@@ -243,6 +282,8 @@ struct JsonFullConfig {
     features: Option<JsonFeatures>,
     #[serde(default)]
     runtime_limits: Option<JsonRuntimeLimits>,
+    #[serde(default)]
+    server: Option<JsonServer>,
 }
 
 /// DeadLoop 检测配置区段
@@ -747,6 +788,10 @@ pub struct AgentsightConfig {
     // --- Runtime Resource Limits ---
     /// Bounded channel capacities, pending queue limits, etc.
     pub runtime_limits: RuntimeLimits,
+
+    // --- Server Authentication ---
+    /// Dashboard authentication configuration.
+    pub server_auth: ServerAuthConfig,
 }
 
 impl Default for AgentsightConfig {
@@ -821,6 +866,9 @@ impl Default for AgentsightConfig {
 
             // Runtime resource limits
             runtime_limits: RuntimeLimits::default(),
+
+            // Server authentication
+            server_auth: ServerAuthConfig::default(),
         }
     }
 }
@@ -1053,6 +1101,27 @@ impl AgentsightConfig {
                     .unwrap_or(DEFAULT_CONNECTION_IDLE_TIMEOUT_SECS),
                 ring_buffer_mb: limits.ring_buffer_mb.unwrap_or(DEFAULT_RING_BUFFER_MB),
             };
+        }
+
+        // Parse server auth configuration
+        if let Some(ref server) = parsed.server {
+            if let Some(ref auth) = server.auth {
+                if let Some(enabled) = auth.enabled {
+                    self.server_auth.enabled = enabled;
+                }
+                if let Some(ref token) = auth.token {
+                    let trimmed = token.trim();
+                    if !trimmed.is_empty() {
+                        self.server_auth.token = Some(trimmed.to_string());
+                    }
+                }
+                if let Some(ref token_file) = auth.token_file {
+                    let trimmed = token_file.trim();
+                    if !trimmed.is_empty() {
+                        self.server_auth.token_file = Some(PathBuf::from(trimmed));
+                    }
+                }
+            }
         }
 
         let (cmdline_rules, https_rules, http_targets) = extract_rules(&parsed);
@@ -1795,5 +1864,69 @@ mod tests {
         assert!(!config.features.audit_enabled);
         assert!(config.features.token_consumption_enabled);
         assert!(config.features.sls_logtail_enabled);
+    }
+
+    #[test]
+    fn load_from_json_parses_server_auth_config() {
+        let json = r#"{
+            "server": {
+                "auth": {
+                    "enabled": true,
+                    "token": "my-secret-token",
+                    "token_file": "/custom/token/path"
+                }
+            }
+        }"#;
+        let mut config = AgentsightConfig::new();
+        config.load_from_json(json).unwrap();
+        assert!(config.server_auth.enabled);
+        assert_eq!(
+            config.server_auth.token,
+            Some("my-secret-token".to_string())
+        );
+        assert_eq!(
+            config.server_auth.token_file,
+            Some(PathBuf::from("/custom/token/path"))
+        );
+    }
+
+    #[test]
+    fn load_from_json_server_auth_defaults_when_absent() {
+        let json = r#"{}"#;
+        let mut config = AgentsightConfig::new();
+        config.load_from_json(json).unwrap();
+        assert!(config.server_auth.enabled); // default is true
+        assert!(config.server_auth.token.is_none());
+        assert!(config.server_auth.token_file.is_none());
+    }
+
+    #[test]
+    fn load_from_json_server_auth_disabled() {
+        let json = r#"{
+            "server": {
+                "auth": {
+                    "enabled": false
+                }
+            }
+        }"#;
+        let mut config = AgentsightConfig::new();
+        config.load_from_json(json).unwrap();
+        assert!(!config.server_auth.enabled);
+    }
+
+    #[test]
+    fn load_from_json_server_auth_empty_token_ignored() {
+        let json = r#"{
+            "server": {
+                "auth": {
+                    "token": "   ",
+                    "token_file": ""
+                }
+            }
+        }"#;
+        let mut config = AgentsightConfig::new();
+        config.load_from_json(json).unwrap();
+        assert!(config.server_auth.token.is_none());
+        assert!(config.server_auth.token_file.is_none());
     }
 }

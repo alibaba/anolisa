@@ -1,5 +1,6 @@
 //! Serve subcommand — start the API server
 
+use agentsight::config::ServerAuthConfig;
 use agentsight::server::run_server;
 use agentsight::storage::sqlite::GenAISqliteStore;
 use structopt::StructOpt;
@@ -18,6 +19,14 @@ pub struct ServeCommand {
     /// Custom database path
     #[structopt(long)]
     pub db: Option<String>,
+
+    /// Disable dashboard authentication (for development only)
+    #[structopt(long)]
+    pub no_auth: bool,
+
+    /// Override the dashboard auth token
+    #[structopt(long)]
+    pub token: Option<String>,
 }
 
 impl ServeCommand {
@@ -32,8 +41,14 @@ impl ServeCommand {
         let host = self.host.clone();
         let port = self.port;
 
+        let auth_config = ServerAuthConfig {
+            enabled: !self.no_auth,
+            token: self.token.clone(),
+            token_file: None,
+        };
+
         actix_web::rt::System::new().block_on(async move {
-            if let Err(e) = run_server(&host, port, db_path).await {
+            if let Err(e) = run_server(&host, port, db_path, auth_config).await {
                 eprintln!("Server error: {e}");
                 std::process::exit(1);
             }

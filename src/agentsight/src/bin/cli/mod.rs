@@ -8,6 +8,8 @@
 //! - `interruption`: Query and manage session interruption events
 
 pub mod audit;
+#[cfg(feature = "server")]
+pub mod dashboard;
 pub mod discover;
 pub mod interruption;
 pub mod metrics;

@@ -74,7 +74,12 @@ export interface TraceEventDetail {
 // ─── Internal helpers ────────────────────────────────────────────────────────
 
 async function apiFetch<T>(url: string): Promise<T> {
-  const res = await fetch(url);
+  const res = await fetch(url, { credentials: 'same-origin' });
+  if (res.status === 401) {
+    // Session expired or invalid — redirect to login
+    window.location.hash = '#/login';
+    throw new Error('Authentication required');
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
     throw new Error(`API ${url} -> ${res.status}: ${text}`);
@@ -477,7 +482,7 @@ export async function fetchInterruptionCount(
 export async function resolveInterruption(interruptionId: string): Promise<void> {
   const res = await fetch(
     `${API_BASE}/api/interruptions/${encodeURIComponent(interruptionId)}/resolve`,
-    { method: 'POST' }
+    { method: 'POST', credentials: 'same-origin' }
   );
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
@@ -529,7 +534,7 @@ export async function fetchAgentHealth(opts?: { includeClients?: boolean }): Pro
  * Acknowledge and remove an offline agent by PID.
  */
 export async function deleteAgentHealth(pid: number): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/agent-health/${pid}`, { method: 'DELETE' });
+  const res = await fetch(`${API_BASE}/api/agent-health/${pid}`, { method: 'DELETE', credentials: 'same-origin' });
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
     throw new Error(`DELETE /api/agent-health/${pid} -> ${res.status}: ${text}`);
@@ -541,7 +546,7 @@ export async function deleteAgentHealth(pid: number): Promise<void> {
  * Returns the new PID on success.
  */
 export async function restartAgentHealth(pid: number): Promise<{ ok: boolean; new_pid: number; cmd: string[] }> {
-  const res = await fetch(`${API_BASE}/api/agent-health/${pid}/restart`, { method: 'POST' });
+  const res = await fetch(`${API_BASE}/api/agent-health/${pid}/restart`, { method: 'POST', credentials: 'same-origin' });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(`POST /api/agent-health/${pid}/restart -> ${res.status}: ${body.error ?? res.statusText}`);
@@ -819,7 +824,11 @@ function buildQuery(params?: object): string {
 }
 
 async function securityFetch<T>(url: string): Promise<SecurityApiResponse<T>> {
-  const res = await fetch(url);
+  const res = await fetch(url, { credentials: 'same-origin' });
+  if (res.status === 401) {
+    window.location.hash = '#/login';
+    throw new Error('Authentication required');
+  }
   const text = await res.text().catch(() => '');
   let body: unknown = null;
   if (text) {
@@ -1014,4 +1023,45 @@ export async function fetchSkillMetrics(
   return apiFetch<SkillMetricsReport>(
     `${API_BASE}/api/skill-metrics${buildSkillMetricsParams(startNs, endNs, agentName, granularity)}`
   );
+}
+
+// ─── Authentication API ──────────────────────────────────────────────────────
+
+export interface AuthStatusResponse {
+  auth_enabled: boolean;
+}
+
+export interface AuthVerifyResponse {
+  authenticated: boolean;
+}
+
+/**
+ * Check whether dashboard authentication is enabled.
+ */
+export async function fetchAuthStatus(): Promise<AuthStatusResponse> {
+  const res = await fetch(`${API_BASE}/api/auth/status`);
+  if (!res.ok) throw new Error(`GET /api/auth/status -> ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Verify the current session (cookie-based).
+ */
+export async function fetchAuthVerify(): Promise<AuthVerifyResponse> {
+  const res = await fetch(`${API_BASE}/api/auth/verify`, { credentials: 'same-origin' });
+  if (!res.ok) throw new Error(`GET /api/auth/verify -> ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Log in with a token string. Sets a session cookie on success.
+ */
+export async function login(token: string): Promise<boolean> {
+  const res = await fetch(`${API_BASE}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({ token }),
+  });
+  return res.ok;
 }

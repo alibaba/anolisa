@@ -10,6 +10,8 @@ use structopt::StructOpt;
 
 mod cli;
 #[cfg(feature = "server")]
+use cli::dashboard::DashboardCommand;
+#[cfg(feature = "server")]
 use cli::serve::ServeCommand;
 use cli::{
     audit::AuditCommand, discover::DiscoverCommand, interruption::InterruptionCommand,
@@ -43,6 +45,9 @@ pub enum Command {
     /// Start the API server
     #[cfg(feature = "server")]
     Serve(ServeCommand),
+    /// Display dashboard authentication status and token
+    #[cfg(feature = "server")]
+    Dashboard(DashboardCommand),
 }
 
 fn main() {
@@ -59,5 +64,7 @@ fn main() {
         Command::Summary(summary_cmd) => summary_cmd.execute(),
         #[cfg(feature = "server")]
         Command::Serve(serve_cmd) => serve_cmd.execute(),
+        #[cfg(feature = "server")]
+        Command::Dashboard(dashboard_cmd) => dashboard_cmd.execute(),
     }
 }

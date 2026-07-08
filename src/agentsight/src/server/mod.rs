@@ -3,6 +3,7 @@
 //! Provides a lightweight HTTP API server using actix-web for querying
 //! AgentSight storage data, and optionally serves the embedded frontend.
 
+pub mod auth;
 mod handlers;
 mod token_savings;
 
@@ -14,8 +15,11 @@ use actix_cors::Cors;
 use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, get, web};
 use include_dir::{Dir, include_dir};
 
+use crate::config::ServerAuthConfig;
 use crate::health::{HealthChecker, HealthStore};
 use crate::storage::sqlite::InterruptionStore;
+
+use self::auth::{AuthMiddleware, DashboardAuth};
 
 /// Embedded frontend static files (built from dashboard/ via `npm run build:embed`)
 /// The directory `frontend-dist/` must exist at compile time; if it is absent
@@ -47,6 +51,8 @@ pub struct AppState {
     pub interruption_store: Option<Arc<InterruptionStore>>,
     /// agent-sec security observability integration configuration
     pub security_observability: SecurityObservabilityConfig,
+    /// Dashboard authentication state
+    pub auth: Arc<DashboardAuth>,
 }
 
 // ─── Static file handler ─────────────────────────────────────────────────────
@@ -122,6 +128,13 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
         // Top-level health & metrics (not under /api)
         .service(handlers::health)
         .service(handlers::metrics)
+        // Auth endpoints (exempt from middleware)
+        .service(
+            web::scope("/api/auth")
+                .service(handlers::auth_status)
+                .service(handlers::auth_verify)
+                .service(web::resource("/login").route(web::post().to(handlers::auth_login))),
+        )
         // All API routes under /api scope
         .service(
             web::scope("/api")
@@ -191,8 +204,31 @@ async fn api_not_found() -> impl Responder {
 ///
 /// Binds to the given host:port and serves API endpoints + embedded frontend.
 /// This function blocks until the server is shut down.
-pub async fn run_server(host: &str, port: u16, storage_path: PathBuf) -> std::io::Result<()> {
+pub async fn run_server(
+    host: &str,
+    port: u16,
+    storage_path: PathBuf,
+    auth_config: ServerAuthConfig,
+) -> std::io::Result<()> {
     let security_observability = SecurityObservabilityConfig::default();
+
+    // Initialize dashboard authentication
+    let storage_base = storage_path
+        .parent()
+        .unwrap_or(std::path::Path::new("/var/log/sysak/.agentsight"));
+    let dashboard_auth = Arc::new(DashboardAuth::init(&auth_config, storage_base));
+    if dashboard_auth.enabled {
+        if let Some(token) = dashboard_auth.read_token_from_file() {
+            let masked = if token.len() > 8 {
+                format!("{}****", &token[..8])
+            } else {
+                "****".to_string()
+            };
+            eprintln!(
+                "Dashboard auth enabled. Token: {masked}  (use `agentsight dashboard` to view)"
+            );
+        }
+    }
 
     // Initialize GenAI SQLite store (needed for HealthChecker to query pending calls)
     let genai_store: Option<Arc<crate::storage::sqlite::GenAISqliteStore>> =
@@ -243,6 +279,7 @@ pub async fn run_server(host: &str, port: u16, storage_path: PathBuf) -> std::io
         health_store,
         interruption_store,
         security_observability,
+        auth: dashboard_auth.clone(),
     });
 
     let has_frontend = FRONTEND.get_file("index.html").is_some();
@@ -260,11 +297,12 @@ pub async fn run_server(host: &str, port: u16, storage_path: PathBuf) -> std::io
         let cors = Cors::default()
             .allow_any_origin()
             .allowed_methods(vec!["GET", "DELETE", "POST", "OPTIONS"])
-            .allowed_headers(vec!["Content-Type"])
+            .allowed_headers(vec!["Content-Type", "Authorization"])
             .max_age(3600);
 
         App::new()
             .wrap(cors)
+            .wrap(AuthMiddleware::new(dashboard_auth.clone()))
             .app_data(data.clone())
             .configure(configure_routes)
     })
@@ -285,10 +323,12 @@ mod tests {
 
     use crate::health::HealthStore;
 
+    use super::auth::DashboardAuth;
     use super::{
         AppState, SecurityObservabilityConfig, configure_routes, serve_frontend,
         serve_frontend_root,
     };
+    use crate::config::ServerAuthConfig;
 
     #[test]
     fn security_observability_config_defaults_to_five_seconds() {
@@ -336,12 +376,21 @@ mod tests {
     }
 
     fn test_app_state(timeout_ms: u64) -> web::Data<AppState> {
+        let auth_config = ServerAuthConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        let auth = Arc::new(DashboardAuth::init(
+            &auth_config,
+            std::path::Path::new("/tmp"),
+        ));
         web::Data::new(AppState {
             storage_path: PathBuf::from(":memory:"),
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
             interruption_store: None,
             security_observability: SecurityObservabilityConfig { timeout_ms },
+            auth,
         })
     }
 }
