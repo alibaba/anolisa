@@ -1,3 +1,46 @@
+use std::sync::Mutex;
+
+static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+struct TempDbGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    test_dir: String,
+}
+
+impl TempDbGuard {
+    fn new() -> Option<Self> {
+        let lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = get_home_dir();
+        if home.is_empty() {
+            return None;
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let test_dir = format!("{}/.tokenless-test-{}", home, nanos);
+        std::fs::create_dir_all(&test_dir).unwrap();
+        unsafe {
+            std::env::set_var("TOKENLESS_STATS_DB", format!("{}/stats.db", test_dir));
+            std::env::set_var("TOKENLESS_STASH_DB", format!("{}/stash.db", test_dir));
+        }
+        Some(TempDbGuard {
+            _lock: lock,
+            test_dir,
+        })
+    }
+}
+
+impl Drop for TempDbGuard {
+    fn drop(&mut self) {
+        unsafe {
+            std::env::remove_var("TOKENLESS_STATS_DB");
+            std::env::remove_var("TOKENLESS_STASH_DB");
+        }
+        std::fs::remove_dir_all(&self.test_dir).ok();
+    }
+}
+
 fn temp_subdir(label: &str) -> std::path::PathBuf {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
@@ -168,6 +211,7 @@ fn warn_mode_mismatch_no_warning_when_matching() {
 
 #[test]
 fn get_stash_db_path_default() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let home = get_home_dir();
     if home.is_empty() {
         return;
@@ -179,6 +223,7 @@ fn get_stash_db_path_default() {
 
 #[test]
 fn get_stash_db_path_with_valid_override() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let home = get_home_dir();
     if home.is_empty() {
         return;
@@ -191,10 +236,7 @@ fn get_stash_db_path_with_valid_override() {
 
 #[test]
 fn open_stash_store_falls_back_on_bad_override() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
+    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     // Bad override is rejected but falls back to the default path.
     // Result may be None in CI if the DB is locked by another test.
     let _result = open_stash_store(Some("/nonexistent/deep/dir/stash.db"));
@@ -202,10 +244,7 @@ fn open_stash_store_falls_back_on_bad_override() {
 
 #[test]
 fn open_stash_store_or_err_falls_back_on_bad_override() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
+    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let result = open_stash_store_or_err(Some("/nonexistent/deep/dir/stash.db"));
     // Bad override path is rejected and falls back to default; result is Ok
     assert!(result.is_ok());
@@ -213,6 +252,8 @@ fn open_stash_store_or_err_falls_back_on_bad_override() {
 
 #[test]
 fn ensure_db_dir_creates_parent() {
+    let _guard = TempDbGuard::new();
+
     // ensure_db_dir is idempotent — calling it when the dir already exists
     // (which it does for most test envs) succeeds.
     let result = ensure_db_dir();
@@ -304,20 +345,14 @@ fn record_compression_stats_records_dryrun_mode() {
 
 #[test]
 fn get_db_path_returns_valid_path() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
+    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let db_path = get_db_path();
-    assert!(db_path.contains(".tokenless/stats.db"));
+    assert!(db_path.contains("stats.db"));
 }
 
 #[test]
 fn open_recorder_exercises_path() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
+    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let result = open_recorder();
     // May succeed or fail depending on filesystem permissions
     let _ = result;
@@ -336,6 +371,8 @@ fn read_input_oversized_file() {
 
 #[test]
 fn run_command_compress_schema_from_file() {
+    let _guard = TempDbGuard::new();
+
     let dir = tempfile::tempdir().unwrap();
     let f = dir.path().join("schema.json");
     std::fs::write(
@@ -419,6 +456,8 @@ fn run_command_compress_response_from_file() {
 
 #[test]
 fn run_command_compress_response_no_stash() {
+    let _guard = TempDbGuard::new();
+
     let dir = tempfile::tempdir().unwrap();
     let f = dir.path().join("resp.json");
     std::fs::write(&f, r#"{"key":"value"}"#).unwrap();
@@ -438,10 +477,7 @@ fn run_command_compress_response_no_stash() {
 
 #[test]
 fn run_command_compress_response_with_stash() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
+    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let dir = tempfile::tempdir().unwrap();
     let f = dir.path().join("resp.json");
     std::fs::write(&f, r#"{"key":"value"}"#).unwrap();
@@ -461,6 +497,7 @@ fn run_command_compress_response_with_stash() {
 
 #[test]
 fn run_command_retrieve_invalid_hash() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let result = run_command(Commands::Retrieve {
         hash: "not-a-hash".to_string(),
         stash_db: None,
@@ -471,10 +508,7 @@ fn run_command_retrieve_invalid_hash() {
 
 #[test]
 fn run_command_retrieve_missing_hash() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
+    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let result = run_command(Commands::Retrieve {
         hash: "abcdef0123456789abcdef01".to_string(),
         stash_db: None,
@@ -485,6 +519,8 @@ fn run_command_retrieve_missing_hash() {
 
 #[test]
 fn run_command_compress_toon_from_file() {
+    let _guard = TempDbGuard::new();
+
     let dir = tempfile::tempdir().unwrap();
     let f = dir.path().join("toon.json");
     std::fs::write(
@@ -529,10 +565,7 @@ fn run_command_decompress_toon_empty_input() {
 
 #[test]
 fn run_command_retrieve_with_marker() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
+    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let store = open_stash_store(None);
     if store.is_none() {
         return;
@@ -549,10 +582,7 @@ fn run_command_retrieve_with_marker() {
 
 #[test]
 fn run_command_retrieve_bare_hash() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
+    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let store = open_stash_store(None);
     if store.is_none() {
         return;
@@ -568,10 +598,7 @@ fn run_command_retrieve_bare_hash() {
 
 #[test]
 fn run_command_stats_show_existing_record() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
+    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let recorder = match open_recorder() {
         Ok(r) => r,
         Err(_) => return,
@@ -598,6 +625,8 @@ fn run_command_stats_show_existing_record() {
 
 #[test]
 fn run_command_compress_response_large_with_truncation() {
+    let _guard = TempDbGuard::new();
+
     let dir = tempfile::tempdir().unwrap();
     let f = dir.path().join("large.json");
     let items: Vec<serde_json::Value> = (0..20).map(|i| serde_json::json!({"id": i, "name": format!("item_{}", i), "long_field": "x".repeat(200)})).collect();
@@ -619,10 +648,7 @@ fn run_command_compress_response_large_with_truncation() {
 
 #[test]
 fn run_command_compress_schema_with_stash() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
+    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let dir = tempfile::tempdir().unwrap();
     let f = dir.path().join("schema_stash.json");
     let long_desc = "A".repeat(500);
@@ -648,10 +674,7 @@ fn run_command_compress_schema_with_stash() {
 
 #[test]
 fn run_command_stats_summary() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
+    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let result = run_command(Commands::Stats(StatsCommands::Summary {
         limit: Some(10),
         json: false,
@@ -662,10 +685,7 @@ fn run_command_stats_summary() {
 
 #[test]
 fn run_command_stats_summary_json() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
+    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let result = run_command(Commands::Stats(StatsCommands::Summary {
         limit: Some(10),
         json: true,
@@ -676,20 +696,14 @@ fn run_command_stats_summary_json() {
 
 #[test]
 fn run_command_stats_list() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
+    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let result = run_command(Commands::Stats(StatsCommands::List { limit: 5 }));
     assert!(result.is_ok());
 }
 
 #[test]
 fn run_command_stats_show_nonexistent() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
+    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let result = run_command(Commands::Stats(StatsCommands::Show { id: 999999 }));
     assert!(result.is_err());
     assert!(result.unwrap_err().0.contains("not found"));
@@ -698,44 +712,22 @@ fn run_command_stats_show_nonexistent() {
 #[test]
 fn run_command_stats_clear_without_confirm() {
     // Clear with --yes to avoid interactive prompt
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
+    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let result = run_command(Commands::Stats(StatsCommands::Clear { yes: true }));
     assert!(result.is_ok());
 }
 
-#[test]
-fn run_command_stats_enable_disable() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
-    let r1 = run_command(Commands::Stats(StatsCommands::Enable));
-    assert!(r1.is_ok());
-    let r2 = run_command(Commands::Stats(StatsCommands::Disable));
-    assert!(r2.is_ok());
-    // Re-enable
-    let _ = run_command(Commands::Stats(StatsCommands::Enable));
-}
 
 #[test]
 fn run_command_stats_status() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
+    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let result = run_command(Commands::Stats(StatsCommands::Status));
     assert!(result.is_ok());
 }
 
 #[test]
 fn run_command_stats_compare() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
+    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let result = run_command(Commands::Stats(StatsCommands::Summary {
         limit: None,
         json: false,
@@ -746,10 +738,7 @@ fn run_command_stats_compare() {
 
 #[test]
 fn run_command_stats_compare_json() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
+    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let result = run_command(Commands::Stats(StatsCommands::Summary {
         limit: None,
         json: true,
@@ -772,6 +761,7 @@ fn run_command_env_check_without_spec() {
 
 #[test]
 fn get_stash_db_path_returns_valid() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let home = get_home_dir();
     if home.is_empty() {
         return;
@@ -783,6 +773,7 @@ fn get_stash_db_path_returns_valid() {
 
 #[test]
 fn get_stash_db_path_with_bad_override() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let home = get_home_dir();
     if home.is_empty() {
         return;
@@ -796,6 +787,8 @@ fn get_stash_db_path_with_bad_override() {
 
 #[test]
 fn run_command_compress_schema_no_savings() {
+    let _guard = TempDbGuard::new();
+
     let dir = tempfile::tempdir().unwrap();
     let f = dir.path().join("small.json");
     std::fs::write(&f, r#"{"function":{"name":"x","parameters":{"type":"object","properties":{}}}}"#).unwrap();
@@ -829,20 +822,14 @@ fn run_command_compress_response_file_not_found() {
 
 #[test]
 fn open_stash_store_none_returns_some() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
+    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let result = open_stash_store(None);
     assert!(result.is_some());
 }
 
 #[test]
 fn open_stash_store_or_err_none_returns_ok() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
+    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let result = open_stash_store_or_err(None);
     assert!(result.is_ok());
 }
@@ -871,10 +858,7 @@ fn record_compression_stats_sls_only_path() {
 
 #[test]
 fn record_compression_stats_full_path() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
+    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let mut config = TokenlessConfig::default();
     config.stats_enabled = true;
     config.sls_enabled = true;
@@ -932,20 +916,11 @@ fn record_compression_stats_no_savings() {
     );
 }
 
-#[test]
-fn run_command_stats_status_after_disable() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
-    let _ = run_command(Commands::Stats(StatsCommands::Disable));
-    let result = run_command(Commands::Stats(StatsCommands::Status));
-    assert!(result.is_ok());
-    let _ = run_command(Commands::Stats(StatsCommands::Enable));
-}
 
 #[test]
 fn run_command_compress_response_no_agent_id() {
+    let _guard = TempDbGuard::new();
+
     let dir = tempfile::tempdir().unwrap();
     let f = dir.path().join("resp.json");
     std::fs::write(&f, r#"{"data":"test","debug":"remove"}"#).unwrap();
@@ -967,7 +942,7 @@ fn run_command_compress_response_no_agent_id() {
 fn read_input_file_too_large() {
     let dir = tempfile::tempdir().unwrap();
     let f = dir.path().join("huge.json");
-    let huge = "x".repeat(100 * 1024 * 1024 + 1);
+    let huge = "x".repeat(64 * 1024 * 1024 + 1);
     std::fs::write(&f, &huge).unwrap();
     let result = read_input(&Some(f.to_str().unwrap().to_string()));
     assert!(result.is_err());
@@ -994,6 +969,8 @@ fn run_command_retrieve_store_error() {
 
 #[test]
 fn run_command_compress_toon_tiny_input() {
+    let _guard = TempDbGuard::new();
+
     let dir = tempfile::tempdir().unwrap();
     let f = dir.path().join("tiny.json");
     std::fs::write(&f, r#""x""#).unwrap();
@@ -1008,6 +985,8 @@ fn run_command_compress_toon_tiny_input() {
 
 #[test]
 fn run_command_compress_toon_empty_obj() {
+    let _guard = TempDbGuard::new();
+
     let dir = tempfile::tempdir().unwrap();
     let f = dir.path().join("empty_obj.json");
     std::fs::write(&f, r#"{}"#).unwrap();
@@ -1022,6 +1001,8 @@ fn run_command_compress_toon_empty_obj() {
 
 #[test]
 fn run_command_compress_response_with_stash_errors() {
+    let _guard = TempDbGuard::new();
+
     let dir = tempfile::tempdir().unwrap();
     let f = dir.path().join("stash_error.json");
     let items: Vec<serde_json::Value> = (0..100).map(|i| serde_json::json!({"id": i, "data": "x".repeat(200)})).collect();

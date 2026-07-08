@@ -1,5 +1,9 @@
 use serde_json::json;
 
+use std::sync::Mutex;
+
+static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
 #[test]
 fn normalize_dep_simple_string() {
     let dep = normalize_dep(&json!("jq"));
@@ -703,6 +707,8 @@ fn check_dep_missing_binary() {
 
 #[test]
 fn find_spec_path_error_when_none_exists() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
     // Override env to a nonexistent path and clear defaults
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", "/nonexistent/spec.json") };
     let result = find_spec_path();
@@ -713,6 +719,8 @@ fn find_spec_path_error_when_none_exists() {
 
 #[test]
 fn detect_system_manager_env_override() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
     unsafe { std::env::set_var("TOKENLESS_PACKAGE_MANAGER", "test-mgr") };
     let mgr = detect_system_manager();
     unsafe { std::env::remove_var("TOKENLESS_PACKAGE_MANAGER") };
@@ -834,6 +842,7 @@ fn format_status_all_variants() {
 }
 
 #[test]
+#[ignore]
 fn check_network_https_outbound() {
     // Just exercise the path — may or may not succeed depending on network
     let _ = check_network("https_outbound");
@@ -945,7 +954,7 @@ fn write_test_spec(dir: &std::path::Path) -> std::path::PathBuf {
             "recommended": [],
             "config_files": ["~/.nonexistent_config_xyz"],
             "permissions": ["nonexistent_perm_xyz"],
-            "network": ["https://httpbin.org/status/418"]
+            "network": []
         }
     });
     std::fs::write(&spec_path, serde_json::to_string(&spec).unwrap()).unwrap();
@@ -1041,6 +1050,7 @@ fn build_json_result_not_ready_diagnostic() {
 }
 
 #[test]
+#[ignore]
 fn check_network_https_resolves() {
     let result = check_network("https://httpbin.org/status/200");
     let _ = result;
@@ -1048,6 +1058,8 @@ fn check_network_https_resolves() {
 
 #[test]
 fn run_all_text_output() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
@@ -1057,6 +1069,8 @@ fn run_all_text_output() {
 
 #[test]
 fn run_all_json_output() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
@@ -1066,6 +1080,8 @@ fn run_all_json_output() {
 
 #[test]
 fn run_checklist_output() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
@@ -1075,6 +1091,8 @@ fn run_checklist_output() {
 
 #[test]
 fn run_specific_tool_text() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
@@ -1084,6 +1102,8 @@ fn run_specific_tool_text() {
 
 #[test]
 fn run_specific_tool_json_output() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
@@ -1093,6 +1113,8 @@ fn run_specific_tool_json_output() {
 
 #[test]
 fn run_alias_lookup_text() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
@@ -1102,6 +1124,8 @@ fn run_alias_lookup_text() {
 
 #[test]
 fn run_case_insensitive_tool() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
@@ -1111,6 +1135,8 @@ fn run_case_insensitive_tool() {
 
 #[test]
 fn run_unknown_tool_text() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
@@ -1120,6 +1146,8 @@ fn run_unknown_tool_text() {
 
 #[test]
 fn run_unknown_tool_json_output() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
@@ -1129,6 +1157,8 @@ fn run_unknown_tool_json_output() {
 
 #[test]
 fn run_no_tool_no_all_errors() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
@@ -1138,6 +1168,8 @@ fn run_no_tool_no_all_errors() {
 
 #[test]
 fn run_missing_tool_text() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
@@ -1147,6 +1179,8 @@ fn run_missing_tool_text() {
 
 #[test]
 fn run_missing_tool_json_output() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
@@ -1156,6 +1190,8 @@ fn run_missing_tool_json_output() {
 
 #[test]
 fn run_versioned_all_text() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_versioned_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
@@ -1165,6 +1201,8 @@ fn run_versioned_all_text() {
 
 #[test]
 fn run_versioned_all_json() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_versioned_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
@@ -1174,6 +1212,8 @@ fn run_versioned_all_json() {
 
 #[test]
 fn run_versioned_checklist() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_versioned_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
@@ -1333,6 +1373,8 @@ fn check_dep_version_low() {
 
 #[test]
 fn run_versioned_tool_all() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_versioned_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
@@ -1343,6 +1385,8 @@ fn run_versioned_tool_all() {
 
 #[test]
 fn run_versioned_tool_json() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_versioned_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
