@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-08
+
+### Added
+
+- `anolisa adapter enable` now supports Tokenless adapters for cosh, Codex, and Claude Code.
+- `anolisa adapter enable` now supports Tokenless adapters for Qoder.
+
+### Changed
+
+- Claude Code adapters now use per-component marketplaces to avoid affecting other ANOLISA plugins.
+- `anolisa adapter enable` now rejects invalid framework and `adapter_type` combinations before changing settings.
+
+### Fixed
+
+- Codex adapters now work when component resources come from packaged data directories.
+- Qoder adapter enable now keeps malformed `settings.json` unchanged instead of replacing it.
+- Qoder adapter disable now removes only hook entries previously added by ANOLISA.
+- Qoder adapters now prefer stable qodercli releases over matching prereleases.
+
 ## [0.2.0] - 2026-07-07
 
 ### Added
@@ -425,6 +444,25 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.2.1] - 2026-07-08
+
+### 新增
+
+- `anolisa adapter enable` 现支持 cosh、Codex、Claude Code 的 Tokenless 适配器。
+- `anolisa adapter enable` 现支持 Qoder Tokenless 适配器。
+
+### 变更
+
+- Claude Code 适配器现使用组件专属 marketplace。
+- `anolisa adapter enable` 现先拒绝无效适配器类型。
+
+### 修复
+
+- Codex 适配器现可使用已打包数据目录资源。
+- Qoder 启用遇到损坏 `settings.json` 时不再覆盖。
+- Qoder 禁用现只移除 ANOLISA 添加的 hook。
+- Qoder 适配器现优先使用稳定版 qodercli。
 
 ## [0.2.0] - 2026-07-07
 
