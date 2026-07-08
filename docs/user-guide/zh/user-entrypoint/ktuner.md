@@ -88,7 +88,7 @@ cosh 通过 skill 定义（`src/os-skills/system-admin/ktuner/`）自动发现 k
 > “按数据库负载优化内核”
 ```
 
-cosh 首次运行自动检查——首次登录时展示一行 `ktuner check` 报告——将在独立 PR 中落地。在此之前，请按上文通过 skill 调用 `ktuner check`。cosh 绝不自行应用改动。
+首次 Linux 认证时，如果系统路径下有可信的 ktuner，cosh 会显示一行非阻塞提示。用 `/ktuner enable` 查看只读的 `ktuner check` 报告，或 `/ktuner disable` 不再提示。也可以在 `/settings` 里通过 `general.ktunerCheck` 修改。cosh 绝不自行应用改动。
 
 ---
 

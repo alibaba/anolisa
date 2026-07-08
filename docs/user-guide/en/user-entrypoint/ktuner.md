@@ -88,7 +88,7 @@ cosh discovers ktuner automatically via its skill definition (`src/os-skills/sys
 > "Optimize the kernel for a database workload"
 ```
 
-A cosh first-run auto-check — a one-line `ktuner check` report shown at initial login — is landing in a separate PR. Until then, invoke `ktuner check` through the skill as above. cosh never applies changes on its own.
+On first Linux auth, if a trusted ktuner is installed at a system path, cosh shows a one-line non-blocking hint. Run `/ktuner enable` to view a read-only `ktuner check` report, or `/ktuner disable` to stop asking. You can also change this via `general.ktunerCheck` in `/settings`. cosh never applies changes on its own.
 
 ---
 
