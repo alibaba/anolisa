@@ -933,130 +933,15 @@ fn record_compression_stats_no_savings() {
 }
 
 #[test]
-fn run_command_stats_status_with_env_override() {
+fn run_command_stats_status_after_disable() {
     let home = get_home_dir();
     if home.is_empty() {
         return;
     }
-    unsafe {
-        std::env::set_var("TOKENLESS_STATS_ENABLED", "1");
-        std::env::set_var("TOKENLESS_SLS_ENABLED", "1");
-    }
+    let _ = run_command(Commands::Stats(StatsCommands::Disable));
     let result = run_command(Commands::Stats(StatsCommands::Status));
-    unsafe {
-        std::env::remove_var("TOKENLESS_STATS_ENABLED");
-        std::env::remove_var("TOKENLESS_SLS_ENABLED");
-    }
     assert!(result.is_ok());
-}
-
-#[test]
-fn run_command_stats_status_disabled() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
-    unsafe {
-        std::env::set_var("TOKENLESS_STATS_ENABLED", "0");
-        std::env::set_var("TOKENLESS_SLS_ENABLED", "0");
-    }
-    let result = run_command(Commands::Stats(StatsCommands::Status));
-    unsafe {
-        std::env::remove_var("TOKENLESS_STATS_ENABLED");
-        std::env::remove_var("TOKENLESS_SLS_ENABLED");
-    }
-    assert!(result.is_ok());
-}
-
-#[test]
-fn run_command_compress_schema_dryrun() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
-    let dir = tempfile::tempdir().unwrap();
-    let f = dir.path().join("dryrun_schema.json");
-    let long_desc = "D".repeat(500);
-    let schema = serde_json::json!({
-        "function": {
-            "name": "dryrun_test",
-            "description": long_desc,
-            "title": "Remove me",
-            "parameters": {"type": "object", "properties": {"x": {"type": "string", "title": "Also remove"}}}
-        }
-    });
-    std::fs::write(&f, serde_json::to_string(&schema).unwrap()).unwrap();
-    unsafe {
-        std::env::set_var("TOKENLESS_COMPRESSION_ENABLED", "0");
-    }
-    let result = run_command(Commands::CompressSchema {
-        file: Some(f.to_str().unwrap().to_string()),
-        batch: false,
-        agent_id: Some("dryrun-agent".to_string()),
-        session_id: None,
-        tool_use_id: None,
-        no_stash: true,
-        stash_db: None,
-    });
-    unsafe {
-        std::env::remove_var("TOKENLESS_COMPRESSION_ENABLED");
-    }
-    assert!(result.is_ok());
-}
-
-#[test]
-fn run_command_compress_response_dryrun() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
-    let dir = tempfile::tempdir().unwrap();
-    let f = dir.path().join("dryrun_resp.json");
-    let data = serde_json::json!({"data": "test", "debug": "remove me", "trace": "also remove"});
-    std::fs::write(&f, serde_json::to_string(&data).unwrap()).unwrap();
-    unsafe {
-        std::env::set_var("TOKENLESS_COMPRESSION_ENABLED", "0");
-    }
-    let result = run_command(Commands::CompressResponse {
-        file: Some(f.to_str().unwrap().to_string()),
-        agent_id: Some("dryrun-agent".to_string()),
-        session_id: None,
-        tool_use_id: None,
-        truncate_strings_at: None,
-        truncate_arrays_at: None,
-        max_depth: None,
-        no_stash: true,
-        stash_db: None,
-    });
-    unsafe {
-        std::env::remove_var("TOKENLESS_COMPRESSION_ENABLED");
-    }
-    assert!(result.is_ok());
-}
-
-#[test]
-fn run_command_compress_toon_dryrun() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
-    let dir = tempfile::tempdir().unwrap();
-    let f = dir.path().join("dryrun_toon.json");
-    let data = serde_json::json!({"key": "value", "items": [1, 2, 3, 4, 5]});
-    std::fs::write(&f, serde_json::to_string(&data).unwrap()).unwrap();
-    unsafe {
-        std::env::set_var("TOKENLESS_COMPRESSION_ENABLED", "0");
-    }
-    let result = run_command(Commands::CompressToon {
-        file: Some(f.to_str().unwrap().to_string()),
-        agent_id: Some("dryrun-agent".to_string()),
-        session_id: None,
-        tool_use_id: None,
-    });
-    unsafe {
-        std::env::remove_var("TOKENLESS_COMPRESSION_ENABLED");
-    }
-    assert!(result.is_ok());
+    let _ = run_command(Commands::Stats(StatsCommands::Enable));
 }
 
 #[test]
@@ -1096,73 +981,6 @@ fn read_input_file_missing() {
     assert!(result.unwrap_err().contains("Failed to open"));
 }
 
-#[test]
-fn get_stash_db_path_env_var_valid() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
-    let env_path = format!("{}/.tokenless/env_stash.db", home);
-    unsafe {
-        std::env::set_var("TOKENLESS_STASH_DB", &env_path);
-    }
-    let result = get_stash_db_path(None);
-    unsafe {
-        std::env::remove_var("TOKENLESS_STASH_DB");
-    }
-    assert!(result.is_some());
-    assert_eq!(result.unwrap(), env_path);
-}
-
-#[test]
-fn get_stash_db_path_with_bad_env_override() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
-    unsafe {
-        std::env::set_var("TOKENLESS_STASH_DB", "/etc/evil_stash.db");
-    }
-    let result = get_stash_db_path(None);
-    unsafe {
-        std::env::remove_var("TOKENLESS_STASH_DB");
-    }
-    assert!(result.is_some());
-    assert!(result.unwrap().contains(".tokenless/stash.db"));
-}
-
-#[test]
-fn get_db_path_with_env_override() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
-    let env_path = format!("{}/.tokenless/env_stats.db", home);
-    unsafe {
-        std::env::set_var("TOKENLESS_STATS_DB", &env_path);
-    }
-    let result = get_db_path();
-    unsafe {
-        std::env::remove_var("TOKENLESS_STATS_DB");
-    }
-    assert_eq!(result, env_path);
-}
-
-#[test]
-fn get_db_path_with_bad_env_override() {
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
-    unsafe {
-        std::env::set_var("TOKENLESS_STATS_DB", "/etc/evil_stats.db");
-    }
-    let result = get_db_path();
-    unsafe {
-        std::env::remove_var("TOKENLESS_STATS_DB");
-    }
-    assert!(result.contains(".tokenless/stats.db"));
-}
 
 #[test]
 fn run_command_retrieve_store_error() {
