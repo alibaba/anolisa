@@ -90,8 +90,8 @@ terminal-runner/
 ### Install
 
 ```bash
-git clone https://github.com/<your-org>/terminal-runner.git
-cd terminal-runner
+git clone https://github.com/alibaba/anolisa.git
+cd anolisa/src/benchmark/terminal-runner
 ./scripts/setup.sh
 ```
 

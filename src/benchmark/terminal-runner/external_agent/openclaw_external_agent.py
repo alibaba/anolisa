@@ -28,9 +28,9 @@ Architecture:
 
 This is *not* an installed agent (``BaseInstalledAgent``).  It extends
 ``BaseAgent`` directly and is loaded at runtime via Harbor's
-``--agent`` mechanism:
+``--agent-import-path`` mechanism:
 
-    harbor run --agent external_agent.openclaw_external_agent:OpenClawExternalAgent \
+    harbor run --agent-import-path external_agent.openclaw_external_agent:OpenClawExternalAgent \
                -p dataset/my-task -m openai/my-model ...
 
 Environment variables
@@ -259,6 +259,7 @@ class OpenClawExternalAgent(BaseAgent):
     ) -> dict[str, Any]:
         container_id = self._harbor_container_id
         profile_name = self._profile_name
+        agent_id = os.environ.get("OPENCLAW_AGENT_ID", "main")
 
         profile_config_dir = os.path.expanduser(f"~/.openclaw-{profile_name}")
         profile_config_path = os.path.join(profile_config_dir, "openclaw.json")
@@ -278,7 +279,7 @@ class OpenClawExternalAgent(BaseAgent):
             shutil.rmtree(profile_config_dir)
         os.makedirs(profile_config_dir)
         profile_agents_dir = os.path.join(
-            profile_config_dir, "agents", "main", "agent"
+            profile_config_dir, "agents", agent_id, "agent"
         )
         os.makedirs(profile_agents_dir)
 
@@ -390,7 +391,6 @@ class OpenClawExternalAgent(BaseAgent):
             with open(profile_models_path, "w") as f:
                 json.dump(models_data, f, indent=2)
 
-        agent_id = os.environ.get("OPENCLAW_AGENT_ID", "main")
         timeout = os.environ.get("OPENCLAW_TIMEOUT", "600")
         thinking = os.environ.get("OPENCLAW_THINKING", "off")
         max_iterations = int(os.environ.get("OPENCLAW_MAX_ITERATIONS", "0"))
@@ -588,7 +588,7 @@ class OpenClawExternalAgent(BaseAgent):
             }
 
         # Collect per-round token usage from OpenClaw session JSONL.
-        session_token_report = self._collect_session_tokens(profile_config_dir)
+        session_token_report = self._collect_session_tokens(profile_config_dir, agent_id)
         if session_token_report:
             final_result["session_tokens"] = session_token_report
 
@@ -601,9 +601,9 @@ class OpenClawExternalAgent(BaseAgent):
     # Session token collection
     # ==================================================================
 
-    def _collect_session_tokens(self, profile_dir: str) -> dict[str, Any] | None:
+    def _collect_session_tokens(self, profile_dir: str, agent_id: str) -> dict[str, Any] | None:
         """Read OpenClaw session JSONL and extract per-round token usage."""
-        sessions_dir = os.path.join(profile_dir, "agents", "main", "sessions")
+        sessions_dir = os.path.join(profile_dir, "agents", agent_id, "sessions")
         jsonl_files = sorted(glob.glob(os.path.join(sessions_dir, "*.jsonl")))
         if not jsonl_files:
             return None
