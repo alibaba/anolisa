@@ -27,6 +27,13 @@ _SKIP_DIRS = frozenset({".git", ".github", ".hub", ".archive", ".skill-meta"})
 _CONTEXT_KEY_FIELDS = ("session_id", "task_id", "run_id")
 _HERMES_SESSION_ENV = "HERMES_SESSION_ID"
 _UNSUPPORTED_STATUS = "unsupported"
+# Managed skill roots that skill-ledger daemon tracks.  When a skill in
+# ~/.hermes/skills/ is reported as "unmanaged", we retry the query against
+# these roots to pick up scan/certify results recorded there.
+_MANAGED_SKILL_ROOTS = (
+    Path("/usr/share/anolisa/skills"),
+    Path("/usr/local/share/anolisa/skills"),
+)
 _UNSUPPORTED_HERMES_NOTICE = "暂不支持Hermes场景，请自行关注skill安全性。"
 _SKILLFS_INPLACE_SENTINELS = (
     Path(".skillfs-inbox"),
@@ -144,9 +151,31 @@ class SkillLedgerCapability(AgentSecCoreCapability):
             )
             return None
 
+        # When the skill is unmanaged (not in managedSkillDirs), the CLI
+        # returns latestStatus="unmanaged" with message=null.  But the skill
+        # may have been scanned/certified in a managed root (e.g.
+        # /usr/share/anolisa/skills/) and copied to ~/.hermes/skills/.
+        # Retry the query against managed roots before giving up.
+        latest_status = str(summary.get("latestStatus", ""))
+        if latest_status == "unmanaged":
+            managed_summary = self._query_managed_root(skill_dir)
+            if managed_summary is not None:
+                summary = managed_summary
+
         message = summary.get("message")
         if not isinstance(message, str) or not message.strip():
-            return None
+            # If still no message after managed-root retry, generate a
+            # synthetic warning for truly unmanaged skills so the user is
+            # alerted that the skill has no ledger attestation.
+            latest_status = str(summary.get("latestStatus", ""))
+            if latest_status == "unmanaged":
+                skill_name = str(summary.get("skillName") or skill_dir.name)
+                message = (
+                    f"Skill '{skill_name}': unmanaged — not tracked by "
+                    f"Skill Ledger. Security status unknown."
+                )
+            if not isinstance(message, str) or not message.strip():
+                return None
 
         status = str(summary.get("latestStatus", "unknown"))
         skill_name = str(summary.get("skillName") or skill_dir.name)
@@ -161,6 +190,38 @@ class SkillLedgerCapability(AgentSecCoreCapability):
             return {"action": "block", "message": message}
 
         self._remember_warning(kwargs, skill_name, skill_dir, status, message)
+        return None
+
+    def _query_managed_root(self, skill_dir: Path) -> dict[str, Any] | None:
+        """Retry skill-ledger show against managed skill roots.
+
+        When a skill in ~/.hermes/skills/ is unmanaged, it may have a
+        scanned/certified copy in a managed root.  Try each managed root
+        and return the first non-unmanaged summary.
+        """
+        skill_name = skill_dir.name
+        for managed_root in _MANAGED_SKILL_ROOTS:
+            managed_path = managed_root / skill_name
+            try:
+                if not managed_path.is_dir():
+                    continue
+            except OSError:
+                continue
+            result = call_agent_sec_cli(
+                ["skill-ledger", "show", str(managed_path)],
+                timeout=self._timeout,
+                trace_context=trace_context({}),
+            )
+            if not result.stdout.strip():
+                continue
+            try:
+                summary = json.loads(result.stdout)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if not isinstance(summary, dict):
+                continue
+            if str(summary.get("latestStatus", "")) != "unmanaged":
+                return summary
         return None
 
     def _on_transform_llm_output(
