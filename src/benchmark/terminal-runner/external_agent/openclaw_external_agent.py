@@ -375,7 +375,7 @@ class OpenClawExternalAgent(BaseAgent):
             json.dump(hybrid_config, f, indent=2)
 
         main_models_path = os.path.expanduser(
-            "~/.openclaw/agents/main/agent/models.json"
+            f"~/.openclaw/agents/{agent_id}/agent/models.json"
         )
         profile_models_path = os.path.join(profile_agents_dir, "models.json")
         if os.path.exists(main_models_path):
