@@ -1009,8 +1009,10 @@ export default {
     '启用只读的 ktuner 内核调优检查',
   'Stop the ktuner kernel tuning check and hint':
     '停止 ktuner 内核调优检查和提示',
-  'ktuner check enabled. It runs a read-only kernel scan after auth and never changes anything.':
-    'ktuner check 已启用。它在认证后做一次只读内核扫描,不改动任何东西。',
+  'ktuner check enabled — running a read-only kernel scan now. Results will appear below.':
+    'ktuner check 已启用——正在做只读内核扫描,结果稍后显示。',
+  'ktuner check enabled, but no trusted ktuner binary was found on a system path. The check will run automatically once ktuner is installed. See the ktuner install docs.':
+    'ktuner check 已启用,但系统路径下没找到可信的 ktuner 二进制。安装 ktuner 后下次会自动检查。请参考 ktuner 安装文档。',
   'ktuner check disabled. Re-enable it anytime with /ktuner enable.':
     'ktuner check 已停用。随时可用 /ktuner enable 重新启用。',
   'ktuner check is currently "{{mode}}". Use /ktuner enable or /ktuner disable to change it.':
