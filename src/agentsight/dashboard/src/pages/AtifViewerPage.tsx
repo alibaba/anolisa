@@ -28,6 +28,21 @@ function shortId(id: string, len = 20): string {
   return id.length > len ? id.slice(0, len) + '\u2026' : id;
 }
 
+function highlightedSections(doc: AtifDocument, callId: string | null): Set<string> {
+  const sections = new Set<string>();
+  if (!callId) return sections;
+
+  for (const step of doc.steps) {
+    if (step.tool_calls?.some((toolCall) => toolCall.tool_call_id === callId)) {
+      sections.add(`${step.step_id}-toolcalls`);
+    }
+    if (step.observation?.results.some((result) => result.source_call_id === callId)) {
+      sections.add(`${step.step_id}-observation`);
+    }
+  }
+  return sections;
+}
+
 // ─── Strategy label config (shared with TokenSavingsPage) ────────────────────
 
 const STRATEGY_LABELS: Record<string, { label: string; color: string; bg: string }> = {
@@ -392,7 +407,14 @@ export const AtifViewerPage: React.FC = () => {
     const i = id ?? queryId;
     if (!i.trim()) return;
 
-    setSearchParams({ type: t, id: i.trim() }, { replace: true });
+    const nextParams: Record<string, string> = { type: t, id: i.trim() };
+    if (searchParams.get('id') === i.trim()) {
+      const highlightCallId = searchParams.get('highlight_call_id');
+      const interruptionId = searchParams.get('interruption_id');
+      if (highlightCallId) nextParams.highlight_call_id = highlightCallId;
+      if (interruptionId) nextParams.interruption_id = interruptionId;
+    }
+    setSearchParams(nextParams, { replace: true });
     setLoading(true);
     setError(null);
     setDoc(null);
@@ -406,6 +428,7 @@ export const AtifViewerPage: React.FC = () => {
         data = await fetchAtifBySession(i.trim());
       }
       setDoc(data);
+      setExpandedSections(highlightedSections(data, nextParams.highlight_call_id ?? null));
       // Fetch savings data for the session
       if (data.session_id) {
         fetchSessionSavings(data.session_id)
@@ -417,7 +440,7 @@ export const AtifViewerPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [queryType, queryId, setSearchParams]);
+  }, [queryType, queryId, searchParams, setSearchParams]);
 
   // Auto-load from URL on mount
   useEffect(() => {

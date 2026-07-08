@@ -142,6 +142,138 @@ export async function fetchConversationDetail(conversationId: string): Promise<T
   );
 }
 
+// ─── Grader APIs ─────────────────────────────────────────────────────────────
+
+export type EvaluationVerdict = 'pass' | 'warn' | 'fail';
+export type EvaluationRootCause =
+  | 'none'
+  | 'no_final_answer'
+  | 'interrupted_main_call'
+  | 'agent_crash'
+  | 'runtime_error'
+  | 'tool_failure'
+  | 'safety_risk'
+  | 'loop_detected'
+  | 'excessive_cost'
+  | 'partial_snapshot';
+
+export interface EvaluationTarget {
+  conversation_id: string;
+  trace_id?: string | null;
+  call_id?: string | null;
+  step_id?: string | null;
+}
+
+export interface EvaluationRef {
+  type: 'genai_event' | 'interruption' | 'security_event' | 'trace' | 'tool_call' | 'atif_step';
+  id: string;
+  label: string;
+  severity?: string | null;
+  target: EvaluationTarget;
+  deeplink?: {
+    route: string;
+    query: Record<string, unknown>;
+  } | null;
+  metadata?: Record<string, unknown> | null;
+}
+
+export interface EvaluationDimension {
+  name: string;
+  score: number;
+  verdict: EvaluationVerdict;
+  reason: string;
+  evidence_refs: EvaluationRef[];
+}
+
+export interface EvaluationFinding {
+  code: string;
+  severity: string;
+  message: string;
+  evidence_refs: EvaluationRef[];
+}
+
+export interface EvaluationMetadata {
+  evaluated_with_pending: boolean;
+  pending_call_count: number;
+  input_event_count: number;
+  grader_type: 'rule' | 'llm' | 'agent';
+  grader_version: string;
+  rubric_version: string | null;
+  judge_model: string | null;
+  prompt_hash: string | null;
+  confidence: number | null;
+}
+
+export interface EvaluationResult {
+  target_type: 'conversation';
+  target_id: string;
+  run_id: string;
+  input_hash: string;
+  verdict: EvaluationVerdict;
+  score: number;
+  summary: string;
+  root_cause: EvaluationRootCause;
+  recommended_action: string;
+  dimensions: EvaluationDimension[];
+  findings: EvaluationFinding[];
+  metadata: EvaluationMetadata;
+}
+
+export interface EvaluationResponse {
+  result: EvaluationResult;
+  reused_existing_run: boolean;
+}
+
+export class EvaluationNotReadyError extends Error {
+  readonly pendingCallCount: number;
+
+  constructor(message: string, pendingCallCount: number) {
+    super(message);
+    this.name = 'EvaluationNotReadyError';
+    this.pendingCallCount = pendingCallCount;
+  }
+}
+
+/**
+ * Fetch the latest persisted evaluation for a conversation.
+ */
+export async function fetchLatestEvaluation(conversationId: string): Promise<EvaluationResult | null> {
+  const params = new URLSearchParams({
+    target_type: 'conversation',
+    target_id: conversationId,
+  });
+  return apiFetch<EvaluationResult | null>(`${API_BASE}/api/grader/latest?${params.toString()}`);
+}
+
+/**
+ * Manually evaluate a conversation with the rule-based grader.
+ */
+export async function evaluateConversation(
+  conversationId: string,
+  force = false,
+): Promise<EvaluationResponse> {
+  const res = await fetch(`${API_BASE}/api/grader/evaluate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      target_type: 'conversation',
+      target_id: conversationId,
+      force,
+    }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    if (res.status === 409 && body?.error === 'conversation_not_ready') {
+      throw new EvaluationNotReadyError(
+        body.message ?? 'Conversation still has pending LLM calls.',
+        Number(body.pending_call_count ?? 0),
+      );
+    }
+    throw new Error(`POST /api/grader/evaluate -> ${res.status}: ${body?.message ?? res.statusText}`);
+  }
+  return body as EvaluationResponse;
+}
+
 // ─── Agent-name & time-series APIs ───────────────────────────────────────────
 
 /**
