@@ -658,20 +658,14 @@ pub(crate) fn collect_configured_services(
                 ..HealthCommandConfig::default()
             },
         ) {
-            Ok(output) => {
-                if let Some(fact) = parse_systemctl_is_active(&service.name, &output) {
-                    fact.record(builder, output.elapsed_ms);
-                    collected = true;
-                } else if output.exit_code != Some(0) {
-                    builder.add_unavailable(
-                        HealthCollector::ConfiguredService,
-                        unavailable_from_stderr(&output.stderr),
-                        HealthSeverity::Degraded,
-                        output.elapsed_ms,
-                    );
-                    return;
+            Ok(output) => match record_configured_service_output(builder, &service.name, &output) {
+                Ok(service_collected) => {
+                    if service_collected {
+                        collected = true;
+                    }
                 }
-            }
+                Err(()) => return,
+            },
             Err(err) => {
                 builder.add_unavailable(
                     HealthCollector::ConfiguredService,
@@ -685,6 +679,27 @@ pub(crate) fn collect_configured_services(
     }
     if collected {
         builder.add_check_done("configured_service");
+    }
+}
+
+fn record_configured_service_output(
+    builder: &mut HealthReportBuilder,
+    service_name: &str,
+    output: &HealthCommandOutput,
+) -> Result<bool, ()> {
+    if let Some(fact) = parse_systemctl_is_active(service_name, output) {
+        fact.record(builder, output.elapsed_ms);
+        Ok(true)
+    } else if output.exit_code != Some(0) {
+        builder.add_unavailable(
+            HealthCollector::ConfiguredService,
+            unavailable_from_stderr(&output.stderr),
+            HealthSeverity::Degraded,
+            output.elapsed_ms,
+        );
+        Err(())
+    } else {
+        Ok(false)
     }
 }
 
@@ -1578,24 +1593,29 @@ Filesystem     Type     1024-blocks    Used Available Capacity Mounted on
         assert_eq!(reason, HealthUnavailableReason::Unsupported);
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
-    fn configured_service_collector_degrades_without_systemd_runtime() {
-        if std::path::Path::new("/run/systemd/system").exists() {
-            return;
-        }
-        let config = HealthConfig {
-            services: vec![crate::config::HealthServiceConfig {
-                name: "definitely-not-a-real-unit.service".to_string(),
-                expected: crate::config::HealthServiceExpectedState::Active,
-            }],
-            ..HealthConfig::default()
+    fn configured_service_output_degrades_without_systemd_runtime() {
+        let output = HealthCommandOutput {
+            exit_code: Some(1),
+            stdout: String::new(),
+            stderr:
+                "System has not been booted with systemd as init system (PID 1). Can't operate.\n\
+                     Failed to connect to bus: Host is down"
+                    .to_string(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+            elapsed_ms: 4,
         };
         let mut builder = HealthReportBuilder::for_started_at(1);
 
-        collect_configured_services(&mut builder, &config);
+        let result = record_configured_service_output(
+            &mut builder,
+            "definitely-not-a-real-unit.service",
+            &output,
+        );
         let report = builder.finish(2);
 
+        assert!(result.is_err());
         assert!(!report
             .checks_done
             .contains(&"configured_service".to_string()));

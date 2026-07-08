@@ -127,10 +127,14 @@ fn raw_cli_delays_agent_output_while_foreground_command_is_active() {
 
 #[test]
 fn raw_cli_agent_marker_invokes_adapter_without_failed_command() {
-    let output = run_raw_cli_with_env(
+    let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",
-        "?? check current directory\nexit\n",
+        &[],
         &[("COSH_SHELL_LANG", "en-US")],
+        vec![
+            (b"?? check current directory\n".to_vec(), Duration::ZERO),
+            (b"exit\n".to_vec(), Duration::from_millis(1_500)),
+        ],
     );
 
     assert!(output.contains("Thinking..."));
@@ -141,10 +145,14 @@ fn raw_cli_agent_marker_invokes_adapter_without_failed_command() {
 
 #[test]
 fn raw_cli_zh_natural_language_intercept_skips_redundant_notice() {
-    let output = run_raw_cli_with_env(
+    let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",
-        "帮我看看当前目录\nexit\n",
+        &[],
         &[("COSH_SHELL_LANG", "zh-CN")],
+        vec![
+            ("帮我看看当前目录\n".as_bytes().to_vec(), Duration::ZERO),
+            (b"exit\n".to_vec(), Duration::from_millis(1_500)),
+        ],
     );
 
     assert!(!output.contains("AI 请求"), "{output}");

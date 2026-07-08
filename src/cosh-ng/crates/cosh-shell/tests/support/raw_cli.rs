@@ -12,7 +12,7 @@ use ratatui::text::Span;
 use wait_timeout::ChildExt;
 
 const RAW_CLI_TIMEOUT: Duration = Duration::from_secs(30);
-const RAW_CLI_SHARED_PARALLELISM: usize = 8;
+const RAW_CLI_SHARED_PARALLELISM: usize = 4;
 pub(crate) const RAW_CLI_UNSET_ENV: &str = "__cosh_raw_cli_unset_env__";
 
 static RAW_CLI_GIT_FIXTURE: OnceLock<PathBuf> = OnceLock::new();
@@ -499,6 +499,7 @@ pub(crate) fn temp_shell_home(label: &str) -> PathBuf {
         std::process::id()
     ));
     fs::create_dir_all(&path).unwrap();
+    fs::write(path.join(".hushlogin"), "").unwrap();
     path
 }
 

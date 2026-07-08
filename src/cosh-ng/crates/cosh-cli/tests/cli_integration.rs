@@ -14,6 +14,14 @@ fn cosh_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cosh-cli"))
 }
 
+fn systemctl_query_available() -> bool {
+    Command::new("systemctl")
+        .args(["list-units", "--type=service", "--no-pager", "--no-legend"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
 /// Spawn `cosh-cli` with audit env vars pinned to a sandbox: log redirected to
 /// `audit_log` and any external `COSH_AUDIT_POLICY` cleared so the built-in
 /// `balanced` preset is used. Use this for any test that exercises the
@@ -816,6 +824,11 @@ fn test_pkg_remove_dry_run_json_envelope() {
 
 #[test]
 fn test_svc_list_json_envelope() {
+    if !systemctl_query_available() {
+        eprintln!("skipping: systemctl service queries are unavailable");
+        return;
+    }
+
     let output = cosh_bin().args(["svc", "list"]).output().unwrap();
 
     assert!(output.status.success());
@@ -831,6 +844,11 @@ fn test_svc_list_json_envelope() {
 
 #[test]
 fn test_svc_list_with_state_filter() {
+    if !systemctl_query_available() {
+        eprintln!("skipping: systemctl service queries are unavailable");
+        return;
+    }
+
     let output = cosh_bin()
         .args(["svc", "list", "--state", "running"])
         .output()
@@ -864,6 +882,11 @@ fn test_svc_list_rejects_invalid_state_filter() {
 
 #[test]
 fn test_svc_status_nonexistent_service() {
+    if !systemctl_query_available() {
+        eprintln!("skipping: systemctl service queries are unavailable");
+        return;
+    }
+
     let output = cosh_bin()
         .args(["svc", "status", "cosh-nonexistent-test-svc-xyz"])
         .output()

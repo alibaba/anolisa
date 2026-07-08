@@ -11,7 +11,13 @@ fn raw_relay_host_intercepts_natural_language_via_bash_hook() {
         std::process::id(),
         unique_suffix()
     ));
-    let config = ShellHostConfig::new("raw-hook-test", &work_dir);
+    let mut config = ShellHostConfig::new("raw-hook-test", &work_dir);
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
     let input = std::io::Cursor::new(
         "please analyze last failure\n\
          \u{8bf7}\u{5e2e}\u{6211}\u{5206}\u{6790}\n\

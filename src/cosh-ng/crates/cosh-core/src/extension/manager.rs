@@ -264,6 +264,12 @@ mod tests {
         ext_dir
     }
 
+    fn isolated_system_dir(base: &std::path::Path) -> PathBuf {
+        let system_dir = base.join("system-ext");
+        fs::create_dir_all(&system_dir).unwrap();
+        system_dir
+    }
+
     #[test]
     fn test_load_extension_from_dir() {
         let tmp = tempfile::tempdir().unwrap();
@@ -276,8 +282,12 @@ mod tests {
             r#"{"name": "my-ext", "version": "1.0.0"}"#,
         );
 
-        let mut mgr =
-            ExtensionManager::new_isolated(PathBuf::from("/workspace"), Some(user_dir), None);
+        let system_dir = isolated_system_dir(tmp.path());
+        let mut mgr = ExtensionManager::new_isolated(
+            PathBuf::from("/workspace"),
+            Some(user_dir),
+            Some(system_dir),
+        );
         mgr.refresh();
 
         assert_eq!(mgr.list().len(), 1);
@@ -301,7 +311,7 @@ mod tests {
         let mut mgr = ExtensionManager::new_isolated(
             PathBuf::from("/workspace"),
             Some(user_dir.clone()),
-            None,
+            Some(isolated_system_dir(tmp.path())),
         );
         mgr.refresh();
 
@@ -336,7 +346,11 @@ mod tests {
             }"#,
         );
 
-        let mut mgr = ExtensionManager::new_isolated(PathBuf::from("/ws"), Some(user_dir), None);
+        let mut mgr = ExtensionManager::new_isolated(
+            PathBuf::from("/ws"),
+            Some(user_dir),
+            Some(isolated_system_dir(tmp.path())),
+        );
         mgr.refresh();
 
         let hooks = mgr.hook_definitions();
@@ -395,7 +409,7 @@ mod tests {
         let mut mgr = ExtensionManager::new_isolated(
             PathBuf::from("/my/workspace"),
             Some(user_dir.clone()),
-            None,
+            Some(isolated_system_dir(tmp.path())),
         );
         mgr.refresh();
 
@@ -416,7 +430,11 @@ mod tests {
         // Create one WITH config
         create_extension_dir(&user_dir, "valid-ext", r#"{"name": "valid-ext"}"#);
 
-        let mut mgr = ExtensionManager::new_isolated(PathBuf::from("/ws"), Some(user_dir), None);
+        let mut mgr = ExtensionManager::new_isolated(
+            PathBuf::from("/ws"),
+            Some(user_dir),
+            Some(isolated_system_dir(tmp.path())),
+        );
         mgr.refresh();
 
         assert_eq!(mgr.list().len(), 1);
@@ -440,7 +458,11 @@ mod tests {
         )
         .unwrap();
 
-        let mut mgr = ExtensionManager::new_isolated(PathBuf::from("/ws"), Some(user_dir), None);
+        let mut mgr = ExtensionManager::new_isolated(
+            PathBuf::from("/ws"),
+            Some(user_dir),
+            Some(isolated_system_dir(tmp.path())),
+        );
         mgr.refresh();
 
         let ext = &mgr.list()[0];

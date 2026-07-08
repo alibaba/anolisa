@@ -284,11 +284,18 @@ fn raw_cli_mode_slash_panel_selects_recommend_with_card_input() {
 
 #[test]
 fn raw_cli_suggest_mode_keeps_tool_requests_display_only() {
-    let output = run_raw_cli_with_input(
+    let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",
-        "/mode approval recommend\n\
-         ?? request tool approval\n\
-         exit\n",
+        &[],
+        &[],
+        vec![
+            (b"/mode approval recommend\n".to_vec(), Duration::ZERO),
+            (
+                b"?? request tool approval\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(3_000)),
+        ],
     );
 
     assert!(output.contains("Mode set to recommend."), "{output}");
