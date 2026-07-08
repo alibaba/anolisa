@@ -1011,8 +1011,12 @@ export default {
     '停止 ktuner 内核调优检查和提示',
   'ktuner check enabled — running a read-only kernel scan now. Results will appear below.':
     'ktuner check 已启用——正在做只读内核扫描,结果稍后显示。',
-  'ktuner check enabled, but no trusted ktuner binary was found on a system path. The check will run automatically once ktuner is installed. See the ktuner install docs.':
-    'ktuner check 已启用,但系统路径下没找到可信的 ktuner 二进制。安装 ktuner 后下次会自动检查。请参考 ktuner 安装文档。',
+  'ktuner check enabled, but no trusted ktuner binary was found on a system path. After installing ktuner, run /ktuner enable again to view the report.':
+    'ktuner check 已启用,但系统路径下没找到可信的 ktuner 二进制。安装后再次运行 /ktuner enable 查看报告。',
+  'ktuner check enabled. A check has already been completed this session.':
+    'ktuner check 已启用。本次会话已经完成过检查。',
+  'Kernel score: {{score}}/100. No tuning suggestions — already well configured.':
+    '内核得分:{{score}}/100。无调优建议——已经配置良好。',
   'ktuner check disabled. Re-enable it anytime with /ktuner enable.':
     'ktuner check 已停用。随时可用 /ktuner enable 重新启用。',
   'ktuner check is currently "{{mode}}". Use /ktuner enable or /ktuner disable to change it.':

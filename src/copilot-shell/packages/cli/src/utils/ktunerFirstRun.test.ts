@@ -222,7 +222,7 @@ describe('maybeRunKtunerFirstRunCheck', () => {
     expect(fs.existsSync(sentinel())).toBe(true);
   });
 
-  it('does not nag when the system is already optimal (0 recommendations)', async () => {
+  it('gives positive feedback when the system is already optimal (0 recommendations)', async () => {
     stubSpawn({
       stdout: JSON.stringify({ score: 100, recommendations: [] }),
       code: 0,
@@ -231,7 +231,9 @@ describe('maybeRunKtunerFirstRunCheck', () => {
 
     await maybeRunKtunerFirstRunCheck(addItem);
 
-    expect(items).toHaveLength(0);
+    expect(items).toHaveLength(1);
+    expect(items[0].text).toContain('100/100');
+    expect(items[0].text).toContain('well configured');
     // Ran successfully, so the sentinel IS written (don't re-check every auth).
     expect(fs.existsSync(sentinel())).toBe(true);
   });

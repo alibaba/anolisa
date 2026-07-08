@@ -1067,8 +1067,12 @@ export default {
     'Stop the ktuner kernel tuning check and hint',
   'ktuner check enabled — running a read-only kernel scan now. Results will appear below.':
     'ktuner check enabled — running a read-only kernel scan now. Results will appear below.',
-  'ktuner check enabled, but no trusted ktuner binary was found on a system path. The check will run automatically once ktuner is installed. See the ktuner install docs.':
-    'ktuner check enabled, but no trusted ktuner binary was found on a system path. The check will run automatically once ktuner is installed. See the ktuner install docs.',
+  'ktuner check enabled, but no trusted ktuner binary was found on a system path. After installing ktuner, run /ktuner enable again to view the report.':
+    'ktuner check enabled, but no trusted ktuner binary was found on a system path. After installing ktuner, run /ktuner enable again to view the report.',
+  'ktuner check enabled. A check has already been completed this session.':
+    'ktuner check enabled. A check has already been completed this session.',
+  'Kernel score: {{score}}/100. No tuning suggestions — already well configured.':
+    'Kernel score: {{score}}/100. No tuning suggestions — already well configured.',
   'ktuner check disabled. Re-enable it anytime with /ktuner enable.':
     'ktuner check disabled. Re-enable it anytime with /ktuner enable.',
   'ktuner check is currently "{{mode}}". Use /ktuner enable or /ktuner disable to change it.':

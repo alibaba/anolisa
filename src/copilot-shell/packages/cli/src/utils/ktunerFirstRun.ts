@@ -106,6 +106,15 @@ export function isKtunerAvailable(): boolean {
   return resolveKtunerBinary() !== null;
 }
 
+/** Whether the read-only check has already run successfully (sentinel exists). */
+export function hasRunCheck(): boolean {
+  try {
+    return fs.existsSync(sentinelPath());
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Hardcoded allowlist of trusted directories to resolve `ktuner` from. We
  * deliberately do NOT consult $PATH: enabling the first-run check authorizes
@@ -276,7 +285,16 @@ export async function maybeRunKtunerFirstRunCheck(
     }
 
     if (report.recommendations <= 0) {
-      // Already optimal — nothing to nag about.
+      addItem(
+        {
+          type: MessageType.INFO,
+          text: t(
+            'Kernel score: {{score}}/100. No tuning suggestions — already well configured.',
+            { score: String(report.score) },
+          ),
+        },
+        Date.now(),
+      );
       return;
     }
 

@@ -11,11 +11,13 @@ import { createMockCommandContext } from '../../test-utils/mockCommandContext.js
 import {
   maybeRunKtunerFirstRunCheck,
   isKtunerAvailable,
+  hasRunCheck,
 } from '../../utils/ktunerFirstRun.js';
 
 vi.mock('../../utils/ktunerFirstRun.js', () => ({
   maybeRunKtunerFirstRunCheck: vi.fn(),
   isKtunerAvailable: vi.fn(() => false),
+  hasRunCheck: vi.fn(() => false),
 }));
 
 describe('ktunerCommand', () => {
@@ -23,6 +25,8 @@ describe('ktunerCommand', () => {
     vi.mocked(maybeRunKtunerFirstRunCheck).mockClear();
     vi.mocked(isKtunerAvailable).mockReset();
     vi.mocked(isKtunerAvailable).mockReturnValue(false);
+    vi.mocked(hasRunCheck).mockReset();
+    vi.mocked(hasRunCheck).mockReturnValue(false);
   });
 
   it('has the correct name and subcommands', () => {
@@ -74,7 +78,21 @@ describe('ktunerCommand', () => {
     expect((result as { content: string }).content).toContain('running');
   });
 
-  it('/ktuner enable + unavailable: sets setting, does NOT trigger check, tells user', async () => {
+  it('/ktuner enable + available + already ran: tells user check already completed, does NOT re-run', async () => {
+    vi.mocked(isKtunerAvailable).mockReturnValue(true);
+    vi.mocked(hasRunCheck).mockReturnValue(true);
+    const ctx = createMockCommandContext();
+    const enableCmd = ktunerCommand.subCommands!.find(
+      (c) => c.name === 'enable',
+    )!;
+
+    const result = await enableCmd.action!(ctx, '');
+
+    expect(maybeRunKtunerFirstRunCheck).not.toHaveBeenCalled();
+    expect((result as { content: string }).content).toContain('already');
+  });
+
+  it('/ktuner enable + unavailable: sets setting, does NOT trigger check, tells user to re-run after install', async () => {
     vi.mocked(isKtunerAvailable).mockReturnValue(false);
     const ctx = createMockCommandContext();
     const enableCmd = ktunerCommand.subCommands!.find(
@@ -91,6 +109,9 @@ describe('ktunerCommand', () => {
     expect(maybeRunKtunerFirstRunCheck).not.toHaveBeenCalled();
     expect((result as { content: string }).content).toContain(
       'no trusted ktuner',
+    );
+    expect((result as { content: string }).content).toContain(
+      '/ktuner enable again',
     );
   });
 

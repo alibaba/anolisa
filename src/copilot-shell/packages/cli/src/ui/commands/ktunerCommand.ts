@@ -11,6 +11,7 @@ import { SettingScope } from '../../config/settings.js';
 import {
   maybeRunKtunerFirstRunCheck,
   isKtunerAvailable,
+  hasRunCheck,
 } from '../../utils/ktunerFirstRun.js';
 
 const enableSubCommand: SlashCommand = {
@@ -25,21 +26,30 @@ const enableSubCommand: SlashCommand = {
       'general.ktunerCheck',
       'enabled',
     );
-    if (isKtunerAvailable()) {
-      void maybeRunKtunerFirstRunCheck(context.ui.addItem);
+    if (!isKtunerAvailable()) {
       return {
         type: 'message',
         messageType: 'info',
         content: t(
-          'ktuner check enabled — running a read-only kernel scan now. Results will appear below.',
+          'ktuner check enabled, but no trusted ktuner binary was found on a system path. After installing ktuner, run /ktuner enable again to view the report.',
         ),
       };
     }
+    if (hasRunCheck()) {
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: t(
+          'ktuner check enabled. A check has already been completed this session.',
+        ),
+      };
+    }
+    void maybeRunKtunerFirstRunCheck(context.ui.addItem);
     return {
       type: 'message',
       messageType: 'info',
       content: t(
-        'ktuner check enabled, but no trusted ktuner binary was found on a system path. The check will run automatically once ktuner is installed. See the ktuner install docs.',
+        'ktuner check enabled — running a read-only kernel scan now. Results will appear below.',
       ),
     };
   },
