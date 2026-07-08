@@ -6,6 +6,7 @@ tokenless is ANOLISA's token-saving toolkit. Through five complementary strategi
 - **TOON encoding**: encodes JSON responses into a token-oriented compact format; structured data saves another 15–40%.
 - **Command rewriting**: integrates RTK to filter and rewrite 70+ common CLI outputs, eliminating 60–90% of noise.
 - **Tool-readiness check**: checks binary/config/permission/network dependencies before execution, auto-fixes missing ones, and attributes environment-class failures to avoid wasted retries.
+- **Reversible compression (Stash)**: response/schema compression is *inline lossy, end-to-end lossless* by default — truncated content is stashed under a BLAKE3 key, a `<<tokenless:KEY>>` marker is embedded in the output, and the LLM can `tokenless retrieve` the original on demand.
 - **Statistics & observability**: every compression records char/token savings metrics; supports SQLite aggregation and SLS JSONL ingestion, with dual-run comparison of real savings.
 
 ---
@@ -19,6 +20,7 @@ tokenless is ANOLISA's token-saving toolkit. Through five complementary strategi
 | TOON encoding | 15–40% | Lossless compact JSON format, chained after response compression |
 | Command rewriting | 60–90% | Filters 70+ CLI outputs via RTK |
 | Tool-readiness check | reduces retry waste | Pre-execution env check, auto-fix, failure attribution |
+| Reversible compression (Stash) | end-to-end lossless | Truncated content stashed, `<<tokenless:KEY>>` marker embedded; LLM retrieves original on demand |
 
 ---
 
@@ -76,6 +78,8 @@ tokenless compress-schema -f tools.json --batch \
 | `-f, --file <path>` | Input file; omit to read stdin |
 | `--batch` | Compress a JSON array (auto-enabled when input is an array) |
 | `--agent-id` / `--session-id` / `--tool-use-id` | Stats tracking fields |
+| `--no-stash` | Disable reversible stash: truncation becomes lossy and non-retrievable (pre-stash behavior) |
+| `--stash-db <path>` | Override the stash database path (default `~/.tokenless/stash.db`; must be under the real user home) |
 
 ### Compress API response
 
@@ -96,6 +100,8 @@ tokenless compress-response -f resp.json \
 | `--truncate-strings-at <usize>` | String truncation threshold (default 4096) |
 | `--truncate-arrays-at <usize>` | Array truncation threshold (default 32) |
 | `--max-depth <usize>` | Nesting depth cap (default 8) |
+| `--no-stash` | Disable reversible stash: truncation becomes lossy and non-retrievable (pre-stash behavior) |
+| `--stash-db <path>` | Override the stash database path (default `~/.tokenless/stash.db`; must be under the real user home) |
 
 ### TOON encode/decode
 
@@ -112,6 +118,32 @@ echo '{"name":"test","value":42}' | tokenless compress-toon | tokenless decompre
 ```
 
 `compress-toon` also supports `--agent-id`/`--session-id`/`--tool-use-id` for stats. If encoding yields no savings, the CLI emits the original and prints a stderr notice; no stats are recorded.
+
+### Reversible compression retrieval (Retrieve)
+
+Response/schema compression stashes truncated content by default and embeds a `<<tokenless:KEY>>` marker in the output. The LLM can quote the marker to recover the original:
+
+```bash
+# Retrieve directly (bare 24-hex hash)
+tokenless retrieve 0123456789abcdef01234567
+
+# Also accepts a full line containing the marker (hash extracted automatically)
+tokenless retrieve "... <... 12 items truncated, retrieve with <<tokenless:0123456789abcdef01234567>>"
+
+# Override the stash database path
+tokenless retrieve <hash> --stash-db /path/to/stash.db
+```
+
+`hash` is 24 hex characters (first 12 bytes / 96 bits of a BLAKE3 hash). Stash entries carry a TTL (SQLite backend 1 hour, InMemory backend 5 minutes); after expiry, retrieve returns empty. See [How it works · Reversible compression](#reversible-compression-stash).
+
+### MCP server
+
+```bash
+# Start the stdio MCP server, exposing the tokenless_retrieve tool
+tokenless mcp serve
+```
+
+An MCP-connected agent can recover truncated payloads on demand via the `tokenless_retrieve` tool, without shelling out to the CLI.
 
 ### Environment readiness check
 
@@ -283,12 +315,12 @@ Recursively traverses JSON values applying 7 rules. Source: `crates/tokenless-sc
 
 | Rule | Name | Condition | Handling | Default threshold |
 |------|------|---------|---------|---------|
-| R1 | String truncation | length > 4096 chars | UTF-8 safe truncation, append `… (truncated)` | 4096 chars |
-| R2 | Array truncation | elements > 32 | Keep first 32, append `<... N more items truncated>` | 32 items |
+| R1 | String truncation | length > 4096 chars | UTF-8 safe truncation; by default stashes the original and appends `… (truncated, retrieve with <<tokenless:KEY>>)`, degrades to `… (truncated)` with `--no-stash` | 4096 chars |
+| R2 | Array truncation | elements > 32 | Keep first 32; by default stashes the dropped tail and appends `<... N items truncated, retrieve with <<tokenless:KEY>>`, degrades to `<... N more items truncated>` with `--no-stash` | 32 items |
 | R3 | Field drop | key matches blacklist | Remove field entirely | 7 fields |
 | R4 | null removal | value is `null` | Delete from object/array | enabled |
 | R5 | Empty removal | value is `""`/`[]`/`{}` | Delete from object/array | enabled |
-| R6 | Depth truncation | nesting depth > 8 | Replace with `<{type} truncated at depth {N}>` | 8 levels |
+| R6 | Depth truncation | nesting depth > 8 | By default stashes the subtree and replaces with `<{type} truncated at depth {N}, retrieve with <<tokenless:KEY>>`, degrades to `<{type} truncated at depth {N}>` with `--no-stash` | 8 levels |
 | R7 | Primitive preservation | bool/number | Keep as-is | — |
 
 **R3 default blacklist**: `debug`, `trace`, `traces`, `stack`, `stacktrace`, `logs`, `logging`
@@ -360,6 +392,18 @@ tool response → ResponseCompressor (lossy) → TOON encode (lossless) → fina
 
 Each stage is fail-open (passes through original on failure).
 
+### Reversible compression (Stash)
+
+Response/schema compression is *inline lossy, end-to-end lossless*: when the compressor truncates, the dropped payload is serialized to JSON and stashed under a BLAKE3-derived 24-hex key, with a `<<tokenless:KEY>>` marker embedded in the compressed output. The LLM can quote the marker back to retrieve the original payload, so no information is permanently lost even though the inline representation is smaller. This mirrors Headroom's CCR (Compress-Cache-Retrieve); the mechanism here is called **stash** to avoid the proprietary abbreviation.
+
+- **Key space**: a key is the first 12 bytes (96 bits) of a BLAKE3 hash of the payload — birthday bound 2⁴⁸, treated as a unique handle. The `tokenless:` namespace distinguishes these markers from user content.
+- **Backends**: `SqliteStore` (feature `sqlite`, on by default; persists to `~/.tokenless/stash.db`, WAL) is the recommended production backend — hooks fork+exec a fresh process per call, so an in-memory store loses state across calls. `InMemoryStore` is for tests/single-process runs.
+- **TTL**: entries carry an expiry and are lazily purged (SQLite 1 hour, InMemory 5 minutes); after expiry, retrieve returns empty.
+- **Disabling**: `--no-stash` makes truncation lossy and non-retrievable (the pre-stash behavior); the same degradation applies when no stash store is attached.
+- **Retrieval**: `tokenless retrieve <KEY>`, or via the MCP `tokenless_retrieve` tool (`tokenless mcp serve`). `retrieve` accepts a bare hash or a full line containing a `<<tokenless:HASH>>` marker (extracted automatically).
+
+See `docs/stash-reversible-compression.md`. Source: `crates/tokenless-ccr/`.
+
 ---
 
 ## Configuration
@@ -412,6 +456,7 @@ Each hook/plugin degrades independently — if the corresponding binary (`rtk` o
 - **CLI**: errors go to stderr; callers check exit codes to decide fallback
 - **Stats recording**: fail-silent; DB errors never block compression output
 - **SLS writes**: fail-silent; stderr warning only
+- **Stash retrieval**: returns empty after TTL expiry (SQLite 1h / InMemory 5min) or when truncation ran with `--no-stash`; if no stash store is available, compression degrades to lossy without blocking output
 
 ---
 
@@ -449,6 +494,7 @@ tokenless env-check --all --checklist
 | `jq not installed` | `dnf install jq` / `apt install jq` |
 | Command not rewritten | Not all commands have RTK equivalents; test with `rtk rewrite "cmd"` |
 | Tool Ready false NOT_READY | Inspect `tool-ready-spec.json`; run `tokenless env-check --tool <name> --fix` |
+| `retrieve` returns empty | Entry expired (TTL SQLite 1h / InMemory 5min); or compression ran with `--no-stash`; or `--stash-db` points at a different database |
 | adapter enable failed | `anolisa adapter scan` to confirm framework installed; `anolisa adapter status tokenless` for details |
 | State out of sync after manual dnf | `anolisa repair tokenless`; or `anolisa forget tokenless` then `anolisa adopt tokenless` |
 
@@ -492,7 +538,7 @@ make adapter-scan         # list registered adapter capabilities
 |----------|------|------|---------|---------|
 | PreToolUse | `tool_ready_hook.sh` (bash) | Tool Ready pre-check + auto-fix + skip-retry | `""` (all, sequential) | 10000ms |
 | PreToolUse | `rewrite_hook.py` (python3) | RTK command rewriting | `^(Bash\|run_shell_command\|terminal\|Shell\|exec\|process)$` | 5000ms |
-| PostToolUse | `compress_response_hook.py` | Response compression + TOON + failure attribution | — | 10000ms |
+| PostToolUse | `compress_response_hook.py` | Response compression (reversible stash by default) + TOON + failure attribution | — | 10000ms |
 | BeforeModel | `compress_schema_hook.py` | Schema compression | — | 10000ms |
 
 All hooks receive `TOKENLESS_AGENT_ID=copilot-shell`. Auxiliary files: `hook_utils.py`, `compress_toon_hook.py`, `run-hook.sh`, `tool_categories.json`.
@@ -514,6 +560,8 @@ All hooks receive `TOKENLESS_AGENT_ID=copilot-shell`. Auxiliary files: `hook_uti
 | Tool Ready dependency spec | `adapters/tokenless/common/tool-ready-spec.json` |
 | Auto-fix script | `adapters/tokenless/common/tokenless-env-fix.sh` |
 | Stats database (default) | `~/.tokenless/stats.db` |
+| Stash database (default) | `~/.tokenless/stash.db` |
+| Reversible compression (stash) | `crates/tokenless-ccr/` |
 | Config file | `~/.tokenless/config.json` |
 | SLS JSONL (default) | `/var/log/anolisa/sls/ops/tokenless.jsonl` |
 | RPM spec | `tokenless.spec.in` |
@@ -555,4 +603,4 @@ All hooks receive `TOKENLESS_AGENT_ID=copilot-shell`. Auxiliary files: `hook_uti
 
 **License**: MIT (tokenless core) + Apache-2.0 (vendored rtk)
 **Version**: 0.6.1
-**Document version**: 2.1 (aligned with ANOLISA-design user-guide structure)
+**Document version**: 2.2 (add reversible compression/Stash, retrieve and mcp subcommands; aligned with 0.6.1 implementation)

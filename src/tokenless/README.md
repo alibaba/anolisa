@@ -40,9 +40,28 @@ Three integration paths are available:
 
 ## Applicable Scenarios & Expected Effects
 
-**tokenless optimizes tokens in tool call responses, not the entire session.** In a typical Agent session, LLM reasoning output and conversation history account for the bulk of consumption; tool responses are only a fraction:
+tokenless only removes redundancy from **tool call responses** before they enter the LLM context; it does not touch model reasoning or conversation history. The payoff depends heavily on the share and shape of tool responses in the session.
 
-| Component | Typical Share | tokenless Can Optimize |
+### Where it pays off
+
+| Workload | Primary strategy | Why |
+|----------|-----------------|-----|
+| Shell-heavy (build/test/triage) | Command rewriting (RTK) | `cargo`/`npm`/`go`/`pytest` output carries lots of progress/warning noise; RTK cuts 60–90% |
+| API/fetch-heavy (REST, web_fetch) | Response compression + TOON | JSON carries debug/null/empty and syntax overhead; 26–78% compression, TOON adds 15–40% |
+| Agents with many tools | Schema compression | Many Function Calling definitions carry verbose descriptions; ~57% |
+| Long responses that must stay faithful | Reversible compression (Stash) | Truncated content is `retrieve`-able end-to-end lossless; thresholds can be tightened safely |
+
+### Where it pays little or doesn't apply
+
+- **Chat-heavy / few tool calls**: tool-response share is tiny, overall savings approach 0.
+- **Already-short responses**: when `after >= before`, the CLI emits the original and records no stats (expected).
+- **Model inference tokens / billed tokens**: outside what tokenless touches.
+
+### Estimating the effect
+
+> The shares below are **illustrative estimates** that vary widely by task, not measured constants.
+
+| Session component | Typical share | tokenless can optimize |
 |-----------|-------------|----------------------|
 | LLM reasoning output (text generation) | ~35% | ❌ Not involved |
 | LLM input (system prompt + conversation history) | ~40% | ❌ Not involved |
@@ -53,6 +72,7 @@ Three integration paths are available:
 
 Example: dashboard shows 60% compression rate, but if tool responses account for 20% of total consumption, the actual savings rate is 60% × 20% = **12%**. This is why savings feel "lighter than a feather" in experiments consuming 15 million tokens — tokenless only optimizes the ~3 million tokens of tool responses.
 
+> Stash makes compression **end-to-end lossless**: you can tighten truncation thresholds for higher inline savings and recover the original via the `<<tokenless:KEY>>` marker when needed, with no correctness impact. Use `TOKENLESS_COMPRESSION_ENABLED=0/1` dual runs to compare real savings.
 > See [user manual](docs/tokenless-user-manual-en.md) for per-strategy trigger conditions.
 
 ## Architecture
