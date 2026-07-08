@@ -8,6 +8,7 @@ import type React from 'react';
 import { useState, useCallback, useEffect, useMemo } from 'react';
 import { AuthType } from '@copilot-shell/core';
 import { Box, Text } from 'ink';
+import Spinner from 'ink-spinner';
 import { Colors } from '../colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import type { Key } from '../hooks/useKeypress.js';
@@ -39,6 +40,13 @@ export function AuthDialog(): React.JSX.Element {
   const config = useConfig();
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  // While a provider selection is being handed off to the auth flow (which may
+  // synchronously probe provider config before the next dialog renders), show a
+  // loading indicator and disable input so repeated keys cannot re-trigger it.
+  const [isSelectingAuth, setIsSelectingAuth] = useState(false);
+  const [pendingSelection, setPendingSelection] = useState<AuthType | null>(
+    null,
+  );
   const authItems = useMemo(
     () => [
       {
@@ -146,13 +154,39 @@ export function AuthDialog(): React.JSX.Element {
     lastAuthOption,
   ]);
 
-  const handleAuthSelect = useCallback(
-    async (authMethod: AuthType) => {
-      setErrorMessage(null);
-      await onAuthSelect(authMethod);
-    },
-    [onAuthSelect],
-  );
+  const handleAuthSelect = useCallback((authMethod: AuthType) => {
+    setErrorMessage(null);
+    // Enter loading state and defer the actual hand-off (see effect below) so the
+    // spinner paints before the auth flow's synchronous work blocks rendering.
+    setIsSelectingAuth(true);
+    setPendingSelection(authMethod);
+  }, []);
+
+  // Run the deferred provider selection once the loading indicator has rendered.
+  // If the hand-off rejects without unmounting this dialog, restore input so the
+  // user is not stuck on the spinner.
+  useEffect(() => {
+    if (!isSelectingAuth || pendingSelection === null) {
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          await onAuthSelect(pendingSelection);
+        } catch {
+          if (!cancelled) {
+            setIsSelectingAuth(false);
+            setPendingSelection(null);
+          }
+        }
+      })();
+    }, 0);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [isSelectingAuth, pendingSelection, onAuthSelect]);
 
   const handleContinueToBash = useCallback(() => {
     setErrorMessage(null);
@@ -271,7 +305,24 @@ export function AuthDialog(): React.JSX.Element {
     ],
   );
 
-  useKeypress(handleDialogKeypress, { isActive: true });
+  useKeypress(handleDialogKeypress, { isActive: !isSelectingAuth });
+
+  if (isSelectingAuth) {
+    return (
+      <Box
+        borderStyle="round"
+        borderColor={Colors.Gray}
+        flexDirection="column"
+        padding={1}
+        width="100%"
+      >
+        <Text>
+          <Spinner type="dots" />{' '}
+          {t('Initializing model configuration, please wait...')}
+        </Text>
+      </Box>
+    );
+  }
 
   return (
     <Box

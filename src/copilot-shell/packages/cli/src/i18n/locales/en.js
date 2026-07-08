@@ -1047,6 +1047,8 @@ export default {
     'Configuration verification failed. Please check your API Key and model settings.',
   'Verifying and saving configuration...':
     'Verifying and saving configuration...',
+  'Initializing model configuration, please wait...':
+    'Initializing model configuration, please wait...',
   '{{authType}} configuration saved successfully, current model: {{model}}':
     '{{authType}} configuration saved successfully, current model: {{model}}',
   '{{authType}} credentials saved successfully.':

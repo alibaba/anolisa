@@ -89,6 +89,40 @@ describe('AuthDialog', () => {
     throw new Error('waitFor timed out');
   };
 
+  const makeUnauthenticatedSettings = (): LoadedSettings =>
+    new LoadedSettings(
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: {},
+        originalSettings: {},
+        path: '',
+      },
+      {
+        settings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        originalSettings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      true,
+      new Set(),
+    );
+
   let originalEnv: NodeJS.ProcessEnv;
 
   beforeEach(() => {
@@ -930,6 +964,72 @@ describe('AuthDialog', () => {
 
     // Should call handleAuthSelect with undefined to exit
     expect(handleAuthSelect).toHaveBeenCalledWith(undefined);
+    unmount();
+  });
+
+  it('should show initializing loading after selecting Custom Provider', async () => {
+    const handleAuthSelect = vi.fn();
+    const settings = makeUnauthenticatedSettings();
+
+    const { lastFrame, stdin, unmount } = renderAuthDialog(
+      settings,
+      {},
+      { handleAuthSelect },
+    );
+
+    await waitFor(() => {
+      expect(lastFrame()).toContain('● Aliyun Authentication');
+    });
+    await wait(); // extra tick: ensure keypress handler re-registered
+
+    // Move to Custom Provider and select it
+    stdin.write('[B');
+    await wait();
+    expect(lastFrame()).toContain('● Custom Provider');
+
+    stdin.write('\r');
+    await wait();
+
+    expect(lastFrame()).toContain(
+      'Initializing model configuration, please wait...',
+    );
+    await waitFor(() => {
+      expect(handleAuthSelect).toHaveBeenCalledWith(AuthType.USE_OPENAI);
+    });
+    unmount();
+  });
+
+  it('should ignore repeated keypresses while initializing', async () => {
+    const handleAuthSelect = vi.fn();
+    const settings = makeUnauthenticatedSettings();
+
+    const { lastFrame, stdin, unmount } = renderAuthDialog(
+      settings,
+      {},
+      { handleAuthSelect },
+    );
+
+    await waitFor(() => {
+      expect(lastFrame()).toContain('● Aliyun Authentication');
+    });
+    await wait(); // extra tick: ensure keypress handler re-registered
+
+    stdin.write('\r');
+    await wait();
+
+    expect(lastFrame()).toContain(
+      'Initializing model configuration, please wait...',
+    );
+
+    // Any further input must be ignored while the loading indicator is shown
+    stdin.write('\r');
+    stdin.write('\r');
+    stdin.write('');
+    stdin.write('[B');
+    await wait();
+
+    expect(handleAuthSelect).toHaveBeenCalledTimes(1);
+    expect(handleAuthSelect).toHaveBeenCalledWith(AuthType.USE_ALIYUN);
     unmount();
   });
 });

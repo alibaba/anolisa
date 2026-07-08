@@ -991,6 +991,8 @@ export default {
   'Configuration verification failed. Please check your API Key and model settings.':
     '配置验证失败。请检查您的 API Key 和模型设置。',
   'Verifying and saving configuration...': '正在验证并保存配置...',
+  'Initializing model configuration, please wait...':
+    '正在初始化模型配置,请稍候...',
   '{{authType}} configuration saved successfully, current model: {{model}}':
     '{{authType}} 配置已保存，当前模型：{{model}}',
   '{{authType}} credentials saved successfully.':
