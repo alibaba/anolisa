@@ -77,11 +77,27 @@ fn test_compress_nested_properties() {
     let result = compressor.compress(&schema);
 
     // Nested structure preserved
-    assert!(result.pointer("/function/parameters/properties/address/properties/street").is_some());
+    assert!(
+        result
+            .pointer("/function/parameters/properties/address/properties/street")
+            .is_some()
+    );
 
     // Titles removed at all levels
-    assert!(result.pointer("/function/parameters/properties/address").unwrap().get("title").is_none());
-    assert!(result.pointer("/function/parameters/properties/address/properties/street").unwrap().get("title").is_none());
+    assert!(
+        result
+            .pointer("/function/parameters/properties/address")
+            .unwrap()
+            .get("title")
+            .is_none()
+    );
+    assert!(
+        result
+            .pointer("/function/parameters/properties/address/properties/street")
+            .unwrap()
+            .get("title")
+            .is_none()
+    );
 }
 
 #[test]
@@ -130,7 +146,11 @@ fn test_description_truncation() {
 
     let result = compressor.compress(&schema);
     let desc = result["function"]["description"].as_str().unwrap();
-    assert!(desc.len() < 500, "Description should be truncated, got len={}", desc.len());
+    assert!(
+        desc.len() < 500,
+        "Description should be truncated, got len={}",
+        desc.len()
+    );
 }
 
 #[test]
@@ -157,7 +177,11 @@ fn test_titles_removed() {
 
     assert!(result["function"].get("title").is_none());
     assert!(result["function"]["parameters"].get("title").is_none());
-    assert!(result["function"]["parameters"]["properties"]["x"].get("title").is_none());
+    assert!(
+        result["function"]["parameters"]["properties"]["x"]
+            .get("title")
+            .is_none()
+    );
 }
 
 #[test]
@@ -179,7 +203,13 @@ fn test_examples_removed() {
     });
 
     let result = compressor.compress(&schema);
-    assert!(result.pointer("/function/parameters/properties/email").unwrap().get("examples").is_none());
+    assert!(
+        result
+            .pointer("/function/parameters/properties/email")
+            .unwrap()
+            .get("examples")
+            .is_none()
+    );
 }
 
 #[test]
@@ -353,13 +383,22 @@ fn test_fixture_hubspot_contact() {
     assert!(compressed.is_object());
 
     // Structure preserved
-    assert!(compressed.pointer("/function/parameters/properties").is_some());
+    assert!(
+        compressed
+            .pointer("/function/parameters/properties")
+            .is_some()
+    );
     assert_eq!(compressed["function"]["name"], "create_or_update_contact");
 
     // Compression occurred
     let orig_len = serde_json::to_string(&schema).unwrap().len();
     let comp_len = serde_json::to_string(&compressed).unwrap().len();
-    assert!(comp_len < orig_len, "Should compress: original={}, compressed={}", orig_len, comp_len);
+    assert!(
+        comp_len < orig_len,
+        "Should compress: original={}, compressed={}",
+        orig_len,
+        comp_len
+    );
 
     // Enum preserved on lifecyclestage
     if let Some(ls) =
@@ -380,7 +419,12 @@ fn test_fixture_stripe_payment() {
 
     let orig_len = serde_json::to_string(&schema).unwrap().len();
     let comp_len = serde_json::to_string(&compressed).unwrap().len();
-    assert!(comp_len < orig_len, "Should compress: original={}, compressed={}", orig_len, comp_len);
+    assert!(
+        comp_len < orig_len,
+        "Should compress: original={}, compressed={}",
+        orig_len,
+        comp_len
+    );
 }
 
 #[test]
@@ -407,7 +451,13 @@ fn test_all_fixtures_produce_valid_json() {
         // Compression ratio > 0
         let orig_len = serde_json::to_string(&schema).unwrap().len();
         let comp_len = json_str.len();
-        assert!(comp_len <= orig_len, "{}: compressed ({}) should be <= original ({})", name, comp_len, orig_len);
+        assert!(
+            comp_len <= orig_len,
+            "{}: compressed ({}) should be <= original ({})",
+            name,
+            comp_len,
+            orig_len
+        );
     }
 }
 
@@ -447,5 +497,9 @@ fn test_fixture_compression_ratio_benchmark() {
     );
 
     // At minimum some compression should occur on complex schemas
-    assert!(avg_saved >= 5.0, "Average compression should be >= 5%, got {:.1}%", avg_saved);
+    assert!(
+        avg_saved >= 5.0,
+        "Average compression should be >= 5%, got {:.1}%",
+        avg_saved
+    );
 }

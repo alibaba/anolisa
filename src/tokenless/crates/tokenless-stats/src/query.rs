@@ -747,11 +747,13 @@ mod tests {
 
     #[test]
     fn test_format_list_with_more_records_than_limit() {
-        let records: Vec<StatsRecord> = (0..5).map(|i| {
-            let mut r = test_record();
-            r.id = i + 1;
-            r
-        }).collect();
+        let records: Vec<StatsRecord> = (0..5)
+            .map(|i| {
+                let mut r = test_record();
+                r.id = i + 1;
+                r
+            })
+            .collect();
         let output = format_list(&records, 3);
         assert!(output.contains("Showing 3 record"));
         assert!(output.contains("and 2 more"));
