@@ -291,9 +291,7 @@ impl GenAIBuilder {
                             let role = format!("{:?}", m.role).to_lowercase();
                             InputMessage {
                                 role,
-                                parts: vec![MessagePart::Text {
-                                    content: m.content.as_text(),
-                                }],
+                                parts: Self::anthropic_message_content_to_parts(&m.content),
                                 name: None,
                             }
                         })
@@ -402,6 +400,77 @@ impl GenAIBuilder {
     // parse_request_body / extract_response_id / openai_msg_to_input /
     // openai_msg_to_output / parse_openai_tool_call_value / parse_sse_response_body /
     // extract_parts_from_sse_body live in `openai_parse.rs` (same impl block).
+
+    fn anthropic_message_content_to_parts(
+        content: &crate::analyzer::message::AnthropicMessageContent,
+    ) -> Vec<MessagePart> {
+        match content {
+            crate::analyzer::message::AnthropicMessageContent::Text(text) => {
+                if text.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![MessagePart::Text {
+                        content: text.clone(),
+                    }]
+                }
+            }
+            crate::analyzer::message::AnthropicMessageContent::Blocks(blocks) => blocks
+                .iter()
+                .filter_map(Self::anthropic_content_block_to_part)
+                .collect(),
+        }
+    }
+
+    fn anthropic_content_block_to_part(
+        block: &crate::analyzer::message::AnthropicContentBlock,
+    ) -> Option<MessagePart> {
+        match block {
+            crate::analyzer::message::AnthropicContentBlock::Text { text, .. } => {
+                if text.is_empty() {
+                    None
+                } else {
+                    Some(MessagePart::Text {
+                        content: text.clone(),
+                    })
+                }
+            }
+            crate::analyzer::message::AnthropicContentBlock::ToolUse { id, name, input } => {
+                Some(MessagePart::ToolCall {
+                    id: Some(id.clone()),
+                    name: name.clone(),
+                    arguments: Some(input.clone()),
+                })
+            }
+            crate::analyzer::message::AnthropicContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                let response = match (content.clone(), *is_error) {
+                    (Some(value), Some(is_error)) => {
+                        serde_json::json!({"content": value, "is_error": is_error})
+                    }
+                    (Some(value), None) => value,
+                    (None, Some(is_error)) => serde_json::json!({"is_error": is_error}),
+                    (None, None) => serde_json::Value::Null,
+                };
+                Some(MessagePart::ToolCallResponse {
+                    id: Some(tool_use_id.clone()),
+                    response,
+                })
+            }
+            crate::analyzer::message::AnthropicContentBlock::Thinking { thinking, .. } => {
+                if thinking.is_empty() {
+                    None
+                } else {
+                    Some(MessagePart::Reasoning {
+                        content: thinking.clone(),
+                    })
+                }
+            }
+            _ => None,
+        }
+    }
 
     /// Build LLMResponse from parsed message or HTTP record
     fn build_response(
@@ -934,6 +1003,69 @@ mod tests {
         );
         assert!(!call.request.stream);
         assert!(call.request.tools.is_some());
+    }
+
+    #[test]
+    fn test_build_request_anthropic_preserves_tool_result_blocks() {
+        let builder = GenAIBuilder::new();
+        let anth_req = AnthropicRequest {
+            model: "claude-3".to_string(),
+            messages: vec![
+                AnthMsg {
+                    role: MessageRole::Assistant,
+                    content: AnthropicMessageContent::Blocks(vec![
+                        AnthropicContentBlock::ToolUse {
+                            id: "toolu_1".to_string(),
+                            name: "Bash".to_string(),
+                            input: serde_json::json!({"command": "cat /tmp/missing.txt"}),
+                        },
+                    ]),
+                },
+                AnthMsg {
+                    role: MessageRole::User,
+                    content: AnthropicMessageContent::Blocks(vec![
+                        AnthropicContentBlock::ToolResult {
+                            tool_use_id: "toolu_1".to_string(),
+                            content: Some(serde_json::json!(
+                                "Exit code 1\ncat: /tmp/missing.txt: No such file or directory"
+                            )),
+                            is_error: Some(true),
+                        },
+                    ]),
+                },
+            ],
+            max_tokens: 200,
+            system: None,
+            stream: Some(false),
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
+            metadata: None,
+            tools: None,
+            tool_choice: None,
+        };
+        let parsed = ParsedApiMessage::AnthropicMessage {
+            request: Some(anth_req),
+            response: None,
+        };
+        let http = make_http("/v1/messages", None, None);
+        let call = build_call(
+            &builder,
+            &[AnalysisResult::Http(http), AnalysisResult::Message(parsed)],
+        )
+        .unwrap();
+
+        assert!(call.request.messages.iter().any(|message| {
+            message.parts.iter().any(|part| {
+                matches!(
+                    part,
+                    MessagePart::ToolCallResponse { id, response }
+                        if id.as_deref() == Some("toolu_1")
+                            && response.get("is_error").and_then(|v| v.as_bool()) == Some(true)
+                )
+            })
+        }));
     }
 
     #[test]

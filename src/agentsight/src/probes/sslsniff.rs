@@ -622,7 +622,7 @@ fn find_boringssl_offsets(path: &str) -> Option<BoringSslOffsets> {
         hs_matches[0]
     } else {
         // Multiple matches: choose the one closest before read_off.
-        match hs_matches.iter().filter(|&&o| o < read_off).next_back() {
+        match hs_matches.iter().rfind(|&&o| o < read_off) {
             Some(&o) => o,
             None => {
                 if verbose {

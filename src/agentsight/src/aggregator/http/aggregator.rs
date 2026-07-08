@@ -173,11 +173,11 @@ impl HttpConnectionAggregator {
         }
     }
 
-    /// Evict connections that have been idle for longer than `self.idle_timeout`
-    /// or whose buffered body exceeds `self.max_body_bytes`.
+    /// Evict discardable connections that have been idle for longer than
+    /// `self.idle_timeout` or whose buffered body exceeds `self.max_body_bytes`.
     ///
-    /// Called periodically from the main event loop (via `UnifiedAggregator`)
-    /// to prevent stale or oversized connection states from accumulating.
+    /// In-flight request/response states are preserved here so callers can
+    /// drain and persist them instead of losing a manually interrupted stream.
     pub fn evict_idle_and_oversized(&mut self) {
         let now = Instant::now();
         let timeout = self.idle_timeout;
@@ -196,16 +196,20 @@ impl HttpConnectionAggregator {
             })
             .collect();
 
+        let mut evicted_idle = 0usize;
         for key in &to_evict {
-            self.connections.pop(key);
-            self.sse_continuation_buffers.pop(key);
-            self.last_appended_src_ptr.pop(key);
-            self.last_activity.pop(key);
+            if matches!(self.connections.peek(key), Some(ConnectionState::Idle)) {
+                self.connections.pop(key);
+                self.sse_continuation_buffers.pop(key);
+                self.last_appended_src_ptr.pop(key);
+                self.last_activity.pop(key);
+                evicted_idle += 1;
+            }
         }
-        if !to_evict.is_empty() {
+        if evicted_idle > 0 {
             log::info!(
                 "[HttpAggregator] evicted {} idle connections (timeout={}s)",
-                to_evict.len(),
+                evicted_idle,
                 timeout.as_secs()
             );
         }
@@ -217,9 +221,6 @@ impl HttpConnectionAggregator {
             .filter_map(|(k, state)| {
                 let body_len = match state {
                     ConnectionState::RequestBodyPending { body_buffer, .. } => body_buffer.len(),
-                    ConnectionState::SseActive {
-                        compressed_buffer, ..
-                    } => compressed_buffer.as_ref().map_or(0, |b| b.len()),
                     _ => 0,
                 };
                 if body_len > max_bytes { Some(*k) } else { None }
@@ -239,6 +240,50 @@ impl HttpConnectionAggregator {
                 max_bytes
             );
         }
+    }
+
+    /// Drain non-idle connections that exceeded `idle_timeout`.
+    ///
+    /// These states can represent manually interrupted or abandoned LLM
+    /// streams. Returning them lets the caller persist a pending GenAI row
+    /// instead of silently dropping the session evidence.
+    pub fn drain_idle_connections(&mut self) -> Vec<(ConnectionId, ConnectionState)> {
+        let now = Instant::now();
+        let timeout = self.idle_timeout;
+        let keys: Vec<ConnectionId> = self
+            .last_activity
+            .iter()
+            .filter_map(|(k, ts)| {
+                if now.duration_since(*ts) > timeout {
+                    Some(*k)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let mut result = Vec::new();
+        for key in keys {
+            self.sse_continuation_buffers.pop(&key);
+            self.last_appended_src_ptr.pop(&key);
+            self.last_activity.pop(&key);
+            if let Some(state) = self.connections.pop(&key) {
+                match state {
+                    ConnectionState::Idle => {}
+                    _ => result.push((key, state)),
+                }
+            }
+        }
+
+        if !result.is_empty() {
+            log::info!(
+                "[HttpAggregator] drained {} idle in-flight connection(s) (timeout={}s)",
+                result.len(),
+                timeout.as_secs()
+            );
+        }
+
+        result
     }
 
     /// Record activity timestamp for a connection.
@@ -2373,5 +2418,82 @@ mod tests {
         std::thread::sleep(Duration::from_millis(60));
         agg.evict_idle_and_oversized();
         assert!(agg.connections.peek(&conn_id).is_none());
+    }
+
+    #[test]
+    fn test_idle_eviction_preserves_sse_active_for_drain() {
+        let mut agg = HttpConnectionAggregator::with_limits(10, 8192, Duration::from_millis(50));
+        let event = create_mock_ssl_event(1234, 0x7000);
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/v1/messages".to_string(),
+            version: 11,
+            headers: HashMap::new(),
+            body_offset: 0,
+            body_len: 0,
+            source_event: event.clone(),
+            reassembled_body: None,
+        };
+        agg.process_request(request);
+
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "text/event-stream".to_string());
+        let response = ParsedResponse {
+            version: 11,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers,
+            body_offset: 0,
+            body_len: 0,
+            source_event: event,
+        };
+        assert!(agg.process_response(response).is_none());
+
+        std::thread::sleep(Duration::from_millis(60));
+        agg.evict_idle_and_oversized();
+        let drained = agg.drain_connections_for_pid(1234);
+
+        assert_eq!(drained.len(), 1);
+        assert!(matches!(drained[0].1, ConnectionState::SseActive { .. }));
+    }
+
+    #[test]
+    fn test_oversized_request_body_pending_is_evicted() {
+        let mut agg = HttpConnectionAggregator::with_limits(10, 1024, Duration::from_secs(60));
+        let conn_id = ConnectionId {
+            pid: 1234,
+            ssl_ptr: 0x7100,
+        };
+        let event = create_mock_ssl_event(conn_id.pid, conn_id.ssl_ptr);
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/v1/messages".to_string(),
+            version: 11,
+            headers: HashMap::new(),
+            body_offset: 0,
+            body_len: 0,
+            source_event: event,
+            reassembled_body: None,
+        };
+
+        agg.connections.push(
+            conn_id,
+            ConnectionState::RequestBodyPending {
+                request,
+                expected_body_len: Some(4096),
+                body_buffer: vec![b'x'; 2048],
+            },
+        );
+        agg.last_activity.push(conn_id, Instant::now());
+        agg.sse_continuation_buffers
+            .push(conn_id, b"stale".to_vec());
+        agg.last_appended_src_ptr.push(conn_id, 42);
+
+        agg.evict_idle_and_oversized();
+
+        assert!(agg.connections.peek(&conn_id).is_none());
+        assert!(agg.last_activity.peek(&conn_id).is_none());
+        assert!(agg.sse_continuation_buffers.peek(&conn_id).is_none());
+        assert!(agg.last_appended_src_ptr.peek(&conn_id).is_none());
     }
 }
