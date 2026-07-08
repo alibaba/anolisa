@@ -16,6 +16,7 @@ use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, get, web}
 use include_dir::{Dir, include_dir};
 
 use crate::config::ServerAuthConfig;
+use crate::grader::EvaluationStore;
 use crate::health::{HealthChecker, HealthStore};
 use crate::storage::sqlite::InterruptionStore;
 
@@ -49,6 +50,8 @@ pub struct AppState {
     pub health_store: Arc<RwLock<HealthStore>>,
     /// Interruption events store
     pub interruption_store: Option<Arc<InterruptionStore>>,
+    /// Grader evaluation store
+    pub evaluation_store: Arc<EvaluationStore>,
     /// agent-sec security observability integration configuration
     pub security_observability: SecurityObservabilityConfig,
     /// Dashboard authentication state
@@ -142,6 +145,8 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(handlers::list_traces_by_session)
                 .service(handlers::get_trace_detail)
                 .service(handlers::get_conversation_events)
+                .service(handlers::evaluate_grader)
+                .service(handlers::latest_grader)
                 .service(handlers::list_agent_names)
                 .service(handlers::get_timeseries)
                 .service(handlers::export_atif_trace)
@@ -212,6 +217,11 @@ pub async fn run_server(
 ) -> std::io::Result<()> {
     let security_observability = SecurityObservabilityConfig::default();
 
+    let evaluation_store = Arc::new(
+        EvaluationStore::new_with_path(&storage_path)
+            .map_err(|error| std::io::Error::other(error.to_string()))?,
+    );
+
     // Initialize dashboard authentication
     let storage_base = storage_path
         .parent()
@@ -278,6 +288,7 @@ pub async fn run_server(
         start_time: Instant::now(),
         health_store,
         interruption_store,
+        evaluation_store,
         security_observability,
         auth: dashboard_auth.clone(),
     });
@@ -321,6 +332,7 @@ mod tests {
     use actix_web::test as awtest;
     use actix_web::{App, web};
 
+    use crate::grader::EvaluationStore;
     use crate::health::HealthStore;
 
     use super::auth::DashboardAuth;
@@ -386,6 +398,9 @@ mod tests {
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
             interruption_store: None,
+            evaluation_store: Arc::new(
+                EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
+            ),
             security_observability: SecurityObservabilityConfig { timeout_ms },
             auth,
         })

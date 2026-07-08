@@ -1,0 +1,321 @@
+//! SQLite persistence for grader evaluation runs.
+
+use std::path::Path;
+use std::sync::Mutex;
+
+use rusqlite::{Connection, params};
+
+use super::types::{
+    EvaluationResult, EvaluationRunRecord, EvaluationStatus, GraderError, GraderType, RootCause,
+    TargetType, Verdict,
+};
+use crate::storage::sqlite::create_connection;
+
+/// SQLite-backed persistence for evaluation runs.
+pub struct EvaluationStore {
+    conn: Mutex<Connection>,
+}
+
+impl EvaluationStore {
+    /// Open an evaluation store using the given SQLite path.
+    ///
+    /// The MVP stores `evaluation_runs` beside GenAI events so `serve --db`
+    /// controls both conversation evidence and evaluation results.
+    pub fn new_with_path(path: &Path) -> Result<Self, GraderError> {
+        let conn =
+            create_connection(path).map_err(|error| GraderError::Storage(error.to_string()))?;
+        let store = EvaluationStore {
+            conn: Mutex::new(conn),
+        };
+        store.init_tables()?;
+        Ok(store)
+    }
+
+    fn init_tables(&self) -> Result<(), GraderError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|error| GraderError::Storage(error.to_string()))?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS evaluation_runs (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id           TEXT NOT NULL UNIQUE,
+                target_type      TEXT NOT NULL,
+                target_id        TEXT NOT NULL,
+                input_hash       TEXT NOT NULL,
+                grader_type      TEXT NOT NULL,
+                grader_version   TEXT NOT NULL,
+                rubric_version   TEXT,
+                judge_model      TEXT,
+                prompt_hash      TEXT,
+                confidence       REAL,
+                status           TEXT NOT NULL,
+                verdict          TEXT,
+                score            REAL,
+                root_cause       TEXT,
+                created_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
+                completed_at     DATETIME,
+                result_json      TEXT,
+                UNIQUE(target_type, target_id, input_hash, grader_type, grader_version)
+            );
+            CREATE INDEX IF NOT EXISTS idx_evaluation_runs_target_latest
+                ON evaluation_runs(target_type, target_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_evaluation_runs_run_id
+                ON evaluation_runs(run_id);",
+        )
+        .map_err(|error| GraderError::Storage(error.to_string()))?;
+        Ok(())
+    }
+
+    /// Return an existing completed run for the idempotency key, if present.
+    pub fn find_completed(
+        &self,
+        target_type: TargetType,
+        target_id: &str,
+        input_hash: &str,
+        grader_type: GraderType,
+        grader_version: &str,
+    ) -> Result<Option<EvaluationRunRecord>, GraderError> {
+        let raw = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|error| GraderError::Storage(error.to_string()))?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, run_id, target_type, target_id, input_hash, grader_type,
+                        grader_version, status, verdict, score, root_cause, created_at,
+                        completed_at, result_json
+                 FROM evaluation_runs
+                 WHERE target_type=?1
+                   AND target_id=?2
+                   AND input_hash=?3
+                   AND grader_type=?4
+                   AND grader_version=?5
+                   AND status='completed'
+                 LIMIT 1",
+                )
+                .map_err(|error| GraderError::Storage(error.to_string()))?;
+            let mut rows = stmt
+                .query(params![
+                    target_type.as_str(),
+                    target_id,
+                    input_hash,
+                    grader_type.as_str(),
+                    grader_version,
+                ])
+                .map_err(|error| GraderError::Storage(error.to_string()))?;
+            match rows
+                .next()
+                .map_err(|error| GraderError::Storage(error.to_string()))?
+            {
+                Some(row) => Some(
+                    read_raw_record(row)
+                        .map_err(|error| GraderError::Storage(error.to_string()))?,
+                ),
+                None => None,
+            }
+        };
+        raw.map(raw_to_record).transpose()
+    }
+
+    /// Insert a completed evaluation result.
+    ///
+    /// Returns `false` when an equivalent completed run already exists.
+    pub fn insert_completed(&self, result: &EvaluationResult) -> Result<bool, GraderError> {
+        let result_json = serde_json::to_string(result)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|error| GraderError::Storage(error.to_string()))?;
+        let inserted = conn
+            .execute(
+                "INSERT OR IGNORE INTO evaluation_runs (
+                run_id, target_type, target_id, input_hash, grader_type, grader_version,
+                rubric_version, judge_model, prompt_hash, confidence, status, verdict,
+                score, root_cause, completed_at, result_json
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,CURRENT_TIMESTAMP,?15)",
+                params![
+                    &result.run_id,
+                    result.target_type.as_str(),
+                    &result.target_id,
+                    &result.input_hash,
+                    result.metadata.grader_type.as_str(),
+                    &result.metadata.grader_version,
+                    &result.metadata.rubric_version,
+                    &result.metadata.judge_model,
+                    &result.metadata.prompt_hash,
+                    result.metadata.confidence,
+                    EvaluationStatus::Completed.as_str(),
+                    result.verdict.as_str(),
+                    result.score,
+                    result.root_cause.as_str(),
+                    result_json,
+                ],
+            )
+            .map_err(|error| GraderError::Storage(error.to_string()))?;
+        Ok(inserted > 0)
+    }
+
+    /// Return the latest completed run for a target.
+    pub fn latest_completed(
+        &self,
+        target_type: TargetType,
+        target_id: &str,
+    ) -> Result<Option<EvaluationRunRecord>, GraderError> {
+        let raw = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|error| GraderError::Storage(error.to_string()))?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, run_id, target_type, target_id, input_hash, grader_type,
+                        grader_version, status, verdict, score, root_cause, created_at,
+                        completed_at, result_json
+                 FROM evaluation_runs
+                 WHERE target_type=?1
+                   AND target_id=?2
+                   AND status='completed'
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT 1",
+                )
+                .map_err(|error| GraderError::Storage(error.to_string()))?;
+            let mut rows = stmt
+                .query(params![target_type.as_str(), target_id])
+                .map_err(|error| GraderError::Storage(error.to_string()))?;
+            match rows
+                .next()
+                .map_err(|error| GraderError::Storage(error.to_string()))?
+            {
+                Some(row) => Some(
+                    read_raw_record(row)
+                        .map_err(|error| GraderError::Storage(error.to_string()))?,
+                ),
+                None => None,
+            }
+        };
+        raw.map(raw_to_record).transpose()
+    }
+}
+
+struct RawEvaluationRunRecord {
+    id: i64,
+    run_id: String,
+    target_type: String,
+    target_id: String,
+    input_hash: String,
+    grader_type: String,
+    grader_version: String,
+    status: String,
+    verdict: Option<String>,
+    score: Option<f64>,
+    root_cause: Option<String>,
+    created_at: String,
+    completed_at: Option<String>,
+    result_json: Option<String>,
+}
+
+fn read_raw_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawEvaluationRunRecord> {
+    Ok(RawEvaluationRunRecord {
+        id: row.get(0)?,
+        run_id: row.get(1)?,
+        target_type: row.get(2)?,
+        target_id: row.get(3)?,
+        input_hash: row.get(4)?,
+        grader_type: row.get(5)?,
+        grader_version: row.get(6)?,
+        status: row.get(7)?,
+        verdict: row.get(8)?,
+        score: row.get(9)?,
+        root_cause: row.get(10)?,
+        created_at: row.get(11)?,
+        completed_at: row.get(12)?,
+        result_json: row.get(13)?,
+    })
+}
+
+fn raw_to_record(raw: RawEvaluationRunRecord) -> Result<EvaluationRunRecord, GraderError> {
+    let target_type = parse_target_type(raw.target_type)?;
+    let grader_type = parse_grader_type(raw.grader_type)?;
+    let status = parse_status(raw.status)?;
+    let verdict = raw.verdict.map(parse_verdict).transpose()?;
+    let root_cause = raw.root_cause.map(parse_root_cause).transpose()?;
+    let result = raw
+        .result_json
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()?;
+
+    Ok(EvaluationRunRecord {
+        id: raw.id,
+        run_id: raw.run_id,
+        target_type,
+        target_id: raw.target_id,
+        input_hash: raw.input_hash,
+        grader_type,
+        grader_version: raw.grader_version,
+        status,
+        verdict,
+        score: raw.score,
+        root_cause,
+        created_at: raw.created_at,
+        completed_at: raw.completed_at,
+        result,
+    })
+}
+
+fn parse_target_type(value: String) -> Result<TargetType, GraderError> {
+    match value.as_str() {
+        "conversation" => Ok(TargetType::Conversation),
+        _ => Err(GraderError::Storage(format!(
+            "unknown target_type: {value}"
+        ))),
+    }
+}
+
+fn parse_grader_type(value: String) -> Result<GraderType, GraderError> {
+    match value.as_str() {
+        "rule" => Ok(GraderType::Rule),
+        "llm" => Ok(GraderType::Llm),
+        "agent" => Ok(GraderType::Agent),
+        _ => Err(GraderError::Storage(format!(
+            "unknown grader_type: {value}"
+        ))),
+    }
+}
+
+fn parse_status(value: String) -> Result<EvaluationStatus, GraderError> {
+    match value.as_str() {
+        "completed" => Ok(EvaluationStatus::Completed),
+        "failed" => Ok(EvaluationStatus::Failed),
+        _ => Err(GraderError::Storage(format!(
+            "unknown evaluation status: {value}"
+        ))),
+    }
+}
+
+fn parse_verdict(value: String) -> Result<Verdict, GraderError> {
+    match value.as_str() {
+        "pass" => Ok(Verdict::Pass),
+        "warn" => Ok(Verdict::Warn),
+        "fail" => Ok(Verdict::Fail),
+        _ => Err(GraderError::Storage(format!("unknown verdict: {value}"))),
+    }
+}
+
+fn parse_root_cause(value: String) -> Result<RootCause, GraderError> {
+    match value.as_str() {
+        "none" => Ok(RootCause::None),
+        "no_final_answer" => Ok(RootCause::NoFinalAnswer),
+        "interrupted_main_call" => Ok(RootCause::InterruptedMainCall),
+        "agent_crash" => Ok(RootCause::AgentCrash),
+        "runtime_error" => Ok(RootCause::RuntimeError),
+        "tool_failure" => Ok(RootCause::ToolFailure),
+        "safety_risk" => Ok(RootCause::SafetyRisk),
+        "loop_detected" => Ok(RootCause::LoopDetected),
+        "excessive_cost" => Ok(RootCause::ExcessiveCost),
+        "partial_snapshot" => Ok(RootCause::PartialSnapshot),
+        _ => Err(GraderError::Storage(format!("unknown root_cause: {value}"))),
+    }
+}

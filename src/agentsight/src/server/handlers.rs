@@ -9,6 +9,10 @@ use serde_json::{Value, json};
 
 use super::AppState;
 use crate::agent_sec::{AgentSecClient, AgentSecClientError, DaemonResponse};
+use crate::grader::{
+    EvaluationRequest, EvaluationResponse, GraderError, GraderType, RULE_GRADER_VERSION,
+    RuleGrader, TargetType, load_conversation_input,
+};
 use crate::health::AgentHealthStatus;
 use crate::storage::sqlite::GenAISqliteStore;
 use crate::storage::sqlite::genai::{ModelTimeseriesBucket, TimeseriesBucket};
@@ -210,6 +214,162 @@ pub async fn get_conversation_events(
         Err(e) => {
             HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
         }
+    }
+}
+
+// ─── Grader endpoints ────────────────────────────────────────────────────────
+
+/// Query parameters for GET /api/grader/latest.
+#[derive(Debug, Deserialize)]
+pub struct GraderLatestQuery {
+    pub target_type: String,
+    pub target_id: String,
+}
+
+/// POST /api/grader/evaluate
+///
+/// Manually evaluate a conversation snapshot with the rule-based grader.
+#[post("/grader/evaluate")]
+pub async fn evaluate_grader(
+    data: web::Data<AppState>,
+    body: web::Json<EvaluationRequest>,
+) -> impl Responder {
+    let target_type = match parse_grader_target_type(&body.target_type) {
+        Ok(target_type) => target_type,
+        Err(error) => return grader_error_response(error),
+    };
+
+    if body.target_id.trim().is_empty() {
+        return HttpResponse::BadRequest()
+            .json(json!({"error": "bad_request", "message": "target_id is required"}));
+    }
+
+    let input = match load_conversation_input(
+        &data.storage_path,
+        data.interruption_store.as_deref(),
+        &body.target_id,
+        body.force,
+    ) {
+        Ok(input) => input,
+        Err(error) => return grader_error_response(error),
+    };
+    let store = &data.evaluation_store;
+
+    match store.find_completed(
+        target_type,
+        &body.target_id,
+        &input.input_hash,
+        GraderType::Rule,
+        RULE_GRADER_VERSION,
+    ) {
+        Ok(Some(record)) => {
+            if let Some(result) = record.result {
+                return HttpResponse::Ok().json(EvaluationResponse {
+                    result,
+                    reused_existing_run: true,
+                });
+            }
+        }
+        Ok(None) => {}
+        Err(error) => return grader_error_response(error),
+    }
+
+    let result = RuleGrader::evaluate(&input);
+    match store.insert_completed(&result) {
+        Ok(true) => {}
+        Ok(false) => {
+            return match store.find_completed(
+                target_type,
+                &body.target_id,
+                &input.input_hash,
+                GraderType::Rule,
+                RULE_GRADER_VERSION,
+            ) {
+                Ok(Some(record)) => {
+                    if let Some(result) = record.result {
+                        HttpResponse::Ok().json(EvaluationResponse {
+                            result,
+                            reused_existing_run: true,
+                        })
+                    } else {
+                        grader_error_response(GraderError::Storage(
+                            "existing evaluation run is missing result_json".to_string(),
+                        ))
+                    }
+                }
+                Ok(None) => grader_error_response(GraderError::Storage(
+                    "evaluation insert was ignored but no completed run was found".to_string(),
+                )),
+                Err(error) => grader_error_response(error),
+            };
+        }
+        Err(error) => return grader_error_response(error),
+    }
+
+    HttpResponse::Ok().json(EvaluationResponse {
+        result,
+        reused_existing_run: false,
+    })
+}
+
+/// GET /api/grader/latest?target_type=conversation&target_id=<id>
+///
+/// Return the latest completed evaluation result for a conversation.
+#[get("/grader/latest")]
+pub async fn latest_grader(
+    data: web::Data<AppState>,
+    query: web::Query<GraderLatestQuery>,
+) -> impl Responder {
+    let target_type = match parse_grader_target_type(&query.target_type) {
+        Ok(target_type) => target_type,
+        Err(error) => return grader_error_response(error),
+    };
+
+    if query.target_id.trim().is_empty() {
+        return HttpResponse::BadRequest()
+            .json(json!({"error": "bad_request", "message": "target_id is required"}));
+    }
+
+    match data
+        .evaluation_store
+        .latest_completed(target_type, &query.target_id)
+    {
+        Ok(Some(record)) => HttpResponse::Ok().json(record.result),
+        Ok(None) => HttpResponse::Ok().json(serde_json::Value::Null),
+        Err(error) => grader_error_response(error),
+    }
+}
+
+fn parse_grader_target_type(value: &str) -> Result<TargetType, GraderError> {
+    match value {
+        "conversation" => Ok(TargetType::Conversation),
+        other => Err(GraderError::UnsupportedTarget(other.to_string())),
+    }
+}
+
+fn grader_error_response(error: GraderError) -> HttpResponse {
+    match error {
+        GraderError::ConversationNotFound(id) => HttpResponse::NotFound().json(json!({
+            "error": "conversation_not_found",
+            "message": format!("Conversation not found: {id}"),
+        })),
+        GraderError::ConversationNotReady { pending_count } => HttpResponse::Conflict().json(json!({
+            "error": "conversation_not_ready",
+            "message": "Conversation still has pending LLM calls. Retry after completion or use force=true.",
+            "pending_call_count": pending_count,
+        })),
+        GraderError::UnsupportedTarget(target) => HttpResponse::BadRequest().json(json!({
+            "error": "unsupported_target",
+            "message": format!("Unsupported target_type: {target}. MVP supports only conversation."),
+        })),
+        GraderError::Storage(message) => HttpResponse::InternalServerError().json(json!({
+            "error": "storage_error",
+            "message": message,
+        })),
+        GraderError::Json(error) => HttpResponse::InternalServerError().json(json!({
+            "error": "json_error",
+            "message": error.to_string(),
+        })),
     }
 }
 
@@ -668,7 +828,9 @@ mod tests {
     use actix_web::test as awtest;
 
     use crate::agent_sec::DaemonErrorPayload;
+    use crate::grader::EvaluationStore;
     use crate::health::HealthStore;
+    use crate::storage::sqlite::genai::{PendingCallInfo, PendingOrigin};
 
     use super::*;
 
@@ -881,6 +1043,52 @@ mod tests {
         }
     }
 
+    #[actix_web::test]
+    async fn latest_grader_uses_shared_evaluation_store() {
+        let root = temp_root("latest_grader_shared_store");
+        let evaluation_path = root.join("evaluation.db");
+        let evaluation_store = Arc::new(EvaluationStore::new_with_path(&evaluation_path).unwrap());
+        let result = test_evaluation_result("conv-shared");
+        evaluation_store.insert_completed(&result).unwrap();
+
+        let blocked_parent = root.join("not-a-directory");
+        std::fs::write(&blocked_parent, b"file").unwrap();
+        let auth_config = crate::config::ServerAuthConfig { enabled: false };
+        let auth = Arc::new(crate::server::auth::DashboardAuth::init(
+            &auth_config,
+            std::path::Path::new("/tmp"),
+        ));
+        let data = web::Data::new(AppState {
+            storage_path: blocked_parent.join("genai.db"),
+            start_time: Instant::now(),
+            health_store: Arc::new(RwLock::new(HealthStore::new())),
+            interruption_store: None,
+            evaluation_store: Arc::clone(&evaluation_store),
+            security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
+            auth,
+        });
+        let app = awtest::init_service(App::new().app_data(data).service(latest_grader)).await;
+
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/grader/latest?target_type=conversation&target_id=conv-shared")
+                .to_request(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &actix_web::body::to_bytes(response.into_body())
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["run_id"], "run-shared");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     async fn response_json(response: HttpResponse) -> Value {
         let body = to_bytes(response.into_body())
             .await
@@ -903,6 +1111,153 @@ mod tests {
         }
     }
 
+    fn test_evaluation_result(target_id: &str) -> crate::grader::EvaluationResult {
+        crate::grader::EvaluationResult {
+            target_type: TargetType::Conversation,
+            target_id: target_id.to_string(),
+            run_id: "run-shared".to_string(),
+            input_hash: "input-hash-shared".to_string(),
+            verdict: crate::grader::Verdict::Pass,
+            score: 1.0,
+            summary: "ok".to_string(),
+            root_cause: crate::grader::RootCause::None,
+            recommended_action: "none".to_string(),
+            dimensions: Vec::new(),
+            findings: Vec::new(),
+            metadata: crate::grader::EvaluationMetadata {
+                evaluated_with_pending: false,
+                pending_call_count: 0,
+                input_event_count: 1,
+                grader_type: GraderType::Rule,
+                grader_version: RULE_GRADER_VERSION.to_string(),
+                rubric_version: None,
+                judge_model: None,
+                prompt_hash: None,
+                confidence: Some(1.0),
+            },
+        }
+    }
+
+    fn grader_app_state(storage_path: PathBuf) -> web::Data<AppState> {
+        let auth_config = crate::config::ServerAuthConfig { enabled: false };
+        let auth = Arc::new(crate::server::auth::DashboardAuth::init(
+            &auth_config,
+            std::path::Path::new("/tmp"),
+        ));
+        web::Data::new(AppState {
+            evaluation_store: Arc::new(EvaluationStore::new_with_path(&storage_path).unwrap()),
+            storage_path,
+            start_time: Instant::now(),
+            health_store: Arc::new(RwLock::new(HealthStore::new())),
+            interruption_store: None,
+            security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
+            auth,
+        })
+    }
+
+    fn write_completed_conversation_event(path: &std::path::Path, conversation_id: &str) {
+        let store = GenAISqliteStore::new_with_path(path).unwrap();
+        let mut call = LLMCall::new(
+            format!("call-{conversation_id}"),
+            1_700_000_000_000_000_000,
+            "anthropic".to_string(),
+            "claude".to_string(),
+            LLMRequest {
+                messages: Vec::new(),
+                temperature: None,
+                max_tokens: None,
+                frequency_penalty: None,
+                presence_penalty: None,
+                top_p: None,
+                top_k: None,
+                seed: None,
+                stop_sequences: None,
+                stream: false,
+                tools: None,
+                raw_body: None,
+            },
+            1234,
+            "claude".to_string(),
+        );
+        call.set_response(
+            LLMResponse {
+                messages: vec![OutputMessage {
+                    role: "assistant".to_string(),
+                    parts: vec![MessagePart::Text {
+                        content: "done".to_string(),
+                    }],
+                    name: None,
+                    finish_reason: Some("stop".to_string()),
+                }],
+                streamed: false,
+                raw_body: None,
+            },
+            1_700_000_000_000_000_500,
+        );
+        call.set_token_usage(TokenUsage {
+            input_tokens: 10,
+            output_tokens: 5,
+            total_tokens: 15,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        });
+        call.metadata
+            .insert("conversation_id".to_string(), conversation_id.to_string());
+        call.metadata.insert(
+            "response_id".to_string(),
+            format!("trace-{conversation_id}"),
+        );
+        call.metadata
+            .insert("user_query".to_string(), "hello".to_string());
+
+        store.export(&[GenAISemanticEvent::LLMCall(call)]);
+        store.flush();
+    }
+
+    fn write_pending_conversation_event(path: &std::path::Path, conversation_id: &str) {
+        let store = GenAISqliteStore::new_with_path(path).unwrap();
+        store
+            .insert_pending(&PendingCallInfo {
+                call_id: format!("pending-{conversation_id}"),
+                trace_id: Some(format!("trace-{conversation_id}")),
+                conversation_id: Some(conversation_id.to_string()),
+                session_id: Some("session-1".to_string()),
+                start_timestamp_ns: 1_700_000_000_000_000_000,
+                pid: 1234,
+                process_name: "claude".to_string(),
+                agent_name: Some("claude".to_string()),
+                http_method: Some("POST".to_string()),
+                http_path: Some("/v1/messages".to_string()),
+                input_messages: Some(r#"[{"role":"user","content":"hello"}]"#.to_string()),
+                system_instructions: None,
+                user_query: Some("hello".to_string()),
+                is_sse: true,
+                model: Some("claude".to_string()),
+                provider: Some("anthropic".to_string()),
+                call_kind: "main".to_string(),
+                pending_origin: PendingOrigin::RequestCapture,
+                pending_match_key: None,
+            })
+            .unwrap();
+        store.flush();
+    }
+
+    fn cleanup_db(path: &std::path::Path) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    fn temp_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "agentsight_{label}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
     fn test_app_state(timeout_ms: u64) -> web::Data<AppState> {
         let auth_config = crate::config::ServerAuthConfig { enabled: false };
         let auth = Arc::new(crate::server::auth::DashboardAuth::init(
@@ -914,6 +1269,9 @@ mod tests {
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
             interruption_store: None,
+            evaluation_store: Arc::new(
+                EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
+            ),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms },
             auth,
         })
@@ -1008,6 +1366,9 @@ mod tests {
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
             interruption_store: None,
+            evaluation_store: Arc::new(
+                EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
+            ),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
         })

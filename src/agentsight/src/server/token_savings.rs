@@ -863,6 +863,7 @@ pub async fn get_session_savings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::grader::EvaluationStore;
     use actix_web::test as actix_test;
     use actix_web::{App, web};
     use std::sync::{Arc, Mutex, RwLock};
@@ -929,10 +930,11 @@ mod tests {
 
     fn make_app_state(db_path: std::path::PathBuf) -> AppState {
         AppState {
-            storage_path: db_path,
+            storage_path: db_path.clone(),
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(crate::health::HealthStore::default())),
             interruption_store: None,
+            evaluation_store: Arc::new(EvaluationStore::new_with_path(&db_path).unwrap()),
             security_observability: crate::server::SecurityObservabilityConfig::default(),
             auth: Arc::new(crate::server::auth::DashboardAuth::init(
                 &crate::config::ServerAuthConfig { enabled: false },
