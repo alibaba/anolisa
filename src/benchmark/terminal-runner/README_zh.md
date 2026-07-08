@@ -1,5 +1,7 @@
 # terminal-runner
 
+[English](README.md)
+
 本文介绍如何通过 [harbor](https://github.com/harbor-framework/harbor) 平台测试 terminal-bench 任务，重点对比两种实现方式 — **Installed mode** 和 **External mode** — 的差异、各自优缺点及使用方法。
 
 ---
@@ -68,7 +70,7 @@ terminal-runner/
 ├── .gitignore
 ├── LICENSE
 ├── README.md
-└── README_CN.md
+└── README_zh.md
 ```
 
 ### 不在仓库内（由 `setup.sh` 克隆）

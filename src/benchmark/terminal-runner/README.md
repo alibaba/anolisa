@@ -1,5 +1,7 @@
 # terminal-runner
 
+[中文版](README_zh.md)
+
 This guide explains how to test terminal-bench tasks via the [harbor](https://github.com/harbor-framework/harbor) platform, focusing on two implementation approaches — **Installed mode** and **External mode** — their differences, trade-offs, and usage.
 
 ---
@@ -68,7 +70,7 @@ terminal-runner/
 ├── .gitignore
 ├── LICENSE
 ├── README.md
-└── README_CN.md
+└── README_zh.md
 ```
 
 ### What's NOT here (cloned by `setup.sh`)
