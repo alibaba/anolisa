@@ -228,7 +228,9 @@ fn get_stash_db_path_with_valid_override() {
     if home.is_empty() {
         return;
     }
-    let db_path = format!("{}/.tokenless/override_test.db", home);
+    let dir = format!("{}/.tokenless", home);
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = format!("{}/override_test.db", dir);
     let result = get_stash_db_path(Some(&db_path));
     assert!(result.is_some());
     assert_eq!(result.unwrap(), db_path);
