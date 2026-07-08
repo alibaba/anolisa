@@ -1,9 +1,13 @@
+use std::path::PathBuf;
+
 use anolisa_core::state::{
     InstalledObject, InstalledState, ObjectKind, ObjectStatus, Ownership, RpmMetadata,
 };
 use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError, PackageVersion};
 
 use crate::commands::tier1::list::state_view::{self, LocalProjection};
+use crate::commands::visible_view::VisibleInstalledView;
+use crate::context::{CliContext, InstallMode};
 use crate::resolution::{
     ComponentAliasEntry, ComponentBackendEntry, ComponentIndex, ComponentIndexEntry,
 };
@@ -221,6 +225,30 @@ pub(super) fn projection_for_index(
         .find(|entry| entry.name == component)
         .unwrap();
     state_view::project_component(entry, state, Some(query))
+}
+
+/// Wrap a single-scope `InstalledState` into a `VisibleInstalledView` for
+/// tests that exercise `build_rows`. The state is placed in user scope with
+/// system scope empty (and unreadable), matching the most common test
+/// scenario where the state represents the current user's install.
+pub(super) fn view_from_state(state: &InstalledState) -> VisibleInstalledView {
+    let ctx = CliContext {
+        install_mode: InstallMode::User,
+        prefix: None,
+        json: false,
+        dry_run: false,
+        verbose: false,
+        quiet: true,
+        no_color: true,
+    };
+    VisibleInstalledView::from_states(
+        state,
+        &InstalledState::default(),
+        PathBuf::from("/test/user/installed.toml"),
+        PathBuf::from("/test/system/installed.toml"),
+        false,
+        &ctx,
+    )
 }
 
 /// A component whose RPM backend package name differs from the component name,

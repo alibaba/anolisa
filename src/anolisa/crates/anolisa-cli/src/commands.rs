@@ -7,6 +7,7 @@
 
 pub mod common;
 pub mod tier1;
+pub mod visible_view;
 
 // Tier 2 surfaces
 pub mod adapter;

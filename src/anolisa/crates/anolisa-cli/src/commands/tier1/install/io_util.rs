@@ -196,6 +196,13 @@ pub(crate) fn snapshot_datadir_contract(
 pub(crate) fn write_atomic_text(path: &Path, content: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
+        // Normalize directory permissions so non-root users can traverse
+        // the component-manifests tree.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755));
+        }
     }
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let name = path

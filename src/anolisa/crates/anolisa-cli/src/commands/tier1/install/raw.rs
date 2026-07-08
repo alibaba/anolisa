@@ -1366,6 +1366,10 @@ pub(crate) fn execute_raw(
         });
     }
 
+    // Normalize system-scope permissions so non-root users can read
+    // the state file and component manifest snapshots.
+    common::normalize_after_save(ctx, layout);
+
     // Audit log is best-effort: the install already succeeded and state is
     // saved, so a log failure downgrades to a warning instead of unwinding.
     // `log` was opened above for the capability audit and is reused here.

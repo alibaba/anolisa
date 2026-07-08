@@ -4,7 +4,7 @@ use crate::commands::tier1::list::{ListArgs, build_rows};
 
 use super::support::{
     FakeRpmQuery, component_object, pkg_info, rpm_component_object, sample_index,
-    state_with_component_object,
+    state_with_component_object, view_from_state,
 };
 
 #[test]
@@ -21,7 +21,7 @@ fn rows_use_local_projection_for_untracked_observed_rpm() {
         what_provides: Vec::new(),
     };
 
-    let rows = build_rows(&index, &args, &state, Some(&query));
+    let rows = build_rows(&index, &args, &view_from_state(&state), &query);
 
     let sight = rows.iter().find(|r| r.name == "agentsight").unwrap();
     assert_eq!(sight.status, "not_installed");
@@ -35,13 +35,23 @@ fn rows_without_rpm_query_do_not_surface_observed_system_rpms() {
     let index = sample_index();
     let state = InstalledState::default();
 
-    let all_rows = build_rows(&index, &ListArgs { installed: false }, &state, None);
+    let all_rows = build_rows(
+        &index,
+        &ListArgs { installed: false },
+        &view_from_state(&state),
+        &FakeRpmQuery::default(),
+    );
     let sight = all_rows.iter().find(|r| r.name == "agentsight").unwrap();
     assert_eq!(sight.local_state, "not_installed");
     assert_eq!(sight.ownership, "none");
     assert_eq!(sight.rpm_package, None);
 
-    let installed_rows = build_rows(&index, &ListArgs { installed: true }, &state, None);
+    let installed_rows = build_rows(
+        &index,
+        &ListArgs { installed: true },
+        &view_from_state(&state),
+        &FakeRpmQuery::default(),
+    );
     assert!(installed_rows.is_empty());
 }
 
@@ -56,7 +66,7 @@ fn rows_ignore_rpm_query_failures() {
         what_provides: Vec::new(),
     };
 
-    let rows = build_rows(&index, &args, &state, Some(&query));
+    let rows = build_rows(&index, &args, &view_from_state(&state), &query);
 
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().all(|row| row.local_state == "not_installed"));
@@ -82,7 +92,7 @@ fn rows_use_status_action_for_tracked_rpm_observed_state() {
         what_provides: Vec::new(),
     };
 
-    let rows = build_rows(&index, &args, &state, Some(&query));
+    let rows = build_rows(&index, &args, &view_from_state(&state), &query);
 
     let sight = rows.iter().find(|r| r.name == "agentsight").unwrap();
     assert_eq!(sight.status, "adopted");
@@ -109,7 +119,7 @@ fn rows_project_raw_and_rpm_managed_state_as_installed() {
         ObjectStatus::Installed,
         Ownership::RawManaged,
     ));
-    let raw_rows = build_rows(&index, &args, &raw_state, Some(&query));
+    let raw_rows = build_rows(&index, &args, &view_from_state(&raw_state), &query);
     let token = raw_rows.iter().find(|r| r.name == "tokenless").unwrap();
     assert_eq!(token.local_state, "installed");
     assert_eq!(token.ownership, "raw-managed");
@@ -121,7 +131,7 @@ fn rows_project_raw_and_rpm_managed_state_as_installed() {
         "agentsight",
         "1.2.3-1.al8",
     ));
-    let rpm_rows = build_rows(&index, &args, &rpm_state, Some(&query));
+    let rpm_rows = build_rows(&index, &args, &view_from_state(&rpm_state), &query);
     let sight = rpm_rows.iter().find(|r| r.name == "agentsight").unwrap();
     assert_eq!(sight.local_state, "installed");
     assert_eq!(sight.ownership, "rpm-managed");
@@ -142,15 +152,15 @@ fn rows_surface_rpm_drift_and_missing() {
     let drifted_rows = build_rows(
         &index,
         &args,
-        &state,
-        Some(&FakeRpmQuery {
+        &view_from_state(&state),
+        &FakeRpmQuery {
             installed: vec![(
                 "agentsight".to_string(),
                 pkg_info("agentsight", "2.0.0", Some("1.al8"), "x86_64"),
             )],
             command_missing: false,
             what_provides: Vec::new(),
-        }),
+        },
     );
     let drifted = drifted_rows
         .iter()
@@ -158,7 +168,12 @@ fn rows_surface_rpm_drift_and_missing() {
         .unwrap();
     assert_eq!(drifted.local_state, "drifted");
 
-    let missing_rows = build_rows(&index, &args, &state, Some(&FakeRpmQuery::default()));
+    let missing_rows = build_rows(
+        &index,
+        &args,
+        &view_from_state(&state),
+        &FakeRpmQuery::default(),
+    );
     let missing = missing_rows
         .iter()
         .find(|r| r.name == "agentsight")
@@ -174,15 +189,15 @@ fn installed_filter_keeps_only_currently_installed_local_states() {
     let observed_rows = build_rows(
         &index,
         &args,
-        &InstalledState::default(),
-        Some(&FakeRpmQuery {
+        &view_from_state(&InstalledState::default()),
+        &FakeRpmQuery {
             installed: vec![(
                 "agentsight".to_string(),
                 pkg_info("agentsight", "1.2.3", Some("1.al8"), "x86_64"),
             )],
             command_missing: false,
             what_provides: Vec::new(),
-        }),
+        },
     );
     assert_eq!(
         observed_rows
@@ -199,7 +214,12 @@ fn installed_filter_keeps_only_currently_installed_local_states() {
     ];
     for (status, ownership, expected_state) in included_cases {
         let state = state_with_component_object(component_object("tokenless", status, ownership));
-        let rows = build_rows(&index, &args, &state, Some(&FakeRpmQuery::default()));
+        let rows = build_rows(
+            &index,
+            &args,
+            &view_from_state(&state),
+            &FakeRpmQuery::default(),
+        );
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].local_state, expected_state);
     }
@@ -210,7 +230,12 @@ fn installed_filter_keeps_only_currently_installed_local_states() {
             status,
             Ownership::RawManaged,
         ));
-        let rows = build_rows(&index, &args, &state, Some(&FakeRpmQuery::default()));
+        let rows = build_rows(
+            &index,
+            &args,
+            &view_from_state(&state),
+            &FakeRpmQuery::default(),
+        );
         assert!(rows.is_empty());
     }
 
@@ -224,26 +249,31 @@ fn installed_filter_keeps_only_currently_installed_local_states() {
     let drifted_rows = build_rows(
         &index,
         &args,
-        &rpm_state,
-        Some(&FakeRpmQuery {
+        &view_from_state(&rpm_state),
+        &FakeRpmQuery {
             installed: vec![(
                 "agentsight".to_string(),
                 pkg_info("agentsight", "2.0.0", Some("1.al8"), "x86_64"),
             )],
             command_missing: false,
             what_provides: Vec::new(),
-        }),
+        },
     );
     assert!(drifted_rows.is_empty());
 
-    let missing_rows = build_rows(&index, &args, &rpm_state, Some(&FakeRpmQuery::default()));
+    let missing_rows = build_rows(
+        &index,
+        &args,
+        &view_from_state(&rpm_state),
+        &FakeRpmQuery::default(),
+    );
     assert!(missing_rows.is_empty());
 
     let empty_rows = build_rows(
         &index,
         &args,
-        &InstalledState::default(),
-        Some(&FakeRpmQuery::default()),
+        &view_from_state(&InstalledState::default()),
+        &FakeRpmQuery::default(),
     );
     assert!(empty_rows.is_empty());
 }

@@ -67,6 +67,9 @@ use super::install::{
 use crate::color::Palette;
 use crate::commands::common;
 use crate::commands::common::RepoPersistPolicy;
+use crate::commands::visible_view::{
+    MutationOperation, VisibleInstalledView, resolve_mutation_target, wrong_scope_reason,
+};
 use crate::context::CliContext;
 use crate::repo_config::{HostVars, RepoConfig};
 use crate::response::{self, CliError};
@@ -170,6 +173,19 @@ fn handle_component_update(component: &str, ctx: &CliContext) -> Result<(), CliE
     let command = format!("update {component}");
     let installed = common::load_installed_state(ctx, COMMAND)?;
     let resolved = common::lookup_component_name(component, &installed, ctx, COMMAND);
+
+    // Scope guard: if the component only exists in another scope,
+    // reject with a scope-switch hint instead of a bare "not installed".
+    let view = VisibleInstalledView::load(ctx);
+    if let crate::commands::visible_view::MutationTarget::WrongScope(record) =
+        resolve_mutation_target(MutationOperation::Update, &resolved, &view)
+    {
+        return Err(CliError::InvalidArgument {
+            command,
+            reason: wrong_scope_reason(MutationOperation::Update, record),
+        });
+    }
+
     let target = resolve_update_target(&resolved, ctx, &command)?;
     let layout = common::resolve_layout(ctx);
     let repo_config = common::load_repo_config(ctx, &layout, &command, RepoPersistPolicy::Require)?;
@@ -932,6 +948,7 @@ fn execute_raw_update(
     }
     let _ = tx.mark_done(persist_idx);
     let _ = tx.finish(TransactionOutcomeStatus::Ok);
+    common::normalize_after_save(ctx, layout);
 
     // Phase 5 — apply external post-commit side effects after state is durable.
     // Capability xattrs and running systemd processes are not covered by the
@@ -984,6 +1001,8 @@ fn execute_raw_update(
                 activation_state_warnings.push(format!(
                     "failed to persist service activation result after update: {err}"
                 ));
+            } else {
+                common::normalize_after_save(ctx, layout);
             }
         }
     }
@@ -1393,6 +1412,10 @@ fn persist_rpm_update(
         command: command.to_string(),
         reason: format!("failed to save state: {err}"),
     })?;
+
+    // Normalize state file permissions so non-root users can read
+    // system-scope state after mutation.
+    common::normalize_after_save(ctx, &layout);
 
     // Audit log is best-effort: the update already persisted, so a log failure
     // downgrades to a warning instead of unwinding.

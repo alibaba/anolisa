@@ -37,6 +37,150 @@ pub fn resolve_layout(ctx: &CliContext) -> FsLayout {
     }
 }
 
+/// Normalize state file permissions after a mutation, gated by install mode.
+///
+/// In system mode, calls [`normalize_system_state_permissions`] so that
+/// non-root users can read the system state. In user mode, this is a no-op
+/// to avoid exposing user-scope state to other users.
+pub fn normalize_after_save(ctx: &CliContext, layout: &FsLayout) {
+    use crate::context::InstallMode;
+    if matches!(ctx.install_mode, InstallMode::System) {
+        normalize_system_state_permissions(layout);
+    }
+}
+
+/// Return the system-scope [`FsLayout`] regardless of the current
+/// `ctx.install_mode`.
+///
+/// Used by read commands that need to discover system-scope installed
+/// components even when running in user mode.
+pub fn system_layout(ctx: &CliContext) -> FsLayout {
+    FsLayout::system(ctx.prefix.clone())
+}
+
+/// Load system-scope `installed.toml` best-effort.
+///
+/// Returns `None` when the file is missing or fails to parse. This is the
+/// read-only path used by the visible-view merge — never a mutation path.
+#[allow(dead_code)]
+pub fn load_system_state(ctx: &CliContext) -> Option<InstalledState> {
+    let layout = system_layout(ctx);
+    let path = layout.state_dir.join("installed.toml");
+    if !path.exists() {
+        return None;
+    }
+    InstalledState::load(&path).ok()
+}
+
+/// Normalize system-scope state file and directory permissions so that
+/// non-root users can read them.
+///
+/// This is a best-effort sweep: it chmods the state directory, the
+/// `installed.toml` file, `component-manifests/` snapshots, and the
+/// `datadir/components/` + `datadir/adapters/` trees to `0755` (dirs) /
+/// `0644` (regular files) / preserve-execute-bit (scripts).
+///
+/// Errors on individual paths are silently ignored — the primary install
+/// operation must not fail because a permission normalization side-effect
+/// could not be applied.
+///
+/// Call this after any system-mode mutation that writes state files.
+///
+/// This is a no-op in user mode — user-scope state files must not be
+/// made world-readable.
+pub fn normalize_system_state_permissions(layout: &FsLayout) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let chmod = |path: &std::path::Path, mode: u32| {
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+        };
+
+        // State directory → 0755
+        chmod(&layout.state_dir, 0o755);
+
+        // installed.toml → 0644
+        let installed_toml = layout.state_dir.join("installed.toml");
+        chmod(&installed_toml, 0o644);
+
+        // component-manifests/ → 0755
+        let manifests_dir = layout.state_dir.join("component-manifests");
+        chmod(&manifests_dir, 0o755);
+
+        // Walk component-manifests/<component>/ → dirs 0755, *.toml 0644
+        if let Ok(entries) = std::fs::read_dir(&manifests_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    chmod(&path, 0o755);
+                    for name in ["component.toml", "provenance.toml"] {
+                        let toml = path.join(name);
+                        if toml.is_file() {
+                            chmod(&toml, 0o644);
+                        }
+                    }
+                }
+            }
+        }
+
+        // datadir/components/ → dirs 0755, component.toml → 0644
+        normalize_datadir_tree(&layout.datadir.join("components"), &chmod);
+
+        // datadir/adapters/ → dirs 0755, regular files 0644,
+        // executable scripts keep execute bit (→ 0755)
+        normalize_datadir_tree(&layout.datadir.join("adapters"), &chmod);
+
+        // Also normalize the FHS package datadir if distinct
+        if let Some(pkg_dd) = layout.package_datadir() {
+            normalize_datadir_tree(&pkg_dd.join("components"), &chmod);
+            normalize_datadir_tree(&pkg_dd.join("adapters"), &chmod);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = layout;
+    }
+}
+
+/// Recursively normalize a datadir subtree: directories → `0755`,
+/// regular files → `0644`, executable files (already have execute bit)
+/// → `0755` (preserves script executability).
+#[cfg(unix)]
+fn normalize_datadir_tree(root: &std::path::Path, chmod: &impl Fn(&std::path::Path, u32)) {
+    if !root.is_dir() {
+        return;
+    }
+    chmod(root, 0o755);
+    walk_datadir(root, chmod);
+}
+
+#[cfg(unix)]
+fn walk_datadir(dir: &std::path::Path, chmod: &impl Fn(&std::path::Path, u32)) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        use std::os::unix::fs::PermissionsExt;
+        if meta.is_dir() {
+            chmod(&path, 0o755);
+            walk_datadir(&path, chmod);
+        } else if meta.is_file() {
+            let mode = meta.permissions().mode();
+            if mode & 0o111 != 0 {
+                // File has execute bits — preserve as executable script.
+                chmod(&path, 0o755);
+            } else {
+                chmod(&path, 0o644);
+            }
+        }
+    }
+}
+
 /// Refuse a handler-level system-only path when called with user-mode context.
 ///
 /// The dispatcher handles normal CLI entry. This guard protects direct calls

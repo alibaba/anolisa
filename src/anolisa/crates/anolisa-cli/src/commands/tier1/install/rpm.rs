@@ -597,6 +597,8 @@ pub(crate) fn execute_adopt(
         reason: format!("failed to save state: {err}"),
     })?;
 
+    common::normalize_after_save(ctx, layout);
+
     // Best-effort: snapshot the datadir component contract so adapter commands
     // can discover declared adapters. Missing or unwritable contracts produce
     // warnings, never failures.
@@ -948,6 +950,8 @@ fn persist_delegated_install(
         command: command.to_string(),
         reason: format!("failed to save state: {err}"),
     })?;
+
+    common::normalize_after_save(ctx, layout);
 
     // Best-effort: snapshot the datadir component contract so adapter commands
     // can discover declared adapters. Missing or unwritable contracts produce

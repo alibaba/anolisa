@@ -20,6 +20,9 @@ use anolisa_core::state::{ObjectKind, OperationRecord};
 
 use crate::color::Palette;
 use crate::commands::common;
+use crate::commands::visible_view::{
+    MutationOperation, VisibleInstalledView, resolve_mutation_target, wrong_scope_reason,
+};
 use crate::context::CliContext;
 use crate::response::{CliError, render_json};
 
@@ -63,6 +66,18 @@ pub fn handle(args: ForgetArgs, ctx: &CliContext) -> Result<(), CliError> {
     let installed = common::load_installed_state(ctx, COMMAND)?;
     let resolved = common::lookup_component_name(input, &installed, ctx, COMMAND);
     let target = resolved.as_str();
+
+    // Scope guard: if the component only exists in another scope,
+    // reject with a scope-switch hint instead of a bare "not installed".
+    let view = VisibleInstalledView::load(ctx);
+    if let crate::commands::visible_view::MutationTarget::WrongScope(record) =
+        resolve_mutation_target(MutationOperation::Forget, target, &view)
+    {
+        return Err(CliError::InvalidArgument {
+            command,
+            reason: wrong_scope_reason(MutationOperation::Forget, record),
+        });
+    }
 
     let obj = installed
         .find_object(ObjectKind::Component, target)
@@ -190,6 +205,10 @@ fn persist_forget(
         command: command.to_string(),
         reason: format!("failed to save state: {err}"),
     })?;
+
+    // Normalize state file permissions so non-root users can read
+    // system-scope state after mutation.
+    common::normalize_after_save(ctx, &layout);
 
     // Audit log is best-effort: the state already persisted, so a log failure
     // downgrades to a warning instead of unwinding.

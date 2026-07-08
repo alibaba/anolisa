@@ -3,14 +3,19 @@ use anolisa_core::state::{ObjectKind, ObjectStatus};
 use crate::commands::tier1::list::{ListArgs, ListPayload, build_rows};
 use crate::resolution::{ComponentBackendEntry, ComponentIndex, ComponentIndexEntry};
 
-use super::support::{empty_state, sample_index, state_with_object};
+use super::support::{FakeRpmQuery, empty_state, sample_index, state_with_object, view_from_state};
 
 #[test]
 fn index_builds_rows() {
     let index = sample_index();
     let args = ListArgs { installed: false };
     let state = empty_state();
-    let rows = build_rows(&index, &args, &state, None);
+    let rows = build_rows(
+        &index,
+        &args,
+        &view_from_state(&state),
+        &FakeRpmQuery::default(),
+    );
     assert_eq!(rows.len(), 2);
 
     let sight = &rows[0];
@@ -30,7 +35,12 @@ fn empty_state_all_not_installed() {
     let index = sample_index();
     let args = ListArgs { installed: false };
     let state = empty_state();
-    let rows = build_rows(&index, &args, &state, None);
+    let rows = build_rows(
+        &index,
+        &args,
+        &view_from_state(&state),
+        &FakeRpmQuery::default(),
+    );
     for row in &rows {
         assert_eq!(row.status, "not_installed");
         assert_eq!(row.local_state, "not_installed");
@@ -42,7 +52,12 @@ fn installed_component_shows_installed() {
     let index = sample_index();
     let args = ListArgs { installed: false };
     let state = state_with_object(ObjectKind::Component, "tokenless", ObjectStatus::Installed);
-    let rows = build_rows(&index, &args, &state, None);
+    let rows = build_rows(
+        &index,
+        &args,
+        &view_from_state(&state),
+        &FakeRpmQuery::default(),
+    );
 
     let sight = rows.iter().find(|r| r.name == "agentsight").unwrap();
     assert_eq!(sight.status, "not_installed");
@@ -56,7 +71,12 @@ fn adopted_rpm_component_shows_adopted() {
     let index = sample_index();
     let args = ListArgs { installed: false };
     let state = state_with_object(ObjectKind::Component, "agentsight", ObjectStatus::Adopted);
-    let rows = build_rows(&index, &args, &state, None);
+    let rows = build_rows(
+        &index,
+        &args,
+        &view_from_state(&state),
+        &FakeRpmQuery::default(),
+    );
 
     let sight = rows.iter().find(|r| r.name == "agentsight").unwrap();
     assert_eq!(sight.status, "adopted");
@@ -68,7 +88,12 @@ fn compatibility_status_labels_are_preserved_before_local_projection() {
     let args = ListArgs { installed: false };
     let state = state_with_object(ObjectKind::Component, "agentsight", ObjectStatus::Adopted);
 
-    let rows = build_rows(&index, &args, &state, None);
+    let rows = build_rows(
+        &index,
+        &args,
+        &view_from_state(&state),
+        &FakeRpmQuery::default(),
+    );
 
     let sight = rows.iter().find(|r| r.name == "agentsight").unwrap();
     assert_eq!(sight.status, "adopted");
@@ -81,7 +106,12 @@ fn adapter_object_does_not_mark_component_installed() {
     let index = sample_index();
     let args = ListArgs { installed: false };
     let state = state_with_object(ObjectKind::Adapter, "tokenless", ObjectStatus::Installed);
-    let rows = build_rows(&index, &args, &state, None);
+    let rows = build_rows(
+        &index,
+        &args,
+        &view_from_state(&state),
+        &FakeRpmQuery::default(),
+    );
     let token = rows.iter().find(|r| r.name == "tokenless").unwrap();
     assert_eq!(token.status, "not_installed");
 }
@@ -91,7 +121,12 @@ fn failed_component_shows_failed() {
     let index = sample_index();
     let args = ListArgs { installed: false };
     let state = state_with_object(ObjectKind::Component, "tokenless", ObjectStatus::Failed);
-    let rows = build_rows(&index, &args, &state, None);
+    let rows = build_rows(
+        &index,
+        &args,
+        &view_from_state(&state),
+        &FakeRpmQuery::default(),
+    );
     let token = rows.iter().find(|r| r.name == "tokenless").unwrap();
     assert_eq!(token.status, "failed");
 }
@@ -101,7 +136,12 @@ fn disabled_component_shows_disabled() {
     let index = sample_index();
     let args = ListArgs { installed: false };
     let state = state_with_object(ObjectKind::Component, "tokenless", ObjectStatus::Disabled);
-    let rows = build_rows(&index, &args, &state, None);
+    let rows = build_rows(
+        &index,
+        &args,
+        &view_from_state(&state),
+        &FakeRpmQuery::default(),
+    );
     let token = rows.iter().find(|r| r.name == "tokenless").unwrap();
     assert_eq!(token.status, "disabled");
 }
@@ -111,7 +151,12 @@ fn installed_filter_returns_only_installed() {
     let index = sample_index();
     let args = ListArgs { installed: true };
     let state = state_with_object(ObjectKind::Component, "tokenless", ObjectStatus::Installed);
-    let rows = build_rows(&index, &args, &state, None);
+    let rows = build_rows(
+        &index,
+        &args,
+        &view_from_state(&state),
+        &FakeRpmQuery::default(),
+    );
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].name, "tokenless");
     assert_eq!(rows[0].status, "installed");
@@ -122,7 +167,12 @@ fn installed_filter_includes_adopted_rpm_components() {
     let index = sample_index();
     let args = ListArgs { installed: true };
     let state = state_with_object(ObjectKind::Component, "agentsight", ObjectStatus::Adopted);
-    let rows = build_rows(&index, &args, &state, None);
+    let rows = build_rows(
+        &index,
+        &args,
+        &view_from_state(&state),
+        &FakeRpmQuery::default(),
+    );
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].name, "agentsight");
     assert_eq!(rows[0].status, "adopted");
@@ -133,7 +183,12 @@ fn installed_filter_with_empty_state_returns_empty() {
     let index = sample_index();
     let args = ListArgs { installed: true };
     let state = empty_state();
-    let rows = build_rows(&index, &args, &state, None);
+    let rows = build_rows(
+        &index,
+        &args,
+        &view_from_state(&state),
+        &FakeRpmQuery::default(),
+    );
     assert!(rows.is_empty());
 }
 
@@ -142,7 +197,12 @@ fn json_payload_uses_components_key() {
     let index = sample_index();
     let args = ListArgs { installed: false };
     let state = empty_state();
-    let rows = build_rows(&index, &args, &state, None);
+    let rows = build_rows(
+        &index,
+        &args,
+        &view_from_state(&state),
+        &FakeRpmQuery::default(),
+    );
     let payload = ListPayload { components: rows };
     let json_str = serde_json::to_string(&payload).expect("serialize");
     let val: serde_json::Value = serde_json::from_str(&json_str).expect("reparse");
@@ -154,7 +214,12 @@ fn json_payload_status_reflects_install_state() {
     let index = sample_index();
     let args = ListArgs { installed: false };
     let state = state_with_object(ObjectKind::Component, "agentsight", ObjectStatus::Installed);
-    let rows = build_rows(&index, &args, &state, None);
+    let rows = build_rows(
+        &index,
+        &args,
+        &view_from_state(&state),
+        &FakeRpmQuery::default(),
+    );
     let payload = ListPayload { components: rows };
     let json_str = serde_json::to_string(&payload).expect("serialize");
     let val: serde_json::Value = serde_json::from_str(&json_str).expect("reparse");
@@ -187,7 +252,12 @@ fn missing_optional_fields_use_defaults() {
     };
     let args = ListArgs { installed: false };
     let state = empty_state();
-    let rows = build_rows(&index, &args, &state, None);
+    let rows = build_rows(
+        &index,
+        &args,
+        &view_from_state(&state),
+        &FakeRpmQuery::default(),
+    );
     assert_eq!(rows.len(), 1);
     let row = &rows[0];
     assert_eq!(row.name, "minimal");
@@ -218,6 +288,11 @@ fn unknown_backend_kind_preserved() {
     };
     let args = ListArgs { installed: false };
     let state = empty_state();
-    let rows = build_rows(&index, &args, &state, None);
+    let rows = build_rows(
+        &index,
+        &args,
+        &view_from_state(&state),
+        &FakeRpmQuery::default(),
+    );
     assert_eq!(rows[0].backends, vec!["custom-repo"]);
 }

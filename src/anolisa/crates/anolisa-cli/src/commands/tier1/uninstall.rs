@@ -70,6 +70,9 @@ use anolisa_platform::rpm_transaction::RpmTransaction;
 
 use crate::color::Palette;
 use crate::commands::common;
+use crate::commands::visible_view::{
+    MutationOperation, VisibleInstalledView, resolve_mutation_target, wrong_scope_reason,
+};
 use crate::context::CliContext;
 use crate::response::{CliError, render_json};
 
@@ -136,6 +139,18 @@ pub(crate) fn handle_with_deps(
     // resolution is ambiguous or the component index is unavailable.
     let resolved = common::lookup_component_name(input, &installed, ctx, COMMAND);
     let target = resolved.as_str();
+
+    // Scope guard: if the component only exists in another scope,
+    // reject with a scope-switch hint instead of a bare "not installed".
+    let view = VisibleInstalledView::load(ctx);
+    if let crate::commands::visible_view::MutationTarget::WrongScope(record) =
+        resolve_mutation_target(MutationOperation::Uninstall, target, &view)
+    {
+        return Err(CliError::InvalidArgument {
+            command,
+            reason: wrong_scope_reason(MutationOperation::Uninstall, record),
+        });
+    }
 
     // A name that only matches a legacy `kind = "capability"` row written
     // by an older release is not uninstallable — say so instead of a bare
@@ -649,6 +664,10 @@ fn uninstall_rpm_component(
         command: command.to_string(),
         reason: format!("failed to save state: {err}"),
     })?;
+
+    // Normalize state file permissions so non-root users can read
+    // system-scope state after mutation.
+    common::normalize_after_save(ctx, &layout);
 
     // Audit log is best-effort: the state already persisted, so a log failure
     // downgrades to a warning instead of unwinding.

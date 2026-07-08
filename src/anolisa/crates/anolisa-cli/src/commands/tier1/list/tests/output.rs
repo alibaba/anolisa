@@ -3,7 +3,7 @@ use anolisa_core::state::InstalledState;
 use crate::commands::tier1::list::render::human_header;
 use crate::commands::tier1::list::{ListArgs, ListPayload, Row, build_rows};
 
-use super::support::{FakeRpmQuery, pkg_info, sample_index};
+use super::support::{FakeRpmQuery, pkg_info, sample_index, view_from_state};
 
 #[test]
 fn row_json_retains_status_and_adds_local_fields() {
@@ -18,7 +18,7 @@ fn row_json_retains_status_and_adds_local_fields() {
         command_missing: false,
         what_provides: Vec::new(),
     };
-    let rows = build_rows(&index, &args, &state, Some(&query));
+    let rows = build_rows(&index, &args, &view_from_state(&state), &query);
     let payload = ListPayload { components: rows };
 
     let json_str = serde_json::to_string(&payload).expect("serialize");
@@ -47,6 +47,11 @@ fn human_header_contains_local_state() {
         local_state: "observed".to_string(),
         ownership: "none".to_string(),
         action: "install".to_string(),
+        scope: "none".to_string(),
+        active: false,
+        shadowed_by: None,
+        mutable_by_current_user: false,
+        state_path: None,
         rpm_package: Some("agentsight".to_string()),
         rpm_evr: Some("1.2.3-1.al8".to_string()),
         rpm_arch: Some("x86_64".to_string()),

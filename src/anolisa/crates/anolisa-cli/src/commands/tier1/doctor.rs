@@ -1479,6 +1479,10 @@ mod tests {
             rpm_evr: None,
             rpm_source_repo: None,
             provisioned_packages: Vec::new(),
+            scope: String::new(),
+            mutable_by_current_user: false,
+            shadowed_by: None,
+            state_path: None,
         }
     }
 

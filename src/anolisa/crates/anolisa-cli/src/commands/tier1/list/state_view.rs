@@ -2,6 +2,7 @@ use anolisa_core::state::{InstalledObject, InstalledState, ObjectKind, ObjectSta
 use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError};
 
 use crate::commands::common;
+use crate::commands::visible_view::VisibleInstalledView;
 use crate::resolution::ComponentIndexEntry;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +92,7 @@ impl LocalProjection {
     }
 }
 
+#[allow(dead_code)] // used by test helpers (projection_for_index)
 pub(super) fn project_component(
     entry: &ComponentIndexEntry,
     state: &InstalledState,
@@ -279,5 +281,25 @@ fn projection_from_observed_rpm(info: PackageInfo) -> LocalProjection {
         rpm_evr: Some(info.version.to_string()),
         rpm_arch: Some(info.arch),
         rpm_source_repo: info.origin,
+    }
+}
+
+/// Project a component from the merged visible view.
+///
+/// Looks up the component's active record in the visible view. If found,
+/// delegates to [`project_tracked_object`]. If not, delegates to
+/// [`project_untracked_entry`] for RPM observed / not_installed detection.
+///
+/// This is the entry point used by `build_rows`; existing tests that call
+/// [`project_component`] directly with a single-scope `InstalledState`
+/// are unaffected.
+pub(super) fn project_visible(
+    entry: &ComponentIndexEntry,
+    view: &VisibleInstalledView,
+    rpm_query: Option<&dyn PackageQuery>,
+) -> LocalProjection {
+    match view.active(&entry.name) {
+        Some(record) => project_tracked_object(&record.object, rpm_query),
+        None => project_untracked_entry(entry, rpm_query),
     }
 }
