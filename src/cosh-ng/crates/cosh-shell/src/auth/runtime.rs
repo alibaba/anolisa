@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::adapter::{AdapterInstance, CoshCoreAdapter};
+use crate::auth::provider_display::auth_required_providers_for_display;
 use crate::runtime::dispatcher::stable_event_key;
 use crate::runtime::prelude::{
     AgentEvent, AuthFieldInfo, AuthProviderInfo, AuthResponse, GovernedEvent, NoticePanelModel,
@@ -163,17 +164,6 @@ pub(crate) fn record_auth_required(
         }
     }
     ids
-}
-
-fn auth_required_providers_for_display(providers: &[AuthProviderInfo]) -> Vec<AuthProviderInfo> {
-    let mut providers = providers.to_vec();
-    for provider in &mut providers {
-        if provider.id == "aliyun" && !provider.label.contains("免费可用") {
-            provider.label = format!("{} (免费可用)", provider.label);
-        }
-    }
-    providers.sort_by_key(|provider| if provider.id == "aliyun" { 0 } else { 1 });
-    providers
 }
 
 pub(crate) fn render_auth_panel<W: std::io::Write>(

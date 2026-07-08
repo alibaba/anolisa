@@ -52,15 +52,6 @@ fn try_migrate_aliyun_credentials(cfg_dir: &Path, config_path: &Path) {
         return;
     }
 
-    // Check if config.toml already has an aliyun provider
-    if config_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(config_path) {
-            if content.contains("[ai.providers.aliyun]") {
-                return;
-            }
-        }
-    }
-
     let encrypted = match std::fs::read_to_string(&creds_path) {
         Ok(c) => c.trim().to_string(),
         Err(_) => return,
@@ -97,21 +88,24 @@ fn try_migrate_aliyun_credentials(cfg_dir: &Path, config_path: &Path) {
         existing.push_str("active_provider = \"aliyun\"\n\n");
     }
 
-    existing.push_str("\n[ai.providers.aliyun]\n");
-    existing.push_str("type = \"aliyun\"\n");
-    if st.is_some() {
-        existing.push_str("auth_source = \"ecs_ram_role\"\n");
-    } else {
-        existing.push_str(&format!(
-            "access_key_id = \"{}\"\n",
-            escape_toml_migrate(ak)
-        ));
-        existing.push_str(&format!(
-            "access_key_secret = \"{}\"\n",
-            escape_toml_migrate(sk)
+    let mut provider = String::from("\n[ai.providers.aliyun]\n");
+    provider.push_str("type = \"aliyun\"\n");
+    provider.push_str(&format!(
+        "access_key_id = \"{}\"\n",
+        escape_toml_migrate(ak)
+    ));
+    provider.push_str(&format!(
+        "access_key_secret = \"{}\"\n",
+        escape_toml_migrate(sk)
+    ));
+    if let Some(st) = st {
+        provider.push_str(&format!(
+            "security_token = \"{}\"\n",
+            escape_toml_migrate(st)
         ));
     }
-    existing.push_str("model = \"qwen3.7-plus\"\n");
+    provider.push_str("model = \"qwen3.7-plus\"\n");
+    upsert_provider_section(&mut existing, "[ai.providers.aliyun]", &provider);
 
     let pid = std::process::id();
     let tmp_path = cfg_dir.join(format!("config.toml.tmp.{pid}"));
@@ -135,6 +129,18 @@ fn escape_toml_migrate(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n")
+}
+
+fn upsert_provider_section(content: &mut String, header: &str, section: &str) {
+    let Some(start) = content.find(header) else {
+        content.push_str(section);
+        return;
+    };
+    let end = content[start + header.len()..]
+        .find("\n[")
+        .map(|offset| start + header.len() + offset)
+        .unwrap_or(content.len());
+    content.replace_range(start..end, section.trim_start_matches('\n'));
 }
 
 fn migrate_settings(
@@ -581,7 +587,7 @@ api_key = "sk-current"
     }
 
     #[test]
-    fn aliyun_settings_migration_does_not_persist_legacy_sts_credentials() {
+    fn aliyun_settings_migration_preserves_legacy_sts_credentials() {
         let tmp = tempfile::TempDir::new().unwrap();
         let settings_path = tmp.path().join("settings.json");
         let config_path = tmp.path().join("config.toml");
@@ -609,16 +615,16 @@ api_key = "sk-current"
         let provider = config.ai.providers.get("aliyun").unwrap();
 
         assert_eq!(config.ai.active_provider.as_deref(), Some("aliyun"));
-        assert_eq!(provider.auth_source.as_deref(), Some("ecs_ram_role"));
-        assert!(provider.access_key_id.is_none());
-        assert!(provider.access_key_secret.is_none());
-        assert!(provider.security_token.is_none());
-        assert!(!content.contains("legacy-ak"));
-        assert!(!content.contains("legacy-token"));
+        assert_eq!(provider.auth_source.as_deref(), None);
+        assert_eq!(provider.access_key_id.as_deref(), Some("legacy-ak"));
+        assert_eq!(provider.access_key_secret.as_deref(), Some("legacy-sk"));
+        assert_eq!(provider.security_token.as_deref(), Some("legacy-token"));
+        assert!(content.contains("legacy-ak"));
+        assert!(content.contains("legacy-token"));
     }
 
     #[test]
-    fn legacy_aliyun_sts_credentials_migrate_to_ecs_auth_source() {
+    fn legacy_aliyun_sts_credentials_keep_ak_sk_token() {
         let tmp = tempfile::TempDir::new().unwrap();
         let config_path = tmp.path().join("config.toml");
         let creds_path = tmp.path().join("aliyun_creds.json");
@@ -640,12 +646,12 @@ api_key = "sk-current"
 
         assert_eq!(config.ai.active_provider.as_deref(), Some("aliyun"));
         assert_eq!(provider.provider_type.as_deref(), Some("aliyun"));
-        assert_eq!(provider.auth_source.as_deref(), Some("ecs_ram_role"));
-        assert!(provider.access_key_id.is_none());
-        assert!(provider.access_key_secret.is_none());
-        assert!(provider.security_token.is_none());
-        assert!(!content.contains("legacy-ak"));
-        assert!(!content.contains("legacy-token"));
+        assert_eq!(provider.auth_source.as_deref(), None);
+        assert_eq!(provider.access_key_id.as_deref(), Some("legacy-ak"));
+        assert_eq!(provider.access_key_secret.as_deref(), Some("legacy-sk"));
+        assert_eq!(provider.security_token.as_deref(), Some("legacy-token"));
+        assert!(content.contains("legacy-ak"));
+        assert!(content.contains("legacy-token"));
     }
 
     #[test]
