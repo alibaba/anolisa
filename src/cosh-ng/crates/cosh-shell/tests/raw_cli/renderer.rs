@@ -1,5 +1,17 @@
 use super::*;
 
+fn run_renderer_case(input: &'static [u8], envs: &[(&str, &str)]) -> String {
+    run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        envs,
+        vec![
+            (input.to_vec(), Duration::ZERO),
+            (b"exit\n".to_vec(), Duration::from_millis(1_500)),
+        ],
+    )
+}
+
 #[test]
 fn raw_cli_tool_output_does_not_break_markdown_stream_finalization() {
     let output = run_raw_cli_with_delayed_input(
@@ -49,9 +61,8 @@ fn raw_cli_no_color_keeps_box_layout_when_terminal_supports_it() {
 
 #[test]
 fn raw_cli_agent_response_renders_markdown_inside_card() {
-    let output = run_raw_cli_with_env(
-        "fake",
-        "?? render markdown\nexit\n",
+    let output = run_renderer_case(
+        b"?? render markdown\n",
         &[("COSH_SHELL_LANG", "en-US"), ("TERM", "xterm-256color")],
     );
 
@@ -199,9 +210,8 @@ fn raw_cli_agent_response_streams_soft_wrapped_markdown_paragraph() {
 
 #[test]
 fn raw_cli_agent_response_renders_markdown_table_inside_card() {
-    let output = run_raw_cli_with_env(
-        "fake",
-        "?? render markdown table\nexit\n",
+    let output = run_renderer_case(
+        b"?? render markdown table\n",
         &[("COSH_SHELL_LANG", "en-US"), ("TERM", "xterm-256color")],
     );
 
@@ -222,9 +232,8 @@ fn raw_cli_agent_response_renders_markdown_table_inside_card() {
 
 #[test]
 fn raw_cli_agent_response_renders_markdown_table_at_configured_narrow_width() {
-    let output = run_raw_cli_with_env(
-        "fake",
-        "?? render markdown table\nexit\n",
+    let output = run_renderer_case(
+        b"?? render markdown table\n",
         &[
             ("COSH_SHELL_LANG", "en-US"),
             ("TERM", "xterm-256color"),
@@ -246,9 +255,8 @@ fn raw_cli_agent_response_renders_markdown_table_at_configured_narrow_width() {
 
 #[test]
 fn raw_cli_agent_response_keeps_markdown_pipe_output_without_separator_as_text() {
-    let output = run_raw_cli_with_env(
-        "fake",
-        "?? render markdown pipe output\nexit\n",
+    let output = run_renderer_case(
+        b"?? render markdown pipe output\n",
         &[("COSH_SHELL_LANG", "en-US"), ("TERM", "xterm-256color")],
     );
 
@@ -265,9 +273,8 @@ fn raw_cli_agent_response_keeps_markdown_pipe_output_without_separator_as_text()
 
 #[test]
 fn raw_cli_agent_response_renders_indented_markdown_code_inside_card() {
-    let output = run_raw_cli_with_env(
-        "fake",
-        "?? render markdown indented code\nexit\n",
+    let output = run_renderer_case(
+        b"?? render markdown indented code\n",
         &[("COSH_SHELL_LANG", "en-US"), ("TERM", "xterm-256color")],
     );
 
@@ -286,9 +293,8 @@ fn raw_cli_agent_response_renders_indented_markdown_code_inside_card() {
 
 #[test]
 fn raw_cli_agent_response_joins_soft_wrapped_markdown_paragraph() {
-    let output = run_raw_cli_with_env(
-        "fake",
-        "?? render markdown paragraph\nexit\n",
+    let output = run_renderer_case(
+        b"?? render markdown paragraph\n",
         &[("COSH_SHELL_LANG", "en-US"), ("TERM", "xterm-256color")],
     );
 
@@ -309,9 +315,8 @@ fn raw_cli_agent_response_joins_soft_wrapped_markdown_paragraph() {
 
 #[test]
 fn raw_cli_agent_response_renders_markdown_in_plain_mode() {
-    let output = run_raw_cli_with_env(
-        "fake",
-        "?? render markdown\nexit\n",
+    let output = run_renderer_case(
+        b"?? render markdown\n",
         &[
             ("COSH_SHELL_LANG", "en-US"),
             ("COSH_SHELL_RENDER", "plain"),
