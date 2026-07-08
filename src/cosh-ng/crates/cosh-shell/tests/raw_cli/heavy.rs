@@ -67,7 +67,7 @@ case "$user_message" in
     printf '%s\n' '{{"type":"control_request","request_id":"ctrl-password-timeout","request":{{"subtype":"can_use_tool","tool_name":"run_shell_command","input":{{"command":"{command_json}"}},"tool_use_id":"toolu-password-timeout"}}}}'
     if IFS= read -r response; then
       case "$response" in
-        *'"behavior":"host_executed_shell"'*'"status":"timed_out"'*'password for cosh timeout'*)
+        *'"behavior":"host_executed_shell"'*'"status":"timed_out"'*)
           printf '%s\n' '{{"type":"assistant","session_id":"sess-host-executed-password-timeout","message":{{"content":[{{"type":"text","text":"Host-executed password timeout result received."}}]}}}}'
           printf '%s\n' '{{"type":"result","subtype":"success","session_id":"sess-host-executed-password-timeout","is_error":false,"result":"done"}}'
           exit 0
@@ -100,8 +100,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","session_id":"sess-host-exe
                 Duration::from_millis(500),
             ),
             (b"\n".to_vec(), Duration::from_millis(2_000)),
-            (b"dummy-password\n".to_vec(), Duration::from_millis(5_000)),
-            (b"exit 0\n".to_vec(), Duration::from_millis(1_500)),
+            (b"exit 0\n".to_vec(), Duration::from_millis(5_000)),
         ],
     );
     let _ = fs::remove_dir_all(&home);
@@ -122,6 +121,7 @@ printf '%s\n' '{{"type":"result","subtype":"success","session_id":"sess-host-exe
         "{output}"
     );
     assert!(output.contains("Shell: timed_out · req-1"), "{output}");
+    assert!(!output.contains("dummy-password"), "{output}");
     assert!(
         !output.contains("missing password timeout result"),
         "{output}"
