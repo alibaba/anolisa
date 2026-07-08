@@ -280,6 +280,7 @@ BINDIR              ?= $(PREFIX)/bin
 LIBDIR              ?= $(PREFIX)/lib/anolisa/sec-core
 LIBEXECDIR          ?= $(PREFIX)/libexec/anolisa/sec-core
 VENV_DIR            ?= $(LIBDIR)/venv
+SYSTEM_SEC_CORE_UV_PYTHON_INSTALL_DIR ?= $(LIBDIR)/uv-python
 WHEEL_DIR           ?= $(LIBDIR)/wheels
 CLI_STAGED_SITE     ?= $(BUILD_DIR)/site-packages
 CLI_PRIVATE_SITE    ?= /opt/agent-sec/lib/python3.11/site-packages
@@ -320,10 +321,15 @@ install-cli-site: ## RPM: Copy staged site-packages to private dir + wrappers
 	install -p -m 0755 scripts/agent-sec-daemon-wrapper.sh $(DESTDIR)/usr/bin/agent-sec-daemon
 
 .PHONY: install-cli-venv
-install-cli-venv: ## User: Create venv, install deps from uv.lock, install wheel, symlink
+install-cli-venv: ## Create venv, install deps from uv.lock, install wheel, symlink
 	@echo "Creating Python venv at $(VENV_DIR) ..."
 	install -d -m 0755 $(VENV_DIR)
+ifeq ($(INSTALL_PROFILE),system)
+	install -d -m 0755 $(SYSTEM_SEC_CORE_UV_PYTHON_INSTALL_DIR)
+	UV_PYTHON_INSTALL_DIR=$(SYSTEM_SEC_CORE_UV_PYTHON_INSTALL_DIR) uv venv --python 3.11.6 --allow-existing $(VENV_DIR)
+else
 	uv venv --python 3.11.6 --allow-existing $(VENV_DIR)
+endif
 	@echo "Installing dependencies from uv.lock ..."
 	cd agent-sec-cli && UV_PROJECT_ENVIRONMENT=$(VENV_DIR) uv sync --frozen --no-dev --no-install-project
 	@echo "Installing agent-sec-cli wheel ..."

@@ -90,3 +90,64 @@ jobs:
           ls ~/.local/lib/anolisa/sec-core/venv/bin/agent-sec-cli
       - name: Run E2E tests
         run: make -C src/agent-sec-core test-e2e-source-build
+
+  system-build:
+    name: Source Build System Install (Ubuntu 22.04)
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          components: clippy, rustfmt, rust-src
+      - name: Install verification tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y passwd util-linux
+      - name: Build and install in system mode
+        run: |
+          ./scripts/build-all.sh --component sec-core --system
+      - name: Verify system commands
+        run: |
+          agent-sec-cli --version
+          agent-sec-cli --help
+          agent-sec-cli scan-pii --help >/dev/null
+          agent-sec-daemon --help
+          linux-sandbox --help
+      - name: Verify system deployment
+        run: |
+          echo "=== System binaries ==="
+          test -x /usr/local/bin/agent-sec-cli
+          test -x /usr/local/bin/agent-sec-daemon
+          test -x /usr/local/bin/linux-sandbox
+          echo "=== Cosh Extension ==="
+          test -d /usr/share/anolisa/extensions/agent-sec-core/hooks
+          echo "=== OpenClaw Plugin ==="
+          test -d /usr/local/lib/anolisa/sec-core/openclaw-plugin/dist
+          test -x /usr/local/lib/anolisa/sec-core/openclaw-plugin/scripts/deploy.sh
+          echo "=== Hermes Plugin ==="
+          test -f /usr/local/lib/anolisa/sec-core/hermes-plugin/src/plugin.yaml
+          test -x /usr/local/lib/anolisa/sec-core/hermes-plugin/scripts/deploy.sh
+          echo "=== Codex Plugin ==="
+          test -f /usr/local/lib/anolisa/sec-core/codex-plugin/hooks-plugin/hooks/code_scanner_hook.py
+          test -f /usr/local/lib/anolisa/sec-core/codex-plugin/hooks-plugin/hooks/skill_ledger_hook.py
+          test -f /usr/local/lib/anolisa/sec-core/codex-plugin/hooks-plugin/.codex-plugin/plugin.json
+          test -x /usr/local/lib/anolisa/sec-core/codex-plugin/install.sh
+          test -f /usr/local/lib/anolisa/sec-core/codex-plugin/.agents/plugins/marketplace.json
+          echo "=== Skills ==="
+          test -d /usr/share/anolisa/skills
+          echo "=== CLI venv ==="
+          test -x /usr/local/lib/anolisa/sec-core/venv/bin/agent-sec-cli
+      - name: Verify system install as regular user
+        run: |
+          python_path="$(readlink -f /usr/local/lib/anolisa/sec-core/venv/bin/python)"
+          echo "venv python: ${python_path}"
+          case "${python_path}" in
+            /root/*)
+              echo "ERROR: venv Python points to root-private path: ${python_path}" >&2
+              exit 1
+              ;;
+          esac
+          namei -l /usr/local/lib/anolisa/sec-core/venv/bin/python
+          sudo useradd -m -s /bin/bash secprobe || true
+          sudo -u secprobe /usr/local/bin/agent-sec-cli --version
+          sudo -u secprobe /usr/local/bin/agent-sec-cli scan-pii --help >/dev/null
