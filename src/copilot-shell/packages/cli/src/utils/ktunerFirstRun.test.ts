@@ -28,9 +28,20 @@ vi.mock('node:child_process');
 // are stubbed so the resolver is deterministic regardless of the test host
 // (CI has no /usr/bin/ktuner; a dev box might).
 const resolverCtl = vi.hoisted(() => ({
-  ktunerPresent: true, // does /usr/bin/ktuner realpath-resolve
-  ktunerFileUid: 0, // owner uid of the ktuner file (0 = root/trusted)
+  ktunerPresent: true,
+  ktunerFileUid: 0,
+  ktunerRealPath: '/usr/bin/ktuner',
+  ktunerFileMode: 0o755,
+  badAncestorDir: '',
 }));
+
+function resetResolverCtl() {
+  resolverCtl.ktunerPresent = true;
+  resolverCtl.ktunerFileUid = 0;
+  resolverCtl.ktunerRealPath = '/usr/bin/ktuner';
+  resolverCtl.ktunerFileMode = 0o755;
+  resolverCtl.badAncestorDir = '';
+}
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -42,7 +53,7 @@ vi.mock('node:fs', async (importOriginal) => {
         if (!resolverCtl.ktunerPresent) {
           throw new Error('ENOENT');
         }
-        return '/usr/bin/ktuner';
+        return resolverCtl.ktunerRealPath;
       }
       if (s === '/usr/local/bin/ktuner') {
         throw new Error('ENOENT');
@@ -56,14 +67,14 @@ vi.mock('node:fs', async (importOriginal) => {
           isFile: () => true,
           isDirectory: () => false,
           uid: resolverCtl.ktunerFileUid,
-          mode: 0o755,
+          mode: resolverCtl.ktunerFileMode,
         } as unknown as fs.Stats;
       }
       if (s === '/usr/bin' || s === '/usr' || s === '/') {
         return {
           isFile: () => false,
           isDirectory: () => true,
-          uid: 0,
+          uid: s === resolverCtl.badAncestorDir ? 1000 : 0,
           mode: 0o755,
         } as unknown as fs.Stats;
       }
@@ -87,8 +98,15 @@ function restorePlatform(): void {
 }
 
 // Dynamic import so the mocks are active when the module loads.
-const { parseKtunerCheck, maybeRunKtunerFirstRunCheck } =
-  await import('./ktunerFirstRun.js');
+const {
+  parseKtunerCheck,
+  maybeRunKtunerFirstRunCheck,
+  isKtunerAvailable,
+  hasPromptedConsent,
+  markConsentPrompted,
+  hasNotifiedUnavailable,
+  markNotifiedUnavailable,
+} = await import('./ktunerFirstRun.js');
 
 const mockSpawn = spawn as unknown as ReturnType<typeof vi.fn>;
 
@@ -171,10 +189,7 @@ describe('maybeRunKtunerFirstRunCheck', () => {
   beforeEach(() => {
     testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ktuner-firstrun-test-'));
     mockSpawn.mockReset();
-    // Default: ktuner is present at a trusted root-owned path on Linux, so the
-    // resolver succeeds and the spawn-based cases below exercise runKtunerCheck.
-    resolverCtl.ktunerPresent = true;
-    resolverCtl.ktunerFileUid = 0;
+    resetResolverCtl();
     forcePlatform('linux');
   });
 
@@ -286,5 +301,107 @@ describe('maybeRunKtunerFirstRunCheck', () => {
     expect(mockSpawn).not.toHaveBeenCalled();
     expect(items).toHaveLength(0);
     expect(fs.existsSync(sentinel())).toBe(false);
+  });
+});
+
+describe('isKtunerAvailable (resolve-only probe)', () => {
+  beforeEach(() => {
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ktuner-avail-test-'));
+    resetResolverCtl();
+    forcePlatform('linux');
+  });
+  afterEach(() => {
+    fs.rmSync(testDir, { recursive: true, force: true });
+    restorePlatform();
+  });
+
+  it('true when a root-owned ktuner resolves on Linux; never spawns', () => {
+    mockSpawn.mockReset();
+    expect(isKtunerAvailable()).toBe(true);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('false on a non-Linux platform', () => {
+    forcePlatform('darwin');
+    expect(isKtunerAvailable()).toBe(false);
+  });
+
+  it('false when the ktuner binary is not root-owned', () => {
+    resolverCtl.ktunerFileUid = 1000;
+    expect(isKtunerAvailable()).toBe(false);
+  });
+
+  it('false when ktuner is absent', () => {
+    resolverCtl.ktunerPresent = false;
+    expect(isKtunerAvailable()).toBe(false);
+  });
+
+  it('false when realpath escapes the trusted allowlist (symlink tamper)', () => {
+    resolverCtl.ktunerRealPath = '/opt/evil/ktuner';
+    expect(isKtunerAvailable()).toBe(false);
+  });
+
+  it('false when the ktuner file is world-writable', () => {
+    resolverCtl.ktunerFileMode = 0o777;
+    expect(isKtunerAvailable()).toBe(false);
+  });
+
+  it('false when the ktuner file is not executable', () => {
+    resolverCtl.ktunerFileMode = 0o644;
+    expect(isKtunerAvailable()).toBe(false);
+  });
+
+  it('false when an ancestor dir is not root-owned', () => {
+    resolverCtl.badAncestorDir = '/usr';
+    expect(isKtunerAvailable()).toBe(false);
+  });
+});
+
+describe('consent sentinel', () => {
+  beforeEach(() => {
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ktuner-consent-test-'));
+  });
+  afterEach(() => {
+    fs.rmSync(testDir, { recursive: true, force: true });
+  });
+
+  it('hasPromptedConsent flips false -> true after markConsentPrompted', () => {
+    expect(hasPromptedConsent()).toBe(false);
+    markConsentPrompted();
+    expect(hasPromptedConsent()).toBe(true);
+  });
+
+  it('consent marker is distinct from the run-once sentinel', () => {
+    markConsentPrompted();
+    expect(fs.existsSync(path.join(testDir, SENTINEL))).toBe(false);
+    expect(fs.existsSync(path.join(testDir, '.ktuner-consent-prompted'))).toBe(
+      true,
+    );
+  });
+});
+
+describe('unavailable-notice sentinel', () => {
+  beforeEach(() => {
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ktuner-unavail-test-'));
+  });
+  afterEach(() => {
+    fs.rmSync(testDir, { recursive: true, force: true });
+  });
+
+  it('hasNotifiedUnavailable flips after markNotifiedUnavailable', () => {
+    expect(hasNotifiedUnavailable()).toBe(false);
+    markNotifiedUnavailable();
+    expect(hasNotifiedUnavailable()).toBe(true);
+  });
+
+  it('unavailable marker is distinct from consent and run markers', () => {
+    markNotifiedUnavailable();
+    expect(fs.existsSync(path.join(testDir, SENTINEL))).toBe(false);
+    expect(fs.existsSync(path.join(testDir, '.ktuner-consent-prompted'))).toBe(
+      false,
+    );
+    expect(
+      fs.existsSync(path.join(testDir, '.ktuner-unavailable-notified')),
+    ).toBe(true);
   });
 });

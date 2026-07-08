@@ -15,6 +15,8 @@ import { t } from '../i18n/index.js';
 type AddItem = (item: Omit<HistoryItem, 'id'>, timestamp: number) => void;
 
 const SENTINEL_FILENAME = '.ktuner-firstrun-checked';
+const CONSENT_SENTINEL_FILENAME = '.ktuner-consent-prompted';
+const UNAVAILABLE_NOTICE_FILENAME = '.ktuner-unavailable-notified';
 const CHECK_TIMEOUT_MS = 5000;
 
 export interface KtunerReport {
@@ -57,6 +59,51 @@ export function parseKtunerCheck(stdout: string): KtunerReport | null {
 
 function sentinelPath(): string {
   return path.join(Storage.getGlobalQwenDir(), SENTINEL_FILENAME);
+}
+
+function consentSentinelPath(): string {
+  return path.join(Storage.getGlobalQwenDir(), CONSENT_SENTINEL_FILENAME);
+}
+
+function unavailableNoticePath(): string {
+  return path.join(Storage.getGlobalQwenDir(), UNAVAILABLE_NOTICE_FILENAME);
+}
+
+function writeMarker(marker: string): void {
+  try {
+    fs.mkdirSync(path.dirname(marker), { recursive: true });
+    fs.writeFileSync(marker, '');
+  } catch {
+    // Best-effort; worst case the message may show again next auth.
+  }
+}
+
+export function hasPromptedConsent(): boolean {
+  try {
+    return fs.existsSync(consentSentinelPath());
+  } catch {
+    return false;
+  }
+}
+
+export function markConsentPrompted(): void {
+  writeMarker(consentSentinelPath());
+}
+
+export function hasNotifiedUnavailable(): boolean {
+  try {
+    return fs.existsSync(unavailableNoticePath());
+  } catch {
+    return false;
+  }
+}
+
+export function markNotifiedUnavailable(): void {
+  writeMarker(unavailableNoticePath());
+}
+
+export function isKtunerAvailable(): boolean {
+  return resolveKtunerBinary() !== null;
 }
 
 /**

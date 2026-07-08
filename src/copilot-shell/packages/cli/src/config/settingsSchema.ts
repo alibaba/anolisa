@@ -171,15 +171,23 @@ const SETTINGS_SCHEMA = {
           'Automatically add a Co-authored-by trailer to git commit messages when commits are made through Copilot Shell.',
         showInDialog: true,
       },
-      ktunerFirstRunCheck: {
-        type: 'boolean',
-        label: 'Kernel tune-up check on first auth',
+      ktunerCheck: {
+        type: 'enum',
+        label: 'Kernel tune-up check',
         category: 'General',
         requiresRestart: false,
-        default: false,
+        default: 'ask',
         description:
-          'On Linux, after the first LLM auth, run a one-time read-only `ktuner check` and show a kernel tuning nudge. Read-only — it never changes anything. Opt-in; off by default.',
+          'On Linux, controls the read-only `ktuner check` kernel tuning hint. ' +
+          '"ask": after auth, if a trusted ktuner is installed at a system path, ' +
+          'show a one-line non-blocking hint once. "enabled": run the read-only ' +
+          'check after auth. "disabled": never. Read-only — it never changes anything.',
         showInDialog: true,
+        options: [
+          { value: 'ask', label: 'Ask once' },
+          { value: 'enabled', label: 'Enabled' },
+          { value: 'disabled', label: 'Disabled' },
+        ],
       },
       checkpointing: {
         type: 'object',

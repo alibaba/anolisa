@@ -1055,6 +1055,22 @@ export default {
     '{{authType}} credentials saved successfully.',
   'Kernel: {{score}}/100, {{count}} tuning suggestion(s) ({{high}} high-confidence). Explore them anytime with ktuner.':
     'Kernel: {{score}}/100, {{count}} tuning suggestion(s) ({{high}} high-confidence). Explore them anytime with ktuner.',
+  'ktuner detected — read-only kernel tuning suggestions are available. Run /ktuner enable to view them, or /ktuner disable to stop asking.':
+    'ktuner detected — read-only kernel tuning suggestions are available. Run /ktuner enable to view them, or /ktuner disable to stop asking.',
+  'ktuner check is enabled, but no trusted ktuner binary was found on a system path. See the ktuner install docs.':
+    'ktuner check is enabled, but no trusted ktuner binary was found on a system path. See the ktuner install docs.',
+  'Control the read-only ktuner kernel tuning check':
+    'Control the read-only ktuner kernel tuning check',
+  'Enable the read-only ktuner kernel tuning check':
+    'Enable the read-only ktuner kernel tuning check',
+  'Stop the ktuner kernel tuning check and hint':
+    'Stop the ktuner kernel tuning check and hint',
+  'ktuner check enabled. It runs a read-only kernel scan after auth and never changes anything.':
+    'ktuner check enabled. It runs a read-only kernel scan after auth and never changes anything.',
+  'ktuner check disabled. Re-enable it anytime with /ktuner enable.':
+    'ktuner check disabled. Re-enable it anytime with /ktuner enable.',
+  'ktuner check is currently "{{mode}}". Use /ktuner enable or /ktuner disable to change it.':
+    'ktuner check is currently "{{mode}}". Use /ktuner enable or /ktuner disable to change it.',
   // OpenAI API key validation errors
   'Invalid API key. Please check your API key and try again.':
     'Invalid API key. Please check your API key and try again.',

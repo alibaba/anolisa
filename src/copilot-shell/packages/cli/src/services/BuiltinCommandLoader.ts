@@ -44,6 +44,7 @@ import { vimCommand } from '../ui/commands/vimCommand.js';
 import { setupGithubCommand } from '../ui/commands/setupGithubCommand.js';
 import { statuslineCommand } from '../ui/commands/statuslineCommand.js';
 import { clawhubCommand } from '../ui/commands/clawhubCommand.js';
+import { ktunerCommand } from '../ui/commands/ktunerCommand.js';
 
 /**
  * Loads the core, hard-coded slash commands that are an integral part
@@ -98,6 +99,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       clawhubCommand,
       terminalSetupCommand,
       statuslineCommand,
+      ...(process.platform === 'linux' ? [ktunerCommand] : []),
     ];
 
     return allDefinitions.filter((cmd): cmd is SlashCommand => cmd !== null);

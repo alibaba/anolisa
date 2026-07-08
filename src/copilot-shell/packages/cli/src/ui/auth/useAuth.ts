@@ -23,7 +23,14 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import type { OpenAICredentials } from '../components/OpenAIKeyPrompt.js';
 import { appEvents, AppEvent } from '../../utils/events.js';
-import { maybeRunKtunerFirstRunCheck } from '../../utils/ktunerFirstRun.js';
+import {
+  maybeRunKtunerFirstRunCheck,
+  isKtunerAvailable,
+  hasPromptedConsent,
+  markConsentPrompted,
+  hasNotifiedUnavailable,
+  markNotifiedUnavailable,
+} from '../../utils/ktunerFirstRun.js';
 import { AuthState, MessageType } from '../types.js';
 import type { HistoryItem } from '../types.js';
 import { t } from '../../i18n/index.js';
@@ -266,12 +273,40 @@ export const useAuthCommand = (
         refreshStatic?.();
       }
 
-      // Opt-in only (off by default): running an external binary after auth is
-      // gated on an explicit user setting. When enabled, surface a read-only
-      // kernel tuning report if ktuner is installed at a trusted path. Never
-      // blocks onboarding, never applies changes; fire-and-forget.
-      if (settings.merged.general?.ktunerFirstRunCheck === true) {
-        void maybeRunKtunerFirstRunCheck(addItem);
+      if (process.platform === 'linux') {
+        const ktunerMode =
+          (settings.merged.general?.ktunerCheck as string | undefined) ?? 'ask';
+        if (ktunerMode === 'enabled') {
+          if (isKtunerAvailable()) {
+            void maybeRunKtunerFirstRunCheck(addItem);
+          } else if (!hasNotifiedUnavailable()) {
+            markNotifiedUnavailable();
+            addItem(
+              {
+                type: MessageType.INFO,
+                text: t(
+                  'ktuner check is enabled, but no trusted ktuner binary was found on a system path. See the ktuner install docs.',
+                ),
+              },
+              Date.now(),
+            );
+          }
+        } else if (
+          ktunerMode === 'ask' &&
+          !hasPromptedConsent() &&
+          isKtunerAvailable()
+        ) {
+          markConsentPrompted();
+          addItem(
+            {
+              type: MessageType.INFO,
+              text: t(
+                'ktuner detected — read-only kernel tuning suggestions are available. Run /ktuner enable to view them, or /ktuner disable to stop asking.',
+              ),
+            },
+            Date.now(),
+          );
+        }
       }
     },
     [settings, handleAuthFailure, config, addItem, refreshStatic],

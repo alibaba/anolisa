@@ -999,6 +999,22 @@ export default {
     '{{authType}} 认证方式凭据已保存。',
   'Kernel: {{score}}/100, {{count}} tuning suggestion(s) ({{high}} high-confidence). Explore them anytime with ktuner.':
     '内核:{{score}}/100,{{count}} 条调优建议({{high}} 条高置信)。想看优化项随时用 ktuner。',
+  'ktuner detected — read-only kernel tuning suggestions are available. Run /ktuner enable to view them, or /ktuner disable to stop asking.':
+    '检测到 ktuner——有只读的内核调优建议可看。用 /ktuner enable 查看,或 /ktuner disable 不再提示。',
+  'ktuner check is enabled, but no trusted ktuner binary was found on a system path. See the ktuner install docs.':
+    'ktuner check 已启用,但系统路径下没找到可信的 ktuner 二进制。请参考 ktuner 安装文档。',
+  'Control the read-only ktuner kernel tuning check':
+    '管理只读的 ktuner 内核调优检查',
+  'Enable the read-only ktuner kernel tuning check':
+    '启用只读的 ktuner 内核调优检查',
+  'Stop the ktuner kernel tuning check and hint':
+    '停止 ktuner 内核调优检查和提示',
+  'ktuner check enabled. It runs a read-only kernel scan after auth and never changes anything.':
+    'ktuner check 已启用。它在认证后做一次只读内核扫描,不改动任何东西。',
+  'ktuner check disabled. Re-enable it anytime with /ktuner enable.':
+    'ktuner check 已停用。随时可用 /ktuner enable 重新启用。',
+  'ktuner check is currently "{{mode}}". Use /ktuner enable or /ktuner disable to change it.':
+    'ktuner check 当前为 "{{mode}}"。用 /ktuner enable 或 /ktuner disable 修改。',
   // OpenAI API key validation errors
   'Invalid API key. Please check your API key and try again.':
     '无效的 API 密钥。请检查您的 API 密钥并重试。',

@@ -4,13 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import type { Config } from '@copilot-shell/core';
 import { AuthType } from '@copilot-shell/core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { useAuthCommand } from './useAuth.js';
-import { maybeRunKtunerFirstRunCheck } from '../../utils/ktunerFirstRun.js';
+import {
+  maybeRunKtunerFirstRunCheck,
+  isKtunerAvailable,
+  hasPromptedConsent,
+  markConsentPrompted,
+  hasNotifiedUnavailable,
+  markNotifiedUnavailable,
+} from '../../utils/ktunerFirstRun.js';
 
 vi.mock('../hooks/useQwenAuth.js', () => ({
   useQwenAuth: () => ({
@@ -27,6 +34,11 @@ vi.mock('../../config/modelProvidersScope.js', () => ({
 // external binary or write a global sentinel (kongche #2).
 vi.mock('../../utils/ktunerFirstRun.js', () => ({
   maybeRunKtunerFirstRunCheck: vi.fn(),
+  isKtunerAvailable: vi.fn(() => false),
+  hasPromptedConsent: vi.fn(() => false),
+  markConsentPrompted: vi.fn(),
+  hasNotifiedUnavailable: vi.fn(() => false),
+  markNotifiedUnavailable: vi.fn(),
 }));
 
 describe('useAuthCommand', () => {
@@ -331,20 +343,20 @@ describe('useAuthCommand', () => {
     expect(refreshStatic).not.toHaveBeenCalled();
   });
 
-  it('does NOT call ktuner check when the setting is off (default)', async () => {
-    const settings = createMockSettings();
-    // merged.general is undefined → setting reads as false → gate closed.
+  // --- ktuner tri-state gate (general.ktunerCheck: ask | enabled | disabled) ---
+
+  const authAndSucceed = async (
+    settings: LoadedSettings,
+    addItem: ReturnType<typeof vi.fn>,
+  ) => {
     const config = createMockConfig();
-    const addItem = vi.fn();
     vi.mocked(config.refreshAuth).mockResolvedValue(undefined);
     vi.mocked(config.getContentGeneratorConfig).mockReturnValue({
       model: 'test',
     } as ReturnType<Config['getContentGeneratorConfig']>);
-
     const { result } = renderHook(() =>
       useAuthCommand(settings, config, addItem, false),
     );
-
     await act(async () => {
       await result.current.handleAuthSelect(AuthType.USE_OPENAI);
     });
@@ -355,37 +367,125 @@ describe('useAuthCommand', () => {
         model: 'test',
       });
     });
+  };
 
-    expect(maybeRunKtunerFirstRunCheck).not.toHaveBeenCalled();
+  const setMode = (settings: LoadedSettings, mode?: string) => {
+    (settings.merged as Record<string, unknown>)['general'] = mode
+      ? { ktunerCheck: mode }
+      : {};
+  };
+  const ktunerItemText = (addItem: ReturnType<typeof vi.fn>): string =>
+    addItem.mock.calls
+      .map(([item]) => (item as { text?: string }).text ?? '')
+      .find((txt) => txt.includes('ktuner')) ?? '';
+
+  let savedPlatform: PropertyDescriptor | undefined;
+  const resetKtunerMocks = () => {
+    vi.mocked(maybeRunKtunerFirstRunCheck).mockClear();
+    vi.mocked(markConsentPrompted).mockClear();
+    vi.mocked(markNotifiedUnavailable).mockClear();
+    vi.mocked(isKtunerAvailable).mockReturnValue(false);
+    vi.mocked(hasPromptedConsent).mockReturnValue(false);
+    vi.mocked(hasNotifiedUnavailable).mockReturnValue(false);
+    if (!savedPlatform) {
+      savedPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    }
+    Object.defineProperty(process, 'platform', {
+      value: 'linux',
+      configurable: true,
+    });
+  };
+  afterEach(() => {
+    if (savedPlatform) {
+      Object.defineProperty(process, 'platform', savedPlatform);
+      savedPlatform = undefined;
+    }
   });
 
-  it('calls ktuner check when the setting is explicitly enabled', async () => {
+  it('disabled: neither runs the check nor shows a hint', async () => {
+    resetKtunerMocks();
+    vi.mocked(isKtunerAvailable).mockReturnValue(true);
     const settings = createMockSettings();
-    (settings.merged as Record<string, unknown>)['general'] = {
-      ktunerFirstRunCheck: true,
-    };
-    const config = createMockConfig();
+    setMode(settings, 'disabled');
     const addItem = vi.fn();
-    vi.mocked(config.refreshAuth).mockResolvedValue(undefined);
-    vi.mocked(config.getContentGeneratorConfig).mockReturnValue({
-      model: 'test',
-    } as ReturnType<Config['getContentGeneratorConfig']>);
+    await authAndSucceed(settings, addItem);
+    expect(maybeRunKtunerFirstRunCheck).not.toHaveBeenCalled();
+    expect(ktunerItemText(addItem)).toBe('');
+  });
 
-    const { result } = renderHook(() =>
-      useAuthCommand(settings, config, addItem, false),
-    );
-
-    await act(async () => {
-      await result.current.handleAuthSelect(AuthType.USE_OPENAI);
-    });
-    await act(async () => {
-      await result.current.handleAuthSelect(AuthType.USE_OPENAI, {
-        apiKey: 'sk-test',
-        baseUrl: 'https://example.com/v1',
-        model: 'test',
-      });
-    });
-
+  it('enabled + available: runs the read-only check', async () => {
+    resetKtunerMocks();
+    vi.mocked(isKtunerAvailable).mockReturnValue(true);
+    const settings = createMockSettings();
+    setMode(settings, 'enabled');
+    const addItem = vi.fn();
+    await authAndSucceed(settings, addItem);
     expect(maybeRunKtunerFirstRunCheck).toHaveBeenCalledTimes(1);
+    expect(markConsentPrompted).not.toHaveBeenCalled();
+  });
+
+  it('enabled + unavailable: surfaces a one-time notice (own marker)', async () => {
+    resetKtunerMocks();
+    vi.mocked(isKtunerAvailable).mockReturnValue(false);
+    vi.mocked(hasNotifiedUnavailable).mockReturnValue(false);
+    const settings = createMockSettings();
+    setMode(settings, 'enabled');
+    const addItem = vi.fn();
+    await authAndSucceed(settings, addItem);
+    expect(maybeRunKtunerFirstRunCheck).not.toHaveBeenCalled();
+    expect(ktunerItemText(addItem)).toContain('no trusted ktuner binary');
+    expect(markNotifiedUnavailable).toHaveBeenCalledTimes(1);
+    expect(markConsentPrompted).not.toHaveBeenCalled();
+  });
+
+  it('ask + available + not prompted: shows the hint', async () => {
+    resetKtunerMocks();
+    vi.mocked(isKtunerAvailable).mockReturnValue(true);
+    vi.mocked(hasPromptedConsent).mockReturnValue(false);
+    const settings = createMockSettings();
+    setMode(settings, undefined);
+    const addItem = vi.fn();
+    await authAndSucceed(settings, addItem);
+    expect(maybeRunKtunerFirstRunCheck).not.toHaveBeenCalled();
+    expect(ktunerItemText(addItem)).toContain('/ktuner enable');
+    expect(markConsentPrompted).toHaveBeenCalledTimes(1);
+  });
+
+  it('ask + available + already prompted: stays silent', async () => {
+    resetKtunerMocks();
+    vi.mocked(isKtunerAvailable).mockReturnValue(true);
+    vi.mocked(hasPromptedConsent).mockReturnValue(true);
+    const settings = createMockSettings();
+    setMode(settings, 'ask');
+    const addItem = vi.fn();
+    await authAndSucceed(settings, addItem);
+    expect(maybeRunKtunerFirstRunCheck).not.toHaveBeenCalled();
+    expect(ktunerItemText(addItem)).toBe('');
+  });
+
+  it('ask + unavailable: stays silent', async () => {
+    resetKtunerMocks();
+    vi.mocked(isKtunerAvailable).mockReturnValue(false);
+    const settings = createMockSettings();
+    setMode(settings, 'ask');
+    const addItem = vi.fn();
+    await authAndSucceed(settings, addItem);
+    expect(maybeRunKtunerFirstRunCheck).not.toHaveBeenCalled();
+    expect(ktunerItemText(addItem)).toBe('');
+  });
+
+  it('non-Linux: the whole ktuner gate is skipped', async () => {
+    resetKtunerMocks();
+    Object.defineProperty(process, 'platform', {
+      value: 'darwin',
+      configurable: true,
+    });
+    vi.mocked(isKtunerAvailable).mockReturnValue(true);
+    const settings = createMockSettings();
+    setMode(settings, 'enabled');
+    const addItem = vi.fn();
+    await authAndSucceed(settings, addItem);
+    expect(maybeRunKtunerFirstRunCheck).not.toHaveBeenCalled();
+    expect(ktunerItemText(addItem)).toBe('');
   });
 });
