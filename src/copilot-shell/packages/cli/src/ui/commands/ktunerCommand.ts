@@ -8,6 +8,7 @@ import type { SlashCommand, MessageActionReturn } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import { SettingScope } from '../../config/settings.js';
+import { maybeRunKtunerFirstRunCheck } from '../../utils/ktunerFirstRun.js';
 
 const enableSubCommand: SlashCommand = {
   name: 'enable',
@@ -21,6 +22,7 @@ const enableSubCommand: SlashCommand = {
       'general.ktunerCheck',
       'enabled',
     );
+    void maybeRunKtunerFirstRunCheck(context.ui.addItem);
     return {
       type: 'message',
       messageType: 'info',
