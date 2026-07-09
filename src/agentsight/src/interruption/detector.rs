@@ -20,6 +20,85 @@ fn is_token_limit_finish(reason: Option<&str>) -> bool {
     matches!(reason, Some("length" | "max_tokens"))
 }
 
+fn structured_stream_error_text(raw_body: &str) -> Option<String> {
+    if let Some(error) = structured_error_json_text(raw_body.trim()) {
+        return Some(error);
+    }
+
+    raw_body.lines().find_map(|line| {
+        let payload = line
+            .trim()
+            .strip_prefix("data:")
+            .map(str::trim)
+            .unwrap_or_else(|| line.trim());
+        if payload.is_empty() || payload == "[DONE]" || payload.starts_with("event:") {
+            return None;
+        }
+        structured_error_json_text(payload)
+    })
+}
+
+fn structured_error_json_text(candidate: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(candidate)
+        .ok()
+        .and_then(|value| structured_error_value_text(&value))
+}
+
+fn structured_error_value_text(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Array(items) => items.iter().find_map(structured_error_value_text),
+        serde_json::Value::Object(map) => {
+            let event_type = map.get("type").and_then(|value| value.as_str());
+            let is_error_event = event_type.is_some_and(|kind| {
+                kind == "error" || kind.ends_with(".failed") || kind.ends_with(".error")
+            });
+
+            if let Some(error) = map.get("error") {
+                return summarize_error_value(error);
+            }
+
+            let response_error = map
+                .get("response")
+                .and_then(|response| response.get("error"))
+                .and_then(summarize_error_value);
+            if let Some(error) = response_error {
+                return Some(error);
+            }
+
+            if is_error_event {
+                return summarize_error_value(value);
+            }
+
+            None
+        }
+        _ => None,
+    }
+}
+
+fn summarize_error_value(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        serde_json::Value::Object(map) => {
+            let text = ["type", "code", "message"]
+                .iter()
+                .filter_map(|key| map.get(*key).and_then(|value| value.as_str()))
+                .filter(|text| !text.trim().is_empty())
+                .map(str::trim)
+                .collect::<Vec<_>>()
+                .join(" ");
+            if text.is_empty() { None } else { Some(text) }
+        }
+        _ => None,
+    }
+}
+
 /// Configuration for the interruption detector
 pub struct DetectorConfig {
     /// Ratio of output_tokens / max_tokens that triggers token_limit (default: 0.95)
@@ -101,8 +180,19 @@ impl InterruptionDetector {
             .and_then(|s| s.parse().ok())
             .unwrap_or(200);
 
-        let error_text = call.error.as_deref().unwrap_or("");
+        let is_sse = call
+            .metadata
+            .get("is_sse")
+            .map(|s| s == "true")
+            .unwrap_or(false);
         let response_body = call.response.raw_body.as_deref().unwrap_or("");
+        let stream_error = if status_code < 400 && is_sse {
+            structured_stream_error_text(response_body)
+        } else {
+            None
+        };
+        let effective_error = call.error.as_deref().or(stream_error.as_deref());
+        let error_text = effective_error.unwrap_or("");
         let structured_error = error_text.to_ascii_lowercase();
         let response_error_body = if status_code >= 400 {
             response_body
@@ -135,7 +225,7 @@ impl InterruptionDetector {
             let detail = serde_json::json!({
                 "model": call.model,
                 "status_code": status_code,
-                "error": call.error,
+                "error": effective_error,
             });
             events.push(InterruptionEvent::new(
                 InterruptionType::AuthError,
@@ -160,7 +250,7 @@ impl InterruptionDetector {
             let detail = serde_json::json!({
                 "model": call.model,
                 "status_code": status_code,
-                "error": call.error,
+                "error": effective_error,
             });
             events.push(InterruptionEvent::new(
                 InterruptionType::RateLimit,
@@ -186,7 +276,7 @@ impl InterruptionDetector {
             let detail = serde_json::json!({
                 "model": call.model,
                 "status_code": status_code,
-                "error": call.error,
+                "error": effective_error,
             });
             events.push(InterruptionEvent::new(
                 InterruptionType::NetworkTimeout,
@@ -213,7 +303,7 @@ impl InterruptionDetector {
             let detail = serde_json::json!({
                 "model": call.model,
                 "status_code": status_code,
-                "error": call.error,
+                "error": effective_error,
             });
             events.push(InterruptionEvent::new(
                 InterruptionType::ServiceUnavailable,
@@ -235,7 +325,7 @@ impl InterruptionDetector {
             let detail = serde_json::json!({
                 "model": call.model,
                 "status_code": status_code,
-                "error": call.error,
+                "error": effective_error,
                 "input_tokens": call.token_usage.as_ref().map(|u| u.input_tokens),
             });
             events.push(InterruptionEvent::new(
@@ -263,7 +353,7 @@ impl InterruptionDetector {
             let detail = serde_json::json!({
                 "model": call.model,
                 "finish_reason": "content_filter",
-                "error": call.error,
+                "error": effective_error,
             });
             events.push(InterruptionEvent::new(
                 InterruptionType::SafetyFilter,
@@ -281,10 +371,10 @@ impl InterruptionDetector {
 
         // ── 7. LLM error (non-context HTTP/API errors) ────────────────────────
         // 通用兜底：所有 HTTP >= 400 且未被上述规则匹配的错误
-        if status_code >= 400 || call.error.is_some() {
+        if status_code >= 400 || call.error.is_some() || stream_error.is_some() {
             let detail = serde_json::json!({
                 "status_code": status_code,
-                "error": call.error,
+                "error": effective_error,
                 "model": call.model,
             });
             events.push(InterruptionEvent::new(
@@ -305,11 +395,6 @@ impl InterruptionDetector {
         // 严格条件：SSE 流 + 持续时间 >= 阈值 + 无正常终止标志 + 非 token-limit
         // 正常终止标志：finish_reason 为 stop/tool_calls/end_turn/tool_use/stop_sequence
         // token-limit (length/max_tokens) 由 rule 9/10 单独处理
-        let is_sse = call
-            .metadata
-            .get("is_sse")
-            .map(|s| s == "true")
-            .unwrap_or(false);
         if is_sse
             && !is_normal_finish(finish_reason)
             && !is_token_limit_finish(finish_reason)
@@ -827,6 +912,44 @@ mod tests {
         let events = detector.detect(&call);
 
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_detects_anthropic_sse_error_event_in_200_stream() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
+        call.duration_ns = 500_000_000;
+        call.response.raw_body = Some(
+            "event: error\n\
+             data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n"
+                .to_string(),
+        );
+
+        let events = detector.detect(&call);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].interruption_type,
+            InterruptionType::ServiceUnavailable
+        );
+    }
+
+    #[test]
+    fn test_detects_structured_sse_error_object_in_200_stream() {
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
+        call.duration_ns = 100_000_000;
+        call.response.raw_body =
+            Some(r#"data: {"error":{"message":"upstream failed before completion"}}"#.to_string());
+
+        let events = detector.detect(&call);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].interruption_type, InterruptionType::LlmError);
     }
 
     #[test]
