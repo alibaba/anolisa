@@ -20,12 +20,19 @@ const LABEL_BY_VERDICT = {
 export const EvaluationBadge: React.FC<EvaluationBadgeProps> = ({ result }) => {
   if (!result) return null;
 
+  const style =
+    STYLE_BY_VERDICT[result.verdict as keyof typeof STYLE_BY_VERDICT] ??
+    'bg-gray-50 text-gray-700 border-gray-200';
+  const label =
+    LABEL_BY_VERDICT[result.verdict as keyof typeof LABEL_BY_VERDICT] ??
+    result.verdict;
+
   return (
     <span
-      className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 text-xs font-semibold ${STYLE_BY_VERDICT[result.verdict]}`}
+      className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 text-xs font-semibold ${style}`}
       title={`质量分 ${Math.round(result.score * 100)}`}
     >
-      <span>{LABEL_BY_VERDICT[result.verdict]}</span>
+      <span>{label}</span>
       <span className="font-mono">{Math.round(result.score * 100)}</span>
     </span>
   );

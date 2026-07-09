@@ -323,12 +323,14 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
   const [expandedEvaluationPanel, setExpandedEvaluationPanel] = useState<string | null>(null);
   const [evaluations, setEvaluations] = useState<Map<string, EvaluationResult>>(new Map());
   const [evaluationLookupDone, setEvaluationLookupDone] = useState<Set<string>>(new Set());
+  const [evaluationLookupFailed, setEvaluationLookupFailed] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     setLoading(true);
     setPage(0);
     setEvaluations(new Map());
     setEvaluationLookupDone(new Set());
+    setEvaluationLookupFailed(new Set());
     fetchTraces(sessionId, startNs, endNs)
       .then(setTraces)
       .catch((e: Error) => setError(e.message))
@@ -345,7 +347,9 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
     if (loading || pageTraces.length === 0) return;
 
     const missing = pageTraces.filter(
-      (trace) => !evaluationLookupDone.has(trace.conversation_id)
+      (trace) =>
+        !evaluationLookupDone.has(trace.conversation_id) &&
+        !evaluationLookupFailed.has(trace.conversation_id)
     );
     if (missing.length === 0) return;
 
@@ -353,29 +357,58 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
     Promise.all(
       missing.map((trace) =>
         fetchLatestEvaluation(trace.conversation_id)
-          .then((result) => result ? [trace.conversation_id, result] as const : null)
-          .catch(() => null)
+          .then((result) => ({
+            conversationId: trace.conversation_id,
+            result,
+            ok: true,
+          }))
+          .catch(() => ({
+            conversationId: trace.conversation_id,
+            result: null,
+            ok: false,
+          }))
       )
     ).then((entries) => {
       if (cancelled) return;
       setEvaluations((prev) => {
         const next = new Map(prev);
         for (const entry of entries) {
-          if (entry) next.set(entry[0], entry[1]);
+          if (entry.ok && entry.result) {
+            next.set(entry.conversationId, entry.result);
+          }
         }
         return next;
       });
       setEvaluationLookupDone((prev) => {
         const next = new Set(prev);
-        for (const trace of missing) next.add(trace.conversation_id);
-        return next;
+        let changed = false;
+        for (const entry of entries) {
+          if (entry.ok && !next.has(entry.conversationId)) {
+            next.add(entry.conversationId);
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+      setEvaluationLookupFailed((prev) => {
+        const next = new Set(prev);
+        let changed = false;
+        for (const entry of entries) {
+          if (entry.ok) {
+            if (next.delete(entry.conversationId)) changed = true;
+          } else if (!next.has(entry.conversationId)) {
+            next.add(entry.conversationId);
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
       });
     });
 
     return () => {
       cancelled = true;
     };
-  }, [evaluationLookupDone, loading, pageTraces]);
+  }, [evaluationLookupDone, evaluationLookupFailed, loading, pageTraces]);
 
   if (loading)
     return (
@@ -466,18 +499,42 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
                   </button>
                 </div>
                 <div>
-                  <button
-                    onClick={() => setExpandedEvaluationPanel(
-                      expandedEvaluationPanel === tr.conversation_id ? null : tr.conversation_id
-                    )}
-                    className="inline-flex min-w-[72px] items-center justify-center rounded border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-50"
-                  >
-                    {evaluations.get(tr.conversation_id) ? (
-                      <EvaluationBadge result={evaluations.get(tr.conversation_id)!} />
-                    ) : (
-                      '评估'
-                    )}
-                  </button>
+                  {(() => {
+                    const evaluation = evaluations.get(tr.conversation_id);
+                    const lookupFailed = evaluationLookupFailed.has(tr.conversation_id);
+                    return (
+                      <button
+                        onClick={() => {
+                          if (lookupFailed) {
+                            setEvaluationLookupFailed((prev) => {
+                              if (!prev.has(tr.conversation_id)) return prev;
+                              const next = new Set(prev);
+                              next.delete(tr.conversation_id);
+                              return next;
+                            });
+                            return;
+                          }
+                          setExpandedEvaluationPanel(
+                            expandedEvaluationPanel === tr.conversation_id ? null : tr.conversation_id
+                          );
+                        }}
+                        className="inline-flex min-w-[72px] items-center justify-center rounded border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-50"
+                      >
+                        {evaluation ? (
+                          <EvaluationBadge result={evaluation} />
+                        ) : lookupFailed ? (
+                          <span
+                            className="text-red-600"
+                            title="质量评估结果加载失败，点击重试"
+                          >
+                            加载失败
+                          </span>
+                        ) : (
+                          '评估'
+                        )}
+                      </button>
+                    );
+                  })()}
                 </div>
                 <div>
                   {(() => {

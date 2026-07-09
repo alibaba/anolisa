@@ -207,7 +207,7 @@ function recommendedActionText(result: EvaluationResult): string {
     return '暂无需要立即处理的动作。';
   }
 
-  const actions: Record<EvaluationResult['root_cause'], string> = {
+  const actions: Record<string, string> = {
     none: '复核告警项和支撑证据。',
     no_final_answer: '检查最后一次 LLM 调用和服务端响应解析。',
     interrupted_main_call: '检查中断证据，修复运行稳定性后再重试会话。',
@@ -220,11 +220,11 @@ function recommendedActionText(result: EvaluationResult): string {
     partial_snapshot: '等待 pending 调用完成，或保留强制评估标记。',
   };
 
-  return actions[result.root_cause];
+  return actions[result.root_cause] ?? result.recommended_action ?? result.root_cause;
 }
 
-function rootCauseLabel(value: EvaluationResult['root_cause']): string {
-  const labels: Record<EvaluationResult['root_cause'], string> = {
+function rootCauseLabel(value: string): string {
+  const labels: Record<string, string> = {
     none: '未发现明确根因',
     no_final_answer: '未生成最终回答',
     interrupted_main_call: '主调用被中断',
@@ -237,7 +237,7 @@ function rootCauseLabel(value: EvaluationResult['root_cause']): string {
     partial_snapshot: '快照未完成',
   };
 
-  return labels[value];
+  return labels[value] ?? value;
 }
 
 function dimensionLabel(value: string): string {

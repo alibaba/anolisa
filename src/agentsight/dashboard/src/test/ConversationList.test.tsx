@@ -1,6 +1,6 @@
 import React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 // Mock recharts
@@ -316,6 +316,62 @@ describe('ConversationList', () => {
 
     fireEvent.click(badge.closest('button')!);
     expect(screen.getByTestId('evaluation-panel')).toHaveTextContent('conv-graded');
+  });
+
+  it('should surface failed grader badge lookups and retry from the error state', async () => {
+    mockFetchSessions.mockResolvedValue([
+      {
+        session_id: 'sess-retry',
+        agent_name: 'RetryAgent',
+        model: 'gpt-4o',
+        conversation_count: 11,
+        total_input_tokens: 1100,
+        total_output_tokens: 550,
+        last_seen_ns: Date.now() * 1_000_000,
+      },
+    ]);
+    mockFetchTraces.mockResolvedValue(
+      Array.from({ length: 11 }, (_, i) => ({
+        trace_id: `trace-${i}`,
+        conversation_id: i === 0 ? 'conv-retry' : `conv-${i}`,
+        user_query: `query ${i}`,
+        total_input_tokens: 100,
+        total_output_tokens: 50,
+        start_ns: Date.now() * 1_000_000 + i,
+        end_ns: Date.now() * 1_000_000 + i + 1,
+        model: 'gpt-4o',
+      }))
+    );
+    mockFetchLatestEvaluation.mockImplementation((conversationId: string) => {
+      if (conversationId === 'conv-retry') {
+        return Promise.reject(new Error('temporary outage'));
+      }
+      return Promise.resolve(null);
+    });
+
+    await act(async () => { renderPage(); });
+    await act(async () => {
+      fireEvent.click(screen.getByText('查询'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('RetryAgent').closest('tr')!);
+    });
+
+    expect(await screen.findByText('加载失败')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        mockFetchLatestEvaluation.mock.calls.filter(([id]) => id === 'conv-retry')
+      ).toHaveLength(1);
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('加载失败'));
+    });
+    await waitFor(() => {
+      expect(
+        mockFetchLatestEvaluation.mock.calls.filter(([id]) => id === 'conv-retry')
+      ).toHaveLength(2);
+    });
   });
 
   it('should show agent dropdown with loaded names', async () => {

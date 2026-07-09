@@ -98,6 +98,22 @@ describe('EvaluationPanel', () => {
     expect(screen.getByText('等待 pending 调用完成，或保留强制评估标记。')).toBeInTheDocument();
   });
 
+  it('falls back for unknown root causes from newer backends', () => {
+    renderPanel(
+      <EvaluationPanel
+        conversationId="conv-1"
+        initialResult={{
+          ...result,
+          root_cause: 'provider_backoff' as any,
+          recommended_action: 'Apply provider-specific backoff.',
+        }}
+      />
+    );
+
+    expect(screen.getByText('当前会话可用，但需要复核：provider_backoff。')).toBeInTheDocument();
+    expect(screen.getByText('Apply provider-specific backoff.')).toBeInTheDocument();
+  });
+
   it('reveals dimensions and findings', () => {
     renderPanel(<EvaluationPanel conversationId="conv-1" initialResult={result} />);
     fireEvent.click(screen.getByText('查看详情'));

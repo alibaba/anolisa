@@ -24,4 +24,11 @@ describe('EvaluationBadge', () => {
     render(<EvaluationBadge result={{ verdict: 'fail', score: 0.2 } as any} />);
     expect(screen.getByText('未通过')).toBeInTheDocument();
   });
+
+  it('falls back to the raw verdict for unknown backend variants', () => {
+    render(<EvaluationBadge result={{ verdict: 'skipped', score: 0.5 } as any} />);
+
+    expect(screen.getByText('skipped')).toBeInTheDocument();
+    expect(screen.getByText('50')).toBeInTheDocument();
+  });
 });
