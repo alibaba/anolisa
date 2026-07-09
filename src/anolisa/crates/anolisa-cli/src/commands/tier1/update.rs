@@ -71,6 +71,8 @@ use crate::context::CliContext;
 use crate::repo_config::{HostVars, RepoConfig};
 use crate::response::{self, CliError};
 
+mod check;
+
 /// Command label for JSON envelopes and error routing.
 const COMMAND: &str = "update";
 
@@ -94,6 +96,28 @@ pub struct UpdateArgs {
     /// single component.
     #[command(subcommand)]
     pub command: Option<UpdateCommands>,
+    /// Report which RPM-backed components can be upgraded, read-only.
+    ///
+    /// `--check` only runs read-only rpm/dnf queries (it does run `dnf
+    /// repoquery` for candidates, but no mutating `dnf` transaction), never
+    /// writes ANOLISA state, and never persists repo/adapter configuration. It
+    /// is mutually exclusive with a component
+    /// argument and with the `self` / `all` subcommands (the latter is enforced
+    /// by `args_conflicts_with_subcommands`). `--motd`, `--refresh`, and
+    /// `--target` are only meaningful together with `--check`.
+    #[arg(long)]
+    pub check: bool,
+    /// With `--check`: emit a short, low-noise MOTD summary (silent when
+    /// nothing can be upgraded).
+    #[arg(long, requires = "check")]
+    pub motd: bool,
+    /// With `--check`: bypass the cached report and re-query.
+    #[arg(long, requires = "check")]
+    pub refresh: bool,
+    /// With `--check`: evaluate against a named target profile so its missing
+    /// default components are reported as installable.
+    #[arg(long, requires = "check", value_name = "TARGET")]
+    pub target: Option<String>,
 }
 
 /// Update operations that intentionally keep CLI self-update and batch update
@@ -117,6 +141,29 @@ pub enum UpdateCommands {
 /// Returns [`CliError`] when the selected update operation fails, no target is
 /// given, or the operation is not implemented yet.
 pub fn handle(args: UpdateArgs, ctx: &CliContext) -> Result<(), CliError> {
+    // `--check` is the read-only upgrade-detection entry (issue #1410). It is
+    // dispatched before the mutating forms so a stray component/subcommand is
+    // rejected instead of silently updating something.
+    if args.check {
+        if args.component.is_some() {
+            return Err(CliError::InvalidArgument {
+                command: check::CHECK_COMMAND.to_string(),
+                reason: "`--check` reports upgrades for every managed component and takes no component argument; run `anolisa update --check`".to_string(),
+            });
+        }
+        // `args_conflicts_with_subcommands` already makes `update --check self`
+        // a parse error; this guard keeps the invariant explicit for any direct
+        // caller that bypasses clap.
+        if args.command.is_some() {
+            return Err(CliError::InvalidArgument {
+                command: check::CHECK_COMMAND.to_string(),
+                reason: "`--check` cannot be combined with the `self` or `all` subcommands"
+                    .to_string(),
+            });
+        }
+        return check::handle_update_check(&args, ctx);
+    }
+
     // `args_conflicts_with_subcommands` guarantees `command` and `component`
     // are never both set, so a present subcommand always wins.
     match (args.command, args.component) {
@@ -2928,6 +2975,10 @@ mod tests {
             UpdateArgs {
                 component: None,
                 command: None,
+                check: false,
+                motd: false,
+                refresh: false,
+                target: None,
             },
             &c,
         )
@@ -3938,6 +3989,10 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
         let args = UpdateArgs {
             component: None,
             command: None,
+            check: false,
+            motd: false,
+            refresh: false,
+            target: None,
         };
         let err = handle(args, &c).expect_err("must require a target");
         assert_eq!(err.code(), "INVALID_ARGUMENT");

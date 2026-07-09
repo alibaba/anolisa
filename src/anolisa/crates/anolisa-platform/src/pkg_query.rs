@@ -8,6 +8,7 @@
 //! observe/repair/update consumers treat absence as expected control flow, so
 //! [`PackageQueryError`] is reserved for genuinely anomalous conditions.
 
+use std::cmp::Ordering;
 use std::fmt;
 
 use thiserror::Error;
@@ -40,6 +41,172 @@ impl fmt::Display for PackageVersion {
         }
         Ok(())
     }
+}
+
+/// Compare two RPM versions by RPM's EVR ordering (epoch, then version, then
+/// release), returning whether `a` sorts before/equal/after `b`.
+///
+/// This is **not** semver: RPM EVRs routinely use shapes semver rejects
+/// (numeric epochs like `1:...`, two-segment versions like `2.3`, `.al8`
+/// releases, `~`/`^` markers). A semver comparison silently treats those as
+/// unordered, so callers that need to know whether a repo candidate genuinely
+/// upgrades an installed package must use this instead. Epoch is compared
+/// numerically (absent epoch is `0`); version and release each use
+/// [`rpmvercmp`].
+pub fn rpm_evr_cmp(a: &PackageVersion, b: &PackageVersion) -> Ordering {
+    let epoch_a = a.epoch.as_deref().unwrap_or("0");
+    let epoch_b = b.epoch.as_deref().unwrap_or("0");
+    let epoch_cmp = match (epoch_a.parse::<i64>(), epoch_b.parse::<i64>()) {
+        (Ok(x), Ok(y)) => x.cmp(&y),
+        // A non-numeric epoch is malformed; fall back to segment comparison
+        // rather than panicking so a weird rpmdb row still orders deterministically.
+        _ => rpmvercmp(epoch_a, epoch_b),
+    };
+    if epoch_cmp != Ordering::Equal {
+        return epoch_cmp;
+    }
+    let version_cmp = rpmvercmp(&a.version, &b.version);
+    if version_cmp != Ordering::Equal {
+        return version_cmp;
+    }
+    rpmvercmp(
+        a.release.as_deref().unwrap_or(""),
+        b.release.as_deref().unwrap_or(""),
+    )
+}
+
+/// Compare a single RPM version or release segment using RPM's `rpmvercmp`
+/// algorithm (a faithful port of `lib/rpmvercmp.c`).
+///
+/// The string is walked in alternating runs of digits and letters separated by
+/// any other bytes; numeric runs compare numerically (leading zeros stripped,
+/// then longer-wins), alphabetic runs compare lexically, a digit run outranks
+/// an alphabetic run, and `~` sorts before everything (including end of string)
+/// while `^` sorts after a shorter version but before a longer one. Kept here in
+/// the platform layer so version logic lives next to the RPM backend.
+pub fn rpmvercmp(a: &str, b: &str) -> Ordering {
+    if a == b {
+        return Ordering::Equal;
+    }
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    let (mut i, mut j) = (0usize, 0usize);
+
+    let is_sep = |c: u8| !c.is_ascii_alphanumeric() && c != b'~' && c != b'^';
+
+    loop {
+        while i < a.len() && is_sep(a[i]) {
+            i += 1;
+        }
+        while j < b.len() && is_sep(b[j]) {
+            j += 1;
+        }
+
+        // `~` sorts before everything, even the empty string.
+        let a_tilde = i < a.len() && a[i] == b'~';
+        let b_tilde = j < b.len() && b[j] == b'~';
+        if a_tilde || b_tilde {
+            if !a_tilde {
+                return Ordering::Greater;
+            }
+            if !b_tilde {
+                return Ordering::Less;
+            }
+            i += 1;
+            j += 1;
+            continue;
+        }
+
+        // `^` sorts after a shorter version but before a longer one.
+        let a_caret = i < a.len() && a[i] == b'^';
+        let b_caret = j < b.len() && b[j] == b'^';
+        if a_caret || b_caret {
+            if i >= a.len() {
+                return Ordering::Less;
+            }
+            if j >= b.len() {
+                return Ordering::Greater;
+            }
+            if !a_caret {
+                return Ordering::Greater;
+            }
+            if !b_caret {
+                return Ordering::Less;
+            }
+            i += 1;
+            j += 1;
+            continue;
+        }
+
+        if i >= a.len() || j >= b.len() {
+            break;
+        }
+
+        let (start_i, start_j) = (i, j);
+        let isnum = a[i].is_ascii_digit();
+        if isnum {
+            while i < a.len() && a[i].is_ascii_digit() {
+                i += 1;
+            }
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+        } else {
+            while i < a.len() && a[i].is_ascii_alphabetic() {
+                i += 1;
+            }
+            while j < b.len() && b[j].is_ascii_alphabetic() {
+                j += 1;
+            }
+        }
+
+        let seg_a = &a[start_i..i];
+        let seg_b = &b[start_j..j];
+
+        // `seg_a` is always non-empty (we entered on an alnum byte of its type);
+        // an empty `seg_b` means the two runs are different types. A numeric run
+        // outranks an alphabetic one.
+        if seg_b.is_empty() {
+            return if isnum {
+                Ordering::Greater
+            } else {
+                Ordering::Less
+            };
+        }
+
+        if isnum {
+            let na = strip_leading_zeros(seg_a);
+            let nb = strip_leading_zeros(seg_b);
+            match na.len().cmp(&nb.len()) {
+                Ordering::Equal => match na.cmp(nb) {
+                    Ordering::Equal => {}
+                    other => return other,
+                },
+                other => return other,
+            }
+        } else {
+            match seg_a.cmp(seg_b) {
+                Ordering::Equal => {}
+                other => return other,
+            }
+        }
+    }
+
+    // Whichever string still has content sorts higher.
+    match (i >= a.len(), j >= b.len()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        // Unreachable: the loop only breaks when at least one side is exhausted.
+        (false, false) => Ordering::Equal,
+    }
+}
+
+fn strip_leading_zeros(mut s: &[u8]) -> &[u8] {
+    while !s.is_empty() && s[0] == b'0' {
+        s = &s[1..];
+    }
+    s
 }
 
 /// A package's identity, version, and origin (shared by installed/available queries).
@@ -192,5 +359,68 @@ pub trait PackageQuery {
         _package: &str,
     ) -> Result<Vec<String>, PackageQueryError> {
         Ok(Vec::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ver(epoch: Option<&str>, version: &str, release: Option<&str>) -> PackageVersion {
+        PackageVersion {
+            epoch: epoch.map(str::to_string),
+            version: version.to_string(),
+            release: release.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn rpmvercmp_matches_rpm_reference_cases() {
+        // Canonical cases from RPM's own rpmvercmp test suite.
+        assert_eq!(rpmvercmp("1.0", "1.0"), Ordering::Equal);
+        assert_eq!(rpmvercmp("1.0", "2.0"), Ordering::Less);
+        assert_eq!(rpmvercmp("2.0", "1.0"), Ordering::Greater);
+        // Numeric segments compare numerically, not lexically: 10 > 2.
+        assert_eq!(rpmvercmp("2", "10"), Ordering::Less);
+        assert_eq!(rpmvercmp("1.10", "1.9"), Ordering::Greater);
+        // Leading zeros are stripped before the length/lex compare.
+        assert_eq!(rpmvercmp("1.0010", "1.10"), Ordering::Equal);
+        // A numeric run outranks an alphabetic run at the same position.
+        assert_eq!(rpmvercmp("1.a", "1.1"), Ordering::Less);
+        // `~` sorts before everything, including a shorter release.
+        assert_eq!(rpmvercmp("1.0~rc1", "1.0"), Ordering::Less);
+        assert_eq!(rpmvercmp("1.0~rc1", "1.0~rc2"), Ordering::Less);
+        // `^` sorts after the base version.
+        assert_eq!(rpmvercmp("1.0^", "1.0"), Ordering::Greater);
+    }
+
+    #[test]
+    fn rpm_evr_cmp_orders_epoch_first() {
+        // A higher epoch wins regardless of version — the classic reason plain
+        // version comparison is wrong.
+        let older = ver(None, "2.0", Some("1.al8"));
+        let newer = ver(Some("1"), "1.0", Some("1.al8"));
+        assert_eq!(rpm_evr_cmp(&older, &newer), Ordering::Less);
+        // Absent epoch is treated as 0, so it equals an explicit "0".
+        assert_eq!(
+            rpm_evr_cmp(&ver(None, "1.0", None), &ver(Some("0"), "1.0", None)),
+            Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn rpm_evr_cmp_detects_non_semver_upgrade() {
+        // Real EVRs that semver cannot parse must still order correctly.
+        let installed = ver(None, "0.5", Some("1.al4"));
+        let candidate = ver(None, "1.0.0", Some("1.al4"));
+        assert_eq!(rpm_evr_cmp(&installed, &candidate), Ordering::Less);
+        // Release differences break upgrade ties.
+        assert_eq!(
+            rpm_evr_cmp(
+                &ver(None, "1.0.0", Some("1.al4")),
+                &ver(None, "1.0.0", Some("2.al4"))
+            ),
+            Ordering::Less
+        );
     }
 }

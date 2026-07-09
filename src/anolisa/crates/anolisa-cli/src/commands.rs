@@ -390,6 +390,13 @@ fn command_policy(command: &Commands) -> CommandPolicy {
             ComponentCommands::Doctor(_) => CommandPolicy::new("doctor", CommandScope::ReadOnly),
             ComponentCommands::Logs(_) => CommandPolicy::new("logs", CommandScope::ReadOnly),
             ComponentCommands::Restart(_) => mode_scoped("restart", false),
+            // `update --check` is read-only upgrade detection: it only runs
+            // read-only rpm/dnf queries (no package transaction, no state
+            // writes), so it must not be gated behind the mutating-update root
+            // requirement — the MOTD hook runs it unprivileged.
+            ComponentCommands::Update(args) if args.check => {
+                CommandPolicy::new("update", CommandScope::ReadOnly)
+            }
             ComponentCommands::Update(_) => mode_scoped("update", true),
             ComponentCommands::Repair(_) => system_only("repair", true),
             ComponentCommands::Forget(_) => mode_scoped("forget", true),
