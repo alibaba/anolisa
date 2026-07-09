@@ -365,6 +365,14 @@ where
             return Box::pin(async move { Ok(response) });
         }
 
+        // OPTIONS preflight requests: pass through to CORS middleware.
+        // Without this, cross-origin preflight to non-exempt /api/* routes
+        // would be 401'd before Cors can answer.
+        if *req.method() == actix_web::http::Method::OPTIONS {
+            let fut = self.service.call(req);
+            return Box::pin(async move { fut.await.map(|res| res.map_into_left_body()) });
+        }
+
         // If auth is disabled, pass through immediately.
         if !self.auth.enabled {
             let fut = self.service.call(req);
@@ -868,6 +876,51 @@ mod tests {
             .to_request();
         let resp = actix_web::test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200, "/metrics should pass from loopback");
+    }
+
+    #[actix_web::test]
+    async fn middleware_passes_options_preflight_without_token() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        let dir = std::env::temp_dir().join("auth_mw_options");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok();
+        let auth = Arc::new(DashboardAuth::init(
+            &ServerAuthConfig { enabled: true },
+            &dir,
+        ));
+        let app = actix_web::test::init_service(
+            actix_web::App::new().wrap(AuthMiddleware::new(auth)).route(
+                "/api/sessions",
+                actix_web::web::get().to(|| async { HttpResponse::Ok().body("ok") }),
+            ),
+        )
+        .await;
+
+        let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), 12345);
+
+        // GET to protected API from remote should be 401
+        let req = actix_web::test::TestRequest::get()
+            .uri("/api/sessions")
+            .peer_addr(remote_addr)
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 401);
+
+        // OPTIONS preflight to the same API should NOT be 401'd by auth middleware.
+        // (404 is expected here — no OPTIONS route registered; in production the
+        // CORS middleware handles OPTIONS. The key assertion is: not 401.)
+        let req = actix_web::test::TestRequest::default()
+            .method(actix_web::http::Method::OPTIONS)
+            .uri("/api/sessions")
+            .peer_addr(remote_addr)
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_ne!(
+            resp.status(),
+            401,
+            "OPTIONS preflight should not be blocked by auth middleware"
+        );
     }
 
     #[actix_web::test]
