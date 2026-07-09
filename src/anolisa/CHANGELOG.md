@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-07-09
+
+### Added
+
+- `anolisa update --check` now reports RPM upgrade opportunities without changing state.
+- `anolisa update --check --motd` now prints a short login-friendly upgrade summary.
+- `anolisa upgrade` now applies RPM image upgrades for RPM-managed toolchains.
+- `anolisa upgrade` now installs missing default components from the selected target profile.
+- `anolisa adapter scan` now marks enabled receipts with missing sources as orphaned.
+- `anolisa adapter status` now reports missing adapter sources as degraded receipts.
+
+### Changed
+
+- `anolisa list` now shows component scope for visible user and system records.
+- `anolisa status` now shows scope, mutability, shadowing, and state path metadata.
+- `anolisa doctor` now includes readable system components in user-mode diagnostics.
+- `anolisa doctor` now suggests system-mode commands for read-only system records.
+- `anolisa update --check` now uses the latest target profile when `--target` is omitted.
+- `anolisa update --check --motd` now points users to `sudo anolisa upgrade` when action is needed.
+
+### Fixed
+
+- `anolisa uninstall`, `forget`, and `update` now reject read-only system targets with system-mode guidance.
+- `anolisa upgrade` now reports unresolved target defaults as check errors.
+- `anolisa upgrade` now warns when refreshed RPM details are unavailable after an upgrade.
+
 ## [0.2.1] - 2026-07-08
 
 ### Added
@@ -444,6 +470,32 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.2.2] - 2026-07-09
+
+### 新增
+
+- `anolisa update --check` 现可只读报告 RPM 升级机会。
+- `anolisa update --check --motd` 现可输出简短登录升级提示。
+- `anolisa upgrade` 现可应用 RPM 工具链升级。
+- `anolisa upgrade` 现可安装目标配置缺失默认组件。
+- `anolisa adapter scan` 现将缺失来源的启用记录标为 orphaned。
+- `anolisa adapter status` 现将缺失适配器来源报告为降级。
+
+### 变更
+
+- `anolisa list` 现显示可见用户和系统记录的 scope。
+- `anolisa status` 现显示 scope、可变性、遮蔽和状态路径。
+- `anolisa doctor` 现在用户模式诊断可读系统组件。
+- `anolisa doctor` 现为只读系统记录建议系统模式命令。
+- `anolisa update --check` 未指定 `--target` 时使用最新目标配置。
+- `anolisa update --check --motd` 现提示用 `sudo anolisa upgrade`。
+
+### 修复
+
+- `anolisa uninstall`、`forget`、`update` 现拒绝只读系统目标。
+- `anolisa upgrade` 现将未解析默认组件报告为检查错误。
+- `anolisa upgrade` 刷新 RPM 详情失败时现会提示。
 
 ## [0.2.1] - 2026-07-08
 
