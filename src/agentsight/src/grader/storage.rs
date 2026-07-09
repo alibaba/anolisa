@@ -319,3 +319,87 @@ fn parse_root_cause(value: String) -> Result<RootCause, GraderError> {
         _ => Err(GraderError::Storage(format!("unknown root_cause: {value}"))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+    use crate::grader::types::{
+        EvaluationMetadata, EvaluationResult, GraderType, RULE_GRADER_VERSION, TargetType, Verdict,
+    };
+
+    #[test]
+    fn insert_completed_is_idempotent_for_same_input_key() {
+        let path = temp_db_path("grader_store_idempotency");
+        let store = EvaluationStore::new_with_path(&path).unwrap();
+        let first = evaluation_result("run-first", "input-hash-1");
+        let duplicate = evaluation_result("run-duplicate", "input-hash-1");
+
+        assert!(store.insert_completed(&first).unwrap());
+        assert!(!store.insert_completed(&duplicate).unwrap());
+
+        let found = store
+            .find_completed(
+                TargetType::Conversation,
+                "conv-1",
+                "input-hash-1",
+                GraderType::Rule,
+                RULE_GRADER_VERSION,
+            )
+            .unwrap()
+            .expect("completed run should be found");
+
+        assert_eq!(found.run_id, "run-first");
+        assert_eq!(
+            found.result.expect("result_json should exist").run_id,
+            "run-first"
+        );
+
+        cleanup_db(&path);
+    }
+
+    fn evaluation_result(run_id: &str, input_hash: &str) -> EvaluationResult {
+        EvaluationResult {
+            target_type: TargetType::Conversation,
+            target_id: "conv-1".to_string(),
+            run_id: run_id.to_string(),
+            input_hash: input_hash.to_string(),
+            verdict: Verdict::Pass,
+            score: 1.0,
+            summary: "ok".to_string(),
+            root_cause: RootCause::None,
+            recommended_action: "none".to_string(),
+            dimensions: Vec::new(),
+            findings: Vec::new(),
+            metadata: EvaluationMetadata {
+                evaluated_with_pending: false,
+                pending_call_count: 0,
+                input_event_count: 1,
+                grader_type: GraderType::Rule,
+                grader_version: RULE_GRADER_VERSION.to_string(),
+                rubric_version: None,
+                judge_model: None,
+                prompt_hash: None,
+                confidence: Some(1.0),
+            },
+        }
+    }
+
+    fn temp_db_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "agentsight_{label}_{}.db",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn cleanup_db(path: &std::path::Path) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+}

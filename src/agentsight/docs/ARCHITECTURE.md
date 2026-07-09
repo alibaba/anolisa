@@ -86,7 +86,7 @@ graph TB
 | **L4: Analyze** | `src/analyzer/`, `src/tokenizer/` | Token 提取、审计记录、消息解析 | → L3, L2 |
 | **L5: Semantic** | `src/genai/`, `src/atif/` | 语义事件构建、轨迹格式导出 | → L4, L3, L2, Cross |
 | **L6: Persist** | `src/storage/` | SQLite 持久化、SLS 远程导出 | → L4, L5 |
-| **L7: Serve** | `src/server/`, `src/health/`, `src/agent_sec/` | HTTP API、前端、agent-sec daemon 代理、健康检查 | → L6, L5 |
+| **L7: Serve** | `src/server/`, `src/health/`, `src/agent_sec/`, `src/grader/` | HTTP API、前端、agent-sec daemon 代理、健康检查、会话质量评估 | → L6, L5 |
 | **L8: Entry** | `src/bin/`, `src/unified.rs`, `src/config.rs` | CLI 入口、编排器、配置 | → L1-L7 |
 | **Cross** | `src/discovery/` | Agent 进程发现与匹配 | 被 L1, L8 使用 |
 
@@ -107,6 +107,7 @@ graph LR
     health[health]
     atif[atif]
     agent_sec[agent_sec]
+    grader[grader]
     server[server]
     unified[unified]
 
@@ -135,10 +136,12 @@ graph LR
     genai --> parser
     storage --> analyzer
     storage --> genai
+    grader --> storage
     server --> storage
     server --> health
     server --> atif
     server --> agent_sec
+    server --> grader
     health --> storage
     atif --> genai
     atif --> storage
@@ -278,6 +281,12 @@ src/
 ├── agent_sec/             # agent-sec daemon 查询代理
 │   ├── mod.rs             # 模块导出
 │   └── client.rs          # Unix socket NDJSON client
+├── grader/                # 会话质量评估
+│   ├── rule.rs            # 确定性规则评估
+│   ├── input.rs           # 证据快照加载与输入哈希
+│   ├── storage.rs         # evaluation_runs 持久化
+│   ├── evidence.rs        # evidence_refs 构建
+│   └── types.rs           # API 和存储共享类型
 ├── server/                # HTTP 服务器（feature=server）
 │   ├── mod.rs             # Actix-web 服务器 + 前端嵌入
 │   └── handlers.rs        # API 处理函数

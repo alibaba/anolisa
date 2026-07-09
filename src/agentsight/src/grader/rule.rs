@@ -214,7 +214,7 @@ fn score_safety(input: &EvaluationInput) -> EvaluationDimension {
     let safety_refs: Vec<EvaluationRef> = input
         .interruptions
         .iter()
-        .filter(|record| record.interruption_type.contains("safety"))
+        .filter(|record| !record.resolved && record.interruption_type.contains("safety"))
         .map(|record| interruption_ref(&input.target_id, record))
         .collect();
     if !safety_refs.is_empty() {
@@ -333,7 +333,14 @@ fn select_root_cause(
     if findings.iter().any(|finding| {
         matches!(
             finding.code.as_str(),
-            "llm_error" | "sse_truncated" | "network_timeout" | "service_unavailable"
+            "llm_error"
+                | "sse_truncated"
+                | "network_timeout"
+                | "service_unavailable"
+                | "rate_limit"
+                | "auth_error"
+                | "context_overflow"
+                | "token_limit"
         )
     }) {
         return RootCause::RuntimeError;
@@ -350,10 +357,12 @@ fn select_root_cause(
     {
         return RootCause::SafetyRisk;
     }
-    if findings
-        .iter()
-        .any(|finding| finding.code == "loop_detected")
-    {
+    if findings.iter().any(|finding| {
+        matches!(
+            finding.code.as_str(),
+            "loop_detected" | "retry_storm" | "dead_loop"
+        )
+    }) {
         return RootCause::LoopDetected;
     }
     if dimensions
@@ -492,6 +501,7 @@ fn round_score(score: f64) -> f64 {
 mod tests {
     use super::*;
     use crate::grader::types::TargetType;
+    use crate::storage::sqlite::InterruptionRecord;
     use crate::storage::sqlite::genai::TraceEventDetail;
 
     fn event(id: i64, status: &str, output_tokens: i64) -> TraceEventDetail {
@@ -536,6 +546,24 @@ mod tests {
         }
     }
 
+    fn interruption(interruption_type: &str, severity: &str, resolved: bool) -> InterruptionRecord {
+        InterruptionRecord {
+            id: 1,
+            interruption_id: format!("intr-{interruption_type}"),
+            session_id: Some("session-1".to_string()),
+            trace_id: Some("trace-1".to_string()),
+            conversation_id: Some("conv-1".to_string()),
+            call_id: Some("call-1".to_string()),
+            pid: Some(1),
+            agent_name: Some("agent".to_string()),
+            interruption_type: interruption_type.to_string(),
+            severity: severity.to_string(),
+            occurred_at_ns: 1_700_000_000_000_000_000,
+            detail: None,
+            resolved,
+        }
+    }
+
     #[test]
     fn passes_completed_conversation_with_output() {
         let result = RuleGrader::evaluate(&input(vec![event(1, "complete", 10)]));
@@ -543,6 +571,25 @@ mod tests {
         assert_eq!(result.verdict, Verdict::Pass);
         assert_eq!(result.root_cause, RootCause::None);
         assert!(result.score >= 0.8);
+    }
+
+    #[test]
+    fn weighted_score_and_score_cutoffs_are_discriminating() {
+        let mut snapshot = input(vec![event(1, "complete", 250_000)]);
+        snapshot.interruptions = vec![interruption("rate_limit", "medium", false)];
+        snapshot.events[0].output_messages = Some(
+            r#"[{"role":"assistant","content":"tool_call_response: {\"error\":\"failed\"}"}]"#
+                .to_string(),
+        );
+
+        let result = RuleGrader::evaluate(&snapshot);
+
+        assert_eq!(result.score, 0.69);
+        assert_eq!(result.verdict, Verdict::Warn);
+        assert_eq!(verdict_for_score(0.80), Verdict::Pass);
+        assert_eq!(verdict_for_score(0.79), Verdict::Warn);
+        assert_eq!(verdict_for_score(0.50), Verdict::Warn);
+        assert_eq!(verdict_for_score(0.49), Verdict::Fail);
     }
 
     #[test]
@@ -589,5 +636,55 @@ mod tests {
         assert_eq!(result.verdict, Verdict::Warn);
         assert_eq!(result.root_cause, RootCause::PartialSnapshot);
         assert!(result.metadata.evaluated_with_pending);
+    }
+
+    #[test]
+    fn resolved_safety_interruption_does_not_penalize_safety() {
+        let mut snapshot = input(vec![event(1, "complete", 10)]);
+        snapshot.interruptions = vec![interruption("safety_filter", "medium", true)];
+
+        let result = RuleGrader::evaluate(&snapshot);
+        let safety = result
+            .dimensions
+            .iter()
+            .find(|dimension| dimension.name == "safety")
+            .expect("safety dimension should exist");
+
+        assert_eq!(safety.score, 1.0);
+        assert_eq!(result.root_cause, RootCause::None);
+        assert!(
+            !result
+                .findings
+                .iter()
+                .any(|finding| finding.code == "safety_filter")
+        );
+    }
+
+    #[test]
+    fn unresolved_interruption_codes_select_specific_root_causes() {
+        for code in [
+            "rate_limit",
+            "auth_error",
+            "context_overflow",
+            "token_limit",
+        ] {
+            let mut snapshot = input(vec![event(1, "complete", 10)]);
+            snapshot.interruptions = vec![interruption(code, "high", false)];
+
+            let result = RuleGrader::evaluate(&snapshot);
+
+            assert_eq!(result.root_cause, RootCause::RuntimeError, "{code}");
+            assert!(!result.summary.ends_with("none."));
+        }
+
+        for code in ["retry_storm", "dead_loop"] {
+            let mut snapshot = input(vec![event(1, "complete", 10)]);
+            snapshot.interruptions = vec![interruption(code, "critical", false)];
+
+            let result = RuleGrader::evaluate(&snapshot);
+
+            assert_eq!(result.root_cause, RootCause::LoopDetected, "{code}");
+            assert!(!result.summary.ends_with("none."));
+        }
     }
 }

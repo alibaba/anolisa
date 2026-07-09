@@ -828,6 +828,11 @@ mod tests {
     use actix_web::test as awtest;
 
     use crate::agent_sec::DaemonErrorPayload;
+    use crate::genai::GenAIExporter;
+    use crate::genai::semantic::{
+        GenAISemanticEvent, LLMCall, LLMRequest, LLMResponse, MessagePart, OutputMessage,
+        TokenUsage,
+    };
     use crate::grader::EvaluationStore;
     use crate::health::HealthStore;
     use crate::storage::sqlite::genai::{PendingCallInfo, PendingOrigin};
@@ -1089,7 +1094,125 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[actix_web::test]
+    async fn evaluate_grader_reuses_existing_run_for_same_snapshot() {
+        let root = temp_root("evaluate_grader_reuses_run");
+        let db_path = root.join("events.db");
+        write_completed_conversation_event(&db_path, "conv-reuse");
+        let data = grader_app_state(db_path.clone());
+        let app = awtest::init_service(App::new().app_data(data).service(evaluate_grader)).await;
+        let request = EvaluationRequest {
+            target_type: "conversation".to_string(),
+            target_id: "conv-reuse".to_string(),
+            force: false,
+        };
+
+        let first = awtest::call_service(
+            &app,
+            awtest::TestRequest::post()
+                .uri("/grader/evaluate")
+                .set_json(&request)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let first_body = service_response_json(first).await;
+        assert_eq!(first_body["reused_existing_run"], false);
+        let run_id = first_body["result"]["run_id"]
+            .as_str()
+            .expect("run_id should be present")
+            .to_string();
+
+        let second = awtest::call_service(
+            &app,
+            awtest::TestRequest::post()
+                .uri("/grader/evaluate")
+                .set_json(&request)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(second.status(), StatusCode::OK);
+        let second_body = service_response_json(second).await;
+        assert_eq!(second_body["reused_existing_run"], true);
+        assert_eq!(second_body["result"]["run_id"], run_id);
+
+        cleanup_db(&db_path);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[actix_web::test]
+    async fn evaluate_grader_maps_bad_request_not_found_and_pending() {
+        let root = temp_root("evaluate_grader_errors");
+        let db_path = root.join("events.db");
+        write_pending_conversation_event(&db_path, "conv-pending");
+        let data = grader_app_state(db_path.clone());
+        let app = awtest::init_service(App::new().app_data(data).service(evaluate_grader)).await;
+
+        let bad_request = awtest::call_service(
+            &app,
+            awtest::TestRequest::post()
+                .uri("/grader/evaluate")
+                .set_json(&EvaluationRequest {
+                    target_type: "trace".to_string(),
+                    target_id: "conv-pending".to_string(),
+                    force: false,
+                })
+                .to_request(),
+        )
+        .await;
+        assert_eq!(bad_request.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            service_response_json(bad_request).await["error"],
+            "unsupported_target"
+        );
+
+        let not_found = awtest::call_service(
+            &app,
+            awtest::TestRequest::post()
+                .uri("/grader/evaluate")
+                .set_json(&EvaluationRequest {
+                    target_type: "conversation".to_string(),
+                    target_id: "missing-conv".to_string(),
+                    force: false,
+                })
+                .to_request(),
+        )
+        .await;
+        assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            service_response_json(not_found).await["error"],
+            "conversation_not_found"
+        );
+
+        let pending = awtest::call_service(
+            &app,
+            awtest::TestRequest::post()
+                .uri("/grader/evaluate")
+                .set_json(&EvaluationRequest {
+                    target_type: "conversation".to_string(),
+                    target_id: "conv-pending".to_string(),
+                    force: false,
+                })
+                .to_request(),
+        )
+        .await;
+        assert_eq!(pending.status(), StatusCode::CONFLICT);
+        let pending_body = service_response_json(pending).await;
+        assert_eq!(pending_body["error"], "conversation_not_ready");
+        assert_eq!(pending_body["pending_call_count"], 1);
+
+        cleanup_db(&db_path);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     async fn response_json(response: HttpResponse) -> Value {
+        let body = to_bytes(response.into_body())
+            .await
+            .expect("response body should be readable");
+        serde_json::from_slice(&body).expect("response body should be JSON")
+    }
+
+    async fn service_response_json(response: actix_web::dev::ServiceResponse) -> Value {
         let body = to_bytes(response.into_body())
             .await
             .expect("response body should be readable");

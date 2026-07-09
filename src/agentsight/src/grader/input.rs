@@ -160,6 +160,7 @@ mod tests {
     use crate::genai::GenAIExporter;
     use crate::genai::semantic::{GenAISemanticEvent, LLMCall, LLMRequest};
     use crate::interruption::{InterruptionEvent, InterruptionType};
+    use crate::storage::sqlite::genai::TraceEventDetail;
 
     use super::*;
 
@@ -202,6 +203,74 @@ mod tests {
         cleanup_db(&genai_path);
         cleanup_db(&interruption_path);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn compute_input_hash_is_stable_and_changes_with_snapshot_inputs() {
+        let base_events = vec![trace_event("call-1", "complete", 10)];
+        let base_hash = compute_input_hash("conv-1", &base_events, &[]).unwrap();
+        let repeated_hash =
+            compute_input_hash("conv-1", &[trace_event("call-1", "complete", 10)], &[]).unwrap();
+
+        let changed_conversation_hash =
+            compute_input_hash("conv-2", &[trace_event("call-1", "complete", 10)], &[]).unwrap();
+        let changed_event_hash =
+            compute_input_hash("conv-1", &[trace_event("call-1", "complete", 11)], &[]).unwrap();
+        let changed_interruption_hash = compute_input_hash(
+            "conv-1",
+            &[trace_event("call-1", "complete", 10)],
+            &[interruption_record("rate_limit", false)],
+        )
+        .unwrap();
+
+        assert_eq!(base_hash, repeated_hash);
+        assert_ne!(base_hash, changed_conversation_hash);
+        assert_ne!(base_hash, changed_event_hash);
+        assert_ne!(base_hash, changed_interruption_hash);
+    }
+
+    fn trace_event(call_id: &str, status: &str, output_tokens: i64) -> TraceEventDetail {
+        TraceEventDetail {
+            id: 1,
+            call_id: Some(call_id.to_string()),
+            start_timestamp_ns: 1_700_000_000_000_000_000,
+            end_timestamp_ns: Some(1_700_000_000_000_000_100),
+            model: Some("claude".to_string()),
+            input_tokens: 100,
+            output_tokens,
+            total_tokens: 100 + output_tokens,
+            input_messages: Some(r#"[{"role":"user","content":"hello"}]"#.to_string()),
+            output_messages: Some(r#"[{"role":"assistant","content":"done"}]"#.to_string()),
+            system_instructions: None,
+            agent_name: Some("claude".to_string()),
+            process_name: Some("claude".to_string()),
+            pid: Some(1234),
+            user_query: Some("hello".to_string()),
+            event_json: None,
+            trace_id: Some("trace-1".to_string()),
+            conversation_id: Some("conv-1".to_string()),
+            cache_read_tokens: None,
+            status: Some(status.to_string()),
+            interruption_type: None,
+        }
+    }
+
+    fn interruption_record(interruption_type: &str, resolved: bool) -> InterruptionRecord {
+        InterruptionRecord {
+            id: 1,
+            interruption_id: format!("intr-{interruption_type}"),
+            session_id: Some("session-1".to_string()),
+            trace_id: Some("trace-1".to_string()),
+            conversation_id: Some("conv-1".to_string()),
+            call_id: Some("call-1".to_string()),
+            pid: Some(1234),
+            agent_name: Some("claude".to_string()),
+            interruption_type: interruption_type.to_string(),
+            severity: "medium".to_string(),
+            occurred_at_ns: 1_700_000_000_000_000_200,
+            detail: None,
+            resolved,
+        }
     }
 
     fn write_conversation_event(path: &Path, conversation_id: &str) {
