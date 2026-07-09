@@ -64,8 +64,8 @@ fn json_has_tool_failure(value: &serde_json::Value) -> bool {
 }
 
 fn tool_response_has_error(map: &serde_json::Map<String, serde_json::Value>) -> bool {
-    if map.get("is_error").and_then(|value| value.as_bool()) == Some(true) {
-        return true;
+    if let Some(is_error) = map.get("is_error").and_then(|value| value.as_bool()) {
+        return is_error;
     }
 
     ["response", "content", "error"]
@@ -78,8 +78,11 @@ fn value_has_error_signal(value: &serde_json::Value) -> bool {
         serde_json::Value::String(text) => text_has_error_signal(text),
         serde_json::Value::Array(items) => items.iter().any(value_has_error_signal),
         serde_json::Value::Object(map) => {
-            map.get("is_error").and_then(|value| value.as_bool()) == Some(true)
-                || map.values().any(value_has_error_signal)
+            if let Some(is_error) = map.get("is_error").and_then(|value| value.as_bool()) {
+                return is_error;
+            }
+
+            map.values().any(value_has_error_signal)
         }
         _ => false,
     }
@@ -272,6 +275,19 @@ mod tests {
         );
 
         assert!(looks_like_tool_failure(&event));
+    }
+
+    #[test]
+    fn ignores_structured_tool_result_with_explicit_non_error_flag() {
+        let event = event(
+            Some(
+                r#"[{"role":"user","parts":[{"type":"tool_call_response","id":"toolu_1","response":{"content":"5 passed, 2 failed","is_error":false}}]}]"#,
+            ),
+            Some(r#"[{"role":"assistant","parts":[{"type":"text","content":"tests completed"}]}]"#),
+            None,
+        );
+
+        assert!(!looks_like_tool_failure(&event));
     }
 
     #[test]

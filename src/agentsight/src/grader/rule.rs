@@ -38,7 +38,7 @@ impl RuleGrader {
         );
         let findings = build_findings(input, &dimensions);
         let root_cause = select_root_cause(input, &dimensions, &findings);
-        let verdict = select_verdict(input, weighted_score, root_cause, &findings);
+        let verdict = select_verdict(input, weighted_score, root_cause, &dimensions, &findings);
 
         EvaluationResult {
             target_type: input.target_type,
@@ -381,6 +381,7 @@ fn select_verdict(
     input: &EvaluationInput,
     score: f64,
     root_cause: RootCause,
+    dimensions: &[EvaluationDimension],
     findings: &[EvaluationFinding],
 ) -> Verdict {
     if matches!(
@@ -392,8 +393,13 @@ fn select_verdict(
     if score < 0.5 {
         return Verdict::Fail;
     }
+    let has_failed_dimension = dimensions
+        .iter()
+        .any(|dimension| dimension.verdict == Verdict::Fail);
     if input.evaluated_with_pending
         || score < 0.8
+        || root_cause != RootCause::None
+        || has_failed_dimension
         || findings.iter().any(|finding| finding.severity != "low")
     {
         return Verdict::Warn;
@@ -590,6 +596,26 @@ mod tests {
         assert_eq!(verdict_for_score(0.79), Verdict::Warn);
         assert_eq!(verdict_for_score(0.50), Verdict::Warn);
         assert_eq!(verdict_for_score(0.49), Verdict::Fail);
+    }
+
+    #[test]
+    fn warns_when_dimension_fails_despite_high_weighted_score() {
+        let result = RuleGrader::evaluate(&input(vec![event(1, "complete", 250_000)]));
+        let efficiency = result
+            .dimensions
+            .iter()
+            .find(|dimension| dimension.name == "efficiency")
+            .expect("efficiency dimension should exist");
+
+        assert_eq!(result.score, 0.94);
+        assert_eq!(result.root_cause, RootCause::ExcessiveCost);
+        assert_eq!(efficiency.verdict, Verdict::Fail);
+        assert_eq!(result.verdict, Verdict::Warn);
+        assert_ne!(
+            result.summary,
+            "Conversation completed successfully with no deterministic quality issue."
+        );
+        assert_ne!(result.recommended_action, "No immediate action required.");
     }
 
     #[test]
