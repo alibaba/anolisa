@@ -20,8 +20,9 @@ use serde::Serialize;
 
 use crate::color::Palette;
 use crate::commands::common;
+use crate::commands::state_view::{ScopedStateRoot, StateScope, StateView, StateVisibility};
 use crate::commands::tier1::status::{self, ComponentRecord, RpmDrift};
-use crate::context::CliContext;
+use crate::context::{CliContext, InstallMode};
 use crate::response::{CliError, render_json_with_status};
 
 const COMMAND: &str = "doctor";
@@ -62,6 +63,13 @@ struct DoctorSummary {
 struct DoctorComponent {
     name: String,
     status: String,
+    scope: String,
+    active: bool,
+    mutable_by_current_invocation: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shadowed_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     state_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -142,6 +150,24 @@ struct DoctorProbeContext<'a> {
     dry_run: bool,
 }
 
+struct DoctorViewContext<'a> {
+    resolver_env: &'a ResolverEnv,
+    rpm_query: &'a RpmPackageQuery,
+    current_system_service: &'a dyn ServiceManager,
+    system_scope_service: &'a dyn ServiceManager,
+    user_service: &'a dyn ServiceManager,
+    dry_run: bool,
+}
+
+impl<'a> DoctorViewContext<'a> {
+    fn system_service_for_root(&self, root: Option<&ScopedStateRoot>) -> &'a dyn ServiceManager {
+        match root.map(|root| root.scope) {
+            Some(StateScope::System) => self.system_scope_service,
+            Some(StateScope::User) | None => self.current_system_service,
+        }
+    }
+}
+
 pub fn handle(args: DoctorArgs, ctx: &CliContext) -> Result<(), CliError> {
     let command = match &args.component {
         Some(comp) => format!("doctor {comp}"),
@@ -174,50 +200,66 @@ pub fn handle(args: DoctorArgs, ctx: &CliContext) -> Result<(), CliError> {
 }
 
 fn diagnose(component: Option<&str>, ctx: &CliContext) -> Result<DoctorPayload, CliError> {
-    let state = common::load_installed_state(ctx, COMMAND)?;
-    let layout = common::resolve_layout(ctx);
-    let mut warnings = Vec::new();
-    let catalog = match common::load_bundled_catalog(ctx, COMMAND) {
-        Ok(catalog) => Some(catalog),
-        Err(err) => {
-            warnings.push(format!("catalog unavailable: {}", err.reason()));
-            None
-        }
-    };
-
+    let mut view = StateView::load(ctx, COMMAND, StateVisibility::UserPlusSystem)?;
+    status::migrate_view_states(&mut view);
+    let catalogs = status::ScopedCatalogs::load(&view, COMMAND);
     let rpm_query = RpmPackageQuery::system();
-    let component = component.map(|name| common::lookup_component_name(name, &state, ctx, COMMAND));
-
-    let status_catalog = if ctx.dry_run { None } else { catalog.as_ref() };
-    let records = status::select_components(
-        &state,
-        &layout,
-        status_catalog,
-        ctx.install_mode.as_str(),
-        component.as_deref(),
-        None,
-    );
+    let component = component.map(|name| lookup_component_name_from_view(name, &view, ctx));
     let env = anolisa_env::EnvService::detect();
     let resolver_env = resolver_env_from_facts(&env);
-    let system_service = service_for_install_mode(ctx.install_mode.as_str(), &env);
+    let current_system_service = service_for_install_mode(ctx.install_mode.as_str(), &env);
+    let system_scope_service = service_for_install_mode(InstallMode::System.as_str(), &env);
     let user_service = user_service_for_install_mode(ctx.install_mode.as_str(), &env);
-    let probe_ctx = DoctorProbeContext {
-        layout: &layout,
+    let view_ctx = DoctorViewContext {
         resolver_env: &resolver_env,
         rpm_query: &rpm_query,
-        system_service: system_service.as_ref(),
+        current_system_service: current_system_service.as_ref(),
+        system_scope_service: system_scope_service.as_ref(),
         user_service: user_service.as_ref(),
         dry_run: ctx.dry_run,
     };
 
+    Ok(diagnose_from_view(
+        &view,
+        &catalogs,
+        component.as_deref(),
+        &view_ctx,
+    ))
+}
+
+fn diagnose_from_view(
+    view: &StateView,
+    catalogs: &status::ScopedCatalogs,
+    component: Option<&str>,
+    view_ctx: &DoctorViewContext<'_>,
+) -> DoctorPayload {
+    let records = status::select_components_from_view(view, catalogs, component, None, None);
+    let warnings = view.warnings.clone();
     let mut components = Vec::new();
+
     for mut record in records {
-        let object = state.find_object(ObjectKind::Component, &record.name);
+        let root = root_for_record(view, &record);
+        let object = root.and_then(|root| {
+            root.state
+                .find_object(ObjectKind::Component, record.name.as_str())
+        });
         normalize_rpm_record(&mut record, object);
+        let catalog = root.and_then(|root| catalogs.catalog_for(root));
+        let layout = root
+            .map(|root| &root.layout)
+            .unwrap_or(&view.writable.layout);
         let (manifest, manifest_warning) = if object.is_some() {
-            resolve_component_manifest(&layout, catalog.as_ref(), &record.name)
+            resolve_component_manifest(layout, catalog, &record.name)
         } else {
             (None, None)
+        };
+        let probe_ctx = DoctorProbeContext {
+            layout,
+            resolver_env: view_ctx.resolver_env,
+            rpm_query: view_ctx.rpm_query,
+            system_service: view_ctx.system_service_for_root(root),
+            user_service: view_ctx.user_service,
+            dry_run: view_ctx.dry_run,
         };
         let component = diagnose_component(
             record,
@@ -230,12 +272,33 @@ fn diagnose(component: Option<&str>, ctx: &CliContext) -> Result<DoctorPayload, 
     }
 
     let summary = summarize(&components);
-    Ok(DoctorPayload {
+    DoctorPayload {
         summary,
         components,
         warnings,
-        dry_run: ctx.dry_run,
-    })
+        dry_run: view_ctx.dry_run,
+    }
+}
+
+fn lookup_component_name_from_view(input: &str, view: &StateView, ctx: &CliContext) -> String {
+    if view
+        .visible_components()
+        .iter()
+        .any(|record| record.object.name == input)
+    {
+        return input.to_string();
+    }
+    common::lookup_component_name(input, &view.writable.state, ctx, COMMAND)
+}
+
+fn root_for_record<'a>(
+    view: &'a StateView,
+    record: &ComponentRecord,
+) -> Option<&'a ScopedStateRoot> {
+    let state_path = record.state_path.as_deref()?;
+    view.visible_roots
+        .iter()
+        .find(|root| root.state_path.display().to_string() == state_path)
 }
 
 fn diagnose_component(
@@ -248,6 +311,11 @@ fn diagnose_component(
     let mut out = DoctorComponent {
         name: record.name.clone(),
         status: "ok".to_string(),
+        scope: record.scope.clone(),
+        active: record.active,
+        mutable_by_current_invocation: record.mutable_by_current_invocation,
+        shadowed_by: record.shadowed_by.clone(),
+        state_path: record.state_path.clone(),
         state_status: Some(
             object
                 .map(|object| common::object_status_str(object.status).to_string())
@@ -274,9 +342,24 @@ fn diagnose_component(
     );
     add_rpm_drift(object, probe_ctx.rpm_query, &mut out);
 
+    qualify_fix_plan_for_record(&record, &mut out.fix_plan);
     dedupe_fix_plan(&mut out.fix_plan);
     out.status = component_status(&out);
     out
+}
+
+fn qualify_fix_plan_for_record(record: &ComponentRecord, fix_plan: &mut [FixSuggestion]) {
+    if record.mutable_by_current_invocation || record.scope != "system" {
+        return;
+    }
+    for fix in fix_plan {
+        let Some(command) = fix.command.as_mut() else {
+            continue;
+        };
+        if let Some(rest) = command.strip_prefix("anolisa ") {
+            *command = format!("sudo anolisa --install-mode system {rest}");
+        }
+    }
 }
 
 fn normalize_rpm_record(record: &mut ComponentRecord, object: Option<&InstalledObject>) {
@@ -1291,11 +1374,21 @@ fn render_human(payload: &DoctorPayload, no_color: bool) {
         println!("{} {warning}", color.warn("warning:"));
     }
     for component in &payload.components {
+        let mut scope_meta = format!("scope={}", component.scope);
+        if !component.active
+            && let Some(scope) = component.shadowed_by.as_deref()
+        {
+            scope_meta.push_str(&format!(", shadowed_by={scope}"));
+        }
+        if !component.mutable_by_current_invocation {
+            scope_meta.push_str(", read-only");
+        }
         println!(
-            "\n{} {} ({})",
+            "\n{} {} ({}) {}",
             color.label(&component.name),
             color.status(&component.status),
             component.version.as_deref().unwrap_or("-"),
+            color.muted(scope_meta),
         );
         if component.findings.is_empty() {
             println!("  {}", color.ok("no issues found"));
@@ -1461,9 +1554,12 @@ fn dedupe_fix_plan(fix_plan: &mut Vec<FixSuggestion>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::state_view::StateScope;
     use anolisa_core::{
-        DependencyStatus, FakeServiceManager, HealthEntry, ObjectStatus, Ownership, ServiceOp,
+        DependencyStatus, FakeServiceManager, HealthEntry, InstalledState,
+        NotSupportedServiceManager, ObjectStatus, Ownership, ServiceOp,
     };
+    use std::path::PathBuf;
 
     fn record(name: &str, status: &str) -> ComponentRecord {
         ComponentRecord {
@@ -1528,6 +1624,11 @@ mod tests {
         DoctorComponent {
             name: name.to_string(),
             status: "ok".to_string(),
+            scope: "system".to_string(),
+            active: true,
+            mutable_by_current_invocation: true,
+            shadowed_by: None,
+            state_path: Some("/tmp/anolisa-system-state/installed.toml".to_string()),
             state_status: None,
             version: None,
             findings: Vec::new(),
@@ -1555,18 +1656,256 @@ mod tests {
         }
     }
 
+    fn state_with_component(object: InstalledObject) -> InstalledState {
+        let mut state = InstalledState::default();
+        state.upsert_object(object);
+        state
+    }
+
+    fn scoped_doctor_view(user_state: InstalledState, system_state: InstalledState) -> StateView {
+        let user_root = ScopedStateRoot {
+            scope: StateScope::User,
+            layout: FsLayout::user_with_overrides(
+                PathBuf::from("/tmp/anolisa-home"),
+                None,
+                None,
+                Some(PathBuf::from("/tmp/anolisa-user-state")),
+                None,
+                None,
+            ),
+            state_path: PathBuf::from("/tmp/anolisa-user-state/installed.toml"),
+            writable: true,
+            state: user_state,
+        };
+        let system_root = ScopedStateRoot {
+            scope: StateScope::System,
+            layout: FsLayout::system(Some(PathBuf::from("/tmp/anolisa-system"))),
+            state_path: PathBuf::from("/tmp/anolisa-system-state/installed.toml"),
+            writable: false,
+            state: system_state,
+        };
+        StateView {
+            writable: user_root.clone(),
+            visible_roots: vec![user_root, system_root],
+            warnings: Vec::new(),
+        }
+    }
+
+    fn system_only_doctor_view(system_state: InstalledState) -> StateView {
+        let system_root = ScopedStateRoot {
+            scope: StateScope::System,
+            layout: FsLayout::system(Some(PathBuf::from("/tmp/anolisa-system"))),
+            state_path: PathBuf::from("/tmp/anolisa-system-state/installed.toml"),
+            writable: true,
+            state: system_state,
+        };
+        StateView {
+            writable: system_root.clone(),
+            visible_roots: vec![system_root],
+            warnings: Vec::new(),
+        }
+    }
+
+    fn diagnose_test_view(view: &StateView, component: Option<&str>) -> DoctorPayload {
+        let resolver_env = ResolverEnv::default();
+        let rpm_query = RpmPackageQuery::system();
+        let system_service = FakeServiceManager::new();
+        let user_service = FakeServiceManager::with_scope(ServiceScope::User);
+        let view_ctx = DoctorViewContext {
+            resolver_env: &resolver_env,
+            rpm_query: &rpm_query,
+            current_system_service: &system_service,
+            system_scope_service: &system_service,
+            user_service: &user_service,
+            dry_run: true,
+        };
+        diagnose_from_view(
+            view,
+            &status::ScopedCatalogs::default(),
+            component,
+            &view_ctx,
+        )
+    }
+
+    #[test]
+    fn user_doctor_view_includes_system_component_as_read_only() {
+        let view = scoped_doctor_view(
+            InstalledState::default(),
+            state_with_component(object(
+                "agentsight",
+                ObjectStatus::Installed,
+                Ownership::RpmManaged,
+            )),
+        );
+
+        let payload = diagnose_test_view(&view, Some("agentsight"));
+
+        assert_eq!(payload.components.len(), 1);
+        let component = &payload.components[0];
+        assert_eq!(component.name, "agentsight");
+        assert_eq!(component.scope, "system");
+        assert!(component.active);
+        assert!(!component.mutable_by_current_invocation);
+        assert_eq!(
+            component.state_path.as_deref(),
+            Some("/tmp/anolisa-system-state/installed.toml")
+        );
+    }
+
+    #[test]
+    fn named_doctor_view_reports_shadowed_system_record() {
+        let view = scoped_doctor_view(
+            state_with_component(object(
+                "agentsight",
+                ObjectStatus::Installed,
+                Ownership::RpmManaged,
+            )),
+            state_with_component(object(
+                "agentsight",
+                ObjectStatus::Installed,
+                Ownership::RpmManaged,
+            )),
+        );
+
+        let payload = diagnose_test_view(&view, Some("agentsight"));
+
+        assert_eq!(payload.components.len(), 2);
+        assert_eq!(payload.components[0].scope, "user");
+        assert!(payload.components[0].active);
+        assert!(payload.components[0].mutable_by_current_invocation);
+        assert_eq!(payload.components[1].scope, "system");
+        assert!(!payload.components[1].active);
+        assert_eq!(payload.components[1].shadowed_by.as_deref(), Some("user"));
+        assert!(!payload.components[1].mutable_by_current_invocation);
+    }
+
+    #[test]
+    fn system_doctor_view_uses_only_visible_system_root() {
+        let view = system_only_doctor_view(state_with_component(object(
+            "system-tool",
+            ObjectStatus::Installed,
+            Ownership::RpmManaged,
+        )));
+
+        let payload = diagnose_test_view(&view, None);
+
+        assert_eq!(payload.components.len(), 1);
+        assert_eq!(payload.components[0].name, "system-tool");
+        assert_eq!(payload.components[0].scope, "system");
+        assert!(payload.components[0].mutable_by_current_invocation);
+    }
+
+    #[test]
+    fn system_record_service_ref_uses_system_scope_manager_in_user_view() {
+        let mut object = object("agentsight", ObjectStatus::Installed, Ownership::RawManaged);
+        object
+            .services
+            .push(service_ref("agentsight.service", ServiceScope::System));
+        let view = scoped_doctor_view(InstalledState::default(), state_with_component(object));
+        let resolver_env = ResolverEnv::default();
+        let rpm_query = RpmPackageQuery::system();
+        let invocation_system_service =
+            NotSupportedServiceManager::new("user-mode system manager".to_string());
+        let system_scope_service = FakeServiceManager::new();
+        system_scope_service.set_state(ServiceState::Active);
+        let user_service = FakeServiceManager::with_scope(ServiceScope::User);
+        let view_ctx = DoctorViewContext {
+            resolver_env: &resolver_env,
+            rpm_query: &rpm_query,
+            current_system_service: &invocation_system_service,
+            system_scope_service: &system_scope_service,
+            user_service: &user_service,
+            dry_run: false,
+        };
+
+        let payload = diagnose_from_view(
+            &view,
+            &status::ScopedCatalogs::default(),
+            Some("agentsight"),
+            &view_ctx,
+        );
+
+        let service_ref = payload.components[0]
+            .health_checks
+            .iter()
+            .find(|check| check.name == "service_ref:agentsight.service")
+            .expect("service ref health check");
+        assert_eq!(service_ref.status, "active");
+        assert_eq!(
+            system_scope_service.calls(),
+            vec![(ServiceOp::Probe, "agentsight.service".to_string())]
+        );
+    }
+
+    #[test]
+    fn system_record_user_service_ref_uses_invocation_user_manager() {
+        let mut object = object(
+            "agent-memory",
+            ObjectStatus::Installed,
+            Ownership::RawManaged,
+        );
+        object.services.push(service_ref(
+            "anolisa-memory@user.service",
+            ServiceScope::User,
+        ));
+        let view = scoped_doctor_view(InstalledState::default(), state_with_component(object));
+        let resolver_env = ResolverEnv::default();
+        let rpm_query = RpmPackageQuery::system();
+        let invocation_system_service =
+            NotSupportedServiceManager::new("user-mode system manager".to_string());
+        let system_scope_service = FakeServiceManager::new();
+        let user_service = FakeServiceManager::with_scope(ServiceScope::User);
+        user_service.set_state(ServiceState::Active);
+        let view_ctx = DoctorViewContext {
+            resolver_env: &resolver_env,
+            rpm_query: &rpm_query,
+            current_system_service: &invocation_system_service,
+            system_scope_service: &system_scope_service,
+            user_service: &user_service,
+            dry_run: false,
+        };
+
+        let payload = diagnose_from_view(
+            &view,
+            &status::ScopedCatalogs::default(),
+            Some("agent-memory"),
+            &view_ctx,
+        );
+
+        let service_ref = payload.components[0]
+            .health_checks
+            .iter()
+            .find(|check| check.name == "service_ref:anolisa-memory@user.service")
+            .expect("service ref health check");
+        assert_eq!(service_ref.status, "active");
+        assert!(system_scope_service.calls().is_empty());
+        assert_eq!(
+            user_service.calls(),
+            vec![(ServiceOp::Probe, "anolisa-memory@user.service".to_string())]
+        );
+    }
+
+    #[test]
+    fn read_only_system_fix_plan_uses_system_mode_command() {
+        let mut rec = record("agentsight", "failed");
+        rec.mutable_by_current_invocation = false;
+        let mut fix_plan = vec![suggestion(
+            "repair_state",
+            Some("anolisa repair agentsight".to_string()),
+            "refresh ANOLISA state",
+        )];
+
+        qualify_fix_plan_for_record(&rec, &mut fix_plan);
+
+        assert_eq!(
+            fix_plan[0].command.as_deref(),
+            Some("sudo anolisa --install-mode system repair agentsight")
+        );
+    }
+
     #[test]
     fn missing_component_recommends_install() {
-        let mut component = DoctorComponent {
-            name: "ghost".to_string(),
-            status: "ok".to_string(),
-            state_status: None,
-            version: None,
-            findings: Vec::new(),
-            health_checks: Vec::new(),
-            dependencies: Vec::new(),
-            fix_plan: Vec::new(),
-        };
+        let mut component = empty_component("ghost");
         add_state_finding(&record("ghost", "not_installed"), None, &mut component);
 
         assert_eq!(component.findings[0].code, "component_not_installed");
@@ -1585,16 +1924,7 @@ mod tests {
             checked_at: "2026-06-01T00:00:00Z".to_string(),
             reason: Some("missing file".to_string()),
         });
-        let mut component = DoctorComponent {
-            name: rec.name.clone(),
-            status: "ok".to_string(),
-            state_status: None,
-            version: None,
-            findings: Vec::new(),
-            health_checks: Vec::new(),
-            dependencies: Vec::new(),
-            fix_plan: Vec::new(),
-        };
+        let mut component = empty_component(&rec.name);
         add_health_entries(&rec, &mut component);
 
         assert_eq!(component.findings[0].severity, FindingSeverity::Error);
@@ -1614,16 +1944,7 @@ mod tests {
             },
             detail: None,
         };
-        let mut component = DoctorComponent {
-            name: "ws-ckpt".to_string(),
-            status: "ok".to_string(),
-            state_status: None,
-            version: None,
-            findings: Vec::new(),
-            health_checks: Vec::new(),
-            dependencies: Vec::new(),
-            fix_plan: Vec::new(),
-        };
+        let mut component = empty_component("ws-ckpt");
         add_dependency_resolution(&resolution, &mut component);
 
         assert_eq!(
@@ -1664,16 +1985,7 @@ mod tests {
     #[test]
     fn rpm_missing_contract_does_not_degrade_component() {
         let obj = object("tokenless", ObjectStatus::Installed, Ownership::RpmManaged);
-        let mut component = DoctorComponent {
-            name: "tokenless".to_string(),
-            status: "ok".to_string(),
-            state_status: None,
-            version: None,
-            findings: Vec::new(),
-            health_checks: Vec::new(),
-            dependencies: Vec::new(),
-            fix_plan: Vec::new(),
-        };
+        let mut component = empty_component("tokenless");
 
         add_manifest_warning(
             Some(
@@ -1703,16 +2015,7 @@ mod tests {
             ObjectStatus::Installed,
             Ownership::RawManaged,
         );
-        let mut component = DoctorComponent {
-            name: rec.name.clone(),
-            status: "ok".to_string(),
-            state_status: None,
-            version: None,
-            findings: Vec::new(),
-            health_checks: Vec::new(),
-            dependencies: Vec::new(),
-            fix_plan: Vec::new(),
-        };
+        let mut component = empty_component(&rec.name);
 
         add_state_finding(&rec, Some(&obj), &mut component);
         add_health_entries(&rec, &mut component);
@@ -1995,22 +2298,14 @@ mod tests {
 
     #[test]
     fn component_status_escalates_findings() {
-        let mut component = DoctorComponent {
-            name: "tokenless".to_string(),
-            status: "ok".to_string(),
-            state_status: None,
-            version: None,
-            findings: vec![finding(
-                FindingSeverity::Warning,
-                "health_unverified",
-                "unverified",
-                "health",
-                None,
-            )],
-            health_checks: Vec::new(),
-            dependencies: Vec::new(),
-            fix_plan: Vec::new(),
-        };
+        let mut component = empty_component("tokenless");
+        component.findings = vec![finding(
+            FindingSeverity::Warning,
+            "health_unverified",
+            "unverified",
+            "health",
+            None,
+        )];
         assert_eq!(component_status(&component), "degraded");
         component.findings.push(finding(
             FindingSeverity::Error,

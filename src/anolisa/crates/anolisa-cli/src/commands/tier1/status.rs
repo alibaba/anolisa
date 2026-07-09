@@ -23,9 +23,11 @@ use anolisa_core::adapter::claim::ClaimStatus;
 use anolisa_core::adapter::manager::ScanEntry;
 use anolisa_core::path_safety::{PathBoundaryError, validate_owned_path};
 use anolisa_core::{
-    Catalog, HealthEntry, HealthSpec, InstalledObject, InstalledState, IntegrityStatus, ObjectKind,
-    RpmMetadata, ServiceState, check_owned_file, service_for_install_mode as service_factory,
+    Catalog, HealthEntry, HealthSpec, InstalledObject, IntegrityStatus, RpmMetadata, ServiceState,
+    check_owned_file, service_for_install_mode as service_factory,
 };
+#[cfg(test)]
+use anolisa_core::{InstalledState, ObjectKind};
 
 /// Wall-clock ceiling for a single manifest command-kind probe. `status`
 /// is read-only; a hostile or buggy probe must not be able to hang the
@@ -155,7 +157,7 @@ struct ScopedCatalog {
 }
 
 impl ScopedCatalogs {
-    fn load(view: &StateView, command: &str) -> Self {
+    pub(crate) fn load(view: &StateView, command: &str) -> Self {
         let entries = view
             .visible_roots
             .iter()
@@ -188,7 +190,7 @@ impl ScopedCatalogs {
         }
     }
 
-    fn catalog_for(&self, root: &ScopedStateRoot) -> Option<&Catalog> {
+    pub(crate) fn catalog_for(&self, root: &ScopedStateRoot) -> Option<&Catalog> {
         self.entries
             .iter()
             .find(|entry| entry.state_path == root.state_path)
@@ -267,7 +269,7 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
     Ok(())
 }
 
-fn migrate_view_states(view: &mut StateView) {
+pub(crate) fn migrate_view_states(view: &mut StateView) {
     for root in &mut view.visible_roots {
         common::migrate_v3_symlinks(&mut root.state, &root.layout);
     }
@@ -298,6 +300,7 @@ const fn install_mode_for_scope(scope: StateScope) -> InstallMode {
 /// optionally filtered to a single name. Extracted so tests can exercise
 /// the filtering/synthetic-not-installed logic without mocking
 /// `CliContext` or touching the filesystem.
+#[cfg(test)]
 pub(crate) fn select_components(
     state: &InstalledState,
     layout: &FsLayout,
@@ -401,6 +404,7 @@ fn apply_record_scope(
     component.state_path = Some(record.root.state_path.display().to_string());
 }
 
+#[cfg(test)]
 fn apply_current_scope(component: &mut ComponentRecord, layout: &FsLayout, install_mode: &str) {
     component.scope = install_mode.to_string();
     component.active = true;
