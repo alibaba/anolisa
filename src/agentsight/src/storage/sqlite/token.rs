@@ -208,7 +208,7 @@ pub fn format_tokens_with_commas(count: u64) -> String {
     let s = count.to_string();
     let mut result = String::new();
     for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
             result.push(',');
         }
         result.push(c);

@@ -272,7 +272,7 @@ impl Storage {
         // Auto-purge check: trigger every `purge_interval` inserts
         if self.purge_interval > 0 && self.retention_days > 0 {
             let count = self.insert_count.fetch_add(1, Ordering::Relaxed) + 1;
-            if count % self.purge_interval == 0 {
+            if count.is_multiple_of(self.purge_interval) {
                 if let Err(e) = self.purge_expired() {
                     log::warn!("Auto-purge failed: {e}");
                 }
