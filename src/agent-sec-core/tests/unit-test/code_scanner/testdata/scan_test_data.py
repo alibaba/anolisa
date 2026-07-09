@@ -87,12 +87,63 @@ SHELL_READ_SENSITIVE_FILE_CASES = [
     ("cat /etc/crontab", "bash", "shell-read-sensitive-file", 1),
     ("cat /var/spool/cron/root", "bash", "shell-read-sensitive-file", 1),
     ("cat /etc/hostname", "bash", "shell-read-sensitive-file", 1),
+    # --- TP: Agent runtime credentials and auth state ---
+    ("cat ~/.codex/auth.json", "bash", "shell-read-sensitive-file", 1),
+    ("cat ~/.hermes/auth.json", "bash", "shell-read-sensitive-file", 1),
+    ("cat ~/.hermes/.env", "bash", "shell-read-sensitive-file", 1),
+    ("cat ~/.hermes/config.yaml", "bash", "shell-read-sensitive-file", 1),
+    ("cat ~/.hermes/profiles/coder/auth.json", "bash", "shell-read-sensitive-file", 1),
+    ("cat ~/.hermes/profiles/coder/.env", "bash", "shell-read-sensitive-file", 1),
+    (
+        "cat ~/.hermes/profiles/coder/config.yaml",
+        "bash",
+        "shell-read-sensitive-file",
+        1,
+    ),
+    ("cat ~/.openclaw/openclaw.json", "bash", "shell-read-sensitive-file", 1),
+    (
+        "cat ~/.openclaw/agents/main/agent/models.json",
+        "bash",
+        "shell-read-sensitive-file",
+        1,
+    ),
+    ("cat ~/.copilot-shell/settings.json", "bash", "shell-read-sensitive-file", 1),
+    ("cat ~/.copilot-shell/aliyun_creds.json", "bash", "shell-read-sensitive-file", 1),
+    (
+        "cat ~/.copilot-shell/mcp-oauth-tokens.json",
+        "bash",
+        "shell-read-sensitive-file",
+        1,
+    ),
+    (
+        "cat ~/.copilot-shell/mcp-oauth-tokens-v2.json",
+        "bash",
+        "shell-read-sensitive-file",
+        1,
+    ),
     # === True Negatives ===
     ("cat /var/log/syslog", "bash", "shell-read-sensitive-file", 0),
     ("less /tmp/output.txt", "bash", "shell-read-sensitive-file", 0),
     ("head -n 5 README.md", "bash", "shell-read-sensitive-file", 0),
     ("echo /etc/shadow", "bash", "shell-read-sensitive-file", 0),
     ("ls -la /etc/shadow", "bash", "shell-read-sensitive-file", 0),
+    # --- TN: Agent diagnostics and non-credential files ---
+    ("hermes doctor", "bash", "shell-read-sensitive-file", 0),
+    ("openclaw doctor --fix", "bash", "shell-read-sensitive-file", 0),
+    ("cat ~/.codex/skills/example/SKILL.md", "bash", "shell-read-sensitive-file", 0),
+    ("cat ~/.codex/tmp/session-note.txt", "bash", "shell-read-sensitive-file", 0),
+    ("cat ~/.hermes/logs/agent.log", "bash", "shell-read-sensitive-file", 0),
+    ("cat ~/.hermes/skills/demo/SKILL.md", "bash", "shell-read-sensitive-file", 0),
+    ("cat ~/.openclaw/skills/demo/SKILL.md", "bash", "shell-read-sensitive-file", 0),
+    ("cat ~/.openclaw/workspace/SOUL.md", "bash", "shell-read-sensitive-file", 0),
+    ("cat ~/.copilot-shell/commands/demo.md", "bash", "shell-read-sensitive-file", 0),
+    (
+        "cat ~/.copilot-shell/history/session.jsonl",
+        "bash",
+        "shell-read-sensitive-file",
+        0,
+    ),
+    ("cat ~/.copilot-shell/memory.md", "bash", "shell-read-sensitive-file", 0),
     # --- cross-command isolation ---
     ("cat file.txt; echo /etc/shadow", "bash", "shell-read-sensitive-file", 0),
     ("cat file.txt | grep /etc/shadow", "bash", "shell-read-sensitive-file", 0),
@@ -791,6 +842,45 @@ PY_SENSITIVE_FILE_ACCESS_CASES = [
     ("f = open('~/.ssh/id_rsa', 'r')", "python", "py-sensitive-file-access", 1),
     ("open('/etc/sudoers', 'w')", "python", "py-sensitive-file-access", 1),
     ("open('.env', 'r')", "python", "py-sensitive-file-access", 1),
+    # === TP: Agent runtime credentials and auth state ===
+    ("open('~/.codex/auth.json').read()", "python", "py-sensitive-file-access", 1),
+    ("Path('~/.hermes/.env').read_text()", "python", "py-sensitive-file-access", 1),
+    (
+        "Path('~/.hermes/config.yaml').read_text()",
+        "python",
+        "py-sensitive-file-access",
+        1,
+    ),
+    (
+        "open('~/.hermes/profiles/coder/auth.json')",
+        "python",
+        "py-sensitive-file-access",
+        1,
+    ),
+    (
+        "Path('~/.hermes/profiles/coder/config.yaml').read_text()",
+        "python",
+        "py-sensitive-file-access",
+        1,
+    ),
+    (
+        "Path('~/.openclaw/openclaw.json').read_text()",
+        "python",
+        "py-sensitive-file-access",
+        1,
+    ),
+    (
+        "Path('~/.openclaw/agents/main/agent/models.json').read_text()",
+        "python",
+        "py-sensitive-file-access",
+        1,
+    ),
+    (
+        "open('~/.copilot-shell/mcp-oauth-tokens-v2.json').read()",
+        "python",
+        "py-sensitive-file-access",
+        1,
+    ),
     # === TP: pathlib + sensitive path ===
     ("Path('/etc/shadow').read_text()", "python", "py-sensitive-file-access", 1),
     (
@@ -850,6 +940,20 @@ PY_SENSITIVE_FILE_ACCESS_CASES = [
         0,
     ),
     ("Path('output.txt').read_text()", "python", "py-sensitive-file-access", 0),
+    # === TN: Agent runtime non-credential files ===
+    ("open('~/.codex/tmp/session-note.txt')", "python", "py-sensitive-file-access", 0),
+    (
+        "Path('~/.hermes/logs/agent.log').read_text()",
+        "python",
+        "py-sensitive-file-access",
+        0,
+    ),
+    (
+        "Path('~/.copilot-shell/history/session.jsonl').read_text()",
+        "python",
+        "py-sensitive-file-access",
+        0,
+    ),
     # --- cross-line isolation ---
     (
         "open('regular.txt')\nprint('/etc/shadow')",
