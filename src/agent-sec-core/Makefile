@@ -410,6 +410,9 @@ uninstall-cli-venv: ## Remove venv and agent-sec-cli symlink
 	rm -f $(DESTDIR)$(BINDIR)/agent-sec-cli
 	rm -f $(DESTDIR)$(BINDIR)/agent-sec-daemon
 	rm -rf $(DESTDIR)$(VENV_DIR)
+ifeq ($(INSTALL_PROFILE),system)
+	rm -rf $(DESTDIR)$(SYSTEM_SEC_CORE_UV_PYTHON_INSTALL_DIR)
+endif
 
 .PHONY: uninstall-cli-site
 uninstall-cli-site: ## Remove RPM-style private site-packages and wrappers
