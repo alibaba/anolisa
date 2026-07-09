@@ -28,6 +28,8 @@ struct FakeHost {
     available_errors: HashSet<String>,
     /// packages whose `query_installed` reports a multi-version drift.
     installed_multi: HashSet<String>,
+    /// capabilities whose `what_provides_installed` returns a query error.
+    provides_errors: HashSet<String>,
     txn_calls: Cell<usize>,
 }
 
@@ -69,6 +71,13 @@ impl PackageQuery for FakeHost {
     }
 
     fn what_provides_installed(&self, capability: &str) -> Result<Vec<String>, PackageQueryError> {
+        if self.provides_errors.contains(capability) {
+            return Err(PackageQueryError::QueryFailed {
+                command: "rpm".to_string(),
+                code: Some(1),
+                stderr: "rpmdb query failed".to_string(),
+            });
+        }
         Ok(self.provides.get(capability).cloned().unwrap_or_default())
     }
 }
@@ -179,6 +188,16 @@ fn run(
     target: Option<TargetProfile>,
     target_name: Option<String>,
 ) -> UpdateCheckReport {
+    run_with_index(host, installed, target, target_name, None)
+}
+
+fn run_with_index(
+    host: &FakeHost,
+    installed: &InstalledState,
+    target: Option<TargetProfile>,
+    target_name: Option<String>,
+    component_index: Option<&crate::resolution::ComponentIndex>,
+) -> UpdateCheckReport {
     run_update_check(CheckInputs {
         installed,
         query: host,
@@ -186,6 +205,7 @@ fn run(
         arch: "x86_64",
         target_name,
         target,
+        component_index,
     })
 }
 
@@ -421,6 +441,239 @@ fn update_check_present_default_is_not_reported() {
     assert_eq!(report.summary.missing_defaults, 0);
 }
 
+/// A default absent from ANOLISA state but installed on the host (declaring the
+/// `anolisa-component(...)` provide) must not be reported as a missing install;
+/// it is evaluated for upgrades instead.
+#[test]
+fn update_check_default_present_via_provide_is_not_missing() {
+    let mut host = FakeHost::with_cli_noop();
+    host.provides.insert(
+        "anolisa-component(cosh)".to_string(),
+        vec!["copilot-shell".to_string()],
+    );
+    host.installed.insert(
+        "copilot-shell".to_string(),
+        info("copilot-shell", "2.6.1", Some("1")),
+    );
+    let state = state_with(vec![]);
+    let profile = TargetProfile {
+        default_components: vec!["cosh".to_string()],
+    };
+
+    let report = run(
+        &host,
+        &state,
+        Some(profile),
+        Some(DEFAULT_TARGET_PROFILE_NAME.to_string()),
+    );
+    let item = report
+        .components
+        .iter()
+        .find(|c| c.component == "cosh")
+        .expect("cosh reported");
+    assert_eq!(item.action, ACTION_NOOP);
+    assert_eq!(item.ownership.as_deref(), Some("rpm-observed"));
+    assert_eq!(
+        report.summary.missing_defaults, 0,
+        "a present-but-unadopted default is not missing"
+    );
+}
+
+/// A present-but-unadopted default with a newer repo candidate is reported as an
+/// upgrade, not an install.
+#[test]
+fn update_check_default_present_via_provide_reports_upgrade() {
+    let mut host = FakeHost::with_cli_noop();
+    host.provides.insert(
+        "anolisa-component(cosh)".to_string(),
+        vec!["copilot-shell".to_string()],
+    );
+    host.installed.insert(
+        "copilot-shell".to_string(),
+        info("copilot-shell", "2.6.1", Some("1")),
+    );
+    host.available.insert(
+        "copilot-shell".to_string(),
+        vec![info("copilot-shell", "2.7.0", Some("1"))],
+    );
+    let state = state_with(vec![]);
+    let profile = TargetProfile {
+        default_components: vec!["cosh".to_string()],
+    };
+
+    let report = run(
+        &host,
+        &state,
+        Some(profile),
+        Some(DEFAULT_TARGET_PROFILE_NAME.to_string()),
+    );
+    let item = &report.components[0];
+    assert_eq!(item.action, ACTION_UPDATE);
+    assert_eq!(item.available.as_deref(), Some("2.7.0-1"));
+    assert_eq!(report.summary.missing_defaults, 0);
+    assert_eq!(report.summary.updates, 1);
+}
+
+/// A legacy default installed under its package name but lacking the
+/// `anolisa-component(...)` provide is still recognised via the component index
+/// mapping, so it is not falsely reported as missing.
+#[test]
+fn update_check_default_present_via_index_package_without_provide() {
+    let mut host = FakeHost::with_cli_noop();
+    host.installed.insert(
+        "copilot-shell".to_string(),
+        info("copilot-shell", "2.6.1", Some("1")),
+    );
+    let index = crate::resolution::ComponentIndex::from_toml_str(
+        "schema_version = 1\n\n[[components]]\nname = \"cosh\"\n\n[[components.backends]]\nkind = \"rpm\"\npackage = \"copilot-shell\"\n",
+        "test-components.toml",
+    )
+    .expect("index parses");
+    let state = state_with(vec![]);
+    let profile = TargetProfile {
+        default_components: vec!["cosh".to_string()],
+    };
+
+    let report = run_with_index(
+        &host,
+        &state,
+        Some(profile),
+        Some(DEFAULT_TARGET_PROFILE_NAME.to_string()),
+        Some(&index),
+    );
+    let item = &report.components[0];
+    assert_eq!(item.action, ACTION_NOOP);
+    assert_eq!(item.ownership.as_deref(), Some("rpm-observed"));
+    assert_eq!(report.summary.missing_defaults, 0);
+}
+
+/// A default absent from both ANOLISA state and rpmdb is still reported as an
+/// install (the pre-fix behaviour for genuinely missing defaults).
+#[test]
+fn update_check_default_absent_from_rpmdb_reports_install() {
+    let host = FakeHost::with_cli_noop();
+    let state = state_with(vec![]);
+    let profile = TargetProfile {
+        default_components: vec!["cosh".to_string()],
+    };
+
+    let report = run(
+        &host,
+        &state,
+        Some(profile),
+        Some(DEFAULT_TARGET_PROFILE_NAME.to_string()),
+    );
+    let item = &report.components[0];
+    assert_eq!(item.action, ACTION_INSTALL);
+    assert_eq!(report.summary.missing_defaults, 1);
+}
+
+/// A failed rpmdb provide query for a default must not be reported as an
+/// installable missing default — "cannot determine" is an item error.
+#[test]
+fn update_check_default_provide_query_error_is_item_error() {
+    let mut host = FakeHost::with_cli_noop();
+    host.provides_errors
+        .insert("anolisa-component(cosh)".to_string());
+    let state = state_with(vec![]);
+    let profile = TargetProfile {
+        default_components: vec!["cosh".to_string()],
+    };
+
+    let report = run(
+        &host,
+        &state,
+        Some(profile),
+        Some(DEFAULT_TARGET_PROFILE_NAME.to_string()),
+    );
+    let item = &report.components[0];
+    assert_eq!(item.action, ACTION_ERROR);
+    assert!(item.error.is_some());
+    assert_eq!(
+        report.summary.missing_defaults, 0,
+        "an indeterminate probe must not count as a missing default"
+    );
+    assert_eq!(report.summary.errors, 1);
+}
+
+/// Multiple installed providers for a default's component capability is
+/// ambiguous and must be an item error, not a silently-picked first package.
+#[test]
+fn update_check_default_multiple_providers_is_item_error() {
+    let mut host = FakeHost::with_cli_noop();
+    host.provides.insert(
+        "anolisa-component(cosh)".to_string(),
+        vec!["copilot-shell".to_string(), "copilot-shell-ng".to_string()],
+    );
+    let state = state_with(vec![]);
+    let profile = TargetProfile {
+        default_components: vec!["cosh".to_string()],
+    };
+
+    let report = run(
+        &host,
+        &state,
+        Some(profile),
+        Some(DEFAULT_TARGET_PROFILE_NAME.to_string()),
+    );
+    let item = &report.components[0];
+    assert_eq!(item.action, ACTION_ERROR);
+    assert!(
+        item.error.as_deref().unwrap().contains("multiple"),
+        "error should explain the ambiguity"
+    );
+    assert_eq!(report.summary.missing_defaults, 0);
+    assert_eq!(report.summary.errors, 1);
+    assert_eq!(
+        host.txn_calls.get(),
+        0,
+        "an ambiguous default must not run a transaction"
+    );
+}
+
+/// If the resolved provider package is absent from rpmdb (a mid-check race), the
+/// default is an item error, not a missing install.
+#[test]
+fn update_check_default_resolved_package_absent_is_item_error() {
+    let mut host = FakeHost::with_cli_noop();
+    // A provider is declared, but the package itself is not in the installed
+    // map, so `query_installed` returns `Ok(None)`.
+    host.provides.insert(
+        "anolisa-component(cosh)".to_string(),
+        vec!["copilot-shell".to_string()],
+    );
+    let state = state_with(vec![]);
+    let profile = TargetProfile {
+        default_components: vec!["cosh".to_string()],
+    };
+
+    let report = run(
+        &host,
+        &state,
+        Some(profile),
+        Some(DEFAULT_TARGET_PROFILE_NAME.to_string()),
+    );
+    let item = &report.components[0];
+    assert_eq!(item.action, ACTION_ERROR);
+    assert_eq!(report.summary.missing_defaults, 0);
+    assert_eq!(report.summary.errors, 1);
+}
+
+/// The index mapping is de-duplicated, so a backend and an alias sharing a name
+/// are queried only once.
+#[test]
+fn update_check_index_rpm_packages_are_deduplicated() {
+    let index = crate::resolution::ComponentIndex::from_toml_str(
+        "schema_version = 1\n\n[[components]]\nname = \"cosh\"\n\n[[components.backends]]\nkind = \"rpm\"\npackage = \"copilot-shell\"\n\n[[components.aliases]]\nkind = \"rpm-package\"\nname = \"copilot-shell\"\n",
+        "test-components.toml",
+    )
+    .expect("index parses");
+    assert_eq!(
+        index_rpm_packages(Some(&index), "cosh"),
+        vec!["copilot-shell".to_string()],
+    );
+}
+
 #[test]
 fn update_check_repo_query_failure_is_item_error() {
     let mut host = FakeHost::with_cli_noop();
@@ -518,7 +771,11 @@ fn update_check_motd_text_lists_upgrades_and_installs() {
     assert!(text.contains("ANOLISA toolchain update is available."));
     assert!(text.contains("1 component can be upgraded"));
     assert!(text.contains("1 new default component can be installed"));
-    assert!(text.contains("Run: sudo anolisa upgrade"));
+    assert!(text.contains("Run: anolisa update --check for details"));
+    assert!(
+        !text.contains("anolisa upgrade"),
+        "MOTD must not reference the not-yet-existing `anolisa upgrade`"
+    );
 }
 
 #[test]
@@ -634,7 +891,7 @@ fn update_check_target_profile_parses_default_components() {
     )
     .expect("write profile");
 
-    let profile = load_target_profile(&layout, "image-v1.0").expect("profile loads");
+    let profile = load_target_profile_by_name(&layout, "image-v1.0").expect("profile loads");
     assert_eq!(profile.default_components, vec!["cosh", "sec-core"]);
 }
 
@@ -642,6 +899,148 @@ fn update_check_target_profile_parses_default_components() {
 fn update_check_target_profile_rejects_traversal() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
-    let err = load_target_profile(&layout, "../escape").expect_err("must reject traversal");
+    let err = load_target_profile_by_name(&layout, "../escape").expect_err("must reject traversal");
     assert_eq!(err.code(), "INVALID_ARGUMENT");
+}
+
+// ── default target profile + user-mode gating ───────────────────────
+
+fn user_ctx() -> CliContext {
+    CliContext {
+        install_mode: crate::context::InstallMode::User,
+        prefix: None,
+        json: false,
+        dry_run: false,
+        verbose: false,
+        quiet: true,
+        no_color: true,
+    }
+}
+
+/// A non-system install mode is out of scope for the RPM upgrade check and must
+/// be rejected explicitly rather than emit a misleading RPM report.
+#[test]
+fn update_check_rejects_user_mode() {
+    let args = UpdateArgs {
+        component: None,
+        command: None,
+        check: true,
+        motd: false,
+        refresh: false,
+        target: None,
+    };
+    let err =
+        super::handle_update_check(&args, &user_ctx()).expect_err("user mode must be rejected");
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+}
+
+/// The MOTD path must stay silent in user mode: a login banner returns `Ok(())`
+/// without touching rpm/dnf or erroring.
+#[test]
+fn update_check_motd_user_mode_is_silent() {
+    let args = UpdateArgs {
+        component: None,
+        command: None,
+        check: true,
+        motd: true,
+        refresh: false,
+        target: None,
+    };
+    super::handle_update_check(&args, &user_ctx()).expect("motd in user mode is a silent Ok");
+}
+
+/// An omitted `--target` maps to the release default name for both the report
+/// and the MOTD cache key.
+#[test]
+fn update_check_effective_target_defaults_to_release_profile() {
+    assert_eq!(effective_target_name(None), DEFAULT_TARGET_PROFILE_NAME);
+    assert_eq!(effective_target_name(Some("image-v1.0")), "image-v1.0");
+}
+
+/// The compiled-in default profile parses and declares at least one default.
+#[test]
+fn update_check_builtin_default_profile_parses() {
+    let profile = load_builtin_default_profile().expect("builtin default profile parses");
+    assert!(
+        !profile.default_components.is_empty(),
+        "default profile must declare at least one default component"
+    );
+}
+
+/// With `--target` omitted, resolution yields the release default name and falls
+/// back to the built-in profile when no disk profile exists.
+#[test]
+fn update_check_omitted_target_uses_builtin_default() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let (name, profile) =
+        load_effective_target_profile(&layout, None).expect("default target resolves");
+    assert_eq!(name, DEFAULT_TARGET_PROFILE_NAME);
+    assert!(!profile.default_components.is_empty());
+}
+
+/// Omitted `--target` and explicit `--target agentic_os-latest` share the same
+/// lookup path, so an on-disk latest profile overrides the built-in fallback.
+#[test]
+fn update_check_omitted_target_uses_disk_default_profile() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let dir = layout.etc_dir.join("profiles");
+    std::fs::create_dir_all(&dir).expect("mkdir profiles");
+    std::fs::write(
+        dir.join(format!("{DEFAULT_TARGET_PROFILE_NAME}.toml")),
+        format!(
+            "schema_version = 1\nname = \"{DEFAULT_TARGET_PROFILE_NAME}\"\ndefault_components = [\"disk-only\"]\n"
+        ),
+    )
+    .expect("write default profile");
+
+    let (name, profile) =
+        load_effective_target_profile(&layout, None).expect("default target resolves");
+    assert_eq!(name, DEFAULT_TARGET_PROFILE_NAME);
+    assert_eq!(profile.default_components, vec!["disk-only"]);
+}
+
+/// An explicit `--target agentic_os-latest` with no on-disk profile falls back to
+/// the compiled-in default rather than erroring.
+#[test]
+fn update_check_explicit_default_target_falls_back_to_builtin() {
+    let _guard = crate::packaged::DataDirEnvGuard::clear();
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let profile = load_target_profile_by_name(&layout, DEFAULT_TARGET_PROFILE_NAME)
+        .expect("explicit default falls back to builtin");
+    assert!(!profile.default_components.is_empty());
+}
+
+/// A missing custom (non-default) profile is a hard invalid-argument error whose
+/// message names the profile.
+#[test]
+fn update_check_explicit_custom_target_missing_is_invalid_argument() {
+    let _guard = crate::packaged::DataDirEnvGuard::clear();
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let err = load_target_profile_by_name(&layout, "no-such-profile")
+        .expect_err("missing custom target must error");
+    assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert!(err.reason().contains("no-such-profile"));
+}
+
+/// The MOTD cache written for the default target is reused when `--target` is
+/// omitted, since both resolve to the same effective name.
+#[test]
+fn update_check_cache_usable_for_omitted_target_matches_default() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let path = cache_path(&layout);
+    write_cache(
+        &path,
+        &report_with_target(Some(DEFAULT_TARGET_PROFILE_NAME)),
+    )
+    .expect("write cache");
+    let cache = read_cache(&path).expect("cache readable");
+    assert!(
+        cache_is_usable(&cache, Some(effective_target_name(None))),
+        "omitted target reuses the default-target cache"
+    );
 }

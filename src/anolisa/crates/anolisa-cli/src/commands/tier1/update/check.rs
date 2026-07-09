@@ -18,8 +18,11 @@
 //! - **Installed components**: each `rpm-managed` / `rpm-observed` component is
 //!   compared against its repo candidates; `raw-managed` components are reported
 //!   `unsupported_in_rpm_upgrade` and never touched.
-//! - **Target profile** (optional, `--target`): default components the profile
-//!   declares but that are not installed are reported as installable.
+//! - **Target profile** (`--target`, optional): default components the profile
+//!   declares but that are not installed are reported as installable. When
+//!   `--target` is omitted the release-owned default profile
+//!   ([`DEFAULT_TARGET_PROFILE_NAME`]) is used, so a plain check still surfaces
+//!   missing default components.
 //!
 //! Repo candidate ordering uses RPM's own EVR comparison
 //! ([`rpm_evr_cmp`]), not semver, so real epochs/releases are ordered
@@ -51,6 +54,7 @@ use super::UpdateArgs;
 use crate::commands::common;
 use crate::context::CliContext;
 use crate::repo_config::RepoConfig;
+use crate::resolution::{ComponentIndex, rpm_component_provide};
 use crate::response::CliError;
 
 /// Command label for JSON envelopes and error routing on the check path.
@@ -62,6 +66,21 @@ const CACHE_FILE: &str = "update-check.json";
 /// How long a cached report is considered fresh for the MOTD path. Off the
 /// round hour so scheduled MOTD refreshes across hosts do not all land at once.
 const CACHE_TTL_SECS: i64 = 6 * 3600 + 137;
+
+/// Release-owned default target profile evaluated when `--target` is omitted, so
+/// a plain `update --check` (and the MOTD path) can report missing defaults.
+const DEFAULT_TARGET_PROFILE_NAME: &str = "agentic_os-latest";
+
+/// Built-in copy of the default target profile, compiled in as the final
+/// fallback so the default check works even before any profile file is laid down
+/// on disk. On-disk copies (`<etc>/profiles`, `<datadir>/profiles`) still win.
+const BUILTIN_DEFAULT_TARGET_PROFILE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../profiles/agentic_os-latest.toml"
+));
+
+/// Subdirectory under `etc_dir` / packaged datadir holding target profiles.
+const PROFILES_SUBDIR: &str = "profiles";
 
 // Stable action vocabulary shared by JSON, cache, and human/MOTD rendering.
 const ACTION_UPDATE: &str = "update";
@@ -184,10 +203,32 @@ struct CheckInputs<'a> {
     target_name: Option<String>,
     /// Loaded profile, when `--target` was given and resolved.
     target: Option<TargetProfile>,
+    /// Repo-side component identity index, used to map a profile default's
+    /// component name to its RPM package so an installed-but-unadopted default is
+    /// not falsely reported as installable. `None` when the index is unavailable
+    /// (best-effort); the check then relies on the `anolisa-component(...)`
+    /// provide alone.
+    component_index: Option<&'a ComponentIndex>,
 }
 
 /// Production entry point for `anolisa update --check`.
 pub(super) fn handle_update_check(args: &UpdateArgs, ctx: &CliContext) -> Result<(), CliError> {
+    // `update --check` only understands the system / RPM-image scenario: it
+    // reasons about rpm-owned components and repo candidates. In user mode there
+    // is no rpmdb-backed toolchain to reason about, so refuse explicitly rather
+    // than emit a misleading "nothing to upgrade" RPM report. The MOTD path
+    // stays silent (a login banner must not error) — this runs before any cache
+    // lookup or rpm/dnf query.
+    if ctx.install_mode != crate::context::InstallMode::System {
+        if args.motd {
+            return Ok(());
+        }
+        return Err(CliError::InvalidArgument {
+            command: CHECK_COMMAND.to_string(),
+            reason: "`update --check` currently supports only system/RPM image scenarios; run without `--install-mode user`".to_string(),
+        });
+    }
+
     let layout = common::resolve_layout(ctx);
     let cache_path = cache_path(&layout);
 
@@ -198,7 +239,7 @@ pub(super) fn handle_update_check(args: &UpdateArgs, ctx: &CliContext) -> Result
         && !args.refresh
         && !ctx.json
         && let Some(cache) = read_cache(&cache_path)
-        && cache_is_usable(&cache, args.target.as_deref())
+        && cache_is_usable(&cache, Some(effective_target_name(args.target.as_deref())))
     {
         render::render_motd(ctx, &cache.report);
         return Ok(());
@@ -257,18 +298,26 @@ fn compute_report(
         })?
         .to_string();
 
-    let target = match &args.target {
-        Some(name) => Some(load_target_profile(layout, name)?),
-        None => None,
-    };
+    // An omitted `--target` resolves to the release default profile, so the
+    // report always carries a target and can surface missing defaults.
+    let (target_name, target) = load_effective_target_profile(layout, args.target.as_deref())?;
+
+    // Best-effort component identity index so a profile default already present
+    // on the host (but not adopted into ANOLISA state) is checked against rpmdb
+    // via its package name rather than reported as installable. Loaded only on
+    // this (uncached) path, so the MOTD fast path is unaffected; a missing index
+    // is non-fatal (the check falls back to the `anolisa-component(...)` provide).
+    let component_index =
+        crate::resolution::load_optional_component_index(layout, &env, &repo_config);
 
     Ok(run_update_check(CheckInputs {
         installed: &installed,
         query: &query,
         cli_exe_path: &exe_path,
         arch: &env.arch,
-        target_name: args.target.clone(),
-        target,
+        target_name: Some(target_name),
+        target: Some(target),
+        component_index: component_index.as_ref(),
     }))
 }
 
@@ -307,26 +356,27 @@ fn run_update_check(inputs: CheckInputs<'_>) -> UpdateCheckReport {
         ));
     }
 
-    // Profile defaults that are absent from state are reported as installable
-    // (issue #1411 performs the install; this only surfaces the gap).
+    // Profile defaults absent from ANOLISA state are surfaced as a gap (issue
+    // #1411 performs the install). Absence from `installed.toml` is not the same
+    // as absence from the host, though, so each candidate is cross-checked
+    // against rpmdb first — a default already installed as an RPM (but never
+    // adopted) is evaluated for upgrades instead of falsely reported as missing.
     if let Some(profile) = &inputs.target {
         for name in &profile.default_components {
             if inputs
                 .installed
                 .find_object(ObjectKind::Component, name)
-                .is_none()
+                .is_some()
             {
-                components.push(ComponentCheck {
-                    component: name.clone(),
-                    package: None,
-                    ownership: None,
-                    installed: None,
-                    available: None,
-                    action: ACTION_INSTALL.to_string(),
-                    error: None,
-                });
-                summary.missing_defaults += 1;
+                continue;
             }
+            components.push(check_default_component(
+                inputs.query,
+                inputs.component_index,
+                name,
+                inputs.arch,
+                &mut summary,
+            ));
         }
     }
 
@@ -563,6 +613,232 @@ fn check_component(
     }
 }
 
+/// Evaluate a profile default that is absent from ANOLISA state.
+///
+/// A default missing from `installed.toml` may still be installed on the host —
+/// e.g. baked into a system image and never adopted, which is common for
+/// `legacy_adopt` packages predating the `anolisa-component(...)` provide.
+/// Reporting such a default as `install` would be a false positive on the
+/// default-profile MOTD, so rpmdb is consulted first (via the component provide
+/// and its index-mapped package name). A present-but-unadopted default is
+/// checked for upgrades like an rpm-observed component; only a default genuinely
+/// absent from rpmdb too is reported installable.
+fn check_default_component(
+    query: &dyn PackageQuery,
+    index: Option<&ComponentIndex>,
+    name: &str,
+    arch: &str,
+    summary: &mut CheckSummary,
+) -> ComponentCheck {
+    match probe_default_package(query, index, name) {
+        // Present on the host but unadopted: evaluate for upgrades.
+        DefaultProbe::Installed(package) => {
+            check_present_default(query, name, &package, arch, summary)
+        }
+        // Genuinely absent from both ANOLISA state and rpmdb.
+        DefaultProbe::Missing => {
+            summary.missing_defaults += 1;
+            ComponentCheck {
+                component: name.to_string(),
+                package: None,
+                ownership: None,
+                installed: None,
+                available: None,
+                action: ACTION_INSTALL.to_string(),
+                error: None,
+            }
+        }
+        // Could not determine presence (query failure, ambiguous providers).
+        // This is an item error, not a missing default — reporting "install"
+        // here would be the false positive the rpmdb cross-check exists to
+        // avoid.
+        DefaultProbe::Indeterminate(reason) => {
+            summary.errors += 1;
+            ComponentCheck {
+                component: name.to_string(),
+                package: None,
+                ownership: None,
+                installed: None,
+                available: None,
+                action: ACTION_ERROR.to_string(),
+                error: Some(reason),
+            }
+        }
+    }
+}
+
+/// Outcome of probing rpmdb for a profile default that is absent from ANOLISA
+/// state. Kept distinct from a plain `Option` so a query failure or an ambiguous
+/// provider set is never collapsed into "missing" (which would be reported as an
+/// installable default — the very false positive this cross-check prevents).
+enum DefaultProbe {
+    /// Installed on the host under this RPM package (an adopt/upgrade target).
+    Installed(String),
+    /// Not installed on the host — a genuine missing default.
+    Missing,
+    /// Presence could not be determined; carries a human-readable reason.
+    Indeterminate(String),
+}
+
+/// Probe rpmdb for the RPM package backing `component` when it is absent from
+/// ANOLISA state.
+///
+/// Two signals are consulted, both read-only:
+/// 1. A package that Provides `anolisa-component(name)`. An empty provider set
+///    falls through to the index fallback; exactly one provider is the target;
+///    multiple providers are ambiguous and reported as indeterminate (mirroring
+///    the CLI-owner "multiple packages = error" rule) rather than silently
+///    picking one.
+/// 2. For `legacy_adopt` packages that may lack that provide, the RPM package
+///    name(s) the component index maps to.
+///
+/// Any query error (rpm/dnf missing, permission denied, malformed rpmdb output,
+/// repoquery failure) yields [`DefaultProbe::Indeterminate`] — never `Missing`.
+fn probe_default_package(
+    query: &dyn PackageQuery,
+    index: Option<&ComponentIndex>,
+    name: &str,
+) -> DefaultProbe {
+    match query.what_provides_installed(&rpm_component_provide(name)) {
+        Ok(providers) => match providers.as_slice() {
+            [] => {}
+            [only] => return DefaultProbe::Installed(only.clone()),
+            many => {
+                return DefaultProbe::Indeterminate(format!(
+                    "default component '{name}' is provided by multiple installed RPM packages ({}); cannot pick an upgrade target",
+                    many.join(", ")
+                ));
+            }
+        },
+        Err(err) => {
+            return DefaultProbe::Indeterminate(format!(
+                "cannot determine whether default component '{name}' is installed: {err}"
+            ));
+        }
+    }
+
+    for package in index_rpm_packages(index, name) {
+        match query.query_installed(&package) {
+            Ok(Some(_)) => return DefaultProbe::Installed(package),
+            Ok(None) => continue,
+            Err(err) => {
+                return DefaultProbe::Indeterminate(format!(
+                    "cannot query installed version of '{package}' for default component '{name}': {err}"
+                ));
+            }
+        }
+    }
+    DefaultProbe::Missing
+}
+
+/// RPM package names the component index maps `component` to: the `rpm` backend
+/// package plus any `rpm-package` aliases (historical names). Empty when there
+/// is no index or no RPM mapping for the component. Duplicates (e.g. a backend
+/// and an alias sharing a name) are collapsed so rpmdb is not queried twice for
+/// the same package, order-preserving.
+fn index_rpm_packages(index: Option<&ComponentIndex>, component: &str) -> Vec<String> {
+    let Some(index) = index else {
+        return Vec::new();
+    };
+    let Some(entry) = index.components.iter().find(|e| e.name == component) else {
+        return Vec::new();
+    };
+    let mut packages: Vec<String> = Vec::new();
+    let mut push_unique = |package: &str| {
+        if !package.is_empty() && !packages.iter().any(|p| p == package) {
+            packages.push(package.to_string());
+        }
+    };
+    for backend in &entry.backends {
+        if backend.kind == "rpm" {
+            push_unique(&backend.package);
+        }
+    }
+    for alias in &entry.aliases {
+        if alias.kind == "rpm-package" {
+            push_unique(&alias.name);
+        }
+    }
+    packages
+}
+
+/// Evaluate an installed-but-unadopted default against the RPM upgrade scope,
+/// mirroring [`check_component`]'s query→candidate flow. Ownership is reported
+/// as `rpm-observed`: present on the host, not managed through ANOLISA state.
+fn check_present_default(
+    query: &dyn PackageQuery,
+    name: &str,
+    package: &str,
+    arch: &str,
+    summary: &mut CheckSummary,
+) -> ComponentCheck {
+    let ownership_label = Ownership::RpmObserved.label().to_string();
+    let installed = match query.query_installed(package) {
+        Ok(Some(info)) => info.version,
+        // The probe just resolved `package` as an installed provider, so an
+        // absent package here means it raced away mid-check. That is an
+        // inconsistency we cannot resolve, not evidence the default is missing —
+        // report an item error rather than flipping back to "install".
+        Ok(None) => {
+            summary.errors += 1;
+            return component_error(
+                name.to_string(),
+                Some(package.to_string()),
+                ownership_label,
+                None,
+                format!(
+                    "default component '{name}' resolved to package '{package}' but it is absent from rpmdb"
+                ),
+            );
+        }
+        Err(err) => {
+            summary.errors += 1;
+            return component_error(
+                name.to_string(),
+                Some(package.to_string()),
+                ownership_label,
+                None,
+                format!("rpm query failed: {err}"),
+            );
+        }
+    };
+    let installed_evr = installed.to_string();
+
+    match repo_upgrade(query, package, arch, &installed) {
+        Ok(Some(available)) => {
+            summary.updates += 1;
+            ComponentCheck {
+                component: name.to_string(),
+                package: Some(package.to_string()),
+                ownership: Some(ownership_label),
+                installed: Some(installed_evr),
+                available: Some(available),
+                action: ACTION_UPDATE.to_string(),
+                error: None,
+            }
+        }
+        Ok(None) => ComponentCheck {
+            component: name.to_string(),
+            package: Some(package.to_string()),
+            ownership: Some(ownership_label),
+            installed: Some(installed_evr),
+            available: None,
+            action: ACTION_NOOP.to_string(),
+            error: None,
+        },
+        Err(err) => {
+            summary.errors += 1;
+            component_error(
+                name.to_string(),
+                Some(package.to_string()),
+                ownership_label,
+                Some(installed_evr),
+                format!("repo candidate query failed: {err}"),
+            )
+        }
+    }
+}
+
 /// Newest repo candidate strictly newer than `installed`, filtered to the
 /// installed arch (plus `noarch`). Returns `None` when no candidate is a genuine
 /// upgrade; ordering uses RPM's own EVR comparison
@@ -630,9 +906,114 @@ fn component_error(
     }
 }
 
-/// Resolve and read a target profile. The name is validated as a single path
-/// segment so `--target` cannot escape the profiles directory.
-fn load_target_profile(layout: &FsLayout, target: &str) -> Result<TargetProfile, CliError> {
+/// Resolved profile name reported for a given `--target` value: the raw name
+/// when supplied, otherwise the release default. Used both to build the report's
+/// `target` field and to key the MOTD cache, so both agree on the same name.
+fn effective_target_name(target: Option<&str>) -> &str {
+    target.unwrap_or(DEFAULT_TARGET_PROFILE_NAME)
+}
+
+/// Resolve the effective target profile and its reported name.
+///
+/// An omitted `--target` resolves to [`DEFAULT_TARGET_PROFILE_NAME`] through the
+/// same lookup path as an explicit target, so disk profiles can override the
+/// built-in bootstrap fallback consistently.
+fn load_effective_target_profile(
+    layout: &FsLayout,
+    target: Option<&str>,
+) -> Result<(String, TargetProfile), CliError> {
+    let name = effective_target_name(target);
+    Ok((name.to_string(), load_target_profile_by_name(layout, name)?))
+}
+
+/// Resolve and read a named target profile. The name is validated as a single
+/// path segment so `--target` cannot escape the profiles directory.
+///
+/// Lookup order (first hit wins): `<etc_dir>/profiles/<name>.toml`, then
+/// `<packaged_datadir>/profiles/<name>.toml`, then — only for the release
+/// default name — the built-in profile compiled into the binary. A missing
+/// non-default profile is a hard [`CliError::InvalidArgument`] listing the
+/// searched paths.
+fn load_target_profile_by_name(layout: &FsLayout, name: &str) -> Result<TargetProfile, CliError> {
+    validate_target_name(name)?;
+
+    let mut searched = Vec::new();
+
+    let etc_path = layout
+        .etc_dir
+        .join(PROFILES_SUBDIR)
+        .join(format!("{name}.toml"));
+    if let Some(profile) = try_read_profile(&etc_path, name)? {
+        return Ok(profile);
+    }
+    searched.push(etc_path);
+
+    let packaged_root =
+        crate::packaged::packaged_datadir_root(layout).unwrap_or_else(|| layout.datadir.clone());
+    let packaged_path = packaged_root
+        .join(PROFILES_SUBDIR)
+        .join(format!("{name}.toml"));
+    if let Some(profile) = try_read_profile(&packaged_path, name)? {
+        return Ok(profile);
+    }
+    searched.push(packaged_path);
+
+    // Only the release default has a compiled-in fallback; any other name that
+    // reached here genuinely has no profile on disk.
+    if name == DEFAULT_TARGET_PROFILE_NAME {
+        return load_builtin_default_profile();
+    }
+
+    Err(CliError::InvalidArgument {
+        command: CHECK_COMMAND.to_string(),
+        reason: format!(
+            "cannot find target profile '{name}'; searched {}",
+            searched
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    })
+}
+
+/// Read one candidate profile path. Distinguishes "absent" (`Ok(None)`, so the
+/// caller keeps looking) from "present but unreadable/invalid" (`Err`, a real
+/// misconfiguration the caller must not paper over with a fallback).
+fn try_read_profile(path: &Path, name: &str) -> Result<Option<TargetProfile>, CliError> {
+    let body = match std::fs::read_to_string(path) {
+        Ok(body) => body,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(CliError::InvalidArgument {
+                command: CHECK_COMMAND.to_string(),
+                reason: format!(
+                    "cannot read target profile '{name}' at {}: {err}",
+                    path.display()
+                ),
+            });
+        }
+    };
+    TargetProfile::from_toml_str(&body)
+        .map(Some)
+        .map_err(|err| CliError::InvalidArgument {
+            command: CHECK_COMMAND.to_string(),
+            reason: format!("target profile '{name}' is invalid: {err}"),
+        })
+}
+
+/// Parse the compiled-in release default profile. A parse failure here is a
+/// build-time bug in the packaged asset, not user input, so it is a
+/// [`CliError::Runtime`].
+fn load_builtin_default_profile() -> Result<TargetProfile, CliError> {
+    TargetProfile::from_toml_str(BUILTIN_DEFAULT_TARGET_PROFILE).map_err(|err| CliError::Runtime {
+        command: CHECK_COMMAND.to_string(),
+        reason: format!("built-in default target profile is invalid: {err}"),
+    })
+}
+
+/// Reject target names that are not a single, safe path segment.
+fn validate_target_name(target: &str) -> Result<(), CliError> {
     if target.trim().is_empty()
         || target == "."
         || target == ".."
@@ -644,21 +1025,7 @@ fn load_target_profile(layout: &FsLayout, target: &str) -> Result<TargetProfile,
             reason: format!("target profile name '{target}' is not a valid profile identifier"),
         });
     }
-    let path = layout
-        .etc_dir
-        .join("profiles")
-        .join(format!("{target}.toml"));
-    let body = std::fs::read_to_string(&path).map_err(|err| CliError::InvalidArgument {
-        command: CHECK_COMMAND.to_string(),
-        reason: format!(
-            "cannot read target profile '{target}' at {}: {err}",
-            path.display()
-        ),
-    })?;
-    TargetProfile::from_toml_str(&body).map_err(|err| CliError::InvalidArgument {
-        command: CHECK_COMMAND.to_string(),
-        reason: format!("target profile '{target}' is invalid: {err}"),
-    })
+    Ok(())
 }
 
 // ── cache ────────────────────────────────────────────────────────────────
