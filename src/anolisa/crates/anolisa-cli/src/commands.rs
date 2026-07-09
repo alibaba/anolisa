@@ -100,6 +100,8 @@ pub enum ComponentCommands {
     Restart(tier1::restart::RestartArgs),
     /// Update a component (`update <component>`), the CLI binary (`self`), or everything (`all`)
     Update(tier1::update::UpdateArgs),
+    /// Upgrade the RPM/system image to the target toolchain profile (system-only)
+    Upgrade(tier1::upgrade::UpgradeArgs),
     /// Reconcile a component's ANOLISA state with rpmdb after manual RPM changes
     Repair(tier1::repair::RepairArgs),
     /// Drop a component's ANOLISA state record without any package operation
@@ -208,6 +210,7 @@ pub fn dispatch(cli: Cli, ctx: &CliContext) -> Result<(), CliError> {
             ComponentCommands::Logs(args) => tier1::logs::handle(args, ctx),
             ComponentCommands::Restart(args) => tier1::restart::handle(args, ctx),
             ComponentCommands::Update(args) => tier1::update::handle(args, ctx),
+            ComponentCommands::Upgrade(args) => tier1::upgrade::handle(args, ctx),
             ComponentCommands::Repair(args) => tier1::repair::handle(args, ctx),
             ComponentCommands::Forget(args) => tier1::forget::handle(args, ctx),
             ComponentCommands::Adopt(args) => tier1::adopt::handle(args, ctx),
@@ -399,6 +402,11 @@ fn command_policy(command: &Commands) -> CommandPolicy {
                 CommandPolicy::new("update", CommandScope::ReadOnly)
             }
             ComponentCommands::Update(_) => mode_scoped("update", true),
+            // `upgrade` is a system-only RPM image mutation: real execution
+            // needs root. `--dry-run` waives only the root requirement, not the
+            // system-mode one, so an explicit system-mode dry-run can preview
+            // the plan without root (matching `repair`).
+            ComponentCommands::Upgrade(_) => system_only("upgrade", true),
             ComponentCommands::Repair(_) => system_only("repair", true),
             ComponentCommands::Forget(_) => mode_scoped("forget", true),
             ComponentCommands::Adopt(_) => system_only("adopt", false),

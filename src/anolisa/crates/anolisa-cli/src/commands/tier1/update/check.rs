@@ -83,22 +83,26 @@ const BUILTIN_DEFAULT_TARGET_PROFILE: &str = include_str!(concat!(
 const PROFILES_SUBDIR: &str = "profiles";
 
 // Stable action vocabulary shared by JSON, cache, and human/MOTD rendering.
-const ACTION_UPDATE: &str = "update";
-const ACTION_NOOP: &str = "noop";
-const ACTION_INSTALL: &str = "install";
-const ACTION_UNSUPPORTED: &str = "unsupported";
-const ACTION_UNSUPPORTED_RPM: &str = "unsupported_in_rpm_upgrade";
-const ACTION_ERROR: &str = "error";
+// `pub(crate)` so the `upgrade` command (issue #1411) can classify a report's
+// items against the same vocabulary the check produces.
+pub(crate) const ACTION_UPDATE: &str = "update";
+pub(crate) const ACTION_NOOP: &str = "noop";
+pub(crate) const ACTION_INSTALL: &str = "install";
+pub(crate) const ACTION_UNSUPPORTED: &str = "unsupported";
+pub(crate) const ACTION_UNSUPPORTED_RPM: &str = "unsupported_in_rpm_upgrade";
+pub(crate) const ACTION_ERROR: &str = "error";
 
 /// Wire shape for `update --check` (`--json`) and the on-disk cache.
 ///
 /// Owned `String`s (rather than `&'static str`) so the same struct round-trips
-/// through the cache via `Deserialize`.
+/// through the cache via `Deserialize`. Exposed `pub(crate)` so `anolisa
+/// upgrade` (issue #1411) can consume the same planning output; only the fields
+/// the upgrade planner reads are widened past module scope.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct UpdateCheckReport {
+pub(crate) struct UpdateCheckReport {
     /// Target profile evaluated, when `--target` was given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    target: Option<String>,
+    pub(crate) target: Option<String>,
     /// Upgrade backend this report covers. Always `rpm` in the first version.
     backend: String,
     /// True when at least one component/CLI `update` was found. Deliberately
@@ -107,49 +111,49 @@ struct UpdateCheckReport {
     upgrade_available: bool,
     /// True when there is anything to do: an upgrade **or** a missing default to
     /// install. This is the signal machine callers should gate on when driving
-    /// the (future) `anolisa upgrade`; `upgrade_available` alone would report
+    /// `anolisa upgrade`; `upgrade_available` alone would report
     /// "nothing to upgrade" on a fresh image that is only missing defaults.
     action_required: bool,
-    cli: CliCheck,
-    components: Vec<ComponentCheck>,
+    pub(crate) cli: CliCheck,
+    pub(crate) components: Vec<ComponentCheck>,
     summary: CheckSummary,
 }
 
 /// Upgrade status of the running `anolisa` CLI binary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CliCheck {
+pub(crate) struct CliCheck {
     /// RPM package that owns the CLI binary; `None` when it is not RPM-owned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    package: Option<String>,
+    pub(crate) package: Option<String>,
     /// Installed EVR from rpmdb.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    installed: Option<String>,
+    pub(crate) installed: Option<String>,
     /// Newest repo candidate EVR, when an upgrade is available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    available: Option<String>,
-    action: String,
+    pub(crate) available: Option<String>,
+    pub(crate) action: String,
     /// Item-level failure that did not abort the whole check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+    pub(crate) error: Option<String>,
 }
 
 /// Upgrade status of one installed (or profile-declared) component.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ComponentCheck {
-    component: String,
+pub(crate) struct ComponentCheck {
+    pub(crate) component: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    package: Option<String>,
+    pub(crate) package: Option<String>,
     /// Provenance label (`rpm-managed` / `rpm-observed` / `raw-managed`);
     /// `None` for a profile default that is not installed yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    ownership: Option<String>,
+    pub(crate) ownership: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    installed: Option<String>,
+    pub(crate) installed: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    available: Option<String>,
-    action: String,
+    pub(crate) available: Option<String>,
+    pub(crate) action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+    pub(crate) error: Option<String>,
 }
 
 /// Aggregate counts used by the summary line, MOTD, and exit signalling.
@@ -245,7 +249,7 @@ pub(super) fn handle_update_check(args: &UpdateArgs, ctx: &CliContext) -> Result
         return Ok(());
     }
 
-    let report = match compute_report(args, ctx, &layout) {
+    let report = match compute_update_check_report(args.target.as_deref(), ctx, &layout) {
         Ok(report) => report,
         Err(err) => {
             // MOTD must stay quiet and low-noise on failure; a JSON/human check
@@ -267,8 +271,17 @@ pub(super) fn handle_update_check(args: &UpdateArgs, ctx: &CliContext) -> Result
 
 /// Build the report from live host state (repo config, rpmdb/dnf, target
 /// profile). Split from [`run_update_check`] so the pure logic stays testable.
-fn compute_report(
-    args: &UpdateArgs,
+///
+/// This is the shared, read-only planner behind both `anolisa update --check`
+/// and `anolisa upgrade` (issue #1411): it runs only read-only rpm/dnf queries,
+/// never a [`PackageTransaction`](anolisa_platform::pkg_transaction::PackageTransaction),
+/// never writes `installed.toml`, and never persists repo/adapter config. The
+/// `upgrade` command consumes the returned report and converts it into an RPM
+/// transaction plan; it does not re-derive the plan. Takes the resolved
+/// `--target` value directly (rather than the whole `UpdateArgs`) so callers
+/// without an `UpdateArgs` can reuse it.
+pub(crate) fn compute_update_check_report(
+    target: Option<&str>,
     ctx: &CliContext,
     layout: &FsLayout,
 ) -> Result<UpdateCheckReport, CliError> {
@@ -300,7 +313,7 @@ fn compute_report(
 
     // An omitted `--target` resolves to the release default profile, so the
     // report always carries a target and can surface missing defaults.
-    let (target_name, target) = load_effective_target_profile(layout, args.target.as_deref())?;
+    let (target_name, target_profile) = load_effective_target_profile(layout, target)?;
 
     // Best-effort component identity index so a profile default already present
     // on the host (but not adopted into ANOLISA state) is checked against rpmdb
@@ -316,7 +329,7 @@ fn compute_report(
         cli_exe_path: &exe_path,
         arch: &env.arch,
         target_name: Some(target_name),
-        target: Some(target),
+        target: Some(target_profile),
         component_index: component_index.as_ref(),
     }))
 }
@@ -638,9 +651,20 @@ fn check_default_component(
         // Genuinely absent from both ANOLISA state and rpmdb.
         DefaultProbe::Missing => {
             summary.missing_defaults += 1;
+            // Best-effort: resolve the RPM package name the profile default maps
+            // to so a downstream `anolisa upgrade` can `dnf install` it. The
+            // check stays read-only — this is an in-memory index lookup, not a
+            // query. A missing/ambiguous mapping leaves `package = None`; the
+            // default is still reported installable here (preserving
+            // `update --check` behaviour), and it is `upgrade`'s job to refuse
+            // an install with no resolved package rather than the check's.
+            let package = match index_rpm_packages(index, name).as_slice() {
+                [only] => Some(only.clone()),
+                _ => None,
+            };
             ComponentCheck {
                 component: name.to_string(),
-                package: None,
+                package,
                 ownership: None,
                 installed: None,
                 available: None,

@@ -71,7 +71,9 @@ use crate::context::CliContext;
 use crate::repo_config::{HostVars, RepoConfig};
 use crate::response::{self, CliError};
 
-mod check;
+// `pub(crate)` so `anolisa upgrade` (issue #1411) can reuse the read-only
+// planner (`check::compute_update_check_report`) instead of re-deriving it.
+pub(crate) mod check;
 
 /// Command label for JSON envelopes and error routing.
 const COMMAND: &str = "update";
@@ -342,7 +344,9 @@ fn resolve_update_target(
     }
 }
 
-fn rpm_repo_source_for_update(
+// `pub(crate)`: shared with `check` (read-only) and `upgrade` (issue #1411) so
+// all three resolve the configured ANOLISA RPM repository the same way.
+pub(crate) fn rpm_repo_source_for_update(
     repo_config: &RepoConfig,
     env: &anolisa_env::EnvFacts,
     command: &str,

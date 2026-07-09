@@ -13,6 +13,7 @@ pub mod restart;
 pub mod status;
 pub mod uninstall;
 pub mod update;
+pub mod upgrade;
 
 // Cross-command end-to-end MVP lifecycle coverage (#963); test-only.
 #[cfg(test)]
