@@ -646,7 +646,7 @@ fn handle_auth_answer<W: std::io::Write>(
                             .insert("auth_source".to_string(), v.clone());
                     }
 
-                    if provider_type == "aliyun"
+                    if should_apply_aliyun_prepare_for_edit(&existing)
                         && apply_aliyun_prepare(adapter, auth).map_err(std::io::Error::other)?
                     {
                         clear_active_auth_panel(state, output)?;
@@ -672,6 +672,7 @@ fn handle_auth_answer<W: std::io::Write>(
         }
         AuthPhase::SelectingProvider => {
             if auth.current_provider().id == "aliyun"
+                && should_apply_aliyun_prepare_on_provider_selection(auth.backend)
                 && apply_aliyun_prepare(adapter, auth).map_err(std::io::Error::other)?
             {
                 clear_active_auth_panel(state, output)?;
@@ -696,11 +697,12 @@ fn handle_auth_answer<W: std::io::Write>(
             if let Some(field) = field.clone() {
                 auth.collected_values.insert(field.name.clone(), value);
             }
-            if auth.backend == AuthBackend::CoreRegistry
-                && auth.editing_provider_name.is_none()
-                && auth.current_provider().id == "aliyun"
-                && field.as_ref().map(|f| f.name.as_str()) == Some("provider_id")
-                && apply_aliyun_prepare(adapter, auth).map_err(std::io::Error::other)?
+            if should_apply_aliyun_prepare_after_field(
+                auth.backend,
+                auth.editing_provider_name.is_some(),
+                auth.current_provider().id.as_str(),
+                field.as_ref().map(|f| f.name.as_str()),
+            ) && apply_aliyun_prepare(adapter, auth).map_err(std::io::Error::other)?
             {
                 clear_active_auth_panel(state, output)?;
                 render_current_auth_panel(state, output)?;
@@ -757,6 +759,26 @@ fn load_current_field_input(auth: &mut RuntimeAuthState) {
     } else {
         auth.field_input.clear();
     }
+}
+
+fn should_apply_aliyun_prepare_on_provider_selection(backend: AuthBackend) -> bool {
+    backend == AuthBackend::ActiveRun
+}
+
+fn should_apply_aliyun_prepare_after_field(
+    backend: AuthBackend,
+    is_editing: bool,
+    provider_type: &str,
+    field_name: Option<&str>,
+) -> bool {
+    backend == AuthBackend::CoreRegistry
+        && !is_editing
+        && provider_type == "aliyun"
+        && field_name == Some("provider_id")
+}
+
+fn should_apply_aliyun_prepare_for_edit(existing: &ExistingProvider) -> bool {
+    existing.provider_type == "aliyun" && existing.auth_source.as_deref() == Some("ecs_ram_role")
 }
 
 fn apply_aliyun_prepare(
@@ -1184,7 +1206,11 @@ fn generate_qr_text(data: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{provider_action_choice, provider_action_options};
+    use super::{
+        provider_action_choice, provider_action_options, should_apply_aliyun_prepare_after_field,
+        should_apply_aliyun_prepare_for_edit, should_apply_aliyun_prepare_on_provider_selection,
+        AuthBackend, ExistingProvider,
+    };
 
     #[test]
     fn provider_action_options_hide_edit_for_non_editable_providers() {
@@ -1211,5 +1237,59 @@ mod tests {
         assert_eq!(provider_action_choice(false, true, 1), "edit");
         assert_eq!(provider_action_choice(false, false, 0), "activate");
         assert_eq!(provider_action_choice(false, false, 1), "cancel");
+    }
+
+    #[test]
+    fn core_registry_aliyun_add_waits_for_provider_id_before_prepare() {
+        assert!(!should_apply_aliyun_prepare_on_provider_selection(
+            AuthBackend::CoreRegistry
+        ));
+        assert!(should_apply_aliyun_prepare_after_field(
+            AuthBackend::CoreRegistry,
+            false,
+            "aliyun",
+            Some("provider_id"),
+        ));
+    }
+
+    #[test]
+    fn active_run_aliyun_selection_can_prepare_without_provider_id_field() {
+        assert!(should_apply_aliyun_prepare_on_provider_selection(
+            AuthBackend::ActiveRun
+        ));
+        assert!(!should_apply_aliyun_prepare_after_field(
+            AuthBackend::ActiveRun,
+            false,
+            "aliyun",
+            Some("provider_id"),
+        ));
+    }
+
+    #[test]
+    fn manual_aliyun_edit_does_not_apply_ecs_prepare() {
+        let manual = ExistingProvider {
+            name: "aliyun-manual".to_string(),
+            provider_type: "aliyun".to_string(),
+            label: "Aliyun Authentication".to_string(),
+            model: "qwen3.7-plus".to_string(),
+            is_active: true,
+            editable: true,
+            source: "user".to_string(),
+            base_url: None,
+            api_key_mask: None,
+            access_key_id_mask: Some("••••".to_string()),
+            access_key_secret_mask: Some("••••••".to_string()),
+            security_token_mask: None,
+            auth_source: None,
+        };
+        let ecs = ExistingProvider {
+            auth_source: Some("ecs_ram_role".to_string()),
+            access_key_id_mask: None,
+            access_key_secret_mask: None,
+            ..manual.clone()
+        };
+
+        assert!(!should_apply_aliyun_prepare_for_edit(&manual));
+        assert!(should_apply_aliyun_prepare_for_edit(&ecs));
     }
 }

@@ -265,6 +265,14 @@ fn handle_auth(
             if provider_id.is_empty() || provider_type.is_empty() {
                 return registry_error(request_id, "missing provider_id or provider_type");
             }
+            if !is_valid_provider_id(provider_id) {
+                return registry_error(request_id, "invalid provider_id");
+            }
+            if config.ai.providers.contains_key(provider_id)
+                && !config.user_ai.providers.contains_key(provider_id)
+            {
+                return registry_error(request_id, "provider is not editable");
+            }
             let mut values: std::collections::HashMap<String, String> = params
                 .get("values")
                 .and_then(|v| v.as_object())
@@ -317,6 +325,13 @@ fn handle_auth(
             &format!("unsupported action for auth: {action}"),
         ),
     }
+}
+
+fn is_valid_provider_id(provider_id: &str) -> bool {
+    !provider_id.is_empty()
+        && provider_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
 }
 
 fn preserve_masked_secret(
@@ -830,5 +845,66 @@ mod tests {
         assert_eq!(system["editable"], false);
         assert_eq!(user["source"], "user");
         assert_eq!(user["editable"], true);
+    }
+
+    #[test]
+    fn auth_configure_rejects_invalid_provider_id() {
+        let mut config = CoreConfig::default();
+        let response = handle_auth(
+            "test-1",
+            "configure",
+            &serde_json::json!({
+                "provider_id": "bad.provider",
+                "provider_type": "dashscope",
+                "values": {
+                    "api_key": "sk-user"
+                }
+            }),
+            &mut config,
+        );
+
+        let OutputMessage::RegistryResponse { success, error, .. } = response else {
+            panic!("unexpected response: {response:?}");
+        };
+        assert!(!success);
+        assert!(error.unwrap().contains("invalid provider_id"));
+        assert!(config.user_ai.providers.is_empty());
+    }
+
+    #[test]
+    fn auth_configure_rejects_system_provider_overwrite() {
+        let mut config = CoreConfig::default();
+        config.ai.providers.insert(
+            "system-provider".to_string(),
+            ProviderConfig {
+                provider_type: Some("dashscope".to_string()),
+                api_key: Some("sk-system".to_string()),
+                ..Default::default()
+            },
+        );
+        config.system_ai = AiConfig {
+            providers: config.ai.providers.clone(),
+            ..Default::default()
+        };
+
+        let response = handle_auth(
+            "test-1",
+            "configure",
+            &serde_json::json!({
+                "provider_id": "system-provider",
+                "provider_type": "dashscope",
+                "values": {
+                    "api_key": "•••••••••"
+                }
+            }),
+            &mut config,
+        );
+
+        let OutputMessage::RegistryResponse { success, error, .. } = response else {
+            panic!("unexpected response: {response:?}");
+        };
+        assert!(!success);
+        assert!(error.unwrap().contains("not editable"));
+        assert!(!config.user_ai.providers.contains_key("system-provider"));
     }
 }
