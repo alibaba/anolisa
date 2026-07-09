@@ -274,7 +274,7 @@ impl DashboardAuth {
 
 // ─── Exempt paths ───────────────────────────────────────────────────────────
 
-/// Paths that do not require authentication.
+/// Paths that do not require authentication (but still subject to localhost-only restriction).
 const EXEMPT_PREFIXES: &[&str] = &[
     "/health",
     "/api/auth/login",
@@ -282,8 +282,18 @@ const EXEMPT_PREFIXES: &[&str] = &[
     "/api/auth/verify",
 ];
 
+/// Paths that are only accessible from localhost (loopback interface).
+/// Non-loopback requests to these paths receive 403 Forbidden.
+const LOCALHOST_ONLY_PREFIXES: &[&str] = &["/health", "/metrics"];
+
 fn is_exempt(path: &str) -> bool {
     EXEMPT_PREFIXES
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+}
+
+fn is_localhost_only(path: &str) -> bool {
+    LOCALHOST_ONLY_PREFIXES
         .iter()
         .any(|prefix| path.starts_with(prefix))
 }
@@ -339,6 +349,22 @@ where
     }
 
     fn call(&self, req: ServiceRequest) -> Self::Future {
+        let path = req.path().to_string();
+        let is_loopback = req
+            .peer_addr()
+            .map(|addr| addr.ip().is_loopback())
+            .unwrap_or(false);
+
+        // Localhost-only endpoints: reject non-loopback requests with 403.
+        if is_localhost_only(&path) && !is_loopback {
+            let response = req.into_response(
+                HttpResponse::Forbidden()
+                    .json(serde_json::json!({"error": "forbidden", "message": "This endpoint is only accessible from localhost"}))
+                    .map_into_right_body(),
+            );
+            return Box::pin(async move { Ok(response) });
+        }
+
         // If auth is disabled, pass through immediately.
         if !self.auth.enabled {
             let fut = self.service.call(req);
@@ -346,14 +372,10 @@ where
         }
 
         // Localhost (loopback) requests bypass authentication.
-        if let Some(peer_addr) = req.peer_addr() {
-            if peer_addr.ip().is_loopback() {
-                let fut = self.service.call(req);
-                return Box::pin(async move { fut.await.map(|res| res.map_into_left_body()) });
-            }
+        if is_loopback {
+            let fut = self.service.call(req);
+            return Box::pin(async move { fut.await.map(|res| res.map_into_left_body()) });
         }
-
-        let path = req.path().to_string();
 
         // Exempt paths pass through.
         if is_exempt(&path) {
@@ -550,6 +572,17 @@ mod tests {
     }
 
     #[test]
+    fn localhost_only_paths_are_recognized() {
+        assert!(is_localhost_only("/health"));
+        assert!(is_localhost_only("/health/"));
+        assert!(is_localhost_only("/metrics"));
+        assert!(is_localhost_only("/metrics?foo=bar"));
+        assert!(!is_localhost_only("/api/sessions"));
+        assert!(!is_localhost_only("/api/auth/login"));
+        assert!(!is_localhost_only("/"));
+    }
+
+    #[test]
     fn extract_query_param_parses_correctly() {
         assert_eq!(
             extract_query_param("foo=bar&token=abc123&baz=qux", "token"),
@@ -741,10 +774,6 @@ mod tests {
             actix_web::App::new()
                 .wrap(AuthMiddleware::new(auth))
                 .route(
-                    "/health",
-                    actix_web::web::get().to(|| async { HttpResponse::Ok().body("ok") }),
-                )
-                .route(
                     "/api/auth/login",
                     actix_web::web::post().to(|| async { HttpResponse::Ok().body("ok") }),
                 )
@@ -754,8 +783,8 @@ mod tests {
                 ),
         )
         .await;
-        // GET exempt paths
-        for uri in &["/health", "/api/auth/status"] {
+        // GET exempt paths (NOT localhost-only)
+        for uri in &["/api/auth/status"] {
             let req = actix_web::test::TestRequest::get().uri(uri).to_request();
             let resp = actix_web::test::call_service(&app, req).await;
             assert_eq!(resp.status(), 200, "exempt path {uri} should pass");
@@ -770,6 +799,75 @@ mod tests {
             200,
             "exempt path /api/auth/login should pass"
         );
+    }
+
+    #[actix_web::test]
+    async fn middleware_blocks_localhost_only_from_remote() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        let dir = std::env::temp_dir().join("auth_mw_localhost_only");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok();
+        let auth = Arc::new(DashboardAuth::init(
+            &ServerAuthConfig { enabled: true },
+            &dir,
+        ));
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .wrap(AuthMiddleware::new(auth))
+                .route(
+                    "/health",
+                    actix_web::web::get().to(|| async { HttpResponse::Ok().body("ok") }),
+                )
+                .route(
+                    "/metrics",
+                    actix_web::web::get().to(|| async { HttpResponse::Ok().body("ok") }),
+                ),
+        )
+        .await;
+
+        let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), 12345);
+        let loopback_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
+
+        // Remote request to /health should be blocked (403)
+        let req = actix_web::test::TestRequest::get()
+            .uri("/health")
+            .peer_addr(remote_addr)
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            403,
+            "/health should be forbidden from remote"
+        );
+
+        // Remote request to /metrics should be blocked (403)
+        let req = actix_web::test::TestRequest::get()
+            .uri("/metrics")
+            .peer_addr(remote_addr)
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            403,
+            "/metrics should be forbidden from remote"
+        );
+
+        // Loopback request to /health should pass
+        let req = actix_web::test::TestRequest::get()
+            .uri("/health")
+            .peer_addr(loopback_addr)
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200, "/health should pass from loopback");
+
+        // Loopback request to /metrics should pass
+        let req = actix_web::test::TestRequest::get()
+            .uri("/metrics")
+            .peer_addr(loopback_addr)
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200, "/metrics should pass from loopback");
     }
 
     #[actix_web::test]
