@@ -64,6 +64,13 @@ pub fn handle(args: ForgetArgs, ctx: &CliContext) -> Result<(), CliError> {
     let resolved = common::lookup_component_name(input, &installed, ctx, COMMAND);
     let target = resolved.as_str();
 
+    if installed
+        .find_object(ObjectKind::Component, target)
+        .is_none()
+    {
+        common::reject_visible_non_writable_component(ctx, &command, target)?;
+    }
+
     let obj = installed
         .find_object(ObjectKind::Component, target)
         .ok_or_else(|| CliError::InvalidArgument {

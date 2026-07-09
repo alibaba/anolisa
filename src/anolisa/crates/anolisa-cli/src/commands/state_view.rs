@@ -106,6 +106,36 @@ impl StateView {
         records
     }
 
+    pub(crate) fn reject_non_writable_component_mutation(
+        &self,
+        command: &str,
+        component: &str,
+    ) -> Result<(), CliError> {
+        if let Some(record) = self.visible_components().into_iter().find(|record| {
+            record.active
+                && !record.mutable_by_current_invocation
+                && (record.object.name == component
+                    || record.object.raw_package.as_deref() == Some(component)
+                    || record
+                        .object
+                        .rpm_metadata
+                        .as_ref()
+                        .is_some_and(|metadata| metadata.package_name == component))
+        }) {
+            let scope = record.scope();
+            return Err(CliError::PermissionDenied {
+                command: command.to_string(),
+                reason: format!(
+                    "component '{component}' is {}-scope and read-only from the current {}-mode invocation",
+                    scope.label(),
+                    self.writable.scope.label(),
+                ),
+                hint: Some(scope_mutation_hint(scope, command)),
+            });
+        }
+        Ok(())
+    }
+
     fn from_layouts(command: &str, roots: Vec<(FsLayout, RootSpec)>) -> Result<Self, CliError> {
         let mut visible_roots = Vec::new();
         let mut writable = None;
@@ -197,6 +227,17 @@ const fn scope_for_mode(mode: InstallMode) -> StateScope {
     match mode {
         InstallMode::User => StateScope::User,
         InstallMode::System => StateScope::System,
+    }
+}
+
+fn scope_mutation_hint(scope: StateScope, command: &str) -> String {
+    match scope {
+        StateScope::System => {
+            format!("run `sudo anolisa --install-mode system {command}` to mutate system state")
+        }
+        StateScope::User => {
+            format!("run `anolisa --install-mode user {command}` to mutate user state")
+        }
     }
 }
 

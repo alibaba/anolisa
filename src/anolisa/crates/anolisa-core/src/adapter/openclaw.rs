@@ -1091,6 +1091,58 @@ fn now_iso8601() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::sync::{Mutex, MutexGuard};
+
+    static OPENCLAW_BIN_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct OpenClawBinEnvGuard {
+        previous: Option<OsString>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl OpenClawBinEnvGuard {
+        fn unset() -> Self {
+            Self::apply(None)
+        }
+
+        fn set(value: &str) -> Self {
+            Self::apply(Some(value))
+        }
+
+        fn apply(value: Option<&str>) -> Self {
+            let lock = OPENCLAW_BIN_ENV_LOCK.lock().expect("openclaw env lock");
+            let previous = std::env::var_os("OPENCLAW_BIN");
+            // SAFETY: these tests serialize every OPENCLAW_BIN mutation and
+            // every command-builder read behind the same process-wide lock.
+            unsafe {
+                if let Some(value) = value {
+                    std::env::set_var("OPENCLAW_BIN", value);
+                } else {
+                    std::env::remove_var("OPENCLAW_BIN");
+                }
+            }
+            Self {
+                previous,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for OpenClawBinEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: the lock is still held while restoring the process
+            // environment, so no sibling OpenClaw test can observe a partial
+            // OPENCLAW_BIN transition.
+            unsafe {
+                if let Some(previous) = &self.previous {
+                    std::env::set_var("OPENCLAW_BIN", previous);
+                } else {
+                    std::env::remove_var("OPENCLAW_BIN");
+                }
+            }
+        }
+    }
 
     #[test]
     fn list_contains_plugin_matches_whole_token() {
@@ -1219,6 +1271,7 @@ mod tests {
 
     #[test]
     fn install_cmd_mirrors_script_contract() {
+        let _env = OpenClawBinEnvGuard::unset();
         let cmd = build_install_cmd(
             Path::new("/data/adapters/tokenless/openclaw"),
             Path::new("/home/u/.openclaw"),
@@ -1248,6 +1301,7 @@ mod tests {
 
     #[test]
     fn uninstall_cmd_uses_force() {
+        let _env = OpenClawBinEnvGuard::unset();
         let cmd = build_uninstall_cmd(
             "tokenless",
             Path::new("/home/u/.openclaw"),
@@ -1322,6 +1376,7 @@ mod tests {
 
     #[test]
     fn config_set_cmd_string_value() {
+        let _env = OpenClawBinEnvGuard::unset();
         let cmd = build_config_set_cmd(
             "plugins.entries.sec.enabled",
             &toml::Value::String("true".to_string()),
@@ -1337,6 +1392,7 @@ mod tests {
 
     #[test]
     fn config_set_cmd_boolean_value() {
+        let _env = OpenClawBinEnvGuard::unset();
         let cmd = build_config_set_cmd(
             "debug.enabled",
             &toml::Value::Boolean(true),
@@ -1348,6 +1404,7 @@ mod tests {
 
     #[test]
     fn config_set_cmd_integer_value() {
+        let _env = OpenClawBinEnvGuard::unset();
         let cmd = build_config_set_cmd(
             "limits.max_plugins",
             &toml::Value::Integer(42),
@@ -1475,20 +1532,8 @@ mod tests {
         );
         assert_eq!(claim_skill_resources(&claim), vec!["install-openclaw"]);
 
-        let previous_bin = std::env::var_os("OPENCLAW_BIN");
-        // SAFETY: test-only; restored before the test returns.
-        unsafe {
-            std::env::set_var("OPENCLAW_BIN", "/bin/sh");
-        }
+        let _env = OpenClawBinEnvGuard::set("/bin/sh");
         let report = driver.status(&claim, &ctx).expect("status");
-        // SAFETY: test-only; restore the process environment.
-        unsafe {
-            if let Some(value) = previous_bin {
-                std::env::set_var("OPENCLAW_BIN", value);
-            } else {
-                std::env::remove_var("OPENCLAW_BIN");
-            }
-        }
 
         assert_eq!(report.summary, AdapterSummary::Healthy);
         assert!(

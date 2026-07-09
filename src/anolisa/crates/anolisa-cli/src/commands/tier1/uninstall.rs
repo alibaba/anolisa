@@ -124,6 +124,7 @@ pub(crate) fn handle_with_deps(
     };
     let input = args.component.as_str();
     let command = format!("{} {}", operation.as_str(), input);
+    let scope_command = scope_guard_command(&args, input);
 
     // Load installed state to plan against. Missing state is the same
     // as "target not installed" — surface that as INVALID_ARGUMENT so
@@ -155,6 +156,12 @@ pub(crate) fn handle_with_deps(
                  on the next install/uninstall; use `anolisa list` to see components"
             ),
         });
+    }
+    if installed
+        .find_object(ObjectKind::Component, target)
+        .is_none()
+    {
+        common::reject_visible_non_writable_component(ctx, &scope_command, target)?;
     }
     // Adapter receipts must be released before the component is removed.
     // Uninstall does not auto-cascade into framework state (a framework CLI
@@ -302,6 +309,19 @@ pub(crate) fn handle_with_deps(
         render_outcome_human(&outcome, ctx.no_color);
     }
     Ok(())
+}
+
+fn scope_guard_command(args: &UninstallArgs, input: &str) -> String {
+    let mut command = COMMAND.to_string();
+    if args.purge {
+        command.push_str(" --purge");
+    }
+    if args.remove_system_package {
+        command.push_str(" --remove-system-package");
+    }
+    command.push(' ');
+    command.push_str(input);
+    command
 }
 
 fn lifecycle_err_to_cli(command: &str, err: LifecycleError) -> CliError {
@@ -1750,6 +1770,29 @@ mod tests {
             remove_system_package: true,
             force: false,
         }
+    }
+
+    #[test]
+    fn scope_guard_command_preserves_uninstall_flags() {
+        assert_eq!(
+            scope_guard_command(&args("system-tool", false), "system-tool"),
+            "uninstall system-tool"
+        );
+        assert_eq!(
+            scope_guard_command(&args("system-tool", true), "system-tool"),
+            "uninstall --purge system-tool"
+        );
+        assert_eq!(
+            scope_guard_command(&args_rm("system-tool"), "system-tool"),
+            "uninstall --remove-system-package system-tool"
+        );
+
+        let mut both = args_rm("system-tool");
+        both.purge = true;
+        assert_eq!(
+            scope_guard_command(&both, "system-tool"),
+            "uninstall --purge --remove-system-package system-tool"
+        );
     }
 
     fn run(

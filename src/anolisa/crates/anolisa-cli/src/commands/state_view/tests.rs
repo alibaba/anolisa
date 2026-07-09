@@ -6,6 +6,7 @@ use crate::context::{CliContext, InstallMode};
 use super::*;
 use support::{component, user_layout, write_state};
 
+mod mutation_guard;
 mod support;
 
 #[test]
@@ -83,6 +84,39 @@ fn user_record_shadows_system_record() {
             && !record.active
             && record.shadowed_by == Some(StateScope::User)
     }));
+}
+
+#[test]
+fn shadowed_system_record_does_not_block_user_lifecycle_mutation() {
+    let tmp = tempdir().expect("tempdir");
+    let user_layout = user_layout(tmp.path().join("home"));
+    let system_layout = FsLayout::system(Some(tmp.path().join("system")));
+    write_state(&user_layout, vec![component("shared")]);
+    write_state(&system_layout, vec![component("shared")]);
+
+    let view = StateView::from_layouts(
+        "test",
+        vec![
+            (
+                user_layout,
+                RootSpec {
+                    scope: StateScope::User,
+                    writable: true,
+                },
+            ),
+            (
+                system_layout,
+                RootSpec {
+                    scope: StateScope::System,
+                    writable: false,
+                },
+            ),
+        ],
+    )
+    .expect("state view");
+
+    view.reject_non_writable_component_mutation("forget shared", "shared")
+        .expect("writable user record owns the active mutation target");
 }
 
 #[test]

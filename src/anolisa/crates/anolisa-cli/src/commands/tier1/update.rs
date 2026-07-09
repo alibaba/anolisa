@@ -307,6 +307,12 @@ fn resolve_update_target(
     command: &str,
 ) -> Result<UpdateTarget, CliError> {
     let installed = common::load_installed_state(ctx, COMMAND)?;
+    if installed
+        .find_object(ObjectKind::Component, target)
+        .is_none()
+    {
+        common::reject_visible_non_writable_component(ctx, command, target)?;
+    }
     let obj = installed
         .find_object(ObjectKind::Component, target)
         .ok_or_else(|| CliError::InvalidArgument {

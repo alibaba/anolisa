@@ -185,6 +185,26 @@ pub fn load_installed_state(ctx: &CliContext, command: &str) -> Result<Installed
     })
 }
 
+/// Refuse lifecycle mutation of a visible component that is not writable by
+/// the current install mode. Missing visible records are left to the caller's
+/// existing "not installed" error path.
+pub(crate) fn reject_visible_non_writable_component(
+    ctx: &CliContext,
+    command: &str,
+    component: &str,
+) -> Result<(), CliError> {
+    let view = StateView::load(ctx, command, StateVisibility::UserPlusSystem)?;
+    reject_visible_non_writable_component_from_view(&view, command, component)
+}
+
+fn reject_visible_non_writable_component_from_view(
+    view: &StateView,
+    command: &str,
+    component: &str,
+) -> Result<(), CliError> {
+    view.reject_non_writable_component_mutation(command, component)
+}
+
 /// Resolve a user-supplied component name to the stable state key.
 ///
 /// Commands that address existing state (uninstall, forget, update, restart,
@@ -633,6 +653,114 @@ pub fn migrate_v3_symlinks(state: &mut InstalledState, layout: &FsLayout) -> usi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use anolisa_core::state::{InstalledObject, Ownership, SubscriptionScope};
+
+    use crate::commands::state_view::{ScopedStateRoot, StateScope};
+
+    fn test_component(name: &str) -> InstalledObject {
+        InstalledObject {
+            kind: ObjectKind::Component,
+            name: name.to_string(),
+            version: "1.0.0".to_string(),
+            status: ObjectStatus::Installed,
+            manifest_digest: None,
+            distribution_source: None,
+            raw_package: None,
+            install_backend: Some("raw".to_string()),
+            ownership: Some(Ownership::RawManaged),
+            rpm_metadata: None,
+            installed_at: "2026-01-01T00:00:00Z".to_string(),
+            last_operation_id: None,
+            managed: true,
+            adopted: false,
+            subscription_scope: SubscriptionScope::None,
+            enabled_features: Vec::new(),
+            component_refs: Vec::new(),
+            files: Vec::new(),
+            external_modified_files: Vec::new(),
+            services: Vec::new(),
+            health: Vec::new(),
+            provisioned_packages: Vec::new(),
+        }
+    }
+
+    fn state_with_objects(objects: Vec<InstalledObject>) -> InstalledState {
+        let mut state = InstalledState::default();
+        for object in objects {
+            state.upsert_object(object);
+        }
+        state
+    }
+
+    fn scoped_view(user_state: InstalledState, system_state: InstalledState) -> StateView {
+        let user_root = ScopedStateRoot {
+            scope: StateScope::User,
+            layout: FsLayout::user_with_overrides(
+                PathBuf::from("/tmp/anolisa-home"),
+                None,
+                None,
+                Some(PathBuf::from("/tmp/anolisa-user-state")),
+                None,
+                None,
+            ),
+            state_path: PathBuf::from("/tmp/anolisa-user-state/installed.toml"),
+            writable: true,
+            state: user_state,
+        };
+        let system_root = ScopedStateRoot {
+            scope: StateScope::System,
+            layout: FsLayout::system(Some(PathBuf::from("/tmp/anolisa-system"))),
+            state_path: PathBuf::from("/tmp/anolisa-system-state/installed.toml"),
+            writable: false,
+            state: system_state,
+        };
+        StateView {
+            writable: user_root.clone(),
+            visible_roots: vec![user_root, system_root],
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn reject_visible_non_writable_component_blocks_read_only_system_view() {
+        let view = scoped_view(
+            InstalledState::default(),
+            state_with_objects(vec![test_component("system-tool")]),
+        );
+
+        let err = reject_visible_non_writable_component_from_view(
+            &view,
+            "uninstall system-tool",
+            "system-tool",
+        )
+        .expect_err("system component must be visible but read-only");
+
+        match err {
+            CliError::PermissionDenied { reason, hint, .. } => {
+                assert!(reason.contains("system-tool"), "reason: {reason}");
+                assert!(reason.contains("system-scope"), "reason: {reason}");
+                assert!(
+                    hint.as_deref()
+                        .is_some_and(|h| h.contains("--install-mode system")),
+                    "hint: {hint:?}",
+                );
+            }
+            other => panic!("expected permission error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reject_visible_non_writable_component_keeps_missing_targets_unchanged() {
+        let view = scoped_view(InstalledState::default(), InstalledState::default());
+
+        reject_visible_non_writable_component_from_view(
+            &view,
+            "forget missing-tool",
+            "missing-tool",
+        )
+        .expect("missing targets should continue into the existing not-installed path");
+    }
 
     /// Verify that `package_datadir()` is wired into the system-mode
     /// manager: an RPM-installed contract under `{prefix}/usr/share/anolisa`

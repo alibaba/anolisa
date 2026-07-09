@@ -1,5 +1,6 @@
 use anolisa_core::{
-    InstalledObject, InstalledState, ObjectKind, ObjectStatus, Ownership, SubscriptionScope,
+    InstalledObject, InstalledState, ObjectKind, ObjectStatus, Ownership, RpmMetadata,
+    SubscriptionScope,
 };
 use anolisa_platform::fs_layout::FsLayout;
 use std::path::PathBuf;
@@ -45,4 +46,19 @@ pub(super) fn component(name: &str) -> InstalledObject {
         health: Vec::new(),
         provisioned_packages: Vec::new(),
     }
+}
+
+pub(super) fn rpm_component(name: &str, package: &str) -> InstalledObject {
+    let mut object = component(name);
+    object.install_backend = Some("rpm".to_string());
+    object.ownership = Some(Ownership::RpmObserved);
+    object.rpm_metadata = Some(RpmMetadata {
+        package_name: package.to_string(),
+        evr: None,
+        arch: None,
+        source_repo: None,
+    });
+    object.managed = false;
+    object.adopted = true;
+    object
 }
