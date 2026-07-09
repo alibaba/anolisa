@@ -7,6 +7,29 @@ use crate::genai::semantic::GenAISemanticEvent;
 
 // ─── Query result types ────────────────────────────────────────────────────────
 
+/// Source that created a pending GenAI row.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PendingOrigin {
+    /// Request was captured before the response arrived.
+    #[default]
+    RequestCapture,
+    /// In-flight request was drained after its owner PID disappeared.
+    DeadPidDrain,
+    /// In-flight stream was snapshotted after an idle timeout while the PID lived.
+    IdleDrain,
+}
+
+impl PendingOrigin {
+    /// Stable string stored in SQLite.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RequestCapture => "request_capture",
+            Self::DeadPidDrain => "dead_pid_drain",
+            Self::IdleDrain => "idle_drain",
+        }
+    }
+}
+
 /// Lightweight info needed to write a PENDING record when a request is first seen
 pub struct PendingCallInfo {
     /// Unique call ID (same one that will be used in the complete record)
@@ -43,6 +66,10 @@ pub struct PendingCallInfo {
     pub provider: Option<String>,
     /// Call kind classification: "main" | "recap" | "web_search"
     pub call_kind: String,
+    /// Source that created this pending record.
+    pub pending_origin: PendingOrigin,
+    /// Deterministic key used to reconcile idle snapshots with resumed streams.
+    pub pending_match_key: Option<String>,
 }
 
 /// Data extracted from captured SSE events for enriching a pending record.
@@ -73,14 +100,14 @@ impl GenAISqliteStore {
                 start_timestamp_ns, pid, process_name, agent_name,
                 http_method, http_path, is_sse,
                 input_messages, system_instructions, user_query,
-                model, provider, call_kind,
+                model, provider, call_kind, pending_origin, pending_match_key,
                 event_json
             ) VALUES (
                 'llm_call', 'pending', ?1, ?2, ?3, ?4, ?5,
                 ?6, ?7, ?8, ?9,
                 ?10, ?11, ?12,
                 ?13, ?14, ?15,
-                ?16, ?17, ?18,
+                ?16, ?17, ?18, ?19, ?20,
                 '{}'
             )",
             params![
@@ -102,6 +129,8 @@ impl GenAISqliteStore {
                 info.model,
                 info.provider,
                 info.call_kind,
+                info.pending_origin.as_str(),
+                info.pending_match_key,
             ],
         )?;
         Ok(())
@@ -245,38 +274,38 @@ impl GenAISqliteStore {
                         call.metadata.get("session_id"),
                         call.end_timestamp_ns as i64,
                         call.duration_ns as i64,
-                        call.provider,
-                        call.model,
-                        call.model,
-                        call.model,
+                        call.provider.as_str(),
+                        call.model.as_str(),
+                        call.model.as_str(),
+                        call.model.as_str(),
                         call.request.temperature,
                         call.request.max_tokens.map(|v| v as i64),
                         call.request.top_p,
                         call.request.frequency_penalty,
                         call.request.presence_penalty,
-                        finish_reasons,
+                        finish_reasons.as_deref(),
                         call.metadata.get("server.address"),
                         input_tokens,
                         output_tokens,
                         total_tokens,
                         cache_creation,
                         cache_read,
-                        system_instructions,
-                        input_messages,
-                        output_messages,
+                        system_instructions.as_deref(),
+                        input_messages.as_deref(),
+                        output_messages.as_deref(),
                         call.metadata
                             .get("status_code")
                             .and_then(|s| s.parse::<i64>().ok()),
                         call.metadata
                             .get("sse_event_count")
                             .and_then(|s| s.parse::<i64>().ok()),
-                        event_json,
-                        tool_call_ids,
+                        event_json.as_str(),
+                        tool_call_ids.as_deref(),
                         call.metadata
                             .get("call_kind")
                             .map(|s| s.as_str())
                             .unwrap_or("main"),
-                        call.call_id,
+                        call.call_id.as_str(),
                     ],
                 )?;
 
@@ -304,6 +333,100 @@ impl GenAISqliteStore {
                     "[GenAI] No row for call_id={}, inserting directly",
                     call.call_id
                 );
+
+                if let Some(match_key) = call.metadata.get("pending_match_key") {
+                    let updated = conn.execute(
+                        "UPDATE genai_events SET
+                            status = 'complete',
+                            trace_id            = ?1,
+                            conversation_id     = ?2,
+                            session_id          = ?3,
+                            end_timestamp_ns    = ?4,
+                            duration_ns         = ?5,
+                            provider            = ?6,
+                            model               = ?7,
+                            request_model       = ?8,
+                            response_model      = ?9,
+                            temperature         = ?10,
+                            max_tokens          = ?11,
+                            top_p               = ?12,
+                            frequency_penalty   = ?13,
+                            presence_penalty    = ?14,
+                            finish_reasons      = ?15,
+                            server_address      = ?16,
+                            input_tokens        = ?17,
+                            output_tokens       = ?18,
+                            total_tokens        = ?19,
+                            cache_creation_tokens = ?20,
+                            cache_read_tokens   = ?21,
+                            system_instructions = ?22,
+                            input_messages      = ?23,
+                            output_messages     = ?24,
+                            status_code         = ?25,
+                            sse_event_count     = ?26,
+                            event_json          = ?27,
+                            tool_call_ids       = ?28,
+                            call_kind           = ?29,
+                            call_id             = ?30
+                         WHERE id = (
+                            SELECT id FROM genai_events
+                            WHERE event_type = 'llm_call'
+                              AND status IN ('pending', 'interrupted')
+                              AND pending_origin = 'idle_drain'
+                              AND pending_match_key = ?31
+                            ORDER BY start_timestamp_ns DESC
+                            LIMIT 1
+                         )",
+                        params![
+                            call.metadata.get("response_id"),
+                            call.metadata.get("conversation_id"),
+                            call.metadata.get("session_id"),
+                            call.end_timestamp_ns as i64,
+                            call.duration_ns as i64,
+                            call.provider.as_str(),
+                            call.model.as_str(),
+                            call.model.as_str(),
+                            call.model.as_str(),
+                            call.request.temperature,
+                            call.request.max_tokens.map(|v| v as i64),
+                            call.request.top_p,
+                            call.request.frequency_penalty,
+                            call.request.presence_penalty,
+                            finish_reasons.as_deref(),
+                            call.metadata.get("server.address"),
+                            input_tokens,
+                            output_tokens,
+                            total_tokens,
+                            cache_creation,
+                            cache_read,
+                            system_instructions.as_deref(),
+                            input_messages.as_deref(),
+                            output_messages.as_deref(),
+                            call.metadata
+                                .get("status_code")
+                                .and_then(|s| s.parse::<i64>().ok()),
+                            call.metadata
+                                .get("sse_event_count")
+                                .and_then(|s| s.parse::<i64>().ok()),
+                            event_json.as_str(),
+                            tool_call_ids.as_deref(),
+                            call.metadata
+                                .get("call_kind")
+                                .map(|s| s.as_str())
+                                .unwrap_or("main"),
+                            call.call_id.as_str(),
+                            match_key.as_str(),
+                        ],
+                    )?;
+
+                    if updated > 0 {
+                        log::debug!(
+                            "[GenAI] Promoted idle pending snapshot→complete for call_id={}",
+                            call.call_id
+                        );
+                        return Ok(());
+                    }
+                }
             }
             // Fallback: store_event handles the full INSERT path
             self.store_event(event)
@@ -444,7 +567,8 @@ impl GenAISqliteStore {
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND status = 'pending'
-               AND pid = ?1",
+               AND pid = ?1
+               AND pending_origin != 'idle_drain'",
         )?;
         let rows = stmt
             .query_map(params![pid], |row| {
@@ -475,7 +599,8 @@ impl GenAISqliteStore {
              SET status = 'interrupted', interruption_type = ?1
              WHERE event_type = 'llm_call'
                AND status = 'pending'
-               AND pid = ?2",
+               AND pid = ?2
+               AND pending_origin != 'idle_drain'",
             params![itype, pid],
         )?;
         if updated > 0 {
@@ -507,6 +632,7 @@ impl GenAISqliteStore {
              FROM genai_events
              WHERE event_type = 'llm_call'
                AND status = 'pending'
+               AND pending_origin != 'idle_drain'
                AND pid IN ({placeholders})"
         );
         let params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = pids

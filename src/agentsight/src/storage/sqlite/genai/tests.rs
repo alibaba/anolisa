@@ -1,5 +1,7 @@
 use super::*;
-use crate::genai::semantic::{GenAISemanticEvent, LLMCall, LLMRequest};
+use crate::genai::semantic::{
+    GenAISemanticEvent, LLMCall, LLMRequest, LLMResponse, MessagePart, OutputMessage,
+};
 
 /// Integration test: store_event (post-fix, no per-insert VACUUM) still
 /// persists data correctly and the row is immediately readable.
@@ -659,6 +661,8 @@ fn test_insert_pending() {
         model: Some("gpt-4".to_string()),
         provider: Some("openai".to_string()),
         call_kind: "main".to_string(),
+        pending_origin: PendingOrigin::RequestCapture,
+        pending_match_key: None,
     };
     store.insert_pending(&info).unwrap();
     let conn = store.conn.lock().unwrap();
@@ -670,6 +674,156 @@ fn test_insert_pending() {
         )
         .unwrap();
     assert_eq!(status, "pending");
+    drop(conn);
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_insert_pending_records_idle_origin_and_match_key() {
+    let path =
+        std::env::temp_dir().join(format!("test_genai_idle_origin_{}.db", std::process::id()));
+    cleanup_db(&path);
+    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+    let info = PendingCallInfo {
+        call_id: "idle-temp".to_string(),
+        trace_id: None,
+        conversation_id: Some("c-idle".to_string()),
+        session_id: Some("s-idle".to_string()),
+        start_timestamp_ns: BASE_NS as u64,
+        pid: 42,
+        process_name: "claude".to_string(),
+        agent_name: Some("claude".to_string()),
+        http_method: Some("POST".to_string()),
+        http_path: Some("/v1/messages".to_string()),
+        input_messages: None,
+        system_instructions: None,
+        user_query: Some("hello".to_string()),
+        is_sse: true,
+        model: Some("claude-sonnet".to_string()),
+        provider: Some("anthropic".to_string()),
+        call_kind: "main".to_string(),
+        pending_origin: PendingOrigin::IdleDrain,
+        pending_match_key: Some("match-idle-1".to_string()),
+    };
+    store.insert_pending(&info).unwrap();
+
+    let conn = store.conn.lock().unwrap();
+    let (origin, match_key): (String, String) = conn
+        .query_row(
+            "SELECT pending_origin, pending_match_key FROM genai_events WHERE call_id = 'idle-temp'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(origin, "idle_drain");
+    assert_eq!(match_key, "match-idle-1");
+    drop(conn);
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_complete_pending_promotes_idle_snapshot_by_match_key() {
+    let path =
+        std::env::temp_dir().join(format!("test_genai_idle_promote_{}.db", std::process::id()));
+    cleanup_db(&path);
+    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+    let info = PendingCallInfo {
+        call_id: "idle-temp".to_string(),
+        trace_id: None,
+        conversation_id: Some("c-idle".to_string()),
+        session_id: Some("s-idle".to_string()),
+        start_timestamp_ns: BASE_NS as u64,
+        pid: 42,
+        process_name: "claude".to_string(),
+        agent_name: Some("claude".to_string()),
+        http_method: Some("POST".to_string()),
+        http_path: Some("/v1/messages".to_string()),
+        input_messages: None,
+        system_instructions: None,
+        user_query: Some("hello".to_string()),
+        is_sse: true,
+        model: Some("claude-sonnet".to_string()),
+        provider: Some("anthropic".to_string()),
+        call_kind: "main".to_string(),
+        pending_origin: PendingOrigin::IdleDrain,
+        pending_match_key: Some("match-idle-2".to_string()),
+    };
+    store.insert_pending(&info).unwrap();
+
+    let request = LLMRequest {
+        messages: vec![],
+        temperature: None,
+        max_tokens: None,
+        frequency_penalty: None,
+        presence_penalty: None,
+        top_p: None,
+        top_k: None,
+        seed: None,
+        stop_sequences: None,
+        stream: true,
+        tools: None,
+        raw_body: None,
+    };
+    let mut call = LLMCall::new(
+        "real-response-id".to_string(),
+        BASE_NS as u64,
+        "anthropic".to_string(),
+        "claude-sonnet".to_string(),
+        request,
+        42,
+        "claude".to_string(),
+    );
+    call.set_response(
+        LLMResponse {
+            messages: vec![OutputMessage {
+                role: "assistant".to_string(),
+                parts: vec![MessagePart::Text {
+                    content: "done".to_string(),
+                }],
+                name: None,
+                finish_reason: Some("stop".to_string()),
+            }],
+            streamed: true,
+            raw_body: None,
+        },
+        (BASE_NS + STEP_NS) as u64,
+    );
+    call.metadata
+        .insert("response_id".to_string(), "real-response-id".to_string());
+    call.metadata
+        .insert("pending_match_key".to_string(), "match-idle-2".to_string());
+    call.metadata
+        .insert("conversation_id".to_string(), "c-real".to_string());
+    call.metadata
+        .insert("session_id".to_string(), "s-real".to_string());
+    call.metadata
+        .insert("status_code".to_string(), "200".to_string());
+    call.metadata
+        .insert("sse_event_count".to_string(), "2".to_string());
+    call.metadata
+        .insert("call_kind".to_string(), "main".to_string());
+
+    store
+        .complete_pending(&GenAISemanticEvent::LLMCall(call))
+        .unwrap();
+
+    let conn = store.conn.lock().unwrap();
+    let total: i64 = conn
+        .query_row("SELECT COUNT(*) FROM genai_events", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(total, 1, "complete must update the idle snapshot row");
+
+    let (status, call_id, trace_id, origin): (String, String, String, String) = conn
+        .query_row(
+            "SELECT status, call_id, trace_id, pending_origin FROM genai_events",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "complete");
+    assert_eq!(call_id, "real-response-id");
+    assert_eq!(trace_id, "real-response-id");
+    assert_eq!(origin, "idle_drain");
     drop(conn);
     cleanup_db(&path);
 }
@@ -729,6 +883,63 @@ fn test_mark_pending_interrupted_for_pid() {
         .unwrap();
     assert_eq!(st, "interrupted");
     assert_eq!(it, "agent_crash");
+    drop(conn);
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_crash_sweep_ignores_idle_drain_pending() {
+    let path =
+        std::env::temp_dir().join(format!("test_genai_idle_sweep_{}.db", std::process::id()));
+    cleanup_db(&path);
+    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+
+    for (call_id, origin) in [
+        ("dead-drain", PendingOrigin::DeadPidDrain),
+        ("idle-drain", PendingOrigin::IdleDrain),
+    ] {
+        let info = PendingCallInfo {
+            call_id: call_id.to_string(),
+            trace_id: None,
+            conversation_id: Some("c-sweep".to_string()),
+            session_id: Some("s-sweep".to_string()),
+            start_timestamp_ns: BASE_NS as u64,
+            pid: 42,
+            process_name: "claude".to_string(),
+            agent_name: Some("claude".to_string()),
+            http_method: Some("POST".to_string()),
+            http_path: Some("/v1/messages".to_string()),
+            input_messages: None,
+            system_instructions: None,
+            user_query: Some("hello".to_string()),
+            is_sse: true,
+            model: Some("claude-sonnet".to_string()),
+            provider: Some("anthropic".to_string()),
+            call_kind: "main".to_string(),
+            pending_origin: origin,
+            pending_match_key: Some(format!("match-{call_id}")),
+        };
+        store.insert_pending(&info).unwrap();
+    }
+
+    let listed = store.list_pending_for_pid(42).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].0, "dead-drain");
+
+    let updated = store
+        .mark_pending_interrupted_for_pid(42, "agent_crash")
+        .unwrap();
+    assert_eq!(updated, 1);
+
+    let conn = store.conn.lock().unwrap();
+    let idle_status: String = conn
+        .query_row(
+            "SELECT status FROM genai_events WHERE call_id = 'idle-drain'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(idle_status, "pending");
     drop(conn);
     cleanup_db(&path);
 }
@@ -830,6 +1041,8 @@ fn make_store_with_pending(records: &[(&str, &str, &str, &str, i64)]) -> GenAISq
             model: Some("gpt-4".to_string()),
             provider: Some("openai".to_string()),
             call_kind: kind.to_string(),
+            pending_origin: PendingOrigin::RequestCapture,
+            pending_match_key: None,
         };
         store.insert_pending(&info).unwrap();
     }

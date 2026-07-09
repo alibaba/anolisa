@@ -11,7 +11,8 @@ use crate::analyzer::AnalysisResult;
 use crate::analyzer::token::TokenParser;
 use crate::parser::sse::ParsedSseEvent;
 use crate::response_map::ResponseSessionMapper;
-use crate::storage::sqlite::{PendingCallInfo, SseEnrichment};
+use crate::storage::sqlite::{PendingCallInfo, PendingOrigin, SseEnrichment};
+use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -55,6 +56,44 @@ impl GenAIBuilder {
             call_counter: AtomicU64::new(0),
             id_resolver: IdResolver::new(),
         }
+    }
+
+    pub(super) fn pending_match_key(
+        pid: u32,
+        start_timestamp_ns: u64,
+        method: &str,
+        path: &str,
+        request_body: Option<&str>,
+    ) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(b"agentsight-pending-v1\0");
+        hasher.update(pid.to_string().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(start_timestamp_ns.to_string().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(method.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(path.as_bytes());
+        hasher.update(b"\0");
+        if let Some(body) = request_body {
+            hasher.update(body.as_bytes());
+        }
+        format!("pmk-{:x}", hasher.finalize())
+    }
+
+    fn parsed_request_match_body(
+        request: &ParsedRequest,
+        body: Option<&serde_json::Value>,
+    ) -> Option<String> {
+        body.map(|v| serde_json::to_string(v).unwrap_or_default())
+            .or_else(|| {
+                let raw = request.body();
+                if raw.is_empty() {
+                    None
+                } else {
+                    Some(String::from_utf8_lossy(raw).to_string())
+                }
+            })
     }
 
     /// Build GenAI semantic events AND a `PendingCallInfo` to be written to DB
@@ -156,6 +195,8 @@ impl GenAIBuilder {
                     .get("call_kind")
                     .cloned()
                     .unwrap_or_else(|| "main".to_string()),
+                pending_origin: PendingOrigin::RequestCapture,
+                pending_match_key: llm_call.metadata.get("pending_match_key").cloned(),
             });
 
             events.push(GenAISemanticEvent::LLMCall(llm_call));
@@ -201,6 +242,14 @@ impl GenAIBuilder {
 
         let call_id = self.generate_id();
         let body = request.json_body();
+        let match_body = Self::parsed_request_match_body(request, body.as_ref());
+        let pending_match_key = Self::pending_match_key(
+            conn_id.pid,
+            request.source_event.timestamp_ns,
+            &request.method,
+            &request.path,
+            match_body.as_deref(),
+        );
 
         // Determine if streaming
         let is_sse = body
@@ -364,6 +413,8 @@ impl GenAIBuilder {
             model,
             provider,
             call_kind: call_kind.to_string(),
+            pending_origin: PendingOrigin::DeadPidDrain,
+            pending_match_key: Some(pending_match_key),
         })
     }
 

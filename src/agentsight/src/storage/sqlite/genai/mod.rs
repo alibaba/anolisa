@@ -27,7 +27,7 @@ use crate::config::BatchConfig;
 
 // Re-export public types from sub-modules
 pub use events::TraceEventDetail;
-pub use pending::{PendingCallInfo, SseEnrichment};
+pub use pending::{PendingCallInfo, PendingOrigin, SseEnrichment};
 pub use session::{SavingsSessionSummary, SessionSummary, ToolCallTurnInfo, TraceSummary};
 pub use stats::{AgentTokenSummary, ModelTimeseriesBucket, TimeseriesBucket};
 

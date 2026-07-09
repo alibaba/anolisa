@@ -88,6 +88,9 @@ impl GenAISqliteStore {
                 interruption_type TEXT,
                 -- Call kind classification (main/recap/web_search)
                 call_kind TEXT NOT NULL DEFAULT 'main',
+                -- Pending row provenance and reconciliation key
+                pending_origin TEXT NOT NULL DEFAULT 'request_capture',
+                pending_match_key TEXT,
                 -- Full event as JSON (fallback)
                 event_json TEXT NOT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -184,6 +187,16 @@ impl GenAISqliteStore {
             "TEXT NOT NULL DEFAULT 'main'",
             "idx_genai_call_kind"
         );
+
+        // v7: pending provenance for idle/drain lifecycle handling
+        ensure_col!(
+            "pending_origin",
+            "TEXT NOT NULL DEFAULT 'request_capture'",
+            "idx_genai_pending_origin"
+        );
+
+        // v8: stable key used to reconcile idle stream snapshots on completion
+        ensure_col!("pending_match_key", "TEXT", "idx_genai_pending_match_key");
 
         Ok(())
     }

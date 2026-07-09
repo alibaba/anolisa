@@ -42,6 +42,13 @@ impl GenAIBuilder {
 
         // Need at least HttpRecord to build LLMCall
         let http = http_record?;
+        let pending_match_key = Self::pending_match_key(
+            http.pid,
+            http.timestamp_ns,
+            &http.method,
+            &http.path,
+            http.request_body.as_deref(),
+        );
 
         // Check if this is an LLM API call (path-based or body-based for SysOM POP API)
         let path_match = self.is_llm_api_path(&http.path);
@@ -255,6 +262,7 @@ impl GenAIBuilder {
                 if let Some(ref sid) = session_id {
                     meta.insert("session_id".to_string(), sid.clone());
                 }
+                meta.insert("pending_match_key".to_string(), pending_match_key);
                 meta
             },
         })

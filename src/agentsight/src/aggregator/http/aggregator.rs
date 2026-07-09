@@ -85,6 +85,8 @@ pub struct HttpConnectionAggregator {
     last_appended_src_ptr: LruCache<ConnectionId, usize>,
     /// Last activity timestamp per connection, used for idle timeout eviction.
     last_activity: LruCache<ConnectionId, Instant>,
+    /// Connections already snapshotted after idle timeout.
+    idle_snapshotted: LruCache<ConnectionId, ()>,
     /// Maximum bytes buffered per connection (request body or compressed SSE).
     max_body_bytes: usize,
     /// Idle timeout before a connection state is forcibly dropped.
@@ -142,6 +144,7 @@ impl HttpConnectionAggregator {
             sse_continuation_buffers: LruCache::new(cap),
             last_appended_src_ptr: LruCache::new(cap),
             last_activity: LruCache::new(cap),
+            idle_snapshotted: LruCache::new(cap),
             max_body_bytes: max_body_bytes.max(1024),
             idle_timeout,
         }
@@ -203,6 +206,7 @@ impl HttpConnectionAggregator {
                 self.sse_continuation_buffers.pop(key);
                 self.last_appended_src_ptr.pop(key);
                 self.last_activity.pop(key);
+                self.idle_snapshotted.pop(key);
                 evicted_idle += 1;
             }
         }
@@ -232,6 +236,7 @@ impl HttpConnectionAggregator {
             self.sse_continuation_buffers.pop(key);
             self.last_appended_src_ptr.pop(key);
             self.last_activity.pop(key);
+            self.idle_snapshotted.pop(key);
         }
         if !oversized.is_empty() {
             log::warn!(
@@ -242,12 +247,12 @@ impl HttpConnectionAggregator {
         }
     }
 
-    /// Drain non-idle connections that exceeded `idle_timeout`.
+    /// Snapshot non-idle connections that exceeded `idle_timeout`.
     ///
     /// These states can represent manually interrupted or abandoned LLM
-    /// streams. Returning them lets the caller persist a pending GenAI row
-    /// instead of silently dropping the session evidence.
-    pub fn drain_idle_connections(&mut self) -> Vec<(ConnectionId, ConnectionState)> {
+    /// streams. Returning cloned states lets the caller persist a pending GenAI
+    /// row while keeping the live connection available if the stream resumes.
+    pub fn snapshot_idle_connections(&mut self) -> Vec<(ConnectionId, ConnectionState)> {
         let now = Instant::now();
         let timeout = self.idle_timeout;
         let keys: Vec<ConnectionId> = self
@@ -264,26 +269,34 @@ impl HttpConnectionAggregator {
 
         let mut result = Vec::new();
         for key in keys {
-            self.sse_continuation_buffers.pop(&key);
-            self.last_appended_src_ptr.pop(&key);
-            self.last_activity.pop(&key);
-            if let Some(state) = self.connections.pop(&key) {
-                match state {
+            if self.idle_snapshotted.peek(&key).is_some() {
+                continue;
+            }
+            if let Some(state) = self.connections.peek(&key) {
+                match state.clone() {
                     ConnectionState::Idle => {}
-                    _ => result.push((key, state)),
+                    state => {
+                        self.idle_snapshotted.push(key, ());
+                        result.push((key, state));
+                    }
                 }
             }
         }
 
         if !result.is_empty() {
             log::info!(
-                "[HttpAggregator] drained {} idle in-flight connection(s) (timeout={}s)",
+                "[HttpAggregator] snapshotted {} idle in-flight connection(s) (timeout={}s)",
                 result.len(),
                 timeout.as_secs()
             );
         }
 
         result
+    }
+
+    /// Backward-compatible alias for idle snapshots.
+    pub fn drain_idle_connections(&mut self) -> Vec<(ConnectionId, ConnectionState)> {
+        self.snapshot_idle_connections()
     }
 
     /// Record activity timestamp for a connection.
@@ -435,6 +448,7 @@ impl HttpConnectionAggregator {
     /// Process HTTP Request (from HTTP Parser)
     pub fn process_request(&mut self, request: ParsedRequest) {
         let connection_id = ConnectionId::from_ssl_event(&request.source_event);
+        self.idle_snapshotted.pop(&connection_id);
 
         // Check if body is complete by comparing with Content-Length
         let content_length: Option<usize> = request
@@ -951,6 +965,10 @@ impl HttpConnectionAggregator {
     /// Clear all connections
     pub fn clear(&mut self) {
         self.connections.clear();
+        self.sse_continuation_buffers.clear();
+        self.last_appended_src_ptr.clear();
+        self.last_activity.clear();
+        self.idle_snapshotted.clear();
     }
 
     /// Drain all connections (for force complete)
@@ -960,7 +978,11 @@ impl HttpConnectionAggregator {
             .map(|(k, v)| (*k, v.clone()))
             .collect::<Vec<_>>()
             .into_iter()
-            .map(|(k, _)| (k, self.connections.pop(&k).unwrap()))
+            .map(|(k, _)| {
+                self.last_activity.pop(&k);
+                self.idle_snapshotted.pop(&k);
+                (k, self.connections.pop(&k).unwrap())
+            })
             .collect()
     }
 
@@ -984,6 +1006,8 @@ impl HttpConnectionAggregator {
         let mut result = Vec::new();
         for key in keys {
             if let Some(state) = self.connections.pop(&key) {
+                self.last_activity.pop(&key);
+                self.idle_snapshotted.pop(&key);
                 match state {
                     ConnectionState::Idle => {}
                     _ => {
@@ -1044,6 +1068,8 @@ impl HttpConnectionAggregator {
         let mut result = Vec::new();
         for key in dead_keys {
             if let Some(state) = self.connections.pop(&key) {
+                self.last_activity.pop(&key);
+                self.idle_snapshotted.pop(&key);
                 match state {
                     ConnectionState::Idle => {
                         // Silently discard idle entries
@@ -2421,9 +2447,13 @@ mod tests {
     }
 
     #[test]
-    fn test_idle_eviction_preserves_sse_active_for_drain() {
+    fn test_idle_snapshot_keeps_sse_active_for_resumed_stream() {
         let mut agg = HttpConnectionAggregator::with_limits(10, 8192, Duration::from_millis(50));
-        let event = create_mock_ssl_event(1234, 0x7000);
+        let conn_id = ConnectionId {
+            pid: 1234,
+            ssl_ptr: 0x7000,
+        };
+        let event = create_mock_ssl_event(conn_id.pid, conn_id.ssl_ptr);
         let request = ParsedRequest {
             method: "POST".to_string(),
             path: "/v1/messages".to_string(),
@@ -2450,11 +2480,23 @@ mod tests {
         assert!(agg.process_response(response).is_none());
 
         std::thread::sleep(Duration::from_millis(60));
-        agg.evict_idle_and_oversized();
-        let drained = agg.drain_connections_for_pid(1234);
+        let snapshots = agg.snapshot_idle_connections();
 
-        assert_eq!(drained.len(), 1);
-        assert!(matches!(drained[0].1, ConnectionState::SseActive { .. }));
+        assert_eq!(snapshots.len(), 1);
+        assert!(matches!(snapshots[0].1, ConnectionState::SseActive { .. }));
+
+        let done_event = create_mock_ssl_event_with_buf(
+            conn_id.pid,
+            conn_id.ssl_ptr,
+            b"data: [DONE]\n\n".to_vec(),
+            0,
+        );
+        let done = ParsedSseEvent::new(None, None, None, 6, 6, done_event);
+        let result = agg.process_sse_event(&conn_id, done);
+        assert!(
+            matches!(result, Some(AggregatedResult::SseComplete(_))),
+            "idle snapshot must not remove the in-flight stream state"
+        );
     }
 
     #[test]

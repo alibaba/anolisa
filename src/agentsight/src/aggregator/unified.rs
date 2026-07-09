@@ -178,11 +178,11 @@ impl Aggregator {
         self.http.drain_dead_pid_connections()
     }
 
-    /// Drain in-flight HTTP connections that exceeded the idle timeout.
+    /// Snapshot in-flight HTTP connections that exceeded the idle timeout.
     ///
     /// Used to persist evidence for manually interrupted streams where the
     /// agent process remains alive, so dead-PID draining would never run.
-    pub fn drain_idle_connections(&mut self) -> Vec<(ConnectionId, ConnectionState)> {
-        self.http.drain_idle_connections()
+    pub fn snapshot_idle_connections(&mut self) -> Vec<(ConnectionId, ConnectionState)> {
+        self.http.snapshot_idle_connections()
     }
 }

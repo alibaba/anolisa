@@ -909,7 +909,7 @@ impl AgentSight {
                 self.flush_expired_pending_genai();
                 // Drain orphaned connections from dead PIDs and persist as pending
                 self.drain_and_persist_dead_connections();
-                // Drain idle in-flight streams whose owning process is still alive.
+                // Snapshot idle in-flight streams whose owning process is still alive.
                 self.drain_and_persist_idle_connections();
                 // Check if config watcher deposited a new LogtailExporter
                 self.check_pending_logtail();
@@ -1280,19 +1280,20 @@ impl AgentSight {
         }
     }
 
-    /// Drain idle in-flight streams and persist them as `pending` records.
+    /// Snapshot idle in-flight streams and persist them as `pending` records.
     ///
     /// This covers manual output interruption where the agent process stays
     /// alive, so dead-PID draining cannot discover the abandoned stream.
     fn drain_and_persist_idle_connections(&mut self) {
-        let drained = self.aggregator.drain_idle_connections();
-        if drained.is_empty() {
+        let snapshots = self.aggregator.snapshot_idle_connections();
+        if snapshots.is_empty() {
             return;
         }
 
         use crate::aggregator::ConnectionState;
+        use crate::storage::sqlite::PendingOrigin;
 
-        for (conn_id, state) in drained {
+        for (conn_id, state) in snapshots {
             let (_state_name, request) = match state {
                 ConnectionState::RequestPending { request } => ("RequestPending", request),
                 ConnectionState::SseActive {
@@ -1301,11 +1302,12 @@ impl AgentSight {
                 _ => continue,
             };
 
-            if let Some(pending) = self.genai_builder.build_pending_from_request(
+            if let Some(mut pending) = self.genai_builder.build_pending_from_request(
                 &request,
                 &conn_id,
                 &self.pid_agent_name_cache,
             ) {
+                pending.pending_origin = PendingOrigin::IdleDrain;
                 if let Some(ref store) = self.genai_sqlite_store {
                     let call_id = pending.call_id.clone();
                     if let Err(e) = store.insert_pending(&pending) {
@@ -2043,6 +2045,8 @@ mod tests {
             model: Some("gpt-4".to_string()),
             provider: Some("openai".to_string()),
             call_kind: "main".to_string(),
+            pending_origin: crate::storage::sqlite::genai::PendingOrigin::RequestCapture,
+            pending_match_key: None,
         }
     }
 

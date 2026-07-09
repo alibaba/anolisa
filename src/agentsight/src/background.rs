@@ -271,7 +271,7 @@ mod tests {
 
     #[test]
     fn test_stale_scanner_loop_runs_body_then_stops() {
-        use crate::storage::sqlite::PendingCallInfo;
+        use crate::storage::sqlite::{PendingCallInfo, PendingOrigin};
 
         let dir = tmp_dir("stale2");
         let store = Arc::new(GenAISqliteStore::new_with_path(&dir.join("test.db")).unwrap());
@@ -297,6 +297,8 @@ mod tests {
                 model: None,
                 provider: None,
                 call_kind: "main".to_string(),
+                pending_origin: PendingOrigin::RequestCapture,
+                pending_match_key: None,
             })
             .unwrap();
 
