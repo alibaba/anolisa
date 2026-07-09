@@ -277,7 +277,6 @@ impl DashboardAuth {
 /// Paths that do not require authentication.
 const EXEMPT_PREFIXES: &[&str] = &[
     "/health",
-    "/metrics",
     "/api/auth/login",
     "/api/auth/status",
     "/api/auth/verify",
@@ -541,7 +540,7 @@ mod tests {
     fn exempt_paths_are_recognized() {
         assert!(is_exempt("/health"));
         assert!(is_exempt("/health/"));
-        assert!(is_exempt("/metrics"));
+        assert!(!is_exempt("/metrics")); // requires auth — contains token stats
         assert!(is_exempt("/api/auth/login"));
         assert!(is_exempt("/api/auth/status"));
         assert!(is_exempt("/api/auth/verify"));
