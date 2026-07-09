@@ -646,12 +646,16 @@ fn handle_auth_answer<W: std::io::Write>(
                             .insert("auth_source".to_string(), v.clone());
                     }
 
-                    if should_apply_aliyun_prepare_for_edit(&existing)
-                        && apply_aliyun_prepare(adapter, auth).map_err(std::io::Error::other)?
-                    {
-                        clear_active_auth_panel(state, output)?;
-                        render_current_auth_panel(state, output)?;
-                        return Ok(true);
+                    if should_apply_aliyun_prepare_for_edit(&existing) {
+                        if apply_aliyun_prepare(adapter, auth).map_err(std::io::Error::other)? {
+                            clear_active_auth_panel(state, output)?;
+                            render_current_auth_panel(state, output)?;
+                            return Ok(true);
+                        }
+                        clear_ecs_auth_source_for_manual_aliyun_edit(
+                            &existing,
+                            &mut auth.collected_values,
+                        );
                     }
 
                     auth.phase = AuthPhase::FillingField;
@@ -779,6 +783,15 @@ fn should_apply_aliyun_prepare_after_field(
 
 fn should_apply_aliyun_prepare_for_edit(existing: &ExistingProvider) -> bool {
     existing.provider_type == "aliyun" && existing.auth_source.as_deref() == Some("ecs_ram_role")
+}
+
+fn clear_ecs_auth_source_for_manual_aliyun_edit(
+    existing: &ExistingProvider,
+    values: &mut HashMap<String, String>,
+) {
+    if should_apply_aliyun_prepare_for_edit(existing) {
+        values.remove("auth_source");
+    }
 }
 
 fn apply_aliyun_prepare(
@@ -1207,10 +1220,12 @@ fn generate_qr_text(data: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        provider_action_choice, provider_action_options, should_apply_aliyun_prepare_after_field,
+        clear_ecs_auth_source_for_manual_aliyun_edit, provider_action_choice,
+        provider_action_options, should_apply_aliyun_prepare_after_field,
         should_apply_aliyun_prepare_for_edit, should_apply_aliyun_prepare_on_provider_selection,
         AuthBackend, ExistingProvider,
     };
+    use std::collections::HashMap;
 
     #[test]
     fn provider_action_options_hide_edit_for_non_editable_providers() {
@@ -1291,5 +1306,56 @@ mod tests {
 
         assert!(!should_apply_aliyun_prepare_for_edit(&manual));
         assert!(should_apply_aliyun_prepare_for_edit(&ecs));
+    }
+
+    #[test]
+    fn ecs_aliyun_manual_fallback_clears_auth_source() {
+        let ecs = ExistingProvider {
+            name: "aliyun-ecs".to_string(),
+            provider_type: "aliyun".to_string(),
+            label: "Aliyun Authentication".to_string(),
+            model: "qwen3.7-plus".to_string(),
+            is_active: true,
+            editable: true,
+            source: "user".to_string(),
+            base_url: None,
+            api_key_mask: None,
+            access_key_id_mask: None,
+            access_key_secret_mask: None,
+            security_token_mask: None,
+            auth_source: Some("ecs_ram_role".to_string()),
+        };
+        let manual = ExistingProvider {
+            auth_source: None,
+            ..ecs.clone()
+        };
+        let mut ecs_values = HashMap::from([
+            ("auth_source".to_string(), "ecs_ram_role".to_string()),
+            ("access_key_id".to_string(), "manual-ak".to_string()),
+            ("access_key_secret".to_string(), "manual-sk".to_string()),
+            ("security_token".to_string(), "manual-token".to_string()),
+        ]);
+        let mut manual_values = ecs_values.clone();
+
+        clear_ecs_auth_source_for_manual_aliyun_edit(&ecs, &mut ecs_values);
+        clear_ecs_auth_source_for_manual_aliyun_edit(&manual, &mut manual_values);
+
+        assert!(!ecs_values.contains_key("auth_source"));
+        assert_eq!(
+            ecs_values.get("access_key_id").map(String::as_str),
+            Some("manual-ak")
+        );
+        assert_eq!(
+            ecs_values.get("access_key_secret").map(String::as_str),
+            Some("manual-sk")
+        );
+        assert_eq!(
+            ecs_values.get("security_token").map(String::as_str),
+            Some("manual-token")
+        );
+        assert_eq!(
+            manual_values.get("auth_source").map(String::as_str),
+            Some("ecs_ram_role")
+        );
     }
 }
