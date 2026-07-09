@@ -34,9 +34,54 @@ jobs:
     steps:
       - name: Configure mirrors and install base tools (Alinux4)
         if: matrix.container != ''
+        env:
+          USE_VPC_MIRROR: "true"
+        shell: bash
         run: |
-          sed -i -e "s/cloud.aliyuncs/aliyun/g" /etc/yum.repos.d/*.repo
-          dnf install -y tar git sudo
+          set -euo pipefail
+
+          configure_repo_host() {
+            local host="$1"
+            sed -i \
+              -e "s#mirrors\.cloud\.aliyuncs\.com#${host}#g" \
+              -e "s#mirrors\.aliyun\.com#${host}#g" \
+              /etc/yum.repos.d/*.repo
+            dnf clean all
+          }
+
+          import_alinux_gpg_key() {
+            local host="$1"
+            local key_url="http://${host}/alinux/4/RPM-GPG-KEY-ALINUX-4"
+            echo "Importing Alinux GPG key from ${key_url}"
+            curl -fsSL --connect-timeout 10 --max-time 60 -o /tmp/RPM-GPG-KEY-ALINUX-4 "${key_url}"
+            rpm --import /tmp/RPM-GPG-KEY-ALINUX-4
+          }
+
+          configure_alinux_mirror() {
+            if [ "${USE_VPC_MIRROR:-false}" = "true" ]; then
+              for attempt in 1 2; do
+                echo "Trying VPC Alinux mirror (${attempt}/2)"
+                configure_repo_host mirrors.cloud.aliyuncs.com
+                if import_alinux_gpg_key mirrors.cloud.aliyuncs.com; then
+                  return 0
+                fi
+                sleep 2
+              done
+              echo "VPC Alinux mirror failed; falling back to public mirror"
+            else
+              echo "Using public Alinux mirror"
+            fi
+
+            configure_repo_host mirrors.aliyun.com
+            import_alinux_gpg_key mirrors.aliyun.com
+          }
+
+          dnf_install() {
+            dnf --setopt=timeout=120 --setopt=retries=5 --setopt=minrate=1 install -y "$@"
+          }
+
+          configure_alinux_mirror
+          dnf_install tar git sudo
           # Fix sudo PAM in container: replace with permissive config
           cat > /etc/pam.d/sudo <<'EOF'
           #%PAM-1.0
