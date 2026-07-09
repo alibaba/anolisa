@@ -6,6 +6,7 @@
 //!   / runtime / osbase). Each surface uses its own appropriate vocabulary.
 
 pub mod common;
+pub(crate) mod state_view;
 pub mod tier1;
 
 // Tier 2 surfaces
@@ -45,7 +46,7 @@ pub struct Cli {
     #[arg(long, global = true, value_enum)]
     pub install_mode: Option<InstallMode>,
 
-    /// Custom install prefix (system-mode only)
+    /// Custom system install prefix, including user-mode system visibility
     #[arg(long, global = true, value_name = "PATH")]
     pub prefix: Option<PathBuf>,
 

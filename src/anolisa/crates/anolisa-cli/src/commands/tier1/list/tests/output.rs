@@ -19,7 +19,10 @@ fn row_json_retains_status_and_adds_local_fields() {
         what_provides: Vec::new(),
     };
     let rows = build_rows(&index, &args, &state, Some(&query));
-    let payload = ListPayload { components: rows };
+    let payload = ListPayload {
+        components: rows,
+        warnings: Vec::new(),
+    };
 
     let json_str = serde_json::to_string(&payload).expect("serialize");
     let val: serde_json::Value = serde_json::from_str(&json_str).expect("reparse");
@@ -33,6 +36,9 @@ fn row_json_retains_status_and_adds_local_fields() {
     assert_eq!(sight["status"], "not_installed");
     assert_eq!(sight["local_state"], "observed");
     assert_eq!(sight["ownership"], "rpm");
+    assert_eq!(sight["scope"], "none");
+    assert_eq!(sight["active"], false);
+    assert_eq!(sight["mutable_by_current_invocation"], false);
     assert_eq!(sight["action"], "install");
 }
 
@@ -46,6 +52,11 @@ fn human_header_contains_local_state() {
         status: "not_installed".to_string(),
         local_state: "observed".to_string(),
         ownership: "none".to_string(),
+        scope: "system".to_string(),
+        active: true,
+        mutable_by_current_invocation: false,
+        shadowed_by: None,
+        state_path: Some("/var/lib/anolisa/installed.toml".to_string()),
         action: "install".to_string(),
         rpm_package: Some("agentsight".to_string()),
         rpm_evr: Some("1.2.3-1.al8".to_string()),
@@ -53,7 +64,9 @@ fn human_header_contains_local_state() {
         rpm_source_repo: Some("@System".to_string()),
     }];
 
-    assert!(human_header(&rows).contains("LOCAL STATE"));
+    let header = human_header(&rows);
+    assert!(header.contains("SCOPE"));
+    assert!(header.contains("LOCAL STATE"));
 }
 
 #[test]

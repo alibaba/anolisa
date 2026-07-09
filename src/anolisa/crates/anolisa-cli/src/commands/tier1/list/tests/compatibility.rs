@@ -143,7 +143,10 @@ fn json_payload_uses_components_key() {
     let args = ListArgs { installed: false };
     let state = empty_state();
     let rows = build_rows(&index, &args, &state, None);
-    let payload = ListPayload { components: rows };
+    let payload = ListPayload {
+        components: rows,
+        warnings: Vec::new(),
+    };
     let json_str = serde_json::to_string(&payload).expect("serialize");
     let val: serde_json::Value = serde_json::from_str(&json_str).expect("reparse");
     assert!(val.get("components").is_some());
@@ -155,7 +158,10 @@ fn json_payload_status_reflects_install_state() {
     let args = ListArgs { installed: false };
     let state = state_with_object(ObjectKind::Component, "agentsight", ObjectStatus::Installed);
     let rows = build_rows(&index, &args, &state, None);
-    let payload = ListPayload { components: rows };
+    let payload = ListPayload {
+        components: rows,
+        warnings: Vec::new(),
+    };
     let json_str = serde_json::to_string(&payload).expect("serialize");
     let val: serde_json::Value = serde_json::from_str(&json_str).expect("reparse");
     let components = val["components"].as_array().unwrap();

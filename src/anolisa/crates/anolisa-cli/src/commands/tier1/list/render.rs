@@ -4,14 +4,16 @@ use crate::commands::tier1::list::Row;
 pub(super) fn human_header(rows: &[Row]) -> String {
     let widths = HumanWidths::for_rows(rows);
     format!(
-        "{:<name_width$}{:<backends_width$}{:<local_state_width$}{:<ownership_width$}{}",
+        "{:<name_width$}{:<backends_width$}{:<scope_width$}{:<local_state_width$}{:<ownership_width$}{}",
         "NAME",
         "BACKENDS",
+        "SCOPE",
         "LOCAL STATE",
         "OWNERSHIP",
         "ACTION",
         name_width = widths.name,
         backends_width = widths.backends,
+        scope_width = widths.scope,
         local_state_width = widths.local_state,
         ownership_width = widths.ownership,
     )
@@ -20,6 +22,7 @@ pub(super) fn human_header(rows: &[Row]) -> String {
 struct HumanWidths {
     name: usize,
     backends: usize,
+    scope: usize,
     local_state: usize,
     ownership: usize,
 }
@@ -41,6 +44,7 @@ impl HumanWidths {
                 .unwrap_or(8)
                 .max(8)
                 + 4,
+            scope: rows.iter().map(|r| r.scope.len()).max().unwrap_or(5).max(5) + 4,
             local_state: rows
                 .iter()
                 .map(|r| r.local_state.len())
@@ -76,14 +80,16 @@ pub(super) fn render_human(rows: &[Row], no_color: bool) {
             row.backends.join(",")
         };
         println!(
-            "{:<name_width$}{:<backends_width$}{}{:<ownership_width$}{}",
+            "{:<name_width$}{:<backends_width$}{:<scope_width$}{}{:<ownership_width$}{}",
             row.name,
             backend_str,
+            row.scope,
             pad_right(color.status(&row.local_state), widths.local_state),
             row.ownership,
             row.action,
             name_width = widths.name,
             backends_width = widths.backends,
+            scope_width = widths.scope,
             ownership_width = widths.ownership,
         );
     }
