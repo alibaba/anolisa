@@ -187,6 +187,11 @@ pub struct ClaimResourceRef {
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AdapterConditionKind {
+    /// The component/adapter source that originally supplied this receipt is
+    /// still visible through ANOLISA's installed-state view. This manager-level
+    /// condition lets automation distinguish a broken framework registration
+    /// from an orphaned receipt whose system/user component source disappeared.
+    SourceAvailable,
     /// The framework itself is detectable on the host.
     FrameworkDetected,
     /// The installed resource bundle still matches the enable-time digest.

@@ -39,7 +39,8 @@ use anolisa_core::adapter::AdapterError;
 use anolisa_core::adapter::claim::{AdapterClaim, ClaimStatus};
 use anolisa_core::adapter::driver::{AdapterStatusReport, DriverPlan};
 use anolisa_core::adapter::manager::{
-    AdapterManager, DisableOutcome, EnableOutcome, ScanEntry, ScanReport, StatusReport,
+    AdapterManager, AdapterSourceStatus, DisableOutcome, EnableOutcome, ScanEntry, ScanReport,
+    StatusReport,
 };
 
 use crate::commands::common;
@@ -103,6 +104,15 @@ struct ScanRow {
     enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     claim_status: Option<ClaimStatus>,
+    /// Receipt source health. Present only when a receipt exists, so JSON
+    /// consumers can distinguish a disabled declaration from an orphaned
+    /// enabled receipt whose source component disappeared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_status: Option<&'static str>,
+    /// Human-readable explanation for [`Self::source_status`] when the source
+    /// is unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_reason: Option<String>,
 }
 
 /// `adapter scan` JSON output.
@@ -208,12 +218,12 @@ fn handle_scan(ctx: &CliContext) -> Result<(), CliError> {
         return Ok(());
     }
     println!(
-        "{:<16} {:<10} {:<14} {:<9} {:<9} {:<9} {:<8} STATE",
-        "COMPONENT", "FRAMEWORK", "TYPE", "DECLARED", "RESOURCE", "DRIVER", "DETECTED"
+        "{:<16} {:<10} {:<14} {:<9} {:<9} {:<9} {:<8} {:<9} STATE",
+        "COMPONENT", "FRAMEWORK", "TYPE", "DECLARED", "RESOURCE", "DRIVER", "DETECTED", "SOURCE"
     );
     for row in &report.entries {
         println!(
-            "{:<16} {:<10} {:<14} {:<9} {:<9} {:<9} {:<8} {}",
+            "{:<16} {:<10} {:<14} {:<9} {:<9} {:<9} {:<8} {:<9} {}",
             row.component,
             row.framework,
             row.adapter_type.as_deref().unwrap_or("-"),
@@ -225,8 +235,12 @@ fn handle_scan(ctx: &CliContext) -> Result<(), CliError> {
             },
             yes_no(row.driver_available),
             yes_no(row.framework_detected),
+            source_status_label(row.source_status),
             scan_state_label(row),
         );
+        if let Some(reason) = &row.source_reason {
+            println!("  source: {reason}");
+        }
     }
     Ok(())
 }
@@ -246,16 +260,23 @@ fn scan_row_from_entry(row: &ScanEntry) -> ScanRow {
         adapter_type: row.adapter_type.clone(),
         enabled: row.enabled,
         claim_status: row.claim_status,
+        source_status: row.source_status.map(AdapterSourceStatus::label),
+        source_reason: row.source_reason.clone(),
     }
 }
 
 fn scan_state_label(row: &ScanEntry) -> &'static str {
-    match (row.enabled, row.claim_status) {
-        (true, Some(ClaimStatus::Enabled)) => "enabled",
-        (true, Some(ClaimStatus::CleanupFailed)) => "cleanup_failed",
-        (true, None) => "enabled",
-        (false, _) => "-",
+    match (row.enabled, row.claim_status, row.source_status) {
+        (true, Some(ClaimStatus::CleanupFailed), _) => "cleanup_failed",
+        (true, _, Some(AdapterSourceStatus::Missing)) => "orphaned",
+        (true, Some(ClaimStatus::Enabled), _) => "enabled",
+        (true, None, _) => "enabled",
+        (false, _, _) => "-",
     }
+}
+
+fn source_status_label(status: Option<AdapterSourceStatus>) -> &'static str {
+    status.map(AdapterSourceStatus::label).unwrap_or("-")
 }
 
 // ---------------------------------------------------------------------------
@@ -633,6 +654,8 @@ mod tests {
             adapter_type: Some("plugin".to_string()),
             enabled: false,
             claim_status: None,
+            source_status: None,
+            source_reason: None,
         };
         let row = scan_row_from_entry(&entry);
         assert_eq!(row.adapter_type.as_deref(), Some("plugin"));
@@ -650,8 +673,36 @@ mod tests {
             adapter_type: None,
             enabled: false,
             claim_status: None,
+            source_status: None,
+            source_reason: None,
         };
         let row = scan_row_from_entry(&entry);
         assert!(row.adapter_type.is_none());
+    }
+
+    #[test]
+    fn scan_row_includes_source_health_for_receipt() {
+        let entry = ScanEntry {
+            component: "tokenless".to_string(),
+            framework: "openclaw".to_string(),
+            declared: false,
+            resource_root: None,
+            driver_available: true,
+            framework_detected: true,
+            adapter_type: Some("plugin".to_string()),
+            enabled: true,
+            claim_status: Some(ClaimStatus::Enabled),
+            source_status: Some(AdapterSourceStatus::Missing),
+            source_reason: Some("no visible installed component".to_string()),
+        };
+
+        let row = scan_row_from_entry(&entry);
+
+        assert_eq!(row.source_status, Some("missing"));
+        assert_eq!(
+            row.source_reason.as_deref(),
+            Some("no visible installed component")
+        );
+        assert_eq!(scan_state_label(&entry), "orphaned");
     }
 }

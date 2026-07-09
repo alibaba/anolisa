@@ -36,8 +36,8 @@ use anolisa_platform::fs_layout::{FsLayout, InstallMode};
 use super::AdapterError;
 use super::claim::{AdapterClaim, ClaimStatus};
 use super::driver::{
-    AdapterOps, AdapterStatusReport, CliOutput, DisableReport, DriverCtx, DriverPlan,
-    FrameworkCommand, HostEnv,
+    AdapterCondition, AdapterConditionKind, AdapterOps, AdapterStatusReport, AdapterSummary,
+    CliOutput, ConditionStatus, DisableReport, DriverCtx, DriverPlan, FrameworkCommand, HostEnv,
 };
 use super::registry::DriverRegistry;
 use crate::central_log::{CentralLog, LogKind, LogRecord, LogStatus, Severity};
@@ -102,6 +102,41 @@ pub struct ScanEntry {
     pub enabled: bool,
     /// Lifecycle status of the receipt, when one exists.
     pub claim_status: Option<ClaimStatus>,
+    /// Availability of the component/adapter source behind an enabled
+    /// receipt. `None` means this row has no receipt, so source health is not
+    /// a persisted-state concern.
+    pub source_status: Option<AdapterSourceStatus>,
+    /// Human-readable reason for [`Self::source_status`], present when source
+    /// health is missing or otherwise needs operator explanation.
+    pub source_reason: Option<String>,
+}
+
+/// Source availability for an adapter receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdapterSourceStatus {
+    /// The component is still installed in a visible scope and its adapter
+    /// resource root can be resolved.
+    Available,
+    /// The receipt remains, but the visible component source or adapter
+    /// resource root is gone.
+    Missing,
+}
+
+impl AdapterSourceStatus {
+    /// Stable wire/human label for scan JSON and table output.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Missing => "missing",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SourceProbe {
+    status: AdapterSourceStatus,
+    resource_root: Option<PathBuf>,
+    reason: Option<String>,
 }
 
 /// Full result of [`AdapterManager::scan`].
@@ -177,6 +212,10 @@ pub struct AdapterManager {
     /// Resource discovery is scope-independent: a user-mode enable may
     /// use adapter resources from a system-installed package.
     all_datadir_roots: Vec<PathBuf>,
+    /// Warnings discovered by the caller while deriving visible roots. Scan
+    /// returns these with manager-local manifest/state warnings so read-only
+    /// adapter surfaces do not lose StateView visibility diagnostics.
+    visibility_warnings: Vec<String>,
     user_home: Option<PathBuf>,
     /// Identity recorded as the central-log actor.
     actor: String,
@@ -200,9 +239,28 @@ impl AdapterManager {
             state_path,
             visible_roots: vec![primary],
             all_datadir_roots,
+            visibility_warnings: Vec::new(),
             user_home,
             actor,
         }
+    }
+
+    /// Replace the visible root set. Receipts still read/write only the
+    /// manager's primary state path; this controls read-only source discovery.
+    pub fn set_visible_roots(&mut self, roots: Vec<VisibleRoot>) {
+        if roots.is_empty() {
+            return;
+        }
+        self.visible_roots.clear();
+        self.all_datadir_roots.clear();
+        for root in roots {
+            self.push_visible_root(root);
+        }
+    }
+
+    /// Preserve a non-fatal root-visibility warning for the next scan report.
+    pub fn push_visibility_warning(&mut self, warning: String) {
+        self.visibility_warnings.push(warning);
     }
 
     /// Add a visible root with explicit contract-scope datadir pairing.
@@ -268,16 +326,7 @@ impl AdapterManager {
         let state = InstalledState::load(&self.state_path)?;
         let mut entries: BTreeMap<(String, String), ScanEntry> = BTreeMap::new();
         for (component, framework, resource_root) in self.discover_all() {
-            let driver = self.registry.get(&framework);
-            let driver_available = driver.is_some();
-            let framework_detected = driver
-                .map(|d| {
-                    d.detect(&HostEnv {
-                        user_home: self.user_home.clone(),
-                    })
-                    .detected
-                })
-                .unwrap_or(false);
+            let (driver_available, framework_detected) = self.driver_scan_facts(&framework);
             let claim = state.find_adapter_claim(&component, &framework);
             entries.insert(
                 (component.clone(), framework.clone()),
@@ -291,11 +340,13 @@ impl AdapterManager {
                     adapter_type: None,
                     enabled: claim.is_some(),
                     claim_status: claim.map(|c| c.status),
+                    source_status: None,
+                    source_reason: None,
                 },
             );
         }
 
-        let (declarations, warnings) = self.load_visible_adapter_declarations(&state);
+        let (declarations, declaration_warnings) = self.load_visible_adapter_declarations(&state);
         for declaration in declarations {
             let key = (declaration.component.clone(), declaration.framework.clone());
             if let Some(entry) = entries.get_mut(&key) {
@@ -328,16 +379,8 @@ impl AdapterManager {
                 )
             });
 
-            let driver = self.registry.get(&declaration.framework);
-            let driver_available = driver.is_some();
-            let framework_detected = driver
-                .map(|d| {
-                    d.detect(&HostEnv {
-                        user_home: self.user_home.clone(),
-                    })
-                    .detected
-                })
-                .unwrap_or(false);
+            let (driver_available, framework_detected) =
+                self.driver_scan_facts(&declaration.framework);
             let claim = state.find_adapter_claim(&declaration.component, &declaration.framework);
             entries.insert(
                 key,
@@ -351,10 +394,43 @@ impl AdapterManager {
                     adapter_type: declaration.adapter_type,
                     enabled: claim.is_some(),
                     claim_status: claim.map(|c| c.status),
+                    source_status: None,
+                    source_reason: None,
                 },
             );
         }
 
+        for claim in &state.adapter_claims {
+            let source = self.source_probe_for_claim(claim, &state);
+            let (driver_available, framework_detected) = self.driver_scan_facts(&claim.framework);
+            let key = (claim.component.clone(), claim.framework.clone());
+            let entry = entries.entry(key).or_insert_with(|| ScanEntry {
+                component: claim.component.clone(),
+                framework: claim.framework.clone(),
+                declared: false,
+                resource_root: source.resource_root.clone(),
+                driver_available,
+                framework_detected,
+                adapter_type: claim.adapter_type.clone(),
+                enabled: false,
+                claim_status: None,
+                source_status: None,
+                source_reason: None,
+            });
+            entry.enabled = true;
+            entry.claim_status = Some(claim.status);
+            if entry.adapter_type.is_none() {
+                entry.adapter_type = claim.adapter_type.clone();
+            }
+            if entry.resource_root.is_none() {
+                entry.resource_root = source.resource_root.clone();
+            }
+            entry.source_status = Some(source.status);
+            entry.source_reason = source.reason;
+        }
+
+        let mut warnings = self.visibility_warnings.clone();
+        warnings.extend(declaration_warnings);
         Ok(ScanReport {
             entries: entries.into_values().collect(),
             warnings,
@@ -811,6 +887,7 @@ impl AdapterManager {
                 continue;
             }
             let framework = claim.framework.clone();
+            let source = self.source_probe_for_claim(claim, &state);
             let driver = match self.registry.get(&framework) {
                 Some(d) => d,
                 None => {
@@ -819,15 +896,22 @@ impl AdapterManager {
                     entries.push(StatusEntry {
                         component: claim.component.clone(),
                         framework,
-                        report: unverified_report("no built-in driver for framework"),
+                        report: with_source_condition(
+                            unverified_report("no built-in driver for framework"),
+                            &source,
+                        ),
                     });
                     continue;
                 }
             };
 
-            let resource_root = self
-                .discover_resource_root(&claim.component, &framework)
-                .map(|(path, _)| path)
+            let resource_root = source
+                .resource_root
+                .clone()
+                .or_else(|| {
+                    self.discover_resource_root(&claim.component, &framework)
+                        .map(|(path, _)| path)
+                })
                 .unwrap_or_else(|| claim.resource_root.clone());
             let label = format!("adapter status {} {framework}", claim.component);
             // Two-phase ops mirroring enable/disable: probe to learn the
@@ -890,7 +974,7 @@ impl AdapterManager {
                 &driver.allowed_external_roots(&ctx),
                 &self.all_datadir_roots,
             )?;
-            let report = driver.status(claim, &ctx)?;
+            let report = with_source_condition(driver.status(claim, &ctx)?, &source);
             entries.push(StatusEntry {
                 component: claim.component.clone(),
                 framework,
@@ -902,6 +986,99 @@ impl AdapterManager {
     }
 
     // -- discovery helpers --------------------------------------------------
+
+    fn driver_scan_facts(&self, framework: &str) -> (bool, bool) {
+        let driver = self.registry.get(framework);
+        let driver_available = driver.is_some();
+        let framework_detected = driver
+            .map(|d| {
+                d.detect(&HostEnv {
+                    user_home: self.user_home.clone(),
+                })
+                .detected
+            })
+            .unwrap_or(false);
+        (driver_available, framework_detected)
+    }
+
+    fn source_probe_for_claim(
+        &self,
+        claim: &AdapterClaim,
+        current_state: &InstalledState,
+    ) -> SourceProbe {
+        self.source_probe(&claim.component, &claim.framework, current_state)
+    }
+
+    fn source_probe(
+        &self,
+        component: &str,
+        framework: &str,
+        current_state: &InstalledState,
+    ) -> SourceProbe {
+        let vr = match self.find_component_visible_root(component, current_state) {
+            Ok(Some(vr)) => vr,
+            Ok(None) => {
+                return source_missing(format!(
+                    "no visible installed component '{component}' supplies this adapter"
+                ));
+            }
+            Err(err) => {
+                return source_missing(format!(
+                    "failed to inspect visible component source for '{component}': {err}"
+                ));
+            }
+        };
+
+        let resolved = match super::contract::resolve_component_contract_with_source(
+            component,
+            std::slice::from_ref(&vr.state_dir),
+            &vr.contract_datadir_roots,
+        ) {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                return source_missing(format!(
+                    "component contract unavailable for '{component}': {err}"
+                ));
+            }
+        };
+        let manifest = resolved.manifest;
+        if manifest.component.name != component {
+            return source_missing(format!(
+                "component contract declares '{}', expected '{component}'",
+                manifest.component.name
+            ));
+        }
+        if !declared_frameworks(&manifest)
+            .iter()
+            .any(|fw| fw == framework)
+        {
+            return source_missing(format!(
+                "component '{component}' no longer declares adapter framework '{framework}'"
+            ));
+        }
+
+        let contract_datadir_root = contract_datadir_root_from_source(
+            component,
+            &resolved.path,
+            &vr.contract_datadir_roots,
+        );
+        match self.resolve_resource_root(
+            component,
+            framework,
+            &manifest,
+            &vr.contract_datadir_roots,
+            contract_datadir_root.as_deref(),
+        ) {
+            Ok((resource_root, _)) => SourceProbe {
+                status: AdapterSourceStatus::Available,
+                resource_root: Some(resource_root),
+                reason: None,
+            },
+            Err(err) => source_missing(format!(
+                "adapter source unavailable for '{component}/{framework}': {err}"
+            )),
+        }
+    }
 
     /// Resolve the framework for an operation from the installed manifest:
     /// use the explicit one when declared, else the single declared
@@ -2417,7 +2594,6 @@ fn plan_disable_report(claim: &AdapterClaim) -> DisableReport {
 /// A status report for a receipt that cannot be verified at all (e.g. no
 /// driver). Reports `Unknown` rather than faking a healthy/absent verdict.
 fn unverified_report(reason: &str) -> AdapterStatusReport {
-    use super::driver::{AdapterCondition, AdapterConditionKind, AdapterSummary, ConditionStatus};
     AdapterStatusReport {
         summary: AdapterSummary::Unknown,
         conditions: vec![AdapterCondition {
@@ -2427,6 +2603,39 @@ fn unverified_report(reason: &str) -> AdapterStatusReport {
             resource: None,
         }],
     }
+}
+
+fn source_missing(reason: String) -> SourceProbe {
+    SourceProbe {
+        status: AdapterSourceStatus::Missing,
+        resource_root: None,
+        reason: Some(reason),
+    }
+}
+
+fn source_condition(source: &SourceProbe) -> AdapterCondition {
+    AdapterCondition {
+        kind: AdapterConditionKind::SourceAvailable,
+        status: match source.status {
+            AdapterSourceStatus::Available => ConditionStatus::True,
+            AdapterSourceStatus::Missing => ConditionStatus::False,
+        },
+        reason: source.reason.clone(),
+        resource: None,
+    }
+}
+
+fn with_source_condition(
+    mut report: AdapterStatusReport,
+    source: &SourceProbe,
+) -> AdapterStatusReport {
+    if source.status == AdapterSourceStatus::Missing
+        && report.summary != AdapterSummary::CleanupFailed
+    {
+        report.summary = AdapterSummary::Degraded;
+    }
+    report.conditions.insert(0, source_condition(source));
+    report
 }
 
 /// Reorder datadir roots so `preferred` is tried first, then the remaining
@@ -2982,6 +3191,155 @@ source = "adapters/openclaw"
         let dir = datadir.join("components").join(component);
         std::fs::create_dir_all(&dir).expect("mkdir contract");
         std::fs::write(dir.join("component.toml"), content).expect("write contract");
+    }
+
+    fn openclaw_claim(component: &str, resource_root: PathBuf) -> AdapterClaim {
+        use crate::adapter::claim::{
+            CLAIM_SCHEMA_VERSION, DRIVER_SCHEMA_VERSION, DriverPayload, OpenClawClaim,
+        };
+
+        AdapterClaim {
+            claim_schema: CLAIM_SCHEMA_VERSION,
+            component: component.to_string(),
+            framework: "openclaw".to_string(),
+            plugin_id: Some(component.to_string()),
+            adapter_type: Some("plugin".to_string()),
+            enabled_at: "2026-07-09T00:00:00Z".to_string(),
+            resource_root,
+            bundle_digest: None,
+            driver_schema: DRIVER_SCHEMA_VERSION,
+            status: ClaimStatus::Enabled,
+            resources: Vec::new(),
+            driver_payload: DriverPayload::OpenClaw(OpenClawClaim {
+                state_dir_resource: "openclaw_state".to_string(),
+                plugin_resource: "openclaw_plugin".to_string(),
+                skill_resources: Vec::new(),
+                config_resources: Vec::new(),
+            }),
+        }
+    }
+
+    fn seed_adapter_claim(state_dir: &std::path::Path, claim: AdapterClaim) {
+        let mut state = InstalledState::default();
+        state.upsert_adapter_claim(claim);
+        std::fs::create_dir_all(state_dir).expect("mkdir state");
+        state
+            .save(&state_dir.join("installed.toml"))
+            .expect("save state");
+    }
+
+    #[test]
+    fn scan_surfaces_orphaned_receipt_when_source_component_is_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        let missing_resource = tmp
+            .path()
+            .join("data")
+            .join("adapters")
+            .join("tokenless")
+            .join("openclaw");
+        seed_adapter_claim(&state_dir, openclaw_claim("tokenless", missing_resource));
+
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let mut manager = AdapterManager::new(layout, Some(tmp.path().join("home")), "test".into());
+        manager.state_path = state_dir.join("installed.toml");
+        manager.visible_roots = vec![VisibleRoot {
+            state_dir,
+            contract_datadir_roots: vec![tmp.path().join("data")],
+        }];
+        manager.all_datadir_roots = vec![tmp.path().join("data")];
+
+        let report = manager.scan().expect("scan");
+        let entry = report
+            .entries
+            .iter()
+            .find(|entry| entry.component == "tokenless" && entry.framework == "openclaw")
+            .expect("orphaned receipt should be listed");
+
+        assert!(entry.enabled);
+        assert_eq!(entry.source_status, Some(AdapterSourceStatus::Missing));
+        assert!(
+            entry
+                .source_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("no visible installed component")),
+            "source reason should explain missing component, got: {:?}",
+            entry.source_reason
+        );
+    }
+
+    #[test]
+    fn status_marks_receipt_degraded_when_source_component_is_missing() {
+        use crate::adapter::driver::{AdapterConditionKind, AdapterSummary, ConditionStatus};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        let missing_resource = tmp
+            .path()
+            .join("data")
+            .join("adapters")
+            .join("tokenless")
+            .join("openclaw");
+        seed_adapter_claim(&state_dir, openclaw_claim("tokenless", missing_resource));
+
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let mut manager = AdapterManager::new(layout, Some(tmp.path().join("home")), "test".into());
+        manager.state_path = state_dir.join("installed.toml");
+        manager.visible_roots = vec![VisibleRoot {
+            state_dir,
+            contract_datadir_roots: vec![tmp.path().join("data")],
+        }];
+        manager.all_datadir_roots = vec![tmp.path().join("data")];
+
+        let report = manager.status(Some("tokenless")).expect("status");
+        let entry = report.entries.first().expect("receipt status");
+
+        assert_eq!(entry.report.summary, AdapterSummary::Degraded);
+        let source_condition = entry
+            .report
+            .conditions
+            .iter()
+            .find(|condition| condition.kind == AdapterConditionKind::SourceAvailable)
+            .expect("source availability condition");
+        assert_eq!(source_condition.status, ConditionStatus::False);
+        assert!(
+            source_condition
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("no visible installed component")),
+            "source condition should explain missing component, got: {:?}",
+            source_condition.reason
+        );
+    }
+
+    #[test]
+    fn disable_dry_run_works_when_adapter_source_is_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        let missing_resource = tmp
+            .path()
+            .join("data")
+            .join("adapters")
+            .join("tokenless")
+            .join("openclaw");
+        seed_adapter_claim(&state_dir, openclaw_claim("tokenless", missing_resource));
+
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let mut manager = AdapterManager::new(layout, Some(tmp.path().join("home")), "test".into());
+        manager.state_path = state_dir.join("installed.toml");
+        manager.visible_roots = vec![VisibleRoot {
+            state_dir,
+            contract_datadir_roots: vec![tmp.path().join("data")],
+        }];
+        manager.all_datadir_roots = vec![tmp.path().join("data")];
+
+        let outcome = manager
+            .disable("tokenless", Some("openclaw"), true)
+            .expect("disable dry-run should not require source root");
+
+        assert!(outcome.dry_run);
+        assert!(!outcome.claim_removed);
+        assert!(outcome.report.cleanup_complete);
     }
 
     // -- contract-driven resource root discovery --------------------------------

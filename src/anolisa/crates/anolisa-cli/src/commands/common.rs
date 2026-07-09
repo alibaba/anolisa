@@ -6,11 +6,12 @@
 
 use std::path::{Path, PathBuf};
 
-use anolisa_core::adapter::manager::AdapterManager;
+use anolisa_core::adapter::manager::{AdapterManager, VisibleRoot};
 use anolisa_core::{Catalog, CatalogLayers, InstalledState, ObjectKind, ObjectStatus};
 use anolisa_platform::fs_layout::FsLayout;
 
 use crate::color::Palette;
+use crate::commands::state_view::{StateView, StateVisibility};
 use crate::context::{CliContext, InstallMode};
 use crate::packaged;
 use crate::repo_config::{RepoConfig, RepoConfigProvisioning};
@@ -393,12 +394,38 @@ pub(crate) fn status_is_enabled(status_label: &str) -> bool {
 /// Build an [`AdapterManager`] for the active layout, shared between
 /// `adapter` and `status` handlers.
 pub(crate) fn build_adapter_manager(ctx: &CliContext) -> AdapterManager {
-    use anolisa_core::adapter::manager::VisibleRoot;
-
     let layout = resolve_layout(ctx);
     let env = anolisa_env::EnvService::detect();
     let mut manager = AdapterManager::new(layout.clone(), Some(env.home), env.user);
 
+    match StateView::load(ctx, "adapter", StateVisibility::UserPlusSystem) {
+        Ok(view) => {
+            let roots = view
+                .visible_roots
+                .iter()
+                .map(|root| visible_root_for_adapter(&root.layout))
+                .collect();
+            manager.set_visible_roots(roots);
+            for warning in view.warnings {
+                manager.push_visibility_warning(warning);
+            }
+        }
+        Err(_) => {
+            manager.set_visible_roots(vec![visible_root_for_adapter(&layout)]);
+        }
+    }
+
+    manager
+}
+
+fn visible_root_for_adapter(layout: &FsLayout) -> VisibleRoot {
+    VisibleRoot {
+        state_dir: layout.state_dir.clone(),
+        contract_datadir_roots: adapter_contract_datadir_roots(layout),
+    }
+}
+
+fn adapter_contract_datadir_roots(layout: &FsLayout) -> Vec<PathBuf> {
     // Two independent datadir-discovery mechanisms are layered here:
     //
     //   packaged_datadir_root()  — runtime probe: env override → exe-sibling
@@ -407,44 +434,25 @@ pub(crate) fn build_adapter_manager(ctx: &CliContext) -> AdapterManager {
     //                              packaged tree actually lives on disk.
     //
     //   layout.package_datadir() — FHS constant: `/usr/share/anolisa` (rebased
-    //                              under prefix). Always present in system mode
-    //                              so RPM-installed contracts are found even
-    //                              when the binary is at `/usr/local/bin/`.
+    //                              under prefix). System roots use it so
+    //                              RPM-installed contracts are found even when
+    //                              the binary is at `/usr/local/bin/`.
     //
-    // Both are added (deduped by push_primary_datadir_root / contains-check)
-    // because they cover different scenarios: the exe-sibling probe handles
-    // relocated installs; the FHS constant handles cross-install-method
-    // discovery (raw binary + RPM components).
-
-    if ctx.install_mode == InstallMode::User {
-        let system_layout = FsLayout::system(ctx.prefix.clone());
-        let mut system_datadirs = vec![system_layout.datadir.clone()];
-        if let Some(packaged) = packaged::packaged_datadir_root(&system_layout)
-            && !system_datadirs.contains(&packaged)
-        {
-            system_datadirs.push(packaged);
-        }
-        if let Some(pkg_dd) = system_layout.package_datadir()
-            && !system_datadirs.contains(&pkg_dd)
-        {
-            system_datadirs.push(pkg_dd);
-        }
-        manager.push_visible_root(VisibleRoot {
-            state_dir: system_layout.state_dir,
-            contract_datadir_roots: system_datadirs,
-        });
-    } else {
-        if let Some(packaged) = packaged::packaged_datadir_root(&layout)
-            && packaged != layout.datadir
-        {
-            manager.push_primary_datadir_root(packaged);
-        }
-        if let Some(pkg_dd) = layout.package_datadir() {
-            manager.push_primary_datadir_root(pkg_dd);
-        }
+    // Both are added (deduped) because they cover different scenarios: the
+    // exe-sibling probe handles relocated installs; the FHS constant handles
+    // cross-install-method discovery (raw binary + RPM components).
+    let mut roots = vec![layout.datadir.clone()];
+    if let Some(packaged) = packaged::packaged_datadir_root(layout)
+        && !roots.contains(&packaged)
+    {
+        roots.push(packaged);
     }
-
-    manager
+    if let Some(pkg_dd) = layout.package_datadir()
+        && !roots.contains(&pkg_dd)
+    {
+        roots.push(pkg_dd);
+    }
+    roots
 }
 
 /// In-memory migration of pre-v4 symlink entries.

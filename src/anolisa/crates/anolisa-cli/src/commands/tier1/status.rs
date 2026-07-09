@@ -20,6 +20,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anolisa_core::adapter::claim::ClaimStatus;
+#[cfg(test)]
+use anolisa_core::adapter::manager::AdapterSourceStatus;
 use anolisa_core::adapter::manager::ScanEntry;
 use anolisa_core::path_safety::{PathBoundaryError, validate_owned_path};
 use anolisa_core::{
@@ -87,6 +89,14 @@ pub(crate) struct AdapterSummaryRecord {
     pub(crate) enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) claim_status: Option<ClaimStatus>,
+    /// Source health for enabled adapter receipts. Present only for receipt
+    /// rows so JSON consumers can identify orphaned user receipts separately
+    /// from adapters that are simply not enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) source_status: Option<String>,
+    /// Explanation for a missing adapter source, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) source_reason: Option<String>,
 }
 
 /// JSON-shaped record for a single component, used in both the wire
@@ -607,6 +617,8 @@ fn adapter_summaries_for(component: &str, scan: Option<&[ScanEntry]>) -> Vec<Ada
             framework_detected: e.framework_detected,
             enabled: e.enabled,
             claim_status: e.claim_status,
+            source_status: e.source_status.map(|status| status.label().to_string()),
+            source_reason: e.source_reason.clone(),
         })
         .collect()
 }
@@ -1291,11 +1303,16 @@ fn render_warnings(warnings: &[String]) {
 }
 
 fn adapter_state_label(adapter: &AdapterSummaryRecord) -> &'static str {
-    match (adapter.enabled, adapter.claim_status) {
-        (_, Some(ClaimStatus::CleanupFailed)) => "cleanup_failed",
-        (true, Some(ClaimStatus::Enabled)) => "enabled",
-        (true, None) => "enabled",
-        (false, _) => "not enabled",
+    match (
+        adapter.enabled,
+        adapter.claim_status,
+        adapter.source_status.as_deref(),
+    ) {
+        (_, Some(ClaimStatus::CleanupFailed), _) => "cleanup_failed",
+        (true, _, Some("missing")) => "orphaned",
+        (true, Some(ClaimStatus::Enabled), _) => "enabled",
+        (true, None, _) => "enabled",
+        (false, _, _) => "not enabled",
     }
 }
 
@@ -2637,6 +2654,8 @@ mod tests {
             } else {
                 None
             },
+            source_status: enabled.then_some(AdapterSourceStatus::Available),
+            source_reason: None,
         }
     }
 
@@ -2740,6 +2759,8 @@ mod tests {
             framework_detected: true,
             enabled: true,
             claim_status: Some(ClaimStatus::Enabled),
+            source_status: Some("available".to_string()),
+            source_reason: None,
         };
         let json = serde_json::to_value(&record).expect("serialize");
         assert_eq!(json["component"], "tokenless");
@@ -2829,6 +2850,8 @@ mod tests {
             framework_detected: true,
             enabled: true,
             claim_status: Some(ClaimStatus::Enabled),
+            source_status: Some("available".to_string()),
+            source_reason: None,
         };
 
         assert_eq!(adapter_state_label(&base), "enabled");
@@ -2843,7 +2866,13 @@ mod tests {
 
         let mut not_enabled = base.clone();
         not_enabled.enabled = false;
+        not_enabled.source_status = None;
         assert_eq!(adapter_state_label(&not_enabled), "not enabled");
+
+        let mut orphaned = base.clone();
+        orphaned.source_status = Some("missing".to_string());
+        orphaned.source_reason = Some("no visible installed component".to_string());
+        assert_eq!(adapter_state_label(&orphaned), "orphaned");
     }
 
     // ── rpm-observed status (#958) ──────────────────────────────────
