@@ -282,13 +282,38 @@ fn validate_component_path_segment(component: &str, command: &str) -> Result<(),
 /// that the bundled layer is always-present and overlays stack on top.
 pub fn load_bundled_catalog(ctx: &CliContext, command: &str) -> Result<Catalog, CliError> {
     let layout = resolve_layout(ctx);
-    let bundled = packaged_manifests_root(&layout)
+    let bundled = discovered_packaged_manifests_root(&layout)
         .or_else(dev_tree_manifests)
         .unwrap_or_else(|| layout.datadir.join(MANIFESTS_SUBDIR));
+    load_catalog_from_layers(&layout, ctx.install_mode, bundled, command)
+}
 
+/// Load the layered catalog for a concrete filesystem layout.
+///
+/// Scoped read-only views may inspect records from a physical root that is
+/// not the current write root. Callers pass the root's layout and scope so
+/// bundled and overlay manifests are loaded from the same physical root as
+/// the state record being projected.
+pub fn load_catalog_for_layout(
+    layout: &FsLayout,
+    install_mode: InstallMode,
+    command: &str,
+) -> Result<Catalog, CliError> {
+    let bundled = trusted_manifests_root(layout, install_mode)
+        .or_else(dev_tree_manifests)
+        .unwrap_or_else(|| layout.datadir.join(MANIFESTS_SUBDIR));
+    load_catalog_from_layers(layout, install_mode, bundled, command)
+}
+
+fn load_catalog_from_layers(
+    layout: &FsLayout,
+    install_mode: InstallMode,
+    bundled: PathBuf,
+    command: &str,
+) -> Result<Catalog, CliError> {
     let overlay = layout.manifests_overlay.clone();
     let overlay = overlay.is_dir().then_some(overlay);
-    let (system, user) = match ctx.install_mode {
+    let (system, user) = match install_mode {
         InstallMode::System => (overlay, None),
         InstallMode::User => (None, overlay),
     };
@@ -304,7 +329,25 @@ pub fn load_bundled_catalog(ctx: &CliContext, command: &str) -> Result<Catalog, 
     })
 }
 
-fn packaged_manifests_root(layout: &FsLayout) -> Option<PathBuf> {
+fn trusted_manifests_root(layout: &FsLayout, install_mode: InstallMode) -> Option<PathBuf> {
+    match install_mode {
+        InstallMode::System => trusted_system_manifests_root(layout),
+        InstallMode::User => discovered_packaged_manifests_root(layout),
+    }
+}
+
+fn trusted_system_manifests_root(layout: &FsLayout) -> Option<PathBuf> {
+    let local = layout.datadir.join(MANIFESTS_SUBDIR);
+    if local.is_dir() {
+        return Some(local);
+    }
+    layout
+        .package_datadir()
+        .map(|datadir| datadir.join(MANIFESTS_SUBDIR))
+        .filter(|candidate| candidate.is_dir())
+}
+
+fn discovered_packaged_manifests_root(layout: &FsLayout) -> Option<PathBuf> {
     // Discover the packaged datadir (`<prefix>/share/anolisa/`) using
     // the shared probe in [`crate::packaged`] — that helper honors the
     // `ANOLISA_DATA_DIR` env override and binary-location lookup so a
@@ -679,6 +722,51 @@ dest = "{datadir}/adapters/sec-core/openclaw/"
                 .map(|e| (&e.component, &e.framework, e.declared))
                 .collect::<Vec<_>>(),
             report.warnings,
+        );
+    }
+
+    #[test]
+    fn system_scoped_catalog_ignores_data_dir_env_override() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().join("system")));
+        let env_datadir = tmp.path().join("env-datadir");
+        let env_runtime = env_datadir.join("manifests/runtime");
+        let system_runtime = layout.datadir.join("manifests/runtime");
+        std::fs::create_dir_all(&env_runtime).expect("mkdir env runtime");
+        std::fs::create_dir_all(&system_runtime).expect("mkdir system runtime");
+        std::fs::write(
+            env_runtime.join("agentsight.toml"),
+            r#"
+[component]
+name = "agentsight"
+version = "env"
+"#,
+        )
+        .expect("write env manifest");
+        std::fs::write(
+            system_runtime.join("agentsight.toml"),
+            r#"
+[component]
+name = "agentsight"
+version = "system"
+"#,
+        )
+        .expect("write system manifest");
+
+        let _guard = crate::packaged::DataDirEnvGuard::set(&env_datadir);
+        let catalog =
+            load_catalog_for_layout(&layout, InstallMode::System, "status").expect("catalog");
+
+        assert_eq!(
+            catalog.layers.bundled,
+            layout.datadir.join("manifests"),
+            "system-scoped catalog must use the system layout, not ANOLISA_DATA_DIR",
+        );
+        assert_eq!(
+            catalog
+                .component("agentsight")
+                .map(|m| m.component.version.as_str()),
+            Some("system")
         );
     }
 

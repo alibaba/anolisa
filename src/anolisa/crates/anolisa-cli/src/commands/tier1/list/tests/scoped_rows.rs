@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use anolisa_core::state::{InstalledState, ObjectStatus, Ownership};
+use anolisa_platform::fs_layout::FsLayout;
 
 use crate::commands::state_view::{ScopedStateRoot, StateScope, StateView};
 use crate::commands::tier1::list::{ListArgs, build_rows_from_view};
@@ -62,12 +63,21 @@ fn user_record_shadows_system_record_in_list_rows() {
 fn user_plus_system_view(user_state: InstalledState, system_state: InstalledState) -> StateView {
     let user_root = ScopedStateRoot {
         scope: StateScope::User,
+        layout: FsLayout::user_with_overrides(
+            PathBuf::from("/tmp/anolisa-home"),
+            None,
+            None,
+            Some(PathBuf::from("/tmp/anolisa-user-state")),
+            None,
+            None,
+        ),
         state_path: PathBuf::from("/tmp/anolisa-user-state/installed.toml"),
         writable: true,
         state: user_state,
     };
     let system_root = ScopedStateRoot {
         scope: StateScope::System,
+        layout: FsLayout::system(Some(PathBuf::from("/tmp/anolisa-system"))),
         state_path: PathBuf::from("/tmp/anolisa-system-state/installed.toml"),
         writable: false,
         state: system_state,

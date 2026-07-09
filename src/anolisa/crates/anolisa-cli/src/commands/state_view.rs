@@ -32,6 +32,7 @@ pub(crate) enum StateVisibility {
 #[derive(Debug, Clone)]
 pub(crate) struct ScopedStateRoot {
     pub(crate) scope: StateScope,
+    pub(crate) layout: FsLayout,
     pub(crate) state_path: PathBuf,
     pub(crate) writable: bool,
     pub(crate) state: InstalledState,
@@ -123,6 +124,7 @@ impl StateView {
             };
             let root = ScopedStateRoot {
                 scope: spec.scope,
+                layout,
                 state_path,
                 writable: spec.writable,
                 state,

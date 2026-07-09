@@ -15,6 +15,7 @@ use chrono::{SecondsFormat, Utc};
 use clap::Parser;
 use serde::Serialize;
 
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -53,6 +54,7 @@ use anolisa_platform::rpm_query::RpmPackageQuery;
 use crate::color::{Palette, pad_right};
 use crate::commands::common;
 use crate::commands::common::RepoPersistPolicy;
+use crate::commands::state_view::{ScopedStateRoot, StateScope, StateView, StateVisibility};
 use crate::commands::tier1::install::rpm_package_candidates_with_index;
 use crate::context::{CliContext, InstallMode};
 use crate::repo_config::BackendConfig;
@@ -93,6 +95,13 @@ pub(crate) struct AdapterSummaryRecord {
 pub(crate) struct ComponentRecord {
     pub(crate) name: String,
     pub(crate) status: String,
+    pub(crate) scope: String,
+    pub(crate) active: bool,
+    pub(crate) mutable_by_current_invocation: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) shadowed_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) state_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -127,24 +136,81 @@ pub(crate) struct ComponentRecord {
     pub(crate) provisioned_packages: Vec<String>,
 }
 
-pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
-    let mut state = common::load_installed_state(ctx, COMMAND)?;
-    let layout = common::resolve_layout(ctx);
-    common::migrate_v3_symlinks(&mut state, &layout);
-    // Catalog is best-effort: if manifests are missing or malformed, status
-    // still reports state-on-disk plus the integrity probe. The manifest
-    // health checks layer is purely additive — never an error path that
-    // would mask a working install.
-    let catalog = common::load_bundled_catalog(ctx, COMMAND).ok();
-    let install_mode = ctx.install_mode.as_str();
+#[derive(Serialize)]
+struct StatusPayload {
+    components: Vec<ComponentRecord>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
+}
 
+#[derive(Debug, Default)]
+pub(crate) struct ScopedCatalogs {
+    entries: Vec<ScopedCatalog>,
+}
+
+#[derive(Debug)]
+struct ScopedCatalog {
+    state_path: PathBuf,
+    catalog: Catalog,
+}
+
+impl ScopedCatalogs {
+    fn load(view: &StateView, command: &str) -> Self {
+        let entries = view
+            .visible_roots
+            .iter()
+            .filter_map(|root| {
+                common::load_catalog_for_layout(
+                    &root.layout,
+                    install_mode_for_scope(root.scope),
+                    command,
+                )
+                .ok()
+                .map(|catalog| ScopedCatalog {
+                    state_path: root.state_path.clone(),
+                    catalog,
+                })
+            })
+            .collect();
+        Self { entries }
+    }
+
+    #[cfg(test)]
+    fn from_entries(entries: Vec<(PathBuf, Catalog)>) -> Self {
+        Self {
+            entries: entries
+                .into_iter()
+                .map(|(state_path, catalog)| ScopedCatalog {
+                    state_path,
+                    catalog,
+                })
+                .collect(),
+        }
+    }
+
+    fn catalog_for(&self, root: &ScopedStateRoot) -> Option<&Catalog> {
+        self.entries
+            .iter()
+            .find(|entry| entry.state_path == root.state_path)
+            .map(|entry| &entry.catalog)
+    }
+}
+
+pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
+    let mut view = StateView::load(ctx, COMMAND, StateVisibility::UserPlusSystem)?;
+    migrate_view_states(&mut view);
+    let layout = common::resolve_layout(ctx);
+    // Catalogs are best-effort: if manifests are missing or malformed for a
+    // scoped root, status still reports state-on-disk plus integrity. Manifest
+    // health checks are additive and must not mask a working install.
+    let catalogs = ScopedCatalogs::load(&view, COMMAND);
     let adapter_scan = common::build_adapter_manager(ctx).scan().ok();
 
     let query = RpmPackageQuery::system();
     let selected_component = args
         .component
         .as_deref()
-        .map(|target| common::lookup_component_name(target, &state, ctx, COMMAND));
+        .map(|target| lookup_component_name_from_view(target, &view, ctx));
 
     // repo_config / component_index are still needed for the observed-record
     // probe below (system mode only). Name resolution above is handled by
@@ -160,13 +226,12 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
         .as_ref()
         .and_then(|cfg| load_optional_component_index(&layout, &env, cfg));
 
-    let mut records = select_components(
-        &state,
-        &layout,
-        catalog.as_ref(),
-        install_mode,
+    let mut records = select_components_from_view(
+        &view,
+        &catalogs,
         selected_component.as_deref(),
         adapter_scan.as_ref().map(|r| r.entries.as_slice()),
+        Some(&query),
     );
 
     // Read-only Observed report (§8): when a named component is absent from
@@ -185,21 +250,48 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
         }
     }
 
-    // Drift adjudication (#960): compare in-state RPM components against rpmdb
-    // and override the wire status with `drifted` / `missing` on divergence.
-    // Like the observed report above this stays strictly read-only — it adjusts
-    // only the wire records, never `installed.toml`.
-    apply_rpm_drift(&mut records, &state, &query);
-
     if ctx.json {
-        let data = serde_json::json!({ "components": records });
-        return render_json(COMMAND, data);
+        return render_json(
+            COMMAND,
+            StatusPayload {
+                components: records,
+                warnings: view.warnings,
+            },
+        );
     }
 
     if !ctx.quiet {
+        render_warnings(&view.warnings);
         render_human(&records, ctx.verbose, ctx.no_color);
     }
     Ok(())
+}
+
+fn migrate_view_states(view: &mut StateView) {
+    for root in &mut view.visible_roots {
+        common::migrate_v3_symlinks(&mut root.state, &root.layout);
+    }
+    if let Some(root) = view.visible_roots.iter().find(|root| root.writable) {
+        view.writable = root.clone();
+    }
+}
+
+fn lookup_component_name_from_view(input: &str, view: &StateView, ctx: &CliContext) -> String {
+    if view
+        .visible_components()
+        .iter()
+        .any(|record| record.object.name == input)
+    {
+        return input.to_string();
+    }
+    common::lookup_component_name(input, &view.writable.state, ctx, COMMAND)
+}
+
+const fn install_mode_for_scope(scope: StateScope) -> InstallMode {
+    match scope {
+        StateScope::User => InstallMode::User,
+        StateScope::System => InstallMode::System,
+    }
 }
 
 /// Pure selector: project [`InstalledState`] down to component records,
@@ -225,6 +317,7 @@ pub(crate) fn select_components(
             .iter()
             .map(|o| {
                 let mut rec = record_from_object(layout, catalog, install_mode, o);
+                apply_current_scope(&mut rec, layout, install_mode);
                 rec.adapters = adapter_summaries_for(&o.name, adapter_scan);
                 rec
             })
@@ -232,24 +325,115 @@ pub(crate) fn select_components(
         Some(target) => match installed.iter().find(|o| o.name == target) {
             Some(obj) => {
                 let mut rec = record_from_object(layout, catalog, install_mode, obj);
+                apply_current_scope(&mut rec, layout, install_mode);
                 rec.adapters = adapter_summaries_for(&obj.name, adapter_scan);
                 vec![rec]
             }
-            None => vec![ComponentRecord {
-                name: target.to_string(),
-                status: "not_installed".to_string(),
-                version: None,
-                installed_at: None,
-                last_operation_id: None,
-                enabled_features: Vec::new(),
-                health: Vec::new(),
-                adapters: Vec::new(),
-                rpm_package: None,
-                rpm_evr: None,
-                rpm_source_repo: None,
-                provisioned_packages: Vec::new(),
-            }],
+            None => vec![not_installed_record(target)],
         },
+    }
+}
+
+pub(crate) fn select_components_from_view(
+    view: &StateView,
+    catalogs: &ScopedCatalogs,
+    name: Option<&str>,
+    adapter_scan: Option<&[ScanEntry]>,
+    rpm_query: Option<&dyn PackageQuery>,
+) -> Vec<ComponentRecord> {
+    let visible_components = view.visible_components();
+    let selected: Vec<_> = match name {
+        None => visible_components
+            .iter()
+            .copied()
+            .filter(|record| record.active)
+            .collect(),
+        Some(target) => visible_components
+            .iter()
+            .copied()
+            .filter(|record| record.object.name == target)
+            .collect(),
+    };
+
+    let Some(target_records) = (!selected.is_empty()).then_some(selected) else {
+        return name
+            .map(|target| vec![not_installed_record(target)])
+            .unwrap_or_default();
+    };
+
+    let checked_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    target_records
+        .into_iter()
+        .map(|record| {
+            let catalog = catalogs.catalog_for(record.root);
+            let mut component = record_from_object(
+                &record.root.layout,
+                catalog,
+                record.scope().label(),
+                record.object,
+            );
+            component.adapters = adapter_summaries_for(&component.name, adapter_scan);
+            apply_record_scope(&mut component, &record);
+            if let Some(query) = rpm_query {
+                apply_rpm_drift_to_record(
+                    &mut component,
+                    record.object.rpm_metadata.as_ref(),
+                    query,
+                    &checked_at,
+                );
+            }
+            component
+        })
+        .collect()
+}
+
+fn apply_record_scope(
+    component: &mut ComponentRecord,
+    record: &crate::commands::state_view::ScopedInstalledObject<'_>,
+) {
+    component.scope = record.scope().label().to_string();
+    component.active = record.active;
+    component.mutable_by_current_invocation = record.mutable_by_current_invocation;
+    component.shadowed_by = record
+        .shadowed_by
+        .map(StateScope::label)
+        .map(str::to_string);
+    component.state_path = Some(record.root.state_path.display().to_string());
+}
+
+fn apply_current_scope(component: &mut ComponentRecord, layout: &FsLayout, install_mode: &str) {
+    component.scope = install_mode.to_string();
+    component.active = true;
+    component.mutable_by_current_invocation = true;
+    component.shadowed_by = None;
+    component.state_path = Some(
+        layout
+            .state_dir
+            .join("installed.toml")
+            .display()
+            .to_string(),
+    );
+}
+
+fn not_installed_record(name: &str) -> ComponentRecord {
+    ComponentRecord {
+        name: name.to_string(),
+        status: "not_installed".to_string(),
+        scope: "none".to_string(),
+        active: false,
+        mutable_by_current_invocation: false,
+        shadowed_by: None,
+        state_path: None,
+        version: None,
+        installed_at: None,
+        last_operation_id: None,
+        enabled_features: Vec::new(),
+        health: Vec::new(),
+        adapters: Vec::new(),
+        rpm_package: None,
+        rpm_evr: None,
+        rpm_source_repo: None,
+        provisioned_packages: Vec::new(),
     }
 }
 
@@ -288,6 +472,11 @@ fn observed_record(
         return Some(ComponentRecord {
             name: target.component,
             status: "observed".to_string(),
+            scope: "system".to_string(),
+            active: false,
+            mutable_by_current_invocation: false,
+            shadowed_by: None,
+            state_path: None,
             version: Some(evr.clone()),
             installed_at: None,
             last_operation_id: None,
@@ -361,66 +550,39 @@ pub(crate) fn probe_rpm_drift(meta: &RpmMetadata, query: &dyn PackageQuery) -> O
     }
 }
 
-/// Layer live rpmdb drift onto the projected records (#960).
-///
-/// For every record whose in-state object carries [`RpmMetadata`] *and* whose
-/// live projection is still clean (`installed` / `adopted`), compare against
-/// rpmdb and, on divergence, override the wire status with `drifted` / `missing`
-/// plus a `rpm:drift` health entry. Surfacing a manual `dnf update` / `rpm -e`
-/// is the point.
-///
-/// The clean-status gate is deliberate: integrity / manifest health may already
-/// have escalated an RPM object to `failed` / `degraded`, and a component may be
-/// deliberately `disabled` — those carry a more-severe signal that a drift label
-/// must not mask, so they are left untouched (the divergence still shows up in
-/// `repair`). Objects without RPM metadata (raw installs, legacy rows with no
-/// recorded package name) never reach the rpmdb probe.
-fn apply_rpm_drift(
-    records: &mut [ComponentRecord],
-    state: &InstalledState,
+fn apply_rpm_drift_to_record(
+    record: &mut ComponentRecord,
+    rpm_meta: Option<&RpmMetadata>,
     query: &dyn PackageQuery,
+    checked_at: &str,
 ) {
-    // Index RPM metadata by component name in a single pass so the per-record
-    // lookup is O(1) instead of re-scanning the object list for every record.
-    let rpm_meta: std::collections::HashMap<&str, &RpmMetadata> = state
-        .objects
-        .iter()
-        .filter(|o| o.kind == ObjectKind::Component)
-        .filter_map(|o| o.rpm_metadata.as_ref().map(|m| (o.name.as_str(), m)))
-        .collect();
-    if rpm_meta.is_empty() {
+    // Only adjudicate drift on a clean live projection; never demote a
+    // failed/degraded/disabled record (see fn doc). This also bounds the
+    // rpm -q probes below to the records that can actually drift.
+    if !matches!(record.status.as_str(), "installed" | "adopted") {
         return;
     }
-    let checked_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
-    for record in records.iter_mut() {
-        // Only adjudicate drift on a clean live projection; never demote a
-        // failed/degraded/disabled record (see fn doc). This also bounds the
-        // rpm -q probes below to the records that can actually drift.
-        if !matches!(record.status.as_str(), "installed" | "adopted") {
-            continue;
-        }
-        let Some(&meta) = rpm_meta.get(record.name.as_str()) else {
-            continue;
-        };
-        let (status, reason) = match probe_rpm_drift(meta, query) {
-            Some(RpmDrift::Drifted { reason }) => ("drifted", reason),
-            Some(RpmDrift::Missing) => (
-                "missing",
-                format!(
-                    "package {} recorded in ANOLISA state is no longer present in rpmdb",
-                    meta.package_name
-                ),
+    let Some(meta) = rpm_meta else {
+        return;
+    };
+    let (status, reason) = match probe_rpm_drift(meta, query) {
+        Some(RpmDrift::Drifted { reason }) => ("drifted", reason),
+        Some(RpmDrift::Missing) => (
+            "missing",
+            format!(
+                "package {} recorded in ANOLISA state is no longer present in rpmdb",
+                meta.package_name
             ),
-            None => continue,
-        };
-        record.status = status.to_string();
-        record.health.push(HealthEntry {
-            name: "rpm:drift".to_string(),
-            status: status.to_string(),
-            checked_at: checked_at.clone(),
-            reason: Some(reason),
-        });
-    }
+        ),
+        None => return,
+    };
+    record.status = status.to_string();
+    record.health.push(HealthEntry {
+        name: "rpm:drift".to_string(),
+        status: status.to_string(),
+        checked_at: checked_at.to_string(),
+        reason: Some(reason),
+    });
 }
 
 /// Build adapter summary records for `component` from the scan entries.
@@ -495,6 +657,11 @@ fn record_from_object(
     ComponentRecord {
         name: obj.name.clone(),
         status: manifest_status,
+        scope: "none".to_string(),
+        active: true,
+        mutable_by_current_invocation: false,
+        shadowed_by: None,
+        state_path: None,
         version: Some(obj.version.clone()),
         installed_at: Some(obj.installed_at.clone()),
         last_operation_id: obj.last_operation_id.clone(),
@@ -982,20 +1149,24 @@ fn render_human(records: &[ComponentRecord], verbose: bool, no_color: bool) {
     println!(
         "{}",
         color.header(format!(
-            "{:<28}  {:<14}  {:<10}  {}",
-            "NAME", "STATUS", "VERSION", "INSTALLED_AT"
+            "{:<28}  {:<8}  {:<14}  {:<10}  {}",
+            "NAME", "SCOPE", "STATUS", "VERSION", "INSTALLED_AT"
         ))
     );
     for record in records {
         let version = record.version.as_deref().unwrap_or("-");
         let installed_at = record.installed_at.as_deref().unwrap_or("-");
         println!(
-            "{name:<28}  {status:<14}  {version:<10}  {installed_at}",
+            "{name:<28}  {scope:<8}  {status:<14}  {version:<10}  {installed_at}",
             name = record.name,
+            scope = record.scope,
             status = color.status(pad_right(&record.status, 14)),
             version = version,
             installed_at = color.muted(installed_at),
         );
+        for (label, value) in scope_metadata_pairs(record) {
+            println!("    {} {}", color.label(format!("{label}:")), value);
+        }
         // RPM provenance for observed / adopted rpm-observed rows (§8).
         if let Some(pkg) = record.rpm_package.as_deref() {
             let repo = record.rpm_source_repo.as_deref().unwrap_or("unknown repo");
@@ -1092,6 +1263,29 @@ fn render_human(records: &[ComponentRecord], verbose: bool, no_color: bool) {
     }
 }
 
+fn scope_metadata_pairs(record: &ComponentRecord) -> Vec<(&'static str, String)> {
+    let mut pairs = vec![
+        ("active", record.active.to_string()),
+        (
+            "mutable_by_current_invocation",
+            record.mutable_by_current_invocation.to_string(),
+        ),
+    ];
+    if let Some(scope) = record.shadowed_by.as_deref() {
+        pairs.push(("shadowed_by", scope.to_string()));
+    }
+    if let Some(path) = record.state_path.as_deref() {
+        pairs.push(("state_path", path.to_string()));
+    }
+    pairs
+}
+
+fn render_warnings(warnings: &[String]) {
+    for warning in warnings {
+        eprintln!("warning: {warning}");
+    }
+}
+
 fn adapter_state_label(adapter: &AdapterSummaryRecord) -> &'static str {
     match (adapter.enabled, adapter.claim_status) {
         (_, Some(ClaimStatus::CleanupFailed)) => "cleanup_failed",
@@ -1104,6 +1298,7 @@ fn adapter_state_label(adapter: &AdapterSummaryRecord) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::state_view::{ScopedStateRoot, StateScope, StateView};
     use crate::repo_config::RepoConfig;
     use crate::resolution::resolve_rpm_component_name;
     use anolisa_core::{
@@ -1157,6 +1352,229 @@ mod tests {
             health: Vec::new(),
             provisioned_packages: Vec::new(),
         }
+    }
+
+    fn scoped_status_view(user_state: InstalledState, system_state: InstalledState) -> StateView {
+        let user_root = ScopedStateRoot {
+            scope: StateScope::User,
+            layout: FsLayout::user_with_overrides(
+                PathBuf::from("/tmp/anolisa-home"),
+                None,
+                None,
+                Some(PathBuf::from("/tmp/anolisa-user-state")),
+                None,
+                None,
+            ),
+            state_path: PathBuf::from("/tmp/anolisa-user-state/installed.toml"),
+            writable: true,
+            state: user_state,
+        };
+        let system_root = ScopedStateRoot {
+            scope: StateScope::System,
+            layout: FsLayout::system(Some(PathBuf::from("/tmp/anolisa-system"))),
+            state_path: PathBuf::from("/tmp/anolisa-system-state/installed.toml"),
+            writable: false,
+            state: system_state,
+        };
+        StateView {
+            writable: user_root.clone(),
+            visible_roots: vec![user_root, system_root],
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn user_status_view_includes_system_component() {
+        let user_state = InstalledState::default();
+        let mut system_state = InstalledState::default();
+        system_state.upsert_object(component_object(
+            "agentsight",
+            "0.1.0",
+            ObjectStatus::Installed,
+        ));
+        let view = scoped_status_view(user_state, system_state);
+
+        let records = select_components_from_view(
+            &view,
+            &ScopedCatalogs::default(),
+            Some("agentsight"),
+            None,
+            None,
+        );
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].name, "agentsight");
+        assert_eq!(records[0].status, "installed");
+        assert_eq!(records[0].scope, "system");
+        assert!(records[0].active);
+        assert!(!records[0].mutable_by_current_invocation);
+        assert_eq!(
+            records[0].state_path.as_deref(),
+            Some("/tmp/anolisa-system-state/installed.toml")
+        );
+    }
+
+    #[test]
+    fn scoped_status_view_uses_catalog_from_record_root() {
+        let user_home = tempfile::tempdir().expect("user home");
+        let user_layout = FsLayout::user_with_overrides(
+            user_home.path().join("home"),
+            Some(user_home.path().join("data")),
+            Some(user_home.path().join("config")),
+            Some(user_home.path().join("state")),
+            Some(user_home.path().join("cache")),
+            Some(user_home.path().join("runtime")),
+        );
+        std::fs::create_dir_all(&user_layout.bin_dir).expect("user bin dir");
+
+        let system_prefix = tempfile::tempdir().expect("system prefix");
+        let system_layout = test_layout(system_prefix.path());
+        let system_probe = system_layout.bin_dir.join("agentsight");
+        std::fs::write(&system_probe, b"binary").expect("write system probe");
+
+        let user_manifest = format!(
+            r#"
+            [component]
+            name = "agentsight"
+            version = "0.1.0"
+
+            [[health_checks]]
+            name = "binary"
+            kind = "file"
+            probe = "{}"
+        "#,
+            user_layout.bin_dir.join("agentsight").display()
+        );
+        let system_manifest = format!(
+            r#"
+            [component]
+            name = "agentsight"
+            version = "0.1.0"
+
+            [[health_checks]]
+            name = "binary"
+            kind = "file"
+            probe = "{}"
+        "#,
+            system_probe.display()
+        );
+        let (user_catalog, _user_catalog_guard) =
+            catalog_with_component("agentsight", &user_manifest);
+        let (system_catalog, _system_catalog_guard) =
+            catalog_with_component("agentsight", &system_manifest);
+
+        let user_state_path = user_layout.state_dir.join("installed.toml");
+        let system_state_path = system_layout.state_dir.join("installed.toml");
+        let user_root = ScopedStateRoot {
+            scope: StateScope::User,
+            layout: user_layout,
+            state_path: user_state_path.clone(),
+            writable: true,
+            state: InstalledState::default(),
+        };
+        let mut system_state = InstalledState::default();
+        system_state.upsert_object(component_object(
+            "agentsight",
+            "0.1.0",
+            ObjectStatus::Installed,
+        ));
+        let system_root = ScopedStateRoot {
+            scope: StateScope::System,
+            layout: system_layout,
+            state_path: system_state_path.clone(),
+            writable: false,
+            state: system_state,
+        };
+        let view = StateView {
+            writable: user_root.clone(),
+            visible_roots: vec![user_root, system_root],
+            warnings: Vec::new(),
+        };
+        let catalogs = ScopedCatalogs::from_entries(vec![
+            (user_state_path, user_catalog),
+            (system_state_path, system_catalog),
+        ]);
+
+        let records = select_components_from_view(&view, &catalogs, Some("agentsight"), None, None);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].scope, "system");
+        assert_eq!(records[0].status, "installed");
+        let health = records[0]
+            .health
+            .iter()
+            .find(|entry| entry.name == "agentsight:file:binary")
+            .expect("system catalog health entry present");
+        assert_eq!(health.status, "ok");
+        assert!(
+            health
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains(&system_probe.display().to_string())),
+            "health reason must use system manifest path: {:?}",
+            health.reason
+        );
+    }
+
+    #[test]
+    fn named_status_view_reports_shadowed_system_record() {
+        let mut user_state = InstalledState::default();
+        user_state.upsert_object(component_object(
+            "agentsight",
+            "0.2.0",
+            ObjectStatus::Installed,
+        ));
+        let mut system_state = InstalledState::default();
+        system_state.upsert_object(component_object(
+            "agentsight",
+            "0.1.0",
+            ObjectStatus::Installed,
+        ));
+        let view = scoped_status_view(user_state, system_state);
+
+        let records = select_components_from_view(
+            &view,
+            &ScopedCatalogs::default(),
+            Some("agentsight"),
+            None,
+            None,
+        );
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].scope, "user");
+        assert!(records[0].active);
+        assert_eq!(records[1].scope, "system");
+        assert!(!records[1].active);
+        assert_eq!(records[1].shadowed_by.as_deref(), Some("user"));
+    }
+
+    #[test]
+    fn system_status_view_projects_only_visible_system_root() {
+        let mut system_state = InstalledState::default();
+        system_state.upsert_object(component_object(
+            "agentsight",
+            "0.1.0",
+            ObjectStatus::Installed,
+        ));
+        let system_root = ScopedStateRoot {
+            scope: StateScope::System,
+            layout: FsLayout::system(Some(PathBuf::from("/tmp/anolisa-system"))),
+            state_path: PathBuf::from("/tmp/anolisa-system-state/installed.toml"),
+            writable: true,
+            state: system_state,
+        };
+        let view = StateView {
+            writable: system_root.clone(),
+            visible_roots: vec![system_root],
+            warnings: Vec::new(),
+        };
+
+        let records =
+            select_components_from_view(&view, &ScopedCatalogs::default(), None, None, None);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].name, "agentsight");
+        assert_eq!(records[0].scope, "system");
     }
 
     /// A missing `installed.toml` is the fresh-install case and must
@@ -2335,6 +2753,11 @@ mod tests {
         let record = ComponentRecord {
             name: "agentsight".to_string(),
             status: "installed".to_string(),
+            scope: "system".to_string(),
+            active: true,
+            mutable_by_current_invocation: true,
+            shadowed_by: None,
+            state_path: Some("/tmp/anolisa-system-state/installed.toml".to_string()),
             version: Some("0.1.0".to_string()),
             installed_at: Some("2026-06-01T10:00:00Z".to_string()),
             last_operation_id: None,
@@ -2355,6 +2778,39 @@ mod tests {
             json.get("rpm_package").is_none(),
             "empty rpm fields must be omitted from JSON"
         );
+    }
+
+    #[test]
+    fn scope_metadata_pairs_expose_mutability_and_state_path() {
+        let record = ComponentRecord {
+            name: "agentsight".to_string(),
+            status: "installed".to_string(),
+            scope: "system".to_string(),
+            active: false,
+            mutable_by_current_invocation: false,
+            shadowed_by: Some("user".to_string()),
+            state_path: Some("/tmp/anolisa-system-state/installed.toml".to_string()),
+            version: Some("0.1.0".to_string()),
+            installed_at: Some("2026-06-01T10:00:00Z".to_string()),
+            last_operation_id: None,
+            enabled_features: Vec::new(),
+            health: Vec::new(),
+            adapters: Vec::new(),
+            rpm_package: None,
+            rpm_evr: None,
+            rpm_source_repo: None,
+            provisioned_packages: Vec::new(),
+        };
+
+        let pairs = scope_metadata_pairs(&record);
+
+        assert!(pairs.contains(&("active", "false".to_string())));
+        assert!(pairs.contains(&("mutable_by_current_invocation", "false".to_string())));
+        assert!(pairs.contains(&("shadowed_by", "user".to_string())));
+        assert!(pairs.contains(&(
+            "state_path",
+            "/tmp/anolisa-system-state/installed.toml".to_string()
+        )));
     }
 
     #[test]
@@ -2742,26 +3198,16 @@ name = "copilot-shell"
         assert!(probe_rpm_drift(&meta, &q).is_none());
     }
 
-    /// `apply_rpm_drift` overrides an adopted rpm-observed row to `drifted` and
-    /// records a `rpm:drift` health entry when rpmdb has moved on.
+    /// The scoped status selector overrides an adopted rpm-observed row to
+    /// `drifted` and records a `rpm:drift` health entry when rpmdb has moved on.
     #[test]
-    fn apply_rpm_drift_overrides_status_to_drifted() {
+    fn select_components_from_view_overrides_rpm_status_to_drifted() {
         let mut state = InstalledState::default();
         state.upsert_object(rpm_observed_object(
             "copilot-shell",
             "copilot-shell",
             "2.2.0-1.al8",
         ));
-        let mut records = select_components(
-            &state,
-            &dummy_layout(),
-            None,
-            "system",
-            Some("copilot-shell"),
-            None,
-        );
-        assert_eq!(records[0].status, "adopted", "baseline before drift");
-
         let q = FakeQuery {
             installed: vec![(
                 "copilot-shell".to_string(),
@@ -2769,7 +3215,15 @@ name = "copilot-shell"
             )],
             origins: Vec::new(),
         };
-        apply_rpm_drift(&mut records, &state, &q);
+        let view = scoped_status_view(InstalledState::default(), state);
+        let records = select_components_from_view(
+            &view,
+            &ScopedCatalogs::default(),
+            Some("copilot-shell"),
+            None,
+            Some(&q),
+        );
+
         assert_eq!(records[0].status, "drifted");
         assert!(
             records[0]
@@ -2780,26 +3234,26 @@ name = "copilot-shell"
         );
     }
 
-    /// `apply_rpm_drift` overrides to `missing` when rpmdb no longer has the
-    /// package (the `rpm -e` case must not be silently reinstalled).
+    /// The scoped status selector overrides to `missing` when rpmdb no longer
+    /// has the package (the `rpm -e` case must not be silently reinstalled).
     #[test]
-    fn apply_rpm_drift_overrides_status_to_missing() {
+    fn select_components_from_view_overrides_rpm_status_to_missing() {
         let mut state = InstalledState::default();
         state.upsert_object(rpm_observed_object(
             "copilot-shell",
             "copilot-shell",
             "2.2.0-1.al8",
         ));
-        let mut records = select_components(
-            &state,
-            &dummy_layout(),
-            None,
-            "system",
+        let q = FakeQuery::default();
+        let view = scoped_status_view(InstalledState::default(), state);
+        let records = select_components_from_view(
+            &view,
+            &ScopedCatalogs::default(),
             Some("copilot-shell"),
             None,
+            Some(&q),
         );
-        let q = FakeQuery::default();
-        apply_rpm_drift(&mut records, &state, &q);
+
         assert_eq!(records[0].status, "missing");
         assert!(
             records[0]
@@ -2812,23 +3266,23 @@ name = "copilot-shell"
     /// A raw component (no RPM metadata) is never touched by drift adjudication,
     /// even when the injected query would report the package absent.
     #[test]
-    fn apply_rpm_drift_leaves_non_rpm_component_untouched() {
+    fn select_components_from_view_leaves_non_rpm_component_untouched() {
         let mut state = InstalledState::default();
         state.upsert_object(component_object(
             "agentsight",
             "0.1.0",
             ObjectStatus::Installed,
         ));
-        let mut records = select_components(
-            &state,
-            &dummy_layout(),
-            None,
-            "system",
+        let q = FakeQuery::default();
+        let view = scoped_status_view(InstalledState::default(), state);
+        let records = select_components_from_view(
+            &view,
+            &ScopedCatalogs::default(),
             Some("agentsight"),
             None,
+            Some(&q),
         );
-        let q = FakeQuery::default();
-        apply_rpm_drift(&mut records, &state, &q);
+
         assert_eq!(records[0].status, "installed", "raw row must not drift");
         assert!(
             !records[0].health.iter().any(|h| h.name == "rpm:drift"),
@@ -2840,28 +3294,11 @@ name = "copilot-shell"
     /// escalated past a clean projection: a `failed` RPM row keeps its
     /// more-severe status even when rpmdb has moved on, and gains no drift entry.
     #[test]
-    fn apply_rpm_drift_keeps_escalated_status() {
+    fn select_components_from_view_keeps_escalated_rpm_status() {
         let mut state = InstalledState::default();
-        state.upsert_object(rpm_observed_object(
-            "copilot-shell",
-            "copilot-shell",
-            "2.2.0-1.al8",
-        ));
-        // A record whose live projection already escalated past `installed`.
-        let mut records = vec![ComponentRecord {
-            name: "copilot-shell".to_string(),
-            status: "failed".to_string(),
-            version: Some("2.2.0-1.al8".to_string()),
-            installed_at: None,
-            last_operation_id: None,
-            enabled_features: Vec::new(),
-            health: Vec::new(),
-            adapters: Vec::new(),
-            rpm_package: None,
-            rpm_evr: None,
-            rpm_source_repo: None,
-            provisioned_packages: Vec::new(),
-        }];
+        let mut object = rpm_observed_object("copilot-shell", "copilot-shell", "2.2.0-1.al8");
+        object.status = ObjectStatus::Failed;
+        state.upsert_object(object);
         // rpmdb has drifted, but the failed status must survive untouched.
         let q = FakeQuery {
             installed: vec![(
@@ -2870,7 +3307,15 @@ name = "copilot-shell"
             )],
             origins: Vec::new(),
         };
-        apply_rpm_drift(&mut records, &state, &q);
+        let view = scoped_status_view(InstalledState::default(), state);
+        let records = select_components_from_view(
+            &view,
+            &ScopedCatalogs::default(),
+            Some("copilot-shell"),
+            None,
+            Some(&q),
+        );
+
         assert_eq!(
             records[0].status, "failed",
             "escalated status must not be demoted to drifted",

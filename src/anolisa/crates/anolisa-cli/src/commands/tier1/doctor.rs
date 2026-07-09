@@ -1469,6 +1469,11 @@ mod tests {
         ComponentRecord {
             name: name.to_string(),
             status: status.to_string(),
+            scope: "system".to_string(),
+            active: true,
+            mutable_by_current_invocation: true,
+            shadowed_by: None,
+            state_path: Some("/tmp/anolisa-system-state/installed.toml".to_string()),
             version: Some("1.0.0".to_string()),
             installed_at: None,
             last_operation_id: None,
