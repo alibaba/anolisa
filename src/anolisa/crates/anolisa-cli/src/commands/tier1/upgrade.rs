@@ -33,8 +33,8 @@ use serde::Serialize;
 use anolisa_core::central_log::{CentralLog, LogKind, LogRecord, LogStatus, Severity};
 use anolisa_core::lock::InstallLock;
 use anolisa_core::state::{
-    InstallMode as StateInstallMode, InstalledObject, ObjectKind, ObjectStatus, OperationRecord,
-    Ownership, RpmMetadata,
+    InstallMode as StateInstallMode, InstalledObject, InstalledState, ObjectKind, ObjectStatus,
+    OperationRecord, Ownership, RpmMetadata,
 };
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageInfo, PackageQuery};
@@ -169,6 +169,8 @@ struct PlannedUpdate {
     from: String,
     /// Newest repo candidate EVR the check reported.
     to: String,
+    /// Whether a missing state row should be recorded as an observed RPM default.
+    adopt_if_missing: bool,
 }
 
 /// A missing default component the upgrade will `dnf install`.
@@ -176,6 +178,15 @@ struct PlannedUpdate {
 struct PlannedInstall {
     name: String,
     package: String,
+}
+
+/// A target default already present in rpmdb but absent from ANOLISA state, with
+/// no dnf transaction needed. Upgrade records it as observed state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlannedObservedDefault {
+    name: String,
+    package: String,
+    installed: String,
 }
 
 /// An item deliberately left untouched (raw-managed, non-RPM CLI).
@@ -202,6 +213,7 @@ struct UpgradePlan {
     cli: Option<PlannedUpdate>,
     updates: Vec<PlannedUpdate>,
     installs: Vec<PlannedInstall>,
+    observed_defaults: Vec<PlannedObservedDefault>,
     skipped: Vec<SkippedItem>,
     errors: Vec<PlanError>,
 }
@@ -288,7 +300,17 @@ fn build_plan(
                 name: component.component.clone(),
                 reason: RAW_SKIP_REASON.to_string(),
             }),
-            ACTION_NOOP => {}
+            ACTION_NOOP => {
+                if component.absent_from_state {
+                    match observed_default(component) {
+                        Ok(observed) => plan.observed_defaults.push(observed),
+                        Err(reason) => plan.errors.push(PlanError {
+                            name: component.component.clone(),
+                            reason,
+                        }),
+                    }
+                }
+            }
             ACTION_ERROR => plan.errors.push(PlanError {
                 name: component.component.clone(),
                 reason: component
@@ -328,6 +350,7 @@ fn cli_update(cli: &CliCheck) -> Result<PlannedUpdate, String> {
         package,
         from,
         to,
+        adopt_if_missing: false,
     })
 }
 
@@ -351,6 +374,25 @@ fn component_update(component: &ComponentCheck) -> Result<PlannedUpdate, String>
         package,
         from,
         to,
+        adopt_if_missing: component.absent_from_state,
+    })
+}
+
+/// Build a no-transaction observed-default record plan, or an error string when
+/// the check row is missing the fields needed to refresh rpmdb/state.
+fn observed_default(component: &ComponentCheck) -> Result<PlannedObservedDefault, String> {
+    let package = component
+        .package
+        .clone()
+        .ok_or_else(|| "observed default reported without an RPM package".to_string())?;
+    let installed = component
+        .installed
+        .clone()
+        .ok_or_else(|| "observed default reported without an installed version".to_string())?;
+    Ok(PlannedObservedDefault {
+        name: component.component.clone(),
+        package,
+        installed,
     })
 }
 
@@ -366,6 +408,7 @@ struct UpgradeResult {
     dry_run: bool,
     updated: Vec<UpdatedItem>,
     installed: Vec<InstalledItem>,
+    recorded: Vec<RecordedItem>,
     skipped: Vec<SkippedResult>,
     errors: Vec<ErrorResult>,
     warnings: Vec<String>,
@@ -389,6 +432,15 @@ struct InstalledItem {
 }
 
 #[derive(Debug, Serialize)]
+struct RecordedItem {
+    name: String,
+    package: String,
+    /// Installed EVR recorded into ANOLISA state; `None` on a dry-run preview.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 struct SkippedResult {
     name: String,
     reason: String,
@@ -402,11 +454,10 @@ struct ErrorResult {
 
 // ── apply ──────────────────────────────────────────────────────────────────
 
-/// A component update whose dnf transaction and rpmdb re-read both succeeded,
-/// awaiting the state save. The CLI update is intentionally not modelled here:
-/// the CLI binary is rpm-owned and not tracked as an ANOLISA component object,
-/// so it is reported but never written to `installed.toml` (self-update owns
-/// that concern).
+/// A component state refresh awaiting the state save. Most rows follow a
+/// successful dnf update; already-current observed defaults use the same shape
+/// after a read-only rpmdb refresh. The CLI update is intentionally not modelled
+/// here because the binary is not an ANOLISA component object.
 struct PendingUpdate {
     name: String,
     package: String,
@@ -414,6 +465,13 @@ struct PendingUpdate {
     from: String,
     /// Post-transaction rpmdb truth used to refresh recorded version/EVR/arch.
     refreshed: PackageInfo,
+    /// Installed package source repository, if rpm/dnf can report it separately.
+    source_repo: Option<String>,
+    /// True for a target default that was present in rpmdb but absent from state.
+    adopt_if_missing: bool,
+    /// True when no package update occurred and the item should be reported as a
+    /// state recording rather than an update.
+    record_only: bool,
 }
 
 /// A newly installed default whose dnf transaction and rpmdb re-read both
@@ -422,6 +480,7 @@ struct PendingInstall {
     name: String,
     package: String,
     refreshed: PackageInfo,
+    source_repo: Option<String>,
 }
 
 /// Outcome of the single state save: the items it actually recorded (reported as
@@ -430,7 +489,110 @@ struct PendingInstall {
 struct PersistOutcome {
     updated: Vec<UpdatedItem>,
     installed: Vec<InstalledItem>,
+    recorded: Vec<RecordedItem>,
     errors: Vec<ErrorResult>,
+}
+
+#[derive(Default)]
+struct AuthorizedPlan<'a> {
+    updates: Vec<&'a PlannedUpdate>,
+    installs: Vec<&'a PlannedInstall>,
+    observed_defaults: Vec<&'a PlannedObservedDefault>,
+    errors: Vec<ErrorResult>,
+}
+
+struct UpgradeAudit {
+    started_at: String,
+    operation_id: String,
+}
+
+struct FinalizeUpgrade<'a> {
+    ctx: &'a CliContext,
+    layout: &'a FsLayout,
+    command: &'a str,
+    state: &'a mut InstalledState,
+    audit: &'a UpgradeAudit,
+    cli_updated: Option<&'a UpdatedItem>,
+    updates: &'a [PendingUpdate],
+    installs: &'a [PendingInstall],
+    prior_errors: usize,
+    warnings: &'a [String],
+}
+
+fn new_upgrade_audit() -> UpgradeAudit {
+    let lock_ts = Utc::now();
+    UpgradeAudit {
+        started_at: now_iso8601(),
+        operation_id: format!(
+            "op-upgrade-{}-{}",
+            lock_ts.format("%Y%m%d%H%M%S"),
+            lock_ts.timestamp_subsec_nanos()
+        ),
+    }
+}
+
+/// Revalidate the plan against the locked ANOLISA state before any RPM
+/// transaction runs. Only authorized items are handed to dnf.
+fn authorize_plan<'a>(state: &InstalledState, plan: &'a UpgradePlan) -> AuthorizedPlan<'a> {
+    let mut authorized = AuthorizedPlan::default();
+
+    for update in &plan.updates {
+        match state.find_object(ObjectKind::Component, &update.name) {
+            Some(obj) if is_matching_rpm_object(obj, &update.package) => {
+                authorized.updates.push(update);
+            }
+            Some(obj) => authorized.errors.push(ErrorResult {
+                name: update.name.clone(),
+                reason: format!(
+                    "component '{}' is now {} in ANOLISA state; refusing to run dnf update for '{}'",
+                    update.name,
+                    obj.effective_ownership().label(),
+                    update.package
+                ),
+            }),
+            None if update.adopt_if_missing => authorized.updates.push(update),
+            None => authorized.errors.push(ErrorResult {
+                name: update.name.clone(),
+                reason: format!(
+                    "component '{}' is no longer present in ANOLISA state; refusing to run dnf update for '{}'",
+                    update.name, update.package
+                ),
+            }),
+        }
+    }
+
+    for install in &plan.installs {
+        match classify_install_slot(state, &install.name, &install.package) {
+            InstallSlot::Absent | InstallSlot::MatchingRpm => authorized.installs.push(install),
+            InstallSlot::Conflict(existing_ownership) => authorized.errors.push(ErrorResult {
+                name: install.name.clone(),
+                reason: format!(
+                    "component '{}' already exists as {existing_ownership} in ANOLISA state; refusing to run dnf install for '{}'",
+                    install.name, install.package
+                ),
+            }),
+        }
+    }
+
+    for observed in &plan.observed_defaults {
+        match state.find_object(ObjectKind::Component, &observed.name) {
+            Some(obj) if is_matching_rpm_object(obj, &observed.package) => {
+                authorized.observed_defaults.push(observed);
+            }
+            Some(obj) => authorized.errors.push(ErrorResult {
+                name: observed.name.clone(),
+                reason: format!(
+                    "default component '{}' already exists as {} in ANOLISA state; refusing to record '{}' as rpm-observed",
+                    observed.name,
+                    obj.effective_ownership().label(),
+                    observed.package
+                ),
+            }),
+            None => authorized.observed_defaults.push(observed),
+        }
+    }
+
+    authorized
 }
 
 /// Core of [`handle`] with the package query, transaction, root status, and
@@ -471,142 +633,197 @@ fn run_upgrade_with_deps(
     }
 
     let mut errors: Vec<ErrorResult> = Vec::new();
-    // The CLI update is applied first and reported, but is never an ANOLISA
-    // component object (the binary is rpm-owned). Held separately so the audit
-    // step can count it toward the outcome even on a CLI-only upgrade.
-    let mut cli_updated: Option<UpdatedItem> = None;
-    // Component updates / installs whose dnf transaction and rpmdb re-read both
-    // succeeded, held back until the single state save can confirm they landed.
-    // Only items the state write actually records are reported as
-    // updated/installed — a transaction that mutated rpmdb but could not be
-    // reflected in ANOLISA state must surface as an error, never a silent `ok`.
-    let mut pending_updates: Vec<PendingUpdate> = Vec::new();
-    let mut pending_installs: Vec<PendingInstall> = Vec::new();
-
-    // 1. CLI package (rpm-owned binary). Reported but never recorded as a
-    //    component object, so it is not gated on the state save.
-    if let Some(cli) = &plan.cli {
-        match txn.update(&cli.package) {
-            Ok(()) => match refresh_evr(query, &cli.package) {
-                Ok(to) => {
-                    cli_updated = Some(UpdatedItem {
-                        name: cli.name.clone(),
-                        package: cli.package.clone(),
-                        from: cli.from.clone(),
-                        to,
-                    })
-                }
-                Err(reason) => errors.push(ErrorResult {
-                    name: cli.name.clone(),
-                    reason,
-                }),
-            },
-            Err(err) => errors.push(ErrorResult {
-                name: cli.name.clone(),
-                reason: txn_error_reason(err),
-            }),
-        }
-    }
-
-    // 2. Already-installed RPM-backed components.
-    for update in &plan.updates {
-        match txn.update(&update.package) {
-            Ok(()) => match query.query_installed(&update.package) {
-                Ok(Some(info)) => pending_updates.push(PendingUpdate {
-                    name: update.name.clone(),
-                    package: update.package.clone(),
-                    from: update.from.clone(),
-                    refreshed: info,
-                }),
-                Ok(None) => errors.push(ErrorResult {
-                    name: update.name.clone(),
-                    reason: format!(
-                        "dnf upgraded '{}' but it is no longer in rpmdb under that name; run `anolisa repair {}`",
-                        update.package, update.name
-                    ),
-                }),
-                Err(err) => errors.push(ErrorResult {
-                    name: update.name.clone(),
-                    reason: format!(
-                        "dnf upgraded '{}' but reading the new version failed ({err}); run `anolisa repair {}`",
-                        update.package, update.name
-                    ),
-                }),
-            },
-            Err(err) => errors.push(ErrorResult {
-                name: update.name.clone(),
-                reason: txn_error_reason(err),
-            }),
-        }
-    }
-
-    // 3. Missing default components.
-    for install in &plan.installs {
-        match txn.install(&install.package) {
-            Ok(()) => match query.query_installed(&install.package) {
-                Ok(Some(info)) => pending_installs.push(PendingInstall {
-                    name: install.name.clone(),
-                    package: install.package.clone(),
-                    refreshed: info,
-                }),
-                Ok(None) => errors.push(ErrorResult {
-                    name: install.name.clone(),
-                    reason: format!(
-                        "dnf installed '{}' but it is not present in rpmdb; state was not recorded",
-                        install.package
-                    ),
-                }),
-                Err(err) => errors.push(ErrorResult {
-                    name: install.name.clone(),
-                    reason: format!(
-                        "dnf installed '{}' but reading its version failed ({err}); state was not recorded",
-                        install.package
-                    ),
-                }),
-            },
-            Err(err) => errors.push(ErrorResult {
-                name: install.name.clone(),
-                reason: txn_error_reason(err),
-            }),
-        }
-    }
-
-    // 4. Refresh ANOLISA state and write the durable audit under the install
-    //    lock. This runs whenever any dnf transaction was attempted — including
-    //    a CLI-only upgrade with no component changes — so a real system
-    //    mutation always leaves an operation record and central-log entry, never
-    //    a silent `ok`. Persistence reloads state and validates each component
-    //    against it, so a drifted item (vanished, changed RPM identity, or
-    //    already present under a different backend) is reported as an error
-    //    rather than reported updated/installed or silently overwriting a
-    //    non-RPM record. Only items the save actually recorded come back as
-    //    updated/installed.
+    let mut warnings: Vec<String> = Vec::new();
     let mut updated: Vec<UpdatedItem> = Vec::new();
     let mut installed: Vec<InstalledItem> = Vec::new();
-    let attempted_transaction =
-        plan.cli.is_some() || !plan.updates.is_empty() || !plan.installs.is_empty();
-    if attempted_transaction {
-        // The transaction-phase errors (dnf/refresh failures) and the CLI
-        // success are passed in so the persisted operation/audit record reflects
-        // the true `ok`/`partial`/`failed` outcome of the whole command.
-        let outcome = finalize_upgrade(
+    let mut recorded: Vec<RecordedItem> = Vec::new();
+    let needs_finalize = plan.cli.is_some()
+        || !plan.updates.is_empty()
+        || !plan.installs.is_empty()
+        || !plan.observed_defaults.is_empty();
+    if needs_finalize {
+        let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
+            command: command.to_string(),
+            reason: format!("failed to acquire install lock: {err}"),
+        })?;
+        let mut state = common::load_installed_state(ctx, command)?;
+        let audit = new_upgrade_audit();
+
+        // Upgrade only runs in system mode; keep the state scope consistent with
+        // install/adopt so a fresh state file records the right mode/prefix.
+        state.install_mode = StateInstallMode::System;
+        state.prefix = layout.prefix.clone();
+
+        let authorized = authorize_plan(&state, plan);
+        errors.extend(authorized.errors);
+
+        // The CLI update is applied first and reported, but is never an ANOLISA
+        // component object (the binary is rpm-owned). Held separately so the
+        // audit step can count it toward the outcome even on a CLI-only upgrade.
+        let mut cli_updated: Option<UpdatedItem> = None;
+        // Component updates / installs whose dnf transaction and rpmdb re-read
+        // both succeeded, held back until the single state save records them.
+        let mut pending_updates: Vec<PendingUpdate> = Vec::new();
+        let mut pending_installs: Vec<PendingInstall> = Vec::new();
+
+        // 1. CLI package (rpm-owned binary). Reported but never recorded as a
+        //    component object, so it is not gated on component state.
+        if let Some(cli) = &plan.cli {
+            match txn.update(&cli.package) {
+                Ok(()) => match refresh_evr(query, &cli.package) {
+                    Ok(to) => {
+                        cli_updated = Some(UpdatedItem {
+                            name: cli.name.clone(),
+                            package: cli.package.clone(),
+                            from: cli.from.clone(),
+                            to,
+                        })
+                    }
+                    Err(reason) => errors.push(ErrorResult {
+                        name: cli.name.clone(),
+                        reason,
+                    }),
+                },
+                Err(err) => errors.push(ErrorResult {
+                    name: cli.name.clone(),
+                    reason: txn_error_reason(err),
+                }),
+            }
+        }
+
+        // 2. Already-installed RPM-backed components authorized by locked state.
+        for update in authorized.updates {
+            match txn.update(&update.package) {
+                Ok(()) => match query.query_installed(&update.package) {
+                    Ok(Some(info)) => {
+                        let source_repo =
+                            installed_origin_or_warn(query, &update.package, &mut warnings);
+                        pending_updates.push(PendingUpdate {
+                            name: update.name.clone(),
+                            package: update.package.clone(),
+                            from: update.from.clone(),
+                            refreshed: info,
+                            source_repo,
+                            adopt_if_missing: update.adopt_if_missing,
+                            record_only: false,
+                        });
+                    }
+                    Ok(None) => errors.push(ErrorResult {
+                        name: update.name.clone(),
+                        reason: format!(
+                            "dnf upgraded '{}' but it is no longer in rpmdb under that name; run `anolisa repair {}`",
+                            update.package, update.name
+                        ),
+                    }),
+                    Err(err) => errors.push(ErrorResult {
+                        name: update.name.clone(),
+                        reason: format!(
+                            "dnf upgraded '{}' but reading the new version failed ({err}); run `anolisa repair {}`",
+                            update.package, update.name
+                        ),
+                    }),
+                },
+                Err(err) => errors.push(ErrorResult {
+                    name: update.name.clone(),
+                    reason: txn_error_reason(err),
+                }),
+            }
+        }
+
+        // 3. Missing default components authorized by locked state.
+        for install in authorized.installs {
+            match txn.install(&install.package) {
+                Ok(()) => match query.query_installed(&install.package) {
+                    Ok(Some(info)) => {
+                        let source_repo =
+                            installed_origin_or_warn(query, &install.package, &mut warnings);
+                        pending_installs.push(PendingInstall {
+                            name: install.name.clone(),
+                            package: install.package.clone(),
+                            refreshed: info,
+                            source_repo,
+                        });
+                    }
+                    Ok(None) => errors.push(ErrorResult {
+                        name: install.name.clone(),
+                        reason: format!(
+                            "dnf installed '{}' but it is not present in rpmdb; state was not recorded",
+                            install.package
+                        ),
+                    }),
+                    Err(err) => errors.push(ErrorResult {
+                        name: install.name.clone(),
+                        reason: format!(
+                            "dnf installed '{}' but reading its version failed ({err}); state was not recorded",
+                            install.package
+                        ),
+                    }),
+                },
+                Err(err) => errors.push(ErrorResult {
+                    name: install.name.clone(),
+                    reason: txn_error_reason(err),
+                }),
+            }
+        }
+
+        // 4. Already-current target defaults authorized by locked state. No dnf
+        //    transaction is needed; refresh rpmdb truth and record as observed.
+        for observed in authorized.observed_defaults {
+            match query.query_installed(&observed.package) {
+                Ok(Some(info)) => {
+                    let source_repo =
+                        installed_origin_or_warn(query, &observed.package, &mut warnings);
+                    pending_updates.push(PendingUpdate {
+                        name: observed.name.clone(),
+                        package: observed.package.clone(),
+                        from: observed.installed.clone(),
+                        refreshed: info,
+                        source_repo,
+                        adopt_if_missing: true,
+                        record_only: true,
+                    });
+                }
+                Ok(None) => errors.push(ErrorResult {
+                    name: observed.name.clone(),
+                    reason: format!(
+                        "default component '{}' resolved to package '{}' but it is absent from rpmdb; state was not recorded",
+                        observed.name, observed.package
+                    ),
+                }),
+                Err(err) => errors.push(ErrorResult {
+                    name: observed.name.clone(),
+                    reason: format!(
+                        "default component '{}' resolved to package '{}' but reading its version failed ({err}); state was not recorded",
+                        observed.name, observed.package
+                    ),
+                }),
+            }
+        }
+
+        // Refresh ANOLISA state and write the durable audit while the same lock
+        // that authorized the RPM work is still held.
+        let outcome = finalize_upgrade(FinalizeUpgrade {
             ctx,
             layout,
             command,
-            cli_updated.as_ref(),
-            &pending_updates,
-            &pending_installs,
-            errors.len(),
-        )?;
+            state: &mut state,
+            audit: &audit,
+            cli_updated: cli_updated.as_ref(),
+            updates: &pending_updates,
+            installs: &pending_installs,
+            prior_errors: errors.len(),
+            warnings: &warnings,
+        })?;
         if let Some(item) = cli_updated {
             updated.push(item);
         }
         updated.extend(outcome.updated);
         installed.extend(outcome.installed);
+        recorded.extend(outcome.recorded);
         errors.extend(outcome.errors);
     }
 
-    let succeeded = updated.len() + installed.len();
+    let succeeded = updated.len() + installed.len() + recorded.len();
     let status = apply_status(succeeded, errors.len());
 
     Ok(UpgradeResult {
@@ -616,9 +833,10 @@ fn run_upgrade_with_deps(
         dry_run: false,
         updated,
         installed,
+        recorded,
         skipped: skipped_results(plan),
         errors,
-        warnings: Vec::new(),
+        warnings,
     })
 }
 
@@ -645,6 +863,22 @@ fn refresh_evr(query: &dyn PackageQuery, package: &str) -> Result<String, String
         Err(err) => Err(format!(
             "dnf upgraded '{package}' but reading the new version failed: {err}"
         )),
+    }
+}
+
+fn installed_origin_or_warn(
+    query: &dyn PackageQuery,
+    package: &str,
+    warnings: &mut Vec<String>,
+) -> Option<String> {
+    match query.installed_origin(package) {
+        Ok(origin) => origin,
+        Err(err) => {
+            warnings.push(format!(
+                "could not determine source repo for '{package}': {err}"
+            ));
+            None
+        }
     }
 }
 
@@ -688,6 +922,15 @@ fn render_plan_preview(plan: &UpgradePlan) -> UpgradeResult {
             version: None,
         })
         .collect();
+    let recorded = plan
+        .observed_defaults
+        .iter()
+        .map(|observed| RecordedItem {
+            name: observed.name.clone(),
+            package: observed.package.clone(),
+            version: None,
+        })
+        .collect();
 
     // A dry-run whose plan carries errors would be blocked if applied for real;
     // report that so automation can gate on it, otherwise `ok`.
@@ -704,6 +947,7 @@ fn render_plan_preview(plan: &UpgradePlan) -> UpgradeResult {
         dry_run: true,
         updated,
         installed,
+        recorded,
         skipped: skipped_results(plan),
         errors: plan_errors(plan),
         warnings: Vec::new(),
@@ -719,6 +963,7 @@ fn blocked_result(plan: &UpgradePlan) -> UpgradeResult {
         dry_run: false,
         updated: Vec::new(),
         installed: Vec::new(),
+        recorded: Vec::new(),
         skipped: skipped_results(plan),
         errors: plan_errors(plan),
         warnings: Vec::new(),
@@ -756,21 +1001,21 @@ fn plan_errors(plan: &UpgradePlan) -> Vec<ErrorResult> {
 
 // ── state persistence + audit ────────────────────────────────────────────────
 
-/// Refresh ANOLISA state for the successful component transactions and write the
-/// durable audit (operation record + central log) under the install lock.
+/// Refresh ANOLISA state for successful component work and write the durable
+/// audit (operation record + central log) while the caller holds the install
+/// lock used to authorize the RPM transactions.
 ///
 /// Audit is decoupled from component-state changes: because a real dnf
 /// transaction may have run even when nothing lands in `installed.toml` (a
-/// CLI-only upgrade, or a run where every component drifted/failed), this always
-/// appends an operation record and central-log entry whenever any transaction
-/// was attempted — so a real system mutation is never left unaudited. The
-/// recorded status is the true `ok` / `partial` / `failed` outcome of the whole
-/// command (`cli_updated` and `prior_errors` from the transaction phase are
-/// folded in), not just the component-persistence result.
+/// CLI-only upgrade, or a run where every component drifted/failed), and some
+/// already-current defaults only need a state record, this appends an operation
+/// record and central-log entry whenever real work was attempted. The recorded
+/// status is the true `ok` / `partial` / `failed` outcome of the whole command
+/// (`cli_updated` and `prior_errors` from the transaction phase are folded in),
+/// not just the component-persistence result.
 ///
-/// State is reloaded under the lock and each pending change is re-validated
-/// against it, because the plan was computed before the lock was held and before
-/// the dnf transactions ran — the on-disk state may have drifted in between:
+/// Each pending change is still re-validated against the locked state before it
+/// is recorded:
 /// - **updates**: the component must still exist and still be the same RPM
 ///   package (mirrors the single-component update guard); otherwise the new EVR
 ///   is not grafted on and the item is reported as an error.
@@ -785,39 +1030,50 @@ fn plan_errors(plan: &UpgradePlan) -> Vec<ErrorResult> {
 /// refused change is returned as an error so the caller downgrades the overall
 /// status rather than claiming a clean `ok` while state is stale. RPM-owned
 /// files are never recorded — dnf owns the file transaction.
-fn finalize_upgrade(
-    ctx: &CliContext,
-    layout: &FsLayout,
-    command: &str,
-    cli_updated: Option<&UpdatedItem>,
-    updates: &[PendingUpdate],
-    installs: &[PendingInstall],
-    prior_errors: usize,
-) -> Result<PersistOutcome, CliError> {
-    let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
-        command: command.to_string(),
-        reason: format!("failed to acquire install lock: {err}"),
-    })?;
-    let mut state = common::load_installed_state(ctx, command)?;
-
-    let started_at = now_iso8601();
-    let lock_ts = Utc::now();
-    let operation_id = format!(
-        "op-upgrade-{}-{}",
-        lock_ts.format("%Y%m%d%H%M%S"),
-        lock_ts.timestamp_subsec_nanos()
-    );
-
-    // Upgrade only runs in system mode; keep the state scope consistent with the
-    // install/adopt paths so a fresh state file records the right mode/prefix.
-    state.install_mode = StateInstallMode::System;
-    state.prefix = layout.prefix.clone();
-
+fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError> {
+    let FinalizeUpgrade {
+        ctx,
+        layout,
+        command,
+        state,
+        audit,
+        cli_updated,
+        updates,
+        installs,
+        prior_errors,
+        warnings,
+    } = req;
     let mut outcome = PersistOutcome::default();
 
     for update in updates {
         let evr = update.refreshed.version.to_string();
         let Some(obj) = state.find_object_mut(ObjectKind::Component, &update.name) else {
+            if update.adopt_if_missing {
+                state.upsert_object(new_observed_rpm_component(
+                    &update.name,
+                    &update.package,
+                    &evr,
+                    &update.refreshed,
+                    update.source_repo.as_deref(),
+                    &audit.started_at,
+                    &audit.operation_id,
+                ));
+                if update.record_only {
+                    outcome.recorded.push(RecordedItem {
+                        name: update.name.clone(),
+                        package: update.package.clone(),
+                        version: Some(evr),
+                    });
+                } else {
+                    outcome.updated.push(UpdatedItem {
+                        name: update.name.clone(),
+                        package: update.package.clone(),
+                        from: update.from.clone(),
+                        to: evr,
+                    });
+                }
+                continue;
+            }
             outcome.errors.push(ErrorResult {
                 name: update.name.clone(),
                 reason: format!(
@@ -830,12 +1086,7 @@ fn finalize_upgrade(
         // Refuse to graft the new EVR onto a row that is no longer this RPM
         // package (a concurrent backend change), mirroring the single-component
         // update guard.
-        let matches = obj
-            .rpm_metadata
-            .as_ref()
-            .is_some_and(|m| m.package_name == update.package)
-            && obj.effective_ownership().is_rpm();
-        if !matches {
+        if !is_matching_rpm_object(obj, &update.package) {
             outcome.errors.push(ErrorResult {
                 name: update.name.clone(),
                 reason: format!(
@@ -846,48 +1097,42 @@ fn finalize_upgrade(
             continue;
         }
         obj.version = evr.clone();
-        obj.last_operation_id = Some(operation_id.clone());
+        obj.last_operation_id = Some(audit.operation_id.clone());
         if let Some(meta) = obj.rpm_metadata.as_mut() {
             meta.evr = Some(evr.clone());
             meta.arch = Some(update.refreshed.arch.clone());
+            if let Some(source_repo) = &update.source_repo {
+                meta.source_repo = Some(source_repo.clone());
+            }
         }
-        outcome.updated.push(UpdatedItem {
-            name: update.name.clone(),
-            package: update.package.clone(),
-            from: update.from.clone(),
-            to: evr,
-        });
+        if update.record_only {
+            outcome.recorded.push(RecordedItem {
+                name: update.name.clone(),
+                package: update.package.clone(),
+                version: Some(evr),
+            });
+        } else {
+            outcome.updated.push(UpdatedItem {
+                name: update.name.clone(),
+                package: update.package.clone(),
+                from: update.from.clone(),
+                to: evr,
+            });
+        }
     }
 
     for install in installs {
         let evr = install.refreshed.version.to_string();
-        // Classify the current state slot with an immutable borrow that is
-        // dropped before any mutation below.
-        let slot = match state.find_object(ObjectKind::Component, &install.name) {
-            None => InstallSlot::Absent,
-            Some(existing) => {
-                let same_rpm = existing
-                    .rpm_metadata
-                    .as_ref()
-                    .is_some_and(|m| m.package_name == install.package)
-                    && existing.effective_ownership().is_rpm();
-                if same_rpm {
-                    InstallSlot::MatchingRpm
-                } else {
-                    InstallSlot::Conflict(existing.effective_ownership().label())
-                }
-            }
-        };
-
-        match slot {
+        match classify_install_slot(state, &install.name, &install.package) {
             InstallSlot::Absent => {
                 state.upsert_object(new_rpm_component(
                     &install.name,
                     &install.package,
                     &evr,
                     &install.refreshed,
-                    &started_at,
-                    &operation_id,
+                    install.source_repo.as_deref(),
+                    &audit.started_at,
+                    &audit.operation_id,
                 ));
                 outcome.installed.push(InstalledItem {
                     name: install.name.clone(),
@@ -900,10 +1145,13 @@ fn finalize_upgrade(
             InstallSlot::MatchingRpm => {
                 if let Some(obj) = state.find_object_mut(ObjectKind::Component, &install.name) {
                     obj.version = evr.clone();
-                    obj.last_operation_id = Some(operation_id.clone());
+                    obj.last_operation_id = Some(audit.operation_id.clone());
                     if let Some(meta) = obj.rpm_metadata.as_mut() {
                         meta.evr = Some(evr.clone());
                         meta.arch = Some(install.refreshed.arch.clone());
+                        if let Some(source_repo) = &install.source_repo {
+                            meta.source_repo = Some(source_repo.clone());
+                        }
                     }
                 }
                 outcome.installed.push(InstalledItem {
@@ -929,8 +1177,10 @@ fn finalize_upgrade(
     // Count the whole command's outcome, not just component state: the CLI
     // update (not an ANOLISA object) and the transaction-phase errors are folded
     // in so the durable record shows the true `ok` / `partial` / `failed`.
-    let total_success =
-        cli_updated.is_some() as usize + outcome.updated.len() + outcome.installed.len();
+    let total_success = cli_updated.is_some() as usize
+        + outcome.updated.len()
+        + outcome.installed.len()
+        + outcome.recorded.len();
     let total_errors = prior_errors + outcome.errors.len();
 
     if total_success == 0 && total_errors == 0 {
@@ -950,10 +1200,10 @@ fn finalize_upgrade(
     // changed (a CLI-only upgrade, or a run where every component drifted): the
     // record is what makes a real system mutation auditable via `anolisa logs`.
     state.operations.push(OperationRecord {
-        id: operation_id.clone(),
+        id: audit.operation_id.clone(),
         command: command.to_string(),
         status: status.to_string(),
-        started_at: started_at.clone(),
+        started_at: audit.started_at.clone(),
         finished_at: Some(now_iso8601()),
     });
 
@@ -965,14 +1215,15 @@ fn finalize_upgrade(
 
     // Audit log is best-effort: state already persisted, so a log failure
     // downgrades to a stderr warning rather than unwinding.
-    let recorded = outcome.updated.len() + outcome.installed.len();
+    let recorded = outcome.updated.len() + outcome.installed.len() + outcome.recorded.len();
     let log = CentralLog::open(layout.central_log.clone());
     let mut objects: Vec<String> = cli_updated.map(|c| c.package.clone()).into_iter().collect();
     objects.extend(outcome.updated.iter().map(|u| u.name.clone()));
     objects.extend(outcome.installed.iter().map(|i| i.name.clone()));
+    objects.extend(outcome.recorded.iter().map(|i| i.name.clone()));
     let record = LogRecord {
         kind: LogKind::Operation,
-        operation_id: Some(operation_id),
+        operation_id: Some(audit.operation_id.clone()),
         command: command.to_string(),
         source: "anolisa-cli".to_string(),
         component: None,
@@ -982,12 +1233,12 @@ fn finalize_upgrade(
         ),
         actor: "cli".to_string(),
         install_mode: Some(ctx.install_mode.as_str().to_string()),
-        started_at,
+        started_at: audit.started_at.clone(),
         finished_at: Some(now_iso8601()),
         status: Some(log_status),
         objects,
         backup_ids: Vec::new(),
-        warnings: Vec::new(),
+        warnings: warnings.to_vec(),
         details: serde_json::Value::Null,
     };
     if let Err(err) = log.append(&record)
@@ -1011,6 +1262,64 @@ enum InstallSlot {
     Conflict(&'static str),
 }
 
+fn classify_install_slot(state: &InstalledState, name: &str, package: &str) -> InstallSlot {
+    match state.find_object(ObjectKind::Component, name) {
+        None => InstallSlot::Absent,
+        Some(existing) if is_matching_rpm_object(existing, package) => InstallSlot::MatchingRpm,
+        Some(existing) => InstallSlot::Conflict(existing.effective_ownership().label()),
+    }
+}
+
+fn is_matching_rpm_object(obj: &InstalledObject, package: &str) -> bool {
+    obj.rpm_metadata
+        .as_ref()
+        .is_some_and(|m| m.package_name == package)
+        && obj.effective_ownership().is_rpm()
+}
+
+/// Build an rpm-observed component object for a target default that was already
+/// installed on the host but absent from ANOLISA state. `upgrade` updated the RPM
+/// package, but ANOLISA still does not own its removal.
+fn new_observed_rpm_component(
+    name: &str,
+    package: &str,
+    evr: &str,
+    refreshed: &PackageInfo,
+    source_repo: Option<&str>,
+    installed_at: &str,
+    operation_id: &str,
+) -> InstalledObject {
+    InstalledObject {
+        kind: ObjectKind::Component,
+        name: name.to_string(),
+        version: evr.to_string(),
+        status: ObjectStatus::Adopted,
+        manifest_digest: None,
+        distribution_source: None,
+        raw_package: None,
+        install_backend: Some("rpm".to_string()),
+        ownership: Some(Ownership::RpmObserved),
+        rpm_metadata: Some(RpmMetadata {
+            package_name: package.to_string(),
+            evr: Some(evr.to_string()),
+            arch: Some(refreshed.arch.clone()),
+            source_repo: source_repo.map(str::to_string),
+        }),
+        installed_at: installed_at.to_string(),
+        last_operation_id: Some(operation_id.to_string()),
+        managed: false,
+        adopted: true,
+        subscription_scope: Default::default(),
+        enabled_features: Vec::new(),
+        component_refs: Vec::new(),
+        files: Vec::new(),
+        external_modified_files: Vec::new(),
+        services: Vec::new(),
+        health: Vec::new(),
+        provisioned_packages: Vec::new(),
+    }
+}
+
 /// Build a fresh rpm-managed component object for a newly installed default.
 /// Mirrors the delegated-install path: `managed = true`, `adopted = false`,
 /// ownership [`Ownership::RpmManaged`], backend `rpm`, and no owned files (dnf
@@ -1020,6 +1329,7 @@ fn new_rpm_component(
     package: &str,
     evr: &str,
     refreshed: &PackageInfo,
+    source_repo: Option<&str>,
     installed_at: &str,
     operation_id: &str,
 ) -> InstalledObject {
@@ -1037,7 +1347,7 @@ fn new_rpm_component(
             package_name: package.to_string(),
             evr: Some(evr.to_string()),
             arch: Some(refreshed.arch.clone()),
-            source_repo: refreshed.origin.clone(),
+            source_repo: source_repo.map(str::to_string),
         }),
         installed_at: installed_at.to_string(),
         last_operation_id: Some(operation_id.to_string()),
@@ -1114,6 +1424,19 @@ fn render_result(ctx: &CliContext, result: &UpgradeResult) {
             color.muted(format!("({})", item.package)),
         );
     }
+    for item in &result.recorded {
+        let verb = if result.dry_run {
+            "would record".to_string()
+        } else {
+            format!("recorded {}", item.version.as_deref().unwrap_or("-"))
+        };
+        println!(
+            "  {} {} {}",
+            color.ok(format!("✓ {verb}")),
+            item.name,
+            color.muted(format!("({})", item.package)),
+        );
+    }
     for item in &result.skipped {
         println!(
             "  {} {} {}",
@@ -1132,10 +1455,11 @@ fn render_result(ctx: &CliContext, result: &UpgradeResult) {
     }
 
     println!(
-        "{} {} updated, {} installed, {} skipped, {} error(s) [{}]",
+        "{} {} updated, {} installed, {} recorded, {} skipped, {} error(s) [{}]",
         color.label("summary:"),
         result.updated.len(),
         result.installed.len(),
+        result.recorded.len(),
         result.skipped.len(),
         result.errors.len(),
         result.status,

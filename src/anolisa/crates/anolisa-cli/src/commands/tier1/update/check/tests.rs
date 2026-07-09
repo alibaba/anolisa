@@ -3,7 +3,7 @@
 
 use super::*;
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anolisa_platform::pkg_query::{PackageInfo, PackageVersion};
 use anolisa_platform::pkg_transaction::{PackageTransaction, PackageTransactionError};
@@ -30,6 +30,8 @@ struct FakeHost {
     installed_multi: HashSet<String>,
     /// capabilities whose `what_provides_installed` returns a query error.
     provides_errors: HashSet<String>,
+    /// capability → available repo provider package names.
+    available_providers: HashMap<String, Vec<String>>,
     txn_calls: Cell<usize>,
 }
 
@@ -80,6 +82,14 @@ impl PackageQuery for FakeHost {
         }
         Ok(self.provides.get(capability).cloned().unwrap_or_default())
     }
+
+    fn what_provides_available(&self, capability: &str) -> Result<Vec<String>, PackageQueryError> {
+        Ok(self
+            .available_providers
+            .get(capability)
+            .cloned()
+            .unwrap_or_default())
+    }
 }
 
 impl PackageTransaction for FakeHost {
@@ -107,6 +117,23 @@ fn info(name: &str, version: &str, release: Option<&str>) -> PackageInfo {
         },
         arch: "x86_64".to_string(),
         origin: None,
+    }
+}
+
+fn rpm_backend_with_package_map(
+    component: &str,
+    package: &str,
+) -> crate::repo_config::BackendConfig {
+    let mut package_map = BTreeMap::new();
+    package_map.insert(component.to_string(), package.to_string());
+    crate::repo_config::BackendConfig {
+        base_url: "https://example.com/rpm/".to_string(),
+        insecure: false,
+        gpgcheck: None,
+        scope: None,
+        cache_ttl_secs: None,
+        offline_fallback: None,
+        package_map,
     }
 }
 
@@ -198,6 +225,17 @@ fn run_with_index(
     target_name: Option<String>,
     component_index: Option<&crate::resolution::ComponentIndex>,
 ) -> UpdateCheckReport {
+    run_with_index_and_backend(host, installed, target, target_name, component_index, None)
+}
+
+fn run_with_index_and_backend(
+    host: &FakeHost,
+    installed: &InstalledState,
+    target: Option<TargetProfile>,
+    target_name: Option<String>,
+    component_index: Option<&crate::resolution::ComponentIndex>,
+    rpm_backend: Option<&crate::repo_config::BackendConfig>,
+) -> UpdateCheckReport {
     run_update_check(CheckInputs {
         installed,
         query: host,
@@ -206,6 +244,7 @@ fn run_with_index(
         target_name,
         target,
         component_index,
+        rpm_backend,
     })
 }
 
@@ -402,7 +441,15 @@ fn update_check_raw_component_is_unsupported() {
 
 #[test]
 fn update_check_missing_default_reports_install() {
-    let host = FakeHost::with_cli_noop();
+    let mut host = FakeHost::with_cli_noop();
+    host.available_providers.insert(
+        "anolisa-component(cosh)".to_string(),
+        vec!["copilot-shell".to_string()],
+    );
+    host.available_providers.insert(
+        "anolisa-component(sec-core)".to_string(),
+        vec!["agent-sec-core".to_string()],
+    );
     let state = state_with(vec![]);
     let profile = TargetProfile {
         default_components: vec!["cosh".to_string(), "sec-core".to_string()],
@@ -547,10 +594,39 @@ fn update_check_default_present_via_index_package_without_provide() {
     assert_eq!(report.summary.missing_defaults, 0);
 }
 
+#[test]
+fn update_check_default_present_via_package_map_without_provide() {
+    let mut host = FakeHost::with_cli_noop();
+    host.installed.insert(
+        "copilot-shell".to_string(),
+        info("copilot-shell", "2.6.1", Some("1")),
+    );
+    let backend = rpm_backend_with_package_map("cosh", "copilot-shell");
+    let state = state_with(vec![]);
+    let profile = TargetProfile {
+        default_components: vec!["cosh".to_string()],
+    };
+
+    let report = run_with_index_and_backend(
+        &host,
+        &state,
+        Some(profile),
+        Some(DEFAULT_TARGET_PROFILE_NAME.to_string()),
+        None,
+        Some(&backend),
+    );
+
+    let item = &report.components[0];
+    assert_eq!(item.action, ACTION_NOOP);
+    assert_eq!(item.package.as_deref(), Some("copilot-shell"));
+    assert_eq!(item.ownership.as_deref(), Some("rpm-observed"));
+    assert_eq!(report.summary.missing_defaults, 0);
+}
+
 /// A default absent from both ANOLISA state and rpmdb is still reported as an
 /// install (the pre-fix behaviour for genuinely missing defaults).
 #[test]
-fn update_check_default_absent_from_rpmdb_reports_install() {
+fn update_check_unresolved_missing_default_is_item_error() {
     let host = FakeHost::with_cli_noop();
     let state = state_with(vec![]);
     let profile = TargetProfile {
@@ -564,8 +640,90 @@ fn update_check_default_absent_from_rpmdb_reports_install() {
         Some(DEFAULT_TARGET_PROFILE_NAME.to_string()),
     );
     let item = &report.components[0];
+    assert_eq!(item.action, ACTION_ERROR);
+    assert!(
+        item.error
+            .as_deref()
+            .unwrap_or("")
+            .contains("cannot resolve")
+    );
+    assert_eq!(report.summary.missing_defaults, 0);
+    assert_eq!(report.summary.errors, 1);
+}
+
+#[test]
+fn update_check_missing_default_resolves_package_from_package_map() {
+    let host = FakeHost::with_cli_noop();
+    let state = state_with(vec![]);
+    let profile = TargetProfile {
+        default_components: vec!["cosh".to_string()],
+    };
+    let backend = rpm_backend_with_package_map("cosh", "copilot-shell");
+
+    let report = run_with_index_and_backend(
+        &host,
+        &state,
+        Some(profile),
+        Some(DEFAULT_TARGET_PROFILE_NAME.to_string()),
+        None,
+        Some(&backend),
+    );
+
+    let item = &report.components[0];
     assert_eq!(item.action, ACTION_INSTALL);
+    assert_eq!(item.package.as_deref(), Some("copilot-shell"));
     assert_eq!(report.summary.missing_defaults, 1);
+}
+
+#[test]
+fn update_check_missing_default_resolves_package_from_available_provide() {
+    let mut host = FakeHost::with_cli_noop();
+    host.available_providers.insert(
+        "anolisa-component(cosh)".to_string(),
+        vec!["copilot-shell".to_string()],
+    );
+    let state = state_with(vec![]);
+    let profile = TargetProfile {
+        default_components: vec!["cosh".to_string()],
+    };
+
+    let report = run(
+        &host,
+        &state,
+        Some(profile),
+        Some(DEFAULT_TARGET_PROFILE_NAME.to_string()),
+    );
+
+    let item = &report.components[0];
+    assert_eq!(item.action, ACTION_INSTALL);
+    assert_eq!(item.package.as_deref(), Some("copilot-shell"));
+    assert_eq!(report.summary.missing_defaults, 1);
+}
+
+#[test]
+fn update_check_ambiguous_missing_default_is_item_error() {
+    let mut host = FakeHost::with_cli_noop();
+    host.available_providers.insert(
+        "anolisa-component(cosh)".to_string(),
+        vec!["copilot-shell".to_string(), "cosh-alt".to_string()],
+    );
+    let state = state_with(vec![]);
+    let profile = TargetProfile {
+        default_components: vec!["cosh".to_string()],
+    };
+
+    let report = run(
+        &host,
+        &state,
+        Some(profile),
+        Some(DEFAULT_TARGET_PROFILE_NAME.to_string()),
+    );
+
+    let item = &report.components[0];
+    assert_eq!(item.action, ACTION_ERROR);
+    assert!(item.error.as_deref().unwrap_or("").contains("multiple"));
+    assert_eq!(report.summary.missing_defaults, 0);
+    assert_eq!(report.summary.errors, 1);
 }
 
 /// A failed rpmdb provide query for a default must not be reported as an
@@ -771,11 +929,8 @@ fn update_check_motd_text_lists_upgrades_and_installs() {
     assert!(text.contains("ANOLISA toolchain update is available."));
     assert!(text.contains("1 component can be upgraded"));
     assert!(text.contains("1 new default component can be installed"));
-    assert!(text.contains("Run: anolisa update --check for details"));
-    assert!(
-        !text.contains("anolisa upgrade"),
-        "MOTD must not reference the not-yet-existing `anolisa upgrade`"
-    );
+    assert!(text.contains("Run: sudo anolisa upgrade to apply"));
+    assert!(text.contains("anolisa update --check for details"));
 }
 
 #[test]

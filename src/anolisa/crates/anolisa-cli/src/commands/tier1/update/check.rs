@@ -53,8 +53,11 @@ use anolisa_platform::rpm_query::RpmPackageQuery;
 use super::UpdateArgs;
 use crate::commands::common;
 use crate::context::CliContext;
-use crate::repo_config::RepoConfig;
-use crate::resolution::{ComponentIndex, rpm_component_provide};
+use crate::repo_config::{BackendConfig, RepoConfig};
+use crate::resolution::{
+    BackendKind, ComponentIndex, ComponentResolver, ResolutionSet, ResolutionUse, ResolveOptions,
+    rpm_component_provide,
+};
 use crate::response::CliError;
 
 /// Command label for JSON envelopes and error routing on the check path.
@@ -154,6 +157,10 @@ pub(crate) struct ComponentCheck {
     pub(crate) action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
+    /// Internal planner hint: this row came from a target-profile default that was
+    /// absent from ANOLISA state. It is intentionally not part of JSON/cache.
+    #[serde(skip)]
+    pub(crate) absent_from_state: bool,
 }
 
 /// Aggregate counts used by the summary line, MOTD, and exit signalling.
@@ -213,6 +220,8 @@ struct CheckInputs<'a> {
     /// (best-effort); the check then relies on the `anolisa-component(...)`
     /// provide alone.
     component_index: Option<&'a ComponentIndex>,
+    /// RPM backend config used for missing-default package resolution.
+    rpm_backend: Option<&'a BackendConfig>,
 }
 
 /// Production entry point for `anolisa update --check`.
@@ -331,6 +340,7 @@ pub(crate) fn compute_update_check_report(
         target_name: Some(target_name),
         target: Some(target_profile),
         component_index: component_index.as_ref(),
+        rpm_backend: repo_config.backends.get("rpm"),
     }))
 }
 
@@ -386,6 +396,7 @@ fn run_update_check(inputs: CheckInputs<'_>) -> UpdateCheckReport {
             components.push(check_default_component(
                 inputs.query,
                 inputs.component_index,
+                inputs.rpm_backend,
                 name,
                 inputs.arch,
                 &mut summary,
@@ -521,6 +532,7 @@ fn check_component(
             available: None,
             action: ACTION_UNSUPPORTED_RPM.to_string(),
             error: None,
+            absent_from_state: false,
         };
     }
 
@@ -602,6 +614,7 @@ fn check_component(
                 available: Some(available),
                 action: ACTION_UPDATE.to_string(),
                 error: None,
+                absent_from_state: false,
             }
         }
         Ok(None) => ComponentCheck {
@@ -612,6 +625,7 @@ fn check_component(
             available: None,
             action: ACTION_NOOP.to_string(),
             error: None,
+            absent_from_state: false,
         },
         Err(err) => {
             summary.errors += 1;
@@ -639,6 +653,7 @@ fn check_component(
 fn check_default_component(
     query: &dyn PackageQuery,
     index: Option<&ComponentIndex>,
+    rpm_backend: Option<&BackendConfig>,
     name: &str,
     arch: &str,
     summary: &mut CheckSummary,
@@ -650,26 +665,57 @@ fn check_default_component(
         }
         // Genuinely absent from both ANOLISA state and rpmdb.
         DefaultProbe::Missing => {
-            summary.missing_defaults += 1;
-            // Best-effort: resolve the RPM package name the profile default maps
-            // to so a downstream `anolisa upgrade` can `dnf install` it. The
-            // check stays read-only — this is an in-memory index lookup, not a
-            // query. A missing/ambiguous mapping leaves `package = None`; the
-            // default is still reported installable here (preserving
-            // `update --check` behaviour), and it is `upgrade`'s job to refuse
-            // an install with no resolved package rather than the check's.
-            let package = match index_rpm_packages(index, name).as_slice() {
-                [only] => Some(only.clone()),
-                _ => None,
+            // Resolve the RPM package name using the shared install resolver so
+            // package_map and available Provides fallbacks stay available.
+            // Missing/ambiguous resolution is an item error: otherwise the check
+            // would claim an installable action that `upgrade` cannot apply.
+            let package = match resolve_default_install_package(query, index, rpm_backend, name) {
+                Ok(package) => package,
+                Err(reason) => {
+                    summary.errors += 1;
+                    return ComponentCheck {
+                        component: name.to_string(),
+                        package: None,
+                        ownership: None,
+                        installed: None,
+                        available: None,
+                        action: ACTION_ERROR.to_string(),
+                        error: Some(reason),
+                        absent_from_state: true,
+                    };
+                }
             };
+            match query.query_installed(&package) {
+                Ok(Some(_)) => {
+                    return check_present_default(query, name, &package, arch, summary);
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    summary.errors += 1;
+                    return ComponentCheck {
+                        component: name.to_string(),
+                        package: Some(package),
+                        ownership: None,
+                        installed: None,
+                        available: None,
+                        action: ACTION_ERROR.to_string(),
+                        error: Some(format!(
+                            "cannot query installed version of resolved package for default component '{name}': {err}"
+                        )),
+                        absent_from_state: true,
+                    };
+                }
+            }
+            summary.missing_defaults += 1;
             ComponentCheck {
                 component: name.to_string(),
-                package,
+                package: Some(package),
                 ownership: None,
                 installed: None,
                 available: None,
                 action: ACTION_INSTALL.to_string(),
                 error: None,
+                absent_from_state: true,
             }
         }
         // Could not determine presence (query failure, ambiguous providers).
@@ -686,8 +732,47 @@ fn check_default_component(
                 available: None,
                 action: ACTION_ERROR.to_string(),
                 error: Some(reason),
+                absent_from_state: true,
             }
         }
+    }
+}
+
+/// Resolve the package to install for a genuinely missing target-profile default.
+///
+/// This delegates to the shared RPM resolver instead of using only the component
+/// index, preserving site-local package_map and repo-side available-provides
+/// fallbacks for `anolisa upgrade`.
+fn resolve_default_install_package(
+    query: &dyn PackageQuery,
+    index: Option<&ComponentIndex>,
+    rpm_backend: Option<&BackendConfig>,
+    name: &str,
+) -> Result<String, String> {
+    let resolver = ComponentResolver::new(index, rpm_backend, Some(query));
+    match resolver.resolve(
+        name,
+        BackendKind::Rpm,
+        ResolutionUse::Install,
+        ResolveOptions::default(),
+    ) {
+        Ok(ResolutionSet::Unique(target)) => Ok(target.package),
+        Ok(ResolutionSet::None) => Err(format!(
+            "cannot resolve RPM package for default component '{name}': no package mapping or provider found"
+        )),
+        Ok(ResolutionSet::Ambiguous(targets)) => {
+            let packages = targets
+                .iter()
+                .map(|target| target.package.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(format!(
+                "cannot resolve RPM package for default component '{name}': multiple candidates ({packages})"
+            ))
+        }
+        Err(err) => Err(format!(
+            "cannot resolve RPM package for default component '{name}': {err}"
+        )),
     }
 }
 
@@ -839,6 +924,7 @@ fn check_present_default(
                 available: Some(available),
                 action: ACTION_UPDATE.to_string(),
                 error: None,
+                absent_from_state: true,
             }
         }
         Ok(None) => ComponentCheck {
@@ -849,6 +935,7 @@ fn check_present_default(
             available: None,
             action: ACTION_NOOP.to_string(),
             error: None,
+            absent_from_state: true,
         },
         Err(err) => {
             summary.errors += 1;
@@ -927,6 +1014,7 @@ fn component_error(
         available: None,
         action: ACTION_ERROR.to_string(),
         error: Some(reason),
+        absent_from_state: false,
     }
 }
 

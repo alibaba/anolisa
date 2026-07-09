@@ -28,6 +28,10 @@ struct FakeHost {
     fail_install: HashSet<String>,
     /// packages whose `query_installed` returns `Ok(None)` (rpmdb miss).
     missing_after: HashSet<String>,
+    /// package -> source repo returned by `installed_origin`.
+    origins: HashMap<String, String>,
+    /// packages whose `installed_origin` returns an error.
+    fail_origin: HashSet<String>,
     /// ordered transaction log (`"update:<pkg>"` / `"install:<pkg>"`).
     calls: RefCell<Vec<String>>,
 }
@@ -35,6 +39,11 @@ struct FakeHost {
 impl FakeHost {
     fn with_installed(mut self, package: &str, info: PackageInfo) -> Self {
         self.installed.insert(package.to_string(), info);
+        self
+    }
+
+    fn with_origin(mut self, package: &str, origin: &str) -> Self {
+        self.origins.insert(package.to_string(), origin.to_string());
         self
     }
 
@@ -53,6 +62,17 @@ impl PackageQuery for FakeHost {
 
     fn query_available(&self, _package: &str) -> Result<Vec<PackageInfo>, PackageQueryError> {
         Ok(Vec::new())
+    }
+
+    fn installed_origin(&self, package: &str) -> Result<Option<String>, PackageQueryError> {
+        if self.fail_origin.contains(package) {
+            return Err(PackageQueryError::QueryFailed {
+                command: "dnf".to_string(),
+                code: Some(1),
+                stderr: "repo lookup failed".to_string(),
+            });
+        }
+        Ok(self.origins.get(package).cloned())
     }
 }
 
@@ -148,6 +168,7 @@ fn component_check(
         available: available.map(str::to_string),
         action: action.to_string(),
         error: error.map(str::to_string),
+        absent_from_state: false,
     }
 }
 
@@ -577,7 +598,8 @@ fn installed_default_is_recorded_as_rpm_managed_after_refresh() {
     let ctx = system_ctx(tmp.path().to_path_buf());
     let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
     let host = FakeHost::default()
-        .with_installed("agent-memory", info("agent-memory", "1.0.0", Some("1.al4")));
+        .with_installed("agent-memory", info("agent-memory", "1.0.0", Some("1.al4")))
+        .with_origin("agent-memory", "alinux4-agentic-os");
     let plan = build_plan(
         None,
         &cli_noop(),
@@ -610,6 +632,103 @@ fn installed_default_is_recorded_as_rpm_managed_after_refresh() {
     assert_eq!(
         obj.rpm_metadata.as_ref().map(|m| m.package_name.as_str()),
         Some("agent-memory")
+    );
+    assert_eq!(
+        obj.rpm_metadata
+            .as_ref()
+            .and_then(|m| m.source_repo.as_deref()),
+        Some("alinux4-agentic-os")
+    );
+}
+
+#[test]
+fn origin_lookup_failure_is_warning_not_apply_failure() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let mut host = FakeHost::default()
+        .with_installed("agent-memory", info("agent-memory", "1.0.0", Some("1.al4")));
+    host.fail_origin.insert("agent-memory".to_string());
+    let plan = build_plan(
+        None,
+        &cli_noop(),
+        &[component_check(
+            "agent-memory",
+            Some("agent-memory"),
+            None,
+            None,
+            None,
+            ACTION_INSTALL,
+            None,
+        )],
+    );
+
+    let result = run_upgrade_with_deps(&ctx, &layout, &plan, &host, &host, true, false, COMMAND)
+        .expect("apply");
+    assert_eq!(result.status, STATUS_OK);
+    assert_eq!(result.warnings.len(), 1);
+    assert!(result.warnings[0].contains("could not determine source repo"));
+
+    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
+    let obj = state
+        .find_object(ObjectKind::Component, "agent-memory")
+        .expect("recorded component");
+    assert_eq!(
+        obj.rpm_metadata
+            .as_ref()
+            .and_then(|m| m.source_repo.as_deref()),
+        None
+    );
+}
+
+#[test]
+fn origin_lookup_failure_preserves_existing_source_repo() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let mut host = FakeHost::default().with_installed(
+        "copilot-shell",
+        info("copilot-shell", "1.1.0", Some("1.al4")),
+    );
+    host.fail_origin.insert("copilot-shell".to_string());
+    seed_state(
+        &layout,
+        vec![rpm_component(
+            "cosh",
+            "copilot-shell",
+            "1.0.0-1.al4",
+            Ownership::RpmManaged,
+        )],
+    );
+    let plan = build_plan(
+        None,
+        &cli_noop(),
+        &[component_check(
+            "cosh",
+            Some("copilot-shell"),
+            Some("rpm-managed"),
+            Some("1.0.0-1.al4"),
+            Some("1.1.0-1.al4"),
+            ACTION_UPDATE,
+            None,
+        )],
+    );
+
+    let result = run_upgrade_with_deps(&ctx, &layout, &plan, &host, &host, true, false, COMMAND)
+        .expect("apply");
+    assert_eq!(result.status, STATUS_OK);
+    assert_eq!(result.warnings.len(), 1);
+
+    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
+    let obj = state
+        .find_object(ObjectKind::Component, "cosh")
+        .expect("component");
+    assert_eq!(obj.version, "1.1.0-1.al4");
+    assert_eq!(
+        obj.rpm_metadata
+            .as_ref()
+            .and_then(|m| m.source_repo.as_deref()),
+        Some("@System")
     );
 }
 
@@ -683,9 +802,7 @@ fn partial_transaction_failure_is_reported_and_not_claimed_as_success() {
 // ── apply: state drift under the lock ────────────────────────────────────────
 
 /// A default install whose name already belongs to a raw-managed component in
-/// state (a concurrent install between plan and save) must not be overwritten:
-/// the dnf install ran, but the state record is left as raw-managed and the item
-/// is reported as an error, so the run does not claim clean success.
+/// state (a concurrent install after planning) must be refused before dnf runs.
 #[test]
 fn install_does_not_overwrite_existing_raw_managed_component() {
     let tmp = tempfile::tempdir().expect("tmpdir");
@@ -724,6 +841,10 @@ fn install_does_not_overwrite_existing_raw_managed_component() {
     assert!(result.installed.is_empty());
     assert_eq!(result.errors.len(), 1);
     assert_eq!(result.errors[0].name, "agent-memory");
+    assert!(
+        host.txn_calls().is_empty(),
+        "stale state must block dnf before RPM mutation"
+    );
 
     // State must still describe the original raw-managed component.
     let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
@@ -734,19 +855,19 @@ fn install_does_not_overwrite_existing_raw_managed_component() {
     assert_eq!(obj.version, "0.9.0");
 }
 
-/// A component update whose state row vanished between planning and the state
-/// save (the dnf transaction succeeded, but the object is gone) must be reported
-/// as an error, not a silent `ok` — the caller must not claim the component was
-/// updated when ANOLISA state no longer reflects it.
+/// A component update whose state row vanished after planning must be rejected
+/// under the install lock before dnf mutates the host.
 #[test]
 fn update_state_drift_missing_object_is_reported_as_error() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let ctx = system_ctx(tmp.path().to_path_buf());
     let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
-    let host = FakeHost::default().with_installed(
-        "copilot-shell",
-        info("copilot-shell", "1.1.0", Some("1.al4")),
-    );
+    let host = FakeHost::default()
+        .with_installed(
+            "copilot-shell",
+            info("copilot-shell", "1.1.0", Some("1.al4")),
+        )
+        .with_origin("copilot-shell", "alinux4-agentic-os");
     // No state is seeded, so the planned update has no row to refresh.
 
     let plan = build_plan(
@@ -776,8 +897,104 @@ fn update_state_drift_missing_object_is_reported_as_error() {
     assert_eq!(result.errors.len(), 1);
     assert_eq!(result.errors[0].name, "cosh");
     assert!(
-        host.txn_calls()
-            .contains(&"update:copilot-shell".to_string())
+        host.txn_calls().is_empty(),
+        "stale state must block dnf before RPM mutation"
+    );
+}
+
+#[test]
+fn observed_default_update_missing_from_state_is_recorded_as_rpm_observed() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let host = FakeHost::default()
+        .with_installed(
+            "copilot-shell",
+            info("copilot-shell", "1.1.0", Some("1.al4")),
+        )
+        .with_origin("copilot-shell", "alinux4-agentic-os");
+    let mut observed_default = component_check(
+        "cosh",
+        Some("copilot-shell"),
+        Some("rpm-observed"),
+        Some("1.0.0-1.al4"),
+        Some("1.1.0-1.al4"),
+        ACTION_UPDATE,
+        None,
+    );
+    observed_default.absent_from_state = true;
+    let plan = build_plan(None, &cli_noop(), &[observed_default]);
+
+    let result = run_upgrade_with_deps(&ctx, &layout, &plan, &host, &host, true, false, COMMAND)
+        .expect("apply");
+    assert_eq!(result.status, STATUS_OK);
+    assert_eq!(result.updated.len(), 1);
+    assert!(result.errors.is_empty());
+
+    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
+    let obj = state
+        .find_object(ObjectKind::Component, "cosh")
+        .expect("observed default recorded");
+    assert_eq!(obj.effective_ownership(), Ownership::RpmObserved);
+    assert_eq!(obj.status, ObjectStatus::Adopted);
+    assert!(obj.adopted);
+    assert!(!obj.managed);
+    assert_eq!(obj.version, "1.1.0-1.al4");
+    assert_eq!(
+        obj.rpm_metadata.as_ref().map(|m| m.package_name.as_str()),
+        Some("copilot-shell")
+    );
+    assert_eq!(
+        obj.rpm_metadata
+            .as_ref()
+            .and_then(|m| m.source_repo.as_deref()),
+        Some("alinux4-agentic-os")
+    );
+}
+
+#[test]
+fn observed_default_noop_missing_from_state_is_recorded_without_dnf() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let host = FakeHost::default().with_installed(
+        "copilot-shell",
+        info("copilot-shell", "1.1.0", Some("1.al4")),
+    );
+    let mut observed_default = component_check(
+        "cosh",
+        Some("copilot-shell"),
+        Some("rpm-observed"),
+        Some("1.1.0-1.al4"),
+        None,
+        ACTION_NOOP,
+        None,
+    );
+    observed_default.absent_from_state = true;
+    let plan = build_plan(None, &cli_noop(), &[observed_default]);
+
+    let result = run_upgrade_with_deps(&ctx, &layout, &plan, &host, &host, true, false, COMMAND)
+        .expect("apply");
+    assert_eq!(result.status, STATUS_OK);
+    assert!(result.updated.is_empty(), "no package update happened");
+    assert_eq!(result.recorded.len(), 1);
+    assert_eq!(result.recorded[0].name, "cosh");
+    assert_eq!(result.recorded[0].version.as_deref(), Some("1.1.0-1.al4"));
+    assert!(
+        host.txn_calls().is_empty(),
+        "recording an observed default must not run dnf"
+    );
+
+    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
+    let obj = state
+        .find_object(ObjectKind::Component, "cosh")
+        .expect("observed default recorded");
+    assert_eq!(obj.effective_ownership(), Ownership::RpmObserved);
+    assert_eq!(obj.status, ObjectStatus::Adopted);
+    assert_eq!(obj.version, "1.1.0-1.al4");
+    assert_eq!(
+        obj.rpm_metadata.as_ref().map(|m| m.package_name.as_str()),
+        Some("copilot-shell")
     );
 }
 
