@@ -1,9 +1,10 @@
 //! Serve subcommand — start the API server
 
-use agentsight::config::ServerAuthConfig;
 use agentsight::server::run_server;
 use agentsight::storage::sqlite::GenAISqliteStore;
 use structopt::StructOpt;
+
+use super::{DEFAULT_CONFIG_PATH, load_server_auth_config};
 
 /// Start the AgentSight API server
 #[derive(Debug, StructOpt, Clone)]
@@ -20,13 +21,9 @@ pub struct ServeCommand {
     #[structopt(long)]
     pub db: Option<String>,
 
-    /// Disable dashboard authentication (for development only)
-    #[structopt(long)]
-    pub no_auth: bool,
-
-    /// Override the dashboard auth token
-    #[structopt(long)]
-    pub token: Option<String>,
+    /// Path to JSON configuration file
+    #[structopt(long, default_value = DEFAULT_CONFIG_PATH)]
+    pub config: String,
 }
 
 impl ServeCommand {
@@ -41,11 +38,8 @@ impl ServeCommand {
         let host = self.host.clone();
         let port = self.port;
 
-        let auth_config = ServerAuthConfig {
-            enabled: !self.no_auth,
-            token: self.token.clone(),
-            token_file: None,
-        };
+        // Load server.auth.enabled from config file (same source as `trace`)
+        let auth_config = load_server_auth_config(&self.config);
 
         actix_web::rt::System::new().block_on(async move {
             if let Err(e) = run_server(&host, port, db_path, auth_config).await {

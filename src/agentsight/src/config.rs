@@ -215,14 +215,14 @@ impl FromStr for TcpTarget {
 }
 
 /// Server authentication configuration (JSON).
+///
+/// Only `enabled` is configurable.  The token is always auto-generated
+/// (or read from the default `.dashboard_token` file) — there is no
+/// way to specify a fixed token or custom token-file path.
 #[derive(serde::Deserialize, Clone, Debug, Default)]
 #[serde(default)]
 pub struct JsonServerAuth {
     pub enabled: Option<bool>,
-    /// Fixed token string (overrides auto-generation when non-empty).
-    pub token: Option<String>,
-    /// Custom path for the token file.
-    pub token_file: Option<String>,
 }
 
 /// Server configuration block (JSON).
@@ -237,19 +237,11 @@ pub struct JsonServer {
 pub struct ServerAuthConfig {
     /// Whether dashboard authentication is enabled.
     pub enabled: bool,
-    /// Fixed token string (overrides auto-generation).
-    pub token: Option<String>,
-    /// Custom path for the token file.
-    pub token_file: Option<PathBuf>,
 }
 
 impl Default for ServerAuthConfig {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            token: None,
-            token_file: None,
-        }
+        Self { enabled: true }
     }
 }
 
@@ -1109,18 +1101,6 @@ impl AgentsightConfig {
                 if let Some(enabled) = auth.enabled {
                     self.server_auth.enabled = enabled;
                 }
-                if let Some(ref token) = auth.token {
-                    let trimmed = token.trim();
-                    if !trimmed.is_empty() {
-                        self.server_auth.token = Some(trimmed.to_string());
-                    }
-                }
-                if let Some(ref token_file) = auth.token_file {
-                    let trimmed = token_file.trim();
-                    if !trimmed.is_empty() {
-                        self.server_auth.token_file = Some(PathBuf::from(trimmed));
-                    }
-                }
             }
         }
 
@@ -1867,27 +1847,17 @@ mod tests {
     }
 
     #[test]
-    fn load_from_json_parses_server_auth_config() {
+    fn load_from_json_parses_server_auth_enabled() {
         let json = r#"{
             "server": {
                 "auth": {
-                    "enabled": true,
-                    "token": "my-secret-token",
-                    "token_file": "/custom/token/path"
+                    "enabled": true
                 }
             }
         }"#;
         let mut config = AgentsightConfig::new();
         config.load_from_json(json).unwrap();
         assert!(config.server_auth.enabled);
-        assert_eq!(
-            config.server_auth.token,
-            Some("my-secret-token".to_string())
-        );
-        assert_eq!(
-            config.server_auth.token_file,
-            Some(PathBuf::from("/custom/token/path"))
-        );
     }
 
     #[test]
@@ -1896,8 +1866,6 @@ mod tests {
         let mut config = AgentsightConfig::new();
         config.load_from_json(json).unwrap();
         assert!(config.server_auth.enabled); // default is true
-        assert!(config.server_auth.token.is_none());
-        assert!(config.server_auth.token_file.is_none());
     }
 
     #[test]
@@ -1912,21 +1880,5 @@ mod tests {
         let mut config = AgentsightConfig::new();
         config.load_from_json(json).unwrap();
         assert!(!config.server_auth.enabled);
-    }
-
-    #[test]
-    fn load_from_json_server_auth_empty_token_ignored() {
-        let json = r#"{
-            "server": {
-                "auth": {
-                    "token": "   ",
-                    "token_file": ""
-                }
-            }
-        }"#;
-        let mut config = AgentsightConfig::new();
-        config.load_from_json(json).unwrap();
-        assert!(config.server_auth.token.is_none());
-        assert!(config.server_auth.token_file.is_none());
     }
 }

@@ -197,14 +197,10 @@ pub struct DashboardAuth {
 impl DashboardAuth {
     /// Initialize authentication from configuration.
     ///
-    /// Priority for the token value:
-    /// 1. Explicit `auth.token` in config
-    /// 2. Existing token file (or generate a new one)
+    /// The token is always read from the default token file
+    /// (`<storage_base>/.dashboard_token`), or auto-generated on first run.
     pub fn init(config: &ServerAuthConfig, storage_base: &Path) -> Self {
-        let token_file = config
-            .token_file
-            .clone()
-            .unwrap_or_else(|| storage_base.join(TOKEN_FILE_NAME));
+        let token_file = storage_base.join(TOKEN_FILE_NAME);
 
         if !config.enabled {
             log::info!("Dashboard authentication is disabled");
@@ -215,12 +211,7 @@ impl DashboardAuth {
             };
         }
 
-        let token = if let Some(ref explicit) = config.token {
-            log::info!("Using configured dashboard auth token");
-            explicit.clone()
-        } else {
-            read_or_create_token(&token_file)
-        };
+        let token = read_or_create_token(&token_file);
 
         Self {
             enabled: true,
@@ -581,37 +572,15 @@ mod tests {
 
     #[test]
     fn dashboard_auth_disabled_passes_through() {
-        let config = ServerAuthConfig {
-            enabled: false,
-            token: None,
-            token_file: None,
-        };
+        let config = ServerAuthConfig { enabled: false };
         let auth = DashboardAuth::init(&config, Path::new("/tmp"));
         assert!(!auth.enabled);
         assert!(auth.token().is_none());
     }
 
     #[test]
-    fn dashboard_auth_with_explicit_token() {
-        let config = ServerAuthConfig {
-            enabled: true,
-            token: Some("my-explicit-token".to_string()),
-            token_file: None,
-        };
-        let auth = DashboardAuth::init(&config, Path::new("/tmp"));
-        assert!(auth.enabled);
-        assert_eq!(auth.token(), Some("my-explicit-token"));
-        assert!(auth.verify_token("my-explicit-token"));
-        assert!(!auth.verify_token("wrong-token"));
-    }
-
-    #[test]
     fn dashboard_auth_token_file_path() {
-        let config = ServerAuthConfig {
-            enabled: true,
-            token: Some("tok".to_string()),
-            token_file: None,
-        };
+        let config = ServerAuthConfig { enabled: true };
         let auth = DashboardAuth::init(&config, Path::new("/var/log/sysak/.agentsight"));
         assert_eq!(
             auth.token_file(),
@@ -620,54 +589,39 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_auth_custom_token_file_path() {
-        let config = ServerAuthConfig {
-            enabled: true,
-            token: Some("tok".to_string()),
-            token_file: Some(PathBuf::from("/custom/path/token")),
-        };
-        let auth = DashboardAuth::init(&config, Path::new("/tmp"));
-        assert_eq!(auth.token_file(), Path::new("/custom/path/token"));
-    }
-
-    #[test]
     fn dashboard_auth_create_and_verify_session_cookie() {
-        let config = ServerAuthConfig {
-            enabled: true,
-            token: Some("secret-token".to_string()),
-            token_file: None,
-        };
-        let auth = DashboardAuth::init(&config, Path::new("/tmp"));
+        let config = ServerAuthConfig { enabled: true };
+        let dir = std::env::temp_dir().join("auth_test_cookie");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok();
+        let auth = DashboardAuth::init(&config, &dir);
         let cookie = auth.create_session_cookie(3600);
         assert!(!cookie.is_empty());
         assert!(auth.verify_session_cookie(&cookie));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn dashboard_auth_session_cookie_wrong_token_fails() {
-        let config1 = ServerAuthConfig {
-            enabled: true,
-            token: Some("token-a".to_string()),
-            token_file: None,
-        };
-        let config2 = ServerAuthConfig {
-            enabled: true,
-            token: Some("token-b".to_string()),
-            token_file: None,
-        };
-        let auth1 = DashboardAuth::init(&config1, Path::new("/tmp"));
-        let auth2 = DashboardAuth::init(&config2, Path::new("/tmp"));
+    fn dashboard_auth_session_cookie_different_storage_fails() {
+        let dir1 = std::env::temp_dir().join("auth_test_cookie_a");
+        let dir2 = std::env::temp_dir().join("auth_test_cookie_b");
+        let _ = std::fs::remove_dir_all(&dir1);
+        let _ = std::fs::remove_dir_all(&dir2);
+        std::fs::create_dir_all(&dir1).ok();
+        std::fs::create_dir_all(&dir2).ok();
+        let config = ServerAuthConfig { enabled: true };
+        let auth1 = DashboardAuth::init(&config, &dir1);
+        let auth2 = DashboardAuth::init(&config, &dir2);
         let cookie = auth1.create_session_cookie(3600);
+        // Different storage dirs → different tokens → cookie should fail
         assert!(!auth2.verify_session_cookie(&cookie));
+        let _ = std::fs::remove_dir_all(&dir1);
+        let _ = std::fs::remove_dir_all(&dir2);
     }
 
     #[test]
     fn dashboard_auth_disabled_returns_empty_cookie() {
-        let config = ServerAuthConfig {
-            enabled: false,
-            token: None,
-            token_file: None,
-        };
+        let config = ServerAuthConfig { enabled: false };
         let auth = DashboardAuth::init(&config, Path::new("/tmp"));
         let cookie = auth.create_session_cookie(3600);
         assert!(cookie.is_empty());
@@ -676,11 +630,7 @@ mod tests {
 
     #[test]
     fn dashboard_auth_verify_token_when_disabled_returns_false() {
-        let config = ServerAuthConfig {
-            enabled: false,
-            token: None,
-            token_file: None,
-        };
+        let config = ServerAuthConfig { enabled: false };
         let auth = DashboardAuth::init(&config, Path::new("/tmp"));
         assert!(!auth.verify_token("any-token"));
     }
@@ -725,29 +675,11 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_auth_read_token_from_file_with_explicit_token() {
-        let config = ServerAuthConfig {
-            enabled: true,
-            token: Some("explicit-token".to_string()),
-            token_file: None,
-        };
-        let auth = DashboardAuth::init(&config, Path::new("/tmp"));
-        assert_eq!(
-            auth.read_token_from_file(),
-            Some("explicit-token".to_string())
-        );
-    }
-
-    #[test]
     fn dashboard_auth_read_token_from_file_reads_persisted() {
         let dir = std::env::temp_dir().join("auth_test_read_persisted");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).ok();
-        let config = ServerAuthConfig {
-            enabled: true,
-            token: None,
-            token_file: None,
-        };
+        let config = ServerAuthConfig { enabled: true };
         let auth = DashboardAuth::init(&config, &dir);
         let token = auth.read_token_from_file();
         assert!(token.is_some());
@@ -760,11 +692,7 @@ mod tests {
         let dir = std::env::temp_dir().join("auth_test_auto_gen");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).ok();
-        let config = ServerAuthConfig {
-            enabled: true,
-            token: None,
-            token_file: None,
-        };
+        let config = ServerAuthConfig { enabled: true };
         let auth = DashboardAuth::init(&config, &dir);
         assert!(auth.enabled);
         assert!(auth.token().is_some());
@@ -784,11 +712,7 @@ mod tests {
     #[actix_web::test]
     async fn middleware_passes_through_when_disabled() {
         let auth = Arc::new(DashboardAuth::init(
-            &ServerAuthConfig {
-                enabled: false,
-                token: None,
-                token_file: None,
-            },
+            &ServerAuthConfig { enabled: false },
             Path::new("/tmp"),
         ));
         let app = actix_web::test::init_service(
@@ -807,13 +731,12 @@ mod tests {
 
     #[actix_web::test]
     async fn middleware_passes_exempt_paths_without_token() {
+        let dir = std::env::temp_dir().join("auth_mw_exempt");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok();
         let auth = Arc::new(DashboardAuth::init(
-            &ServerAuthConfig {
-                enabled: true,
-                token: Some("secret".to_string()),
-                token_file: None,
-            },
-            Path::new("/tmp"),
+            &ServerAuthConfig { enabled: true },
+            &dir,
         ));
         let app = actix_web::test::init_service(
             actix_web::App::new()
@@ -852,13 +775,12 @@ mod tests {
 
     #[actix_web::test]
     async fn middleware_returns_401_for_protected_api_without_token() {
+        let dir = std::env::temp_dir().join("auth_mw_401");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok();
         let auth = Arc::new(DashboardAuth::init(
-            &ServerAuthConfig {
-                enabled: true,
-                token: Some("secret".to_string()),
-                token_file: None,
-            },
-            Path::new("/tmp"),
+            &ServerAuthConfig { enabled: true },
+            &dir,
         ));
         let app = actix_web::test::init_service(
             actix_web::App::new().wrap(AuthMiddleware::new(auth)).route(
@@ -876,14 +798,14 @@ mod tests {
 
     #[actix_web::test]
     async fn middleware_allows_valid_bearer_token() {
+        let dir = std::env::temp_dir().join("auth_mw_bearer");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok();
         let auth = Arc::new(DashboardAuth::init(
-            &ServerAuthConfig {
-                enabled: true,
-                token: Some("my-secret".to_string()),
-                token_file: None,
-            },
-            Path::new("/tmp"),
+            &ServerAuthConfig { enabled: true },
+            &dir,
         ));
+        let token = auth.token().unwrap_or("").to_string();
         let app = actix_web::test::init_service(
             actix_web::App::new().wrap(AuthMiddleware::new(auth)).route(
                 "/api/sessions",
@@ -893,7 +815,7 @@ mod tests {
         .await;
         let req = actix_web::test::TestRequest::get()
             .uri("/api/sessions")
-            .insert_header(("Authorization", "Bearer my-secret"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
             .to_request();
         let resp = actix_web::test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);
@@ -901,14 +823,14 @@ mod tests {
 
     #[actix_web::test]
     async fn middleware_allows_valid_query_token() {
+        let dir = std::env::temp_dir().join("auth_mw_query");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok();
         let auth = Arc::new(DashboardAuth::init(
-            &ServerAuthConfig {
-                enabled: true,
-                token: Some("my-secret".to_string()),
-                token_file: None,
-            },
-            Path::new("/tmp"),
+            &ServerAuthConfig { enabled: true },
+            &dir,
         ));
+        let token = auth.token().unwrap_or("").to_string();
         let app = actix_web::test::init_service(
             actix_web::App::new().wrap(AuthMiddleware::new(auth)).route(
                 "/api/sessions",
@@ -917,7 +839,7 @@ mod tests {
         )
         .await;
         let req = actix_web::test::TestRequest::get()
-            .uri("/api/sessions?token=my-secret")
+            .uri(&format!("/api/sessions?token={token}"))
             .to_request();
         let resp = actix_web::test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);
@@ -925,13 +847,12 @@ mod tests {
 
     #[actix_web::test]
     async fn middleware_allows_valid_session_cookie() {
+        let dir = std::env::temp_dir().join("auth_mw_cookie");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok();
         let auth = Arc::new(DashboardAuth::init(
-            &ServerAuthConfig {
-                enabled: true,
-                token: Some("my-secret".to_string()),
-                token_file: None,
-            },
-            Path::new("/tmp"),
+            &ServerAuthConfig { enabled: true },
+            &dir,
         ));
         let cookie_value = auth.create_session_cookie(3600);
         let app = actix_web::test::init_service(
@@ -954,13 +875,12 @@ mod tests {
 
     #[actix_web::test]
     async fn middleware_rejects_invalid_bearer_token() {
+        let dir = std::env::temp_dir().join("auth_mw_reject");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok();
         let auth = Arc::new(DashboardAuth::init(
-            &ServerAuthConfig {
-                enabled: true,
-                token: Some("my-secret".to_string()),
-                token_file: None,
-            },
-            Path::new("/tmp"),
+            &ServerAuthConfig { enabled: true },
+            &dir,
         ));
         let app = actix_web::test::init_service(
             actix_web::App::new().wrap(AuthMiddleware::new(auth)).route(
@@ -979,13 +899,12 @@ mod tests {
 
     #[actix_web::test]
     async fn middleware_passes_through_non_api_paths_without_token() {
+        let dir = std::env::temp_dir().join("auth_mw_nonapi");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok();
         let auth = Arc::new(DashboardAuth::init(
-            &ServerAuthConfig {
-                enabled: true,
-                token: Some("secret".to_string()),
-                token_file: None,
-            },
-            Path::new("/tmp"),
+            &ServerAuthConfig { enabled: true },
+            &dir,
         ));
         let app = actix_web::test::init_service(
             actix_web::App::new().wrap(AuthMiddleware::new(auth)).route(

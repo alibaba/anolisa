@@ -1,8 +1,9 @@
 //! Dashboard subcommand — display dashboard authentication status
 
-use agentsight::config::ServerAuthConfig;
 use agentsight::server::auth::DashboardAuth;
 use structopt::StructOpt;
+
+use super::{DEFAULT_CONFIG_PATH, load_server_auth_config};
 
 /// Display the current AgentSight dashboard status (auth, token, URL)
 #[derive(Debug, StructOpt, Clone)]
@@ -18,6 +19,10 @@ pub struct DashboardCommand {
     /// Port the server is listening on
     #[structopt(long, default_value = "7396")]
     pub port: u16,
+
+    /// Path to JSON configuration file
+    #[structopt(long, default_value = DEFAULT_CONFIG_PATH)]
+    pub config: String,
 }
 
 impl DashboardCommand {
@@ -34,9 +39,9 @@ impl DashboardCommand {
                     .to_path_buf()
             });
 
-        // Load config to check if auth is enabled
-        let config = ServerAuthConfig::default();
-        let auth = DashboardAuth::init(&config, &storage_base);
+        // Load server.auth.enabled from config file (same source as `serve`)
+        let auth_config = load_server_auth_config(&self.config);
+        let auth = DashboardAuth::init(&auth_config, &storage_base);
 
         println!("AgentSight Dashboard Status");
         println!("===========================");

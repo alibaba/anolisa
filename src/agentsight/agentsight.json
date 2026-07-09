@@ -4,9 +4,7 @@
   },
   "server": {
     "auth": {
-      "enabled": true,
-      "token": "",
-      "token_file": ""
+      "enabled": true
     }
   },
   "deadloop": {

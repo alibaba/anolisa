@@ -20,6 +20,33 @@ pub mod summary;
 pub mod token;
 pub mod trace;
 
+/// Default configuration file path (shared by trace / serve / dashboard).
+#[cfg(feature = "server")]
+pub const DEFAULT_CONFIG_PATH: &str = "/etc/agentsight/config.json";
+
+/// Load `ServerAuthConfig` from the agentsight config file.
+///
+/// Falls back to defaults if the file cannot be read or parsed.
+#[cfg(feature = "server")]
+pub fn load_server_auth_config(config_path: &str) -> agentsight::config::ServerAuthConfig {
+    use agentsight::config::{AgentsightConfig, ensure_default_agents_config};
+
+    let path = std::path::Path::new(config_path);
+    let mut config = AgentsightConfig::new();
+
+    // Ensure the config file exists (generate default if missing)
+    if let Err(e) = ensure_default_agents_config(path) {
+        log::warn!("Failed to ensure default config at {config_path:?}: {e}, using defaults");
+        return config.server_auth;
+    }
+
+    if let Err(e) = config.load_from_file(path) {
+        log::warn!("Failed to load config from {config_path:?}: {e}, using defaults");
+    }
+
+    config.server_auth
+}
+
 /// Parse period string into TimePeriod
 pub fn parse_period(s: &str) -> agentsight::TimePeriod {
     match s {

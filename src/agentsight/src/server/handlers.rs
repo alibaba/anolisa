@@ -904,10 +904,7 @@ mod tests {
     }
 
     fn test_app_state(timeout_ms: u64) -> web::Data<AppState> {
-        let auth_config = crate::config::ServerAuthConfig {
-            enabled: false,
-            ..Default::default()
-        };
+        let auth_config = crate::config::ServerAuthConfig { enabled: false };
         let auth = Arc::new(crate::server::auth::DashboardAuth::init(
             &auth_config,
             std::path::Path::new("/tmp"),
@@ -990,16 +987,22 @@ mod tests {
 
     // ─── Auth endpoint tests ──────────────────────────────────────────────────
 
-    fn test_app_state_with_auth(token: &str, enabled: bool) -> web::Data<AppState> {
-        let auth_config = crate::config::ServerAuthConfig {
-            enabled,
-            token: Some(token.to_string()),
-            ..Default::default()
-        };
-        let auth = Arc::new(crate::server::auth::DashboardAuth::init(
-            &auth_config,
-            std::path::Path::new("/tmp"),
-        ));
+    /// A test token that is >= 32 chars (required by read_or_create_token).
+    const TEST_TOKEN: &str = "correct-token-for-auth-testing-32chars!!";
+
+    fn test_app_state_with_auth(enabled: bool) -> web::Data<AppState> {
+        // Use a unique dir per call to avoid test-parallelism races
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("handler_auth_test_{id}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok();
+        if enabled {
+            std::fs::write(dir.join(".dashboard_token"), TEST_TOKEN).ok();
+        }
+        let auth_config = crate::config::ServerAuthConfig { enabled };
+        let auth = Arc::new(crate::server::auth::DashboardAuth::init(&auth_config, &dir));
         web::Data::new(AppState {
             storage_path: PathBuf::from(":memory:"),
             start_time: Instant::now(),
@@ -1014,13 +1017,13 @@ mod tests {
     async fn auth_login_success_with_correct_token() {
         let app = awtest::init_service(
             App::new()
-                .app_data(test_app_state_with_auth("correct-token", true))
+                .app_data(test_app_state_with_auth(true))
                 .route("/api/auth/login", web::post().to(auth_login)),
         )
         .await;
         let req = awtest::TestRequest::post()
             .uri("/api/auth/login")
-            .set_json(json!({"token": "correct-token"}))
+            .set_json(json!({"token": TEST_TOKEN}))
             .to_request();
         let resp = awtest::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -1036,7 +1039,7 @@ mod tests {
     async fn auth_login_fails_with_wrong_token() {
         let app = awtest::init_service(
             App::new()
-                .app_data(test_app_state_with_auth("correct-token", true))
+                .app_data(test_app_state_with_auth(true))
                 .route("/api/auth/login", web::post().to(auth_login)),
         )
         .await;
@@ -1056,7 +1059,7 @@ mod tests {
     async fn auth_status_reports_enabled() {
         let app = awtest::init_service(
             App::new()
-                .app_data(test_app_state_with_auth("tok", true))
+                .app_data(test_app_state_with_auth(true))
                 .service(auth_status),
         )
         .await;
@@ -1098,7 +1101,7 @@ mod tests {
     async fn auth_verify_returns_false_without_cookie() {
         let app = awtest::init_service(
             App::new()
-                .app_data(test_app_state_with_auth("tok", true))
+                .app_data(test_app_state_with_auth(true))
                 .service(auth_verify),
         )
         .await;
@@ -1112,7 +1115,7 @@ mod tests {
 
     #[actix_web::test]
     async fn auth_verify_returns_true_with_valid_cookie() {
-        let state = test_app_state_with_auth("my-secret", true);
+        let state = test_app_state_with_auth(true);
         let cookie_value = state.auth.create_session_cookie(3600);
         let app = awtest::init_service(App::new().app_data(state).service(auth_verify)).await;
         let req = awtest::TestRequest::get()

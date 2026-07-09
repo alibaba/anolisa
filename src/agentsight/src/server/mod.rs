@@ -376,10 +376,7 @@ mod tests {
     }
 
     fn test_app_state(timeout_ms: u64) -> web::Data<AppState> {
-        let auth_config = ServerAuthConfig {
-            enabled: false,
-            ..Default::default()
-        };
+        let auth_config = ServerAuthConfig { enabled: false };
         let auth = Arc::new(DashboardAuth::init(
             &auth_config,
             std::path::Path::new("/tmp"),

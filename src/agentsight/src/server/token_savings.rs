@@ -935,11 +935,7 @@ mod tests {
             interruption_store: None,
             security_observability: crate::server::SecurityObservabilityConfig::default(),
             auth: Arc::new(crate::server::auth::DashboardAuth::init(
-                &crate::config::ServerAuthConfig {
-                    enabled: false,
-                    token: None,
-                    token_file: None,
-                },
+                &crate::config::ServerAuthConfig { enabled: false },
                 std::path::Path::new("/tmp"),
             )),
         }
