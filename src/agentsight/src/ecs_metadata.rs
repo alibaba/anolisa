@@ -438,6 +438,31 @@ mod tests {
         assert!(meta.public_ipv4.is_empty());
     }
 
+    #[test]
+    fn probe_times_out_when_server_is_slow() {
+        // Bind a listener but never respond — simulates an unreachable server
+        // that accepts TCP but hangs on HTTP (the PROBE_TIMEOUT is 2s).
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let base = format!("http://127.0.0.1:{port}/latest/meta-data");
+
+        // Accept connections in a background thread but never send data
+        std::thread::spawn(move || {
+            let _ = listener.accept(); // block until probe connects
+            std::thread::sleep(Duration::from_secs(30)); // hold the connection
+        });
+
+        let start = std::time::Instant::now();
+        let result = probe_ecs_metadata_with(&base);
+        let elapsed = start.elapsed();
+
+        assert!(result.is_none(), "slow server should cause timeout → None");
+        assert!(
+            elapsed < PROBE_TIMEOUT + Duration::from_secs(2),
+            "probe should respect PROBE_TIMEOUT, took {elapsed:?}"
+        );
+    }
+
     // Environment-dependent: CI runners may be on ECS where metadata is reachable.
     // Run manually with: cargo test --lib -- ecs_metadata::tests::probe_returns_none_when_not_on_ecs --ignored
     #[test]

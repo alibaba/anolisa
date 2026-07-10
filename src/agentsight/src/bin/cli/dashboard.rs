@@ -3,7 +3,7 @@
 use std::net::TcpStream;
 use std::time::Duration;
 
-use agentsight::ecs_metadata::probe_ecs_metadata;
+use agentsight::ecs_metadata::{EcsMetadata, probe_ecs_metadata};
 use agentsight::server::auth::DashboardAuth;
 use structopt::StructOpt;
 
@@ -45,28 +45,35 @@ impl DashboardCommand {
             std::process::exit(1);
         }
 
-        // Build dashboard URL
+        let output = self.build_output();
+
+        println!();
+        for line in &output.lines {
+            println!("{line}");
+        }
+
+        // ECS security group guide
+        if let Some(ref msg) = output.sg_message {
+            println!("{msg}");
+        }
+
+        // Try to open browser
+        if !self.no_open {
+            try_open_browser(&output.display_url);
+        }
+    }
+
+    /// Compute all display information without performing I/O.
+    fn build_output(&self) -> DashboardOutput {
         let local_url = format!("http://127.0.0.1:{}", self.port);
 
-        // Probe ECS metadata (2s timeout)
         let ecs = if self.skip_sg_guide {
             None
         } else {
             probe_ecs_metadata()
         };
 
-        // Determine the display URL: ECS public IP > non-loopback local IP > localhost
-        let display_url = if let Some(ref meta) = ecs {
-            meta.public_ip()
-                .map(|ip| format!("http://{ip}:{}", self.port))
-                .unwrap_or_else(|| local_url.clone())
-        } else {
-            local_addresses()
-                .into_iter()
-                .next()
-                .map(|ip| format!("http://{ip}:{}", self.port))
-                .unwrap_or_else(|| local_url.clone())
-        };
+        let display_url = resolve_display_url(&ecs, &local_url, self.port);
 
         let storage_base = self
             .db
@@ -83,46 +90,70 @@ impl DashboardCommand {
         let auth_config = load_server_auth_config(&self.config);
         let auth = DashboardAuth::init(&auth_config, &storage_base);
 
-        println!();
-        println!("AgentSight Dashboard: {display_url}");
+        let mut lines = Vec::new();
+        lines.push(format!("AgentSight Dashboard: {display_url}"));
         if display_url != local_url {
-            println!("  Local:   {local_url} (no auth required)");
+            lines.push(format!("  Local:   {local_url} (no auth required)"));
         }
-        println!();
+        lines.push(String::new());
 
         if auth.enabled
             && let Some(token) = auth.read_token_from_file()
         {
-            println!("  Auth:      enabled");
-            println!("  URL with token: {display_url}/?token={token}");
-            println!();
+            lines.push("  Auth:      enabled".to_string());
+            lines.push(format!("  URL with token: {display_url}/?token={token}"));
+            lines.push(String::new());
         }
 
-        // ECS security group guide
-        match ecs {
-            Some(meta) => {
-                println!(
-                    "远程打不开？请前往实例控制台配置安全组，放行 TCP {}：",
-                    self.port
-                );
-                println!("  {}", meta.instance_url());
-                println!();
-            }
-            None => {
-                if !self.skip_sg_guide {
-                    println!(
-                        "未检测到 ECS 环境，请手动确保防火墙/安全组已放行 {} 端口。",
-                        self.port
-                    );
-                    println!();
-                }
-            }
-        }
+        let sg_message = build_sg_message(&ecs, self.skip_sg_guide, self.port);
 
-        // Try to open browser
-        if !self.no_open {
-            try_open_browser(&display_url);
+        DashboardOutput {
+            display_url,
+            lines,
+            sg_message,
         }
+    }
+}
+
+/// Pre-computed display data for the dashboard command.
+#[derive(Debug)]
+struct DashboardOutput {
+    display_url: String,
+    lines: Vec<String>,
+    sg_message: Option<String>,
+}
+
+/// Determine the display URL: ECS public IP > non-loopback local IP > localhost.
+fn resolve_display_url(ecs: &Option<EcsMetadata>, local_url: &str, port: u16) -> String {
+    if let Some(meta) = ecs {
+        meta.public_ip()
+            .map(|ip| format!("http://{ip}:{port}"))
+            .unwrap_or_else(|| local_url.to_string())
+    } else {
+        local_addresses()
+            .into_iter()
+            .next()
+            .map(|ip| format!("http://{ip}:{port}"))
+            .unwrap_or_else(|| local_url.to_string())
+    }
+}
+
+/// Build the security group guide message, if applicable.
+fn build_sg_message(ecs: &Option<EcsMetadata>, skip: bool, port: u16) -> Option<String> {
+    match ecs {
+        Some(meta) => {
+            let mut msg = String::new();
+            msg.push_str(&format!(
+                "远程打不开？请前往实例控制台配置安全组，放行 TCP {port}：\n"
+            ));
+            msg.push_str(&format!("  {}", meta.instance_url()));
+            msg.push('\n');
+            Some(msg)
+        }
+        None if !skip => Some(format!(
+            "未检测到 ECS 环境，请手动确保防火墙/安全组已放行 {port} 端口。\n"
+        )),
+        None => None,
     }
 }
 
@@ -232,5 +263,66 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let result = check_server_running(port);
         assert!(result, "should detect the active listener on port {port}");
+    }
+
+    #[test]
+    fn resolve_display_url_with_ecs_public_ip() {
+        let ecs = Some(EcsMetadata {
+            instance_id: "i-test".to_string(),
+            region_id: "cn-hangzhou".to_string(),
+            eip: "1.2.3.4".to_string(),
+            public_ipv4: String::new(),
+        });
+        let url = resolve_display_url(&ecs, "http://127.0.0.1:7396", 7396);
+        assert_eq!(url, "http://1.2.3.4:7396");
+    }
+
+    #[test]
+    fn resolve_display_url_falls_back_to_local_when_no_public_ip() {
+        let ecs = Some(EcsMetadata {
+            instance_id: "i-test".to_string(),
+            region_id: "cn-hangzhou".to_string(),
+            eip: String::new(),
+            public_ipv4: String::new(),
+        });
+        let url = resolve_display_url(&ecs, "http://127.0.0.1:7396", 7396);
+        assert_eq!(url, "http://127.0.0.1:7396");
+    }
+
+    #[test]
+    fn resolve_display_url_without_ecs() {
+        let url = resolve_display_url(&None, "http://127.0.0.1:7396", 7396);
+        // Should use local_addresses or fall back to localhost
+        assert!(url.starts_with("http://"));
+        assert!(url.ends_with(":7396"));
+    }
+
+    #[test]
+    fn build_sg_message_with_ecs_metadata() {
+        let ecs = Some(EcsMetadata {
+            instance_id: "i-abc123".to_string(),
+            region_id: "cn-hangzhou".to_string(),
+            eip: "1.2.3.4".to_string(),
+            public_ipv4: String::new(),
+        });
+        let msg = build_sg_message(&ecs, false, 7396);
+        let msg = msg.expect("should produce a message");
+        assert!(msg.contains("7396"));
+        assert!(msg.contains("i-abc123"));
+        assert!(msg.contains("安全组"));
+    }
+
+    #[test]
+    fn build_sg_message_none_when_skipped() {
+        let msg = build_sg_message(&None, true, 7396);
+        assert!(msg.is_none(), "skip=true should produce None");
+    }
+
+    #[test]
+    fn build_sg_message_without_ecs() {
+        let msg = build_sg_message(&None, false, 7396);
+        let msg = msg.expect("should produce a message when not skipped");
+        assert!(msg.contains("7396"));
+        assert!(msg.contains("未检测到"));
     }
 }
