@@ -1,4 +1,4 @@
-%define anolis_release 2
+%define anolis_release 1
 %global         rustflags -C opt-level=3 -C codegen-units=1
 %global         debug_package %{nil}
 %global         _localbindir /usr/local/bin
@@ -62,6 +62,9 @@ cp -rp docs/skills/skillfs-mount/. \
 %{_datadir}/anolisa/runtime/skills/skillfs/
 
 %changelog
+* Fri Jul 10 2026 Kongche <kongche.jbw@alibaba-inc.com> - 0.3.3-1
+- Release Hermes workspace layout compatibility and SkillFS reliability fixes.
+
 * Fri Jul 03 2026 Kongche <kongche.jbw@alibaba-inc.com> - 0.3.2-1
 - Fix SLS ops logging and runtime metric delta reporting.
 

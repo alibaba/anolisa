@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-07-10
+
+### Added
+- Hermes workspace layout compatibility. SkillFS now recognizes Hermes hub
+  markers, preserves management paths, and exposes nested
+  `category/skill/SKILL.md` skills alongside top-level skills.
+- Nested Hermes skills now support activation state, installer lifecycle
+  writes, notifications, audit attribution, fallback snapshots, and hidden
+  visibility.
+
+### Fixed
+- `skillfs validate --json` now includes source paths for warning and error
+  entries so automation can locate invalid skills.
+- FUSE teardown now bounds failed unmount cleanup and prevents leaked test
+  mounts from affecting later sessions.
+
 ## [0.3.2] - 2026-07-03
 
 ### Fixed
