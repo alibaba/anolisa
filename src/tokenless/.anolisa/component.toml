@@ -51,3 +51,33 @@ dest = "{datadir}/adapters/{component}/qoder/"
 # uninstall.sh ship in the same bundle as publishing assets, but the ANOLISA
 # driver never invokes them — enable/disable behavior is built into Rust.
 entry = ".qoder-plugin/plugin.json"
+
+[[adapters]]
+framework = "claude-code"
+adapter_type = "plugin"
+plugin_id = "tokenless"
+source = "adapters/claude-code"
+dest = "{datadir}/adapters/{component}/claude-code/"
+
+[adapters.bundle]
+entry = ".claude-plugin/marketplace.json"
+
+[[adapters]]
+framework = "codex"
+adapter_type = "plugin"
+plugin_id = "tokenless"
+source = "adapters/codex"
+dest = "{datadir}/adapters/{component}/codex/"
+
+[adapters.bundle]
+entry = ".codex-plugin/plugin.json"
+
+[[adapters]]
+framework = "cosh"
+adapter_type = "extension"
+plugin_id = "tokenless"
+source = "adapters/common"
+dest = "{datadir}/extensions/{component}/"
+
+[adapters.bundle]
+entry = "cosh-extension.json"

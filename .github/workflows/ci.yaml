@@ -752,6 +752,9 @@ jobs:
         with:
           workspaces: src/tokenless
 
+      - name: Check component contract
+        run: make -C src/tokenless check-component-contract
+
       - name: Check formatting
         run: |
           cd src/tokenless

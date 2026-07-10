@@ -36,3 +36,48 @@ dest = "{datadir}/adapters/{component}/hermes/"
 # so the contract names the platform entry manifest (matches the file
 # shipped at the dest root: adapters/<component>/hermes/plugin.yaml).
 entry = "plugin.yaml"
+
+[[adapters]]
+framework = "qoder"
+adapter_type = "plugin"
+plugin_id = "tokenless"
+source = "adapters/qoder"
+dest = "{datadir}/adapters/{component}/qoder/"
+
+[adapters.bundle]
+# Qoder-native plugin manifest inside the bundle directory. The built-in
+# qoder driver reads this to confirm the bundle is a valid Qoder plugin and
+# requires hooks.json beside it. The legacy scripts/install.sh and
+# uninstall.sh ship in the same bundle as publishing assets, but the ANOLISA
+# driver never invokes them — enable/disable behavior is built into Rust.
+entry = ".qoder-plugin/plugin.json"
+
+[[adapters]]
+framework = "claude-code"
+adapter_type = "plugin"
+plugin_id = "tokenless"
+source = "adapters/claude-code"
+dest = "{datadir}/adapters/{component}/claude-code/"
+
+[adapters.bundle]
+entry = ".claude-plugin/marketplace.json"
+
+[[adapters]]
+framework = "codex"
+adapter_type = "plugin"
+plugin_id = "tokenless"
+source = "adapters/codex"
+dest = "{datadir}/adapters/{component}/codex/"
+
+[adapters.bundle]
+entry = ".codex-plugin/plugin.json"
+
+[[adapters]]
+framework = "cosh"
+adapter_type = "extension"
+plugin_id = "tokenless"
+source = "adapters/common"
+dest = "{datadir}/extensions/{component}/"
+
+[adapters.bundle]
+entry = "cosh-extension.json"
