@@ -808,7 +808,7 @@ impl CoshCore {
                             ),
                         );
                         let request_id = self.next_request_id();
-                        let bypass_tool_use_id = format!("{}-bypass", &tc.id);
+                        let bypass_tool_use_id = format!("{}-bypass", tc.id);
                         self.emit(
                             writer,
                             &OutputMessage::can_use_tool(
