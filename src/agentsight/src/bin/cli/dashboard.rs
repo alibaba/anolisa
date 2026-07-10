@@ -90,12 +90,12 @@ impl DashboardCommand {
         }
         println!();
 
-        if auth.enabled {
-            if let Some(token) = auth.read_token_from_file() {
-                println!("  Auth:      enabled");
-                println!("  URL with token: {display_url}/?token={token}");
-                println!();
-            }
+        if auth.enabled
+            && let Some(token) = auth.read_token_from_file()
+        {
+            println!("  Auth:      enabled");
+            println!("  URL with token: {display_url}/?token={token}");
+            println!();
         }
 
         // ECS security group guide
