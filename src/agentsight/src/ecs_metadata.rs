@@ -4,11 +4,18 @@
 //! at `http://100.100.100.200/latest/meta-data/`.
 //!
 //! Supports both IMDSv1 (no token) and hardened IMDS (token-based).
-//! Returns `None` when not running on an ECS instance (2s timeout).
+//! Returns `None` when not running on an ECS instance (2s hard deadline).
 
+use std::sync::mpsc;
 use std::time::Duration;
 
 const METADATA_BASE: &str = "http://100.100.100.200/latest/meta-data";
+
+/// Hard deadline for the entire metadata probe (all HTTP requests combined).
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Per-request timeout for each individual HTTP call (connect + read).
+const REQUEST_TIMEOUT: Duration = Duration::from_millis(800);
 
 /// ECS instance metadata collected from the metadata service.
 #[derive(Debug, Clone)]
@@ -44,16 +51,26 @@ impl EcsMetadata {
     }
 }
 
-/// Probe the ECS metadata service with a 2-second timeout.
+/// Probe the ECS metadata service with a hard 2-second deadline.
 ///
-/// Spawns a background thread so that the caller is guaranteed to return
-/// within ~2 seconds even if the metadata endpoint is unreachable.
+/// Spawns a background thread that performs all HTTP requests, then uses
+/// `mpsc::recv_timeout` to enforce the deadline.  If the thread does not
+/// finish within [`PROBE_TIMEOUT`], the caller returns `None` immediately
+/// (the background thread is abandoned and will be cleaned up on process exit).
+///
 /// Returns `None` when not running on an ECS instance.
 pub fn probe_ecs_metadata() -> Option<EcsMetadata> {
-    let handle = std::thread::spawn(fetch_ecs_metadata);
-    match handle.join() {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(fetch_ecs_metadata());
+    });
+    match rx.recv_timeout(PROBE_TIMEOUT) {
         Ok(result) => result,
-        Err(_) => {
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            log::debug!("ECS metadata probe timed out after {PROBE_TIMEOUT:?}");
+            None
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
             log::debug!("ECS metadata probe thread panicked");
             None
         }
@@ -63,7 +80,8 @@ pub fn probe_ecs_metadata() -> Option<EcsMetadata> {
 /// Fetch ECS metadata fields from the metadata service.
 fn fetch_ecs_metadata() -> Option<EcsMetadata> {
     let agent = ureq::builder()
-        .timeout_connect(Duration::from_secs(2))
+        .timeout_connect(REQUEST_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
         .build();
 
     // Verify reachability via instance-id
@@ -190,12 +208,15 @@ mod tests {
     #[test]
     fn probe_returns_none_when_not_on_ecs() {
         // On non-ECS machines the metadata endpoint is unreachable.
-        // The probe should return None within ~2 seconds.
+        // The probe should return None within the PROBE_TIMEOUT (2s).
         let start = std::time::Instant::now();
         let result = probe_ecs_metadata();
         let elapsed = start.elapsed();
         assert!(result.is_none(), "Expected None on non-ECS host");
-        // Should not take much longer than the 2s connect timeout
-        assert!(elapsed.as_secs() < 10, "Probe took too long: {elapsed:?}");
+        // recv_timeout guarantees we don't exceed PROBE_TIMEOUT by much
+        assert!(
+            elapsed < PROBE_TIMEOUT + Duration::from_secs(1),
+            "Probe took too long: {elapsed:?}"
+        );
     }
 }
