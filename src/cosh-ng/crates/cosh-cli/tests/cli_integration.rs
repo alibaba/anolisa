@@ -905,43 +905,32 @@ fn test_svc_status_nonexistent_service() {
 // --- svc: dry-run ---
 
 #[test]
-fn test_svc_enable_dry_run_json_envelope() {
-    let output = cosh_bin()
-        .args([
-            "svc",
-            "enable",
-            "--dry-run",
-            "cosh-nonexistent-test-svc-xyz",
-        ])
-        .output()
-        .unwrap();
+fn test_svc_actions_dry_run_nonexistent_service_succeed() {
+    let name = "cosh-nonexistent-test-svc-1361";
 
-    // dry-run queries status first, so a nonexistent service still fails
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    for action in ["start", "stop", "restart", "enable", "disable"] {
+        let output = cosh_bin()
+            .args(["svc", action, "--dry-run", name])
+            .output()
+            .unwrap();
 
-    // Either succeeds (dry-run envelope) or fails (SvcNotFound) — both are valid JSON
-    assert!(json["meta"]["subsystem"] == "svc");
-    assert!(json["meta"]["dry_run"] == true);
-}
+        assert!(
+            output.status.success(),
+            "dry-run {action} failed: stdout={}, stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
 
-#[test]
-fn test_svc_disable_dry_run_json_envelope() {
-    let output = cosh_bin()
-        .args([
-            "svc",
-            "disable",
-            "--dry-run",
-            "cosh-nonexistent-test-svc-xyz",
-        ])
-        .output()
-        .unwrap();
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-
-    assert!(json["meta"]["subsystem"] == "svc");
-    assert!(json["meta"]["dry_run"] == true);
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["ok"], true, "action={action}: {json}");
+        assert_eq!(json["data"]["name"], name);
+        assert_eq!(json["data"]["action"], action);
+        assert_eq!(json["data"]["success"], true);
+        assert_eq!(json["data"]["previous_state"]["Unknown"], "(dry-run)");
+        assert_eq!(json["data"]["new_state"]["Unknown"], "(dry-run)");
+        assert_eq!(json["meta"]["subsystem"], "svc");
+        assert_eq!(json["meta"]["dry_run"], true);
+    }
 }
 
 // --- Input validation ---
