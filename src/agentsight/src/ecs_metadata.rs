@@ -221,7 +221,10 @@ mod tests {
         assert!(url.starts_with("https://ecs.console.aliyun.com/"));
     }
 
+    // Environment-dependent: CI runners may be on ECS where metadata is reachable.
+    // Run manually with: cargo test --lib -- ecs_metadata::tests::probe_returns_none_when_not_on_ecs --ignored
     #[test]
+    #[ignore]
     fn probe_returns_none_when_not_on_ecs() {
         // On non-ECS machines the metadata endpoint is unreachable.
         // The probe should return None within the PROBE_TIMEOUT (2s).
