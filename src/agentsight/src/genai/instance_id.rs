@@ -14,6 +14,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use crate::ecs_metadata::{metadata_agent, read_plain};
+
 /// ECS metadata 请求超时（连接 + 读取均为 1 秒）
 const METADATA_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -62,14 +64,6 @@ static OWNER_ACCOUNT_ID: CachedUid = CachedUid::new();
 /// 全局缓存：instance-id
 static INSTANCE_ID: OnceLock<String> = OnceLock::new();
 
-/// 构建带有显式 connect timeout 的 ureq agent，避免非 ECS 环境 TCP SYN 重试卡死
-fn metadata_agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout_connect(METADATA_TIMEOUT)
-        .timeout(METADATA_TIMEOUT)
-        .build()
-}
-
 /// 获取 owner account ID：成功结果缓存，后续直接返回；失败返回空字符串且不缓存，
 /// 下次调用重试。请求阿里云 ECS metadata（超时 1 秒）。
 pub fn get_owner_account_id() -> String {
@@ -78,25 +72,17 @@ pub fn get_owner_account_id() -> String {
 
 /// 实际请求 owner-account-id
 fn fetch_owner_account_id() -> String {
-    let agent = metadata_agent();
-    match agent
-        .get("http://100.100.100.200/latest/meta-data/owner-account-id")
-        .call()
-    {
-        Ok(resp) => {
-            if let Ok(body) = resp.into_string() {
-                let uid = body.trim().to_string();
-                if !uid.is_empty() {
-                    log::info!("Got ECS owner-account-id: {uid}");
-                    return uid;
-                }
-            }
+    let agent = metadata_agent(METADATA_TIMEOUT);
+    match read_plain(&agent, "owner-account-id") {
+        Some(uid) => {
+            log::info!("Got ECS owner-account-id: {uid}");
+            uid
         }
-        Err(e) => {
-            log::warn!("ECS owner-account-id not available: {e}");
+        None => {
+            log::warn!("ECS owner-account-id not available");
+            String::new()
         }
     }
-    String::new()
 }
 
 /// 获取实例ID（带缓存）：首次调用请求阿里云 ECS metadata（超时1秒），
@@ -108,24 +94,12 @@ pub fn get_instance_id() -> &'static str {
 /// 实际请求 instance-id
 fn fetch_instance_id() -> String {
     // 尝试从 ECS metadata service 获取 instance-id
-    let agent = metadata_agent();
-    match agent
-        .get("http://100.100.100.200/latest/meta-data/instance-id")
-        .call()
-    {
-        Ok(resp) => {
-            if let Ok(body) = resp.into_string() {
-                let id = body.trim().to_string();
-                if !id.is_empty() {
-                    log::debug!("Got ECS instance-id: {id}");
-                    return id;
-                }
-            }
-        }
-        Err(e) => {
-            log::debug!("ECS metadata not available, falling back to hostname: {e}");
-        }
+    let agent = metadata_agent(METADATA_TIMEOUT);
+    if let Some(id) = read_plain(&agent, "instance-id") {
+        log::debug!("Got ECS instance-id: {id}");
+        return id;
     }
+    log::debug!("ECS metadata not available, falling back to hostname");
     // 回退: /etc/hostname -> $HOSTNAME -> "unknown"
     std::fs::read_to_string("/etc/hostname")
         .map(|s| s.trim().to_string())

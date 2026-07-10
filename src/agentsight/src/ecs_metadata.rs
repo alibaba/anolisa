@@ -1,21 +1,49 @@
 //! ECS metadata service client
 //!
-//! Queries instance metadata from the Alibaba Cloud ECS metadata service
+//! Shared primitives for querying the Alibaba Cloud ECS metadata service
 //! at `http://100.100.100.200/latest/meta-data/`.
 //!
+//! Provides [`metadata_agent()`] and [`read_plain()`] used by both
+//! `genai::instance_id` and the dashboard ECS probe.
+//!
 //! Supports both IMDSv1 (no token) and hardened IMDS (token-based).
-//! Returns `None` when not running on an ECS instance (2s hard deadline).
 
 use std::sync::mpsc;
 use std::time::Duration;
 
-const METADATA_BASE: &str = "http://100.100.100.200/latest/meta-data";
+/// Base URL for the ECS metadata service.
+pub(crate) const METADATA_BASE: &str = "http://100.100.100.200/latest/meta-data";
 
 /// Hard deadline for the entire metadata probe (all HTTP requests combined).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Per-request timeout for each individual HTTP call (connect + read).
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(800);
+
+/// Build a ureq agent with explicit connect + overall request timeouts.
+///
+/// Shared by [`read_plain`] and the dashboard ECS probe.
+pub(crate) fn metadata_agent(timeout: Duration) -> ureq::Agent {
+    ureq::builder()
+        .timeout_connect(timeout)
+        .timeout(timeout)
+        .build()
+}
+
+/// Read a single metadata path without IMDSv2 authentication (IMDSv1).
+///
+/// `path` is relative to [`METADATA_BASE`], e.g. `"instance-id"`.
+/// Returns `None` when the endpoint is unreachable or returns empty.
+pub(crate) fn read_plain(agent: &ureq::Agent, path: &str) -> Option<String> {
+    let url = format!("{METADATA_BASE}/{path}");
+    agent
+        .get(&url)
+        .call()
+        .ok()
+        .and_then(|r| r.into_string().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
 
 /// ECS instance metadata collected from the metadata service.
 #[derive(Debug, Clone)]
@@ -79,10 +107,7 @@ pub fn probe_ecs_metadata() -> Option<EcsMetadata> {
 
 /// Fetch ECS metadata fields from the metadata service.
 fn fetch_ecs_metadata() -> Option<EcsMetadata> {
-    let agent = ureq::builder()
-        .timeout_connect(REQUEST_TIMEOUT)
-        .timeout(REQUEST_TIMEOUT)
-        .build();
+    let agent = metadata_agent(REQUEST_TIMEOUT);
 
     // Obtain IMDSv2 token once (None on non-ECS or when IMDSv2 is unavailable)
     let token = get_imdsv2_token(&agent);
@@ -105,17 +130,16 @@ fn fetch_ecs_metadata() -> Option<EcsMetadata> {
 
 /// Read a single metadata path, using the pre-fetched token if available.
 fn read_metadata(agent: &ureq::Agent, path: &str, token: Option<&str>) -> Option<String> {
-    let url = format!("{METADATA_BASE}/{path}");
-
     // Try IMDSv2 (token-based) first if we have a token
     if let Some(t) = token {
+        let url = format!("{METADATA_BASE}/{path}");
         if let Some(val) = read_with_token(agent, &url, t) {
             return Some(val);
         }
     }
 
     // Fallback to IMDSv1 (no token)
-    read_plain(agent, &url)
+    read_plain(agent, path)
 }
 
 /// Attempt to read metadata with an IMDSv2 session token.
@@ -124,17 +148,6 @@ fn read_with_token(agent: &ureq::Agent, url: &str, token: &str) -> Option<String
         .get(url)
         .set("X-Forwarded-For", "China")
         .set("X-Alibaba-Cloud-Ecs-Metadata-Token", token)
-        .call()
-        .ok()
-        .and_then(|r| r.into_string().ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-/// Read metadata without a token (IMDSv1).
-fn read_plain(agent: &ureq::Agent, url: &str) -> Option<String> {
-    agent
-        .get(url)
         .call()
         .ok()
         .and_then(|r| r.into_string().ok())
