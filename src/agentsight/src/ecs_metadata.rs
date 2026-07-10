@@ -84,13 +84,16 @@ fn fetch_ecs_metadata() -> Option<EcsMetadata> {
         .timeout(REQUEST_TIMEOUT)
         .build();
 
+    // Obtain IMDSv2 token once (None on non-ECS or when IMDSv2 is unavailable)
+    let token = get_imdsv2_token(&agent);
+
     // Verify reachability via instance-id
-    let instance_id = read_metadata(&agent, "instance-id")?;
+    let instance_id = read_metadata(&agent, "instance-id", token.as_deref())?;
 
-    let region_id = read_metadata(&agent, "region-id").unwrap_or_default();
+    let region_id = read_metadata(&agent, "region-id", token.as_deref()).unwrap_or_default();
 
-    let eip = read_metadata(&agent, "eipv4").unwrap_or_default();
-    let public_ipv4 = read_metadata(&agent, "public-ipv4").unwrap_or_default();
+    let eip = read_metadata(&agent, "eipv4", token.as_deref()).unwrap_or_default();
+    let public_ipv4 = read_metadata(&agent, "public-ipv4", token.as_deref()).unwrap_or_default();
 
     Some(EcsMetadata {
         instance_id,
@@ -100,13 +103,13 @@ fn fetch_ecs_metadata() -> Option<EcsMetadata> {
     })
 }
 
-/// Read a single metadata path, trying IMDSv2 token first, then IMDSv1.
-fn read_metadata(agent: &ureq::Agent, path: &str) -> Option<String> {
+/// Read a single metadata path, using the pre-fetched token if available.
+fn read_metadata(agent: &ureq::Agent, path: &str, token: Option<&str>) -> Option<String> {
     let url = format!("{METADATA_BASE}/{path}");
 
-    // Try IMDSv2 (token-based) first
-    if let Some(token) = get_imdsv2_token(agent) {
-        if let Some(val) = read_with_token(agent, &url, &token) {
+    // Try IMDSv2 (token-based) first if we have a token
+    if let Some(t) = token {
+        if let Some(val) = read_with_token(agent, &url, t) {
             return Some(val);
         }
     }
