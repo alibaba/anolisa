@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.8.0
+
+**Build & Packaging**
+
+- Installed the Codex plugin during source builds so source deployments include the same Codex integration as packaged installs. (#1302)
+- Updated source build scripts for the sec-core install flow. (#1348)
+- Fixed system-mode source builds by placing uv-managed Python under the shared sec-core library directory and adding a system install smoke check. (#1400)
+
+**Code Scanner**
+
+- Added sensitive file path rules for common agent credentials to block API key exposure. (#1401)
+
+**OpenClaw Plugin**
+
+- Hardened OpenClaw deploy compatibility handling and covered deployment edge cases with unit tests. (#1358)
+- Added an OpenClaw plugin cross-version E2E matrix that validates packaged plugin loading, Gateway flows, policy behavior, and observability across supported OpenClaw hosts. (#1372)
+
+**Documentation**
+
+- Added bilingual agent-sec-core user guide documentation and documentation maintenance rules. (#1311)
+- Documented OpenClaw plugin deployment, compatibility, and upgrade guidance. (#1370)
+
 ## 0.7.1
 
 **Prompt Scanner**

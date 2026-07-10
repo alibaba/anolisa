@@ -35,7 +35,7 @@ try:
 
     __version__ = get_version("agent-sec-cli")
 except Exception:
-    __version__ = "0.7.1"  # pragma: no cover
+    __version__ = "0.8.0"  # pragma: no cover
 
 app = typer.Typer(
     name="agent-sec-cli",

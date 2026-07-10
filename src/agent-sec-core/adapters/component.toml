@@ -3,7 +3,7 @@ anolisa_min_version = "0.1.12"
 
 [component]
 name = "sec-core"
-version = "0.7.1"
+version = "0.8.0"
 layer = "runtime"
 domain = "security"
 description = "Agent security core adapters for OpenClaw and Hermes"
