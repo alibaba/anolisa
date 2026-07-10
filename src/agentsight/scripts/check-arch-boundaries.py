@@ -67,6 +67,7 @@ CROSS_CUTTING = {
     "discovery",       # process discovery (Cross in ARCHITECTURE.md)
     "skill_metrics",   # metric helpers
     "token_breakdown", # token analysis helpers
+    "ecs_metadata",    # shared ECS metadata client primitives
 }
 
 # Known violations: (source_file_relative_to_src, target_module, reason)
