@@ -98,6 +98,19 @@ describe('EvaluationPanel', () => {
     expect(screen.getByText('等待 pending 调用完成，或保留强制评估标记。')).toBeInTheDocument();
   });
 
+  it('updates the displayed result when initialResult changes', () => {
+    const view = renderPanel(<EvaluationPanel conversationId="conv-1" initialResult={null} />);
+
+    view.rerender(
+      <MemoryRouter>
+        <EvaluationPanel conversationId="conv-1" initialResult={result} />
+      </MemoryRouter>
+    );
+
+    expect(screen.getByText('需复核')).toBeInTheDocument();
+    expect(screen.getByText('72')).toBeInTheDocument();
+  });
+
   it('falls back for unknown root causes from newer backends', () => {
     renderPanel(
       <EvaluationPanel
@@ -120,6 +133,67 @@ describe('EvaluationPanel', () => {
     expect(screen.getByText('完成度')).toBeInTheDocument();
     expect(screen.getAllByText('快照未完成').length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText('助手输出')).toBeInTheDocument();
+  });
+
+  it('translates every interruption type used by grader findings and evidence', () => {
+    const interruptionTypes = [
+      'auth_error',
+      'context_overflow',
+      'dead_loop',
+      'rate_limit',
+      'retry_storm',
+      'safety_filter',
+      'token_limit',
+    ];
+    const translatedResult: EvaluationResult = {
+      ...result,
+      findings: interruptionTypes.map((code, index) => ({
+        code,
+        severity: 'high',
+        message: `Interruption ${index}`,
+        evidence_refs: [{
+          type: 'interruption',
+          id: `interruption-${index}`,
+          label: code,
+          target: { conversation_id: 'conv-1' },
+        }],
+      })),
+    };
+
+    renderPanel(<EvaluationPanel conversationId="conv-1" initialResult={translatedResult} />);
+    fireEvent.click(screen.getByText('查看详情'));
+
+    for (const label of ['鉴权错误', '上下文溢出', '死循环', '速率限制', '重试风暴', '安全过滤', 'Token 超限']) {
+      expect(screen.getAllByText(label)).toHaveLength(2);
+    }
+  });
+
+  it('uses unique keys for repeated findings and evidence refs', () => {
+    const duplicateFinding = result.findings[0];
+    const duplicateRef = result.dimensions[0].evidence_refs[0];
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    try {
+      renderPanel(
+        <EvaluationPanel
+          conversationId="conv-1"
+          initialResult={{
+            ...result,
+            dimensions: [{
+              ...result.dimensions[0],
+              evidence_refs: [duplicateRef, duplicateRef],
+            }],
+            findings: [duplicateFinding, duplicateFinding],
+          }}
+        />
+      );
+      fireEvent.click(screen.getByText('查看详情'));
+
+      const consoleOutput = consoleError.mock.calls.flat().join(' ');
+      expect(consoleOutput).not.toContain('Encountered two children with the same key');
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 
   it('runs evaluation and emits the new result', async () => {

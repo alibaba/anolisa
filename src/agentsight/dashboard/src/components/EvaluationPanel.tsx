@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   EvaluationNotReadyError,
   EvaluationRef,
   EvaluationResult,
+  INTERRUPTION_TYPE_CN,
   evaluateConversation,
 } from '../utils/apiClient';
 import { EvaluationBadge } from './EvaluationBadge';
@@ -25,6 +26,10 @@ export const EvaluationPanel: React.FC<EvaluationPanelProps> = ({
   const [loading, setLoading] = useState(false);
   const [pendingCount, setPendingCount] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setResult(initialResult);
+  }, [initialResult]);
 
   const runEvaluation = async (force: boolean) => {
     setLoading(true);
@@ -50,11 +55,11 @@ export const EvaluationPanel: React.FC<EvaluationPanelProps> = ({
 
     return (
       <div className="mt-1 flex flex-wrap gap-1">
-        {refs.slice(0, 3).map((ref) => {
+        {refs.slice(0, 3).map((ref, index) => {
           const path = evidencePath(ref);
           return (
             <button
-              key={`${ref.type}-${ref.id}-${ref.label}`}
+              key={`${ref.type}-${ref.id}-${ref.label}-${index}`}
               onClick={() => path && navigate(path)}
               disabled={!path}
               className="rounded border border-blue-200 bg-white px-1.5 py-0.5 text-[11px] text-blue-700 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50"
@@ -156,8 +161,8 @@ export const EvaluationPanel: React.FC<EvaluationPanelProps> = ({
                   {result.findings.length === 0 ? (
                     <p className="text-xs text-gray-400">未发现问题。</p>
                   ) : (
-                    result.findings.map((finding) => (
-                      <div key={`${finding.code}-${finding.message}`} className="rounded bg-gray-50 px-2 py-1">
+                    result.findings.map((finding, index) => (
+                      <div key={`${finding.code}-${finding.message}-${index}`} className="rounded bg-gray-50 px-2 py-1">
                         <div className="flex items-center justify-between gap-2">
                           <span className="text-xs text-gray-700" title={finding.code}>
                             {findingLabel(finding.code)}
@@ -289,7 +294,7 @@ function findingLabel(value: string): string {
     agent_crash: 'Agent 崩溃',
   };
 
-  return labels[value] ?? value;
+  return labels[value] ?? INTERRUPTION_TYPE_CN[value] ?? value;
 }
 
 function findingMessageText(value: string): string {

@@ -73,8 +73,20 @@ export interface TraceEventDetail {
 
 // ─── Internal helpers ────────────────────────────────────────────────────────
 
-async function apiFetch<T>(url: string): Promise<T> {
-  const res = await fetch(url, { credentials: 'same-origin' });
+class ApiRequestError extends Error {
+  readonly status: number;
+  readonly body: Record<string, unknown> | null;
+
+  constructor(url: string, status: number, text: string, body: Record<string, unknown> | null) {
+    super(`API ${url} -> ${status}: ${text}`);
+    this.name = 'ApiRequestError';
+    this.status = status;
+    this.body = body;
+  }
+}
+
+async function apiFetch<T>(url: string, init: RequestInit = {}): Promise<T> {
+  const res = await fetch(url, { ...init, credentials: 'same-origin' });
   if (res.status === 401) {
     // Session expired or invalid — redirect to login
     window.location.hash = '#/login';
@@ -82,7 +94,16 @@ async function apiFetch<T>(url: string): Promise<T> {
   }
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
-    throw new Error(`API ${url} -> ${res.status}: ${text}`);
+    let body: Record<string, unknown> | null = null;
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        body = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Error responses may be plain text.
+    }
+    throw new ApiRequestError(url, res.status, text, body);
   }
   return res.json() as Promise<T>;
 }
@@ -252,26 +273,30 @@ export async function evaluateConversation(
   conversationId: string,
   force = false,
 ): Promise<EvaluationResponse> {
-  const res = await fetch(`${API_BASE}/api/grader/evaluate`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      target_type: 'conversation',
-      target_id: conversationId,
-      force,
-    }),
-  });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    if (res.status === 409 && body?.error === 'conversation_not_ready') {
+  try {
+    return await apiFetch<EvaluationResponse>(`${API_BASE}/api/grader/evaluate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        target_type: 'conversation',
+        target_id: conversationId,
+        force,
+      }),
+    });
+  } catch (error) {
+    if (
+      error instanceof ApiRequestError &&
+      error.status === 409 &&
+      error.body?.error === 'conversation_not_ready'
+    ) {
+      const message = error.body.message;
       throw new EvaluationNotReadyError(
-        body.message ?? 'Conversation still has pending LLM calls.',
-        Number(body.pending_call_count ?? 0),
+        typeof message === 'string' ? message : 'Conversation still has pending LLM calls.',
+        Number(error.body.pending_call_count ?? 0),
       );
     }
-    throw new Error(`POST /api/grader/evaluate -> ${res.status}: ${body?.message ?? res.statusText}`);
+    throw error;
   }
-  return body as EvaluationResponse;
 }
 
 // ─── Agent-name & time-series APIs ───────────────────────────────────────────
