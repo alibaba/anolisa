@@ -42,13 +42,25 @@ set -e
 current=$(rpm -q --qf '%%{NAME}' -f /usr/bin/cosh 2>/dev/null || echo "none")
 case "$current" in
   cosh-ng)
+    target="copilot-shell"
     echo "Current: cosh-ng -> switching to copilot-shell"
     sudo yum swap cosh-ng copilot-shell ;;
   copilot-shell)
+    target="cosh-ng"
     echo "Current: copilot-shell -> switching to cosh-ng"
     sudo yum swap copilot-shell cosh-ng ;;
   *)
     echo "Error: neither cosh-ng nor copilot-shell is installed."; exit 1 ;;
+esac
+case "${LANG:-}" in
+  zh_*|zh)
+    echo ""
+    echo "已切换到 ${target}。当前会话仍运行在旧模式下，无法热切换。"
+    echo "请退出并重新打开 shell（或重新连接会话），再运行 \"cosh\" 进入新模式。" ;;
+  *)
+    echo ""
+    echo "Switched to $target. The current session still runs the old mode and cannot hot-switch."
+    echo "Please exit and reopen your shell (or reconnect the session), then run \"cosh\" to enter the new mode." ;;
 esac
 EOF
 chmod 0755 %{buildroot}%{_bindir}/cosh-switch
@@ -69,13 +81,25 @@ run = """set -e
 current=$(rpm -q --qf '%%{NAME}' -f /usr/bin/cosh 2>/dev/null || echo 'none')
 case "$current" in
   cosh-ng)
-    echo "Current: cosh-ng -> switching to copilot-shell"
+    target='copilot-shell'
+    echo 'Current: cosh-ng -> switching to copilot-shell'
     sudo yum swap cosh-ng copilot-shell ;;
   copilot-shell)
-    echo "Current: copilot-shell -> switching to cosh-ng"
+    target='cosh-ng'
+    echo 'Current: copilot-shell -> switching to cosh-ng'
     sudo yum swap copilot-shell cosh-ng ;;
   *)
-    echo "Error: neither cosh-ng nor copilot-shell is installed."; exit 1 ;;
+    echo 'Error: neither cosh-ng nor copilot-shell is installed.'; exit 1 ;;
+esac
+case "${LANG:-}" in
+  zh_*|zh)
+    echo ''
+    echo "已切换到 ${target}。当前会话仍运行在旧模式下，无法热切换。"
+    echo '请退出并重新打开 shell（或重新连接会话），再运行 cosh 进入新模式。' ;;
+  *)
+    echo ''
+    echo "Switched to $target. The current session still runs the old mode and cannot hot-switch."
+    echo 'Please exit and reopen your shell (or reconnect the session), then run cosh to enter the new mode.' ;;
 esac"""
 EOF
 
