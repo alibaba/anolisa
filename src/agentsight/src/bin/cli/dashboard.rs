@@ -179,3 +179,58 @@ fn find_executable(name: &str) -> Option<String> {
         .map(|dir| format!("{dir}/{name}"))
         .find(|full| std::path::Path::new(full).is_file())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    #[test]
+    fn find_executable_returns_path_for_known_command() {
+        // "ls" should exist on any Linux system
+        let result = find_executable("ls");
+        assert!(result.is_some(), "ls should be found in PATH");
+        let path = result.unwrap();
+        assert!(
+            std::path::Path::new(&path).is_file(),
+            "returned path should be a file: {path}"
+        );
+    }
+
+    #[test]
+    fn find_executable_returns_none_for_nonexistent_command() {
+        let result = find_executable("__nonexistent_binary_xyz__");
+        assert!(result.is_none(), "nonexistent command should return None");
+    }
+
+    #[test]
+    fn local_addresses_returns_valid_ipv4_or_empty() {
+        let addrs = local_addresses();
+        for addr in &addrs {
+            let parsed: Result<std::net::Ipv4Addr, _> = addr.parse();
+            assert!(parsed.is_ok(), "each address should be valid IPv4: {addr}");
+            let ip = parsed.unwrap();
+            assert!(!ip.is_loopback(), "should exclude loopback: {ip}");
+            assert!(!ip.is_unspecified(), "should exclude unspecified: {ip}");
+        }
+    }
+
+    #[test]
+    fn check_server_running_returns_false_when_no_listener() {
+        // Pick a port that is almost certainly not in use
+        let result = check_server_running(1);
+        assert!(
+            !result,
+            "port 1 should not have a listener, so check should return false"
+        );
+    }
+
+    #[test]
+    fn check_server_running_returns_true_with_active_listener() {
+        // Bind a TCP listener on a random port
+        let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind");
+        let port = listener.local_addr().unwrap().port();
+        let result = check_server_running(port);
+        assert!(result, "should detect the active listener on port {port}");
+    }
+}

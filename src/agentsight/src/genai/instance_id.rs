@@ -14,7 +14,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use crate::ecs_metadata::{metadata_agent, read_plain};
+use crate::ecs_metadata::{METADATA_BASE, metadata_agent, read_plain};
 
 /// ECS metadata 请求超时（连接 + 读取均为 1 秒）
 const METADATA_TIMEOUT: Duration = Duration::from_secs(1);
@@ -73,7 +73,7 @@ pub fn get_owner_account_id() -> String {
 /// 实际请求 owner-account-id
 fn fetch_owner_account_id() -> String {
     let agent = metadata_agent(METADATA_TIMEOUT);
-    match read_plain(&agent, "owner-account-id") {
+    match read_plain(&agent, METADATA_BASE, "owner-account-id") {
         Some(uid) => {
             log::info!("Got ECS owner-account-id: {uid}");
             uid
@@ -95,7 +95,7 @@ pub fn get_instance_id() -> &'static str {
 fn fetch_instance_id() -> String {
     // 尝试从 ECS metadata service 获取 instance-id
     let agent = metadata_agent(METADATA_TIMEOUT);
-    if let Some(id) = read_plain(&agent, "instance-id") {
+    if let Some(id) = read_plain(&agent, METADATA_BASE, "instance-id") {
         log::debug!("Got ECS instance-id: {id}");
         return id;
     }

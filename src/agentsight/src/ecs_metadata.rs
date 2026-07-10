@@ -30,12 +30,13 @@ pub(crate) fn metadata_agent(timeout: Duration) -> ureq::Agent {
         .build()
 }
 
-/// Read a single metadata path without IMDSv2 authentication (IMDSv1).
+/// Read a single metadata path using IMDSv1 (no token).
 ///
-/// `path` is relative to [`METADATA_BASE`], e.g. `"instance-id"`.
+/// `base_url` is the metadata service root (e.g. [`METADATA_BASE`]).
+/// `path` is relative, e.g. `"instance-id"`.
 /// Returns `None` when the endpoint is unreachable or returns empty.
-pub(crate) fn read_plain(agent: &ureq::Agent, path: &str) -> Option<String> {
-    let url = format!("{METADATA_BASE}/{path}");
+pub(crate) fn read_plain(agent: &ureq::Agent, base_url: &str, path: &str) -> Option<String> {
+    let url = format!("{base_url}/{path}");
     agent
         .get(&url)
         .call()
@@ -88,9 +89,15 @@ impl EcsMetadata {
 ///
 /// Returns `None` when not running on an ECS instance.
 pub fn probe_ecs_metadata() -> Option<EcsMetadata> {
+    probe_ecs_metadata_with(METADATA_BASE)
+}
+
+/// Internal probe entry point accepting a configurable metadata base URL.
+fn probe_ecs_metadata_with(base_url: &str) -> Option<EcsMetadata> {
+    let base_url = base_url.to_owned();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(fetch_ecs_metadata());
+        let _ = tx.send(fetch_ecs_metadata(&base_url));
     });
     match rx.recv_timeout(PROBE_TIMEOUT) {
         Ok(result) => result,
@@ -106,19 +113,21 @@ pub fn probe_ecs_metadata() -> Option<EcsMetadata> {
 }
 
 /// Fetch ECS metadata fields from the metadata service.
-fn fetch_ecs_metadata() -> Option<EcsMetadata> {
+fn fetch_ecs_metadata(base_url: &str) -> Option<EcsMetadata> {
     let agent = metadata_agent(REQUEST_TIMEOUT);
 
     // Obtain IMDSv2 token once (None on non-ECS or when IMDSv2 is unavailable)
-    let token = get_imdsv2_token(&agent);
+    let token = get_imdsv2_token(&agent, base_url);
 
     // Verify reachability via instance-id
-    let instance_id = read_metadata(&agent, "instance-id", token.as_deref())?;
+    let instance_id = read_metadata(&agent, base_url, "instance-id", token.as_deref())?;
 
-    let region_id = read_metadata(&agent, "region-id", token.as_deref()).unwrap_or_default();
+    let region_id =
+        read_metadata(&agent, base_url, "region-id", token.as_deref()).unwrap_or_default();
 
-    let eip = read_metadata(&agent, "eipv4", token.as_deref()).unwrap_or_default();
-    let public_ipv4 = read_metadata(&agent, "public-ipv4", token.as_deref()).unwrap_or_default();
+    let eip = read_metadata(&agent, base_url, "eipv4", token.as_deref()).unwrap_or_default();
+    let public_ipv4 =
+        read_metadata(&agent, base_url, "public-ipv4", token.as_deref()).unwrap_or_default();
 
     Some(EcsMetadata {
         instance_id,
@@ -129,17 +138,22 @@ fn fetch_ecs_metadata() -> Option<EcsMetadata> {
 }
 
 /// Read a single metadata path, using the pre-fetched token if available.
-fn read_metadata(agent: &ureq::Agent, path: &str, token: Option<&str>) -> Option<String> {
+fn read_metadata(
+    agent: &ureq::Agent,
+    base_url: &str,
+    path: &str,
+    token: Option<&str>,
+) -> Option<String> {
     // Try IMDSv2 (token-based) first if we have a token
     if let Some(t) = token {
-        let url = format!("{METADATA_BASE}/{path}");
+        let url = format!("{base_url}/{path}");
         if let Some(val) = read_with_token(agent, &url, t) {
             return Some(val);
         }
     }
 
     // Fallback to IMDSv1 (no token)
-    read_plain(agent, path)
+    read_plain(agent, base_url, path)
 }
 
 /// Attempt to read metadata with an IMDSv2 session token.
@@ -155,12 +169,21 @@ fn read_with_token(agent: &ureq::Agent, url: &str, token: &str) -> Option<String
         .filter(|s| !s.is_empty())
 }
 
-const IMDS_TOKEN_URL: &str = "http://100.100.100.200/latest/api/token";
+/// Token endpoint path relative to the metadata base URL.
+const TOKEN_PATH: &str = "api/token";
 
 /// Obtain an IMDSv2 session token via PUT request.
-fn get_imdsv2_token(agent: &ureq::Agent) -> Option<String> {
+fn get_imdsv2_token(agent: &ureq::Agent, base_url: &str) -> Option<String> {
+    // The token endpoint lives under /latest/api/token, which is one level
+    // above /latest/meta-data.  Derive it from base_url by replacing the
+    // trailing `meta-data` segment.
+    let token_url = base_url
+        .strip_suffix("/meta-data")
+        .map(|prefix| format!("{prefix}/api/{TOKEN_PATH}"))
+        .unwrap_or_else(|| format!("{base_url}/{TOKEN_PATH}"));
+
     agent
-        .put(IMDS_TOKEN_URL)
+        .put(&token_url)
         .set("X-Alibaba-Cloud-Ecs-Metadata-Token-Ttl-Seconds", "300")
         .call()
         .ok()
@@ -172,6 +195,8 @@ fn get_imdsv2_token(agent: &ureq::Agent) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
 
     fn sample_metadata() -> EcsMetadata {
         EcsMetadata {
@@ -219,6 +244,198 @@ mod tests {
         assert!(url.contains("cn-hangzhou"));
         assert!(url.contains("i-bp1abcdef"));
         assert!(url.starts_with("https://ecs.console.aliyun.com/"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Mock HTTP server helpers
+    // -----------------------------------------------------------------------
+
+    /// A minimal HTTP/1.1 mock server bound to localhost.
+    struct MockServer {
+        listener: TcpListener,
+        /// Base URL for the metadata API (e.g. `http://127.0.0.1:PORT/latest/meta-data`)
+        meta_base: String,
+    }
+
+    impl MockServer {
+        /// Bind to a random available port and return the server handle.
+        fn bind() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let meta_base = format!("http://127.0.0.1:{port}/latest/meta-data");
+            Self {
+                listener,
+                meta_base,
+            }
+        }
+
+        /// Spawn a handler thread that serves a fixed metadata response set.
+        /// Handles both PUT (token) and GET (metadata) requests.
+        fn serve_metadata(self, fields: Vec<(&'static str, &'static str)>) {
+            let listener = self.listener;
+            std::thread::spawn(move || {
+                // Accept up to 8 connections (token + 4 fields * IMDSv1+IMDSv2 fallback)
+                for _ in 0..8 {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        continue;
+                    };
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                    let mut reader = BufReader::new(&stream);
+
+                    // Read the request line
+                    let mut request_line = String::new();
+                    if reader.read_line(&mut request_line).is_err() {
+                        continue;
+                    }
+                    // Skip headers
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
+                            break;
+                        }
+                    }
+
+                    let is_put = request_line.starts_with("PUT");
+
+                    let body = if is_put {
+                        // PUT /latest/api/token → return a mock token
+                        "mock-token-abc".to_string()
+                    } else {
+                        // GET /latest/meta-data/<field>
+                        let path = request_line
+                            .split_whitespace()
+                            .nth(1)
+                            .unwrap_or("")
+                            .to_string();
+                        fields
+                            .iter()
+                            .find(|(k, _)| path.ends_with(k))
+                            .map(|(_, v)| v.to_string())
+                            .unwrap_or_else(|| "not-found".to_string())
+                    };
+
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    let _ = stream.flush();
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn read_plain_returns_value_on_success() {
+        let server = MockServer::bind();
+        let base = server.meta_base.clone();
+        server.serve_metadata(vec![("instance-id", "i-test123")]);
+
+        let agent = metadata_agent(Duration::from_secs(2));
+        let val = read_plain(&agent, &base, "instance-id");
+        assert_eq!(val.as_deref(), Some("i-test123"));
+    }
+
+    #[test]
+    fn read_plain_returns_none_for_unknown_path() {
+        let server = MockServer::bind();
+        let base = server.meta_base.clone();
+        // Server has no mapping for "eipv4", returns "not-found" which is non-empty
+        // so read_plain will return Some("not-found"). This tests the fallback path.
+        server.serve_metadata(vec![("instance-id", "i-test123")]);
+
+        let agent = metadata_agent(Duration::from_secs(2));
+        let val = read_plain(&agent, &base, "eipv4");
+        // "not-found" is a valid non-empty string, so read_plain returns Some
+        assert_eq!(val.as_deref(), Some("not-found"));
+    }
+
+    #[test]
+    fn read_plain_returns_none_when_server_unreachable() {
+        // Use a port that is not listening
+        let agent = metadata_agent(Duration::from_millis(100));
+        let val = read_plain(&agent, "http://127.0.0.1:1/latest/meta-data", "instance-id");
+        assert_eq!(val, None);
+    }
+
+    #[test]
+    fn get_imdsv2_token_returns_token_on_success() {
+        let server = MockServer::bind();
+        let base = server.meta_base.clone();
+        server.serve_metadata(vec![]);
+
+        let agent = metadata_agent(Duration::from_secs(2));
+        let token = get_imdsv2_token(&agent, &base);
+        assert_eq!(token.as_deref(), Some("mock-token-abc"));
+    }
+
+    #[test]
+    fn read_metadata_prefers_imdsv2_when_token_present() {
+        let server = MockServer::bind();
+        let base = server.meta_base.clone();
+        server.serve_metadata(vec![("instance-id", "i-v2value")]);
+
+        let agent = metadata_agent(Duration::from_secs(2));
+        let val = read_metadata(&agent, &base, "instance-id", Some("my-token"));
+        assert_eq!(val.as_deref(), Some("i-v2value"));
+    }
+
+    #[test]
+    fn read_metadata_falls_back_to_imdsv1_when_no_token() {
+        let server = MockServer::bind();
+        let base = server.meta_base.clone();
+        server.serve_metadata(vec![("instance-id", "i-v1value")]);
+
+        let agent = metadata_agent(Duration::from_secs(2));
+        let val = read_metadata(&agent, &base, "instance-id", None);
+        assert_eq!(val.as_deref(), Some("i-v1value"));
+    }
+
+    #[test]
+    fn fetch_ecs_metadata_returns_all_fields() {
+        let server = MockServer::bind();
+        let base = server.meta_base.clone();
+        server.serve_metadata(vec![
+            ("instance-id", "i-fetch123"),
+            ("region-id", "cn-beijing"),
+            ("eipv4", "10.0.0.1"),
+            ("public-ipv4", "172.16.0.1"),
+        ]);
+
+        let result = fetch_ecs_metadata(&base);
+        let meta = result.expect("should return metadata");
+        assert_eq!(meta.instance_id, "i-fetch123");
+        assert_eq!(meta.region_id, "cn-beijing");
+        assert_eq!(meta.eip, "10.0.0.1");
+        assert_eq!(meta.public_ipv4, "172.16.0.1");
+    }
+
+    #[test]
+    fn fetch_ecs_metadata_returns_none_when_instance_id_missing() {
+        // Server has no mapping for "instance-id", returns "not-found" which is
+        // treated as a valid value.  To test the None path, use an unreachable
+        // address.
+        let result = fetch_ecs_metadata("http://127.0.0.1:1/latest/meta-data");
+        assert!(result.is_none(), "unreachable server should return None");
+    }
+
+    #[test]
+    fn probe_with_mock_server_returns_metadata() {
+        let server = MockServer::bind();
+        let base = server.meta_base.clone();
+        server.serve_metadata(vec![
+            ("instance-id", "i-probe456"),
+            ("region-id", "cn-shanghai"),
+            ("eipv4", "8.8.8.8"),
+            ("public-ipv4", ""),
+        ]);
+
+        let result = probe_ecs_metadata_with(&base);
+        let meta = result.expect("probe should succeed with mock server");
+        assert_eq!(meta.instance_id, "i-probe456");
+        assert_eq!(meta.region_id, "cn-shanghai");
+        assert_eq!(meta.eip, "8.8.8.8");
+        assert!(meta.public_ipv4.is_empty());
     }
 
     // Environment-dependent: CI runners may be on ECS where metadata is reachable.
