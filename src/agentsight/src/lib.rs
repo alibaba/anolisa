@@ -49,6 +49,8 @@ pub mod atif;
 pub(crate) mod background;
 pub mod chrome_trace;
 pub mod discovery;
+#[cfg(feature = "server")]
+pub mod ecs_metadata;
 pub mod event;
 pub mod ffi;
 pub mod genai;

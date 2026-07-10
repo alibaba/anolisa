@@ -6,6 +6,7 @@
 //! - `audit`: Query audit events
 //! - `discover`: Discover running AI agents
 //! - `interruption`: Query and manage session interruption events
+//! - `dashboard`: Display dashboard URL and ECS console access guide
 use structopt::StructOpt;
 
 mod cli;
@@ -45,7 +46,7 @@ pub enum Command {
     /// Start the API server
     #[cfg(feature = "server")]
     Serve(ServeCommand),
-    /// Display dashboard authentication status and token
+    /// Display dashboard URL and ECS console access guide
     #[cfg(feature = "server")]
     Dashboard(DashboardCommand),
 }

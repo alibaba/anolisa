@@ -304,7 +304,7 @@ pub async fn run_server(
         );
     }
 
-    HttpServer::new(move || {
+    let server = HttpServer::new(move || {
         let cors = Cors::default()
             .allow_any_origin()
             .allowed_methods(vec!["GET", "DELETE", "POST", "OPTIONS"])
@@ -317,9 +317,17 @@ pub async fn run_server(
             .app_data(data.clone())
             .configure(configure_routes)
     })
-    .bind((host, port))?
-    .run()
-    .await
+    .bind((host, port))?;
+
+    // Guide users toward the `dashboard` subcommand when listening on all interfaces
+    if host == "0.0.0.0" || host == "::" {
+        eprintln!();
+        eprintln!("提示：远程访问需要安全组放行 TCP {port}。");
+        eprintln!("运行 'agentsight dashboard' 可自动检测并生成配置命令。");
+        eprintln!();
+    }
+
+    server.run().await
 }
 
 #[cfg(test)]

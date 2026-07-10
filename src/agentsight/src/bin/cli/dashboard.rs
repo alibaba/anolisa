@@ -1,11 +1,15 @@
-//! Dashboard subcommand — display dashboard authentication status
+//! Dashboard subcommand — display dashboard URL, auth status, and ECS access guide
 
+use std::net::TcpStream;
+use std::time::Duration;
+
+use agentsight::ecs_metadata::probe_ecs_metadata;
 use agentsight::server::auth::DashboardAuth;
 use structopt::StructOpt;
 
 use super::{DEFAULT_CONFIG_PATH, load_server_auth_config};
 
-/// Display the current AgentSight dashboard status (auth, token, URL)
+/// Display the AgentSight dashboard URL and ECS access guide
 #[derive(Debug, StructOpt, Clone)]
 pub struct DashboardCommand {
     /// Custom database path (used to locate the token file)
@@ -20,6 +24,14 @@ pub struct DashboardCommand {
     #[structopt(long, default_value = "7396")]
     pub port: u16,
 
+    /// Do not attempt to open a browser
+    #[structopt(long)]
+    pub no_open: bool,
+
+    /// Skip ECS security group guide output
+    #[structopt(long)]
+    pub skip_sg_guide: bool,
+
     /// Path to JSON configuration file
     #[structopt(long, default_value = DEFAULT_CONFIG_PATH)]
     pub config: String,
@@ -27,6 +39,35 @@ pub struct DashboardCommand {
 
 impl DashboardCommand {
     pub fn execute(&self) {
+        // Check if the server is running
+        if !check_server_running(self.port) {
+            eprintln!("AgentSight 服务未启动。请先运行 `agentsight serve`。");
+            std::process::exit(1);
+        }
+
+        // Build dashboard URL
+        let local_url = format!("http://127.0.0.1:{}", self.port);
+
+        // Probe ECS metadata (2s timeout)
+        let ecs = if self.skip_sg_guide {
+            None
+        } else {
+            probe_ecs_metadata()
+        };
+
+        // Determine the display URL: ECS public IP > non-loopback local IP > localhost
+        let display_url = if let Some(ref meta) = ecs {
+            meta.public_ip()
+                .map(|ip| format!("http://{ip}:{}", self.port))
+                .unwrap_or_else(|| local_url.clone())
+        } else {
+            local_addresses()
+                .into_iter()
+                .next()
+                .map(|ip| format!("http://{ip}:{}", self.port))
+                .unwrap_or_else(|| local_url.clone())
+        };
+
         let storage_base = self
             .db
             .as_ref()
@@ -39,36 +80,49 @@ impl DashboardCommand {
                     .to_path_buf()
             });
 
-        // Load server.auth.enabled from config file (same source as `serve`)
         let auth_config = load_server_auth_config(&self.config);
         let auth = DashboardAuth::init(&auth_config, &storage_base);
 
-        println!("AgentSight Dashboard Status");
-        println!("===========================");
+        println!();
+        println!("AgentSight Dashboard: {display_url}");
+        if display_url != local_url {
+            println!("  Local:   {local_url} (no auth required)");
+        }
         println!();
 
         if auth.enabled {
-            println!("  Auth:      enabled");
-        } else {
-            println!("  Auth:      disabled");
+            if let Some(token) = auth.read_token_from_file() {
+                println!("  Auth:      enabled");
+                println!("  URL with token: {display_url}/?token={token}");
+                println!();
+            }
         }
 
-        // Display URLs
-        println!(
-            "  Local:     http://127.0.0.1:{} (no auth required)",
-            self.port
-        );
-        let net_ip = local_addresses().into_iter().next();
-        match (net_ip, auth.read_token_from_file()) {
-            (Some(ip), Some(token)) => {
-                println!("  Network:   http://{}:{}/?token={}", ip, self.port, token);
+        // ECS security group guide
+        match ecs {
+            Some(meta) => {
+                println!(
+                    "远程打不开？请前往实例控制台配置安全组，放行 TCP {}：",
+                    self.port
+                );
+                println!("  {}", meta.instance_url());
+                println!();
             }
-            (Some(ip), None) => {
-                println!("  Network:   http://{}:{}", ip, self.port);
+            None => {
+                if !self.skip_sg_guide {
+                    println!(
+                        "未检测到 ECS 环境，请手动确保防火墙/安全组已放行 {} 端口。",
+                        self.port
+                    );
+                    println!();
+                }
             }
-            _ => println!("  Network:   (no non-loopback interface found)"),
         }
-        println!();
+
+        // Try to open browser
+        if !self.no_open {
+            try_open_browser(&display_url);
+        }
     }
 }
 
@@ -94,4 +148,34 @@ fn local_addresses() -> Vec<String> {
         .filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
         .map(|ip| ip.to_string())
         .collect()
+}
+
+/// Quick TCP connect to check whether the server is listening.
+fn check_server_running(port: u16) -> bool {
+    TcpStream::connect_timeout(
+        &std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port),
+        Duration::from_millis(500),
+    )
+    .is_ok()
+}
+
+/// Try to open a URL in the default browser.
+fn try_open_browser(url: &str) {
+    let opener = find_executable("xdg-open");
+    if let Some(bin) = opener {
+        let _ = std::process::Command::new(bin)
+            .arg(url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+}
+
+/// Check whether an executable exists in `$PATH`.
+fn find_executable(name: &str) -> Option<String> {
+    let path_var = std::env::var("PATH").unwrap_or_default();
+    path_var
+        .split(':')
+        .map(|dir| format!("{dir}/{name}"))
+        .find(|full| std::path::Path::new(full).is_file())
 }
