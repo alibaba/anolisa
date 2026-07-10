@@ -416,6 +416,9 @@ build_agentsight() {
     # component.toml — spec %install installs it to %{_datadir}/anolisa/components/agentsight/
     [ -f "${SIGHT_DIR}/component.toml" ] && cp "${SIGHT_DIR}/component.toml" "$pkg_dir/"
 
+    # agentsight.json — spec %install installs it to %{_sysconfdir}/agentsight/config.json
+    [ -f "${SIGHT_DIR}/agentsight.json" ] && cp "${SIGHT_DIR}/agentsight.json" "$pkg_dir/"
+
     tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
     rm -rf "$tmp_dir"
 
