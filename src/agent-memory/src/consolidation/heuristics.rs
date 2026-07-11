@@ -295,7 +295,7 @@ fn rule_lesson(entries: &[OwnedAuditEntry], session_id: &str) -> Vec<Consolidate
         .iter()
         .filter(|e| !e.ok && e.error.is_some())
         .map(|e| {
-            let error = e.error.as_ref().unwrap();
+            let error = e.error.as_deref().unwrap_or("(unknown error)");
             let path = if e.path.is_empty() {
                 "(no path)".to_string()
             } else {

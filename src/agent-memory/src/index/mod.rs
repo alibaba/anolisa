@@ -76,7 +76,7 @@ impl IndexHandle {
     }
 
     pub fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>> {
-        let store = self.store.lock().expect("index store poisoned");
+        let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         store.search(query, top_k, self.exclude_cold)
     }
 
@@ -87,18 +87,18 @@ impl IndexHandle {
         top_k: usize,
         agent_scope: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
-        let store = self.store.lock().expect("index store poisoned");
+        let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         store.search_scoped(query, top_k, self.exclude_cold, agent_scope)
     }
 
     /// Deep search: include cold files too.
     pub fn search_deep(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>> {
-        let store = self.store.lock().expect("index store poisoned");
+        let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         store.search(query, top_k, false)
     }
 
     pub fn search_vec(&self, query_vec: &[f32], top_k: usize) -> Result<Vec<SearchHit>> {
-        let store = self.store.lock().expect("index store poisoned");
+        let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         let raw = store.search_vec(query_vec, top_k)?;
         Ok(raw
             .into_iter()
@@ -117,19 +117,19 @@ impl IndexHandle {
         query_vec: &[f32],
         top_k: usize,
     ) -> Result<Vec<SearchHit>> {
-        let store = self.store.lock().expect("index store poisoned");
+        let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         store.search_hybrid(query, query_vec, top_k)
     }
 
     /// Compact the index: mark old, never-accessed files as cold.
     pub fn compact(&self, cold_after_days: u64) -> Result<usize> {
-        let mut store = self.store.lock().expect("index store poisoned");
+        let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         store.compact(cold_after_days)
     }
 
     /// Return counts of warm vs cold files.
     pub fn warm_cold_counts(&self) -> Result<(usize, usize)> {
-        let store = self.store.lock().expect("index store poisoned");
+        let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         store.warm_cold_counts()
     }
 
@@ -144,7 +144,7 @@ impl IndexHandle {
     }
 
     pub fn count(&self) -> Result<usize> {
-        let store = self.store.lock().expect("index store poisoned");
+        let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         store.count()
     }
 

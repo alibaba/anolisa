@@ -80,7 +80,7 @@ impl FactWriter {
                 fact.title,
                 fact.content.chars().take(100).collect::<String>()
             );
-            let mut s = store.lock().expect("store poisoned");
+            let mut s = store.lock().unwrap_or_else(|e| e.into_inner());
             match s.detect_conflicts(&search_text, self.conflict_threshold) {
                 Ok(conflicts) => {
                     for (old_path, score) in &conflicts {
@@ -126,14 +126,13 @@ impl FactWriter {
             crate::safe_fs::append(fd.as_fd(), &jsonl_rel, jsonl_line.as_bytes())?;
         } else {
             let mut guard = self.jsonl_file.lock().unwrap_or_else(|e| e.into_inner());
-            if guard.is_none() {
-                let f = OpenOptions::new()
+            let f = guard.get_or_insert_with(|| {
+                OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(&self.jsonl_path)?;
-                *guard = Some(f);
-            }
-            let f = guard.as_mut().unwrap();
+                    .open(&self.jsonl_path)
+                    .expect("failed to open jsonl file for append")
+            });
             f.write_all(jsonl_line.as_bytes())?;
             f.sync_all()?;
         }
