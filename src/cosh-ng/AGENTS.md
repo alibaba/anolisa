@@ -72,7 +72,8 @@ Prerequisites: Linux (or macOS for limited functionality), Rust 1.74+. pkg/svc c
 
 ### cosh-shell Code Organization
 
-本轮改造只允许动 `crates/cosh-shell/`；不要顺手修改 `cosh-types`、`cosh-platform`、`cosh-cli`、`cosh-core`、lockfile、`.env` 或 workspace 外代码。
+每个 Issue 或任务只允许修改其 triage、已批准 design 或执行 spec 明确授权的文件；不得顺手扩大范围。
+涉及 `crates/cosh-shell/` 的修改仍须遵守下列组织、owner 与布局约束。
 
 长期 owner 约定：
 
@@ -132,9 +133,11 @@ Don't trust development reports — verify before merging:
 
 Strict [Conventional Commits](https://www.conventionalcommits.org/):
 
-- `type(scope): subject` — types limited to `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`. **Do not use `harden:` / `cleanup:`** — they aren't standard. Map them: closing a known vulnerability → `fix:`; adding a new defensive mechanism → `feat:`; lint/dead-code cleanup → `chore:`.
-- `scope` is the crate short name (`cli`, `core`, `shell`, `platform`, `types`); use `cli,platform` for multi-crate changes.
-- Subject in imperative mood, ≤ 72 chars, no trailing period. Body explains *why*, not *what*.
+- Format: `type(cosh-ng): [crate_scope] imperative subject`.
+- `type` is limited to `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, and `chore`. **Do not use `harden:` / `cleanup:`** — map them to a standard type.
+- `[crate_scope]` names the affected crate or crates, such as `[core]`, `[shell]`, or `[cli,platform]`.
+- The complete subject line is imperative, has no trailing period, and subject 不超过 50 字符；body 每行不超过 100 字符。
+- Detect the active Codex version at commit time and place `Assisted-by: Codex:<version>` above the `Signed-off-by` trailer generated from Git config.
 
 ## Git History Hygiene
 
