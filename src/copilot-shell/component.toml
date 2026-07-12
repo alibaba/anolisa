@@ -3,7 +3,7 @@ anolisa_min_version = "0.1.0"
 
 [component]
 name = "cosh"
-version = "2.5.0"
+version = "2.7.0"
 layer = "runtime"
 domain = "tools"
 description = "Copilot shell launcher and deterministic CLI gateway"

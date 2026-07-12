@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.7.0
+
+- Added `/ktuner` command with consent-gated, opt-in first-run check and trusted-path resolver. (#1279)
+- Added loading indicator when selecting an auth provider. (#1389)
+- Added COSH_SESSION_ID export for agentsight per-run correlation. (#1383)
+- Fixed security intents to map to hook commands. (#1438)
+- Fixed cosh-switch post-switch guidance for clarity. (#1424)
+- Fixed shell mode to add actionable error guidance for exit code 127. (#1319)
+- Updated docs to rename _\_CN.md to _\_zh.md, fix cross-refs, and add missing READMEs. (#1335)
+
 ## 2.6.1
 
 - Added npm packaging support for CLI and cosh. (#1307)
