@@ -4,6 +4,29 @@ All notable changes to the cosh-ng project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] — 2026-07-12
+
+### Added
+- Move authentication ownership into cosh-core with isolated config layers (f028ad90)
+
+### Changed
+- Consolidate logging under a unified runtime module (db86b3dd)
+- Migrate component docs into user-guide/developer-guide and add cosh-ng docs (317d3f26, adf63ac2)
+- Rename `*_CN.md` docs to `*_zh.md` and fix cross-references (82f8dab4)
+
+### Fixed
+- Honor svc dry-run across platform and cli (4c593050)
+- Preserve manual aliyun fallback and legacy STS auth (924dd76b, ee1dd179)
+- Protect auth provider edits; prioritize aliyun auth option (f0c97efa, 904655fb)
+- Bound host-executed shell preview (a6da7301)
+- Route noninteractive cosh launcher calls; support raw command passthrough (ecb56739, 1490eb3c)
+- Bind startup prompt and agent request context (14d6336f, 25d9d28f)
+- Own prompt boundary in shell (#1310)
+- Avoid UTF-8 split in loop detection (ef7f5147)
+- Remove provider-visible skill hints; guide diagnostic skill use (a6024873, 7f695178)
+- Drop redundant format borrow; satisfy clippy diagnostics (5e14a686, 063217f1)
+- Stabilize CI, raw-cli, PTY, and service tests (d573796d, 3563a5ab, 0fb34ea6, fc28da5f, ad138d45, 65421d25, 5b17b892, 3e43ba6e, 707bc3c0)
+
 ## [0.11.0] — 2026-06-28
 
 ### Added
