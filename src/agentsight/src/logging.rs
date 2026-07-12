@@ -113,8 +113,8 @@ impl AgentsightLogger {
 
     fn reconfigure(&self, filter: Filter, writer: LogWriter) {
         log::set_max_level(filter.filter());
-        *self.filter.lock().expect("log filter lock poisoned") = filter;
-        *self.writer.lock().expect("log writer lock poisoned") = writer;
+        *self.filter.lock().unwrap_or_else(|e| e.into_inner()) = filter;
+        *self.writer.lock().unwrap_or_else(|e| e.into_inner()) = writer;
     }
 }
 
@@ -132,12 +132,12 @@ impl Log for AgentsightLogger {
         }
 
         let line = format_record(record);
-        let mut writer = self.writer.lock().expect("log writer lock poisoned");
+        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         let _ = writeln!(writer, "{line}");
     }
 
     fn flush(&self) {
-        let mut writer = self.writer.lock().expect("log writer lock poisoned");
+        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         let _ = writer.flush();
     }
 }

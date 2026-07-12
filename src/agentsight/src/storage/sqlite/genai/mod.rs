@@ -95,7 +95,7 @@ impl GenAISqliteStore {
     /// fsync/WAL checkpoints), not from wrapping in a single transaction
     /// (which would require refactoring the Mutex-based conn access).
     pub fn flush(&self) {
-        let mut pending = self.pending.lock().unwrap();
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         if pending.is_empty() {
             return;
         }
@@ -113,7 +113,7 @@ impl GenAISqliteStore {
         if ok_count > 0 {
             log::debug!("Batch-flushed {ok_count} GenAI events");
         }
-        *self.last_flush.lock().unwrap() = Instant::now();
+        *self.last_flush.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
     }
 
     /// Check if batch flush is needed based on size or time.
@@ -121,7 +121,11 @@ impl GenAISqliteStore {
         if pending_len >= self.batch_config.max_size {
             return true;
         }
-        let elapsed = self.last_flush.lock().unwrap().elapsed();
+        let elapsed = self
+            .last_flush
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .elapsed();
         elapsed >= Duration::from_millis(self.batch_config.flush_ms as u64)
     }
 

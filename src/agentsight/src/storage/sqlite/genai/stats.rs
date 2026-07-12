@@ -46,7 +46,7 @@ impl GenAISqliteStore {
         let range_ns = (end_ns - start_ns).max(1);
         let bucket_ns = range_ns / bucket_count as i64;
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
         // Build query with optional agent_name filter
         let sql = if agent_name.is_some() {
@@ -115,7 +115,7 @@ impl GenAISqliteStore {
         let range_ns = (end_ns - start_ns).max(1);
         let bucket_ns = range_ns / bucket_count as i64;
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
         let sql = if agent_name.is_some() {
             "SELECT
@@ -174,7 +174,7 @@ impl GenAISqliteStore {
     pub fn get_agent_token_summary(
         &self,
     ) -> Result<Vec<AgentTokenSummary>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT COALESCE(agent_name, process_name, 'unknown') AS agent,
                     COALESCE(SUM(input_tokens),  0) AS input_tokens,

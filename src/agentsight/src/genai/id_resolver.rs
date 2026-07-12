@@ -135,7 +135,7 @@ impl IdResolver {
 
         let key = compose_key(agent_name, pid, text);
         let first_response_id = {
-            let mut guard = cache.lock().expect("IdResolver LRU mutex poisoned");
+            let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
             // 已有条目时直接复用首个 response_id；否则把当前 response_id
             // 写入作为锚点，让同一 key 后续调用得到稳定结果。
             if let Some(existing) = guard.get(&key) {

@@ -51,7 +51,7 @@ impl InterruptionStore {
     }
 
     fn init_tables(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS interruption_events (
                 id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -86,7 +86,7 @@ impl InterruptionStore {
 
     /// Insert a single interruption event (ignores duplicates by interruption_id).
     pub fn insert(&self, event: &InterruptionEvent) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT OR IGNORE INTO interruption_events (
                 interruption_id, session_id, trace_id, conversation_id, call_id, pid, agent_name,
@@ -124,7 +124,7 @@ impl InterruptionStore {
     /// Deduplication check for OOM events: return true if an agent_crash row
     /// with oom=true already exists for the given (pid, occurred_at_ns).
     pub fn oom_event_exists(&self, pid: i32, occurred_at_ns: i64) -> bool {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.query_row(
             "SELECT COUNT(*) FROM interruption_events
              WHERE interruption_type='agent_crash' AND pid=?1 AND occurred_at_ns=?2
@@ -139,7 +139,7 @@ impl InterruptionStore {
     /// Return the maximum occurred_at_ns of OOM-sourced agent_crash events.
     /// Returns 0 if no such events exist.
     pub fn latest_oom_event_ns(&self) -> i64 {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.query_row(
             "SELECT COALESCE(MAX(occurred_at_ns), 0) FROM interruption_events
              WHERE interruption_type='agent_crash' AND detail LIKE '%\"oom\":true%'",
@@ -151,7 +151,7 @@ impl InterruptionStore {
 
     /// Deduplication check: return true if a row with same call_id + type already exists.
     pub fn exists_for_call(&self, call_id: &str, itype: &InterruptionType) -> bool {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.query_row(
             "SELECT COUNT(*) FROM interruption_events WHERE call_id=?1 AND interruption_type=?2",
             params![call_id, itype.as_str()],
@@ -175,7 +175,7 @@ impl InterruptionStore {
         itype: &InterruptionType,
         error_msg: Option<&str>,
     ) -> bool {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = match conn.prepare(
             "SELECT detail FROM interruption_events
              WHERE conversation_id=?1 AND interruption_type=?2 AND resolved=0",
@@ -215,7 +215,7 @@ impl InterruptionStore {
 
     /// Mark an interruption as resolved.
     pub fn resolve(&self, interruption_id: &str) -> Result<bool, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let updated = conn.execute(
             "UPDATE interruption_events SET resolved=1 WHERE interruption_id=?1",
             params![interruption_id],
@@ -228,7 +228,7 @@ impl InterruptionStore {
     /// Used by the DeadLoop auto-kill feature to determine whether the kill
     /// threshold has been reached.
     pub fn count_for_conversation(&self, conversation_id: &str, itype: &InterruptionType) -> usize {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let result: Result<i64, _> = conn.query_row(
             "SELECT COUNT(*) FROM interruption_events
              WHERE conversation_id=?1 AND interruption_type=?2 AND resolved=0",
@@ -251,7 +251,7 @@ impl InterruptionStore {
         resolved: Option<bool>,
         limit: i64,
     ) -> Result<Vec<InterruptionRecord>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
         // Build dynamic WHERE clause
         let mut conditions = vec!["occurred_at_ns BETWEEN ?1 AND ?2".to_string()];
@@ -325,7 +325,7 @@ impl InterruptionStore {
         &self,
         interruption_id: &str,
     ) -> Result<Option<InterruptionRecord>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT id, interruption_id, session_id, trace_id, conversation_id, call_id, pid, agent_name,
                     interruption_type, severity, occurred_at_ns, detail, resolved
@@ -356,7 +356,7 @@ impl InterruptionStore {
         &self,
         session_id: &str,
     ) -> Result<Vec<InterruptionRecord>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT id, interruption_id, session_id, trace_id, conversation_id, call_id, pid, agent_name,
                     interruption_type, severity, occurred_at_ns, detail, resolved
@@ -392,7 +392,7 @@ impl InterruptionStore {
         &self,
         conversation_id: &str,
     ) -> Result<Vec<InterruptionRecord>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT id, interruption_id, session_id, trace_id, conversation_id, call_id, pid, agent_name,
                     interruption_type, severity, occurred_at_ns, detail, resolved
@@ -430,7 +430,7 @@ impl InterruptionStore {
         start_ns: i64,
         end_ns: i64,
     ) -> Result<Vec<InterruptionTypeStat>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT interruption_type, severity, COUNT(*) AS cnt
              FROM interruption_events
@@ -459,7 +459,7 @@ impl InterruptionStore {
         start_ns: i64,
         end_ns: i64,
     ) -> Result<Vec<(String, String, String, i64)>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT session_id, severity, interruption_type, COUNT(*) AS cnt
              FROM interruption_events
@@ -490,7 +490,7 @@ impl InterruptionStore {
         start_ns: i64,
         end_ns: i64,
     ) -> Result<Vec<(String, String, String, i64)>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT conversation_id, severity, interruption_type, COUNT(*) AS cnt
              FROM interruption_events
@@ -525,7 +525,7 @@ impl InterruptionStore {
             .map(|d| d.as_nanos() as i64)
             .unwrap_or(0);
         let cutoff_ns = now_ns - (window_secs as i64 * 1_000_000_000);
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.query_row(
             "SELECT COUNT(*) FROM interruption_events
              WHERE interruption_type='agent_crash' AND pid=?1 AND occurred_at_ns > ?2",
@@ -538,7 +538,7 @@ impl InterruptionStore {
 
     /// Purge interruption events older than cutoff_ns.
     pub fn purge_before(&self, cutoff_ns: i64) -> Result<usize, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let deleted = conn.execute(
             "DELETE FROM interruption_events WHERE occurred_at_ns < ?1",
             params![cutoff_ns],
@@ -597,7 +597,7 @@ impl InterruptionStore {
 
     /// Delete the oldest N interruption events.
     fn delete_oldest_batch(&self, limit: usize) -> Result<usize, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let deleted = conn.execute(
             "DELETE FROM interruption_events WHERE id IN (
                 SELECT id FROM interruption_events ORDER BY occurred_at_ns ASC LIMIT ?1
@@ -611,7 +611,7 @@ impl InterruptionStore {
     fn db_path(&self) -> std::path::PathBuf {
         // The connection was created from a path in `new_with_path`; we can
         // recover it via `path()` on the underlying connection.
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.path()
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from("interruption_events.db"))
@@ -619,7 +619,7 @@ impl InterruptionStore {
 
     /// Run VACUUM to reclaim free pages.
     fn vacuum(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute_batch("VACUUM;")?;
         Ok(())
     }
