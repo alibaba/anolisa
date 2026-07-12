@@ -170,6 +170,18 @@ class ModelManager:
 
     # ------------------------------------------------------------------
 
+    def is_model_loaded(self, model_name: str) -> bool:
+        """Return True if *model_name* is already resident in the in-memory cache.
+
+        ``load_model`` serves a resident model from RAM via its fast path
+        without touching disk, so a model can remain loadable even after the
+        on-disk cache is evicted.  Callers like ``MLClassifier.is_available()``
+        must treat RAM residency as available — otherwise they would
+        under-report and silently drop L2 while ``load_model`` would still
+        succeed.
+        """
+        return model_name in self._loaded_models
+
     def is_model_downloaded(self, model_name: str) -> bool:
         """Return True if *model_name* is present in the local cache.
 

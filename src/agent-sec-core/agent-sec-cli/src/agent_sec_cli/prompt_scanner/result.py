@@ -96,6 +96,9 @@ class ScanResult(BaseModel):
             layer_results:  Per-layer breakdown (name, detected, score, latency_ms).
             engine_version: Semantic version string.
             elapsed_ms:     Total scan time in milliseconds.
+            skip_reason:    Optional; present only when one or more detection
+                            layers were skipped (e.g. L2 ML degraded to L1).
+                            Absent on a full-fidelity scan.
         """
         findings = []
         for lr in self.layer_results:
@@ -138,6 +141,15 @@ class ScanResult(BaseModel):
             "summary": self._build_summary(),
             "findings": findings,
             "layer_results": layer_summary,
+            # Additive optional field: present only when one or more detection
+            # layers were skipped (e.g. L2 degraded to L1). Lets a JSON consumer
+            # tell a degraded scan from a full-fidelity one. Absent on a normal
+            # scan, so schema_version 1.0 consumers are unaffected.
+            **(
+                {"skip_reason": self.metadata["skip_reason"]}
+                if "skip_reason" in self.metadata
+                else {}
+            ),
             "engine_version": "0.1.0",
             "elapsed_ms": round(self.latency_ms, 2),
         }

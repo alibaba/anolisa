@@ -52,13 +52,19 @@ class MLClassifier(DetectionLayer):
         return "ml_classifier"
 
     def is_available(self) -> bool:
-        """Return True only if torch/transformers are importable AND the
-        model is downloaded locally.
+        """Return True only if torch/transformers are importable AND the model
+        is loadable — either already resident in RAM or downloaded on disk.
 
         Returns False (instead of raising) when dependencies are missing or
-        the model has not been fetched yet (e.g. ``scan-prompt warmup`` never
-        ran), so the scanner can skip L2 and degrade to L1 rather than
-        failing every scan.
+        the model cannot be loaded (e.g. ``scan-prompt warmup`` never ran), so
+        the scanner can skip L2 and degrade to L1 rather than failing every
+        scan.
+
+        Availability checks RAM residency *before* disk: ``load_model`` serves
+        a resident model from its RAM fast path even if the on-disk cache was
+        evicted afterwards, so gating on disk alone would under-report and
+        silently drop L2 while a scan would in fact have run L2 — diverging
+        from the daemon's in-memory ``degraded`` signal.
         """
         import importlib.util
 
@@ -68,8 +74,10 @@ class MLClassifier(DetectionLayer):
         ):
             return False
 
-        return self._classifier._manager.is_model_downloaded(
-            self._classifier._model_name
+        manager = self._classifier._manager
+        model_name = self._classifier._model_name
+        return manager.is_model_loaded(model_name) or manager.is_model_downloaded(
+            model_name
         )
 
     def warmup(self) -> None:

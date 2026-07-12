@@ -252,7 +252,12 @@ class PromptScanner:
             if self._config.fast_fail and lr.detected:
                 break
 
-        if not self._detectors:
+        # Record which optional detectors were skipped so the result can signal
+        # a degraded scan (e.g. L2 ML dropped -> L1-only). Set whenever ANY
+        # detector was skipped — not only when ALL were — so a partial degrade
+        # (rule_engine survives, ml_classifier dropped) is still detectable by
+        # a structured-output consumer, not just via the stderr log.warning.
+        if self._skipped_detectors:
             metadata["skip_reason"] = _build_skip_reason(self._skipped_detectors)
 
         verdict = determine_verdict(layer_results)

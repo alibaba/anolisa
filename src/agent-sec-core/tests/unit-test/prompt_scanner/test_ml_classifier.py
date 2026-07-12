@@ -257,6 +257,15 @@ class TestModelManagerCache(unittest.TestCase):
         mgr = ModelManager(device="cpu")
         self.assertEqual(mgr.device, "cpu")
 
+    def test_is_model_loaded_reflects_ram_cache(self) -> None:
+        # is_model_loaded tracks RAM residency independent of disk, so
+        # is_available() can treat a resident-but-evicted-from-disk model as
+        # available. False when absent, True once inserted into _loaded_models.
+        mgr = self._make_manager()
+        self.assertFalse(mgr.is_model_loaded("test-model"))  # type: ignore[union-attr]
+        mgr._loaded_models["test-model"] = (object(), object())  # type: ignore[union-attr]
+        self.assertTrue(mgr.is_model_loaded("test-model"))  # type: ignore[union-attr]
+
     def test_is_model_downloaded_false_when_missing(self) -> None:
         mgr = self._make_manager()
         self.assertFalse(mgr.is_model_downloaded("nonexistent/model"))
@@ -480,20 +489,31 @@ class TestMLClassifierLayer(unittest.TestCase):
         layer = self.MLClassifier.__new__(self.MLClassifier)
         self.assertEqual(layer.name, "ml_classifier")
 
-    def _make_layer_with_model(self, downloaded: bool):
+    def _make_layer_with_model(self, downloaded: bool, loaded: bool = False):
         layer = self.MLClassifier.__new__(self.MLClassifier)
         mock_clf = MagicMock()
         mock_clf._model_name = "test-model"
         mock_clf._manager.is_model_downloaded.return_value = downloaded
+        mock_clf._manager.is_model_loaded.return_value = loaded
         layer._classifier = mock_clf
         return layer
 
     def test_is_available_false_when_model_missing(self) -> None:
-        # Deps present but model NOT downloaded -> False, so the scanner skips
-        # L2 and degrades to L1 instead of failing every scan.
-        layer = self._make_layer_with_model(downloaded=False)
+        # Deps present but model neither downloaded nor RAM-resident -> False,
+        # so the scanner skips L2 and degrades to L1 instead of failing.
+        layer = self._make_layer_with_model(downloaded=False, loaded=False)
         with patch("importlib.util.find_spec", return_value=object()):
             self.assertFalse(layer.is_available())
+
+    def test_is_available_true_when_ram_loaded_but_not_on_disk(self) -> None:
+        # Model evicted from the on-disk cache but still resident in the
+        # process-wide RAM cache: load_model's fast path still serves it, so
+        # is_available() MUST return True — otherwise L2 is silently dropped
+        # while the daemon still reports degraded=false. Discriminating: a
+        # disk-only is_available() (pre-fix) returns False here and fails.
+        layer = self._make_layer_with_model(downloaded=False, loaded=True)
+        with patch("importlib.util.find_spec", return_value=object()):
+            self.assertTrue(layer.is_available())
 
     def test_is_available_false_without_deps(self) -> None:
         # torch/transformers missing -> False even if the model is present
