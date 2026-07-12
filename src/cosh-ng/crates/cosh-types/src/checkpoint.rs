@@ -203,8 +203,15 @@ pub struct ConfigReport {
 /// Result of creating a checkpoint (CLI display layer).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CkptCreated {
-    pub snapshot_id: String,
+    /// Daemon-assigned identifier, present exactly when a snapshot was created.
+    pub snapshot_id: Option<String>,
+    /// Original request path, preserved even when the daemon skips creation.
     pub workspace: String,
+    /// Indicates the daemon accepted the request but created no snapshot.
+    #[serde(default)]
+    pub skipped: bool,
+    /// Daemon explanation, present exactly when creation was skipped.
+    pub reason: Option<String>,
 }
 
 /// A single checkpoint entry (CLI display layer).
@@ -277,6 +284,20 @@ pub struct CkptRecoverResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_ckpt_created_deserializes_historical_success_json() {
+        let created: CkptCreated = serde_json::from_value(serde_json::json!({
+            "snapshot_id": "snap-1",
+            "workspace": "/tmp/ws",
+        }))
+        .unwrap();
+
+        assert_eq!(created.snapshot_id.as_deref(), Some("snap-1"));
+        assert_eq!(created.workspace, "/tmp/ws");
+        assert!(!created.skipped);
+        assert!(created.reason.is_none());
+    }
 
     #[test]
     fn test_request_bincode_roundtrip() {

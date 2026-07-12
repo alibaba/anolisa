@@ -6,12 +6,60 @@
 //! - Help text availability
 //! - Error handling when daemon is unavailable
 
+use std::io::{Read, Write};
+use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::process::Command;
+use std::thread;
+use std::time::{Duration, Instant};
 
 /// Get the path to the compiled cosh-cli binary.
 fn cosh_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cosh-cli"))
+}
+
+fn spawn_checkpoint_skipped_daemon(
+    reason: &str,
+) -> (tempfile::TempDir, String, thread::JoinHandle<()>) {
+    let dir = tempfile::tempdir().unwrap();
+    let socket_path = dir.path().join("ws-ckpt.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let reason = reason.to_string();
+    let handle = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "timed out waiting for cosh-cli to connect to fake ws-ckpt daemon"
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("fake ws-ckpt daemon failed to accept connection: {error}"),
+            }
+        };
+        let mut len_buf = [0_u8; 4];
+        stream.read_exact(&mut len_buf).unwrap();
+        let request_len = u32::from_le_bytes(len_buf) as usize;
+        let mut request = vec![0_u8; request_len];
+        stream.read_exact(&mut request).unwrap();
+
+        let mut payload = Vec::new();
+        // Zero-based wire index 11 is WsCkptResponse::CheckpointSkipped.
+        payload.extend_from_slice(&11_u32.to_le_bytes());
+        payload.extend_from_slice(&(reason.len() as u64).to_le_bytes());
+        payload.extend_from_slice(reason.as_bytes());
+        stream
+            .write_all(&(payload.len() as u32).to_le_bytes())
+            .unwrap();
+        stream.write_all(&payload).unwrap();
+    });
+
+    let socket_path = socket_path.to_string_lossy().into_owned();
+    (dir, socket_path, handle)
 }
 
 fn systemctl_query_available() -> bool {
@@ -516,6 +564,38 @@ fn test_redacted_password_does_not_appear_in_log() {
 }
 
 // --- Checkpoint: daemon unavailable graceful error ---
+
+#[test]
+fn test_checkpoint_create_skipped_is_success() {
+    let reason = "workspace has no changes";
+    let (_dir, socket_path, daemon) = spawn_checkpoint_skipped_daemon(reason);
+    let output = cosh_bin()
+        .args([
+            "checkpoint",
+            "create",
+            "--workspace",
+            "/tmp/test-ws",
+            "--id",
+            "snap-001",
+            "--socket",
+            &socket_path,
+        ])
+        .output()
+        .unwrap();
+    daemon.join().unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["ok"], true);
+    assert!(json["error"].is_null());
+    assert_eq!(json["data"]["snapshot_id"], serde_json::Value::Null);
+    assert_eq!(json["data"]["workspace"], "/tmp/test-ws");
+    assert_eq!(json["data"]["skipped"], true);
+    assert_eq!(json["data"]["reason"], reason);
+    assert_eq!(json["meta"]["subsystem"], "checkpoint");
+    assert_eq!(json["meta"]["dry_run"], false);
+}
 
 #[test]
 fn test_checkpoint_create_daemon_unavailable() {
