@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-07-12
+
+### Changed
+
+- Package installation and removal progress now uses stderr, keeping command output safe for redirection.
+
+### Fixed
+
+- ANOLISA commands now exit cleanly when a downstream pipeline closes standard output early.
+- ANOLISA commands now report standard output write failures instead of silently succeeding.
+
 ## [0.2.2] - 2026-07-09
 
 ### Added
@@ -470,6 +481,17 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.2.3] - 2026-07-12
+
+### 变更
+
+- 软件包安装和卸载进度现输出至标准错误，避免干扰重定向结果。
+
+### 修复
+
+- 下游管道提前关闭标准输出时，ANOLISA 命令现可正常退出。
+- 标准输出写入失败时，ANOLISA 命令现会报错而非静默成功。
 
 ## [0.2.2] - 2026-07-09
 

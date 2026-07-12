@@ -124,7 +124,12 @@ install -m 0644 manifests/repo.toml %{buildroot}%{_sysconfdir}/anolisa/repo.toml
 #%%doc %%{_docdir}/%%{name}/README.md
 
 %changelog
-* Thu Jul 09 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Sun Jul 12 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Package installation and removal progress now uses stderr, keeping command output safe for redirection.
+- ANOLISA commands now exit cleanly when a downstream pipeline closes standard output early.
+- ANOLISA commands now report standard output write failures instead of silently succeeding.
+
+* Thu Jul 09 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.2-1
 - `anolisa update --check` now reports RPM upgrade opportunities without changing state.
 - `anolisa update --check --motd` now prints a short login-friendly upgrade summary.
 - `anolisa upgrade` now applies RPM image upgrades for RPM-managed toolchains.
