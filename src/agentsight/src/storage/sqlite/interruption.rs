@@ -763,4 +763,27 @@ mod tests {
         let count = store.count_for_conversation("conv-5", &InterruptionType::DeadLoop);
         assert_eq!(count, 0);
     }
+
+    /// After intentionally poisoning the conn mutex, methods that use
+    /// `unwrap_or_else(|e| e.into_inner())` should still operate correctly.
+    #[test]
+    fn poison_recovery_conn_still_operational() {
+        let store = temp_store();
+
+        // Intentionally poison the conn mutex
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = store.conn.lock().unwrap();
+            panic!("intentional poison");
+        }));
+        assert!(result.is_err(), "Mutex should be poisoned");
+
+        // Exercise the poison-recovery path via count_for_conversation
+        // which locks conn via unwrap_or_else(|e| e.into_inner())
+        let count = store.count_for_conversation("conv-none", &InterruptionType::DeadLoop);
+        assert_eq!(count, 0, "Should still query after poison recovery");
+
+        // Also exercise a write path (insert)
+        let event = make_event("conv-poison", InterruptionType::DeadLoop);
+        store.insert(&event).unwrap();
+    }
 }

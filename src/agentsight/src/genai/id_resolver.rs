@@ -461,6 +461,38 @@ mod tests {
         assert_ne!(a, b);
     }
 
+    /// After intentionally poisoning the session LRU cache mutex,
+    /// resolve should still operate via poison recovery.
+    #[test]
+    fn poison_recovery_cache_still_operational() {
+        let resolver = IdResolver::new();
+
+        // Poison the session_first_resp mutex
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = resolver.session_first_resp.lock().unwrap();
+            panic!("intentional poison");
+        }));
+        assert!(result.is_err(), "Mutex should be poisoned");
+
+        // Exercise the poison-recovery path
+        let sid = resolver
+            .resolve_session_id(A, P, "poison-test", "resp-1")
+            .unwrap();
+        assert_eq!(sid.len(), 32);
+
+        // Same for conv cache — poison it, then exercise
+        let result2 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = resolver.conv_first_resp.lock().unwrap();
+            panic!("intentional poison");
+        }));
+        assert!(result2.is_err(), "Mutex should be poisoned");
+
+        let cid = resolver
+            .resolve_conversation_id(A, P, "poison-conv", "resp-2")
+            .unwrap();
+        assert_eq!(cid.len(), 32);
+    }
+
     #[test]
     fn crash_fallback_id_diverges_from_normal_id() {
         // 以同一 user_text 分别走正常路径与 crash fallback，两者应因为

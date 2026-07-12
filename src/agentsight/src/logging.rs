@@ -202,6 +202,51 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// After intentionally poisoning filter and writer mutexes,
+    /// reconfigure / log / flush should still operate via poison recovery.
+    ///
+    /// NOTE: `enabled()` uses `expect()`, not `unwrap_or_else`, so calling
+    /// `log()` with a poisoned filter would panic. We poison the writer first,
+    /// exercise it through log+flush (filter stays healthy so enabled() works),
+    /// then poison the filter separately to exercise reconfigure's filter path.
+    #[test]
+    fn poison_recovery_filter_and_writer_still_operational() {
+        let logger = AgentsightLogger::new(default_filter(true), open_log_writer(None));
+
+        // Poison only the writer mutex (filter stays healthy so enabled() works)
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _w = logger.writer.lock().unwrap();
+            panic!("intentional poison");
+        }));
+        assert!(result.is_err(), "Writer mutex should be poisoned");
+
+        // log() calls enabled() (healthy filter) then recovers poisoned writer
+        // via writer.lock().unwrap_or_else(|e| e.into_inner())
+        logger.log(
+            &log::Record::builder()
+                .args(format_args!("poison-recovery test"))
+                .level(log::Level::Info)
+                .target("test")
+                .build(),
+        );
+
+        // flush() uses writer.lock().unwrap_or_else(|e| e.into_inner())
+        logger.flush();
+
+        // Now poison the filter to exercise reconfigure's filter poison path
+        let result2 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _f = logger.filter.lock().unwrap();
+            panic!("intentional poison");
+        }));
+        assert!(result2.is_err(), "Filter mutex should be poisoned");
+
+        // reconfigure() uses unwrap_or_else for both filter and writer locks
+        logger.reconfigure(default_filter(false), open_log_writer(None));
+        // Call again — both are still poisoned (poison flag persists), so
+        // both unwrap_or_else paths are exercised a second time
+        logger.reconfigure(default_filter(true), open_log_writer(None));
+    }
+
     #[test]
     fn logger_reconfigure_swaps_writer() {
         let dir =
