@@ -360,9 +360,9 @@ fn format_source(source: &Option<anolisa_core::RegisterSource>) -> String {
 }
 
 fn prompt_yn(prompt: &str, default: bool) -> bool {
-    use std::io::{self, BufRead, Write};
+    use std::io::{self, BufRead};
     print!("{prompt}");
-    io::stdout().flush().ok();
+    crate::output::flush_stdout();
     let line = io::stdin()
         .lock()
         .lines()
