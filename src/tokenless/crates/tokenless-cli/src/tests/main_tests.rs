@@ -5,6 +5,7 @@ static ENV_MUTEX: Mutex<()> = Mutex::new(());
 struct TempDbGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
     test_dir: String,
+    sls_dir: String,
     prev_stats_db: Option<std::ffi::OsString>,
     prev_stash_db: Option<std::ffi::OsString>,
     prev_sls_path: Option<std::ffi::OsString>,
@@ -22,18 +23,24 @@ impl TempDbGuard {
             .unwrap()
             .as_nanos();
         let test_dir = format!("{}/.tokenless-test-{}", home, nanos);
+        let sls_dir = format!("/tmp/tokenless-sls-test-{}", nanos);
         std::fs::create_dir_all(&test_dir).unwrap();
+        std::fs::create_dir_all(&sls_dir).unwrap();
+        let sls_path = format!("{}/tokenless.jsonl", sls_dir);
+        // Pre-create the JSONL file so SlsWriter::write can open it.
+        std::fs::write(&sls_path, "").unwrap();
         let prev_stats_db = std::env::var_os("TOKENLESS_STATS_DB");
         let prev_stash_db = std::env::var_os("TOKENLESS_STASH_DB");
         let prev_sls_path = std::env::var_os("TOKENLESS_SLS_PATH");
         unsafe {
             std::env::set_var("TOKENLESS_STATS_DB", format!("{}/stats.db", test_dir));
             std::env::set_var("TOKENLESS_STASH_DB", format!("{}/stash.db", test_dir));
-            std::env::set_var("TOKENLESS_SLS_PATH", format!("{}/tokenless.jsonl", test_dir));
+            std::env::set_var("TOKENLESS_SLS_PATH", &sls_path);
         }
         Some(TempDbGuard {
             _lock: lock,
             test_dir,
+            sls_dir,
             prev_stats_db,
             prev_stash_db,
             prev_sls_path,
@@ -58,6 +65,7 @@ impl Drop for TempDbGuard {
             }
         }
         std::fs::remove_dir_all(&self.test_dir).ok();
+        std::fs::remove_dir_all(&self.sls_dir).ok();
     }
 }
 
@@ -523,7 +531,7 @@ fn run_command_compress_response_with_stash() {
 
 #[test]
 fn run_command_retrieve_invalid_hash() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let result = run_command(Commands::Retrieve {
         hash: "not-a-hash".to_string(),
         stash_db: None,
@@ -1030,11 +1038,11 @@ fn run_command_compress_toon_empty_obj() {
 }
 
 #[test]
-fn run_command_compress_response_with_stash_errors() {
-    let _guard = TempDbGuard::new();
+fn run_command_compress_response_with_stash_truncation() {
+    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
 
     let dir = tempfile::tempdir().unwrap();
-    let f = dir.path().join("stash_error.json");
+    let f = dir.path().join("stash_truncation.json");
     let items: Vec<serde_json::Value> = (0..100).map(|i| serde_json::json!({"id": i, "data": "x".repeat(200)})).collect();
     let data = serde_json::json!({"results": items});
     std::fs::write(&f, serde_json::to_string(&data).unwrap()).unwrap();
@@ -1049,6 +1057,6 @@ fn run_command_compress_response_with_stash_errors() {
         no_stash: false,
         stash_db: None,
     });
-    // Compression succeeds even when stash writes encounter errors (fail-open).
+    // Compression with stash enabled and aggressive truncation succeeds.
     assert!(result.is_ok());
 }

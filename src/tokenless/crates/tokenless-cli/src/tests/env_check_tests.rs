@@ -4,6 +4,31 @@ use std::sync::Mutex;
 
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
+struct EnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    prev: Option<std::ffi::OsString>,
+}
+
+impl EnvGuard {
+    fn set_spec(path: &str) -> Self {
+        let lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var_os("TOKENLESS_TOOL_READY_SPEC");
+        unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", path) };
+        EnvGuard { _lock: lock, prev }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.prev {
+                Some(v) => std::env::set_var("TOKENLESS_TOOL_READY_SPEC", v),
+                None => std::env::remove_var("TOKENLESS_TOOL_READY_SPEC"),
+            }
+        }
+    }
+}
+
 #[test]
 fn normalize_dep_simple_string() {
     let dep = normalize_dep(&json!("jq"));
@@ -1059,167 +1084,122 @@ fn check_network_https_resolves() {
 
 #[test]
 fn run_all_text_output() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
-    unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
     assert!(run(None, true, false, false, false).is_ok());
-    unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
 #[test]
 fn run_all_json_output() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
-    unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
     assert!(run(None, true, false, false, true).is_ok());
-    unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
 #[test]
 fn run_checklist_output() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
-    unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
     assert!(run(None, false, false, true, false).is_ok());
-    unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
 #[test]
 fn run_specific_tool_text() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
-    unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
     assert!(run(Some("TestTool"), false, false, false, false).is_ok());
-    unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
 #[test]
 fn run_specific_tool_json_output() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
-    unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
     assert!(run(Some("TestTool"), false, false, false, true).is_ok());
-    unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
 #[test]
 fn run_alias_lookup_text() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
-    unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
     assert!(run(Some("tt"), false, false, false, false).is_ok());
-    unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
 #[test]
 fn run_case_insensitive_tool() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
-    unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
     assert!(run(Some("testtool"), false, false, false, false).is_ok());
-    unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
 #[test]
 fn run_unknown_tool_text() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
-    unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
     assert!(run(Some("UnknownTool"), false, false, false, false).is_ok());
-    unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
 #[test]
 fn run_unknown_tool_json_output() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
-    unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
     assert!(run(Some("UnknownTool"), false, false, false, true).is_ok());
-    unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
 #[test]
 fn run_no_tool_no_all_errors() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
-    unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
     assert!(run(None, false, false, false, false).is_err());
-    unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
 #[test]
 fn run_missing_tool_text() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
-    unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
     assert!(run(Some("MissingTool"), false, false, false, false).is_ok());
-    unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
 #[test]
 fn run_missing_tool_json_output() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
-    unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
     assert!(run(Some("MissingTool"), false, false, false, true).is_ok());
-    unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
 #[test]
 fn run_versioned_all_text() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_versioned_spec(dir.path());
-    unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
     assert!(run(None, true, false, false, false).is_ok());
-    unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
 #[test]
 fn run_versioned_all_json() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_versioned_spec(dir.path());
-    unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
     assert!(run(None, true, false, false, true).is_ok());
-    unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
 #[test]
 fn run_versioned_checklist() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_versioned_spec(dir.path());
-    unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
     assert!(run(None, false, false, true, false).is_ok());
-    unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
 #[test]
@@ -1374,25 +1354,19 @@ fn check_dep_version_low() {
 
 #[test]
 fn run_versioned_tool_all() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_versioned_spec(dir.path());
-    unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
     let result = run(None, true, false, false, false);
-    unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
     assert!(result.is_ok());
 }
 
 #[test]
 fn run_versioned_tool_json() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_versioned_spec(dir.path());
-    unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
+    let _guard = EnvGuard::set_spec(spec_path.to_str().unwrap());
     let result = run(None, true, false, false, true);
-    unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
     assert!(result.is_ok());
 }
 
