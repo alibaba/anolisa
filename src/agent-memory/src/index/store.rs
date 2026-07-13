@@ -434,29 +434,31 @@ impl BM25Store {
             );
             let mut or_stmt = self.conn.prepare(&or_sql)?;
             if let Some(ref agent_id) = agent_param {
-                or_stmt.query_map(params![or_q, top_k as i64, agent_id], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, f64>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, i64>(4)?,
-                    ))
-                })?
-                .flatten()
-                .collect()
+                or_stmt
+                    .query_map(params![or_q, top_k as i64, agent_id], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, f64>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, i64>(4)?,
+                        ))
+                    })?
+                    .flatten()
+                    .collect()
             } else {
-                or_stmt.query_map(params![or_q, top_k as i64], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, f64>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, i64>(4)?,
-                    ))
-                })?
-                .flatten()
-                .collect()
+                or_stmt
+                    .query_map(params![or_q, top_k as i64], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, f64>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, i64>(4)?,
+                        ))
+                    })?
+                    .flatten()
+                    .collect()
             }
         } else {
             rows
