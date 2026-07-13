@@ -768,7 +768,7 @@ jobs:
       - name: Run tests
         run: |
           cd src/tokenless
-          cargo test --workspace
+          cargo test --workspace -- --test-threads=1
 
   # =========================================================================
   # Step 7: Test ws-ckpt
