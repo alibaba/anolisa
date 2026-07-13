@@ -7,9 +7,10 @@
 //! dnf/rpm transaction and never switches backend — only rpmdb reads plus a
 //! state write.
 //!
-//! A package that has been `rpm -e`'d cannot be repaired: there is nothing to
-//! refresh from, so `repair` refuses and points at `anolisa forget`. Raw
-//! components have no rpmdb to reconcile against and are not handled yet.
+//! A pending delegated install can also be completed from its transaction
+//! journal when dnf committed the RPM but `installed.toml` was not saved. A
+//! tracked package that has since been `rpm -e`'d still cannot be repaired;
+//! raw components have no rpmdb to reconcile against and are not handled yet.
 
 use chrono::{SecondsFormat, Utc};
 use clap::Parser;
@@ -18,13 +19,21 @@ use serde::Serialize;
 use anolisa_core::central_log::{CentralLog, LogKind, LogRecord, LogStatus, Severity};
 use anolisa_core::lock::InstallLock;
 use anolisa_core::state::{ObjectKind, OperationRecord, Ownership, RpmMetadata};
+use anolisa_core::transaction::TransactionOutcomeStatus;
+use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError};
 use anolisa_platform::rpm_query::RpmPackageQuery;
 
 use crate::color::Palette;
 use crate::commands::common;
 use crate::commands::common::RepoPersistPolicy;
-use crate::commands::tier1::install::rpm_package_candidates_with_index;
+use crate::commands::tier1::install::{
+    rpm_package_candidates_with_index, snapshot_datadir_contract,
+};
+use crate::commands::tier1::rpm_recovery::{
+    RpmInstallRecovery, find_pending_rpm_install, load_pending_rpm_install,
+    record_rpm_managed_install,
+};
 use crate::context::CliContext;
 use crate::resolution::{ResolutionUse, load_optional_component_index};
 use crate::response::{CliError, render_json};
@@ -71,9 +80,9 @@ struct RepairPayload {
 ///
 /// # Errors
 ///
-/// Returns [`CliError`] when the component is absent, raw-backed (unsupported),
-/// the package is gone from rpmdb, the rpmdb read is ambiguous, or the state
-/// write fails.
+/// Returns [`CliError`] when neither state nor a recovery journal identifies
+/// the component, the component is raw-backed (unsupported), the package is
+/// gone from rpmdb, the rpmdb read is ambiguous, or the state write fails.
 pub fn handle(args: RepairArgs, ctx: &CliContext) -> Result<(), CliError> {
     let query = RpmPackageQuery::system();
     repair_with_query(&args.component, ctx, &query)
@@ -99,14 +108,28 @@ fn repair_with_query(
 
     let component = common::lookup_component_name(target, &installed, ctx, COMMAND);
 
-    let obj = installed
-        .find_object(ObjectKind::Component, &component)
-        .ok_or_else(|| CliError::InvalidArgument {
-            command: command.clone(),
-            reason: format!(
-                "component '{target}' is not installed — nothing to repair (run `anolisa status` to see what is installed)"
-            ),
-        })?;
+    let obj = match installed.find_object(ObjectKind::Component, &component) {
+        Some(obj) => obj,
+        None => {
+            let layout = common::resolve_layout(ctx);
+            let state_path = layout.state_dir.join("installed.toml");
+            let journal_dir = layout.state_dir.join("journal");
+            let pending = find_pending_rpm_install(
+                &journal_dir,
+                &state_path,
+                &installed,
+                &component,
+            )
+                .map_err(|err| rpm_recovery_error(&command, err))?
+                .ok_or_else(|| CliError::InvalidArgument {
+                    command: command.clone(),
+                    reason: format!(
+                        "component '{target}' is not installed — nothing to repair (run `anolisa status` to see what is installed)"
+                    ),
+                })?;
+            return repair_pending_rpm_install(ctx, query, &command, pending);
+        }
+    };
 
     let ownership = obj.effective_ownership();
     // Raw components have no rpmdb to reconcile against. Keep them on the same
@@ -221,6 +244,373 @@ fn repair_with_query(
     };
     render_repair(ctx, &payload);
     Ok(())
+}
+
+/// Recover an RPM install whose dnf transaction outlived its state commit.
+fn repair_pending_rpm_install(
+    ctx: &CliContext,
+    query: &dyn PackageQuery,
+    command: &str,
+    pending: RpmInstallRecovery,
+) -> Result<(), CliError> {
+    if ctx.dry_run {
+        return preview_pending_rpm_repair(ctx, query, command, pending);
+    }
+
+    let layout = common::resolve_layout(ctx);
+    let state_path = layout.state_dir.join("installed.toml");
+    let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("failed to acquire install lock: {err}"),
+    })?;
+    let mut state = common::load_installed_state(ctx, command)?;
+    if let Some(existing) = state.find_object(ObjectKind::Component, pending.component()) {
+        return Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "component '{}' appeared in state while RPM recovery was being prepared and is now tracked as {}; refusing to overwrite it",
+                pending.component(),
+                existing.effective_ownership().label()
+            ),
+        });
+    }
+
+    // Reload the exact marker and rescan under the lock. The path check guards
+    // against replacement, while the scan also rejects a newly-created second
+    // marker for the same component.
+    let expected_path = pending.journal_path().to_path_buf();
+    let expected_operation_id = pending.operation_id().to_string();
+    let expected_component = pending.component().to_string();
+    let expected_package = pending.package().to_string();
+    let exact = load_pending_rpm_install(&expected_path, &state_path)
+        .map_err(|err| rpm_recovery_error(command, err))?
+        .ok_or_else(|| CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "RPM recovery journal {} is no longer pending; no state was changed",
+                expected_path.display()
+            ),
+        })?;
+    validate_pending_identity(
+        command,
+        &exact,
+        &expected_operation_id,
+        &expected_component,
+        &expected_package,
+    )?;
+    let mut recovery = find_pending_rpm_install(
+        &layout.state_dir.join("journal"),
+        &state_path,
+        &state,
+        &expected_component,
+    )
+    .map_err(|err| rpm_recovery_error(command, err))?
+    .ok_or_else(|| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!(
+            "RPM recovery journal for component '{expected_component}' is no longer pending; no state was changed"
+        ),
+    })?;
+    validate_pending_identity(
+        command,
+        &recovery,
+        &expected_operation_id,
+        &expected_component,
+        &expected_package,
+    )?;
+
+    let info = match query.query_installed(&expected_package) {
+        Ok(Some(info)) => info,
+        Ok(None) => {
+            let reason = format!(
+                "rpmdb does not contain pending package '{expected_package}'; no ANOLISA state was committed"
+            );
+            recovery
+                .mark_install_failed(&reason)
+                .map_err(|err| pending_journal_update_error(command, &expected_component, err))?;
+            recovery
+                .mark_persist_failed(&reason)
+                .map_err(|err| pending_journal_update_error(command, &expected_component, err))?;
+            recovery
+                .finish(TransactionOutcomeStatus::Failed)
+                .map_err(|err| pending_journal_update_error(command, &expected_component, err))?;
+            return Err(CliError::Runtime {
+                command: command.to_string(),
+                reason: format!(
+                    "pending RPM install for component '{expected_component}' was cleared because package '{expected_package}' is not installed; re-run `anolisa install --backend rpm {expected_component}`"
+                ),
+            });
+        }
+        Err(PackageQueryError::UnexpectedOutput { detail, .. }) => {
+            let reason = format!("rpm returned unexpected output: {detail}");
+            mark_pending_query_partial(&mut recovery, &reason);
+            return Err(pending_rpm_query_error(
+                command,
+                &expected_component,
+                &expected_package,
+                &reason,
+            ));
+        }
+        Err(PackageQueryError::CommandMissing { .. }) => {
+            let reason = "rpm/dnf was not found";
+            mark_pending_query_partial(&mut recovery, reason);
+            return Err(pending_rpm_query_error(
+                command,
+                &expected_component,
+                &expected_package,
+                reason,
+            ));
+        }
+        Err(err) => {
+            let reason = format!("rpm query failed: {err}");
+            mark_pending_query_partial(&mut recovery, &reason);
+            return Err(pending_rpm_query_error(
+                command,
+                &expected_component,
+                &expected_package,
+                &reason,
+            ));
+        }
+    };
+
+    let mut warnings = Vec::new();
+    let source_repo = match query.installed_origin(&expected_package) {
+        Ok(origin) => origin,
+        Err(err) => {
+            warnings.push(format!(
+                "could not determine source repo for '{expected_package}': {err}"
+            ));
+            None
+        }
+    };
+    recovery
+        .mark_install_done()
+        .map_err(|err| pending_journal_update_error(command, &expected_component, err))?;
+
+    let finished_at = now_iso8601();
+    let install_command = format!("install {expected_component}");
+    record_rpm_managed_install(
+        &mut state,
+        &layout,
+        &expected_component,
+        &info,
+        source_repo.as_deref(),
+        &expected_operation_id,
+        recovery.started_at(),
+        &install_command,
+        &finished_at,
+    );
+    if let Err(err) = state.save(&state_path) {
+        let reason = format!("failed to save recovered RPM state: {err}");
+        let _ = recovery.mark_persist_failed(&reason);
+        let _ = recovery.finish(TransactionOutcomeStatus::Partial);
+        return Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "{reason}; pending install remains recoverable — run `anolisa repair {expected_component}` after fixing the state path"
+            ),
+        });
+    }
+
+    warnings.extend(snapshot_datadir_contract(
+        &layout,
+        &expected_component,
+        command,
+    ));
+    if let Err(err) = recovery.mark_persist_done() {
+        warnings.push(format!(
+            "recovered state was saved but the RPM recovery journal could not mark persistence complete: {err}"
+        ));
+    } else if let Err(err) = recovery.finish(TransactionOutcomeStatus::Ok) {
+        warnings.push(format!(
+            "recovered state was saved but the RPM recovery journal could not be finalized: {err}"
+        ));
+    }
+
+    append_pending_repair_log(
+        ctx,
+        &layout,
+        command,
+        &expected_component,
+        &expected_package,
+        &info,
+        &expected_operation_id,
+        recovery.started_at(),
+        &finished_at,
+        &warnings,
+    );
+    let payload = RepairPayload {
+        component: expected_component,
+        package: expected_package,
+        backend: "rpm",
+        ownership: Ownership::RpmManaged.label(),
+        install_mode: ctx.install_mode.as_str().to_string(),
+        from_version: None,
+        to_version: info.version.to_string(),
+        refreshed: true,
+        changed: true,
+        dry_run: false,
+        operation_id: Some(expected_operation_id),
+        warnings,
+    };
+    render_repair(ctx, &payload);
+    Ok(())
+}
+
+fn preview_pending_rpm_repair(
+    ctx: &CliContext,
+    query: &dyn PackageQuery,
+    command: &str,
+    pending: RpmInstallRecovery,
+) -> Result<(), CliError> {
+    let package = pending.package().to_string();
+    let component = pending.component().to_string();
+    let info = match query.query_installed(&package) {
+        Ok(Some(info)) => info,
+        Ok(None) => {
+            return Err(CliError::Runtime {
+                command: command.to_string(),
+                reason: format!(
+                    "pending RPM package '{package}' is not installed; dry-run left the recovery marker unchanged — run `anolisa repair {component}` without --dry-run to clear it, then reinstall"
+                ),
+            });
+        }
+        Err(err) => {
+            return Err(pending_rpm_query_error(
+                command,
+                &component,
+                &package,
+                &err.to_string(),
+            ));
+        }
+    };
+    let mut warnings = Vec::new();
+    match query.installed_origin(&package) {
+        Ok(_) => {}
+        Err(err) => {
+            warnings.push(format!(
+                "could not determine source repo for '{package}': {err}"
+            ));
+        }
+    }
+    let payload = RepairPayload {
+        component,
+        package,
+        backend: "rpm",
+        ownership: Ownership::RpmManaged.label(),
+        install_mode: ctx.install_mode.as_str().to_string(),
+        from_version: None,
+        to_version: info.version.to_string(),
+        refreshed: false,
+        changed: true,
+        dry_run: true,
+        operation_id: None,
+        warnings,
+    };
+    render_repair(ctx, &payload);
+    Ok(())
+}
+
+fn validate_pending_identity(
+    command: &str,
+    pending: &RpmInstallRecovery,
+    operation_id: &str,
+    component: &str,
+    package: &str,
+) -> Result<(), CliError> {
+    if pending.operation_id() == operation_id
+        && pending.component() == component
+        && pending.package() == package
+    {
+        return Ok(());
+    }
+    Err(CliError::Runtime {
+        command: command.to_string(),
+        reason: format!(
+            "RPM recovery journal changed while repair was being prepared; expected operation '{operation_id}' for component '{component}' and package '{package}', so no state was changed"
+        ),
+    })
+}
+
+fn mark_pending_query_partial(recovery: &mut RpmInstallRecovery, reason: &str) {
+    let _ = recovery.mark_persist_failed(reason);
+    let _ = recovery.finish(TransactionOutcomeStatus::Partial);
+}
+
+fn rpm_recovery_error(
+    command: &str,
+    err: crate::commands::tier1::rpm_recovery::RpmRecoveryError,
+) -> CliError {
+    CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("RPM install recovery journal failure: {err}"),
+    }
+}
+
+fn pending_journal_update_error(
+    command: &str,
+    component: &str,
+    err: anolisa_core::transaction::TransactionError,
+) -> CliError {
+    CliError::Runtime {
+        command: command.to_string(),
+        reason: format!(
+            "failed to update the RPM recovery journal for component '{component}': {err}; no ANOLISA state was committed"
+        ),
+    }
+}
+
+fn pending_rpm_query_error(
+    command: &str,
+    component: &str,
+    package: &str,
+    reason: &str,
+) -> CliError {
+    CliError::Runtime {
+        command: command.to_string(),
+        reason: format!(
+            "could not determine whether pending RPM package '{package}' for component '{component}' is installed ({reason}); recovery marker was retained and ANOLISA state was not changed"
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_pending_repair_log(
+    ctx: &CliContext,
+    layout: &FsLayout,
+    command: &str,
+    component: &str,
+    package: &str,
+    info: &PackageInfo,
+    operation_id: &str,
+    started_at: &str,
+    finished_at: &str,
+    warnings: &[String],
+) {
+    let evr = info.version.to_string();
+    let record = LogRecord {
+        kind: LogKind::Operation,
+        operation_id: Some(operation_id.to_string()),
+        command: command.to_string(),
+        source: "anolisa-cli".to_string(),
+        component: Some(component.to_string()),
+        severity: Severity::Info,
+        message: format!(
+            "recovered rpm-managed state for component {component} from installed RPM package {package} ({evr})"
+        ),
+        actor: "cli".to_string(),
+        install_mode: Some(ctx.install_mode.as_str().to_string()),
+        started_at: started_at.to_string(),
+        finished_at: Some(finished_at.to_string()),
+        status: Some(LogStatus::Ok),
+        objects: vec![component.to_string()],
+        backup_ids: Vec::new(),
+        warnings: warnings.to_vec(),
+        details: serde_json::Value::Null,
+    };
+    if let Err(err) = CentralLog::open(layout.central_log.clone()).append(&record) {
+        eprintln!("warning: failed to write central log: {err}");
+    }
 }
 
 /// Resolve the RPM package name `repair` should reconcile against.
@@ -528,6 +918,7 @@ fn now_iso8601() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::tier1::rpm_recovery::begin_rpm_install;
     use crate::context::InstallMode;
 
     use std::{fs, path::PathBuf};
@@ -535,6 +926,7 @@ mod tests {
     use anolisa_core::state::{
         InstallMode as StateInstallMode, InstalledObject, InstalledState, ObjectStatus,
     };
+    use anolisa_core::transaction::{Transaction, TransactionOutcomeStatus, TransactionStepStatus};
     use anolisa_platform::pkg_query::PackageVersion;
 
     /// Configurable in-memory [`PackageQuery`] for the repair tests. Repair runs
@@ -743,6 +1135,182 @@ mod tests {
     fn load_state(ctx: &CliContext) -> InstalledState {
         let layout = common::resolve_layout(ctx);
         InstalledState::load(&layout.state_dir.join("installed.toml")).expect("load state")
+    }
+
+    fn seed_pending_rpm_install(
+        ctx: &CliContext,
+        component: &str,
+        package: &str,
+    ) -> (String, PathBuf) {
+        let layout = common::resolve_layout(ctx);
+        let mut recovery = begin_rpm_install(
+            layout.state_dir.join("installed.toml"),
+            &layout.state_dir.join("journal"),
+            component,
+            package,
+        )
+        .expect("begin pending install");
+        let operation_id = recovery.operation_id().to_string();
+        let journal_path = recovery.journal_path().to_path_buf();
+        recovery.mark_install_done().expect("dnf done marker");
+        recovery
+            .mark_persist_failed("simulated state commit failure")
+            .expect("persist failure marker");
+        recovery
+            .finish(TransactionOutcomeStatus::Partial)
+            .expect("partial marker");
+        (operation_id, journal_path)
+    }
+
+    #[test]
+    fn repair_recovers_installed_rpm_from_pending_journal() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        let layout = common::resolve_layout(&c);
+        let contract_source = FsLayout::component_contract_path(&layout.datadir, "cosh");
+        fs::create_dir_all(contract_source.parent().expect("contract parent"))
+            .expect("create contract dir");
+        fs::write(
+            &contract_source,
+            "[component]\nname = \"cosh\"\nversion = \"2.3.0\"\n",
+        )
+        .expect("write contract");
+        let (operation_id, journal_path) = seed_pending_rpm_install(&c, "cosh", "copilot-shell");
+        let rpm = FakeQuery::new(
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "aarch64")),
+        )
+        .with_origin("anolisa");
+
+        repair_with_query("cosh", &c, &rpm).expect("recover pending install");
+
+        let state = load_state(&c);
+        let obj = state
+            .find_object(ObjectKind::Component, "cosh")
+            .expect("recovered component");
+        assert_eq!(obj.version, "2.3.0-1.al8");
+        assert_eq!(obj.status, ObjectStatus::Installed);
+        assert_eq!(obj.ownership, Some(Ownership::RpmManaged));
+        assert_eq!(obj.install_backend.as_deref(), Some("rpm"));
+        assert!(obj.managed);
+        assert!(!obj.adopted);
+        assert_eq!(
+            obj.last_operation_id.as_deref(),
+            Some(operation_id.as_str())
+        );
+        let metadata = obj.rpm_metadata.as_ref().expect("rpm metadata");
+        assert_eq!(metadata.package_name, "copilot-shell");
+        assert_eq!(metadata.evr.as_deref(), Some("2.3.0-1.al8"));
+        assert_eq!(metadata.arch.as_deref(), Some("aarch64"));
+        assert_eq!(metadata.source_repo.as_deref(), Some("anolisa"));
+        let operation = state
+            .operations
+            .iter()
+            .find(|operation| operation.id == operation_id)
+            .expect("original install operation committed");
+        assert_eq!(operation.command, "install cosh");
+
+        let journal = Transaction::load_journal(&journal_path).expect("load finalized journal");
+        assert_eq!(journal.status, TransactionOutcomeStatus::Ok);
+        assert!(
+            journal
+                .steps
+                .iter()
+                .all(|step| step.status == TransactionStepStatus::Done)
+        );
+        let snapshot = common::installed_component_manifest_path(&layout, "cosh", "repair cosh")
+            .expect("snapshot path");
+        assert_eq!(
+            fs::read_to_string(snapshot).expect("read snapshot"),
+            fs::read_to_string(contract_source).expect("read source contract")
+        );
+    }
+
+    #[test]
+    fn repair_clears_pending_marker_when_rpm_is_absent() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        let (_operation_id, journal_path) = seed_pending_rpm_install(&c, "cosh", "copilot-shell");
+        let rpm = FakeQuery::new("copilot-shell", None);
+
+        let err = repair_with_query("cosh", &c, &rpm)
+            .expect_err("absent pending package must clear marker and error");
+        assert!(err.reason().contains("was cleared"));
+        assert!(err.reason().contains("install --backend rpm cosh"));
+        let journal = Transaction::load_journal(&journal_path).expect("load failed journal");
+        assert_eq!(journal.status, TransactionOutcomeStatus::Failed);
+        assert!(
+            journal
+                .steps
+                .iter()
+                .all(|step| step.status == TransactionStepStatus::Failed)
+        );
+        assert!(
+            load_state(&c)
+                .find_object(ObjectKind::Component, "cosh")
+                .is_none()
+        );
+        let layout = common::resolve_layout(&c);
+        assert!(
+            find_pending_rpm_install(
+                &layout.state_dir.join("journal"),
+                &layout.state_dir.join("installed.toml"),
+                &load_state(&c),
+                "cosh",
+            )
+            .expect("scan markers")
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn repair_keeps_pending_marker_partial_when_rpmdb_is_ambiguous() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        let (_operation_id, journal_path) = seed_pending_rpm_install(&c, "cosh", "copilot-shell");
+        let rpm = FakeQuery::new(
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.3.0", Some("1"), "x86_64")),
+        )
+        .multi_version();
+
+        let err = repair_with_query("cosh", &c, &rpm)
+            .expect_err("ambiguous rpmdb must preserve pending recovery");
+        assert!(err.reason().contains("marker was retained"));
+        assert_eq!(
+            Transaction::load_journal(&journal_path)
+                .expect("load partial journal")
+                .status,
+            TransactionOutcomeStatus::Partial
+        );
+        assert!(
+            load_state(&c)
+                .find_object(ObjectKind::Component, "cosh")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn repair_pending_dry_run_writes_nothing() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, true);
+        let (_operation_id, journal_path) = seed_pending_rpm_install(&c, "cosh", "copilot-shell");
+        let before = fs::read(&journal_path).expect("read marker before dry-run");
+        let rpm = FakeQuery::new(
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.3.0", Some("1"), "x86_64")),
+        );
+
+        repair_with_query("cosh", &c, &rpm).expect("dry-run preview");
+        assert_eq!(
+            fs::read(&journal_path).expect("read marker after dry-run"),
+            before
+        );
+        assert!(
+            load_state(&c)
+                .find_object(ObjectKind::Component, "cosh")
+                .is_none()
+        );
     }
 
     /// A drifted rpm-observed component refreshes its EVR/arch/source from rpmdb

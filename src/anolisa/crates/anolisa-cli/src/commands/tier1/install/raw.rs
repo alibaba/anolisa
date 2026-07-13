@@ -40,7 +40,7 @@ use super::provision::{resolver_env_from_facts, retained_packages_note, run_prov
 use super::render::{artifact_ext, artifact_type_wire, render_result, repo_config_err};
 use super::types::*;
 
-use super::{COMMAND, ensure_component_backend_compatible};
+use super::{COMMAND, ensure_component_backend_compatible, reject_pending_rpm_install};
 pub(crate) fn resolve_raw(
     ctx: &CliContext,
     layout: &FsLayout,
@@ -1011,6 +1011,7 @@ pub(crate) fn execute_raw(
             command: command.to_string(),
             reason: format!("failed to load installed state: {err}"),
         })?;
+    reject_pending_rpm_install(layout, &state, &resolution.component, command)?;
     ensure_component_backend_compatible(
         &state,
         &resolution.component,

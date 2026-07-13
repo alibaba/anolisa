@@ -24,7 +24,9 @@ use super::InstallArgs;
 use super::raw::{build_install_preview, execute_raw, prepare_raw_execution, resolve_raw};
 use super::render::render_plan;
 use super::render::repo_config_err;
-use super::rpm::{RpmExec, RpmSituation, probe_rpm_situation, route_rpm_adopt};
+use super::rpm::{
+    RpmExec, RpmSituation, probe_rpm_situation, reject_pending_rpm_install, route_rpm_adopt,
+};
 use super::types::*;
 
 use super::{ANOLISA_RPM_REPO_ID, COMMAND};
@@ -91,6 +93,12 @@ fn handle_one_with_config(
     // backend selection, so ExistingState detection and compatibility checks
     // use the canonical component name stored in state.
     let component = common::lookup_component_name(&component, &installed, ctx, COMMAND);
+
+    // A pending delegated RPM transaction owns this component until repair
+    // resolves it. Check before backend selection so explicit/default raw and
+    // every dry-run path cannot bypass that recovery contract. Mutating
+    // executors repeat this check under the install lock for TOCTOU safety.
+    reject_pending_rpm_install(&layout, &installed, &component, &command)?;
 
     let mut rpm_component_index: Option<ComponentIndex> = None;
 

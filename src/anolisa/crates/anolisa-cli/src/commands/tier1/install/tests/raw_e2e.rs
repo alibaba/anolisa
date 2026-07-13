@@ -9,6 +9,7 @@ use anolisa_core::state::{
 use anolisa_platform::fs_layout::FsLayout;
 
 use crate::commands::common;
+use crate::commands::tier1::rpm_recovery::begin_rpm_install;
 use tempfile::tempdir;
 
 #[test]
@@ -48,6 +49,44 @@ fn install_dry_run_resolves_without_writing_files() {
             .all(|name| !name.ends_with("agentsight.tar.gz")),
         "dry-run must not download the install artifact; cache entries: {cached_names:?}"
     );
+}
+
+#[test]
+fn raw_executor_rechecks_pending_rpm_journal_under_lock() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo(&tmp.path().join("repo"));
+    let ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    let layout = FsLayout::system(Some(prefix));
+    let env = anolisa_env::EnvService::detect();
+    let resolution = resolve_raw(
+        &ctx,
+        &layout,
+        &env,
+        ResolveInputs {
+            component: "agentsight".to_string(),
+            package: "agentsight".to_string(),
+            backend: "raw".to_string(),
+            base_url: repo_url,
+            version: None,
+            warnings: Vec::new(),
+        },
+    )
+    .expect("resolve raw artifact");
+    let prepared = prepare_raw_execution(&ctx, &layout, resolution).expect("prepare raw install");
+
+    begin_rpm_install(
+        layout.state_dir.join("installed.toml"),
+        &layout.state_dir.join("journal"),
+        "agentsight",
+        "agentsight",
+    )
+    .expect("seed marker after the dispatch-time check");
+
+    let err = execute_raw(&ctx, &layout, "install agentsight", prepared)
+        .expect_err("locked raw executor must recheck RPM recovery ownership");
+    assert!(err.reason().contains("repair agentsight"));
+    assert!(!layout.bin_dir.join("agentsight").exists());
 }
 
 #[test]

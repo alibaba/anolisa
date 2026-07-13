@@ -625,6 +625,10 @@ pub struct FakeInstaller {
     pub install_succeeds: bool,
     pub installed: RefCell<Option<PackageInfo>>,
     pub install_calls: Cell<usize>,
+    /// Fail rpmdb reads after dnf has populated the in-memory package.
+    pub fail_post_install_query: bool,
+    /// Create this directory after dnf succeeds to make state-file saving fail.
+    pub state_save_blocker: Option<PathBuf>,
 }
 
 impl FakeInstaller {
@@ -637,6 +641,8 @@ impl FakeInstaller {
             install_succeeds: true,
             installed: RefCell::new(None),
             install_calls: Cell::new(0),
+            fail_post_install_query: false,
+            state_save_blocker: None,
         }
     }
     pub fn with_origin(mut self, repo: &str) -> Self {
@@ -645,6 +651,14 @@ impl FakeInstaller {
     }
     pub fn failing_install(mut self) -> Self {
         self.install_succeeds = false;
+        self
+    }
+    pub fn failing_post_install_query(mut self) -> Self {
+        self.fail_post_install_query = true;
+        self
+    }
+    pub fn blocking_state_save(mut self, path: PathBuf) -> Self {
+        self.state_save_blocker = Some(path);
         self
     }
 
@@ -657,6 +671,12 @@ impl PackageQuery for FakeInstaller {
     fn query_installed(&self, package: &str) -> Result<Option<PackageInfo>, PackageQueryError> {
         if package != self.package {
             return Ok(None);
+        }
+        if self.fail_post_install_query && self.installed.borrow().is_some() {
+            return Err(PackageQueryError::UnexpectedOutput {
+                command: "rpm".to_string(),
+                detail: "simulated post-install rpmdb failure".to_string(),
+            });
         }
         Ok(self.installed.borrow().clone())
     }
@@ -728,6 +748,9 @@ impl PackageTransaction for FakeInstaller {
         }
         // rpmdb now holds the package, modelling dnf placing it.
         *self.installed.borrow_mut() = Some(self.installs_to.clone());
+        if let Some(path) = &self.state_save_blocker {
+            std::fs::create_dir_all(path).expect("create state-save blocker");
+        }
         Ok(())
     }
     fn update(&self, _package: &str) -> Result<(), PackageTransactionError> {

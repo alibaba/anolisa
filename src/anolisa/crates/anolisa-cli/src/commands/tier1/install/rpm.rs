@@ -8,6 +8,7 @@ use anolisa_core::state::{
     InstallMode as StateInstallMode, InstalledObject, InstalledState, ObjectKind, ObjectStatus,
     OperationRecord, Ownership, RpmMetadata,
 };
+use anolisa_core::transaction::TransactionOutcomeStatus;
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError};
 use anolisa_platform::pkg_transaction::{PackageTransaction, PackageTransactionError};
@@ -15,6 +16,9 @@ use chrono::Utc;
 
 use crate::color::Palette;
 use crate::commands::common;
+use crate::commands::tier1::rpm_recovery::{
+    RpmInstallRecovery, begin_rpm_install, find_pending_rpm_install, record_rpm_managed_install,
+};
 use crate::context::CliContext;
 use crate::repo_config::{BackendConfig, RepoConfig};
 use crate::resolution::{
@@ -350,6 +354,7 @@ pub(crate) fn route_rpm_adopt(
                 command,
                 &target.component,
                 &target.package,
+                installed.find_object(ObjectKind::Component, &target.component),
             )
         }
         RpmSituation::NotAnolisaComponent => Err(CliError::InvalidArgument {
@@ -485,6 +490,7 @@ pub(crate) fn execute_adopt(
             command: command.to_string(),
             reason: format!("failed to load installed state: {err}"),
         })?;
+    reject_pending_rpm_install(layout, &preview_state, component, command)?;
     refuse_observed_repoint(&preview_state, component, &info.name, command)?;
 
     if ctx.dry_run {
@@ -503,6 +509,7 @@ pub(crate) fn execute_adopt(
             command: command.to_string(),
             reason: format!("failed to load installed state: {err}"),
         })?;
+    reject_pending_rpm_install(layout, &state, component, command)?;
 
     // Re-validate against the freshly-reloaded state, mirroring execute_raw's
     // post-lock guard. Layer 1 may have decided "adopt" from a pre-lock read
@@ -725,13 +732,14 @@ pub(crate) struct DelegatedInstallPayload {
 /// (`owns_removal=true`). ANOLISA never fetches bytes itself — dnf owns the
 /// file transaction. Gated on root for the real run; `--dry-run` previews the
 /// `dnf install` without touching the host.
-fn execute_delegated_install(
+pub(crate) fn execute_delegated_install(
     exec: &RpmExec,
     ctx: &CliContext,
     layout: &FsLayout,
     command: &str,
     component: &str,
     package: &str,
+    expected_component: Option<&InstalledObject>,
 ) -> Result<InstallOutcome, CliError> {
     let mut warnings: Vec<String> = Vec::new();
 
@@ -783,10 +791,100 @@ fn execute_delegated_install(
         });
     }
 
-    // dnf install — delegate the file transaction.
-    exec.txn
-        .install(package)
-        .map_err(|err| txn_install_err(err, command))?;
+    // Serialize the whole delegated transaction. The lock must be acquired
+    // before dnf mutates rpmdb, not only when installed.toml is finalized:
+    // otherwise another ANOLISA writer can win between those two commits.
+    let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("failed to acquire install lock: {err}"),
+    })?;
+    let mut state =
+        common::load_installed_state(ctx, command).map_err(|err| CliError::Runtime {
+            command: command.to_string(),
+            reason: format!("failed to load installed state: {err}"),
+        })?;
+
+    // Compare the object used for routing with the freshly locked state. An
+    // unchanged tracked RPM whose package disappeared may be reinstalled, but
+    // any concurrent addition, removal, or mutation invalidates the decision
+    // that led here and must not be overwritten by a second dnf transaction.
+    if state.find_object(ObjectKind::Component, component) != expected_component {
+        return Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "component '{component}' changed while this RPM install was being prepared; dnf was not run — inspect it with `anolisa status {component}` and retry"
+            ),
+        });
+    }
+    ensure_component_backend_compatible(&state, component, "rpm", command)?;
+
+    let state_path = layout.state_dir.join("installed.toml");
+    let journal_dir = layout.state_dir.join("journal");
+    reject_pending_rpm_install(layout, &state, component, command)?;
+
+    // Persist both planned steps before invoking dnf. If the process exits at
+    // any later point, repair can identify both the component and package from
+    // this journal without trusting a partial installed-state object.
+    let mut recovery = begin_rpm_install(state_path.clone(), &journal_dir, component, package)
+        .map_err(|err| rpm_recovery_error(command, err))?;
+    let operation_id = recovery.operation_id().to_string();
+    let started_at = recovery.started_at().to_string();
+
+    if let Err(err) = exec.txn.install(package) {
+        let dnf_error = txn_install_err(err, command);
+        let dnf_reason = dnf_error.reason();
+        match exec.query.query_installed(package) {
+            // The failed dnf transaction made no observable package change, so
+            // the marker can be closed and the original package-manager error
+            // remains the useful result.
+            Ok(None) => {
+                let _ = recovery.mark_install_failed(&dnf_reason);
+                let _ = recovery.finish(TransactionOutcomeStatus::Failed);
+                return Err(dnf_error);
+            }
+            // A non-zero dnf exit can still leave a package installed. Preserve
+            // that fact for repair instead of pretending the transaction was
+            // cleanly rolled back.
+            Ok(Some(_)) => {
+                let _ = recovery.mark_install_done();
+                mark_rpm_install_partial(
+                    &mut recovery,
+                    "dnf returned an error but rpmdb reports the package installed",
+                );
+                return Err(rpm_install_needs_repair(
+                    command,
+                    component,
+                    package,
+                    &format!(
+                        "dnf reported failure ({dnf_reason}) but rpmdb now contains the package"
+                    ),
+                ));
+            }
+            Err(query_err) => {
+                let _ = recovery.mark_install_failed(&dnf_reason);
+                let _ = recovery.finish(TransactionOutcomeStatus::Partial);
+                return Err(rpm_install_needs_repair(
+                    command,
+                    component,
+                    package,
+                    &format!(
+                        "dnf reported failure ({dnf_reason}) and rpmdb verification also failed ({query_err})"
+                    ),
+                ));
+            }
+        }
+    }
+
+    if let Err(err) = recovery.mark_install_done() {
+        return Err(rpm_install_needs_repair(
+            command,
+            component,
+            package,
+            &format!(
+                "dnf succeeded but recording that result in the recovery journal failed ({err})"
+            ),
+        ));
+    }
 
     // Refresh from rpmdb: the authoritative installed EVR/arch.
     let info = match exec.query.query_installed(package) {
@@ -794,22 +892,41 @@ fn execute_delegated_install(
         // dnf reported success, so the package should be present; a miss here is
         // anomalous (a no-op transaction?). Refuse rather than record a phantom.
         Ok(None) => {
-            return Err(CliError::Runtime {
-                command: command.to_string(),
-                reason: format!(
-                    "dnf install of '{package}' reported success but rpmdb has no such package; the transaction may have been a no-op — run `anolisa status {component}`"
-                ),
-            });
+            mark_rpm_install_partial(
+                &mut recovery,
+                "dnf succeeded but rpmdb did not return the installed package",
+            );
+            return Err(rpm_install_needs_repair(
+                command,
+                component,
+                package,
+                "dnf succeeded but rpmdb has no package under that name",
+            ));
         }
         Err(PackageQueryError::UnexpectedOutput { .. }) => {
-            return Err(CliError::Runtime {
-                command: command.to_string(),
-                reason: format!(
-                    "RPM package '{package}' has multiple installed versions after install; refusing to record an ambiguous version"
-                ),
-            });
+            mark_rpm_install_partial(
+                &mut recovery,
+                "rpmdb reports multiple installed versions after dnf succeeded",
+            );
+            return Err(rpm_install_needs_repair(
+                command,
+                component,
+                package,
+                "dnf succeeded but rpmdb reports multiple installed versions",
+            ));
         }
-        Err(err) => return Err(pkg_query_err(err, command)),
+        Err(err) => {
+            mark_rpm_install_partial(
+                &mut recovery,
+                &format!("reading rpmdb after dnf succeeded failed: {err}"),
+            );
+            return Err(rpm_install_needs_repair(
+                command,
+                component,
+                package,
+                &format!("dnf succeeded but reading rpmdb failed ({err})"),
+            ));
+        }
     };
 
     // source_repo is supplementary metadata: a failed origin lookup degrades to
@@ -824,17 +941,45 @@ fn execute_delegated_install(
         }
     };
 
-    let (operation_id, snapshot_warnings) = persist_delegated_install(
+    let snapshot_warnings = match persist_delegated_install(
         ctx,
         layout,
+        &mut state,
         command,
         component,
         package,
         &info,
         source_repo.as_deref(),
         &warnings,
-    )?;
+        &operation_id,
+        &started_at,
+    ) {
+        Ok(snapshot_warnings) => snapshot_warnings,
+        Err(err) => {
+            let reason = err.reason();
+            mark_rpm_install_partial(&mut recovery, &reason);
+            return Err(rpm_install_needs_repair(
+                command,
+                component,
+                package,
+                &format!("dnf succeeded but ANOLISA state finalization failed ({reason})"),
+            ));
+        }
+    };
     warnings.extend(snapshot_warnings);
+
+    // installed.toml is authoritative once saved. A journal-finalization
+    // failure after that point is diagnostic only: the committed operation id
+    // lets future scans recognize and ignore the stale marker.
+    if let Err(err) = recovery.mark_persist_done() {
+        warnings.push(format!(
+            "installed state was saved but the RPM recovery journal could not mark state persistence complete: {err}"
+        ));
+    } else if let Err(err) = recovery.finish(TransactionOutcomeStatus::Ok) {
+        warnings.push(format!(
+            "installed state was saved but the RPM recovery journal could not be finalized: {err}"
+        ));
+    }
 
     let payload = DelegatedInstallPayload {
         component: component.to_string(),
@@ -855,7 +1000,7 @@ fn execute_delegated_install(
 }
 
 /// Persist a delegated install as `rpm-managed` state under the install lock,
-/// then append an audit record. Returns the operation id.
+/// then append an audit record. Returns datadir snapshot warnings.
 ///
 /// Mirrors [`execute_adopt`]'s state write but records ANOLISA ownership
 /// (`managed=true`, `adopted=false`, [`Ownership::RpmManaged`]) — the file
@@ -864,84 +1009,28 @@ fn execute_delegated_install(
 fn persist_delegated_install(
     ctx: &CliContext,
     layout: &FsLayout,
+    state: &mut InstalledState,
     command: &str,
     component: &str,
     package: &str,
     info: &PackageInfo,
     source_repo: Option<&str>,
     warnings: &[String],
-) -> Result<(String, Vec<String>), CliError> {
+    operation_id: &str,
+    started_at: &str,
+) -> Result<Vec<String>, CliError> {
     let evr = info.version.to_string();
-    let started_at = now_iso8601();
-
-    // Acquire the lock, then load state inside it so a concurrent writer is not
-    // clobbered — mirrors `execute_adopt`/`execute_raw` ordering.
-    let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
-        command: command.to_string(),
-        reason: format!("failed to acquire install lock: {err}"),
-    })?;
-    let mut state =
-        common::load_installed_state(ctx, command).map_err(|err| CliError::Runtime {
-            command: command.to_string(),
-            reason: format!("failed to load installed state: {err}"),
-        })?;
-
-    // Re-validate against the freshly-reloaded state: a concurrent raw install
-    // may have won the lock and recorded the component first. Refuse rather than
-    // overwrite its provenance with rpm-managed.
-    ensure_component_backend_compatible(&state, component, "rpm", command)?;
-
-    let lock_ts = Utc::now();
-    let operation_id = format!(
-        "op-install-{}-{}",
-        lock_ts.format("%Y%m%d%H%M%S"),
-        lock_ts.timestamp_subsec_nanos()
+    record_rpm_managed_install(
+        state,
+        layout,
+        component,
+        info,
+        source_repo,
+        operation_id,
+        started_at,
+        command,
+        &now_iso8601(),
     );
-
-    // Delegated install is system-scope by construction (route_rpm_adopt
-    // rejects user mode before reaching the Absent branch).
-    state.install_mode = StateInstallMode::System;
-    state.prefix = layout.prefix.clone();
-    state.upsert_object(InstalledObject {
-        kind: ObjectKind::Component,
-        name: component.to_string(),
-        version: evr.clone(),
-        status: ObjectStatus::Installed,
-        manifest_digest: None,
-        // Not an ANOLISA-delivered raw artifact; dnf resolved the source.
-        distribution_source: None,
-        raw_package: None,
-        install_backend: Some("rpm".to_string()),
-        ownership: Some(Ownership::RpmManaged),
-        rpm_metadata: Some(RpmMetadata {
-            package_name: info.name.clone(),
-            evr: Some(evr.clone()),
-            arch: Some(info.arch.clone()),
-            source_repo: source_repo.map(str::to_string),
-        }),
-        installed_at: started_at.clone(),
-        last_operation_id: Some(operation_id.clone()),
-        // ANOLISA delegated the install and owns the removal (owns_removal=true).
-        managed: true,
-        // Not an adoption: ANOLISA drove the install.
-        adopted: false,
-        subscription_scope: Default::default(),
-        enabled_features: Vec::new(),
-        component_refs: Vec::new(),
-        // dnf owns the file transaction; RPM-owned files stay out of state.
-        files: Vec::new(),
-        external_modified_files: Vec::new(),
-        services: Vec::new(),
-        health: Vec::new(),
-        provisioned_packages: Vec::new(),
-    });
-    state.operations.push(OperationRecord {
-        id: operation_id.clone(),
-        command: command.to_string(),
-        status: "ok".to_string(),
-        started_at: started_at.clone(),
-        finished_at: Some(now_iso8601()),
-    });
 
     let state_path = layout.state_dir.join("installed.toml");
     state.save(&state_path).map_err(|err| CliError::Runtime {
@@ -961,7 +1050,7 @@ fn persist_delegated_install(
     let log = CentralLog::open(layout.central_log.clone());
     let record = LogRecord {
         kind: LogKind::Operation,
-        operation_id: Some(operation_id.clone()),
+        operation_id: Some(operation_id.to_string()),
         command: command.to_string(),
         source: "anolisa-cli".to_string(),
         component: Some(component.to_string()),
@@ -971,7 +1060,7 @@ fn persist_delegated_install(
         ),
         actor: "cli".to_string(),
         install_mode: Some(ctx.install_mode.as_str().to_string()),
-        started_at,
+        started_at: started_at.to_string(),
         finished_at: Some(now_iso8601()),
         status: Some(LogStatus::Ok),
         objects: vec![component.to_string()],
@@ -983,7 +1072,59 @@ fn persist_delegated_install(
         eprintln!("warning: failed to write central log: {err}");
     }
 
-    Ok((operation_id, snapshot_warnings))
+    Ok(snapshot_warnings)
+}
+
+fn rpm_recovery_error(
+    command: &str,
+    err: crate::commands::tier1::rpm_recovery::RpmRecoveryError,
+) -> CliError {
+    CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("RPM install recovery journal failure: {err}"),
+    }
+}
+
+pub(crate) fn reject_pending_rpm_install(
+    layout: &FsLayout,
+    state: &InstalledState,
+    component: &str,
+    command: &str,
+) -> Result<(), CliError> {
+    let state_path = layout.state_dir.join("installed.toml");
+    let journal_dir = layout.state_dir.join("journal");
+    let Some(pending) = find_pending_rpm_install(&journal_dir, &state_path, state, component)
+        .map_err(|err| rpm_recovery_error(command, err))?
+    else {
+        return Ok(());
+    };
+    Err(CliError::Runtime {
+        command: command.to_string(),
+        reason: format!(
+            "component '{component}' has an unfinished RPM install {} for package '{}'; no install or adopt changes were made — recover it with `anolisa repair {component}`",
+            pending.operation_id(),
+            pending.package()
+        ),
+    })
+}
+
+fn mark_rpm_install_partial(recovery: &mut RpmInstallRecovery, reason: &str) {
+    let _ = recovery.mark_persist_failed(reason);
+    let _ = recovery.finish(TransactionOutcomeStatus::Partial);
+}
+
+fn rpm_install_needs_repair(
+    command: &str,
+    component: &str,
+    package: &str,
+    reason: &str,
+) -> CliError {
+    CliError::Runtime {
+        command: command.to_string(),
+        reason: format!(
+            "{reason}; RPM package '{package}' may already be installed while ANOLISA state is incomplete — run `anolisa repair {component}`"
+        ),
+    }
 }
 
 /// Render a delegated-install result (JSON envelope or human text). Silent in

@@ -6,9 +6,11 @@ use anolisa_core::state::{
     InstallMode as StateInstallMode, InstalledObject, InstalledState, ObjectKind, ObjectStatus,
     Ownership, RpmMetadata,
 };
+use anolisa_core::transaction::{Transaction, TransactionOutcomeStatus, TransactionStepStatus};
 use anolisa_platform::fs_layout::FsLayout;
 
 use crate::commands::common;
+use crate::commands::tier1::rpm_recovery::begin_rpm_install;
 use crate::context::InstallMode;
 use crate::repo_config::RepoConfig;
 use crate::resolution::ResolutionUse;
@@ -614,6 +616,67 @@ fn adopt_origin_failure_degrades_to_none() {
     );
 }
 
+fn rpm_journals(ctx: &CliContext) -> Vec<Transaction> {
+    let journal_dir = common::resolve_layout(ctx).state_dir.join("journal");
+    let entries = match std::fs::read_dir(journal_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(err) => panic!("read journal dir: {err}"),
+    };
+    let mut paths = entries
+        .map(|entry| entry.expect("journal entry").path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".journal.toml"))
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|path| Transaction::load_journal(&path).expect("load journal"))
+        .collect()
+}
+
+fn only_rpm_journal(ctx: &CliContext) -> Transaction {
+    let mut journals = rpm_journals(ctx);
+    assert_eq!(journals.len(), 1, "expected exactly one journal");
+    journals.pop().expect("journal")
+}
+
+fn tracked_component(component: &str, ownership: Ownership) -> InstalledObject {
+    let rpm = ownership == Ownership::RpmManaged;
+    InstalledObject {
+        kind: ObjectKind::Component,
+        name: component.to_string(),
+        version: "1.0.0".to_string(),
+        status: ObjectStatus::Installed,
+        manifest_digest: None,
+        distribution_source: (!rpm).then(|| "file:///tmp/component.tar.gz".to_string()),
+        raw_package: None,
+        install_backend: Some(if rpm { "rpm" } else { "raw" }.to_string()),
+        ownership: Some(ownership),
+        rpm_metadata: rpm.then(|| RpmMetadata {
+            package_name: component.to_string(),
+            evr: Some("1.0.0".to_string()),
+            arch: Some("x86_64".to_string()),
+            source_repo: None,
+        }),
+        installed_at: "2026-06-01T10:00:00Z".to_string(),
+        last_operation_id: Some("op-concurrent".to_string()),
+        managed: true,
+        adopted: false,
+        subscription_scope: Default::default(),
+        enabled_features: Vec::new(),
+        component_refs: Vec::new(),
+        files: Vec::new(),
+        external_modified_files: Vec::new(),
+        services: Vec::new(),
+        health: Vec::new(),
+        provisioned_packages: Vec::new(),
+    }
+}
+
 #[test]
 fn delegated_install_writes_rpm_managed_state() {
     let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
@@ -652,6 +715,272 @@ fn delegated_install_writes_rpm_managed_state() {
     assert_eq!(meta.arch.as_deref(), Some("x86_64"));
     assert_eq!(meta.source_repo.as_deref(), Some("anolisa"));
     assert!(state.operations[0].id.starts_with("op-install-"));
+
+    let journal = only_rpm_journal(&ctx);
+    assert_eq!(journal.operation_id, state.operations[0].id);
+    assert_eq!(journal.status, TransactionOutcomeStatus::Ok);
+    assert_eq!(journal.steps.len(), 2);
+    assert_eq!(
+        (
+            journal.steps[0].phase.as_str(),
+            journal.steps[0].action.as_str(),
+            journal.steps[0].target.as_str(),
+        ),
+        ("rpm_install", "dnf_install", "copilot-shell")
+    );
+    assert_eq!(
+        (
+            journal.steps[1].phase.as_str(),
+            journal.steps[1].action.as_str(),
+            journal.steps[1].target.as_str(),
+        ),
+        ("persist_state", "record_rpm_managed", "copilot-shell")
+    );
+    assert!(
+        journal
+            .steps
+            .iter()
+            .all(|step| step.status == TransactionStepStatus::Done),
+        "both dnf and state-persistence steps must be complete"
+    );
+}
+
+#[test]
+fn delegated_install_lock_failure_precedes_journal_and_dnf() {
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    let layout = common::resolve_layout(&ctx);
+    let _held = anolisa_core::lock::InstallLock::acquire(&layout.lock_file).expect("hold lock");
+    let fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+    );
+    let exec = RpmExec {
+        query: &fake,
+        txn: &fake,
+        is_root: true,
+    };
+    let mut a = args("copilot-shell");
+    a.backend = Some("rpm".to_string());
+
+    let err = handle_one_with_exec("copilot-shell".to_string(), a, &ctx, &exec)
+        .expect_err("held lock must fail before dnf");
+    assert!(err.reason().contains("install lock"));
+    assert_eq!(fake.install_calls.get(), 0);
+    assert!(rpm_journals(&ctx).is_empty(), "no marker before lock");
+}
+
+#[test]
+fn delegated_install_rechecks_concurrent_state_before_dnf() {
+    for ownership in [Ownership::RawManaged, Ownership::RpmManaged] {
+        let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+        let layout = common::resolve_layout(&ctx);
+        let mut state = InstalledState {
+            install_mode: StateInstallMode::System,
+            prefix: layout.prefix.clone(),
+            ..Default::default()
+        };
+        state.upsert_object(tracked_component("copilot-shell", ownership));
+        state
+            .save(&layout.state_dir.join("installed.toml"))
+            .expect("seed concurrent state");
+        let fake = FakeInstaller::new(
+            "copilot-shell",
+            pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+        );
+        let exec = RpmExec {
+            query: &fake,
+            txn: &fake,
+            is_root: true,
+        };
+
+        let err = execute_delegated_install(
+            &exec,
+            &ctx,
+            &layout,
+            "install copilot-shell",
+            "copilot-shell",
+            "copilot-shell",
+            None,
+        )
+        .expect_err("concurrent state must block delegated install");
+        assert!(err.reason().contains("changed"));
+        assert_eq!(fake.install_calls.get(), 0);
+        assert!(rpm_journals(&ctx).is_empty());
+    }
+}
+
+#[test]
+fn delegated_install_pending_journal_blocks_dnf() {
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    let layout = common::resolve_layout(&ctx);
+    begin_rpm_install(
+        layout.state_dir.join("installed.toml"),
+        &layout.state_dir.join("journal"),
+        "copilot-shell",
+        "copilot-shell",
+    )
+    .expect("seed marker");
+    let fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+    );
+    let exec = RpmExec {
+        query: &fake,
+        txn: &fake,
+        is_root: true,
+    };
+    let mut a = args("copilot-shell");
+    a.backend = Some("rpm".to_string());
+
+    let err = handle_one_with_exec("copilot-shell".to_string(), a, &ctx, &exec)
+        .expect_err("pending marker must block a second dnf transaction");
+    assert!(err.reason().contains("repair"));
+    assert_eq!(fake.install_calls.get(), 0);
+}
+
+#[test]
+fn pending_journal_blocks_explicit_and_default_raw_routes() {
+    for backend in [Some("raw"), None] {
+        let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+        let layout = common::resolve_layout(&ctx);
+        begin_rpm_install(
+            layout.state_dir.join("installed.toml"),
+            &layout.state_dir.join("journal"),
+            "copilot-shell",
+            "copilot-shell",
+        )
+        .expect("seed marker");
+        let fake = FakeInstaller::new(
+            "copilot-shell",
+            pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+        );
+        let exec = RpmExec {
+            query: &fake,
+            txn: &fake,
+            is_root: true,
+        };
+        let mut a = args("copilot-shell");
+        a.backend = backend.map(str::to_string);
+
+        let err = handle_one_with_exec("copilot-shell".to_string(), a, &ctx, &exec)
+            .expect_err("pending RPM marker must own the component across backends");
+        assert!(err.reason().contains("repair copilot-shell"));
+        assert_eq!(fake.install_calls.get(), 0);
+        assert!(
+            load_state(&ctx)
+                .find_object(ObjectKind::Component, "copilot-shell")
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn pending_journal_blocks_delegated_install_dry_run() {
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(true);
+    let layout = common::resolve_layout(&ctx);
+    begin_rpm_install(
+        layout.state_dir.join("installed.toml"),
+        &layout.state_dir.join("journal"),
+        "copilot-shell",
+        "copilot-shell",
+    )
+    .expect("seed marker");
+    let fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+    );
+    let exec = RpmExec {
+        query: &fake,
+        txn: &fake,
+        is_root: false,
+    };
+    let mut a = args("copilot-shell");
+    a.backend = Some("rpm".to_string());
+
+    let err = handle_one_with_exec("copilot-shell".to_string(), a, &ctx, &exec)
+        .expect_err("dry-run must not preview an install blocked on RPM recovery");
+    assert!(err.reason().contains("repair copilot-shell"));
+    assert_eq!(fake.install_calls.get(), 0);
+}
+
+#[test]
+fn pending_journal_blocks_retry_from_becoming_rpm_observed() {
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    let layout = common::resolve_layout(&ctx);
+    begin_rpm_install(
+        layout.state_dir.join("installed.toml"),
+        &layout.state_dir.join("journal"),
+        "copilot-shell",
+        "copilot-shell",
+    )
+    .expect("seed marker");
+    let fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+    );
+    *fake.installed.borrow_mut() = Some(fake.installs_to.clone());
+    let exec = RpmExec {
+        query: &fake,
+        txn: &fake,
+        is_root: true,
+    };
+    let mut a = args("copilot-shell");
+    a.backend = Some("rpm".to_string());
+
+    let err = handle_one_with_exec("copilot-shell".to_string(), a, &ctx, &exec)
+        .expect_err("pending marker must block the adopt route on retry");
+    assert!(err.reason().contains("repair copilot-shell"));
+    assert_eq!(fake.install_calls.get(), 0);
+    assert!(
+        load_state(&ctx)
+            .find_object(ObjectKind::Component, "copilot-shell")
+            .is_none(),
+        "retry must not downgrade the interrupted install to rpm-observed"
+    );
+    assert_eq!(
+        only_rpm_journal(&ctx).status,
+        TransactionOutcomeStatus::InFlight
+    );
+}
+
+#[test]
+fn delegated_install_reinstalls_tracked_rpm_missing_from_rpmdb() {
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    let layout = common::resolve_layout(&ctx);
+    let mut state = InstalledState {
+        install_mode: StateInstallMode::System,
+        prefix: layout.prefix.clone(),
+        ..Default::default()
+    };
+    state.upsert_object(tracked_component("copilot-shell", Ownership::RpmManaged));
+    state
+        .save(&layout.state_dir.join("installed.toml"))
+        .expect("seed tracked RPM state");
+    let fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+    );
+    let exec = RpmExec {
+        query: &fake,
+        txn: &fake,
+        is_root: true,
+    };
+
+    let outcome = handle_one_with_exec(
+        "copilot-shell".to_string(),
+        args("copilot-shell"),
+        &ctx,
+        &exec,
+    )
+    .expect("unchanged tracked RPM may be reinstalled when rpmdb is missing it");
+    assert_eq!(outcome, InstallOutcome::Installed);
+    assert_eq!(fake.install_calls.get(), 1);
+    let state = load_state(&ctx);
+    let object = state
+        .find_object(ObjectKind::Component, "copilot-shell")
+        .expect("tracked component remains recorded");
+    assert_eq!(object.ownership, Some(Ownership::RpmManaged));
+    assert_eq!(object.version, "2.3.0-1.al8");
 }
 
 #[test]
@@ -711,6 +1040,7 @@ fn delegated_install_dry_run_previews_without_txn_or_state() {
             .is_none(),
         "dry-run must not persist state"
     );
+    assert!(rpm_journals(&ctx).is_empty(), "dry-run must not journal");
 }
 
 #[test]
@@ -744,6 +1074,62 @@ fn delegated_install_dnf_failure_surfaces() {
             .is_none(),
         "failed install must not write state"
     );
+    let journal = only_rpm_journal(&ctx);
+    assert_eq!(journal.status, TransactionOutcomeStatus::Failed);
+    assert_eq!(journal.steps[0].status, TransactionStepStatus::Failed);
+}
+
+#[test]
+fn delegated_install_post_dnf_query_failure_stays_repairable() {
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    let fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+    )
+    .failing_post_install_query();
+    let exec = RpmExec {
+        query: &fake,
+        txn: &fake,
+        is_root: true,
+    };
+    let mut a = args("copilot-shell");
+    a.backend = Some("rpm".to_string());
+
+    let err = handle_one_with_exec("copilot-shell".to_string(), a, &ctx, &exec)
+        .expect_err("rpmdb failure after dnf must require repair");
+    assert!(err.reason().contains("repair copilot-shell"));
+    assert_eq!(fake.install_calls.get(), 1);
+    assert_eq!(
+        only_rpm_journal(&ctx).status,
+        TransactionOutcomeStatus::Partial,
+    );
+}
+
+#[test]
+fn delegated_install_state_save_failure_stays_repairable() {
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    let layout = common::resolve_layout(&ctx);
+    let fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+    )
+    .blocking_state_save(layout.state_dir.join("installed.toml"));
+    let exec = RpmExec {
+        query: &fake,
+        txn: &fake,
+        is_root: true,
+    };
+    let mut a = args("copilot-shell");
+    a.backend = Some("rpm".to_string());
+
+    let err = handle_one_with_exec("copilot-shell".to_string(), a, &ctx, &exec)
+        .expect_err("state save failure after dnf must require repair");
+    assert!(err.reason().contains("repair copilot-shell"));
+    assert_eq!(fake.install_calls.get(), 1);
+    let journal = only_rpm_journal(&ctx);
+    assert_eq!(journal.status, TransactionOutcomeStatus::Partial);
+    assert_eq!(journal.steps[0].status, TransactionStepStatus::Done);
+    assert_eq!(journal.steps[1].status, TransactionStepStatus::Failed);
 }
 
 #[test]
