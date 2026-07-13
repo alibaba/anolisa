@@ -5,7 +5,7 @@
 #   ./scripts/rpm-build.sh <package>        Build a single package
 #   ./scripts/rpm-build.sh all              Build all packages
 #
-# Packages: copilot-shell, agent-sec-core, os-skills, agentsight, tokenless, agent-memory, skillfs, cosh-ng
+# Packages: copilot-shell, agent-sec-core, os-skills, agentsight, tokenless, agent-memory, skillfs, cosh-ng, anolisa
 #
 # Environment variables:
 #   VERSION    Override version for .spec.in templates (default: auto-detect)
@@ -26,6 +26,7 @@ SKILLS_DIR="${ROOT_DIR}/src/os-skills"
 SIGHT_DIR="${ROOT_DIR}/src/agentsight"
 TOKEN_DIR="${ROOT_DIR}/src/tokenless"
 MEM_DIR="${ROOT_DIR}/src/agent-memory"
+ANOLISA_DIR="${ROOT_DIR}/src/anolisa"
 SKILLFS_DIR="${ROOT_DIR}/src/skillfs"
 COSH_DIR="${ROOT_DIR}/src/cosh-ng"
 SANDBOX_PKG_DIR="${ROOT_DIR}/src/anolisa/packaging/sandbox"
@@ -622,6 +623,85 @@ build_agent_memory() {
 }
 
 # =============================================================================
+# anolisa
+# =============================================================================
+build_anolisa() {
+    log "=========================================="
+    log "Building RPM: anolisa"
+    log "=========================================="
+
+    local spec_in="${ANOLISA_DIR}/anolisa.spec.in"
+    if [ ! -f "$spec_in" ]; then
+        err "Spec template not found: $spec_in"
+        return 1
+    fi
+
+    local version="${VERSION:-}"
+    if [ -z "$version" ]; then
+        version=$(grep -m1 '^version = ' "${ANOLISA_DIR}/Cargo.toml" | sed 's/version = "\(.*\)"/\1/' 2>/dev/null || true)
+    fi
+    if [ -z "$version" ]; then
+        err "Cannot determine anolisa version. Set VERSION env or ensure Cargo.toml exists."
+        return 1
+    fi
+
+    local pkg_name
+    pkg_name=$(parse_spec_name "$spec_in")
+    local tarball_name="${pkg_name}-${version}.tar.gz"
+    local vendor_tarball_name="${pkg_name}-${version}-vendor.tar.gz"
+    local spec_file
+    spec_file=$(process_spec_template "$spec_in" "$version")
+
+    log "Step 1/3: Creating source tarball ${tarball_name}..."
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local pkg_dir="${tmp_dir}/${pkg_name}"
+    mkdir -p "$pkg_dir"
+
+    # Tarball layout is fixed by the spec:
+    #   Source0 = ${pkg_name}-${version}.tar.gz    → unpacks to top-level `anolisa/`
+    #                                              (no version suffix; spec %prep uses %setup -q)
+    #   Source1 = ${pkg_name}-${version}-vendor.tar.gz → unpacks to `vendor/` next to Source0
+    # Keep runtime assets in Source0; exclude generated deps (target/vendor/.cargo).
+    tar -cf - -C "$ANOLISA_DIR" \
+        --exclude='target' \
+        --exclude='vendor' \
+        --exclude='.cargo' \
+        --exclude='.git' \
+        --exclude='node_modules' \
+        . | tar -xf - -C "$pkg_dir"
+
+    tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "$pkg_name"
+    rm -rf "$tmp_dir"
+
+    log "Step 2/3: Creating vendor tarball ${vendor_tarball_name}..."
+    local vendor_tmp
+    vendor_tmp=$(mktemp -d)
+    # `cargo vendor --locked` can fail for three distinct reasons; surface which:
+    #   - lock-file drift (Cargo.lock out of date vs Cargo.toml)        → regenerate lock
+    #   - network unreachable / registry auth                            → check CI network env
+    #   - permission denied on vendor_tmp                                → check mount/owner
+    (
+        cd "$ANOLISA_DIR"
+        cargo vendor --locked "${vendor_tmp}/vendor" >/dev/null
+    ) || {
+        rc=$?
+        err "cargo vendor failed (exit=${rc}). Likely: (1) Cargo.lock out of date — regenerate with 'cargo generate-lockfile' then 'cargo update --workspace'; (2) network/registry auth issue in CI; (3) permission denied on ${vendor_tmp}."
+        rm -rf "$vendor_tmp"
+        return ${rc}
+    }
+    tar -czf "${BUILD_DIR}/SOURCES/${vendor_tarball_name}" -C "$vendor_tmp" vendor
+    rm -rf "$vendor_tmp"
+
+    log "Step 3/3: Running rpmbuild..."
+    "$RPMBUILD" -ba --nodeps \
+        --define "_topdir ${BUILD_DIR}" \
+        "$spec_file"
+
+    ok "anolisa RPM built successfully"
+}
+
+# =============================================================================
 # skillfs
 # =============================================================================
 build_skillfs() {
@@ -1034,6 +1114,7 @@ usage() {
     echo "  tokenless                 Build tokenless RPM"
     echo "  agent-memory              Build agent-memory RPM"
     echo "  skillfs                   Build skillfs RPM"
+    echo "  anolisa                   Build anolisa RPM"
     echo "  gvisor-runsc              Build gvisor-runsc RPM (sandbox)"
     echo "  containerd-shim-runsc-v1  Build containerd-shim-runsc-v1 RPM (sandbox)"
     echo "  atelet                    Build atelet RPM (sandbox, placeholder)"
@@ -1093,6 +1174,9 @@ case "$TARGET" in
     cosh-ng)
         build_cosh_ng
         ;;
+    anolisa)
+        build_anolisa
+        ;;
     gvisor-runsc)
         build_gvisor_runsc
         ;;
@@ -1120,6 +1204,7 @@ case "$TARGET" in
         build_agent_memory
         build_skillfs
         build_cosh_ng
+        build_anolisa
         ;;
     *)
         err "Unknown package: $TARGET"
