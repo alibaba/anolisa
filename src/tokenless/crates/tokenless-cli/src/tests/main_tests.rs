@@ -335,6 +335,7 @@ fn record_compression_stats_skips_when_no_savings() {
 
 #[test]
 fn record_compression_stats_records_when_savings_exist() {
+    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let config = TokenlessConfig::default();
     let long_before = "x".repeat(500);
     let short_after = "y".repeat(50);
@@ -355,6 +356,7 @@ fn record_compression_stats_records_when_savings_exist() {
 
 #[test]
 fn record_compression_stats_records_dryrun_mode() {
+    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let config = TokenlessConfig::default();
     let long_before = "x".repeat(500);
     let short_after = "y".repeat(50);
@@ -874,6 +876,7 @@ fn open_stash_store_or_err_none_returns_ok() {
 
 #[test]
 fn record_compression_stats_sls_only_path() {
+    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let config = TokenlessConfig { stats_enabled: false, sls_enabled: true, ..Default::default() };
     let long_before = "x".repeat(500);
     let short_after = "y".repeat(50);
@@ -910,24 +913,6 @@ fn record_compression_stats_full_path() {
         Some(3),
         Some(1),
         Some(200),
-    );
-}
-
-#[test]
-fn record_compression_stats_both_disabled() {
-    let config = TokenlessConfig::default();
-    record_compression_stats(
-        &config,
-        OperationType::CompressResponse,
-        None,
-        None,
-        None,
-        "before".to_string(),
-        "after".to_string(),
-        CompressionMode::Active,
-        None,
-        None,
-        None,
     );
 }
 

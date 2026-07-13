@@ -6,15 +6,20 @@ static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
 struct EnvGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
+    key: &'static str,
     prev: Option<std::ffi::OsString>,
 }
 
 impl EnvGuard {
-    fn set_spec(path: &str) -> Self {
+    fn set(key: &'static str, value: &str) -> Self {
         let lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var_os("TOKENLESS_TOOL_READY_SPEC");
-        unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", path) };
-        EnvGuard { _lock: lock, prev }
+        let prev = std::env::var_os(key);
+        unsafe { std::env::set_var(key, value) };
+        EnvGuard { _lock: lock, key, prev }
+    }
+
+    fn set_spec(path: &str) -> Self {
+        Self::set("TOKENLESS_TOOL_READY_SPEC", path)
     }
 }
 
@@ -22,8 +27,8 @@ impl Drop for EnvGuard {
     fn drop(&mut self) {
         unsafe {
             match &self.prev {
-                Some(v) => std::env::set_var("TOKENLESS_TOOL_READY_SPEC", v),
-                None => std::env::remove_var("TOKENLESS_TOOL_READY_SPEC"),
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
             }
         }
     }
@@ -732,12 +737,9 @@ fn check_dep_missing_binary() {
 
 #[test]
 fn find_spec_path_error_when_none_exists() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-
     // Override env to a nonexistent path and clear defaults
-    unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", "/nonexistent/spec.json") };
+    let _guard = EnvGuard::set_spec("/nonexistent/spec.json");
     let result = find_spec_path();
-    unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
     // Result depends on whether any default path exists on the system;
     // the test exercises the code path without asserting a fixed outcome.
     let _ = result;
@@ -745,11 +747,8 @@ fn find_spec_path_error_when_none_exists() {
 
 #[test]
 fn detect_system_manager_env_override() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-
-    unsafe { std::env::set_var("TOKENLESS_PACKAGE_MANAGER", "test-mgr") };
+    let _guard = EnvGuard::set("TOKENLESS_PACKAGE_MANAGER", "test-mgr");
     let mgr = detect_system_manager();
-    unsafe { std::env::remove_var("TOKENLESS_PACKAGE_MANAGER") };
     assert_eq!(mgr, "test-mgr");
 }
 
