@@ -726,6 +726,7 @@ fn classify_ssl_lib(path: &str) -> Option<SslLibKind> {
             | "chromium"
             | "google-chrome"
             | "google-chrome-stable"
+            | "claude"
             | "claude.exe"
     ) {
         return Some(SslLibKind::Boring);
