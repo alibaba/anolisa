@@ -260,7 +260,7 @@ fn schema_migration_adds_missing_columns() {
         .unwrap();
     }
     let rec = StatsRecorder::new(&db_path).unwrap();
-    let mut record =
+    let record =
         StatsRecord::new(OperationType::CompressSchema, "cli".into(), 100, 25, 50, 12)
             .with_mode(CompressionMode::Active)
             .with_stash(Some(1), Some(0), Some(5));
@@ -291,7 +291,7 @@ fn all_records_handles_corrupt_row() {
         .unwrap();
     }
     let records = rec.all_records(None).unwrap();
-    assert!(records.len() >= 1);
+    assert!(!records.is_empty());
 }
 
 #[test]

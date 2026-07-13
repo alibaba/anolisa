@@ -713,7 +713,8 @@ fn find_spec_path_error_when_none_exists() {
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", "/nonexistent/spec.json") };
     let result = find_spec_path();
     unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
-    // Result depends on whether any default path exists on the system
+    // Result depends on whether any default path exists on the system;
+    // the test exercises the code path without asserting a fixed outcome.
     let _ = result;
 }
 
@@ -1063,7 +1064,7 @@ fn run_all_text_output() {
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
-    let _ = run(None, true, false, false, false);
+    assert!(run(None, true, false, false, false).is_ok());
     unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
@@ -1074,7 +1075,7 @@ fn run_all_json_output() {
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
-    let _ = run(None, true, false, false, true);
+    assert!(run(None, true, false, false, true).is_ok());
     unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
@@ -1085,7 +1086,7 @@ fn run_checklist_output() {
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
-    let _ = run(None, false, false, true, false);
+    assert!(run(None, false, false, true, false).is_ok());
     unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
@@ -1096,7 +1097,7 @@ fn run_specific_tool_text() {
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
-    let _ = run(Some("TestTool"), false, false, false, false);
+    assert!(run(Some("TestTool"), false, false, false, false).is_ok());
     unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
@@ -1107,7 +1108,7 @@ fn run_specific_tool_json_output() {
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
-    let _ = run(Some("TestTool"), false, false, false, true);
+    assert!(run(Some("TestTool"), false, false, false, true).is_ok());
     unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
@@ -1118,7 +1119,7 @@ fn run_alias_lookup_text() {
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
-    let _ = run(Some("tt"), false, false, false, false);
+    assert!(run(Some("tt"), false, false, false, false).is_ok());
     unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
@@ -1129,7 +1130,7 @@ fn run_case_insensitive_tool() {
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
-    let _ = run(Some("testtool"), false, false, false, false);
+    assert!(run(Some("testtool"), false, false, false, false).is_ok());
     unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
@@ -1140,7 +1141,7 @@ fn run_unknown_tool_text() {
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
-    let _ = run(Some("UnknownTool"), false, false, false, false);
+    assert!(run(Some("UnknownTool"), false, false, false, false).is_ok());
     unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
@@ -1151,7 +1152,7 @@ fn run_unknown_tool_json_output() {
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
-    let _ = run(Some("UnknownTool"), false, false, false, true);
+    assert!(run(Some("UnknownTool"), false, false, false, true).is_ok());
     unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
@@ -1162,7 +1163,7 @@ fn run_no_tool_no_all_errors() {
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
-    let _ = run(None, false, false, false, false);
+    assert!(run(None, false, false, false, false).is_err());
     unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
@@ -1173,7 +1174,7 @@ fn run_missing_tool_text() {
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
-    let _ = run(Some("MissingTool"), false, false, false, false);
+    assert!(run(Some("MissingTool"), false, false, false, false).is_ok());
     unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
@@ -1184,7 +1185,7 @@ fn run_missing_tool_json_output() {
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_test_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
-    let _ = run(Some("MissingTool"), false, false, false, true);
+    assert!(run(Some("MissingTool"), false, false, false, true).is_ok());
     unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
@@ -1195,7 +1196,7 @@ fn run_versioned_all_text() {
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_versioned_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
-    let _ = run(None, true, false, false, false);
+    assert!(run(None, true, false, false, false).is_ok());
     unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
@@ -1206,7 +1207,7 @@ fn run_versioned_all_json() {
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_versioned_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
-    let _ = run(None, true, false, false, true);
+    assert!(run(None, true, false, false, true).is_ok());
     unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 
@@ -1217,7 +1218,7 @@ fn run_versioned_checklist() {
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_versioned_spec(dir.path());
     unsafe { std::env::set_var("TOKENLESS_TOOL_READY_SPEC", spec_path.to_str().unwrap()) };
-    let _ = run(None, false, false, true, false);
+    assert!(run(None, false, false, true, false).is_ok());
     unsafe { std::env::remove_var("TOKENLESS_TOOL_READY_SPEC") };
 }
 

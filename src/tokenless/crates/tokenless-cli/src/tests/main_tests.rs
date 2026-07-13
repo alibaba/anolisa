@@ -5,6 +5,9 @@ static ENV_MUTEX: Mutex<()> = Mutex::new(());
 struct TempDbGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
     test_dir: String,
+    prev_stats_db: Option<std::ffi::OsString>,
+    prev_stash_db: Option<std::ffi::OsString>,
+    prev_sls_path: Option<std::ffi::OsString>,
 }
 
 impl TempDbGuard {
@@ -20,13 +23,20 @@ impl TempDbGuard {
             .as_nanos();
         let test_dir = format!("{}/.tokenless-test-{}", home, nanos);
         std::fs::create_dir_all(&test_dir).unwrap();
+        let prev_stats_db = std::env::var_os("TOKENLESS_STATS_DB");
+        let prev_stash_db = std::env::var_os("TOKENLESS_STASH_DB");
+        let prev_sls_path = std::env::var_os("TOKENLESS_SLS_PATH");
         unsafe {
             std::env::set_var("TOKENLESS_STATS_DB", format!("{}/stats.db", test_dir));
             std::env::set_var("TOKENLESS_STASH_DB", format!("{}/stash.db", test_dir));
+            std::env::set_var("TOKENLESS_SLS_PATH", format!("{}/tokenless.jsonl", test_dir));
         }
         Some(TempDbGuard {
             _lock: lock,
             test_dir,
+            prev_stats_db,
+            prev_stash_db,
+            prev_sls_path,
         })
     }
 }
@@ -34,8 +44,18 @@ impl TempDbGuard {
 impl Drop for TempDbGuard {
     fn drop(&mut self) {
         unsafe {
-            std::env::remove_var("TOKENLESS_STATS_DB");
-            std::env::remove_var("TOKENLESS_STASH_DB");
+            match &self.prev_stats_db {
+                Some(v) => std::env::set_var("TOKENLESS_STATS_DB", v),
+                None => std::env::remove_var("TOKENLESS_STATS_DB"),
+            }
+            match &self.prev_stash_db {
+                Some(v) => std::env::set_var("TOKENLESS_STASH_DB", v),
+                None => std::env::remove_var("TOKENLESS_STASH_DB"),
+            }
+            match &self.prev_sls_path {
+                Some(v) => std::env::set_var("TOKENLESS_SLS_PATH", v),
+                None => std::env::remove_var("TOKENLESS_SLS_PATH"),
+            }
         }
         std::fs::remove_dir_all(&self.test_dir).ok();
     }
@@ -259,8 +279,8 @@ fn ensure_db_dir_creates_parent() {
     // ensure_db_dir is idempotent — calling it when the dir already exists
     // (which it does for most test envs) succeeds.
     let result = ensure_db_dir();
-    // Either Ok or an error from a broken home; never panics.
-    let _ = result;
+    // With TempDbGuard the stats DB path points to a temp dir, so this succeeds.
+    assert!(result.is_ok());
 }
 
 #[test]
@@ -356,8 +376,8 @@ fn get_db_path_returns_valid_path() {
 fn open_recorder_exercises_path() {
     let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let result = open_recorder();
-    // May succeed or fail depending on filesystem permissions
-    let _ = result;
+    // With TempDbGuard the stats DB path points to a writable temp dir.
+    assert!(result.is_ok());
 }
 
 #[test]
@@ -396,6 +416,8 @@ fn run_command_compress_schema_from_file() {
 
 #[test]
 fn run_command_compress_schema_batch() {
+    let _guard = TempDbGuard::new();
+
     let dir = tempfile::tempdir().unwrap();
     let f = dir.path().join("schemas.json");
     std::fs::write(
@@ -435,6 +457,8 @@ fn run_command_compress_schema_invalid_json() {
 
 #[test]
 fn run_command_compress_response_from_file() {
+    let _guard = TempDbGuard::new();
+
     let dir = tempfile::tempdir().unwrap();
     let f = dir.path().join("response.json");
     std::fs::write(
@@ -561,8 +585,8 @@ fn run_command_decompress_toon_empty_input() {
     let result = run_command(Commands::DecompressToon {
         file: Some(f.to_str().unwrap().to_string()),
     });
-    // Empty input may decode to null (valid) or fail — either is acceptable
-    let _ = result;
+    // Empty input decodes to null, which serializes to "null" and is printed.
+    assert!(result.is_ok());
 }
 
 #[test]
@@ -621,8 +645,8 @@ fn run_command_stats_show_existing_record() {
         Err(_) => return,
     };
     let result = run_command(Commands::Stats(StatsCommands::Show { id }));
-    // format_show requires before_text/after_text to be present
-    let _ = result;
+    // before_text and after_text are set above, so format_show succeeds.
+    assert!(result.is_ok());
 }
 
 #[test]
@@ -751,6 +775,7 @@ fn run_command_stats_compare_json() {
 
 #[test]
 fn run_command_env_check_without_spec() {
+    let _guard = TempDbGuard::new();
     let result = run_command(Commands::EnvCheck {
         tool: Some("NonexistentTool".to_string()),
         all: false,
@@ -758,6 +783,9 @@ fn run_command_env_check_without_spec() {
         checklist: false,
         json: false,
     });
+    // Outcome depends on whether a tool-ready-spec file exists on the system:
+    // Ok when a spec is found (NonexistentTool is reported as unknown),
+    // Err when no spec file is available.
     let _ = result;
 }
 
@@ -838,9 +866,7 @@ fn open_stash_store_or_err_none_returns_ok() {
 
 #[test]
 fn record_compression_stats_sls_only_path() {
-    let mut config = TokenlessConfig::default();
-    config.stats_enabled = false;
-    config.sls_enabled = true;
+    let config = TokenlessConfig { stats_enabled: false, sls_enabled: true, ..Default::default() };
     let long_before = "x".repeat(500);
     let short_after = "y".repeat(50);
     record_compression_stats(
@@ -861,9 +887,7 @@ fn record_compression_stats_sls_only_path() {
 #[test]
 fn record_compression_stats_full_path() {
     let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
-    let mut config = TokenlessConfig::default();
-    config.stats_enabled = true;
-    config.sls_enabled = true;
+    let config = TokenlessConfig { stats_enabled: true, sls_enabled: true, ..Default::default() };
     let long_before = "z".repeat(1000);
     let short_after = "w".repeat(100);
     record_compression_stats(
@@ -901,8 +925,7 @@ fn record_compression_stats_both_disabled() {
 
 #[test]
 fn record_compression_stats_no_savings() {
-    let mut config = TokenlessConfig::default();
-    config.stats_enabled = true;
+    let config = TokenlessConfig { stats_enabled: true, ..Default::default() };
     record_compression_stats(
         &config,
         OperationType::CompressResponse,
@@ -961,12 +984,15 @@ fn read_input_file_missing() {
 
 #[test]
 fn run_command_retrieve_store_error() {
+    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let result = run_command(Commands::Retrieve {
         hash: "abcdef0123456789abcdef01".to_string(),
         stash_db: Some("/nonexistent/deep/nested/dir/stash.db".to_string()),
     });
-    // The stash_db override gets rejected and falls back to default
-    let _ = result;
+    // The stash_db override gets rejected and falls back to the temp DB,
+    // where the hash does not exist.
+    assert!(result.is_err());
+    assert!(result.unwrap_err().0.contains("no stashed payload"));
 }
 
 #[test]
@@ -982,7 +1008,8 @@ fn run_command_compress_toon_tiny_input() {
         session_id: None,
         tool_use_id: None,
     });
-    let _ = result;
+    // A tiny JSON string compresses successfully.
+    assert!(result.is_ok());
 }
 
 #[test]
@@ -998,7 +1025,8 @@ fn run_command_compress_toon_empty_obj() {
         session_id: None,
         tool_use_id: None,
     });
-    let _ = result;
+    // An empty JSON object compresses successfully.
+    assert!(result.is_ok());
 }
 
 #[test]
@@ -1021,5 +1049,6 @@ fn run_command_compress_response_with_stash_errors() {
         no_stash: false,
         stash_db: None,
     });
-    let _ = result;
+    // Compression succeeds even when stash writes encounter errors (fail-open).
+    assert!(result.is_ok());
 }
