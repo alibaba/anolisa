@@ -5,7 +5,7 @@
 #   ./scripts/rpm-build.sh <package>        Build a single package
 #   ./scripts/rpm-build.sh all              Build all packages
 #
-# Packages: copilot-shell, agent-sec-core, os-skills, agentsight, tokenless, agent-memory, skillfs
+# Packages: copilot-shell, agent-sec-core, os-skills, agentsight, tokenless, agent-memory, skillfs, cosh-ng
 #
 # Environment variables:
 #   VERSION    Override version for .spec.in templates (default: auto-detect)
@@ -27,6 +27,7 @@ SIGHT_DIR="${ROOT_DIR}/src/agentsight"
 TOKEN_DIR="${ROOT_DIR}/src/tokenless"
 MEM_DIR="${ROOT_DIR}/src/agent-memory"
 SKILLFS_DIR="${ROOT_DIR}/src/skillfs"
+COSH_DIR="${ROOT_DIR}/src/cosh-ng"
 SANDBOX_PKG_DIR="${ROOT_DIR}/src/anolisa/packaging/sandbox"
 
 # gVisor upstream release (overridable via env). Format: YYYYMMDD
@@ -700,6 +701,67 @@ EOF
 }
 
 # =============================================================================
+# cosh-ng
+# =============================================================================
+build_cosh_ng() {
+    log "=========================================="
+    log "Building RPM: cosh-ng"
+    log "=========================================="
+
+    local spec_in="${COSH_DIR}/cosh-ng.spec.in"
+    if [ ! -f "$spec_in" ]; then
+        err "Spec template not found: $spec_in"
+        return 1
+    fi
+
+    # Version from env, Cargo.toml workspace, then spec fallback
+    local version="${VERSION:-}"
+    if [ -z "$version" ]; then
+        version=$(grep -m1 '^version' "${COSH_DIR}/Cargo.toml" | sed 's/version = "\(.*\)"/\1/' 2>/dev/null || true)
+    fi
+    if [ -z "$version" ]; then
+        version=$(grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' "$spec_in" | head -1)
+    fi
+    if [ -z "$version" ]; then
+        err "Could not derive cosh-ng version from VERSION env, Cargo.toml, or ${spec_in}"
+        exit 1
+    fi
+
+    local pkg_name
+    pkg_name=$(parse_spec_name "$spec_in")
+    local tarball_name="${pkg_name}-${version}.tar.gz"
+
+    local spec_file
+    spec_file=$(process_spec_template "$spec_in" "$version")
+
+    # Single Source0 tarball: spec %build is plain `cargo build --workspace --release`
+    # (online), %prep is `%setup -q` which expects top-level dir `%{name}-%{version}`.
+    log "Step 1/2: Creating source tarball ${tarball_name}..."
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
+    mkdir -p "$pkg_dir"
+
+    # cosh-ng ships component.toml at repo root — must be in the tarball because
+    # spec %install does `install -m 0644 component.toml ...`.
+    tar -cf - -C "$COSH_DIR" \
+        --exclude='target' \
+        --exclude='.git' \
+        --exclude='node_modules' \
+        . | tar -xf - -C "$pkg_dir"
+
+    tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
+    rm -rf "$tmp_dir"
+
+    log "Step 2/2: Running rpmbuild..."
+    "$RPMBUILD" -ba --nodeps \
+        --define "_topdir ${BUILD_DIR}" \
+        "$spec_file"
+
+    ok "cosh-ng RPM built successfully"
+}
+
+# =============================================================================
 # sandbox: shared helpers
 # =============================================================================
 
@@ -1028,6 +1090,9 @@ case "$TARGET" in
     skillfs)
         build_skillfs
         ;;
+    cosh-ng)
+        build_cosh_ng
+        ;;
     gvisor-runsc)
         build_gvisor_runsc
         ;;
@@ -1054,6 +1119,7 @@ case "$TARGET" in
         build_tokenless
         build_agent_memory
         build_skillfs
+        build_cosh_ng
         ;;
     *)
         err "Unknown package: $TARGET"
