@@ -6,6 +6,7 @@ struct TempDbGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
     test_dir: String,
     sls_dir: String,
+    stash_db_path: String,
     prev_stats_db: Option<std::ffi::OsString>,
     prev_stash_db: Option<std::ffi::OsString>,
     prev_sls_path: Option<std::ffi::OsString>,
@@ -37,14 +38,21 @@ impl TempDbGuard {
             std::env::set_var("TOKENLESS_STASH_DB", format!("{}/stash.db", test_dir));
             std::env::set_var("TOKENLESS_SLS_PATH", &sls_path);
         }
+        let stash_db_path = format!("{}/stash.db", test_dir);
         Some(TempDbGuard {
             _lock: lock,
             test_dir,
             sls_dir,
+            stash_db_path,
             prev_stats_db,
             prev_stash_db,
             prev_sls_path,
         })
+    }
+
+    /// Returns the temp stash DB path, useful for override-path tests.
+    fn stash_db_path(&self) -> &str {
+        &self.stash_db_path
     }
 }
 
@@ -251,13 +259,11 @@ fn get_stash_db_path_default() {
 
 #[test]
 fn get_stash_db_path_with_valid_override() {
-    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
-    // TOKENLESS_STASH_DB is now set to a temp path by TempDbGuard.
-    // get_stash_db_path with no override should return that temp path.
-    let result = get_stash_db_path(None);
-    assert!(result.is_some());
-    let path = result.unwrap();
-    assert!(path.contains(".tokenless-test-"));
+    let guard = match TempDbGuard::new() { Some(g) => g, None => return };
+    // Use the temp stash path as an explicit override; get_stash_db_path
+    // validates it (under home via TempDbGuard) and returns it directly.
+    let result = get_stash_db_path(Some(guard.stash_db_path()));
+    assert_eq!(result, Some(guard.stash_db_path().to_string()));
 }
 
 #[test]

@@ -180,7 +180,7 @@ test: test-tokenless test-hooks
 
 test-tokenless:
 	@echo "==> Testing tokenless..."
-	cargo test --workspace
+	cargo test --workspace -- --test-threads=1
 
 test-hooks:
 	@echo "==> Testing copilot-shell hooks..."
