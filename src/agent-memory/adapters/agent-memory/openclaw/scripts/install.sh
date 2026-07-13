@@ -55,4 +55,12 @@ env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" pl
 }
 
 echo "[${COMPONENT}] ${AGENT} plugin installed via openclaw CLI."
+
+# Non-bundled plugins must explicitly set hooks.allowConversationAccess=true
+# to register conversation hooks (agent_end, before_agent_reply, etc.).
+# Without this, OpenClaw silently blocks the agent_end auto-capture hook,
+# and auto-capture never fires (E2E test_openclaw_e2e failures).
+env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" config set \
+    "plugins.entries.memory-anolisa.hooks.allowConversationAccess" true 2>/dev/null || true
+
 echo "[${COMPONENT}] Run '${OPENCLAW_BIN} gateway restart' to activate."
