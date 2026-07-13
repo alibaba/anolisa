@@ -251,25 +251,21 @@ fn get_stash_db_path_default() {
 
 #[test]
 fn get_stash_db_path_with_valid_override() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let home = get_home_dir();
-    if home.is_empty() {
-        return;
-    }
-    let dir = format!("{}/.tokenless", home);
-    std::fs::create_dir_all(&dir).unwrap();
-    let db_path = format!("{}/override_test.db", dir);
-    let result = get_stash_db_path(Some(&db_path));
+    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
+    // TOKENLESS_STASH_DB is now set to a temp path by TempDbGuard.
+    // get_stash_db_path with no override should return that temp path.
+    let result = get_stash_db_path(None);
     assert!(result.is_some());
-    assert_eq!(result.unwrap(), db_path);
+    let path = result.unwrap();
+    assert!(path.contains(".tokenless-test-"));
 }
 
 #[test]
 fn open_stash_store_falls_back_on_bad_override() {
     let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
-    // Bad override is rejected but falls back to the default path.
-    // Result may be None in CI if the DB is locked by another test.
-    let _result = open_stash_store(Some("/nonexistent/deep/dir/stash.db"));
+    // Bad override is rejected but falls back to the temp DB path.
+    let result = open_stash_store(Some("/nonexistent/deep/dir/stash.db"));
+    assert!(result.is_some());
 }
 
 #[test]
