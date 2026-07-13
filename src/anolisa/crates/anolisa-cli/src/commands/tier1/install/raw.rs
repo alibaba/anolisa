@@ -66,12 +66,12 @@ pub(crate) fn resolve_raw(
             command: COMMAND.to_string(),
             reason: format!("failed to fetch distribution index {index_url}: {err}"),
         })?;
-    let index = DistributionIndex::load(&downloaded_index.cached_path).map_err(|err| {
-        CliError::Runtime {
+    let index = DistributionIndex::load(&downloaded_index.cached_path)
+        .map(installable_raw_index)
+        .map_err(|err| CliError::Runtime {
             command: COMMAND.to_string(),
             reason: format!("failed to parse distribution index {index_url}: {err}"),
-        }
-    })?;
+        })?;
 
     // The index is keyed by the backend-native package name so that
     // `package_map` / `--package` select between alternate publications.
@@ -224,7 +224,8 @@ pub(crate) fn available_raw_versions(
     let Ok(downloaded) = cache.fetch(&index_url, None) else {
         return Vec::new();
     };
-    let Ok(index) = DistributionIndex::load(&downloaded.cached_path) else {
+    let Ok(index) = DistributionIndex::load(&downloaded.cached_path).map(installable_raw_index)
+    else {
         return Vec::new();
     };
     let query = ResolveQuery {
@@ -239,6 +240,13 @@ pub(crate) fn available_raw_versions(
         preferred_types: &[],
     };
     index.matching_versions(&query)
+}
+
+fn installable_raw_index(mut index: DistributionIndex) -> DistributionIndex {
+    index.entries.retain(|entry| {
+        SUPPORTED_ARTIFACT_TYPES.contains(&artifact_type_wire(&entry.artifact_type))
+    });
+    index
 }
 
 impl InstallContractSource {
@@ -368,8 +376,7 @@ pub(crate) fn prepare_raw_execution(
             ),
         })?;
 
-    let contract =
-        load_execution_install_contract(ctx, layout, &resolution, &artifact.cached_path)?;
+    let contract = load_execution_install_contract(&resolution, &artifact.cached_path)?;
     let (files, services, capabilities) = resolve_manifest_contract(
         &contract.manifest,
         layout,
@@ -389,8 +396,6 @@ pub(crate) fn prepare_raw_execution(
 }
 
 fn load_execution_install_contract(
-    ctx: &CliContext,
-    layout: &FsLayout,
     resolution: &RawResolution,
     artifact_path: &Path,
 ) -> Result<LoadedInstallContract, CliError> {
@@ -411,30 +416,18 @@ fn load_execution_install_contract(
                         resolution.package
                     ),
                 })?;
-            let manifest = ComponentManifest::from_toml_str(&toml).map_err(|err| {
-                CliError::Runtime {
+            let manifest =
+                ComponentManifest::from_toml_str(&toml).map_err(|err| CliError::Runtime {
                     command: COMMAND.to_string(),
                     reason: format!(
                         "failed to parse embedded component manifest from {}: {err}",
                         resolution.artifact_url
                     ),
-                }
-            })?;
+                })?;
             Ok(LoadedInstallContract {
                 manifest,
                 source: InstallContractSource::EmbeddedArtifact,
                 toml,
-            })
-        }
-        ArtifactType::Binary => {
-            load_lightweight_install_contract(ctx, layout, resolution)?.ok_or_else(|| {
-                CliError::Runtime {
-                    command: COMMAND.to_string(),
-                    reason: format!(
-                        "binary artifact for package '{}' {} requires sidecar meta.toml or a matching local component manifest",
-                        resolution.package, resolution.entry.version
-                    ),
-                }
             })
         }
         other => Err(CliError::InvalidArgument {

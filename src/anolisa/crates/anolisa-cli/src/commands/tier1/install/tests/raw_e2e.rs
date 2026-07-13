@@ -113,11 +113,9 @@ fn install_dry_run_reads_version_meta_without_downloading_artifact() {
 }
 
 #[test]
-fn install_binary_artifact_uses_local_catalog_contract() {
+fn install_rejects_local_binary_before_artifact_fetch() {
     let tmp = tempdir().expect("tmpdir");
     let prefix = tmp.path().join("sys");
-    let layout = FsLayout::system(Some(prefix.clone()));
-    write_overlay_manifest(&layout, "legacy-bin", "1.0.0", &["system"]);
 
     let mut a = args("legacy-bin");
     a.repo = Some(write_binary_repo_component(
@@ -126,15 +124,134 @@ fn install_binary_artifact_uses_local_catalog_contract() {
         "1.0.0",
         &["system"],
     ));
+    let err = handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+        .expect_err("local binary must be rejected");
 
+    assert!(
+        err.reason().contains("cannot resolve package 'legacy-bin'")
+            && err.reason().contains("no distribution entry matches"),
+        "got: {}",
+        err.reason()
+    );
+    assert!(
+        !err.reason().contains("publish it as"),
+        "got: {}",
+        err.reason()
+    );
+    let downloads = FsLayout::system(Some(prefix)).cache_dir.join("downloads");
+    let cached_names: Vec<String> = std::fs::read_dir(downloads)
+        .expect("downloads cache exists")
+        .map(|entry| {
+            entry
+                .expect("cache entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert!(
+        cached_names
+            .iter()
+            .all(|name| !name.ends_with("legacy-bin") && !name.ends_with("meta.toml")),
+        "rejected binary must not fetch artifact or sidecar: {cached_names:?}"
+    );
+}
+
+#[test]
+fn install_dry_run_rejects_remote_binary_before_artifact_fetch() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_root = tmp.path().join("repo");
+    let repo_url = write_binary_repo_component(&repo_root, "remote-bin", "1.0.0", &["system"]);
+    let index_path = repo_root.join("v1/index.toml");
+    let index = std::fs::read_to_string(&index_path)
+        .expect("read index")
+        .replace(
+            "url = \"remote-bin\"",
+            "url = \"https://example.test/remote-bin\"",
+        );
+    std::fs::write(index_path, index).expect("write remote binary index");
+
+    let mut a = args("remote-bin");
+    a.repo = Some(repo_url);
+    let mut ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    ctx.dry_run = true;
+    let err = handle_with_fake_rpm(a, &ctx).expect_err("remote binary must be rejected");
+
+    assert!(
+        err.reason().contains("cannot resolve package 'remote-bin'")
+            && err.reason().contains("no distribution entry matches"),
+        "got: {}",
+        err.reason()
+    );
+    assert!(
+        !err.reason().contains("publish it as"),
+        "got: {}",
+        err.reason()
+    );
+    let downloads = FsLayout::system(Some(prefix)).cache_dir.join("downloads");
+    let cached_names: Vec<String> = std::fs::read_dir(downloads)
+        .expect("downloads cache exists")
+        .map(|entry| {
+            entry
+                .expect("cache entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert!(
+        cached_names
+            .iter()
+            .all(|name| !name.ends_with("remote-bin") && !name.ends_with("meta.toml")),
+        "rejected binary must not fetch artifact or sidecar: {cached_names:?}"
+    );
+}
+
+#[test]
+fn install_ignores_binary_entries_when_resolving_tar_gz() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_root = tmp.path().join("repo");
+    let repo_url = write_local_repo(&repo_root);
+    let index_path = repo_root.join("v1/index.toml");
+    let mut index = std::fs::read_to_string(&index_path).expect("read index");
+    let env = anolisa_env::EnvService::detect();
+
+    for version in ["0.2.0", "9.0.0"] {
+        index.push_str(&format!(
+            r#"
+
+[[entries]]
+component = "agentsight"
+version = "{version}"
+channel = "stable"
+artifact_type = "binary"
+backend = "raw"
+url = "legacy-agentsight-{version}"
+os = "{os}"
+arch = "{arch}"
+install_modes = ["system"]
+sha256 = "{sha}"
+"#,
+            os = env.os,
+            arch = env.arch,
+            sha = "0".repeat(64),
+        ));
+    }
+    std::fs::write(index_path, index).expect("write mixed index");
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url.clone());
     handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
-        .expect("install must succeed");
+        .expect("tar_gz entry must remain installable");
 
-    let bin = FsLayout::system(Some(prefix)).bin_dir.join("legacy-bin");
-    assert!(bin.exists(), "binary artifact must be installed");
+    let layout = FsLayout::system(Some(prefix));
+    assert!(layout.bin_dir.join("agentsight").exists());
     assert_eq!(
-        std::fs::read_to_string(&bin).expect("read installed binary"),
-        "#!/bin/sh\necho legacy-bin\n"
+        available_raw_versions(&layout, &repo_url, "agentsight", &env, "system"),
+        vec!["0.2.0"],
+        "binary-only versions must not appear in update candidates"
     );
 }
 

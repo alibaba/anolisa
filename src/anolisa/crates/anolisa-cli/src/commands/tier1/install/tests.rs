@@ -320,16 +320,6 @@ sha256 = "{sha}"
     format!("file://{}", v1.display())
 }
 
-pub fn write_overlay_manifest(layout: &FsLayout, component: &str, version: &str, modes: &[&str]) {
-    let runtime_dir = layout.manifests_overlay.join("runtime");
-    std::fs::create_dir_all(&runtime_dir).expect("create overlay runtime dir");
-    std::fs::write(
-        runtime_dir.join(format!("{component}.toml")),
-        component_manifest_toml(component, version, modes),
-    )
-    .expect("write overlay manifest");
-}
-
 pub fn write_conventional_repo(root: &Path) -> String {
     let env = anolisa_env::EnvService::detect();
     let artifact_dir = root
