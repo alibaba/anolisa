@@ -184,7 +184,7 @@ impl Parser {
 
     /// Parse unified Event
     pub fn parse_event(&self, event: Event) -> ParseResult {
-        log::debug!("Parsing event({:?})", event.event_type());
+        log::trace!("Parsing event({:?})", event.event_type());
         match event {
             Event::Ssl(ssl_event) => self.parse_ssl_event(Rc::new(ssl_event)),
             Event::Proc(proc_event) => self.parse_proc_event(&proc_event),
