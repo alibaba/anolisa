@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Secrets
+.env
+*.key
+
+# IDE
+.idea/
+.qoder/
+.vscode/
+*.swp
+*.swo
+*~
+
+Introduce the claweval-runner (ce-runner) package under src/benchmark/, orchestrating claw-eval evaluation tasks through the openclaw agent.
+
+It runs the agent in isolated Docker sandboxes, converts sessions to traces, and performs LLM-judge grading, with single-task and parallel batch runners plus an idempotent end-to-end environment setup.
+
+# OS
+.DS_Store
+Thumbs.db
+
+# claw-eval sources are cloned at setup time (see scripts/setup_env.py) and
+# must not be committed into the monorepo.
+/claw-eval/
+
+# Downloaded fixture archive cache (~2.7GB)
+.cache/
+
+# Temporary files
+/tmp/
+*.log
