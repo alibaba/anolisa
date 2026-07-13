@@ -126,13 +126,14 @@ impl FactWriter {
             crate::safe_fs::append(fd.as_fd(), &jsonl_rel, jsonl_line.as_bytes())?;
         } else {
             let mut guard = self.jsonl_file.lock().unwrap_or_else(|e| e.into_inner());
-            let f = guard.get_or_insert_with(|| {
-                OpenOptions::new()
+            if guard.is_none() {
+                let f = OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(&self.jsonl_path)
-                    .expect("failed to open jsonl file for append")
-            });
+                    .open(&self.jsonl_path)?;
+                *guard = Some(f);
+            }
+            let f = guard.as_mut().expect("just inserted");
             f.write_all(jsonl_line.as_bytes())?;
             f.sync_all()?;
         }
