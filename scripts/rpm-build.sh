@@ -5,7 +5,7 @@
 #   ./scripts/rpm-build.sh <package>        Build a single package
 #   ./scripts/rpm-build.sh all              Build all packages
 #
-# Packages: copilot-shell, agent-sec-core, os-skills, agentsight, tokenless, agent-memory, skillfs
+# Packages: copilot-shell, agent-sec-core, os-skills, agentsight, tokenless, agent-memory, skillfs, anolisa
 #
 # Environment variables:
 #   VERSION    Override version for .spec.in templates (default: auto-detect)
@@ -27,6 +27,7 @@ SIGHT_DIR="${ROOT_DIR}/src/agentsight"
 TOKEN_DIR="${ROOT_DIR}/src/tokenless"
 MEM_DIR="${ROOT_DIR}/src/agent-memory"
 SKILLFS_DIR="${ROOT_DIR}/src/skillfs"
+ANOLISA_DIR="${ROOT_DIR}/src/anolisa"
 SANDBOX_PKG_DIR="${ROOT_DIR}/src/anolisa/packaging/sandbox"
 
 # gVisor upstream release (overridable via env). Format: YYYYMMDD
@@ -700,6 +701,97 @@ EOF
 }
 
 # =============================================================================
+# anolisa (the main CLI package)
+# =============================================================================
+build_anolisa() {
+    log "=========================================="
+    log "Building RPM: anolisa"
+    log "=========================================="
+
+    local spec_in="${ANOLISA_DIR}/anolisa.spec.in"
+    if [ ! -f "$spec_in" ]; then
+        err "Spec template not found: $spec_in"
+        return 1
+    fi
+
+    # Clean vendoring artefacts on exit so a `set -e` mid-build can't leave
+    # $ANOLISA_DIR/vendor/ and $ANOLISA_DIR/.cargo/ behind.
+    # shellcheck disable=SC2064  # we want $ANOLISA_DIR expanded now
+    trap "rm -rf '${ANOLISA_DIR}/vendor' '${ANOLISA_DIR}/.cargo'" RETURN
+
+    # Version from env, Cargo.toml workspace, then spec fallback
+    local version="${VERSION:-}"
+    if [ -z "$version" ]; then
+        version=$(grep -m1 '^version' "${ANOLISA_DIR}/Cargo.toml" | sed 's/version = "\(.*\)"/\1/' 2>/dev/null || true)
+    fi
+    if [ -z "$version" ]; then
+        version=$(grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' "$spec_in" | head -1)
+    fi
+    if [ -z "$version" ]; then
+        err "Could not derive anolisa version from VERSION env, Cargo.toml, or ${spec_in}"
+        exit 1
+    fi
+
+    local pkg_name
+    pkg_name=$(parse_spec_name "$spec_in")
+    local tarball_name="${pkg_name}-${version}.tar.gz"
+    local vendor_tarball_name="${pkg_name}-${version}-vendor.tar.gz"
+
+    local spec_file
+    spec_file=$(process_spec_template "$spec_in" "$version")
+
+    # Source tarball top-level dir is "anolisa/" (no version suffix), because the
+    # spec %prep uses `%setup -q -n anolisa` (overrides default %{name}-%{version}).
+    log "Step 1/3: Creating source tarball ${tarball_name}..."
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local pkg_dir="${tmp_dir}/${pkg_name}"
+    mkdir -p "$pkg_dir"
+
+    # Single tar pass: copy the whole source tree minus build artefacts.
+    # .cargo/config.toml is generated fresh below (and re-created by spec %prep
+    # at build time anyway); we exclude the source-tree .cargo to avoid the
+    # vendored-sources config leaking into the source tarball before vendor/
+    # exists. It will be re-added after vendoring.
+    tar -cf - -C "$ANOLISA_DIR" \
+        --exclude='target' \
+        --exclude='.git' \
+        --exclude='vendor' \
+        --exclude='.cargo' \
+        --exclude='node_modules' \
+        --exclude='.tsbuildinfo' \
+        . | tar -xf - -C "$pkg_dir"
+
+    # Vendor tarball for --offline cargo build (spec %build uses --offline --locked).
+    log "Step 2/3: Creating vendor tarball..."
+    cd "$ANOLISA_DIR" && cargo vendor vendor/
+    mkdir -p "$ANOLISA_DIR"/.cargo
+    printf '[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "vendor"\n' > "$ANOLISA_DIR"/.cargo/config.toml
+    local vendor_tmp
+    vendor_tmp=$(mktemp -d)
+    cp -R "$ANOLISA_DIR"/vendor "$vendor_tmp"/vendor
+    tar czf "${BUILD_DIR}/SOURCES/${vendor_tarball_name}" -C "$vendor_tmp" vendor
+    rm -rf "$vendor_tmp"
+
+    # Drop the vendored-sources .cargo/config.toml into Source0 too so cargo
+    # --offline finds vendor/ without relying on spec %prep writing it. The
+    # spec %prep re-writes .cargo/config.toml, but having it in Source0 is
+    # harmless and makes the tarball self-describing.
+    mkdir -p "$pkg_dir"/.cargo
+    cp "$ANOLISA_DIR"/.cargo/config.toml "$pkg_dir"/.cargo/
+
+    tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}"
+    rm -rf "$tmp_dir"
+
+    log "Step 3/3: Running rpmbuild..."
+    "$RPMBUILD" -ba --nodeps \
+        --define "_topdir ${BUILD_DIR}" \
+        "$spec_file"
+
+    ok "anolisa RPM built successfully"
+}
+
+# =============================================================================
 # sandbox: shared helpers
 # =============================================================================
 
@@ -1028,6 +1120,9 @@ case "$TARGET" in
     skillfs)
         build_skillfs
         ;;
+    anolisa)
+        build_anolisa
+        ;;
     gvisor-runsc)
         build_gvisor_runsc
         ;;
@@ -1054,6 +1149,7 @@ case "$TARGET" in
         build_tokenless
         build_agent_memory
         build_skillfs
+        build_anolisa
         ;;
     *)
         err "Unknown package: $TARGET"
