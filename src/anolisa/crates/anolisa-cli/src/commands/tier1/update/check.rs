@@ -53,6 +53,7 @@ use anolisa_platform::rpm_query::RpmPackageQuery;
 use super::UpdateArgs;
 use crate::commands::common;
 use crate::context::CliContext;
+use crate::progress;
 use crate::repo_config::{BackendConfig, RepoConfig};
 use crate::resolution::{
     BackendKind, ComponentIndex, ComponentResolver, ResolutionSet, ResolutionUse, ResolveOptions,
@@ -258,15 +259,27 @@ pub(super) fn handle_update_check(args: &UpdateArgs, ctx: &CliContext) -> Result
         return Ok(());
     }
 
-    let report = match compute_update_check_report(args.target.as_deref(), ctx, &layout) {
-        Ok(report) => report,
-        Err(err) => {
-            // MOTD must stay quiet and low-noise on failure; a JSON/human check
-            // surfaces the error as usual.
-            if args.motd {
-                return Ok(());
+    // Show activity while the (potentially blocking) repo queries run, so a slow
+    // repository does not look like a hung process. The MOTD path stays
+    // low-noise and never animates. The guard cleans up on every exit path via
+    // RAII, including the error return below.
+    let feedback = if args.motd {
+        progress::FeedbackMode::Disabled
+    } else {
+        progress::feedback_for_stderr(ctx.json, ctx.quiet)
+    };
+    let report = {
+        let _activity = progress::Activity::start(feedback, "Checking for updates...");
+        match compute_update_check_report(args.target.as_deref(), ctx, &layout) {
+            Ok(report) => report,
+            Err(err) => {
+                // MOTD must stay quiet and low-noise on failure; a JSON/human
+                // check surfaces the error as usual.
+                if args.motd {
+                    return Ok(());
+                }
+                return Err(err);
             }
-            return Err(err);
         }
     };
 

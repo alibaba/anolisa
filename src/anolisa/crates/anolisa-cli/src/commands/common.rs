@@ -90,7 +90,10 @@ fn render_repo_config_provisioning(ctx: &CliContext, provisioning: &RepoConfigPr
         return;
     }
     let color = Palette::new(ctx.no_color);
-    match provisioning {
+    // Routed through `suspend_output` so these persistent lines cannot
+    // interleave with a live activity spinner (issue #1452); a no-op when no
+    // spinner is running, which is the case for most callers.
+    crate::progress::suspend_output(|| match provisioning {
         RepoConfigProvisioning::Existing => {}
         RepoConfigProvisioning::Downloaded { url, dest } => {
             println!(
@@ -115,7 +118,7 @@ fn render_repo_config_provisioning(ctx: &CliContext, provisioning: &RepoConfigPr
                 reason,
             );
         }
-    }
+    });
 }
 
 /// Controls whether a failed persistence of downloaded repo config is fatal.

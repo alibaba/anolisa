@@ -51,6 +51,7 @@ use crate::color::Palette;
 use crate::commands::common;
 use crate::commands::common::RepoPersistPolicy;
 use crate::context::{CliContext, InstallMode};
+use crate::progress::{self, Activity, ProgressReporter};
 use crate::response::{self, CliError};
 
 /// Command label for JSON envelopes and error routing.
@@ -112,6 +113,13 @@ pub fn handle(args: UpgradeArgs, ctx: &CliContext) -> Result<(), CliError> {
 
     let layout = common::resolve_layout(ctx);
 
+    // A single activity spinner spans both planning and the apply transactions,
+    // so a slow repo query or `dnf` transaction never looks like a hung process.
+    // It is dropped (clearing the line) before `render_result` prints the final
+    // structured output, and on every early-return path via RAII.
+    let feedback = progress::feedback_for_stderr(ctx.json, ctx.quiet);
+    let activity = Activity::start(feedback, "Planning upgrade...");
+
     // Reuse the read-only planner behind `update --check`. This performs only
     // rpm/dnf *queries* — no transaction, no state write.
     let report = check::compute_update_check_report(args.target.as_deref(), ctx, &layout)?;
@@ -140,8 +148,11 @@ pub fn handle(args: UpgradeArgs, ctx: &CliContext) -> Result<(), CliError> {
         privilege::is_root(),
         ctx.dry_run,
         COMMAND,
+        &activity,
     )?;
 
+    // Clear the spinner before the final result is rendered to stdout.
+    drop(activity);
     render_result(ctx, &result);
 
     // A non-`ok` status has already been rendered (human or JSON); propagate a
@@ -613,8 +624,11 @@ fn run_upgrade_with_deps(
     is_root: bool,
     dry_run: bool,
     command: &str,
+    reporter: &dyn ProgressReporter,
 ) -> Result<UpgradeResult, CliError> {
     if dry_run {
+        // Dry-run only planned; it never applies a transaction, so it reports no
+        // apply-phase progress (planning feedback is handled by the caller).
         return Ok(render_plan_preview(plan));
     }
 
@@ -657,6 +671,15 @@ fn run_upgrade_with_deps(
         let authorized = authorize_plan(&state, plan);
         errors.extend(authorized.errors);
 
+        // Reliable total for the `i/total` counter: only the items that actually
+        // run a `dnf` transaction (CLI update + authorized component updates and
+        // installs). Observed-default recording touches no transaction and is
+        // folded into the finalize phase, so it is deliberately excluded — the
+        // counter never advertises work that has no `dnf` step.
+        let transaction_total =
+            plan.cli.is_some() as usize + authorized.updates.len() + authorized.installs.len();
+        let mut transaction_step = 0usize;
+
         // The CLI update is applied first and reported, but is never an ANOLISA
         // component object (the binary is rpm-owned). Held separately so the
         // audit step can count it toward the outcome even on a CLI-only upgrade.
@@ -669,6 +692,11 @@ fn run_upgrade_with_deps(
         // 1. CLI package (rpm-owned binary). Reported but never recorded as a
         //    component object, so it is not gated on component state.
         if let Some(cli) = &plan.cli {
+            transaction_step += 1;
+            reporter.report(&format!(
+                "Upgrading {} ({transaction_step}/{transaction_total})...",
+                cli.name
+            ));
             match txn.update(&cli.package) {
                 Ok(()) => match refresh_evr(query, &cli.package) {
                     Ok(to) => {
@@ -693,6 +721,11 @@ fn run_upgrade_with_deps(
 
         // 2. Already-installed RPM-backed components authorized by locked state.
         for update in authorized.updates {
+            transaction_step += 1;
+            reporter.report(&format!(
+                "Upgrading {} ({transaction_step}/{transaction_total})...",
+                update.name
+            ));
             match txn.update(&update.package) {
                 Ok(()) => match query.query_installed(&update.package) {
                     Ok(Some(info)) => {
@@ -732,6 +765,11 @@ fn run_upgrade_with_deps(
 
         // 3. Missing default components authorized by locked state.
         for install in authorized.installs {
+            transaction_step += 1;
+            reporter.report(&format!(
+                "Installing {} ({transaction_step}/{transaction_total})...",
+                install.name
+            ));
             match txn.install(&install.package) {
                 Ok(()) => match query.query_installed(&install.package) {
                     Ok(Some(info)) => {
@@ -802,6 +840,7 @@ fn run_upgrade_with_deps(
 
         // Refresh ANOLISA state and write the durable audit while the same lock
         // that authorized the RPM work is still held.
+        reporter.report("Finalizing ANOLISA state...");
         let outcome = finalize_upgrade(FinalizeUpgrade {
             ctx,
             layout,
@@ -1244,7 +1283,11 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
     if let Err(err) = log.append(&record)
         && !ctx.quiet
     {
-        eprintln!("warning: failed to write central log: {err}");
+        // Routed through `suspend_output` so this warning never collides with
+        // the "Finalizing ANOLISA state..." spinner frame (issue #1452).
+        progress::suspend_output(|| {
+            eprintln!("warning: failed to write central log: {err}");
+        });
     }
 
     Ok(outcome)

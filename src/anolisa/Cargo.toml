@@ -45,7 +45,7 @@ chrono = { version = "0.4", default-features = false, features = [
 
 # Linux / System
 dirs = "6"
-nix = { version = "0.29", default-features = false, features = ["user", "fs", "socket"] }
+nix = { version = "0.29", default-features = false, features = ["user", "fs", "socket", "signal"] }
 
 # File integrity
 sha2 = "0.10"

@@ -440,7 +440,11 @@ impl RepoConfig {
 
     fn emit_deprecation_warnings(&self, path: &Path) {
         if let Some(warning) = self.deprecation_warning() {
-            eprintln!("warning: repo config at {} {warning}", path.display());
+            // Routed through `suspend_output` so this persistent line cannot
+            // interleave with a live activity spinner (issue #1452).
+            crate::progress::suspend_output(|| {
+                eprintln!("warning: repo config at {} {warning}", path.display());
+            });
         }
     }
 

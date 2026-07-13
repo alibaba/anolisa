@@ -13,6 +13,11 @@ use anolisa_platform::pkg_query::{PackageInfo, PackageQueryError, PackageVersion
 
 use anolisa_core::state::{InstalledObject, InstalledState, RpmMetadata, SubscriptionScope};
 
+// `Activity` and `ProgressReporter` reach the tests through the module glob
+// (`use super::*`); `NoopReporter` is the only progress item not re-imported by
+// the upgrade module, so it is brought in explicitly here.
+use crate::progress::NoopReporter;
+
 // ── fake host ────────────────────────────────────────────────────────────────
 
 /// In-memory host: `query_installed` returns the configured post-transaction
@@ -304,8 +309,18 @@ fn upgrade_real_execution_without_root_is_rejected_with_sudo_hint() {
     let host = FakeHost::default();
     let plan = build_plan(None, &cli_noop(), &[]);
 
-    let err = run_upgrade_with_deps(&ctx, &layout, &plan, &host, &host, false, false, COMMAND)
-        .expect_err("non-root real execution must be rejected");
+    let err = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        false,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect_err("non-root real execution must be rejected");
     assert_eq!(err.code(), "EXECUTION_FAILED");
     assert!(err.reason().contains("sudo anolisa upgrade"));
     assert!(host.txn_calls().is_empty(), "no dnf on a rejected run");
@@ -337,8 +352,18 @@ fn upgrade_dry_run_apply_runs_without_root_and_touches_nothing() {
         )],
     );
 
-    let result = run_upgrade_with_deps(&ctx, &layout, &plan, &host, &host, false, true, COMMAND)
-        .expect("dry-run is allowed without root");
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        false,
+        true,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("dry-run is allowed without root");
     assert!(result.dry_run);
     assert_eq!(result.status, STATUS_OK);
     assert_eq!(result.updated.len(), 1);
@@ -475,8 +500,18 @@ fn plan_errors_block_real_execution_before_dnf() {
     );
     assert!(plan.has_errors());
 
-    let result = run_upgrade_with_deps(&ctx, &layout, &plan, &host, &host, true, false, COMMAND)
-        .expect("blocked plan renders rather than erroring");
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("blocked plan renders rather than erroring");
     assert_eq!(result.status, STATUS_BLOCKED);
     assert!(!result.dry_run);
     assert!(
@@ -511,8 +546,18 @@ fn raw_managed_component_is_skipped_and_never_transacted() {
         )],
     );
 
-    let result = run_upgrade_with_deps(&ctx, &layout, &plan, &host, &host, true, false, COMMAND)
-        .expect("apply");
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("apply");
     assert_eq!(result.status, STATUS_OK);
     assert_eq!(result.skipped.len(), 1);
     assert_eq!(result.skipped[0].reason, RAW_SKIP_REASON);
@@ -576,8 +621,18 @@ fn transaction_order_is_cli_then_updates_then_installs() {
     ];
     let plan = build_plan(None, &cli, &components);
 
-    let result = run_upgrade_with_deps(&ctx, &layout, &plan, &host, &host, true, false, COMMAND)
-        .expect("apply");
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("apply");
     assert_eq!(result.status, STATUS_OK);
     assert_eq!(
         host.txn_calls(),
@@ -614,8 +669,18 @@ fn installed_default_is_recorded_as_rpm_managed_after_refresh() {
         )],
     );
 
-    let result = run_upgrade_with_deps(&ctx, &layout, &plan, &host, &host, true, false, COMMAND)
-        .expect("apply");
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("apply");
     assert_eq!(result.status, STATUS_OK);
     assert_eq!(result.installed.len(), 1);
     assert_eq!(result.installed[0].version.as_deref(), Some("1.0.0-1.al4"));
@@ -663,8 +728,18 @@ fn origin_lookup_failure_is_warning_not_apply_failure() {
         )],
     );
 
-    let result = run_upgrade_with_deps(&ctx, &layout, &plan, &host, &host, true, false, COMMAND)
-        .expect("apply");
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("apply");
     assert_eq!(result.status, STATUS_OK);
     assert_eq!(result.warnings.len(), 1);
     assert!(result.warnings[0].contains("could not determine source repo"));
@@ -714,8 +789,18 @@ fn origin_lookup_failure_preserves_existing_source_repo() {
         )],
     );
 
-    let result = run_upgrade_with_deps(&ctx, &layout, &plan, &host, &host, true, false, COMMAND)
-        .expect("apply");
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("apply");
     assert_eq!(result.status, STATUS_OK);
     assert_eq!(result.warnings.len(), 1);
 
@@ -778,8 +863,18 @@ fn partial_transaction_failure_is_reported_and_not_claimed_as_success() {
     ];
     let plan = build_plan(None, &cli_noop(), &components);
 
-    let result = run_upgrade_with_deps(&ctx, &layout, &plan, &host, &host, true, false, COMMAND)
-        .expect("apply");
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("apply");
     assert_eq!(
         result.status, STATUS_PARTIAL,
         "must not claim clean success"
@@ -835,8 +930,18 @@ fn install_does_not_overwrite_existing_raw_managed_component() {
         )],
     );
 
-    let result = run_upgrade_with_deps(&ctx, &layout, &plan, &host, &host, true, false, COMMAND)
-        .expect("apply");
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("apply");
     assert_eq!(result.status, STATUS_FAILED, "nothing landed cleanly");
     assert!(result.installed.is_empty());
     assert_eq!(result.errors.len(), 1);
@@ -884,8 +989,18 @@ fn update_state_drift_missing_object_is_reported_as_error() {
         )],
     );
 
-    let result = run_upgrade_with_deps(&ctx, &layout, &plan, &host, &host, true, false, COMMAND)
-        .expect("apply");
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("apply");
     assert_eq!(
         result.status, STATUS_FAILED,
         "a dnf success with no state refresh must not be reported as ok"
@@ -925,8 +1040,18 @@ fn observed_default_update_missing_from_state_is_recorded_as_rpm_observed() {
     observed_default.absent_from_state = true;
     let plan = build_plan(None, &cli_noop(), &[observed_default]);
 
-    let result = run_upgrade_with_deps(&ctx, &layout, &plan, &host, &host, true, false, COMMAND)
-        .expect("apply");
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("apply");
     assert_eq!(result.status, STATUS_OK);
     assert_eq!(result.updated.len(), 1);
     assert!(result.errors.is_empty());
@@ -973,8 +1098,18 @@ fn observed_default_noop_missing_from_state_is_recorded_without_dnf() {
     observed_default.absent_from_state = true;
     let plan = build_plan(None, &cli_noop(), &[observed_default]);
 
-    let result = run_upgrade_with_deps(&ctx, &layout, &plan, &host, &host, true, false, COMMAND)
-        .expect("apply");
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("apply");
     assert_eq!(result.status, STATUS_OK);
     assert!(result.updated.is_empty(), "no package update happened");
     assert_eq!(result.recorded.len(), 1);
@@ -1019,8 +1154,18 @@ fn cli_only_upgrade_records_durable_audit() {
     );
     let plan = build_plan(None, &cli, &[]);
 
-    let result = run_upgrade_with_deps(&ctx, &layout, &plan, &host, &host, true, false, COMMAND)
-        .expect("apply");
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("apply");
     assert_eq!(result.status, STATUS_OK);
     assert_eq!(result.updated.len(), 1);
     assert_eq!(result.updated[0].name, "anolisa");
@@ -1069,8 +1214,18 @@ fn cli_success_with_component_failure_records_partial_audit() {
     )];
     let plan = build_plan(None, &cli, &components);
 
-    let result = run_upgrade_with_deps(&ctx, &layout, &plan, &host, &host, true, false, COMMAND)
-        .expect("apply");
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("apply");
     assert_eq!(result.status, STATUS_PARTIAL);
     assert_eq!(result.updated.len(), 1);
     assert_eq!(result.updated[0].name, "anolisa");
@@ -1082,5 +1237,236 @@ fn cli_success_with_component_failure_records_partial_audit() {
         state.operations.last().map(|op| op.status.as_str()),
         Some("partial"),
         "CLI success + component failure must record a partial operation"
+    );
+}
+
+// ── progress reporting (issue #1452) ─────────────────────────────────────────
+
+/// Records the phase messages emitted during the apply loop so tests can assert
+/// the exact sequence without a TTY or animated-frame timing.
+#[derive(Default)]
+struct RecordingReporter {
+    messages: RefCell<Vec<String>>,
+}
+
+impl RecordingReporter {
+    fn messages(&self) -> Vec<String> {
+        self.messages.borrow().clone()
+    }
+}
+
+impl ProgressReporter for RecordingReporter {
+    fn report(&self, message: &str) {
+        self.messages.borrow_mut().push(message.to_string());
+    }
+}
+
+/// A real apply reports each transaction item with a reliable `i/total`, then a
+/// finalize phase, in order: CLI → component update → install → finalizing.
+#[test]
+fn apply_reports_each_phase_with_reliable_counts() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let host = FakeHost::default()
+        .with_installed("anolisa", info("anolisa", "1.0.0", Some("1.al4")))
+        .with_installed(
+            "copilot-shell",
+            info("copilot-shell", "1.1.0", Some("1.al4")),
+        )
+        .with_installed("agent-memory", info("agent-memory", "1.0.0", Some("1.al4")));
+    seed_state(
+        &layout,
+        vec![rpm_component(
+            "cosh",
+            "copilot-shell",
+            "1.0.0-1.al4",
+            Ownership::RpmManaged,
+        )],
+    );
+
+    let cli = cli_check(
+        ACTION_UPDATE,
+        Some("anolisa"),
+        Some("0.5.0-1.al4"),
+        Some("1.0.0-1.al4"),
+        None,
+    );
+    let components = vec![
+        component_check(
+            "cosh",
+            Some("copilot-shell"),
+            Some("rpm-managed"),
+            Some("1.0.0-1.al4"),
+            Some("1.1.0-1.al4"),
+            ACTION_UPDATE,
+            None,
+        ),
+        component_check(
+            "agent-memory",
+            Some("agent-memory"),
+            None,
+            None,
+            None,
+            ACTION_INSTALL,
+            None,
+        ),
+    ];
+    let plan = build_plan(None, &cli, &components);
+    let reporter = RecordingReporter::default();
+
+    let result = run_upgrade_with_deps(
+        &ctx, &layout, &plan, &host, &host, true, false, COMMAND, &reporter,
+    )
+    .expect("apply");
+    assert_eq!(result.status, STATUS_OK);
+    assert_eq!(
+        reporter.messages(),
+        vec![
+            "Upgrading anolisa (1/3)...".to_string(),
+            "Upgrading cosh (2/3)...".to_string(),
+            "Installing agent-memory (3/3)...".to_string(),
+            "Finalizing ANOLISA state...".to_string(),
+        ],
+        "each transaction reports a reliable i/total, then finalizing"
+    );
+}
+
+/// A dry-run plans only; it must not report any apply-phase progress.
+#[test]
+fn dry_run_reports_no_apply_phase() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let host = FakeHost::default();
+    let plan = build_plan(
+        Some("agentic_os-latest".to_string()),
+        &cli_noop(),
+        &[component_check(
+            "cosh",
+            Some("copilot-shell"),
+            Some("rpm-managed"),
+            Some("1.0.0-1.al4"),
+            Some("1.1.0-1.al4"),
+            ACTION_UPDATE,
+            None,
+        )],
+    );
+    let reporter = RecordingReporter::default();
+
+    let result = run_upgrade_with_deps(
+        &ctx, &layout, &plan, &host, &host, false, true, COMMAND, &reporter,
+    )
+    .expect("dry-run");
+    assert!(result.dry_run);
+    assert!(
+        reporter.messages().is_empty(),
+        "dry-run must not report an apply phase that never happens"
+    );
+}
+
+/// A per-item transaction failure still reports the item (its message is emitted
+/// before the failing `dnf` call) and still reaches the finalize phase, so the
+/// reporter contract holds on the error path.
+#[test]
+fn apply_reports_phases_even_when_an_item_fails() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let mut host = FakeHost::default().with_installed(
+        "copilot-shell",
+        info("copilot-shell", "1.1.0", Some("1.al4")),
+    );
+    host.fail_update.insert("agent-sec-core".to_string());
+    // Both components are seeded so they are authorized against locked state and
+    // both reach the `dnf` layer; only the second one's transaction fails there.
+    seed_state(
+        &layout,
+        vec![
+            rpm_component(
+                "cosh",
+                "copilot-shell",
+                "1.0.0-1.al4",
+                Ownership::RpmManaged,
+            ),
+            rpm_component(
+                "sec-core",
+                "agent-sec-core",
+                "1.0.0-1.al4",
+                Ownership::RpmManaged,
+            ),
+        ],
+    );
+    let components = vec![
+        component_check(
+            "cosh",
+            Some("copilot-shell"),
+            Some("rpm-managed"),
+            Some("1.0.0-1.al4"),
+            Some("1.1.0-1.al4"),
+            ACTION_UPDATE,
+            None,
+        ),
+        component_check(
+            "sec-core",
+            Some("agent-sec-core"),
+            Some("rpm-managed"),
+            Some("1.0.0-1.al4"),
+            Some("1.1.0-1.al4"),
+            ACTION_UPDATE,
+            None,
+        ),
+    ];
+    let plan = build_plan(None, &cli_noop(), &components);
+    let reporter = RecordingReporter::default();
+
+    let result = run_upgrade_with_deps(
+        &ctx, &layout, &plan, &host, &host, true, false, COMMAND, &reporter,
+    )
+    .expect("apply");
+    assert_eq!(result.status, STATUS_PARTIAL);
+    assert_eq!(
+        reporter.messages(),
+        vec![
+            "Upgrading cosh (1/2)...".to_string(),
+            "Upgrading sec-core (2/2)...".to_string(),
+            "Finalizing ANOLISA state...".to_string(),
+        ],
+        "a failing item is still announced and the finalize phase still runs"
+    );
+}
+
+/// A blocked plan (planning error) never reaches the apply loop, so no phase is
+/// reported — real execution aborts before any `dnf` transaction.
+#[test]
+fn blocked_plan_reports_no_apply_phase() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let host = FakeHost::default();
+    let plan = build_plan(
+        None,
+        &cli_noop(),
+        &[component_check(
+            "mystery",
+            None,
+            None,
+            None,
+            None,
+            ACTION_INSTALL,
+            None,
+        )],
+    );
+    assert!(plan.has_errors());
+    let reporter = RecordingReporter::default();
+
+    let result = run_upgrade_with_deps(
+        &ctx, &layout, &plan, &host, &host, true, false, COMMAND, &reporter,
+    )
+    .expect("blocked plan renders");
+    assert_eq!(result.status, STATUS_BLOCKED);
+    assert!(
+        reporter.messages().is_empty(),
+        "a blocked plan must not report an apply phase"
     );
 }

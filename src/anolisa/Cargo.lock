@@ -43,6 +43,7 @@ dependencies = [
  "console",
  "dirs",
  "flate2",
+ "nix",
  "semver",
  "serde",
  "serde_json",
