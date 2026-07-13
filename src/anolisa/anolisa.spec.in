@@ -124,7 +124,12 @@ install -m 0644 manifests/repo.toml %{buildroot}%{_sysconfdir}/anolisa/repo.toml
 #%%doc %%{_docdir}/%%{name}/README.md
 
 %changelog
-* Sun Jul 12 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Mon Jul 13 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- `anolisa update --check` now shows progress while checking for updates in interactive terminals.
+- `anolisa upgrade` now shows progress while planning and applying upgrades in interactive terminals.
+- Raw component installs and updates now choose installable archives even when binary releases are also listed.
+
+* Sun Jul 12 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.3-1
 - Package installation and removal progress now uses stderr, keeping command output safe for redirection.
 - ANOLISA commands now exit cleanly when a downstream pipeline closes standard output early.
 - ANOLISA commands now report standard output write failures instead of silently succeeding.

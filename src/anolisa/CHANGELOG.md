@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-07-13
+
+### Added
+
+- `anolisa update --check` now shows progress while checking for updates in interactive terminals.
+- `anolisa upgrade` now shows progress while planning and applying upgrades in interactive terminals.
+
+### Fixed
+
+- Raw component installs and updates now choose installable archives even when binary releases are also listed.
+
 ## [0.2.3] - 2026-07-12
 
 ### Changed
@@ -481,6 +492,17 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.2.4] - 2026-07-13
+
+### 新增
+
+- 交互终端中，`anolisa update --check` 现会在检查更新时显示进度。
+- 交互终端中，`anolisa upgrade` 现会在规划和执行升级时显示进度。
+
+### 修复
+
+- Raw 组件安装和更新现可在同时存在二进制发布包时选中可安装归档包。
 
 ## [0.2.3] - 2026-07-12
 
