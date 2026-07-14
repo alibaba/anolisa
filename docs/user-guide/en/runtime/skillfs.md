@@ -213,7 +213,7 @@ mount.
 | Operation | Behavior |
 | --- | --- |
 | `readdir` | Controlled by views and runtime activation state |
-| Read `SKILL.md` | Returns compiled content, not raw source text |
+| Read `SKILL.md` | Compiled content by default; the selected target's raw content when the directive stage is disabled with no other transform |
 | Read ordinary files | Passes through to the physical source tree |
 | Write `SKILL.md` | Writes through and reparses the store |
 | Write ordinary files | Writes through without changing skill metadata |
@@ -240,6 +240,93 @@ mapping:
 In activation file mode, activation JSON expresses fallback and hidden states.
 It does not write current/live state. If a skill has no activation JSON or
 activation xattr in this mode, SkillFS treats it as hidden by fail-safe default.
+
+## Read-Time Transforms
+
+After the activation target is resolved, `SKILL.md` bytes pass through an
+ordered transform pipeline before an agent sees them:
+
+1. The **directive** stage runs the conditional compiler (`@if` / `@else` /
+   `@endif` plus heuristic command normalization). It is enabled by default;
+   when present it always runs first, so output is unchanged from earlier
+   releases. Disable it with `[transforms.directive] enabled = false`.
+2. The optional **OS adapter** stage runs second and only on `SKILL.md`. It
+   rewrites distribution-specific literals between Ubuntu/Debian and
+   Alinux/Anolis conventions.
+
+Both stages are optional: you can run both, directive-only (the default),
+adapter-only (directive disabled), or neither — an empty pipeline serves the
+selected raw bytes unchanged. Initialization diagnostics report the actual
+enabled stage list.
+
+The pipeline only affects the bytes an agent reads. Source files, trusted
+snapshots, activation metadata, and the rule artifact are never modified.
+Hidden skills stay hidden and never enter the pipeline; a fallback read is
+transformed from the trusted snapshot and never falls back to the live source.
+`getattr` size, partial reads, and full reads always agree on the transformed
+bytes. Only `SKILL.md` is adapted — other Markdown, shell, Python, and config
+files pass through untouched.
+
+### Disabling the Directive Stage
+
+The directive/compiler stage stays enabled unless explicitly turned off:
+
+```toml
+[transforms.directive]
+enabled = false
+```
+
+An absent `[transforms.directive]` section keeps directive compilation enabled,
+so existing configurations are unaffected. Disabling it only affects the
+compiler stage; the OS adapter remains independently opt-in.
+
+### Enabling the OS Adapter
+
+The OS adapter is disabled by default and configured through the existing
+`--config <PATH>` TOML file (no extra CLI flags):
+
+```toml
+[transforms.os_adapter]
+enabled = true
+target_os = "auto"                 # auto | ubuntu | alinux
+rules_path = "/etc/skillfs/ubuntu-alinux.yaml"
+```
+
+- `target_os = "auto"` reads the exact `/etc/os-release` `ID` once at mount
+  startup — `ubuntu`/`debian` map to Ubuntu, `alinux`/`anolis` map to Alinux.
+  Detection is fail-closed: `ID_LIKE` is not consulted, so RHEL-family
+  derivatives (Rocky, AlmaLinux, CentOS, …) are not silently treated as Alinux,
+  and unrecognized hosts reject the mount. Set `ubuntu` or `alinux` explicitly
+  on other distributions.
+- `rules_path` is a read-only rule artifact maintained by a separate rule
+  provider. SkillFS loads and validates it once at startup; the per-read path
+  performs only in-memory substitution and never parses YAML, reads
+  `/etc/os-release`, spawns processes, or makes network/LLM calls.
+
+The rule artifact is a top-level YAML sequence. Each rule declares the literal
+for each OS side, a `direction`, and a required `auto_apply` flag:
+
+```yaml
+- ubuntu: "apt-get install -y "
+  alinux: "dnf install -y "
+  direction: bidirectional          # bidirectional | ubuntu_to_alinux_only | alinux_to_ubuntu_only
+  auto_apply: always                # always | never — REQUIRED
+```
+
+- `auto_apply` is required on every rule; only `auto_apply: always` rules are
+  applied, and only in a direction the resolved target allows. A legacy artifact
+  that omits `auto_apply` is rejected with an error naming the rule index.
+- `confidence` and `notes` are accepted as annotations with no behavior —
+  eligibility is governed solely by `auto_apply`.
+- Rules apply in file order, so list more specific patterns before shorter ones.
+- A many-to-one forward mapping must resolve reverse ambiguity explicitly: mark
+  one pair `bidirectional` (canonical reverse) and the alternates
+  `ubuntu_to_alinux_only`. Colliding `bidirectional` reverses are rejected.
+
+When enabled, a missing/unreadable `rules_path`, malformed YAML, a missing or
+invalid `direction`/`auto_apply` value, duplicate or ambiguous patterns, or an
+unrecognized `target_os = "auto"` host reject the mount before it starts with an
+actionable error.
 
 ## Security Integration
 

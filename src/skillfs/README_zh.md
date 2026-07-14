@@ -83,7 +83,8 @@ physical skills dir
 SkillFS 是一个混合文件系统：虚拟目录视图 + 物理写透传。
 
 - `readdir` 仍由虚拟 view 控制。
-- 读取 `SKILL.md` 返回编译后内容，而不是原始 source 文件。
+- 读取 `SKILL.md` 默认返回编译后内容；当 directive stage 关闭且无其他 stage 时，
+  返回选定目标的 raw 内容。
 - 其他文件直接读写底层文件系统。
 - 写入、创建或 rename 后写入 `SKILL.md` 会重新解析文件并更新
   `SharedSkillStore`。
@@ -219,6 +220,90 @@ FUSE 读取 `SKILL.md` 时，SkillFS 会执行 `compiler::compile`，支持：
 - `pip install` -> `uv pip install`
 - `python -m venv` -> `uv venv`
 - `npm install` -> `pnpm install` / `yarn install`
+
+## 读时转换流水线
+
+在解析出激活目标（live source、trusted snapshot 或 hidden）之后，`SKILL.md`
+读取会经过一条固定顺序的转换流水线：
+
+```text
+激活目标 -> 读取选中字节 -> [directive/compiler stage]
+  -> [可选 os_adapter stage] -> Agent 可见字节
+```
+
+两个 stage 都是可选且相互独立的，固定顺序为 `directive -> os_adapter`：
+
+- **directive** stage 即上文的条件编译，**默认开启**；开启时始终第一个执行，因此
+  现有挂载与旧版本逐字节一致。可通过 `[transforms.directive] enabled = false`
+  关闭（见下文）。
+- **os_adapter** stage 为 opt-in，仅作用于 `SKILL.md`，第二个执行。它在
+  Ubuntu/Debian 与 Alinux/Anolis 风格之间改写发行版相关的字面量（包管理器、
+  `-dev`/`-devel` 包名、service 单元名、文件系统路径）。
+
+任意组合都合法：两个 stage（默认 + 启用适配器）、仅 directive（默认）、仅
+适配器（关闭 directive），或两者都关闭——空流水线原样返回选中的字节。初始化
+诊断会报告实际启用的 stage 列表，包括空列表。
+
+转换绝不修改源文件、snapshot、激活元数据或规则文件。Hidden 技能保持 `ENOENT`
+且不进入流水线；snapshot 读取只转换 snapshot，绝不回退到 live source。只有
+`SKILL.md` 会被适配——其他 Markdown、shell、Python 与配置文件原样透传。
+
+### 关闭 directive stage
+
+directive/compiler stage 默认开启，除非显式关闭：
+
+```toml
+[transforms.directive]
+enabled = false
+```
+
+当 `[transforms.directive]` 段不存在时，directive 编译保持开启，因此现有配置不受
+影响。关闭它只影响 compiler stage；OS 适配器仍是独立的 opt-in 项。
+
+### OS 适配器配置
+
+OS 适配器复用现有的 `--config <PATH>` TOML 文件（不新增 CLI flag），默认关闭，
+必须显式启用：
+
+```toml
+[transforms.os_adapter]
+enabled = true
+target_os = "auto"                 # auto | ubuntu | alinux
+rules_path = "/etc/skillfs/ubuntu-alinux.yaml"
+```
+
+- `target_os = "auto"` 在挂载启动时读取一次 `/etc/os-release` 的精确 `ID`
+  检测宿主：`ubuntu`/`debian` 映射为 Ubuntu，`alinux`/`anolis` 映射为 Alinux。
+  检测是 **fail-closed** 的：不参考 `ID_LIKE`，因此 RHEL 系衍生版（Rocky、
+  AlmaLinux、CentOS 等）不会被静默判定为 Alinux，无法识别的宿主会拒绝挂载。
+  其他发行版请显式设置 `ubuntu` 或 `alinux`。
+- `rules_path` 指向由独立规则提供方维护的只读规则文件。SkillFS 在挂载启动时
+  一次性加载并校验；读时热路径只做内存内替换。
+
+规则文件是一个顶层 YAML 序列，每条规则声明两侧 OS 的字面量、`direction` 以及
+显式的 `auto_apply` 资格标记：
+
+```yaml
+- ubuntu: "apt-get install -y "
+  alinux: "dnf install -y "
+  direction: bidirectional          # bidirectional | ubuntu_to_alinux_only | alinux_to_ubuntu_only
+  auto_apply: always                # always | never —— 必填
+```
+
+- `auto_apply` 在每条规则上都是**必填**的。只有 `auto_apply: always` 的规则会被
+  应用，且仅在目标允许的方向上生效。缺少 `auto_apply` 的历史规则文件会在挂载
+  启动时被拒绝，并给出指明出错规则序号的错误信息。
+- `confidence` 与 `notes` 作为人类可读注解被接受，但不影响任何行为——资格完全
+  由 `auto_apply` 决定。
+- 规则按文件顺序应用，因此更具体的模式必须排在更短的模式之前。
+- 多对一的正向映射（多个 Ubuntu 写法 → 同一个 Alinux 包）必须**显式**解决反向
+  歧义：恰好将一条标为 `bidirectional`（作为规范反向），其余标为
+  `ubuntu_to_alinux_only`。两条在反向目标上冲突的 `bidirectional` 规则会被判定
+  为歧义并拒绝。
+
+当 `enabled = true` 时，缺失或不可读的 `rules_path`、YAML 格式错误、非法的
+`direction`/`auto_apply` 值、重复或冲突的模式，或 `target_os = "auto"` 无法识别
+宿主，都会在挂载开始前以可执行的错误信息失败，而不是静默禁用适配器。
 
 ## 项目结构
 

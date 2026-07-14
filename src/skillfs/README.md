@@ -37,7 +37,7 @@ mounted filesystem while ordinary skill files remain backed by the source tree.
 | Operation | Normal mount | In-place mount | Notes |
 | --- | --- | --- | --- |
 | `readdir` | Virtual view | Virtual view | Visibility comes from views plus the store. |
-| Read `SKILL.md` | Compiled output | Compiled output | Uses `compiler::compile`. |
+| Read `SKILL.md` | Configured transform output | Configured transform output | Directive/compiler stage by default; raw content when it is disabled with no other transform. |
 | Read other files | Passthrough | Passthrough | Reads the physical source file. |
 | Write `SKILL.md` | Passthrough + store reparse | Passthrough + store reparse | Directory name is the authoritative store key. |
 | `create` ordinary file | Passthrough | Passthrough | Does not update the store. |
@@ -90,7 +90,9 @@ SkillFS is a hybrid filesystem: a virtual directory view plus physical
 passthrough writes.
 
 - `readdir` is still controlled by the virtual view.
-- Reading `SKILL.md` returns compiled content, not the raw source file.
+- Reading `SKILL.md` returns compiled content by default; with the directive
+  stage disabled and no other transform, it returns the selected target's raw
+  content.
 - Other files read and write directly against the underlying filesystem.
 - Writing, creating, or writing after renaming `SKILL.md` reparses the file and
   updates `SharedSkillStore`.
@@ -234,6 +236,104 @@ heuristic command normalizations, for example:
 - `pip install` -> `uv pip install`
 - `python -m venv` -> `uv venv`
 - `npm install` -> `pnpm install` / `yarn install`
+
+## Read-Time Transform Pipeline
+
+`SKILL.md` reads pass through an ordered transform pipeline after the activation
+target (live source, trusted snapshot, or hidden) is resolved:
+
+```text
+activation target -> read selected bytes -> [directive/compiler stage]
+  -> [optional os_adapter stage] -> Agent-visible bytes
+```
+
+Both stages are optional and independent; the fixed order is
+`directive -> os_adapter`:
+
+- The **directive** stage is the conditional compiler above. It is **enabled by
+  default**, and when present it always runs first, so existing mounts stay
+  byte-for-byte identical to earlier releases. Disable it with
+  `[transforms.directive] enabled = false` (see below).
+- The **os_adapter** stage is opt-in, applies only to `SKILL.md`, and runs
+  second. It rewrites distribution-specific literals (package managers,
+  `-dev`/`-devel` package names, service unit names, filesystem paths) between
+  Ubuntu/Debian and Alinux/Anolis style.
+
+Any combination is valid: both stages (the default plus an enabled adapter),
+directive-only (the default), adapter-only (directive disabled), or neither —
+an empty pipeline serves the selected raw bytes unchanged. Initialization
+diagnostics report the actual enabled stage list, including an empty list.
+
+Transforms never modify source files, snapshots, activation metadata, or the
+rule artifact. Hidden skills stay `ENOENT` and never enter the pipeline; a
+snapshot read is transformed from the snapshot and never falls back to the live
+source. Only `SKILL.md` is adapted — other Markdown, shell, Python, and config
+files pass through unchanged.
+
+### Disabling the Directive Stage
+
+The directive/compiler stage stays enabled unless explicitly turned off:
+
+```toml
+[transforms.directive]
+enabled = false
+```
+
+When the `[transforms.directive]` section is absent, directive compilation
+remains enabled, so existing configurations are unaffected. Disabling it only
+affects the compiler stage; the OS adapter remains independently opt-in.
+
+### OS Adapter Configuration
+
+The OS adapter reuses the existing `--config <PATH>` TOML file (no new CLI
+flags). It is disabled unless explicitly enabled:
+
+```toml
+[transforms.os_adapter]
+enabled = true
+target_os = "auto"                 # auto | ubuntu | alinux
+rules_path = "/etc/skillfs/ubuntu-alinux.yaml"
+```
+
+- `target_os = "auto"` detects the host distribution from the exact
+  `/etc/os-release` `ID` once at mount startup — `ubuntu`/`debian` map to Ubuntu
+  and `alinux`/`anolis` map to Alinux. Detection is **fail-closed**: `ID_LIKE`
+  is not consulted, so RHEL-family derivatives (Rocky, AlmaLinux, CentOS, …) do
+  not silently resolve to Alinux, and unrecognized hosts reject the mount. Set
+  `ubuntu` or `alinux` explicitly on other distributions.
+- `rules_path` points at a read-only rule artifact owned by a separate rule
+  provider. SkillFS loads and validates it once at mount startup; the per-read
+  hot path performs only in-memory substitution.
+
+The rule artifact is a top-level YAML sequence. Each entry declares the literal
+strings for each OS side, a `direction`, and an explicit `auto_apply`
+eligibility flag:
+
+```yaml
+- ubuntu: "apt-get install -y "
+  alinux: "dnf install -y "
+  direction: bidirectional          # bidirectional | ubuntu_to_alinux_only | alinux_to_ubuntu_only
+  auto_apply: always                # always | never — REQUIRED
+```
+
+- `auto_apply` is **required** on every rule. Only `auto_apply: always` rules
+  are applied, and only in a direction the resolved target permits. A legacy
+  artifact that omits `auto_apply` is rejected at mount startup with an error
+  naming the offending rule index.
+- `confidence` and `notes` are accepted as human annotations but carry no
+  behavior — eligibility is governed solely by `auto_apply`.
+- Rules apply in file order, so more specific patterns must be listed before
+  shorter ones.
+- A many-to-one forward mapping (several Ubuntu spellings → one Alinux package)
+  must resolve reverse ambiguity **explicitly**: mark exactly one pair
+  `bidirectional` (the canonical reverse) and the alternates
+  `ubuntu_to_alinux_only`. Two `bidirectional` rules that collide on the reverse
+  target are rejected as ambiguous.
+
+When `enabled = true`, a missing or unreadable `rules_path`, malformed YAML, an
+invalid `direction`/`auto_apply` value, duplicate or ambiguous patterns, or an
+unrecognized `target_os = "auto"` host all fail the mount before it starts with
+an actionable error rather than a silently disabled adapter.
 
 ## Project Layout
 
