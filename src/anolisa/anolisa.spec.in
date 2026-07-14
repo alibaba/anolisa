@@ -124,7 +124,17 @@ install -m 0644 manifests/repo.toml %{buildroot}%{_sysconfdir}/anolisa/repo.toml
 #%%doc %%{_docdir}/%%{name}/README.md
 
 %changelog
-* Mon Jul 13 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Tue Jul 14 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- `anolisa repair` now recovers interrupted fresh RPM installs after the package has been installed.
+- `anolisa update --check` now reports RPM components whose saved state requires reconciliation.
+- Install, adopt, and upgrade commands now require interrupted RPM installs to be repaired before continuing.
+- Concurrent RPM installs now fail safely instead of overwriting another operation's component state.
+- Reinstalling a missing ANOLISA-managed RPM now preserves the component's settings and history.
+- `anolisa uninstall --dry-run --json` now includes `dry_run: true` and omits removal phases for components that are not installed.
+- `anolisa upgrade` now refreshes saved RPM versions and package details after upgrades.
+- `anolisa upgrade` now reconciles older RPM records that lack package details.
+
+* Mon Jul 13 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.4-1
 - `anolisa update --check` now shows progress while checking for updates in interactive terminals.
 - `anolisa upgrade` now shows progress while planning and applying upgrades in interactive terminals.
 - Raw component installs and updates now choose installable archives even when binary releases are also listed.

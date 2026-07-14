@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-07-14
+
+### Added
+
+- `anolisa repair` now recovers interrupted fresh RPM installs after the package has been installed.
+- `anolisa update --check` now reports RPM components whose saved state requires reconciliation.
+
+### Changed
+
+- Install, adopt, and upgrade commands now require interrupted RPM installs to be repaired before continuing.
+
+### Fixed
+
+- Concurrent RPM installs now fail safely instead of overwriting another operation's component state.
+- Reinstalling a missing ANOLISA-managed RPM now preserves the component's settings and history.
+- `anolisa uninstall --dry-run --json` now includes `dry_run: true` and omits removal phases for components that are not installed.
+- `anolisa upgrade` now refreshes saved RPM versions and package details after upgrades.
+- `anolisa upgrade` now reconciles older RPM records that lack package details.
+
 ## [0.2.4] - 2026-07-13
 
 ### Added
@@ -492,6 +511,25 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.2.5] - 2026-07-14
+
+### 新增
+
+- `anolisa repair` 现可恢复软件包安装后中断的首次 RPM 安装。
+- `anolisa update --check` 现会报告已保存状态需要同步的 RPM 组件。
+
+### 变更
+
+- 安装、接管和升级命令现会先要求修复中断的 RPM 安装。
+
+### 修复
+
+- 并发 RPM 安装现会安全失败，不再覆盖其他操作的组件状态。
+- 重装缺失的 ANOLISA 托管 RPM 时，现会保留组件设置和历史记录。
+- `anolisa uninstall --dry-run --json` 现包含 `dry_run: true`，且未安装组件不再显示删除阶段。
+- `anolisa upgrade` 现会在升级后刷新已保存的 RPM 版本和软件包信息。
+- `anolisa upgrade` 现可同步缺少软件包信息的旧版 RPM 记录。
 
 ## [0.2.4] - 2026-07-13
 
