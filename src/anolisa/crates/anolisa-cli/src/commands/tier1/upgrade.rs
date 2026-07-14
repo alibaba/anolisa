@@ -9,8 +9,8 @@
 //! 1. Update the RPM-owned `anolisa` CLI package, if a newer candidate exists.
 //! 2. Update already-installed RPM-backed components.
 //! 3. Install target-profile default components that are missing.
-//! 4. Re-read rpmdb and refresh ANOLISA state so `anolisa status` reflects the
-//!    result.
+//! 4. Re-read rpmdb, refresh planned changes, and reconcile recorded RPM state
+//!    so `anolisa status` reflects package-manager truth.
 //!
 //! Scope is deliberately narrow (first phase):
 //! - RPM / system-image scenario only; user mode is rejected. `--dry-run` waives
@@ -26,6 +26,8 @@
 //! and both commands share it, so `upgrade` and `update --check` can never
 //! disagree about what is upgradable.
 
+use std::collections::HashSet;
+
 use chrono::{SecondsFormat, Utc};
 use clap::Parser;
 use serde::Serialize;
@@ -37,7 +39,7 @@ use anolisa_core::state::{
     OperationRecord, Ownership, RpmMetadata,
 };
 use anolisa_platform::fs_layout::FsLayout;
-use anolisa_platform::pkg_query::{PackageInfo, PackageQuery};
+use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError};
 use anolisa_platform::pkg_transaction::{PackageTransaction, PackageTransactionError};
 use anolisa_platform::privilege;
 use anolisa_platform::rpm_query::RpmPackageQuery;
@@ -419,6 +421,8 @@ struct UpgradeResult {
     dry_run: bool,
     updated: Vec<UpdatedItem>,
     installed: Vec<InstalledItem>,
+    /// RPM-backed state rows refreshed from rpmdb without a package transaction.
+    reconciled: Vec<ReconciledItem>,
     recorded: Vec<RecordedItem>,
     skipped: Vec<SkippedResult>,
     errors: Vec<ErrorResult>,
@@ -440,6 +444,14 @@ struct InstalledItem {
     /// Installed EVR after `dnf install`; `None` on a dry-run preview.
     #[serde(skip_serializing_if = "Option::is_none")]
     version: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReconciledItem {
+    name: String,
+    package: String,
+    from: String,
+    to: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -494,12 +506,28 @@ struct PendingInstall {
     source_repo: Option<String>,
 }
 
+/// A drifted RPM-backed state row awaiting the caller's single state save.
+struct PendingReconciliation {
+    name: String,
+    package: String,
+    from: String,
+    refreshed: PackageInfo,
+    source_repo: Option<String>,
+}
+
+#[derive(Default)]
+struct ReconciliationInspection {
+    pending: Vec<PendingReconciliation>,
+    errors: Vec<ErrorResult>,
+}
+
 /// Outcome of the single state save: the items it actually recorded (reported as
 /// updated/installed) plus per-item drift errors for changes it refused to make.
 #[derive(Default)]
 struct PersistOutcome {
     updated: Vec<UpdatedItem>,
     installed: Vec<InstalledItem>,
+    reconciled: Vec<ReconciledItem>,
     recorded: Vec<RecordedItem>,
     errors: Vec<ErrorResult>,
 }
@@ -523,11 +551,12 @@ struct FinalizeUpgrade<'a> {
     command: &'a str,
     state: &'a mut InstalledState,
     audit: &'a UpgradeAudit,
+    query: &'a dyn PackageQuery,
     cli_updated: Option<&'a UpdatedItem>,
     updates: &'a [PendingUpdate],
     installs: &'a [PendingInstall],
-    prior_errors: usize,
-    warnings: &'a [String],
+    prior_errors: &'a [ErrorResult],
+    warnings: &'a mut Vec<String>,
 }
 
 fn new_upgrade_audit() -> UpgradeAudit {
@@ -627,9 +656,10 @@ fn run_upgrade_with_deps(
     reporter: &dyn ProgressReporter,
 ) -> Result<UpgradeResult, CliError> {
     if dry_run {
-        // Dry-run only planned; it never applies a transaction, so it reports no
-        // apply-phase progress (planning feedback is handled by the caller).
-        return Ok(render_plan_preview(plan));
+        // Dry-run reads state/rpmdb without taking the install lock, applying a
+        // transaction, or constructing an operation to persist.
+        let state = common::load_installed_state(ctx, command)?;
+        return Ok(render_plan_preview(plan, &state, query));
     }
 
     // Real execution needs root for the dnf transactions. Check up front so the
@@ -650,12 +680,12 @@ fn run_upgrade_with_deps(
     let mut warnings: Vec<String> = Vec::new();
     let mut updated: Vec<UpdatedItem> = Vec::new();
     let mut installed: Vec<InstalledItem> = Vec::new();
+    let mut reconciled: Vec<ReconciledItem> = Vec::new();
     let mut recorded: Vec<RecordedItem> = Vec::new();
-    let needs_finalize = plan.cli.is_some()
-        || !plan.updates.is_empty()
-        || !plan.installs.is_empty()
-        || !plan.observed_defaults.is_empty();
-    if needs_finalize {
+    // An empty transaction plan can still carry RPM state drift caused by an
+    // external yum/dnf run, so every real invocation enters the same locked
+    // finalize boundary. A true no-op returns before save/audit below.
+    {
         let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
             command: command.to_string(),
             reason: format!("failed to acquire install lock: {err}"),
@@ -847,22 +877,24 @@ fn run_upgrade_with_deps(
             command,
             state: &mut state,
             audit: &audit,
+            query,
             cli_updated: cli_updated.as_ref(),
             updates: &pending_updates,
             installs: &pending_installs,
-            prior_errors: errors.len(),
-            warnings: &warnings,
+            prior_errors: &errors,
+            warnings: &mut warnings,
         })?;
         if let Some(item) = cli_updated {
             updated.push(item);
         }
         updated.extend(outcome.updated);
         installed.extend(outcome.installed);
+        reconciled.extend(outcome.reconciled);
         recorded.extend(outcome.recorded);
         errors.extend(outcome.errors);
     }
 
-    let succeeded = updated.len() + installed.len() + recorded.len();
+    let succeeded = updated.len() + installed.len() + reconciled.len() + recorded.len();
     let status = apply_status(succeeded, errors.len());
 
     Ok(UpgradeResult {
@@ -872,6 +904,7 @@ fn run_upgrade_with_deps(
         dry_run: false,
         updated,
         installed,
+        reconciled,
         recorded,
         skipped: skipped_results(plan),
         errors,
@@ -921,6 +954,94 @@ fn installed_origin_or_warn(
     }
 }
 
+/// Inspect existing RPM-backed component rows against rpmdb without mutating
+/// state. Callers decide whether to preview or apply the returned changes.
+fn inspect_rpm_reconciliations(
+    state: &InstalledState,
+    query: &dyn PackageQuery,
+    excluded: &HashSet<String>,
+    warnings: &mut Vec<String>,
+) -> ReconciliationInspection {
+    let mut inspection = ReconciliationInspection::default();
+
+    for object in &state.objects {
+        if object.kind != ObjectKind::Component
+            || !object.effective_ownership().is_rpm()
+            || excluded.contains(&object.name)
+        {
+            continue;
+        }
+        let Some(metadata) = object.rpm_metadata.as_ref() else {
+            continue;
+        };
+        let package = metadata.package_name.as_str();
+        if package.trim().is_empty() {
+            continue;
+        }
+
+        let refreshed = match query.query_installed(package) {
+            Ok(Some(info)) => info,
+            Ok(None) => {
+                inspection.errors.push(ErrorResult {
+                    name: object.name.clone(),
+                    reason: format!(
+                        "RPM package '{package}' recorded for component '{}' is not present in rpmdb; state was not reconciled",
+                        object.name
+                    ),
+                });
+                continue;
+            }
+            Err(PackageQueryError::UnexpectedOutput { detail, .. }) => {
+                inspection.errors.push(ErrorResult {
+                    name: object.name.clone(),
+                    reason: format!(
+                        "rpm returned unexpected output for package '{package}' recorded for component '{}': {detail}; refusing to reconcile without one installed version",
+                        object.name
+                    ),
+                });
+                continue;
+            }
+            Err(err) => {
+                inspection.errors.push(ErrorResult {
+                    name: object.name.clone(),
+                    reason: format!(
+                        "failed to query RPM package '{package}' recorded for component '{}': {err}; state was not reconciled",
+                        object.name
+                    ),
+                });
+                continue;
+            }
+        };
+
+        let to = refreshed.version.to_string();
+        let drifted = object.version != to
+            || metadata.evr.as_deref() != Some(to.as_str())
+            || metadata.arch.as_deref() != Some(refreshed.arch.as_str());
+        if !drifted {
+            continue;
+        }
+        let source_repo = installed_origin_or_warn(query, package, warnings);
+        inspection.pending.push(PendingReconciliation {
+            name: object.name.clone(),
+            package: package.to_string(),
+            from: object.version.clone(),
+            refreshed,
+            source_repo,
+        });
+    }
+
+    inspection
+}
+
+fn reconciliation_result(pending: &PendingReconciliation) -> ReconciledItem {
+    ReconciledItem {
+        name: pending.name.clone(),
+        package: pending.package.clone(),
+        from: pending.from.clone(),
+        to: pending.refreshed.version.to_string(),
+    }
+}
+
 /// Human-readable reason for a failed `dnf` transaction.
 fn txn_error_reason(err: PackageTransactionError) -> String {
     match err {
@@ -944,15 +1065,20 @@ fn txn_error_reason(err: PackageTransactionError) -> String {
     }
 }
 
-/// Build the dry-run preview result from the plan (no host access).
-fn render_plan_preview(plan: &UpgradePlan) -> UpgradeResult {
+/// Build the dry-run preview from the transaction plan plus read-only rpmdb
+/// reconciliation detection.
+fn render_plan_preview(
+    plan: &UpgradePlan,
+    state: &InstalledState,
+    query: &dyn PackageQuery,
+) -> UpgradeResult {
     let mut updated: Vec<UpdatedItem> = Vec::new();
     if let Some(cli) = &plan.cli {
         updated.push(planned_to_updated(cli));
     }
     updated.extend(plan.updates.iter().map(planned_to_updated));
 
-    let installed = plan
+    let installed: Vec<InstalledItem> = plan
         .installs
         .iter()
         .map(|install| InstalledItem {
@@ -961,7 +1087,7 @@ fn render_plan_preview(plan: &UpgradePlan) -> UpgradeResult {
             version: None,
         })
         .collect();
-    let recorded = plan
+    let recorded: Vec<RecordedItem> = plan
         .observed_defaults
         .iter()
         .map(|observed| RecordedItem {
@@ -971,12 +1097,34 @@ fn render_plan_preview(plan: &UpgradePlan) -> UpgradeResult {
         })
         .collect();
 
+    // Planned component work will refresh these rows during finalize, so a
+    // preview must not report the same component as both updated and reconciled.
+    let excluded: HashSet<String> = plan
+        .updates
+        .iter()
+        .map(|item| item.name.clone())
+        .chain(plan.installs.iter().map(|item| item.name.clone()))
+        .chain(plan.observed_defaults.iter().map(|item| item.name.clone()))
+        .collect();
+    let mut warnings = Vec::new();
+    let inspection = inspect_rpm_reconciliations(state, query, &excluded, &mut warnings);
+    let reconciled = inspection
+        .pending
+        .iter()
+        .map(reconciliation_result)
+        .collect::<Vec<_>>();
+    let mut errors = plan_errors(plan);
+    errors.extend(inspection.errors);
+
     // A dry-run whose plan carries errors would be blocked if applied for real;
-    // report that so automation can gate on it, otherwise `ok`.
+    // otherwise report reconcile query failures with normal apply semantics.
     let status = if plan.has_errors() {
         STATUS_BLOCKED
     } else {
-        STATUS_OK
+        apply_status(
+            updated.len() + installed.len() + recorded.len() + reconciled.len(),
+            errors.len(),
+        )
     };
 
     UpgradeResult {
@@ -986,10 +1134,11 @@ fn render_plan_preview(plan: &UpgradePlan) -> UpgradeResult {
         dry_run: true,
         updated,
         installed,
+        reconciled,
         recorded,
         skipped: skipped_results(plan),
-        errors: plan_errors(plan),
-        warnings: Vec::new(),
+        errors,
+        warnings,
     }
 }
 
@@ -1002,6 +1151,7 @@ fn blocked_result(plan: &UpgradePlan) -> UpgradeResult {
         dry_run: false,
         updated: Vec::new(),
         installed: Vec::new(),
+        reconciled: Vec::new(),
         recorded: Vec::new(),
         skipped: skipped_results(plan),
         errors: plan_errors(plan),
@@ -1076,6 +1226,7 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
         command,
         state,
         audit,
+        query,
         cli_updated,
         updates,
         installs,
@@ -1213,14 +1364,79 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
         }
     }
 
+    // Pending update/install/default changes are already reflected in memory.
+    // Excluding their names makes the reporting invariant explicit: one
+    // component cannot be both transaction-updated and reconciled in this run.
+    let excluded: HashSet<String> = outcome
+        .updated
+        .iter()
+        .map(|item| item.name.clone())
+        .chain(outcome.installed.iter().map(|item| item.name.clone()))
+        .chain(outcome.recorded.iter().map(|item| item.name.clone()))
+        .collect();
+    let inspection = inspect_rpm_reconciliations(state, query, &excluded, warnings);
+    // Apply errors do not exclude a component from the sweep: a transient
+    // post-transaction query may recover here and still reconcile state. If
+    // the retry fails again, keep the original item error instead of counting
+    // the same component twice in the result and durable operation summary.
+    let prior_error_names: HashSet<&str> = prior_errors
+        .iter()
+        .map(|error| error.name.as_str())
+        .collect();
+    outcome.errors.extend(
+        inspection
+            .errors
+            .into_iter()
+            .filter(|error| !prior_error_names.contains(error.name.as_str())),
+    );
+
+    for reconciliation in inspection.pending {
+        let Some(object) = state.find_object_mut(ObjectKind::Component, &reconciliation.name)
+        else {
+            outcome.errors.push(ErrorResult {
+                name: reconciliation.name.clone(),
+                reason: format!(
+                    "component '{}' disappeared from ANOLISA state during RPM reconciliation for package '{}'; state was not changed",
+                    reconciliation.name, reconciliation.package
+                ),
+            });
+            continue;
+        };
+        if !is_matching_rpm_object(object, &reconciliation.package) {
+            outcome.errors.push(ErrorResult {
+                name: reconciliation.name.clone(),
+                reason: format!(
+                    "component '{}' changed ownership/package during RPM reconciliation for package '{}'; state was not changed",
+                    reconciliation.name, reconciliation.package
+                ),
+            });
+            continue;
+        }
+
+        let to = reconciliation.refreshed.version.to_string();
+        object.version = to.clone();
+        object.last_operation_id = Some(audit.operation_id.clone());
+        if let Some(metadata) = object.rpm_metadata.as_mut() {
+            metadata.evr = Some(to.clone());
+            metadata.arch = Some(reconciliation.refreshed.arch.clone());
+            if let Some(source_repo) = &reconciliation.source_repo {
+                metadata.source_repo = Some(source_repo.clone());
+            }
+        }
+        outcome
+            .reconciled
+            .push(reconciliation_result(&reconciliation));
+    }
+
     // Count the whole command's outcome, not just component state: the CLI
     // update (not an ANOLISA object) and the transaction-phase errors are folded
     // in so the durable record shows the true `ok` / `partial` / `failed`.
     let total_success = cli_updated.is_some() as usize
         + outcome.updated.len()
         + outcome.installed.len()
+        + outcome.reconciled.len()
         + outcome.recorded.len();
-    let total_errors = prior_errors + outcome.errors.len();
+    let total_errors = prior_errors.len() + outcome.errors.len();
 
     if total_success == 0 && total_errors == 0 {
         // No transaction actually happened (e.g. only skips/noops reached here);
@@ -1235,9 +1451,10 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
         _ => (LogStatus::Failed, Severity::Error),
     };
 
-    // Always append the operation record and save, even when no component object
-    // changed (a CLI-only upgrade, or a run where every component drifted): the
-    // record is what makes a real system mutation auditable via `anolisa logs`.
+    // Always append the operation record and save when real work or an item
+    // error occurred, even if no component object changed (for example a
+    // CLI-only upgrade or failed rpmdb query). The record keeps the attempt
+    // auditable via `anolisa logs`.
     state.operations.push(OperationRecord {
         id: audit.operation_id.clone(),
         command: command.to_string(),
@@ -1254,11 +1471,15 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
 
     // Audit log is best-effort: state already persisted, so a log failure
     // downgrades to a stderr warning rather than unwinding.
-    let recorded = outcome.updated.len() + outcome.installed.len() + outcome.recorded.len();
+    let recorded = outcome.updated.len()
+        + outcome.installed.len()
+        + outcome.reconciled.len()
+        + outcome.recorded.len();
     let log = CentralLog::open(layout.central_log.clone());
     let mut objects: Vec<String> = cli_updated.map(|c| c.package.clone()).into_iter().collect();
     objects.extend(outcome.updated.iter().map(|u| u.name.clone()));
     objects.extend(outcome.installed.iter().map(|i| i.name.clone()));
+    objects.extend(outcome.reconciled.iter().map(|i| i.name.clone()));
     objects.extend(outcome.recorded.iter().map(|i| i.name.clone()));
     let record = LogRecord {
         kind: LogKind::Operation,
@@ -1467,6 +1688,21 @@ fn render_result(ctx: &CliContext, result: &UpgradeResult) {
             color.muted(format!("({})", item.package)),
         );
     }
+    for item in &result.reconciled {
+        let verb = if result.dry_run {
+            "would reconcile"
+        } else {
+            "reconciled"
+        };
+        println!(
+            "  {} {} {} → {} {}",
+            color.ok(format!("✓ {verb}")),
+            item.name,
+            item.from,
+            item.to,
+            color.muted(format!("({})", item.package)),
+        );
+    }
     for item in &result.recorded {
         let verb = if result.dry_run {
             "would record".to_string()
@@ -1498,10 +1734,11 @@ fn render_result(ctx: &CliContext, result: &UpgradeResult) {
     }
 
     println!(
-        "{} {} updated, {} installed, {} recorded, {} skipped, {} error(s) [{}]",
+        "{} {} updated, {} installed, {} reconciled, {} recorded, {} skipped, {} error(s) [{}]",
         color.label("summary:"),
         result.updated.len(),
         result.installed.len(),
+        result.reconciled.len(),
         result.recorded.len(),
         result.skipped.len(),
         result.errors.len(),

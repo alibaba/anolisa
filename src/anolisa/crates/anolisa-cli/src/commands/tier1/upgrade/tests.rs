@@ -33,12 +33,20 @@ struct FakeHost {
     fail_install: HashSet<String>,
     /// packages whose `query_installed` returns `Ok(None)` (rpmdb miss).
     missing_after: HashSet<String>,
+    /// packages whose installed query reports multiple/unparseable rows.
+    ambiguous_after: HashSet<String>,
+    /// packages whose installed query fails.
+    fail_query: HashSet<String>,
+    /// packages whose next installed query fails once, then recovers.
+    fail_query_once: RefCell<HashSet<String>>,
     /// package -> source repo returned by `installed_origin`.
     origins: HashMap<String, String>,
     /// packages whose `installed_origin` returns an error.
     fail_origin: HashSet<String>,
     /// ordered transaction log (`"update:<pkg>"` / `"install:<pkg>"`).
     calls: RefCell<Vec<String>>,
+    /// package names inspected through `query_installed`.
+    query_calls: RefCell<Vec<String>>,
 }
 
 impl FakeHost {
@@ -55,10 +63,28 @@ impl FakeHost {
     fn txn_calls(&self) -> Vec<String> {
         self.calls.borrow().clone()
     }
+
+    fn query_calls(&self) -> Vec<String> {
+        self.query_calls.borrow().clone()
+    }
 }
 
 impl PackageQuery for FakeHost {
     fn query_installed(&self, package: &str) -> Result<Option<PackageInfo>, PackageQueryError> {
+        self.query_calls.borrow_mut().push(package.to_string());
+        if self.ambiguous_after.contains(package) {
+            return Err(PackageQueryError::UnexpectedOutput {
+                command: "rpm".to_string(),
+                detail: "2 installed versions".to_string(),
+            });
+        }
+        if self.fail_query.contains(package) || self.fail_query_once.borrow_mut().remove(package) {
+            return Err(PackageQueryError::QueryFailed {
+                command: "rpm".to_string(),
+                code: Some(1),
+                stderr: "rpmdb read failed".to_string(),
+            });
+        }
         if self.missing_after.contains(package) {
             return Ok(None);
         }
@@ -128,6 +154,12 @@ fn info(name: &str, version: &str, release: Option<&str>) -> PackageInfo {
         arch: "x86_64".to_string(),
         origin: None,
     }
+}
+
+fn info_with_arch(name: &str, version: &str, release: Option<&str>, arch: &str) -> PackageInfo {
+    let mut package = info(name, version, release);
+    package.arch = arch.to_string();
+    package
 }
 
 fn cli_check(
@@ -1237,6 +1269,648 @@ fn cli_success_with_component_failure_records_partial_audit() {
         state.operations.last().map(|op| op.status.as_str()),
         Some("partial"),
         "CLI success + component failure must record a partial operation"
+    );
+}
+
+// ── batch RPM state reconciliation (issue #1472) ───────────────────────────
+
+#[test]
+fn empty_plan_reconciles_all_drifted_rpm_components() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let components = [
+        ("sec-core", "agent-sec-core", "0.7.1", "0.8.0"),
+        ("agentsight", "agentsight", "0.7.1", "0.8.0"),
+        ("tokenless", "tokenless", "0.6.1", "0.7.0"),
+        ("agent-memory", "agent-memory", "0.2.1", "0.2.3"),
+        ("cosh", "copilot-shell", "2.6.1", "2.7.0"),
+        ("skillfs", "skillfs", "0.3.2", "0.3.3"),
+    ];
+    let objects = components
+        .iter()
+        .map(|(name, package, old, _)| {
+            rpm_component(
+                name,
+                package,
+                &format!("{old}-1.alnx4"),
+                Ownership::RpmManaged,
+            )
+        })
+        .collect();
+    seed_state(&layout, objects);
+
+    let mut host = FakeHost::default();
+    for (_, package, _, new) in components {
+        host.installed
+            .insert(package.to_string(), info(package, new, Some("1.alnx4")));
+    }
+    let plan = build_plan(None, &cli_noop(), &[]);
+
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("reconcile empty plan");
+
+    assert_eq!(result.status, STATUS_OK);
+    assert!(result.updated.is_empty());
+    assert_eq!(result.reconciled.len(), 6);
+    assert!(host.txn_calls().is_empty(), "reconcile must not call dnf");
+
+    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
+    assert_eq!(state.operations.len(), 1, "one upgrade operation");
+    let operation_id = &state.operations[0].id;
+    for (name, _package, _old, new) in components {
+        let expected = format!("{new}-1.alnx4");
+        let object = state
+            .find_object(ObjectKind::Component, name)
+            .expect("reconciled component");
+        let metadata = object.rpm_metadata.as_ref().expect("rpm metadata");
+        assert_eq!(object.version, expected);
+        assert_eq!(metadata.evr.as_deref(), Some(expected.as_str()));
+        assert_eq!(metadata.arch.as_deref(), Some("x86_64"));
+        assert_eq!(
+            object.last_operation_id.as_deref(),
+            Some(operation_id.as_str())
+        );
+    }
+}
+
+#[test]
+fn empty_plan_without_drift_is_true_noop() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let mut object = rpm_component(
+        "cosh",
+        "copilot-shell",
+        "2.7.0-1.alnx4",
+        Ownership::RpmManaged,
+    );
+    object.last_operation_id = Some("op-before".to_string());
+    seed_state(&layout, vec![object]);
+    let before = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("before");
+    let host = FakeHost::default().with_installed(
+        "copilot-shell",
+        info("copilot-shell", "2.7.0", Some("1.alnx4")),
+    );
+    let plan = build_plan(None, &cli_noop(), &[]);
+
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("true noop");
+
+    assert_eq!(result.status, STATUS_OK);
+    assert!(result.reconciled.is_empty());
+    assert!(result.errors.is_empty());
+    assert!(host.txn_calls().is_empty());
+    let after = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("after");
+    assert_eq!(after, before, "a drift-free run must not save state");
+}
+
+#[test]
+fn planned_update_is_not_reported_as_reconciled() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    seed_state(
+        &layout,
+        vec![
+            rpm_component(
+                "cosh",
+                "copilot-shell",
+                "2.6.1-1.alnx4",
+                Ownership::RpmManaged,
+            ),
+            rpm_component(
+                "sec-core",
+                "agent-sec-core",
+                "0.7.1-1.alnx4",
+                Ownership::RpmManaged,
+            ),
+        ],
+    );
+    let host = FakeHost::default()
+        .with_installed(
+            "copilot-shell",
+            info("copilot-shell", "2.7.0", Some("1.alnx4")),
+        )
+        .with_installed(
+            "agent-sec-core",
+            info("agent-sec-core", "0.8.0", Some("1.alnx4")),
+        );
+    let plan = build_plan(
+        None,
+        &cli_noop(),
+        &[component_check(
+            "cosh",
+            Some("copilot-shell"),
+            Some("rpm-managed"),
+            Some("2.6.1-1.alnx4"),
+            Some("2.7.0-1.alnx4"),
+            ACTION_UPDATE,
+            None,
+        )],
+    );
+
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("update and reconcile");
+
+    assert_eq!(result.status, STATUS_OK);
+    assert_eq!(result.updated.len(), 1);
+    assert_eq!(result.updated[0].name, "cosh");
+    assert_eq!(result.reconciled.len(), 1);
+    assert_eq!(result.reconciled[0].name, "sec-core");
+    assert_eq!(host.txn_calls(), vec!["update:copilot-shell"]);
+
+    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
+    assert_eq!(state.operations.len(), 1, "one operation and one save path");
+    let operation_id = &state.operations[0].id;
+    for name in ["cosh", "sec-core"] {
+        assert_eq!(
+            state
+                .find_object(ObjectKind::Component, name)
+                .and_then(|object| object.last_operation_id.as_deref()),
+            Some(operation_id.as_str()),
+            "all state changes share the upgrade operation",
+        );
+    }
+}
+
+#[test]
+fn post_transaction_query_failure_is_not_double_counted() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    seed_state(
+        &layout,
+        vec![rpm_component(
+            "cosh",
+            "copilot-shell",
+            "2.6.1-1.alnx4",
+            Ownership::RpmManaged,
+        )],
+    );
+    let mut host = FakeHost::default().with_installed(
+        "copilot-shell",
+        info("copilot-shell", "2.7.0", Some("1.alnx4")),
+    );
+    host.fail_query.insert("copilot-shell".to_string());
+    let plan = build_plan(
+        None,
+        &cli_noop(),
+        &[component_check(
+            "cosh",
+            Some("copilot-shell"),
+            Some("rpm-managed"),
+            Some("2.6.1-1.alnx4"),
+            Some("2.7.0-1.alnx4"),
+            ACTION_UPDATE,
+            None,
+        )],
+    );
+
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("post-transaction query failure");
+
+    assert_eq!(host.txn_calls(), vec!["update:copilot-shell"]);
+    assert_eq!(host.query_calls(), vec!["copilot-shell", "copilot-shell"]);
+    assert_eq!(result.status, STATUS_FAILED);
+    assert!(result.updated.is_empty());
+    assert!(result.reconciled.is_empty());
+    assert_eq!(result.errors.len(), 1, "one component yields one error");
+    assert_eq!(result.errors[0].name, "cosh");
+
+    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
+    assert_eq!(
+        state
+            .find_object(ObjectKind::Component, "cosh")
+            .expect("cosh")
+            .version,
+        "2.6.1-1.alnx4",
+    );
+    assert_eq!(state.operations.len(), 1);
+    assert_eq!(state.operations[0].status, STATUS_FAILED);
+}
+
+#[test]
+fn post_transaction_query_retry_can_reconcile() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    seed_state(
+        &layout,
+        vec![rpm_component(
+            "cosh",
+            "copilot-shell",
+            "2.6.1-1.alnx4",
+            Ownership::RpmManaged,
+        )],
+    );
+    let host = FakeHost::default().with_installed(
+        "copilot-shell",
+        info("copilot-shell", "2.7.0", Some("1.alnx4")),
+    );
+    host.fail_query_once
+        .borrow_mut()
+        .insert("copilot-shell".to_string());
+    let plan = build_plan(
+        None,
+        &cli_noop(),
+        &[component_check(
+            "cosh",
+            Some("copilot-shell"),
+            Some("rpm-managed"),
+            Some("2.6.1-1.alnx4"),
+            Some("2.7.0-1.alnx4"),
+            ACTION_UPDATE,
+            None,
+        )],
+    );
+
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("reconcile after query recovery");
+
+    assert_eq!(host.txn_calls(), vec!["update:copilot-shell"]);
+    assert_eq!(host.query_calls(), vec!["copilot-shell", "copilot-shell"]);
+    assert_eq!(result.status, STATUS_PARTIAL);
+    assert!(result.updated.is_empty());
+    assert_eq!(result.reconciled.len(), 1);
+    assert_eq!(result.reconciled[0].name, "cosh");
+    assert_eq!(result.errors.len(), 1, "the original apply error remains");
+
+    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
+    let object = state
+        .find_object(ObjectKind::Component, "cosh")
+        .expect("cosh");
+    assert_eq!(object.version, "2.7.0-1.alnx4");
+    assert_eq!(state.operations.len(), 1);
+    assert_eq!(state.operations[0].status, STATUS_PARTIAL);
+    assert_eq!(
+        object.last_operation_id.as_deref(),
+        Some(state.operations[0].id.as_str())
+    );
+}
+
+#[test]
+fn reconcile_preserves_rpm_ownership_and_metadata() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let mut managed = rpm_component(
+        "cosh",
+        "copilot-shell",
+        "2.6.1-1.alnx4",
+        Ownership::RpmManaged,
+    );
+    managed.manifest_digest = Some("sha256:managed".to_string());
+    managed.enabled_features = vec!["shell-hooks".to_string()];
+    let mut observed = rpm_component(
+        "os-skills",
+        "os-skills",
+        "0.6.1-1.alnx4",
+        Ownership::RpmObserved,
+    );
+    observed.status = ObjectStatus::Adopted;
+    observed.installed_at = "2026-05-01T00:00:00Z".to_string();
+    observed.manifest_digest = Some("sha256:observed".to_string());
+    if let Some(metadata) = observed.rpm_metadata.as_mut() {
+        metadata.evr = None;
+        metadata.arch = None;
+    }
+    let mut raw = rpm_component("local-tool", "local-tool", "1.0.0", Ownership::RawManaged);
+    raw.enabled_features = vec!["local".to_string()];
+    let managed_before = managed.clone();
+    let observed_before = observed.clone();
+    let raw_before = raw.clone();
+    seed_state(&layout, vec![managed, observed, raw]);
+    let host = FakeHost::default()
+        .with_installed(
+            "copilot-shell",
+            info_with_arch("copilot-shell", "2.7.0", Some("1.alnx4"), "aarch64"),
+        )
+        .with_origin("copilot-shell", "anolisa-updates")
+        .with_installed(
+            "os-skills",
+            info_with_arch("os-skills", "0.6.1", Some("1.alnx4"), "noarch"),
+        )
+        .with_origin("os-skills", "anolisa-updates");
+    let plan = build_plan(None, &cli_noop(), &[]);
+
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("preserving reconcile");
+
+    assert_eq!(result.reconciled.len(), 2);
+    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
+    let mut expected_managed = managed_before;
+    let actual_managed = state
+        .find_object(ObjectKind::Component, "cosh")
+        .expect("managed");
+    expected_managed.version = "2.7.0-1.alnx4".to_string();
+    expected_managed.last_operation_id = actual_managed.last_operation_id.clone();
+    let managed_meta = expected_managed.rpm_metadata.as_mut().expect("metadata");
+    managed_meta.evr = Some("2.7.0-1.alnx4".to_string());
+    managed_meta.arch = Some("aarch64".to_string());
+    managed_meta.source_repo = Some("anolisa-updates".to_string());
+    assert_eq!(actual_managed, &expected_managed);
+
+    let mut expected_observed = observed_before;
+    let actual_observed = state
+        .find_object(ObjectKind::Component, "os-skills")
+        .expect("observed");
+    expected_observed.version = "0.6.1-1.alnx4".to_string();
+    expected_observed.last_operation_id = actual_observed.last_operation_id.clone();
+    let observed_meta = expected_observed.rpm_metadata.as_mut().expect("metadata");
+    observed_meta.evr = Some("0.6.1-1.alnx4".to_string());
+    observed_meta.arch = Some("noarch".to_string());
+    observed_meta.source_repo = Some("anolisa-updates".to_string());
+    assert_eq!(actual_observed, &expected_observed);
+    assert_eq!(
+        state
+            .find_object(ObjectKind::Component, "local-tool")
+            .expect("raw"),
+        &raw_before,
+        "raw-managed state is untouched",
+    );
+    assert_eq!(
+        host.query_calls().into_iter().collect::<HashSet<_>>(),
+        HashSet::from(["copilot-shell".to_string(), "os-skills".to_string()]),
+        "raw-managed components are not queried",
+    );
+}
+
+#[test]
+fn reconcile_missing_or_ambiguous_rpm_is_not_written() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let objects = vec![
+        rpm_component(
+            "missing",
+            "missing-pkg",
+            "1.0.0-1.alnx4",
+            Ownership::RpmManaged,
+        ),
+        rpm_component(
+            "ambiguous",
+            "ambiguous-pkg",
+            "1.0.0-1.alnx4",
+            Ownership::RpmManaged,
+        ),
+        rpm_component(
+            "broken",
+            "broken-pkg",
+            "1.0.0-1.alnx4",
+            Ownership::RpmManaged,
+        ),
+    ];
+    seed_state(&layout, objects.clone());
+    let mut host = FakeHost::default();
+    host.missing_after.insert("missing-pkg".to_string());
+    host.ambiguous_after.insert("ambiguous-pkg".to_string());
+    host.fail_query.insert("broken-pkg".to_string());
+    let plan = build_plan(None, &cli_noop(), &[]);
+
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("failed reconciliation audit");
+
+    assert_eq!(result.status, STATUS_FAILED);
+    assert!(result.reconciled.is_empty());
+    assert_eq!(result.errors.len(), 3);
+    for (name, package) in [
+        ("missing", "missing-pkg"),
+        ("ambiguous", "ambiguous-pkg"),
+        ("broken", "broken-pkg"),
+    ] {
+        let error = result
+            .errors
+            .iter()
+            .find(|error| error.name == name)
+            .expect("item error");
+        assert!(
+            error.reason.contains(package),
+            "package identity is visible"
+        );
+    }
+    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
+    assert_eq!(
+        state.objects, objects,
+        "failed items remain byte-for-byte facts"
+    );
+    assert_eq!(state.operations.len(), 1);
+    assert_eq!(state.operations[0].status, STATUS_FAILED);
+
+    let partial_tmp = tempfile::tempdir().expect("partial tmpdir");
+    let partial_ctx = system_ctx(partial_tmp.path().to_path_buf());
+    let partial_layout = FsLayout::system(Some(partial_tmp.path().to_path_buf()));
+    seed_state(
+        &partial_layout,
+        vec![
+            rpm_component("good", "good-pkg", "1.0.0-1.alnx4", Ownership::RpmManaged),
+            rpm_component(
+                "missing",
+                "missing-pkg",
+                "1.0.0-1.alnx4",
+                Ownership::RpmManaged,
+            ),
+        ],
+    );
+    let mut partial_host =
+        FakeHost::default().with_installed("good-pkg", info("good-pkg", "2.0.0", Some("1.alnx4")));
+    partial_host.missing_after.insert("missing-pkg".to_string());
+    let partial_result = run_upgrade_with_deps(
+        &partial_ctx,
+        &partial_layout,
+        &plan,
+        &partial_host,
+        &partial_host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("partial reconciliation");
+    assert_eq!(partial_result.status, STATUS_PARTIAL);
+    assert_eq!(partial_result.reconciled.len(), 1);
+    assert_eq!(partial_result.errors.len(), 1);
+}
+
+#[test]
+fn reconcile_origin_failure_preserves_prior_source() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    seed_state(
+        &layout,
+        vec![rpm_component(
+            "cosh",
+            "copilot-shell",
+            "2.6.1-1.alnx4",
+            Ownership::RpmManaged,
+        )],
+    );
+    let mut host = FakeHost::default().with_installed(
+        "copilot-shell",
+        info("copilot-shell", "2.7.0", Some("1.alnx4")),
+    );
+    host.fail_origin.insert("copilot-shell".to_string());
+    let plan = build_plan(None, &cli_noop(), &[]);
+
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("origin warning");
+
+    assert_eq!(result.status, STATUS_OK);
+    assert_eq!(result.reconciled.len(), 1);
+    assert_eq!(result.warnings.len(), 1);
+    assert!(result.warnings[0].contains("copilot-shell"));
+    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
+    let object = state
+        .find_object(ObjectKind::Component, "cosh")
+        .expect("cosh");
+    assert_eq!(object.version, "2.7.0-1.alnx4");
+    assert_eq!(
+        object
+            .rpm_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.source_repo.as_deref()),
+        Some("@System"),
+    );
+}
+
+#[test]
+fn upgrade_dry_run_reports_reconcile_without_writes() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    seed_state(
+        &layout,
+        vec![rpm_component(
+            "cosh",
+            "copilot-shell",
+            "2.6.1-1.alnx4",
+            Ownership::RpmManaged,
+        )],
+    );
+    let state_path = layout.state_dir.join("installed.toml");
+    let before = std::fs::read(&state_path).expect("state bytes");
+    let host = FakeHost::default().with_installed(
+        "copilot-shell",
+        info("copilot-shell", "2.7.0", Some("1.alnx4")),
+    );
+    let plan = build_plan(None, &cli_noop(), &[]);
+
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        false,
+        true,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("dry-run reconcile preview");
+
+    assert!(result.dry_run);
+    assert_eq!(result.status, STATUS_OK);
+    assert_eq!(result.reconciled.len(), 1);
+    assert_eq!(result.reconciled[0].name, "cosh");
+    assert_eq!(result.reconciled[0].from, "2.6.1-1.alnx4");
+    assert_eq!(result.reconciled[0].to, "2.7.0-1.alnx4");
+    let json = serde_json::to_value(&result).expect("serialize result");
+    assert_eq!(json["reconciled"][0]["package"], "copilot-shell");
+    assert!(host.txn_calls().is_empty());
+    assert_eq!(std::fs::read(&state_path).expect("state bytes"), before);
+    assert!(
+        !layout.lock_file.exists(),
+        "dry-run must not acquire the install lock"
+    );
+    let state = InstalledState::load(&state_path).expect("state");
+    assert!(state.operations.is_empty());
+    assert!(
+        state
+            .find_object(ObjectKind::Component, "cosh")
+            .expect("cosh")
+            .last_operation_id
+            .is_none()
     );
 }
 
