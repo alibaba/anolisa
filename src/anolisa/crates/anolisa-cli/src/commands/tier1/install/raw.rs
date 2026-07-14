@@ -26,6 +26,7 @@ use anolisa_platform::fs_layout::FsLayout;
 use chrono::Utc;
 
 use crate::commands::common;
+use crate::commands::tier1::rpm_install;
 use crate::context::CliContext;
 use crate::repo_config::{
     HostVars, RepoConfig, raw_artifact_url, raw_index_url, raw_relative_root,
@@ -1011,6 +1012,12 @@ pub(crate) fn execute_raw(
             command: command.to_string(),
             reason: format!("failed to load installed state: {err}"),
         })?;
+    rpm_install::reject_pending_claim(
+        layout,
+        &state,
+        &[resolution.component.as_str(), resolution.package.as_str()],
+        command,
+    )?;
     ensure_component_backend_compatible(
         &state,
         &resolution.component,

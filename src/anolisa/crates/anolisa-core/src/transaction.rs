@@ -350,6 +350,19 @@ impl Transaction {
         self.persist()
     }
 
+    /// Append several steps and persist them as one journal revision.
+    ///
+    /// Use this when recovery requires the complete initial step contract to
+    /// become visible atomically. If the process exits during persistence,
+    /// readers observe either the previous journal or the complete batch.
+    pub fn record_steps(
+        &mut self,
+        steps: impl IntoIterator<Item = TransactionStep>,
+    ) -> Result<(), TransactionError> {
+        self.steps.extend(steps);
+        self.persist()
+    }
+
     /// Mark `idx` as [`TransactionStepStatus::Done`] and persist.
     pub fn mark_done(&mut self, idx: usize) -> Result<(), TransactionError> {
         self.set_step_status(idx, TransactionStepStatus::Done, None)
@@ -763,6 +776,23 @@ mod tests {
         assert_eq!(reloaded.steps.len(), 1);
         assert_eq!(reloaded.steps[0].action, "install_file");
         assert_eq!(reloaded.steps[0].status, TransactionStepStatus::Planned);
+    }
+
+    #[test]
+    fn record_steps_persists_complete_batch() {
+        let tmp = tempdir().expect("tempdir");
+        let (state_path, journal_dir) = fresh(&tmp);
+        let mut tx = Transaction::begin("install", state_path, &journal_dir).expect("begin");
+
+        tx.record_steps([
+            TransactionStep::planned("rpm-install", "pkg", "dnf-install", None),
+            TransactionStep::planned("rpm-state", "component", "commit-state", None),
+        ])
+        .expect("record step batch");
+
+        let reloaded = Transaction::load_journal(&tx.journal_path).expect("load");
+        assert_eq!(reloaded.steps, tx.steps);
+        assert_eq!(reloaded.steps.len(), 2);
     }
 
     #[test]

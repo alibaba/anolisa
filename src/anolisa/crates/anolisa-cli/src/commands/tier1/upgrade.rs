@@ -50,6 +50,7 @@ use super::update::check::{
 use crate::color::Palette;
 use crate::commands::common;
 use crate::commands::common::RepoPersistPolicy;
+use crate::commands::tier1::rpm_install;
 use crate::context::{CliContext, InstallMode};
 use crate::progress::{self, Activity, ProgressReporter};
 use crate::response::{self, CliError};
@@ -626,6 +627,9 @@ fn run_upgrade_with_deps(
     command: &str,
     reporter: &dyn ProgressReporter,
 ) -> Result<UpgradeResult, CliError> {
+    let preview_state = common::load_installed_state(ctx, command)?;
+    reject_upgrade_pending_claims(layout, &preview_state, plan, command)?;
+
     if dry_run {
         // Dry-run only planned; it never applies a transaction, so it reports no
         // apply-phase progress (planning feedback is handled by the caller).
@@ -661,6 +665,7 @@ fn run_upgrade_with_deps(
             reason: format!("failed to acquire install lock: {err}"),
         })?;
         let mut state = common::load_installed_state(ctx, command)?;
+        reject_upgrade_pending_claims(layout, &state, plan, command)?;
         let audit = new_upgrade_audit();
 
         // Upgrade only runs in system mode; keep the state scope consistent with
@@ -877,6 +882,39 @@ fn run_upgrade_with_deps(
         errors,
         warnings,
     })
+}
+
+fn reject_upgrade_pending_claims(
+    layout: &FsLayout,
+    state: &InstalledState,
+    plan: &UpgradePlan,
+    command: &str,
+) -> Result<(), CliError> {
+    for update in &plan.updates {
+        rpm_install::reject_pending_claim(
+            layout,
+            state,
+            &[update.name.as_str(), update.package.as_str()],
+            command,
+        )?;
+    }
+    for install in &plan.installs {
+        rpm_install::reject_pending_claim(
+            layout,
+            state,
+            &[install.name.as_str(), install.package.as_str()],
+            command,
+        )?;
+    }
+    for observed in &plan.observed_defaults {
+        rpm_install::reject_pending_claim(
+            layout,
+            state,
+            &[observed.name.as_str(), observed.package.as_str()],
+            command,
+        )?;
+    }
+    Ok(())
 }
 
 /// Status for a completed real run: `ok` when nothing errored, `partial` when

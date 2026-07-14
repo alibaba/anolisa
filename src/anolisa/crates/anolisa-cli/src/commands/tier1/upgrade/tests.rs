@@ -377,6 +377,46 @@ fn upgrade_dry_run_apply_runs_without_root_and_touches_nothing() {
     );
 }
 
+#[test]
+fn upgrade_rejects_pending_rpm_claim_before_any_transaction() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    rpm_install::begin_fresh_install(&layout, "cosh", "copilot-shell", "install cosh")
+        .expect("begin pending install");
+    let host = FakeHost::default();
+    let plan = build_plan(
+        None,
+        &cli_noop(),
+        &[component_check(
+            "cosh",
+            Some("copilot-shell"),
+            None,
+            None,
+            None,
+            ACTION_INSTALL,
+            None,
+        )],
+    );
+
+    for dry_run in [true, false] {
+        let err = run_upgrade_with_deps(
+            &ctx,
+            &layout,
+            &plan,
+            &host,
+            &host,
+            true,
+            dry_run,
+            COMMAND,
+            &NoopReporter,
+        )
+        .expect_err("pending install must block the whole upgrade");
+        assert!(err.reason().contains("repair cosh"));
+    }
+    assert!(host.txn_calls().is_empty());
+}
+
 // ── plan conversion ──────────────────────────────────────────────────────────
 
 #[test]

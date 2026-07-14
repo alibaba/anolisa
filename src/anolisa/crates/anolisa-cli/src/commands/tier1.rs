@@ -10,6 +10,7 @@ pub mod list;
 pub mod logs;
 pub mod repair;
 pub mod restart;
+pub(crate) mod rpm_install;
 pub mod status;
 pub mod uninstall;
 pub mod update;

@@ -624,11 +624,18 @@ pub struct FakeInstaller {
     pub available: Vec<PackageInfo>,
     /// `false` makes the dnf install transaction fail.
     pub install_succeeds: bool,
+    /// Make the authoritative rpmdb read fail after dnf has run.
+    pub post_install_query_fails: bool,
     pub installed: RefCell<Option<PackageInfo>>,
     pub install_calls: Cell<usize>,
     /// Optional lock path probed from inside `install`.
     pub lock_probe: Option<PathBuf>,
     pub lock_was_held: Cell<bool>,
+    /// Optional installed.toml path replaced with a directory after dnf.
+    pub block_state_save: Option<PathBuf>,
+    /// Optional journal directory replaced with a file during the post-install query.
+    pub block_journal_update: Option<PathBuf>,
+    pub journal_was_blocked: Cell<bool>,
 }
 
 impl FakeInstaller {
@@ -639,10 +646,14 @@ impl FakeInstaller {
             origin: None,
             available: Vec::new(),
             install_succeeds: true,
+            post_install_query_fails: false,
             installed: RefCell::new(None),
             install_calls: Cell::new(0),
             lock_probe: None,
             lock_was_held: Cell::new(false),
+            block_state_save: None,
+            block_journal_update: None,
+            journal_was_blocked: Cell::new(false),
         }
     }
     pub fn with_origin(mut self, repo: &str) -> Self {
@@ -653,8 +664,20 @@ impl FakeInstaller {
         self.install_succeeds = false;
         self
     }
+    pub fn failing_post_install_query(mut self) -> Self {
+        self.post_install_query_fails = true;
+        self
+    }
     pub fn expect_lock_held(mut self, path: PathBuf) -> Self {
         self.lock_probe = Some(path);
+        self
+    }
+    pub fn failing_state_save(mut self, path: PathBuf) -> Self {
+        self.block_state_save = Some(path);
+        self
+    }
+    pub fn failing_journal_update(mut self, path: PathBuf) -> Self {
+        self.block_journal_update = Some(path);
         self
     }
 
@@ -667,6 +690,21 @@ impl PackageQuery for FakeInstaller {
     fn query_installed(&self, package: &str) -> Result<Option<PackageInfo>, PackageQueryError> {
         if package != self.package {
             return Ok(None);
+        }
+        if self.post_install_query_fails && self.install_calls.get() > 0 {
+            if let Some(path) = &self.block_journal_update
+                && !self.journal_was_blocked.replace(true)
+            {
+                let backup = path.with_extension("before-write-failure");
+                std::fs::rename(path, &backup).expect("move journal directory");
+                std::fs::write(path, b"block journal updates")
+                    .expect("replace journal directory with file");
+            }
+            return Err(PackageQueryError::QueryFailed {
+                command: "rpm".to_string(),
+                code: Some(1),
+                stderr: "rpmdb unavailable".to_string(),
+            });
         }
         Ok(self.installed.borrow().clone())
     }
@@ -744,6 +782,9 @@ impl PackageTransaction for FakeInstaller {
         }
         // rpmdb now holds the package, modelling dnf placing it.
         *self.installed.borrow_mut() = Some(self.installs_to.clone());
+        if let Some(path) = &self.block_state_save {
+            std::fs::create_dir_all(path).expect("block installed.toml save");
+        }
         Ok(())
     }
     fn update(&self, _package: &str) -> Result<(), PackageTransactionError> {

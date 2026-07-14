@@ -17,6 +17,7 @@ use anolisa_platform::rpm_query::RpmPackageQuery;
 use crate::commands::common;
 use crate::commands::common::RepoPersistPolicy;
 use crate::commands::tier1::install::{RpmSituation, execute_adopt, probe_rpm_situation};
+use crate::commands::tier1::rpm_install;
 use crate::context::CliContext;
 use crate::resolution::{ResolutionUse, load_optional_component_index};
 use crate::response::CliError;
@@ -105,6 +106,11 @@ pub(crate) fn adopt_with_query(
     }
 
     let layout = common::resolve_layout(ctx);
+    let mut claims = vec![target];
+    if let Some(package) = cli_override {
+        claims.push(package);
+    }
+    rpm_install::reject_pending_claim(&layout, &installed, &claims, &command)?;
     // repo.toml locates the RPM backend and raw-hosted component index. Both
     // are supplementary to the explicit --package input, installed Provides
     // contract, and default name candidate, so unreadable config degrades to
@@ -671,6 +677,20 @@ mod tests {
             !layout.state_dir.join("installed.toml").exists(),
             "dry-run must not write state",
         );
+    }
+
+    #[test]
+    fn adopt_refuses_pending_rpm_install_claim() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        let layout = common::resolve_layout(&c);
+        rpm_install::begin_fresh_install(&layout, "cosh", "copilot-shell", "install cosh")
+            .expect("begin pending install");
+        let q = FakeQuery::default();
+
+        let err = adopt_with_query("cosh", Some("copilot-shell"), &c, &q)
+            .expect_err("adopt must not bypass a pending managed install");
+        assert!(err.reason().contains("repair cosh"));
     }
 
     /// `--package` pins the RPM name, bypassing the candidate chain.

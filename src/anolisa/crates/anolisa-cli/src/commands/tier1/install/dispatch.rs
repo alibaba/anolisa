@@ -10,6 +10,7 @@ use anolisa_platform::rpm_transaction::RpmTransaction;
 
 use crate::commands::common;
 use crate::commands::common::RepoPersistPolicy;
+use crate::commands::tier1::rpm_install;
 use crate::context::{CliContext, InstallMode};
 use crate::repo_config::{
     BackendConfig, HostVars, RepoConfig, RepoConfigError, normalize_override_url,
@@ -97,6 +98,11 @@ fn handle_one_with_config(
         installed,
     } = identity;
     let command = format!("install {requested_component}");
+    let mut initial_claims = vec![requested_component.as_str(), component.as_str()];
+    if let Some(package) = args.package.as_deref() {
+        initial_claims.push(package);
+    }
+    rpm_install::reject_pending_claim(&layout, &installed, &initial_claims, &command)?;
 
     let mut rpm_component_index: Option<ComponentIndex> = None;
 
@@ -352,6 +358,13 @@ pub(crate) fn handle_raw_install(
             version: args.version.as_deref(),
             warnings,
         },
+    )?;
+
+    rpm_install::reject_pending_claim(
+        layout,
+        installed,
+        &[resolved.component.as_str(), resolved.package.as_str()],
+        command,
     )?;
 
     if ctx.dry_run {
