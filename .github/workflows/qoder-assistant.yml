@@ -22,6 +22,13 @@ jobs:
         startsWith(github.event.comment.body, '@qoder') ||
         startsWith(github.event.comment.body, '/qoder')
       ) &&
+      (
+        github.event_name != 'issue_comment' ||
+        (
+          !startsWith(github.event.comment.body, '@qoder review') &&
+          !startsWith(github.event.comment.body, '/qoder review')
+        )
+      ) &&
       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
     runs-on: [self-hosted, Linux, anolisa-agent-review]
     permissions:
@@ -37,6 +44,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
 
@@ -74,6 +82,10 @@ jobs:
 
           first_line="${body%%$'\n'*}"
           first_line="${first_line%$'\r'}"
+          if [[ "$EVENT_NAME" == "issue_comment" && "$first_line" =~ ^(@qoder|/qoder)[[:space:]]+review([[:space:]]+full)?[[:space:]]*$ ]]; then
+            deny "review-command"
+            exit 0
+          fi
           if [[ "$first_line" != @qoder* && "$first_line" != /qoder* ]]; then
             deny "no-qoder-command"
             exit 0
