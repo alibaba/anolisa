@@ -264,7 +264,7 @@ jobs:
           SUBJECT:
           ${SUBJECT}
 
-          REQUEST_BODY_UNTRUSTED:
+          BODY:
           ${comment_body}
 
           CONVERSATION_CONTEXT_UNTRUSTED:
