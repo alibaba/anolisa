@@ -855,6 +855,34 @@ fn update_check_repo_query_failure_is_item_error() {
 }
 
 #[test]
+fn update_check_resolves_legacy_rpm_component_without_metadata() {
+    let mut host = FakeHost::with_cli_noop();
+    host.installed.insert(
+        "copilot-shell".to_string(),
+        info("copilot-shell", "2.7.0", Some("1.alnx4")),
+    );
+    let backend = rpm_backend_with_package_map("cosh", "copilot-shell");
+    let mut component = rpm_component(
+        "cosh",
+        "copilot-shell",
+        "2.6.1-1.alnx4",
+        Ownership::RpmManaged,
+    );
+    component.rpm_metadata = None;
+    let state = state_with(vec![component]);
+
+    let report = run_with_index_and_backend(&host, &state, None, None, None, Some(&backend));
+
+    let item = &report.components[0];
+    assert_eq!(item.action, ACTION_NOOP);
+    assert_eq!(item.package.as_deref(), Some("copilot-shell"));
+    assert_eq!(item.installed.as_deref(), Some("2.7.0-1.alnx4"));
+    assert!(item.backfill_rpm_metadata);
+    assert!(serde_json::to_value(item).expect("serialize item")["backfill_rpm_metadata"].is_null());
+    assert_eq!(report.summary.errors, 0);
+}
+
+#[test]
 fn update_check_component_missing_from_rpmdb_is_item_error() {
     let host = FakeHost::with_cli_noop();
     // No installed entry for the package → rpmdb miss.

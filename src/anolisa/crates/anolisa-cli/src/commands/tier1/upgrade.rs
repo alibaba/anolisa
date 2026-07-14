@@ -184,6 +184,8 @@ struct PlannedUpdate {
     to: String,
     /// Whether a missing state row should be recorded as an observed RPM default.
     adopt_if_missing: bool,
+    /// Whether this package was resolved for a legacy RPM row without metadata.
+    backfill_rpm_metadata: bool,
 }
 
 /// A missing default component the upgrade will `dnf install`.
@@ -200,6 +202,13 @@ struct PlannedObservedDefault {
     name: String,
     package: String,
     installed: String,
+}
+
+/// Resolved RPM identity for a legacy state row that the final sweep may repair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlannedLegacyReconciliation {
+    name: String,
+    package: String,
 }
 
 /// An item deliberately left untouched (raw-managed, non-RPM CLI).
@@ -227,6 +236,7 @@ struct UpgradePlan {
     updates: Vec<PlannedUpdate>,
     installs: Vec<PlannedInstall>,
     observed_defaults: Vec<PlannedObservedDefault>,
+    legacy_reconciliations: Vec<PlannedLegacyReconciliation>,
     skipped: Vec<SkippedItem>,
     errors: Vec<PlanError>,
 }
@@ -285,6 +295,16 @@ fn build_plan(
 
     // ── components ──
     for component in components {
+        if component.backfill_rpm_metadata
+            && matches!(component.action.as_str(), ACTION_UPDATE | ACTION_NOOP)
+            && let Some(package) = &component.package
+        {
+            plan.legacy_reconciliations
+                .push(PlannedLegacyReconciliation {
+                    name: component.component.clone(),
+                    package: package.clone(),
+                });
+        }
         match component.action.as_str() {
             ACTION_UPDATE => match component_update(component) {
                 Ok(update) => plan.updates.push(update),
@@ -364,6 +384,7 @@ fn cli_update(cli: &CliCheck) -> Result<PlannedUpdate, String> {
         from,
         to,
         adopt_if_missing: false,
+        backfill_rpm_metadata: false,
     })
 }
 
@@ -388,6 +409,7 @@ fn component_update(component: &ComponentCheck) -> Result<PlannedUpdate, String>
         from,
         to,
         adopt_if_missing: component.absent_from_state,
+        backfill_rpm_metadata: component.backfill_rpm_metadata,
     })
 }
 
@@ -492,6 +514,8 @@ struct PendingUpdate {
     source_repo: Option<String>,
     /// True for a target default that was present in rpmdb but absent from state.
     adopt_if_missing: bool,
+    /// True when the locked legacy row may still lack RPM package metadata.
+    backfill_rpm_metadata: bool,
     /// True when no package update occurred and the item should be reported as a
     /// state recording rather than an update.
     record_only: bool,
@@ -513,6 +537,7 @@ struct PendingReconciliation {
     from: String,
     refreshed: PackageInfo,
     source_repo: Option<String>,
+    allow_metadata_backfill: bool,
 }
 
 #[derive(Default)]
@@ -555,6 +580,7 @@ struct FinalizeUpgrade<'a> {
     cli_updated: Option<&'a UpdatedItem>,
     updates: &'a [PendingUpdate],
     installs: &'a [PendingInstall],
+    legacy_reconciliations: &'a [PlannedLegacyReconciliation],
     prior_errors: &'a [ErrorResult],
     warnings: &'a mut Vec<String>,
 }
@@ -578,7 +604,13 @@ fn authorize_plan<'a>(state: &InstalledState, plan: &'a UpgradePlan) -> Authoriz
 
     for update in &plan.updates {
         match state.find_object(ObjectKind::Component, &update.name) {
-            Some(obj) if is_matching_rpm_object(obj, &update.package) => {
+            Some(obj)
+                if is_matching_or_legacy_rpm_object(
+                    obj,
+                    &update.package,
+                    update.backfill_rpm_metadata,
+                ) =>
+            {
                 authorized.updates.push(update);
             }
             Some(obj) => authorized.errors.push(ErrorResult {
@@ -768,6 +800,7 @@ fn run_upgrade_with_deps(
                             refreshed: info,
                             source_repo,
                             adopt_if_missing: update.adopt_if_missing,
+                            backfill_rpm_metadata: update.backfill_rpm_metadata,
                             record_only: false,
                         });
                     }
@@ -848,6 +881,7 @@ fn run_upgrade_with_deps(
                         refreshed: info,
                         source_repo,
                         adopt_if_missing: true,
+                        backfill_rpm_metadata: false,
                         record_only: true,
                     });
                 }
@@ -881,6 +915,7 @@ fn run_upgrade_with_deps(
             cli_updated: cli_updated.as_ref(),
             updates: &pending_updates,
             installs: &pending_installs,
+            legacy_reconciliations: &plan.legacy_reconciliations,
             prior_errors: &errors,
             warnings: &mut warnings,
         })?;
@@ -960,6 +995,7 @@ fn inspect_rpm_reconciliations(
     state: &InstalledState,
     query: &dyn PackageQuery,
     excluded: &HashSet<String>,
+    legacy_reconciliations: &[PlannedLegacyReconciliation],
     warnings: &mut Vec<String>,
 ) -> ReconciliationInspection {
     let mut inspection = ReconciliationInspection::default();
@@ -971,15 +1007,23 @@ fn inspect_rpm_reconciliations(
         {
             continue;
         }
-        let Some(metadata) = object.rpm_metadata.as_ref() else {
-            continue;
+        let (package, allow_metadata_backfill) = match object
+            .rpm_metadata
+            .as_ref()
+            .map(|metadata| metadata.package_name.trim())
+            .filter(|package| !package.is_empty())
+        {
+            Some(package) => (package.to_string(), false),
+            None => match legacy_reconciliations
+                .iter()
+                .find(|candidate| candidate.name == object.name)
+            {
+                Some(candidate) => (candidate.package.clone(), true),
+                None => continue,
+            },
         };
-        let package = metadata.package_name.as_str();
-        if package.trim().is_empty() {
-            continue;
-        }
 
-        let refreshed = match query.query_installed(package) {
+        let refreshed = match query.query_installed(&package) {
             Ok(Some(info)) => info,
             Ok(None) => {
                 inspection.errors.push(ErrorResult {
@@ -1014,19 +1058,23 @@ fn inspect_rpm_reconciliations(
         };
 
         let to = refreshed.version.to_string();
-        let drifted = object.version != to
-            || metadata.evr.as_deref() != Some(to.as_str())
-            || metadata.arch.as_deref() != Some(refreshed.arch.as_str());
+        let metadata_current = object.rpm_metadata.as_ref().is_some_and(|metadata| {
+            metadata.package_name == package
+                && metadata.evr.as_deref() == Some(to.as_str())
+                && metadata.arch.as_deref() == Some(refreshed.arch.as_str())
+        });
+        let drifted = object.version != to || !metadata_current;
         if !drifted {
             continue;
         }
-        let source_repo = installed_origin_or_warn(query, package, warnings);
+        let source_repo = installed_origin_or_warn(query, &package, warnings);
         inspection.pending.push(PendingReconciliation {
             name: object.name.clone(),
-            package: package.to_string(),
+            package,
             from: object.version.clone(),
             refreshed,
             source_repo,
+            allow_metadata_backfill,
         });
     }
 
@@ -1097,6 +1145,22 @@ fn render_plan_preview(
         })
         .collect();
 
+    if plan.has_errors() {
+        return UpgradeResult {
+            target: plan.target.clone(),
+            backend: BACKEND,
+            status: STATUS_BLOCKED,
+            dry_run: true,
+            updated,
+            installed,
+            reconciled: Vec::new(),
+            recorded,
+            skipped: skipped_results(plan),
+            errors: plan_errors(plan),
+            warnings: Vec::new(),
+        };
+    }
+
     // Planned component work will refresh these rows during finalize, so a
     // preview must not report the same component as both updated and reconciled.
     let excluded: HashSet<String> = plan
@@ -1107,7 +1171,13 @@ fn render_plan_preview(
         .chain(plan.observed_defaults.iter().map(|item| item.name.clone()))
         .collect();
     let mut warnings = Vec::new();
-    let inspection = inspect_rpm_reconciliations(state, query, &excluded, &mut warnings);
+    let inspection = inspect_rpm_reconciliations(
+        state,
+        query,
+        &excluded,
+        &plan.legacy_reconciliations,
+        &mut warnings,
+    );
     let reconciled = inspection
         .pending
         .iter()
@@ -1116,16 +1186,10 @@ fn render_plan_preview(
     let mut errors = plan_errors(plan);
     errors.extend(inspection.errors);
 
-    // A dry-run whose plan carries errors would be blocked if applied for real;
-    // otherwise report reconcile query failures with normal apply semantics.
-    let status = if plan.has_errors() {
-        STATUS_BLOCKED
-    } else {
-        apply_status(
-            updated.len() + installed.len() + recorded.len() + reconciled.len(),
-            errors.len(),
-        )
-    };
+    let status = apply_status(
+        updated.len() + installed.len() + recorded.len() + reconciled.len(),
+        errors.len(),
+    );
 
     UpgradeResult {
         target: plan.target.clone(),
@@ -1230,6 +1294,7 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
         cli_updated,
         updates,
         installs,
+        legacy_reconciliations,
         prior_errors,
         warnings,
     } = req;
@@ -1276,7 +1341,7 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
         // Refuse to graft the new EVR onto a row that is no longer this RPM
         // package (a concurrent backend change), mirroring the single-component
         // update guard.
-        if !is_matching_rpm_object(obj, &update.package) {
+        if !is_matching_or_legacy_rpm_object(obj, &update.package, update.backfill_rpm_metadata) {
             outcome.errors.push(ErrorResult {
                 name: update.name.clone(),
                 reason: format!(
@@ -1288,13 +1353,13 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
         }
         obj.version = evr.clone();
         obj.last_operation_id = Some(audit.operation_id.clone());
-        if let Some(meta) = obj.rpm_metadata.as_mut() {
-            meta.evr = Some(evr.clone());
-            meta.arch = Some(update.refreshed.arch.clone());
-            if let Some(source_repo) = &update.source_repo {
-                meta.source_repo = Some(source_repo.clone());
-            }
-        }
+        refresh_rpm_metadata(
+            obj,
+            &update.package,
+            &evr,
+            &update.refreshed.arch,
+            update.source_repo.as_deref(),
+        );
         if update.record_only {
             outcome.recorded.push(RecordedItem {
                 name: update.name.clone(),
@@ -1374,7 +1439,8 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
         .chain(outcome.installed.iter().map(|item| item.name.clone()))
         .chain(outcome.recorded.iter().map(|item| item.name.clone()))
         .collect();
-    let inspection = inspect_rpm_reconciliations(state, query, &excluded, warnings);
+    let inspection =
+        inspect_rpm_reconciliations(state, query, &excluded, legacy_reconciliations, warnings);
     // Apply errors do not exclude a component from the sweep: a transient
     // post-transaction query may recover here and still reconcile state. If
     // the retry fails again, keep the original item error instead of counting
@@ -1402,7 +1468,11 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
             });
             continue;
         };
-        if !is_matching_rpm_object(object, &reconciliation.package) {
+        if !is_matching_or_legacy_rpm_object(
+            object,
+            &reconciliation.package,
+            reconciliation.allow_metadata_backfill,
+        ) {
             outcome.errors.push(ErrorResult {
                 name: reconciliation.name.clone(),
                 reason: format!(
@@ -1416,13 +1486,13 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
         let to = reconciliation.refreshed.version.to_string();
         object.version = to.clone();
         object.last_operation_id = Some(audit.operation_id.clone());
-        if let Some(metadata) = object.rpm_metadata.as_mut() {
-            metadata.evr = Some(to.clone());
-            metadata.arch = Some(reconciliation.refreshed.arch.clone());
-            if let Some(source_repo) = &reconciliation.source_repo {
-                metadata.source_repo = Some(source_repo.clone());
-            }
-        }
+        refresh_rpm_metadata(
+            object,
+            &reconciliation.package,
+            &to,
+            &reconciliation.refreshed.arch,
+            reconciliation.source_repo.as_deref(),
+        );
         outcome
             .reconciled
             .push(reconciliation_result(&reconciliation));
@@ -1539,6 +1609,41 @@ fn is_matching_rpm_object(obj: &InstalledObject, package: &str) -> bool {
         .as_ref()
         .is_some_and(|m| m.package_name == package)
         && obj.effective_ownership().is_rpm()
+}
+
+fn is_matching_or_legacy_rpm_object(
+    obj: &InstalledObject,
+    package: &str,
+    allow_metadata_backfill: bool,
+) -> bool {
+    is_matching_rpm_object(obj, package)
+        || (allow_metadata_backfill
+            && obj.effective_ownership().is_rpm()
+            && obj
+                .rpm_metadata
+                .as_ref()
+                .is_none_or(|metadata| metadata.package_name.trim().is_empty()))
+}
+
+fn refresh_rpm_metadata(
+    obj: &mut InstalledObject,
+    package: &str,
+    evr: &str,
+    arch: &str,
+    source_repo: Option<&str>,
+) {
+    let metadata = obj.rpm_metadata.get_or_insert_with(|| RpmMetadata {
+        package_name: package.to_string(),
+        evr: None,
+        arch: None,
+        source_repo: None,
+    });
+    metadata.package_name = package.to_string();
+    metadata.evr = Some(evr.to_string());
+    metadata.arch = Some(arch.to_string());
+    if let Some(source_repo) = source_repo {
+        metadata.source_repo = Some(source_repo.to_string());
+    }
 }
 
 /// Build an rpm-observed component object for a target default that was already

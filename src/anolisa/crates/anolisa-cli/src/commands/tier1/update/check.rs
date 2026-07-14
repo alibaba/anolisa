@@ -162,6 +162,10 @@ pub(crate) struct ComponentCheck {
     /// absent from ANOLISA state. It is intentionally not part of JSON/cache.
     #[serde(skip)]
     pub(crate) absent_from_state: bool,
+    /// Internal planner hint: the RPM package was resolved for a legacy state
+    /// row whose package metadata needs to be backfilled by `upgrade`.
+    #[serde(skip)]
+    pub(crate) backfill_rpm_metadata: bool,
 }
 
 /// Aggregate counts used by the summary line, MOTD, and exit signalling.
@@ -386,6 +390,8 @@ fn run_update_check(inputs: CheckInputs<'_>) -> UpdateCheckReport {
         }
         components.push(check_component(
             inputs.query,
+            inputs.component_index,
+            inputs.rpm_backend,
             obj,
             inputs.arch,
             &mut summary,
@@ -526,6 +532,8 @@ fn build_cli_check(
 /// Evaluate one installed component against the RPM upgrade scope.
 fn check_component(
     query: &dyn PackageQuery,
+    component_index: Option<&ComponentIndex>,
+    rpm_backend: Option<&BackendConfig>,
     obj: &InstalledObject,
     arch: &str,
     summary: &mut CheckSummary,
@@ -546,26 +554,33 @@ fn check_component(
             action: ACTION_UNSUPPORTED_RPM.to_string(),
             error: None,
             absent_from_state: false,
+            backfill_rpm_metadata: false,
         };
     }
 
     let ownership_label = ownership.label().to_string();
-    let package = match obj
+    let (package, backfill_rpm_metadata) = match obj
         .rpm_metadata
         .as_ref()
         .map(|m| m.package_name.clone())
         .filter(|p| !p.is_empty())
     {
-        Some(package) => package,
+        Some(package) => (package, false),
         None => {
-            summary.errors += 1;
-            return component_error(
-                component,
-                None,
-                ownership_label,
-                Some(obj.version.clone()),
-                "component is recorded as RPM-backed but has no package metadata; run `anolisa repair` to refresh it".to_string(),
-            );
+            match resolve_legacy_component_package(query, component_index, rpm_backend, &component)
+            {
+                Ok(package) => (package, true),
+                Err(reason) => {
+                    summary.errors += 1;
+                    return component_error(
+                        component,
+                        None,
+                        ownership_label,
+                        Some(obj.version.clone()),
+                        reason,
+                    );
+                }
+            }
         }
     };
 
@@ -628,6 +643,7 @@ fn check_component(
                 action: ACTION_UPDATE.to_string(),
                 error: None,
                 absent_from_state: false,
+                backfill_rpm_metadata,
             }
         }
         Ok(None) => ComponentCheck {
@@ -639,6 +655,7 @@ fn check_component(
             action: ACTION_NOOP.to_string(),
             error: None,
             absent_from_state: false,
+            backfill_rpm_metadata,
         },
         Err(err) => {
             summary.errors += 1;
@@ -695,6 +712,7 @@ fn check_default_component(
                         action: ACTION_ERROR.to_string(),
                         error: Some(reason),
                         absent_from_state: true,
+                        backfill_rpm_metadata: false,
                     };
                 }
             };
@@ -716,6 +734,7 @@ fn check_default_component(
                             "cannot query installed version of resolved package for default component '{name}': {err}"
                         )),
                         absent_from_state: true,
+                        backfill_rpm_metadata: false,
                     };
                 }
             }
@@ -729,6 +748,7 @@ fn check_default_component(
                 action: ACTION_INSTALL.to_string(),
                 error: None,
                 absent_from_state: true,
+                backfill_rpm_metadata: false,
             }
         }
         // Could not determine presence (query failure, ambiguous providers).
@@ -746,6 +766,7 @@ fn check_default_component(
                 action: ACTION_ERROR.to_string(),
                 error: Some(reason),
                 absent_from_state: true,
+                backfill_rpm_metadata: false,
             }
         }
     }
@@ -785,6 +806,37 @@ fn resolve_default_install_package(
         }
         Err(err) => Err(format!(
             "cannot resolve RPM package for default component '{name}': {err}"
+        )),
+    }
+}
+
+fn resolve_legacy_component_package(
+    query: &dyn PackageQuery,
+    index: Option<&ComponentIndex>,
+    rpm_backend: Option<&BackendConfig>,
+    name: &str,
+) -> Result<String, String> {
+    let resolver = ComponentResolver::new(index, rpm_backend, Some(query));
+    match resolver.resolve(
+        name,
+        BackendKind::Rpm,
+        ResolutionUse::RepairLegacy,
+        ResolveOptions::default(),
+    ) {
+        Ok(ResolutionSet::Unique(target)) => Ok(target.package),
+        Ok(ResolutionSet::None) => Err(format!(
+            "component '{name}' is recorded as RPM-backed without package metadata, and no RPM package could be resolved; run `anolisa repair {name}`"
+        )),
+        Ok(ResolutionSet::Ambiguous(targets)) => Err(format!(
+            "component '{name}' is recorded as RPM-backed without package metadata, and multiple RPM packages were resolved ({}); run `anolisa repair {name}`",
+            targets
+                .iter()
+                .map(|target| target.package.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        Err(err) => Err(format!(
+            "cannot resolve the RPM package for legacy component '{name}': {err}"
         )),
     }
 }
@@ -938,6 +990,7 @@ fn check_present_default(
                 action: ACTION_UPDATE.to_string(),
                 error: None,
                 absent_from_state: true,
+                backfill_rpm_metadata: false,
             }
         }
         Ok(None) => ComponentCheck {
@@ -949,6 +1002,7 @@ fn check_present_default(
             action: ACTION_NOOP.to_string(),
             error: None,
             absent_from_state: true,
+            backfill_rpm_metadata: false,
         },
         Err(err) => {
             summary.errors += 1;
@@ -1028,6 +1082,7 @@ fn component_error(
         action: ACTION_ERROR.to_string(),
         error: Some(reason),
         absent_from_state: false,
+        backfill_rpm_metadata: false,
     }
 }
 
