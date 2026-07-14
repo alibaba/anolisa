@@ -242,7 +242,11 @@ pub(crate) fn handle_with_deps(
 
     if ctx.dry_run {
         if ctx.json {
-            return render_json(COMMAND, &plan);
+            let payload = PlanDryRunPayload {
+                dry_run: true,
+                plan: &plan,
+            };
+            return render_json(COMMAND, &payload);
         }
         if !ctx.quiet {
             render_plan_human(&plan, ctx.no_color);
@@ -897,6 +901,26 @@ fn render_uninstall_rpm(ctx: &CliContext, payload: &UninstallRpmPayload) {
     if let Some(id) = &payload.operation_id {
         println!("{} {}", color.label("operation_id:"), color.id(id));
     }
+}
+
+/// JSON wire wrapper for a `--dry-run` [`LifecyclePlan`] (the generic
+/// uninstall/purge plan view).
+///
+/// [`LifecyclePlan`] is a render-context-free planning model and deliberately
+/// carries no `dry_run` field — the plan is identical whether or not the caller
+/// asked to preview it. The CLI only serializes it on the `--dry-run` path, so
+/// the flag is stamped here at the same `data` level as the RPM view's
+/// [`UninstallRpmPayload::dry_run`]. That gives clients a single `data.dry_run`
+/// field to detect a dry-run across both views without a per-view schema branch.
+///
+/// `#[serde(flatten)]` keeps every plan field at the top of `data` (rather than
+/// nesting it under a `plan` key), so the plan's existing wire shape is
+/// preserved and only augmented with `dry_run`.
+#[derive(serde::Serialize)]
+struct PlanDryRunPayload<'a> {
+    dry_run: bool,
+    #[serde(flatten)]
+    plan: &'a LifecyclePlan,
 }
 
 #[derive(serde::Serialize)]
@@ -2559,6 +2583,163 @@ name = "copilot-shell"
         assert!(
             after.find_object(ObjectKind::Component, "cosh").is_none(),
             "ANOLISA state record for 'cosh' must be dropped",
+        );
+    }
+
+    // ── #1471: generic plan-view dry-run JSON contract ──────────────────
+
+    /// #1471: the generic plan view's dry-run JSON must carry
+    /// `data.dry_run == true` and keep every plan field flattened at the
+    /// `data` top level (never nested under a `plan` key), so a client
+    /// detects a dry-run with one field across both the plan and RPM
+    /// views. For an absent component the flattened `phases` must be empty.
+    #[test]
+    fn plan_dry_run_payload_flattens_plan_and_stamps_dry_run() {
+        let empty = InstalledState::default();
+        let plan = LifecyclePlan::for_component_uninstall("agentsight", &empty);
+        let payload = PlanDryRunPayload {
+            dry_run: true,
+            plan: &plan,
+        };
+        let value = serde_json::to_value(&payload).expect("serialize payload");
+        let obj = value
+            .as_object()
+            .expect("payload serializes to a JSON object");
+
+        assert_eq!(
+            obj.get("dry_run"),
+            Some(&serde_json::Value::Bool(true)),
+            "data.dry_run must be true: {value}",
+        );
+        assert!(
+            obj.get("plan").is_none(),
+            "flatten must not introduce a nested 'plan' key: {value}",
+        );
+        assert_eq!(
+            obj.get("operation").and_then(|v| v.as_str()),
+            Some("uninstall"),
+            "flattened plan field 'operation' must sit at the data top level: {value}",
+        );
+        assert_eq!(
+            obj.get("component").and_then(|v| v.as_str()),
+            Some("agentsight"),
+            "flattened plan field 'component' must sit at the data top level: {value}",
+        );
+        assert_eq!(
+            obj.get("phases"),
+            Some(&serde_json::Value::Array(Vec::new())),
+            "absent-component phases must be empty: {value}",
+        );
+    }
+
+    /// #1471: a dry-run over an *installed* raw-managed component keeps the
+    /// legitimate phase `mode == "execute"` — that value describes the real
+    /// execute-time behavior and must not be relabeled for the dry-run
+    /// context — while the payload still reports `dry_run == true`.
+    #[test]
+    fn plan_dry_run_payload_installed_keeps_execute_mode() {
+        use anolisa_core::{FileOwner, OwnedFile, OwnedFileKind};
+
+        let owned = PathBuf::from("/usr/local/bin/agentsight");
+        let mut state = InstalledState::default();
+        state.upsert_object(InstalledObject {
+            kind: ObjectKind::Component,
+            name: "agentsight".to_string(),
+            version: "0.2.0".to_string(),
+            status: ObjectStatus::Installed,
+            manifest_digest: None,
+            distribution_source: Some("file:///fake".to_string()),
+            raw_package: None,
+            install_backend: Some("raw".to_string()),
+            ownership: None,
+            rpm_metadata: None,
+            installed_at: "2026-06-01T10:00:00Z".to_string(),
+            last_operation_id: None,
+            managed: true,
+            adopted: false,
+            subscription_scope: Default::default(),
+            enabled_features: Vec::new(),
+            component_refs: Vec::new(),
+            files: vec![OwnedFile {
+                path: owned.clone(),
+                owner: FileOwner::Anolisa,
+                sha256: Some("0".repeat(64)),
+                kind: OwnedFileKind::File,
+                referent: None,
+            }],
+            external_modified_files: Vec::new(),
+            services: Vec::new(),
+            health: Vec::new(),
+            provisioned_packages: Vec::new(),
+        });
+
+        let plan = LifecyclePlan::for_component_uninstall("agentsight", &state);
+        let payload = PlanDryRunPayload {
+            dry_run: true,
+            plan: &plan,
+        };
+        let value = serde_json::to_value(&payload).expect("serialize payload");
+        let obj = value
+            .as_object()
+            .expect("payload serializes to a JSON object");
+
+        assert_eq!(
+            obj.get("dry_run"),
+            Some(&serde_json::Value::Bool(true)),
+            "installed dry-run must still stamp dry_run: {value}",
+        );
+        let phases = obj
+            .get("phases")
+            .and_then(|v| v.as_array())
+            .expect("phases array present");
+        let remove_file = phases
+            .iter()
+            .find(|p| p.get("name").and_then(|v| v.as_str()) == Some("remove_file"))
+            .expect("owned-file removal phase present for installed component");
+        assert_eq!(
+            remove_file.get("mode").and_then(|v| v.as_str()),
+            Some("execute"),
+            "the owned-file removal phase keeps mode=execute: {value}",
+        );
+        let remove_state = phases
+            .iter()
+            .find(|p| p.get("name").and_then(|v| v.as_str()) == Some("remove_state"))
+            .expect("remove_state phase present for installed component");
+        assert_eq!(
+            remove_state.get("mode").and_then(|v| v.as_str()),
+            Some("execute"),
+            "the remove_state phase keeps mode=execute: {value}",
+        );
+    }
+
+    /// #1471: `--purge --dry-run` shares the same wrapper, so its JSON also
+    /// carries `data.dry_run == true` with the plan flattened at the top.
+    #[test]
+    fn plan_dry_run_payload_covers_purge() {
+        let empty = InstalledState::default();
+        let plan = LifecyclePlan::for_component_purge("agentsight", &empty);
+        let payload = PlanDryRunPayload {
+            dry_run: true,
+            plan: &plan,
+        };
+        let value = serde_json::to_value(&payload).expect("serialize payload");
+        let obj = value
+            .as_object()
+            .expect("payload serializes to a JSON object");
+
+        assert_eq!(
+            obj.get("dry_run"),
+            Some(&serde_json::Value::Bool(true)),
+            "purge dry-run must stamp dry_run: {value}",
+        );
+        assert_eq!(
+            obj.get("operation").and_then(|v| v.as_str()),
+            Some("purge"),
+            "purge operation must sit flattened at the data top level: {value}",
+        );
+        assert!(
+            obj.get("plan").is_none(),
+            "purge payload must also stay flat: {value}",
         );
     }
 }

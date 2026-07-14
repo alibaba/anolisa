@@ -622,13 +622,20 @@ fn build_phases(
             }
         }
     }
-    phases.push(LifecyclePhase {
-        name: "remove_state".to_string(),
-        action: "remove_object".to_string(),
-        target: component.to_string(),
-        mode: LifecycleMode::Execute,
-        rollback_hint: Some("anolisa install <component> (reinstall)".to_string()),
-    });
+    // State-record removal is the one phase every *installed* target ends
+    // with. When the target is absent, `components` is empty and the plan is
+    // genuinely empty (see the "not installed — plan is empty" warning in
+    // `build`); appending `remove_state` here would report a phantom removal
+    // that contradicts that warning, so gate it on a present component.
+    if !components.is_empty() {
+        phases.push(LifecyclePhase {
+            name: "remove_state".to_string(),
+            action: "remove_object".to_string(),
+            target: component.to_string(),
+            mode: LifecycleMode::Execute,
+            rollback_hint: Some("anolisa install <component> (reinstall)".to_string()),
+        });
+    }
 
     phases
 }
@@ -2728,6 +2735,33 @@ mod tests {
             other => panic!("expected ComponentNotInstalled, got {other:?}"),
         }
         assert!(!layout.central_log.exists());
+    }
+
+    /// #1471: an absent target must yield a *genuinely* empty plan — the
+    /// "not installed" warning present, and neither a component slice nor
+    /// any phase emitted. Guards the self-contradiction where the warning
+    /// said "plan is empty" while a phantom `remove_state` phase remained.
+    #[test]
+    fn uninstall_absent_component_yields_empty_components_and_phases() {
+        let empty = InstalledState::default();
+        let plan = LifecyclePlan::for_component_uninstall("agentsight", &empty);
+
+        assert!(
+            plan.components.is_empty(),
+            "absent component must produce no component slice",
+        );
+        assert!(
+            plan.phases.is_empty(),
+            "absent component must produce no phases (not even remove_state): {:?}",
+            plan.phases,
+        );
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|w| w.contains("is not installed") && w.contains("plan is empty")),
+            "the not-installed warning must be retained: {:?}",
+            plan.warnings,
+        );
     }
 
     #[test]
