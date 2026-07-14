@@ -5,7 +5,7 @@
 //! field. `confidence` and `notes` are accepted as human annotations but carry
 //! no behavior — SkillFS does not inherit any confidence-driven semantics.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use serde::Deserialize;
@@ -68,8 +68,17 @@ impl Direction {
 /// Parsed, validated, and direction-filtered substitution table for one target.
 #[derive(Debug)]
 pub(crate) struct CompiledRules {
-    /// Ordered literal `(from, to)` substitutions, applied sequentially.
+    /// Literal `(from, to)` substitutions in file order; applied by a
+    /// single-pass, longest-match scan (file order only breaks length ties,
+    /// which distinct sources cannot produce).
     pub rules: Vec<(String, String)>,
+    /// Source literals that must be matched-and-preserved during the scan, so a
+    /// shorter eligible rule cannot rewrite inside them. These come from rules
+    /// that are ineligible for this target — `auto_apply: never`, identity
+    /// (`from == to`), or direction-disallowed — and never appear in `rules`.
+    /// A source that is also an eligible substitution is excluded (substitution
+    /// wins), so protection never suppresses a real mapping.
+    pub protects: Vec<String>,
     /// Number of rules parsed from the artifact (before direction filtering).
     pub total_rules: usize,
 }
@@ -101,6 +110,12 @@ pub(crate) fn compile(
 
     let mut rules: Vec<(String, String)> = Vec::new();
     let mut seen: HashMap<String, String> = HashMap::new();
+    // Sources of ineligible rules (never / identity / direction-disallowed).
+    // Kept so their full span is preserved during the longest-match scan and a
+    // shorter eligible rule cannot rewrite inside them. Substitutions win, so we
+    // strip any protect source that is also an eligible substitution afterward.
+    let mut protects: Vec<String> = Vec::new();
+    let mut protect_seen: HashSet<String> = HashSet::new();
     for (index, raw) in raw_rules.iter().enumerate() {
         let direction =
             Direction::parse(&raw.direction).ok_or_else(|| OsAdapterError::InvalidDirection {
@@ -131,19 +146,21 @@ pub(crate) fn compile(
             });
         }
 
-        if !auto_apply || !direction.applies_to(target) {
-            continue;
-        }
-
         // Source is the opposite side of the target we convert toward.
         let (from, to) = match target {
             OsTarget::Alinux => (&raw.ubuntu, &raw.alinux),
             OsTarget::Ubuntu => (&raw.alinux, &raw.ubuntu),
         };
 
-        // Identity rules never change bytes; skip so repeated same-name pairs
-        // (e.g. "nginx" -> "nginx") do not trip conflict detection.
-        if from == to {
+        // A rule contributes a real substitution only when it is eligible for
+        // this target and actually changes bytes. Everything else (never,
+        // direction-disallowed, or identity `from == to`) becomes a protection
+        // source so eligibility is not bypassed by a shorter overlapping rule.
+        let is_substitution = auto_apply && direction.applies_to(target) && from != to;
+        if !is_substitution {
+            if protect_seen.insert(from.clone()) {
+                protects.push(from.clone());
+            }
             continue;
         }
 
@@ -165,7 +182,16 @@ pub(crate) fn compile(
         rules.push((from.clone(), to.clone()));
     }
 
-    Ok(CompiledRules { rules, total_rules })
+    // Substitutions take precedence over protection for the same source, so the
+    // canonical reverse mapping (e.g. `dnf install -y ` -> `apt-get install -y`)
+    // is never suppressed by a direction-disallowed alternate that shares it.
+    protects.retain(|source| !seen.contains_key(source));
+
+    Ok(CompiledRules {
+        rules,
+        protects,
+        total_rules,
+    })
 }
 
 #[cfg(test)]

@@ -56,10 +56,13 @@ pub struct DirectiveSection {
 
 /// `[transforms.os_adapter]` — opt-in OS adapter stage.
 ///
-/// The stage rewrites distribution-specific literals in `SKILL.md` using the
-/// externally supplied rule artifact at `rules_path`. Disabled by default; when
-/// `enabled = true`, `rules_path` is required and the artifact is loaded and
-/// validated once at mount startup.
+/// The stage rewrites distribution-specific literals in `SKILL.md`. Disabled by
+/// default. When `enabled = true` and `rules_path` is absent, SkillFS uses its
+/// built-in Ubuntu/Alinux catalog embedded in the binary. A non-empty
+/// `rules_path` overrides the built-in with an external artifact. Either way the
+/// artifact is loaded and validated once at mount startup. A present but blank
+/// `rules_path` is rejected as an invalid override rather than treated as the
+/// built-in default.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OsAdapterSection {
@@ -68,7 +71,8 @@ pub struct OsAdapterSection {
     pub enabled: bool,
     /// Target OS selector: `"auto"` (default), `"ubuntu"`, or `"alinux"`.
     pub target_os: Option<String>,
-    /// Path to the read-only rule artifact.
+    /// Optional path to an external read-only rule artifact. Absent selects the
+    /// built-in catalog; blank/whitespace is rejected.
     pub rules_path: Option<String>,
 }
 
@@ -412,17 +416,17 @@ impl SecurityConfig {
         }
         if let Some(adapter) = self.transforms.as_ref().and_then(|t| t.os_adapter.as_ref()) {
             if adapter.enabled {
-                let has_rules = adapter
-                    .rules_path
-                    .as_deref()
-                    .map(|s| !s.trim().is_empty())
-                    .unwrap_or(false);
-                if !has_rules {
-                    return Err(ConfigError::InvalidValue {
-                        field: "transforms.os_adapter.rules_path",
-                        value: String::new(),
-                        allowed: "non-empty path when transforms.os_adapter.enabled = true",
-                    });
+                // An absent rules_path selects the built-in catalog. A present
+                // but blank/whitespace value is a configuration mistake, not a
+                // request for the default, so reject it explicitly.
+                if let Some(rules_path) = adapter.rules_path.as_deref() {
+                    if rules_path.trim().is_empty() {
+                        return Err(ConfigError::InvalidValue {
+                            field: "transforms.os_adapter.rules_path",
+                            value: String::new(),
+                            allowed: "non-empty path, or omit to use the built-in catalog",
+                        });
+                    }
                 }
             }
             if let Some(value) = adapter.target_os.as_deref() {
@@ -675,19 +679,29 @@ impl SecurityConfig {
     /// Build the opt-in OS adapter stage from `[transforms.os_adapter]`.
     ///
     /// Returns `Ok(None)` when the section is absent or `enabled = false`, so
-    /// the default read pipeline (directive stage only) is preserved.
+    /// the default read pipeline (directive stage only) is preserved and no
+    /// catalog is loaded or validated.
     ///
-    /// When enabled, the rule artifact is read, parsed, validated, and
-    /// specialized for the resolved target OS here — once, before the mount
-    /// begins. `target_os = "auto"` reads `/etc/os-release`.
+    /// When enabled, an artifact is parsed, validated, and specialized for the
+    /// resolved target OS here — once, before the mount begins. An absent
+    /// `rules_path` uses the built-in catalog embedded in the binary; a
+    /// non-empty `rules_path` overrides it with that external artifact.
+    /// `target_os = "auto"` reads `/etc/os-release`.
     ///
     /// # Errors
     ///
-    /// Returns [`OsAdapterError`] when the rule artifact is missing/unreadable,
-    /// the YAML is malformed, a rule is invalid, the resolved target has
-    /// duplicate/ambiguous patterns, or `target_os = auto` cannot map the host
-    /// distribution. Callers must surface this before mounting. `rules_path`
-    /// presence and `target_os` validity are already enforced by [`Self::load`].
+    /// Returns [`OsAdapterError`] when `target_os` is an unsupported value, the
+    /// external rule artifact is missing/unreadable, a configured `rules_path`
+    /// is blank/whitespace, the YAML is malformed, a rule is invalid, the
+    /// resolved target has duplicate/ambiguous patterns, or `target_os = auto`
+    /// cannot map the host distribution. Callers must surface this before
+    /// mounting.
+    ///
+    /// This builder is **fail-closed** — on both a blank `rules_path` and an
+    /// invalid `target_os` — independently of [`Self::load`]'s validation, so an
+    /// embedder that constructs a config by other means (e.g. direct
+    /// deserialization) cannot silently fall back to the built-in catalog or to
+    /// `auto` detection when it meant something specific.
     pub fn build_os_adapter_stage(&self) -> Result<Option<OsAdapterStage>, OsAdapterError> {
         let Some(adapter) = self
             .transforms
@@ -697,19 +711,31 @@ impl SecurityConfig {
         else {
             return Ok(None);
         };
-        // `rules_path` presence is guaranteed by validate() when enabled.
-        let rules_path = adapter
-            .rules_path
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or_default();
-        let selector = adapter
-            .target_os
-            .as_deref()
-            .and_then(TargetSelector::parse)
-            .unwrap_or(TargetSelector::Auto);
-        let stage = OsAdapterStage::load(Path::new(rules_path), selector)?;
+        // An *absent* target_os defaults to auto. A *present* but unsupported
+        // value is a misconfiguration: reject it fail-closed rather than
+        // silently coercing to auto (which would then probe /etc/os-release).
+        let selector = match adapter.target_os.as_deref() {
+            None => TargetSelector::Auto,
+            Some(raw) => {
+                TargetSelector::parse(raw).ok_or_else(|| OsAdapterError::InvalidTargetSelector {
+                    value: raw.to_string(),
+                })?
+            }
+        };
+        // An *absent* rules_path selects the built-in catalog. A *present*
+        // rules_path selects an external artifact — but a blank/whitespace one
+        // is a misconfiguration, so reject it rather than defaulting to
+        // built-in.
+        let stage = match adapter.rules_path.as_deref() {
+            None => OsAdapterStage::load_default(selector)?,
+            Some(raw) => {
+                let path = raw.trim();
+                if path.is_empty() {
+                    return Err(OsAdapterError::BlankRulesPath);
+                }
+                OsAdapterStage::load(Path::new(path), selector)?
+            }
+        };
         Ok(Some(stage))
     }
 
@@ -1865,10 +1891,34 @@ rules_path = "/nonexistent/rules.yaml"
     }
 
     #[test]
-    fn os_adapter_enabled_without_rules_path_rejected() {
+    fn os_adapter_enabled_without_rules_path_builds_builtin() {
+        // Absent rules_path is valid: it selects the built-in catalog. Use an
+        // explicit target so the test does not depend on the host's os-release.
+        let toml = r#"
+[transforms.os_adapter]
+enabled = true
+target_os = "alinux"
+"#;
+        let cfg: SecurityConfig = toml::from_str(toml).unwrap();
+        cfg.validate().expect("absent rules_path must validate");
+        let stage = cfg
+            .build_os_adapter_stage()
+            .unwrap()
+            .expect("built-in stage");
+        assert_eq!(stage.target().as_str(), "alinux");
+        // The bundled catalog has 311 rules.
+        assert_eq!(stage.total_rules(), 311);
+    }
+
+    #[test]
+    fn os_adapter_blank_rules_path_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bad.toml");
-        std::fs::write(&path, "[transforms.os_adapter]\nenabled = true\n").unwrap();
+        std::fs::write(
+            &path,
+            "[transforms.os_adapter]\nenabled = true\nrules_path = \"   \"\n",
+        )
+        .unwrap();
         let result = SecurityConfig::load(&path);
         assert!(
             matches!(
@@ -1878,7 +1928,39 @@ rules_path = "/nonexistent/rules.yaml"
                     ..
                 })
             ),
-            "enabled without rules_path must fail: {result:?}"
+            "blank rules_path must be rejected, not treated as built-in: {result:?}"
+        );
+    }
+
+    #[test]
+    fn os_adapter_builder_rejects_blank_rules_path_without_validate() {
+        // Deserialize directly (no SecurityConfig::load, so validate() never
+        // runs), mimicking an embedder that bypasses config validation. The
+        // builder must still fail closed on a blank rules_path instead of
+        // silently loading the built-in catalog.
+        let cfg: SecurityConfig = toml::from_str(
+            "[transforms.os_adapter]\nenabled = true\ntarget_os = \"alinux\"\nrules_path = \"   \"\n",
+        )
+        .unwrap();
+        let err = cfg.build_os_adapter_stage().unwrap_err();
+        assert!(
+            format!("{err}").contains("blank"),
+            "builder must reject a blank rules_path fail-closed: {err}"
+        );
+    }
+
+    #[test]
+    fn os_adapter_builder_rejects_invalid_target_os_without_validate() {
+        // Deserialize directly (bypassing SecurityConfig::load/validate), then
+        // build. An unsupported target_os must fail closed instead of being
+        // coerced to auto and resolved from /etc/os-release.
+        let cfg: SecurityConfig =
+            toml::from_str("[transforms.os_adapter]\nenabled = true\ntarget_os = \"fedora\"\n")
+                .unwrap();
+        let err = cfg.build_os_adapter_stage().unwrap_err();
+        assert!(
+            format!("{err}").contains("invalid target_os"),
+            "builder must reject an unsupported target_os fail-closed: {err}"
         );
     }
 
@@ -1934,6 +2016,13 @@ rules_path = "/definitely/missing/os-rules.yaml"
         let cfg: SecurityConfig = toml::from_str(&toml).unwrap();
         let stage = cfg.build_os_adapter_stage().unwrap().expect("stage built");
         assert_eq!(stage.target().as_str(), "alinux");
+        // A non-empty rules_path overrides the built-in catalog: this artifact
+        // has exactly one rule, not the 311 bundled rules.
+        assert_eq!(
+            stage.total_rules(),
+            1,
+            "external artifact overrides built-in"
+        );
     }
 
     #[test]

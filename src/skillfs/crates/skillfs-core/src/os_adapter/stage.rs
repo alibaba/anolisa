@@ -14,13 +14,23 @@ use super::detect::{OsTarget, TargetSelector, resolve_target};
 use super::error::OsAdapterError;
 use super::rules;
 
+/// The built-in Ubuntu/Alinux rule catalog, embedded from the repository asset
+/// so the default adapter works in source builds, RPMs, and containers without
+/// depending on a separate on-disk file.
+const BUILTIN_RULES: &[u8] = include_bytes!("../../assets/ubuntu-alinux.yaml");
+
 /// The compiled OS-adapter stage: an ordered list of literal `(from, to)`
 /// substitutions specialized for one resolved [`OsTarget`].
 #[derive(Debug)]
 pub struct OsAdapterStage {
     target: OsTarget,
-    /// Ordered literal substitutions; applied sequentially per read.
+    /// Ordered literal substitutions; applied by a single-pass, longest-match
+    /// scan per read (see the `TransformStage::apply` impl).
     rules: Vec<(String, String)>,
+    /// Source literals matched-and-preserved during the scan (ineligible rules:
+    /// never / identity / direction-disallowed), so a shorter eligible rule
+    /// cannot rewrite inside a span an ineligible rule claims.
+    protects: Vec<String>,
     /// Content-free digest of the rule artifact bytes, for diagnostics.
     digest: String,
     /// Number of rules parsed from the artifact (before direction filtering).
@@ -46,6 +56,27 @@ impl OsAdapterStage {
         Self::from_bytes(&bytes, target, rules_path)
     }
 
+    /// Load, validate, and compile the built-in Ubuntu/Alinux catalog embedded
+    /// in the binary, for the given `selector`.
+    ///
+    /// Used when the OS adapter is enabled without an explicit `rules_path`. The
+    /// catalog is compiled from the embedded artifact exactly once at mount
+    /// startup; the per-read path is unaffected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OsAdapterError`] when `target_os = auto` cannot map
+    /// `/etc/os-release` to a supported target, or (should the embedded artifact
+    /// ever regress) when it fails to compile. Never panics.
+    pub fn load_default(selector: TargetSelector) -> Result<Self, OsAdapterError> {
+        let target = resolve_target(selector)?;
+        Self::from_bytes(
+            BUILTIN_RULES,
+            target,
+            Path::new("<built-in ubuntu-alinux.yaml>"),
+        )
+    }
+
     /// Compile a stage from raw artifact `bytes` for an already-resolved
     /// `target`. Split out from [`Self::load`] so target detection and file I/O
     /// stay testable independently.
@@ -58,6 +89,7 @@ impl OsAdapterStage {
         Ok(Self {
             target,
             rules: compiled.rules,
+            protects: compiled.protects,
             digest: digest_hex(bytes),
             total_rules: compiled.total_rules,
         })
@@ -93,13 +125,67 @@ impl TransformStage for OsAdapterStage {
     }
 
     fn apply(&self, input: &str) -> String {
-        let mut current = input.to_string();
-        for (from, to) in &self.rules {
-            if current.contains(from.as_str()) {
-                current = current.replace(from.as_str(), to);
+        // Single left-to-right pass over the *original* input. At each position
+        // pick the longest matching source pattern (most specific wins), emit
+        // its replacement, and skip past the matched span so neither the
+        // replacement text nor already-scanned input is rewritten again.
+        //
+        // This keeps every rule a 1:1 map to its declared target and prevents
+        // cascading rewrites through overlapping patterns — e.g. `apache2`
+        // never rewrites the inside of `apache2-utils`, and `cron` never
+        // re-hits the `crond` produced by a more specific rule. A naive
+        // sequential `replace` per rule would corrupt both. Distinct sources of
+        // equal length cannot both prefix the same position, so the longest
+        // match is unambiguous; compile-time dedup already rejects equal
+        // sources.
+        //
+        // Ineligible patterns (never / identity / direction-disallowed) also
+        // compete in the scan as *protection* matches: when one is the longest
+        // match it is emitted verbatim and skipped, so a shorter eligible rule
+        // cannot rewrite inside a span an ineligible rule claims (e.g. the
+        // `never` path `/etc/init.d/apache2` is not corrupted by `apache2`).
+        let mut out = String::with_capacity(input.len());
+        let mut i = 0;
+        while i < input.len() {
+            let rest = &input[i..];
+            // Longest matching source at this position, and its replacement:
+            // `Some(to)` substitutes, `None` protects (emit the source as-is).
+            let mut best_from: Option<&str> = None;
+            let mut best_to: Option<&str> = None;
+            for (from, to) in &self.rules {
+                if rest.starts_with(from.as_str()) && best_from.is_none_or(|b| from.len() > b.len())
+                {
+                    best_from = Some(from);
+                    best_to = Some(to);
+                }
+            }
+            for from in &self.protects {
+                if rest.starts_with(from.as_str()) && best_from.is_none_or(|b| from.len() > b.len())
+                {
+                    best_from = Some(from);
+                    best_to = None;
+                }
+            }
+            match best_from {
+                Some(from) => {
+                    out.push_str(best_to.unwrap_or(from));
+                    i += from.len();
+                }
+                None => {
+                    // No pattern matches here: copy one whole UTF-8 scalar so
+                    // `i` stays on a char boundary for the next iteration. The
+                    // loop guard `i < input.len()` makes `rest` non-empty, so
+                    // `chars().next()` is always `Some`.
+                    let Some(ch) = rest.chars().next() else {
+                        unreachable!("rest is non-empty while i < input.len()")
+                    };
+                    let len = ch.len_utf8();
+                    out.push_str(&rest[..len]);
+                    i += len;
+                }
             }
         }
-        current
+        out
     }
 }
 
@@ -191,6 +277,237 @@ mod tests {
         let stage = stage_from(SAMPLE, OsTarget::Alinux).unwrap();
         assert_eq!(stage.apply("enable ufw now"), "enable ufw now");
         assert_eq!(stage.total_rules(), 6);
+    }
+
+    // -----------------------------------------------------------------------
+    // Built-in catalog (bundled default)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn builtin_catalog_has_expected_rule_and_eligibility_counts() {
+        // Structural contract of the bundled asset: exactly 311 rules, every
+        // rule carries an explicit auto_apply, split 257 always / 54 never.
+        let value: serde_yaml::Value = serde_yaml::from_slice(BUILTIN_RULES).unwrap();
+        let seq = value.as_sequence().expect("top-level YAML sequence");
+        assert_eq!(seq.len(), 311, "exactly 311 rules");
+        let (mut always, mut never) = (0usize, 0usize);
+        for rule in seq {
+            let aa = rule
+                .get("auto_apply")
+                .and_then(|v| v.as_str())
+                .expect("every rule must declare auto_apply explicitly");
+            match aa {
+                "always" => always += 1,
+                "never" => never += 1,
+                other => panic!("unexpected auto_apply value: {other}"),
+            }
+        }
+        assert_eq!(always, 257, "high-confidence rules are auto_apply: always");
+        assert_eq!(never, 54, "medium+low rules are auto_apply: never");
+    }
+
+    #[test]
+    fn builtin_catalog_loads_for_explicit_alinux() {
+        let stage = OsAdapterStage::load_default(TargetSelector::Alinux).unwrap();
+        assert_eq!(stage.target(), OsTarget::Alinux);
+        // 311 rules parsed before direction/eligibility filtering.
+        assert_eq!(stage.total_rules(), 311);
+        // Non-identity active substitutions when converting toward Alinux.
+        assert_eq!(stage.active_rules(), 223);
+    }
+
+    #[test]
+    fn builtin_catalog_loads_for_explicit_ubuntu() {
+        let stage = OsAdapterStage::load_default(TargetSelector::Ubuntu).unwrap();
+        assert_eq!(stage.target(), OsTarget::Ubuntu);
+        assert_eq!(stage.total_rules(), 311);
+        assert_eq!(stage.active_rules(), 192);
+    }
+
+    #[test]
+    fn builtin_catalog_transforms_high_confidence_rules_both_directions() {
+        // A representative high-confidence rule (apt-get install) converts in
+        // both directions using the bundled catalog.
+        let to_alinux = OsAdapterStage::load_default(TargetSelector::Alinux).unwrap();
+        let out = to_alinux.apply("run sudo apt-get install -y nginx\n");
+        assert!(out.contains("sudo dnf install -y "), "{out}");
+        assert!(!out.contains("apt-get install"), "{out}");
+
+        let to_ubuntu = OsAdapterStage::load_default(TargetSelector::Ubuntu).unwrap();
+        let back = to_ubuntu.apply("run sudo dnf install -y nginx\n");
+        assert!(back.contains("sudo apt-get install -y "), "{back}");
+    }
+
+    #[test]
+    fn builtin_apt_shorthand_is_forward_only_without_reverse_ambiguity() {
+        // The reclassified `apt update` shorthand still rewrites Ubuntu ->
+        // Alinux, but the reverse target uses the canonical apt-get/apt-cache
+        // form, so the catalog loads for Ubuntu without a reverse conflict.
+        let to_alinux = OsAdapterStage::load_default(TargetSelector::Alinux).unwrap();
+        assert!(to_alinux.apply("apt update\n").contains("dnf check-update"));
+        // Loading toward Ubuntu already succeeded above with 192 active rules,
+        // proving no ambiguity was introduced by the shorthand rules.
+        OsAdapterStage::load_default(TargetSelector::Ubuntu).unwrap();
+    }
+
+    #[test]
+    fn builtin_medium_and_low_rules_are_present_but_inert() {
+        // Representative low (ufw -> firewalld) and medium (apt-get dist-upgrade
+        // -> dnf distro-sync) rules ship in the catalog as auto_apply: never, so
+        // their target literals are never produced by the compiled stage.
+        let value: serde_yaml::Value = serde_yaml::from_slice(BUILTIN_RULES).unwrap();
+        let seq = value.as_sequence().unwrap();
+        let has = |ubuntu: &str, aa: &str| {
+            seq.iter().any(|r| {
+                r.get("ubuntu").and_then(|v| v.as_str()) == Some(ubuntu)
+                    && r.get("auto_apply").and_then(|v| v.as_str()) == Some(aa)
+            })
+        };
+        assert!(
+            has("ufw", "never"),
+            "low-confidence ufw rule present as never"
+        );
+        assert!(
+            has("apt-get dist-upgrade", "never"),
+            "medium-confidence dist-upgrade rule present as never"
+        );
+
+        // Neither never-rule contributes a substitution: their target literals
+        // never appear in the output.
+        let stage = OsAdapterStage::load_default(TargetSelector::Alinux).unwrap();
+        assert!(!stage.apply("please enable ufw now").contains("firewalld"));
+        assert!(
+            !stage
+                .apply("run apt-get dist-upgrade")
+                .contains("dnf distro-sync")
+        );
+    }
+
+    #[test]
+    fn builtin_overlapping_patterns_do_not_cascade() {
+        // Regression: sequential per-rule replacement corrupted overlapping
+        // patterns. Single-pass longest-match keeps each rule's declared target.
+        let alinux = OsAdapterStage::load_default(TargetSelector::Alinux).unwrap();
+        // `apache2` must not rewrite the inside of `apache2-utils`.
+        assert_eq!(alinux.apply("apache2-utils"), "httpd-tools");
+        // `cron` must not rewrite the inside of `cron.service`.
+        assert_eq!(alinux.apply("cron.service"), "crond.service");
+        // The command form wins over the bare `cron` verb, and `crond` in the
+        // result is never re-hit by the `cron` rule.
+        assert_eq!(
+            alinux.apply("systemctl restart cron"),
+            "systemctl restart crond"
+        );
+        // The specific config path wins over its `/etc/apache2/` components.
+        assert_eq!(
+            alinux.apply("/etc/apache2/apache2.conf"),
+            "/etc/httpd/conf/httpd.conf"
+        );
+        // A bare, non-overlapping match still converts.
+        assert_eq!(alinux.apply("apache2"), "httpd");
+
+        // Reverse: the specific package name is not corrupted by the
+        // `httpd` -> `apache2` rule firing inside it.
+        let ubuntu = OsAdapterStage::load_default(TargetSelector::Ubuntu).unwrap();
+        assert_eq!(ubuntu.apply("libmicrohttpd-devel"), "libmicrohttpd-dev");
+    }
+
+    #[test]
+    fn builtin_catalog_full_audit_no_penetration() {
+        // Catalog-wide guard enumerated from the *raw* artifact (not the
+        // already-filtered `stage.rules`), so it also covers never / identity /
+        // direction-disallowed rules. For each raw rule, applying the full
+        // compiled stage to its source must yield:
+        //   - the declared target, when the rule is an eligible substitution;
+        //   - the source unchanged, otherwise (protected — no shorter eligible
+        //     rule may penetrate it).
+        // The old implementation dropped ineligible rules, so shorter rules
+        // penetrated them (e.g. `/etc/init.d/apache2` -> `/etc/init.d/httpd`).
+        use std::collections::HashMap;
+        let value: serde_yaml::Value = serde_yaml::from_slice(BUILTIN_RULES).unwrap();
+        let seq = value.as_sequence().unwrap();
+        let field = |rule: &serde_yaml::Value, key: &str| {
+            rule.get(key).and_then(|v| v.as_str()).unwrap().to_string()
+        };
+        for (target, selector) in [
+            (OsTarget::Alinux, TargetSelector::Alinux),
+            (OsTarget::Ubuntu, TargetSelector::Ubuntu),
+        ] {
+            let stage = OsAdapterStage::load_default(selector).unwrap();
+            let sided = |rule: &serde_yaml::Value| {
+                let ubuntu = field(rule, "ubuntu");
+                let alinux = field(rule, "alinux");
+                match target {
+                    OsTarget::Alinux => (ubuntu, alinux),
+                    OsTarget::Ubuntu => (alinux, ubuntu),
+                }
+            };
+            let allows = |direction: &str| {
+                direction == "bidirectional"
+                    || (direction == "ubuntu_to_alinux_only" && target == OsTarget::Alinux)
+                    || (direction == "alinux_to_ubuntu_only" && target == OsTarget::Ubuntu)
+            };
+            // Eligible substitutions first; a substitution wins over any
+            // protection for the same source (mirrors `compile`'s precedence).
+            let mut subs: HashMap<String, String> = HashMap::new();
+            for rule in seq {
+                let (source, dest) = sided(rule);
+                if field(rule, "auto_apply") == "always"
+                    && allows(&field(rule, "direction"))
+                    && source != dest
+                {
+                    subs.insert(source, dest);
+                }
+            }
+            // Every raw source must transform to its substitution target, or be
+            // preserved verbatim when it has no eligible substitution.
+            for rule in seq {
+                let (source, _) = sided(rule);
+                let expected = subs.get(&source).cloned().unwrap_or_else(|| source.clone());
+                assert_eq!(
+                    stage.apply(&source),
+                    expected,
+                    "target {}: source {source:?} must map to {expected:?}",
+                    stage.target().as_str()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn builtin_never_and_identity_rules_are_protected() {
+        // Regression: ineligible rules were dropped at compile time, so shorter
+        // eligible rules penetrated them. They now protect their whole span.
+        let alinux = OsAdapterStage::load_default(TargetSelector::Alinux).unwrap();
+        // `never` path must not be rewritten by the shorter `apache2` rule.
+        assert_eq!(alinux.apply("/etc/init.d/apache2"), "/etc/init.d/apache2");
+
+        let ubuntu = OsAdapterStage::load_default(TargetSelector::Ubuntu).unwrap();
+        // Identity `postgresql-contrib` must not be split by the shorter
+        // `postgresql` -> `postgresql-client` reverse rule.
+        assert_eq!(ubuntu.apply("postgresql-contrib"), "postgresql-contrib");
+        // The shorter reverse rule still fires on its own bare source.
+        assert_eq!(ubuntu.apply("postgresql"), "postgresql-client");
+    }
+
+    #[test]
+    fn apply_does_not_rewrite_replacement_output() {
+        // A minimal fixture proving non-cascading: `ab` -> `bc` must not then
+        // match a `bc` -> `x` rule on the produced output.
+        let yaml = "- ubuntu: ab\n  alinux: bc\n  direction: bidirectional\n  auto_apply: always\n\
+                    - ubuntu: bc\n  alinux: x\n  direction: ubuntu_to_alinux_only\n  auto_apply: always\n";
+        let stage = stage_from(yaml, OsTarget::Alinux).unwrap();
+        // `ab` -> `bc` (not `x`); the literal `bc` in input -> `x`.
+        assert_eq!(stage.apply("ab bc"), "bc x");
+    }
+
+    #[test]
+    fn builtin_digest_is_stable_across_targets() {
+        // Digest is over the raw artifact bytes, independent of resolved target.
+        let a = OsAdapterStage::load_default(TargetSelector::Alinux).unwrap();
+        let u = OsAdapterStage::load_default(TargetSelector::Ubuntu).unwrap();
+        assert_eq!(a.rule_digest(), u.rule_digest());
+        assert_eq!(a.rule_digest().len(), 64);
     }
 
     #[test]

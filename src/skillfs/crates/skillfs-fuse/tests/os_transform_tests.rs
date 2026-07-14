@@ -381,6 +381,37 @@ fn both_stages_disabled_serves_raw_content() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Built-in bundled catalog (no external rules_path)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Build a stage from the bundled catalog embedded in the binary, exactly as
+/// `enabled = true` with an absent `rules_path` would produce.
+fn builtin_stage(target: OsTarget) -> OsAdapterStage {
+    let selector = match target {
+        OsTarget::Alinux => TargetSelector::Alinux,
+        OsTarget::Ubuntu => TargetSelector::Ubuntu,
+    };
+    OsAdapterStage::load_default(selector).expect("load built-in catalog")
+}
+
+#[test]
+fn builtin_catalog_transforms_skill_md_without_rules_path() {
+    skip_if_no_fuse!();
+    let stage = builtin_stage(OsTarget::Alinux);
+    // The bundled catalog carries all 311 rules.
+    assert_eq!(stage.total_rules(), 311);
+    let body = "# Setup\n\nRun `sudo apt-get install -y nginx`.\n";
+    let fx = MountFixture::normal_with_os_adapter(|src| seed_skill(src, "web", body), stage);
+    let got = std::fs::read_to_string(fx.skill_path("web").join("SKILL.md")).expect("read");
+    // A representative high-confidence rule from the built-in catalog applied.
+    assert!(got.contains("sudo dnf install -y nginx"), "got: {got}");
+    assert!(!got.contains("apt-get"), "got: {got}");
+    // The physical source SKILL.md is never mutated by the transformed read.
+    let src = std::fs::read_to_string(fx.source_skill_path("web").join("SKILL.md")).unwrap();
+    assert_eq!(src, body, "source bytes must remain unchanged");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // getattr size and partial reads agree with transformed bytes
 // ─────────────────────────────────────────────────────────────────────────────
 

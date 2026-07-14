@@ -7,6 +7,25 @@ use std::path::PathBuf;
 /// Errors raised while loading or validating the OS-adapter rule artifact.
 #[derive(Debug, thiserror::Error)]
 pub enum OsAdapterError {
+    /// `target_os` was configured with an unsupported value.
+    ///
+    /// The stage builder rejects it fail-closed so a bad value can never be
+    /// silently coerced to `auto` (and then resolved from `/etc/os-release`),
+    /// even when a caller bypasses the higher-level config validation.
+    #[error("os_adapter: invalid target_os '{value}'; allowed: auto, ubuntu, alinux")]
+    InvalidTargetSelector { value: String },
+
+    /// `rules_path` was present in the config but blank/whitespace.
+    ///
+    /// A blank override is a configuration mistake, not a request for the
+    /// built-in catalog, so the stage builder rejects it fail-closed even when
+    /// a caller bypasses the higher-level config validation.
+    #[error(
+        "os_adapter: configured rules_path is blank; omit it to use the built-in \
+         catalog or set a non-empty path"
+    )]
+    BlankRulesPath,
+
     /// The rule file could not be read.
     #[error("os_adapter: cannot read rules file '{path}': {source}")]
     ReadRules {

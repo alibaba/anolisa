@@ -283,14 +283,21 @@ compiler stage; the OS adapter remains independently opt-in.
 ### Enabling the OS Adapter
 
 The OS adapter is disabled by default and configured through the existing
-`--config <PATH>` TOML file (no extra CLI flags):
+`--config <PATH>` TOML file (no extra CLI flags). When enabled without a
+`rules_path`, it uses the built-in catalog:
 
 ```toml
 [transforms.os_adapter]
 enabled = true
 target_os = "auto"                 # auto | ubuntu | alinux
-rules_path = "/etc/skillfs/ubuntu-alinux.yaml"
+# rules_path = "/etc/skillfs/ubuntu-alinux.yaml"   # optional external override
 ```
+
+SkillFS ships a **built-in 311-rule Ubuntu/Alinux catalog** embedded in the
+binary from the repository asset, so the adapter works in source builds, RPMs,
+and containers without a separate file. It stays opt-in. In this catalog,
+high-confidence rules are `auto_apply: always`, while medium- and low-confidence
+rules are included but `auto_apply: never` (documented yet never applied).
 
 - `target_os = "auto"` reads the exact `/etc/os-release` `ID` once at mount
   startup — `ubuntu`/`debian` map to Ubuntu, `alinux`/`anolis` map to Alinux.
@@ -298,13 +305,16 @@ rules_path = "/etc/skillfs/ubuntu-alinux.yaml"
   derivatives (Rocky, AlmaLinux, CentOS, …) are not silently treated as Alinux,
   and unrecognized hosts reject the mount. Set `ubuntu` or `alinux` explicitly
   on other distributions.
-- `rules_path` is a read-only rule artifact maintained by a separate rule
-  provider. SkillFS loads and validates it once at startup; the per-read path
+- `rules_path` is an optional external override. Omit it to use the built-in
+  catalog; set a non-empty path to load an external read-only artifact instead.
+  A present-but-blank path is rejected, not treated as the default. SkillFS
+  loads and validates the chosen artifact once at startup; the per-read path
   performs only in-memory substitution and never parses YAML, reads
   `/etc/os-release`, spawns processes, or makes network/LLM calls.
 
-The rule artifact is a top-level YAML sequence. Each rule declares the literal
-for each OS side, a `direction`, and a required `auto_apply` flag:
+The rule artifact — built-in or external — is a top-level YAML sequence. Each
+rule declares the literal for each OS side, a `direction`, and a required
+`auto_apply` flag:
 
 ```yaml
 - ubuntu: "apt-get install -y "
@@ -313,20 +323,27 @@ for each OS side, a `direction`, and a required `auto_apply` flag:
   auto_apply: always                # always | never — REQUIRED
 ```
 
-- `auto_apply` is required on every rule; only `auto_apply: always` rules are
-  applied, and only in a direction the resolved target allows. A legacy artifact
-  that omits `auto_apply` is rejected with an error naming the rule index.
+- `auto_apply` is required on every rule, including external override artifacts;
+  only `auto_apply: always` rules are applied, and only in a direction the
+  resolved target allows. An artifact that omits `auto_apply` is rejected with an
+  error naming the rule index.
 - `confidence` and `notes` are accepted as annotations with no behavior —
   eligibility is governed solely by `auto_apply`.
-- Rules apply in file order, so list more specific patterns before shorter ones.
+- Substitution is a single non-cascading pass; at each position the longest
+  matching pattern wins, so overlapping patterns never chain and file order does
+  not affect the result.
+- Ineligible patterns (`auto_apply: never`, identity, or direction-disallowed)
+  still match and are emitted unchanged, protecting their whole span so a shorter
+  eligible rule cannot rewrite inside them. An eligible substitution wins over
+  protection for the same source.
 - A many-to-one forward mapping must resolve reverse ambiguity explicitly: mark
   one pair `bidirectional` (canonical reverse) and the alternates
   `ubuntu_to_alinux_only`. Colliding `bidirectional` reverses are rejected.
 
-When enabled, a missing/unreadable `rules_path`, malformed YAML, a missing or
-invalid `direction`/`auto_apply` value, duplicate or ambiguous patterns, or an
-unrecognized `target_os = "auto"` host reject the mount before it starts with an
-actionable error.
+When enabled, a missing/unreadable external `rules_path`, a blank `rules_path`,
+malformed YAML, a missing or invalid `direction`/`auto_apply` value, duplicate
+or ambiguous patterns, or an unrecognized `target_os = "auto"` host reject the
+mount before it starts with an actionable error.
 
 ## Security Integration
 

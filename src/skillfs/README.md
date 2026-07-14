@@ -286,14 +286,19 @@ affects the compiler stage; the OS adapter remains independently opt-in.
 ### OS Adapter Configuration
 
 The OS adapter reuses the existing `--config <PATH>` TOML file (no new CLI
-flags). It is disabled unless explicitly enabled:
+flags). It is disabled unless explicitly enabled. When enabled without a
+`rules_path`, it uses the built-in catalog:
 
 ```toml
 [transforms.os_adapter]
 enabled = true
 target_os = "auto"                 # auto | ubuntu | alinux
-rules_path = "/etc/skillfs/ubuntu-alinux.yaml"
+# rules_path = "/etc/skillfs/ubuntu-alinux.yaml"   # optional external override
 ```
+
+SkillFS **ships a built-in 311-rule Ubuntu/Alinux catalog** embedded in the
+binary from the repository asset, so the adapter works in source builds, RPMs,
+and containers without a separate file. It remains opt-in.
 
 - `target_os = "auto"` detects the host distribution from the exact
   `/etc/os-release` `ID` once at mount startup — `ubuntu`/`debian` map to Ubuntu
@@ -301,13 +306,18 @@ rules_path = "/etc/skillfs/ubuntu-alinux.yaml"
   is not consulted, so RHEL-family derivatives (Rocky, AlmaLinux, CentOS, …) do
   not silently resolve to Alinux, and unrecognized hosts reject the mount. Set
   `ubuntu` or `alinux` explicitly on other distributions.
-- `rules_path` points at a read-only rule artifact owned by a separate rule
-  provider. SkillFS loads and validates it once at mount startup; the per-read
-  hot path performs only in-memory substitution.
+- `rules_path` is an **optional external override**. Omit it to use the built-in
+  catalog; set a non-empty path to load an external read-only artifact instead.
+  A present-but-blank path is rejected, not treated as the default. SkillFS
+  loads and validates the chosen artifact once at mount startup; the per-read
+  hot path performs only in-memory substitution — no model, network, or
+  subprocess call at any point.
 
-The rule artifact is a top-level YAML sequence. Each entry declares the literal
-strings for each OS side, a `direction`, and an explicit `auto_apply`
-eligibility flag:
+In the built-in catalog, high-confidence rules are `auto_apply: always` while
+medium- and low-confidence rules are included but `auto_apply: never`, so they
+are documented yet never applied. The rule artifact — built-in or external — is
+a top-level YAML sequence. Each entry declares the literal strings for each OS
+side, a `direction`, and an explicit `auto_apply` eligibility flag:
 
 ```yaml
 - ubuntu: "apt-get install -y "
@@ -316,24 +326,32 @@ eligibility flag:
   auto_apply: always                # always | never — REQUIRED
 ```
 
-- `auto_apply` is **required** on every rule. Only `auto_apply: always` rules
-  are applied, and only in a direction the resolved target permits. A legacy
-  artifact that omits `auto_apply` is rejected at mount startup with an error
-  naming the offending rule index.
+- `auto_apply` is **required** on every rule, including external override
+  artifacts. Only `auto_apply: always` rules are applied, and only in a
+  direction the resolved target permits. An artifact that omits `auto_apply` is
+  rejected at mount startup with an error naming the offending rule index.
 - `confidence` and `notes` are accepted as human annotations but carry no
   behavior — eligibility is governed solely by `auto_apply`.
-- Rules apply in file order, so more specific patterns must be listed before
-  shorter ones.
+- Substitution is a single non-cascading pass over the original bytes: at each
+  position the longest matching pattern wins (most specific first), so
+  overlapping patterns like `apache2` and `apache2-utils` never chain and file
+  order does not affect the result.
+- Ineligible patterns (`auto_apply: never`, identity, or direction-disallowed)
+  still match and are emitted unchanged, protecting their whole span so a shorter
+  eligible rule cannot rewrite inside them (e.g. a `never` `/etc/init.d/apache2`
+  is not touched by the `apache2` rule). An eligible substitution wins over
+  protection for the same source.
 - A many-to-one forward mapping (several Ubuntu spellings → one Alinux package)
   must resolve reverse ambiguity **explicitly**: mark exactly one pair
   `bidirectional` (the canonical reverse) and the alternates
   `ubuntu_to_alinux_only`. Two `bidirectional` rules that collide on the reverse
   target are rejected as ambiguous.
 
-When `enabled = true`, a missing or unreadable `rules_path`, malformed YAML, an
-invalid `direction`/`auto_apply` value, duplicate or ambiguous patterns, or an
-unrecognized `target_os = "auto"` host all fail the mount before it starts with
-an actionable error rather than a silently disabled adapter.
+When `enabled = true`, a missing or unreadable external `rules_path`, a blank
+`rules_path`, malformed YAML, an invalid `direction`/`auto_apply` value,
+duplicate or ambiguous patterns, or an unrecognized `target_os = "auto"` host
+all fail the mount before it starts with an actionable error rather than a
+silently disabled adapter.
 
 ## Project Layout
 

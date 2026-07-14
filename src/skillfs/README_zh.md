@@ -263,25 +263,32 @@ enabled = false
 ### OS 适配器配置
 
 OS 适配器复用现有的 `--config <PATH>` TOML 文件（不新增 CLI flag），默认关闭，
-必须显式启用：
+必须显式启用。启用且未设置 `rules_path` 时使用内置规则目录：
 
 ```toml
 [transforms.os_adapter]
 enabled = true
 target_os = "auto"                 # auto | ubuntu | alinux
-rules_path = "/etc/skillfs/ubuntu-alinux.yaml"
+# rules_path = "/etc/skillfs/ubuntu-alinux.yaml"   # 可选的外部覆盖
 ```
+
+SkillFS **内置一份 311 条规则的 Ubuntu/Alinux 规则目录**，通过 `include_bytes!`
+从仓库资产嵌入二进制，因此源码构建、RPM 与容器中无需额外文件即可工作。适配器仍是
+opt-in。
 
 - `target_os = "auto"` 在挂载启动时读取一次 `/etc/os-release` 的精确 `ID`
   检测宿主：`ubuntu`/`debian` 映射为 Ubuntu，`alinux`/`anolis` 映射为 Alinux。
   检测是 **fail-closed** 的：不参考 `ID_LIKE`，因此 RHEL 系衍生版（Rocky、
   AlmaLinux、CentOS 等）不会被静默判定为 Alinux，无法识别的宿主会拒绝挂载。
   其他发行版请显式设置 `ubuntu` 或 `alinux`。
-- `rules_path` 指向由独立规则提供方维护的只读规则文件。SkillFS 在挂载启动时
-  一次性加载并校验；读时热路径只做内存内替换。
+- `rules_path` 是**可选的外部覆盖**。省略即使用内置目录；设置非空路径则改为加载
+  该外部只读规则文件。留空（空串/空白）会被拒绝，而不会当作默认值。SkillFS 在挂载
+  启动时一次性加载并校验所选规则；读时热路径只做内存内替换——全程不调用模型、网络
+  或子进程。
 
-规则文件是一个顶层 YAML 序列，每条规则声明两侧 OS 的字面量、`direction` 以及
-显式的 `auto_apply` 资格标记：
+内置目录中，高置信度规则为 `auto_apply: always`，中/低置信度规则虽然收录但为
+`auto_apply: never`，因此被记录却永不应用。规则文件（内置或外部）是一个顶层 YAML
+序列，每条规则声明两侧 OS 的字面量、`direction` 以及显式的 `auto_apply` 资格标记：
 
 ```yaml
 - ubuntu: "apt-get install -y "
@@ -290,20 +297,26 @@ rules_path = "/etc/skillfs/ubuntu-alinux.yaml"
   auto_apply: always                # always | never —— 必填
 ```
 
-- `auto_apply` 在每条规则上都是**必填**的。只有 `auto_apply: always` 的规则会被
-  应用，且仅在目标允许的方向上生效。缺少 `auto_apply` 的历史规则文件会在挂载
-  启动时被拒绝，并给出指明出错规则序号的错误信息。
+- `auto_apply` 在每条规则上都是**必填**的（外部覆盖文件同样如此）。只有
+  `auto_apply: always` 的规则会被应用，且仅在目标允许的方向上生效。缺少
+  `auto_apply` 的规则文件会在挂载启动时被拒绝，并给出指明出错规则序号的错误信息。
 - `confidence` 与 `notes` 作为人类可读注解被接受，但不影响任何行为——资格完全
   由 `auto_apply` 决定。
-- 规则按文件顺序应用，因此更具体的模式必须排在更短的模式之前。
+- 替换是对原始字节的单遍非级联扫描：每个位置优先匹配最长（最具体）的模式，因此
+  `apache2` 与 `apache2-utils` 这类重叠模式不会连锁改写，且与文件顺序无关。
+- 不生效的模式（`auto_apply: never`、identity、方向不允许）仍会参与匹配并原样输出，
+  从而保护整个 span，使更短的可用规则无法改写其内部（例如 `never` 的
+  `/etc/init.d/apache2` 不会被 `apache2` 规则改写）。同一 source 上，substitution
+  优先于 protection。
 - 多对一的正向映射（多个 Ubuntu 写法 → 同一个 Alinux 包）必须**显式**解决反向
   歧义：恰好将一条标为 `bidirectional`（作为规范反向），其余标为
   `ubuntu_to_alinux_only`。两条在反向目标上冲突的 `bidirectional` 规则会被判定
   为歧义并拒绝。
 
-当 `enabled = true` 时，缺失或不可读的 `rules_path`、YAML 格式错误、非法的
-`direction`/`auto_apply` 值、重复或冲突的模式，或 `target_os = "auto"` 无法识别
-宿主，都会在挂载开始前以可执行的错误信息失败，而不是静默禁用适配器。
+当 `enabled = true` 时，缺失或不可读的外部 `rules_path`、留空的 `rules_path`、
+YAML 格式错误、非法的 `direction`/`auto_apply` 值、重复或冲突的模式，或
+`target_os = "auto"` 无法识别宿主，都会在挂载开始前以可执行的错误信息失败，而不是
+静默禁用适配器。
 
 ## 项目结构
 

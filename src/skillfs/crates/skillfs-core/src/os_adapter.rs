@@ -2,9 +2,16 @@
 //!
 //! Rewrites distribution-specific literal strings (package managers, package
 //! names, service unit names, filesystem paths) between Ubuntu/Debian and
-//! Alinux/Anolis style using an externally supplied, versioned rule artifact.
-//! SkillFS never maintains its own mapping table; it consumes a read-only rule
-//! file whose format is a top-level YAML sequence of rules.
+//! Alinux/Anolis style using a versioned rule artifact.
+//!
+//! SkillFS ships a built-in Ubuntu/Alinux catalog, embedded in the binary from
+//! the repository asset (`assets/ubuntu-alinux.yaml`), and loads it via
+//! [`OsAdapterStage::load_default`] when the adapter is enabled without an
+//! explicit path. An operator may instead point at an external, read-only rule
+//! artifact via [`OsAdapterStage::load`] to override the default. Both are the
+//! same format: a top-level YAML sequence of rules. The adapter stays disabled
+//! by default; enabling it and choosing built-in versus external are the only
+//! decisions.
 //!
 //! # Rule schema
 //!
@@ -29,9 +36,18 @@
 //! The rule artifact is parsed, validated, and compiled into an ordered literal
 //! substitution table exactly once, when the mount starts. Validation rejects
 //! unknown fields, invalid `direction`/`auto_apply` values, empty patterns, and
-//! duplicate or ambiguous source patterns for the resolved target. Rules apply
-//! in file order (callers must place more specific patterns first). The per-read
-//! hot path only performs in-memory string substitution.
+//! duplicate or ambiguous source patterns for the resolved target. The per-read
+//! hot path performs a single left-to-right pass over the original bytes,
+//! choosing the longest matching source pattern at each position (most specific
+//! wins) and skipping past it — so overlapping patterns never cascade and rule
+//! file order does not affect the result.
+//!
+//! Ineligible patterns (`auto_apply: never`, identity where the two sides are
+//! equal, or direction-disallowed for the resolved target) still take part in
+//! the scan as *protection* matches: when one is the longest match it is emitted
+//! unchanged and skipped, so a shorter eligible rule cannot rewrite inside a
+//! span such a rule claims. An eligible substitution always wins over protection
+//! for the same source. This holds for external override artifacts too.
 //!
 //! # Module layout
 //!

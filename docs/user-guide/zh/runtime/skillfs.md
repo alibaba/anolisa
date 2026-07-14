@@ -262,26 +262,33 @@ compiler stage；OS 适配器仍是独立的 opt-in 项。
 
 ### 启用 OS 适配器
 
-OS 适配器默认关闭，通过现有的 `--config <PATH>` TOML 文件配置（不新增 CLI flag）：
+OS 适配器默认关闭，通过现有的 `--config <PATH>` TOML 文件配置（不新增 CLI flag）。
+启用且未设置 `rules_path` 时使用内置规则目录：
 
 ```toml
 [transforms.os_adapter]
 enabled = true
 target_os = "auto"                 # auto | ubuntu | alinux
-rules_path = "/etc/skillfs/ubuntu-alinux.yaml"
+# rules_path = "/etc/skillfs/ubuntu-alinux.yaml"   # 可选的外部覆盖
 ```
+
+SkillFS **内置一份 311 条规则的 Ubuntu/Alinux 规则目录**，通过仓库资产嵌入二进制，
+因此源码构建、RPM 与容器中无需额外文件即可工作，且仍是 opt-in。内置目录中，高置信度
+规则为 `auto_apply: always`，中/低置信度规则虽然收录但为 `auto_apply: never`（被记录
+却永不应用）。
 
 - `target_os = "auto"` 在挂载启动时读取一次 `/etc/os-release` 的精确 `ID` 选择
   目标：`ubuntu`/`debian` 映射为 Ubuntu，`alinux`/`anolis` 映射为 Alinux。检测是
   fail-closed 的：不参考 `ID_LIKE`，因此 RHEL 系衍生版（Rocky、AlmaLinux、CentOS
   等）不会被静默判定为 Alinux，无法识别的宿主会拒绝挂载。其他发行版请显式设置
   `ubuntu` 或 `alinux`。
-- `rules_path` 是由独立规则提供方维护的只读规则文件。SkillFS 在启动时一次性加载
-  并校验；读时路径只做内存内替换，不解析 YAML、不读取 `/etc/os-release`、不启动
-  进程、不访问网络或调用 LLM。
+- `rules_path` 是可选的外部覆盖。省略即使用内置目录；设置非空路径则改为加载该外部
+  只读规则文件。留空会被拒绝，而不会当作默认值。SkillFS 在启动时一次性加载并校验所选
+  规则；读时路径只做内存内替换，不解析 YAML、不读取 `/etc/os-release`、不启动进程、
+  不访问网络或调用 LLM。
 
-规则文件是顶层 YAML 序列。每条规则声明两侧 OS 的字面量、`direction` 以及必填的
-`auto_apply` 标记：
+规则文件（内置或外部）是顶层 YAML 序列。每条规则声明两侧 OS 的字面量、`direction`
+以及必填的 `auto_apply` 标记：
 
 ```yaml
 - ubuntu: "apt-get install -y "
@@ -290,18 +297,22 @@ rules_path = "/etc/skillfs/ubuntu-alinux.yaml"
   auto_apply: always                # always | never —— 必填
 ```
 
-- `auto_apply` 在每条规则上都是必填的；只有 `auto_apply: always` 的规则会被应用，
-  且仅在目标允许的方向上生效。缺少 `auto_apply` 的历史规则文件会被拒绝，并给出
-  指明出错规则序号的错误信息。
+- `auto_apply` 在每条规则上都是必填的（外部覆盖文件同样如此）；只有
+  `auto_apply: always` 的规则会被应用，且仅在目标允许的方向上生效。缺少
+  `auto_apply` 的规则文件会被拒绝，并给出指明出错规则序号的错误信息。
 - `confidence` 与 `notes` 作为注解被接受，但不影响行为——资格完全由 `auto_apply`
   决定。
-- 规则按文件顺序应用，因此更具体的模式必须排在更短的模式之前。
+- 替换是单遍非级联扫描：每个位置优先匹配最长的模式，因此重叠模式不会连锁改写，
+  且与文件顺序无关。
+- 不生效的模式（`auto_apply: never`、identity、方向不允许）仍会参与匹配并原样输出，
+  保护整个 span，使更短的可用规则无法改写其内部。同一 source 上，substitution 优先
+  于 protection。
 - 多对一的正向映射必须显式解决反向歧义：将一条标为 `bidirectional`（规范反向），
   其余标为 `ubuntu_to_alinux_only`。在反向目标上冲突的 `bidirectional` 会被拒绝。
 
-启用后，缺失或不可读的 `rules_path`、YAML 格式错误、缺失或非法的
-`direction`/`auto_apply` 值、重复或冲突的模式，或 `target_os = "auto"` 无法识别
-宿主，都会在挂载开始前以可执行的错误信息拒绝挂载。
+启用后，缺失或不可读的外部 `rules_path`、留空的 `rules_path`、YAML 格式错误、缺失或
+非法的 `direction`/`auto_apply` 值、重复或冲突的模式，或 `target_os = "auto"` 无法
+识别宿主，都会在挂载开始前以可执行的错误信息拒绝挂载。
 
 ## 安全集成
 

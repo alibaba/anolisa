@@ -93,28 +93,78 @@ offset/partial reads for a given resolved target, so a tool that stats then
 reads (or reads in chunks) sees a consistent view. Content that grows or shrinks
 under the OS adapter is reflected in the reported size.
 
-## 6. OS-adapter rule ownership and compatibility
+## 6. OS-adapter rule catalog and compatibility
 
-SkillFS does not own or ship OS mappings; it consumes a read-only rule artifact
-produced by a **separate rule provider**. The artifact is a top-level YAML
-sequence loaded and validated once at mount startup.
+SkillFS ships a built-in Ubuntu/Alinux rule catalog and embeds it in the binary
+from the repository asset `crates/skillfs-core/assets/ubuntu-alinux.yaml` via
+`include_bytes!`, so the default adapter works in source builds, RPMs, and
+containers without a separate on-disk file. An operator may override the default
+with an external read-only artifact by setting a non-empty `rules_path`. Either
+way the artifact is a top-level YAML sequence, loaded and validated once at
+mount startup; `OsAdapterStage::load_default` compiles the built-in bytes and
+`OsAdapterStage::load` compiles an external file. There is no second in-code
+mapping table — the catalog lives only in the asset.
 
-### Explicit provider contract
+### Built-in catalog composition
+
+The bundled catalog carries **311 rules** covering package-manager verbs,
+`-dev`/`-devel` package names, service unit names, and filesystem paths. Each
+rule's eligibility is normalized to an explicit `auto_apply`: the 257
+high-confidence rules are `auto_apply: always` and the 51 medium plus 3 low
+rules are `auto_apply: never`. Medium and low rules are therefore documented in
+the catalog but never applied — SkillFS performs no verification, Repology
+lookup, network call, subprocess, or LLM review to promote them. After
+normalization the catalog produces **223** non-identity active substitutions for
+target Alinux and **192** for target Ubuntu, with no duplicate or ambiguous
+active mapping for either target.
+
+### Explicit rule contract (built-in and external)
 
 - Each rule declares `ubuntu`, `alinux`, `direction`, and a **required**
   `auto_apply` (`always` | `never`). Eligibility is governed solely by
   `auto_apply`; only `always` rules are applied, and only in a direction the
   resolved target permits.
 - `confidence` and `notes` are accepted but inert — SkillFS attaches no behavior
-  to them. This is a deliberate break from the earlier prototype's fuzzy,
-  unenforced `confidence` semantics.
-- A legacy artifact that omits `auto_apply` is rejected with an indexed error,
-  rather than defaulting to applied.
+  to them.
+- An artifact that omits `auto_apply` on any rule is rejected with an indexed
+  error, rather than defaulting to applied. This applies to external override
+  artifacts too: they must carry explicit `auto_apply`.
 - Duplicate and ambiguous active mappings are rejected. A many-to-one forward
   mapping must resolve reverse ambiguity explicitly: exactly one pair is
   `bidirectional` (the canonical reverse) and the alternates are direction-
-  scoped (`ubuntu_to_alinux_only` / `alinux_to_ubuntu_only`). Rule order is
-  significant, so more specific patterns precede shorter ones.
+  scoped (`ubuntu_to_alinux_only` / `alinux_to_ubuntu_only`). The built-in
+  catalog applies this to the apt shorthand verbs (`apt update`, `apt upgrade`,
+  …), which are `ubuntu_to_alinux_only` so the reverse target uses the canonical
+  `apt-get`/`apt-cache` spelling without collision.
+
+### Non-cascading substitution
+
+`apply` runs a single left-to-right pass over the *original* read bytes. At each
+position it selects the **longest** matching source pattern (most specific
+wins), emits that rule's declared target, and advances past the consumed span.
+Neither the replacement text nor already-scanned input is rescanned, so:
+
+- overlapping patterns never chain — `apache2` does not rewrite the inside of
+  `apache2-utils`, and `cron` does not re-hit the `crond` a more specific rule
+  produced;
+- each rule is a 1:1 map to its declared target, independent of file order (two
+  distinct sources of equal length cannot both match at one position, so the
+  longest match is unambiguous).
+
+A naive per-rule sequential `replace` would corrupt these cases; the single-pass
+scan is the correctness fix.
+
+**Protection matches.** Ineligible patterns — `auto_apply: never`, identity
+(`from == to`), and direction-disallowed for the resolved target — also take
+part in the scan, as *protection* matches: when one is the longest match at a
+position it is emitted verbatim and skipped. Without this, dropping ineligible
+rules from the compiled table let a shorter eligible rule rewrite inside a span
+an ineligible rule claims (e.g. the `never` path `/etc/init.d/apache2` becoming
+`/etc/init.d/httpd`, or the identity `postgresql-contrib` becoming
+`postgresql-client-contrib` on reverse), silently bypassing eligibility. An
+eligible substitution always wins over protection for the same source, so a
+direction-disallowed alternate never suppresses the canonical reverse mapping it
+shares a target with.
 
 ### Fail-closed OS detection
 
@@ -122,18 +172,8 @@ sequence loaded and validated once at mount startup.
 → Ubuntu, `alinux`/`anolis` → Alinux. `ID_LIKE` is intentionally ignored, so
 RHEL-family derivatives are not silently treated as Alinux and unrecognized
 hosts reject the mount. Operators on other distributions must set `target_os`
-explicitly.
-
-### Migration note for the reference provider
-
-The reference rule set that ships with the separate provider repository uses a
-`confidence` field and does not carry an explicit `auto_apply`. It is a format
-reference only and is **not** directly loadable as-is. Before SkillFS can
-consume a provider artifact, the provider must:
-
-1. add an explicit `auto_apply: always|never` to every rule; and
-2. express many-to-one forward mappings with a single canonical `bidirectional`
-   reverse plus direction-scoped alternates, so no reverse target is ambiguous.
+explicitly. A present-but-blank `rules_path` is rejected as a misconfiguration
+rather than silently falling back to the built-in catalog.
 
 ## 7. Out of scope (first package)
 
