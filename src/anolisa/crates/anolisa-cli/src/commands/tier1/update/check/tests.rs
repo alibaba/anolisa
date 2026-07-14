@@ -874,12 +874,31 @@ fn update_check_resolves_legacy_rpm_component_without_metadata() {
     let report = run_with_index_and_backend(&host, &state, None, None, None, Some(&backend));
 
     let item = &report.components[0];
-    assert_eq!(item.action, ACTION_NOOP);
+    assert_eq!(item.action, ACTION_RECONCILE);
     assert_eq!(item.package.as_deref(), Some("copilot-shell"));
     assert_eq!(item.installed.as_deref(), Some("2.7.0-1.alnx4"));
     assert!(item.backfill_rpm_metadata);
-    assert!(serde_json::to_value(item).expect("serialize item")["backfill_rpm_metadata"].is_null());
+    let json = serde_json::to_value(&report).expect("serialize report");
+    assert_eq!(json["components"][0]["action"], ACTION_RECONCILE);
+    assert!(json["components"][0]["backfill_rpm_metadata"].is_null());
+    assert_eq!(json["summary"]["reconciliations"], 1);
+    assert!(report.action_required);
+    assert_eq!(report.summary.reconciliations, 1);
     assert_eq!(report.summary.errors, 0);
+
+    let motd = build_motd(&report).expect("reconciliation appears in MOTD");
+    assert!(motd.contains("ANOLISA state reconciliation is required."));
+    assert!(motd.contains("1 component requires state reconciliation"));
+
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let path = cache_path(&layout);
+    write_cache(&path, &report).expect("write cache");
+    let cached = read_cache(&path).expect("read cache");
+    assert!(cached.report.action_required);
+    assert_eq!(cached.report.summary.reconciliations, 1);
+    assert_eq!(cached.report.components[0].action, ACTION_RECONCILE);
+    assert!(build_motd(&cached.report).is_some());
 }
 
 #[test]
@@ -948,6 +967,7 @@ fn update_check_motd_text_lists_upgrades_and_installs() {
         components: Vec::new(),
         summary: CheckSummary {
             updates: 1,
+            reconciliations: 0,
             missing_defaults: 1,
             unsupported: 0,
             errors: 0,

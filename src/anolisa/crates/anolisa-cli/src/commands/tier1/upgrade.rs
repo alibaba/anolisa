@@ -46,8 +46,8 @@ use anolisa_platform::rpm_query::RpmPackageQuery;
 use anolisa_platform::rpm_transaction::RpmTransaction;
 
 use super::update::check::{
-    self, ACTION_ERROR, ACTION_INSTALL, ACTION_NOOP, ACTION_UNSUPPORTED, ACTION_UNSUPPORTED_RPM,
-    ACTION_UPDATE, CliCheck, ComponentCheck,
+    self, ACTION_ERROR, ACTION_INSTALL, ACTION_NOOP, ACTION_RECONCILE, ACTION_UNSUPPORTED,
+    ACTION_UNSUPPORTED_RPM, ACTION_UPDATE, CliCheck, ComponentCheck,
 };
 use crate::color::Palette;
 use crate::commands::common;
@@ -295,19 +295,18 @@ fn build_plan(
 
     // ── components ──
     for component in components {
-        if component.backfill_rpm_metadata
-            && matches!(component.action.as_str(), ACTION_UPDATE | ACTION_NOOP)
-            && let Some(package) = &component.package
-        {
-            plan.legacy_reconciliations
-                .push(PlannedLegacyReconciliation {
-                    name: component.component.clone(),
-                    package: package.clone(),
-                });
-        }
         match component.action.as_str() {
             ACTION_UPDATE => match component_update(component) {
-                Ok(update) => plan.updates.push(update),
+                Ok(update) => {
+                    if component.backfill_rpm_metadata {
+                        plan.legacy_reconciliations
+                            .push(PlannedLegacyReconciliation {
+                                name: update.name.clone(),
+                                package: update.package.clone(),
+                            });
+                    }
+                    plan.updates.push(update);
+                }
                 Err(reason) => plan.errors.push(PlanError {
                     name: component.component.clone(),
                     reason,
@@ -333,6 +332,18 @@ fn build_plan(
                 name: component.component.clone(),
                 reason: RAW_SKIP_REASON.to_string(),
             }),
+            ACTION_RECONCILE => match component.package.clone() {
+                Some(package) => plan.legacy_reconciliations.push(
+                    PlannedLegacyReconciliation {
+                        name: component.component.clone(),
+                        package,
+                    },
+                ),
+                None => plan.errors.push(PlanError {
+                    name: component.component.clone(),
+                    reason: "state reconciliation reported without an RPM package".to_string(),
+                }),
+            },
             ACTION_NOOP => {
                 if component.absent_from_state {
                     match observed_default(component) {

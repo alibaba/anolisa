@@ -91,6 +91,7 @@ const PROFILES_SUBDIR: &str = "profiles";
 // items against the same vocabulary the check produces.
 pub(crate) const ACTION_UPDATE: &str = "update";
 pub(crate) const ACTION_NOOP: &str = "noop";
+pub(crate) const ACTION_RECONCILE: &str = "reconcile";
 pub(crate) const ACTION_INSTALL: &str = "install";
 pub(crate) const ACTION_UNSUPPORTED: &str = "unsupported";
 pub(crate) const ACTION_UNSUPPORTED_RPM: &str = "unsupported_in_rpm_upgrade";
@@ -113,10 +114,10 @@ pub(crate) struct UpdateCheckReport {
     /// narrow: a missing default is an *install*, not an upgrade, so it does not
     /// set this — see [`action_required`](Self::action_required).
     upgrade_available: bool,
-    /// True when there is anything to do: an upgrade **or** a missing default to
-    /// install. This is the signal machine callers should gate on when driving
-    /// `anolisa upgrade`; `upgrade_available` alone would report
-    /// "nothing to upgrade" on a fresh image that is only missing defaults.
+    /// True when there is anything to do: an upgrade, a missing default to
+    /// install, or RPM state to reconcile. This is the signal machine callers
+    /// should gate on when driving `anolisa upgrade`; `upgrade_available` alone
+    /// intentionally covers only package version updates.
     action_required: bool,
     pub(crate) cli: CliCheck,
     pub(crate) components: Vec<ComponentCheck>,
@@ -173,6 +174,10 @@ pub(crate) struct ComponentCheck {
 struct CheckSummary {
     /// Upgrades found (CLI plus components).
     updates: usize,
+    /// Legacy RPM rows whose resolved package metadata needs reconciliation.
+    /// Defaults to zero when reading caches written before this field existed.
+    #[serde(default)]
+    reconciliations: usize,
     /// Profile default components absent from state.
     missing_defaults: usize,
     /// Items outside the RPM upgrade scope (raw-managed, non-RPM CLI).
@@ -424,7 +429,8 @@ fn run_update_check(inputs: CheckInputs<'_>) -> UpdateCheckReport {
     }
 
     let upgrade_available = summary.updates > 0;
-    let action_required = upgrade_available || summary.missing_defaults > 0;
+    let action_required =
+        upgrade_available || summary.reconciliations > 0 || summary.missing_defaults > 0;
     UpdateCheckReport {
         target: inputs.target_name,
         backend: "rpm".to_string(),
@@ -646,17 +652,25 @@ fn check_component(
                 backfill_rpm_metadata,
             }
         }
-        Ok(None) => ComponentCheck {
-            component,
-            package: Some(package),
-            ownership: Some(ownership_label),
-            installed: Some(installed_evr),
-            available: None,
-            action: ACTION_NOOP.to_string(),
-            error: None,
-            absent_from_state: false,
-            backfill_rpm_metadata,
-        },
+        Ok(None) => {
+            let action = if backfill_rpm_metadata {
+                summary.reconciliations += 1;
+                ACTION_RECONCILE
+            } else {
+                ACTION_NOOP
+            };
+            ComponentCheck {
+                component,
+                package: Some(package),
+                ownership: Some(ownership_label),
+                installed: Some(installed_evr),
+                available: None,
+                action: action.to_string(),
+                error: None,
+                absent_from_state: false,
+                backfill_rpm_metadata,
+            }
+        }
         Err(err) => {
             summary.errors += 1;
             component_error(

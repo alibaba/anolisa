@@ -1365,16 +1365,15 @@ fn empty_plan_reconciles_legacy_rpm_component_and_backfills_metadata() {
             info("copilot-shell", "2.7.0", Some("1.alnx4")),
         )
         .with_origin("copilot-shell", "anolisa");
-    let mut check = component_check(
+    let check = component_check(
         "cosh",
         Some("copilot-shell"),
         Some("rpm-managed"),
         Some("2.7.0-1.alnx4"),
         None,
-        ACTION_NOOP,
+        ACTION_RECONCILE,
         None,
     );
-    check.backfill_rpm_metadata = true;
     let plan = build_plan(None, &cli_noop(), &[check]);
 
     let result = run_upgrade_with_deps(
