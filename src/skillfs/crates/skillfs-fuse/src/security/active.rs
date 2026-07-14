@@ -33,6 +33,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::RwLock;
 
@@ -212,6 +214,48 @@ impl From<ActiveMappingError> for ActiveResolverError {
 pub struct ActiveSkillResolver {
     source_root: PathBuf,
     entries: RwLock<HashMap<String, ActiveTarget>>,
+    /// Test-only counter of [`Self::get`] calls, used to assert the
+    /// pinned-resolution boundary consults the resolver exactly once. Compiled
+    /// out of production builds so `get` stays a plain read on the hot path.
+    #[cfg(test)]
+    get_calls: AtomicU64,
+    /// Test-only counter of [`Self::get`] calls made **inside an `open`
+    /// decision scope** (see [`open_decision_scope`]). Unlike [`Self::get_calls`]
+    /// this ignores reads from `lookup`/`getattr`/`read`, so a test can assert
+    /// the real `open` boundary consults the resolver exactly once without any
+    /// dependence on kernel cache timing. Production builds omit it.
+    #[cfg(test)]
+    open_decision_reads: AtomicU64,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Set while a FUSE `open` callback is resolving its activation decision, so
+    /// [`ActiveSkillResolver::get`] can attribute reads to the `open` boundary
+    /// specifically. FUSE callbacks run on the session thread, so a thread-local
+    /// cleanly scopes counting to the `open` handler and excludes the separate
+    /// `lookup`/`getattr`/`read` callbacks.
+    static IN_OPEN_DECISION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test-only RAII guard marking the current thread as inside an `open` decision.
+/// While held, [`ActiveSkillResolver::get`] increments
+/// `open_decision_reads`. `open_impl` holds one across its whole body so a
+/// regression that reads the resolver twice is counted as two.
+#[cfg(test)]
+pub(crate) struct OpenDecisionScope;
+
+#[cfg(test)]
+pub(crate) fn open_decision_scope() -> OpenDecisionScope {
+    IN_OPEN_DECISION.with(|c| c.set(true));
+    OpenDecisionScope
+}
+
+#[cfg(test)]
+impl Drop for OpenDecisionScope {
+    fn drop(&mut self) {
+        IN_OPEN_DECISION.with(|c| c.set(false));
+    }
 }
 
 impl ActiveSkillResolver {
@@ -222,6 +266,10 @@ impl ActiveSkillResolver {
         Self {
             source_root: source_root.into(),
             entries: RwLock::new(HashMap::new()),
+            #[cfg(test)]
+            get_calls: AtomicU64::new(0),
+            #[cfg(test)]
+            open_decision_reads: AtomicU64::new(0),
         }
     }
 
@@ -347,7 +395,29 @@ impl ActiveSkillResolver {
 
     /// Look up the active target for `skill_name`, cloned out of the map.
     pub fn get(&self, skill_name: &str) -> Option<ActiveTarget> {
+        #[cfg(test)]
+        {
+            self.get_calls.fetch_add(1, Ordering::Relaxed);
+            if IN_OPEN_DECISION.with(|c| c.get()) {
+                self.open_decision_reads.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         self.entries.read().get(skill_name).cloned()
+    }
+
+    /// Test-only count of [`Self::get`] calls since construction. Used by the
+    /// pinned-resolution unit tests to assert a single resolver read; not part
+    /// of the production API.
+    #[cfg(test)]
+    pub(crate) fn get_call_count(&self) -> u64 {
+        self.get_calls.load(Ordering::Relaxed)
+    }
+
+    /// Test-only count of [`Self::get`] calls made inside an `open` decision
+    /// scope (i.e. attributable to the `open` callback, not `lookup`/`getattr`).
+    #[cfg(test)]
+    pub(crate) fn open_decision_reads(&self) -> u64 {
+        self.open_decision_reads.load(Ordering::Relaxed)
     }
 
     /// Number of entries currently mapped.

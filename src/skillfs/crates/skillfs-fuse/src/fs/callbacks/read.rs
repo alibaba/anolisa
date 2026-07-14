@@ -153,10 +153,14 @@ impl SkillFs {
                 ref category,
                 ref skill_name,
             } => {
-                // Nested SKILL.md is compiled just like the flat SkillMd:
-                // frontmatter is stripped and env placeholders resolved, so
-                // the agent-visible content matches the flat contract.
-                match self.compiled_hermes_nested_skill_md(category, skill_name) {
+                // Nested SKILL.md runs the same pipeline as the flat SkillMd
+                // and honors the handle's pinned activation target so a later
+                // resolver change cannot re-point an open read.
+                match self.compiled_hermes_nested_skill_md_pinned(
+                    category,
+                    skill_name,
+                    pinned.as_ref(),
+                ) {
                     Some(c) => c,
                     None => {
                         self.emit_op_event(
@@ -250,6 +254,11 @@ impl SkillFs {
         flags: i32,
         reply: ReplyOpen,
     ) {
+        // Test-only: scope every resolver read this `open` performs so a unit
+        // test can assert the activation target is read exactly once (a single
+        // snapshot drives both the decision and the handle's pinned target).
+        #[cfg(test)]
+        let _open_scope = crate::security::active::open_decision_scope();
         debug!(ino, flags, "open");
         if self.inodes.get(ino).is_none() && ino != FUSE_ROOT_ID {
             reply.error(libc::ENOENT);
@@ -446,9 +455,13 @@ impl SkillFs {
                 // I2: staging roots bypass the active resolver entirely.
                 // Pending installs use the same bypass.
                 if !self.is_staging_skill_root(skill_name) && !self.is_pending_install(skill_name) {
-                    if let Some(ref resolver) = self.active_resolver {
-                        pinned_target = resolver.get(skill_name);
-                    }
+                    // TOCTOU-safe: read the activation target exactly once and
+                    // drive both the open-time decision and the handle's pinned
+                    // target from that single snapshot, so a `Current -> Snapshot`
+                    // change cannot let the open be judged against one target
+                    // while reads serve another.
+                    let (target, resolution) = self.resolve_skill_read_pinned(skill_name);
+                    pinned_target = target;
                     let grace_rel = match &path_type {
                         PathType::Passthrough { relative_path, .. } => {
                             Some(relative_path.as_path())
@@ -472,7 +485,7 @@ impl SkillFs {
                     );
                     let record_hit = !is_discover && !is_meta && !is_mutating_open;
                     let policy_decided = self.active_resolver.is_some() && !is_discover && !is_meta;
-                    match self.resolve_skill_read(skill_name) {
+                    match resolution {
                         ReadResolution::Hidden
                             if !self.is_post_publish_grace_allowed(skill_name, grace_rel) =>
                         {
@@ -541,6 +554,12 @@ impl SkillFs {
                 // H3: staging and pending install bypass for nested skills.
                 let nested_id = Self::hermes_skill_id(category, skill_name);
                 if !self.is_staging_skill_root(&nested_id) && !self.is_pending_install(&nested_id) {
+                    // TOCTOU-safe: read the nested skill's activation target once
+                    // and use that single snapshot for both the open-time decision
+                    // and the handle's pinned target — mirrors the flat contract.
+                    let (target, resolution) =
+                        self.resolve_hermes_nested_read_pinned(category, skill_name);
+                    pinned_target = target;
                     let grace_rel = match &path_type {
                         PathType::NestedPassthrough { relative_path, .. } => {
                             Some(relative_path.as_path())
@@ -548,7 +567,7 @@ impl SkillFs {
                         PathType::NestedSkillMd { .. } => Some(Path::new("SKILL.md")),
                         _ => None,
                     };
-                    match self.resolve_hermes_nested_read(category, skill_name) {
+                    match resolution {
                         ReadResolution::Hidden
                             if !self.is_post_publish_grace_allowed(&nested_id, grace_rel) =>
                         {
@@ -787,8 +806,11 @@ impl SkillFs {
                     Err(e) => reply.error(errno(&e)),
                 }
             } else {
-                // Read-only: compiled content served virtually, no fd.
-                let fh = self.handles.allocate(ino, flags, None, None);
+                // Read-only: compiled content served virtually, no fd. Pin the
+                // resolved activation target so the read stays stable.
+                let fh = self
+                    .handles
+                    .allocate(ino, flags, None, pinned_target.clone());
                 self.emit_op_event(
                     req,
                     &path_type,

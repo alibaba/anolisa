@@ -12,8 +12,6 @@
 
 use std::path::{Path, PathBuf};
 
-use skillfs_core::compiler;
-
 use super::SkillFs;
 use crate::security::ActiveTarget;
 
@@ -65,7 +63,7 @@ impl SkillFs {
             ReadResolution::Snapshot { dir, .. } => dir.join("SKILL.md"),
         };
         let raw = std::fs::read_to_string(&physical_path).ok()?;
-        Some(compiler::compile(&raw, &self.env_profile))
+        Some(self.transform_pipeline.run(&raw))
     }
 
     /// Whether a virtual `SKILL.md` entry should be listed for
@@ -138,7 +136,7 @@ impl SkillFs {
             ReadResolution::Snapshot { dir, .. } => dir.join("SKILL.md"),
         };
         let raw = std::fs::read_to_string(&physical_path).ok()?;
-        Some(compiler::compile(&raw, &self.env_profile))
+        Some(self.transform_pipeline.run(&raw))
     }
 
     /// Resolve from an explicit `ActiveTarget` without consulting the resolver.
@@ -163,28 +161,42 @@ impl SkillFs {
     /// no resolver is attached so the pre-security code paths behave
     /// exactly as before. Skill-discover is always `Source`.
     pub(super) fn resolve_skill_read(&self, skill_name: &str) -> ReadResolution {
+        self.resolve_skill_read_pinned(skill_name).1
+    }
+
+    /// Snapshot the resolver **once** and return both the pinned
+    /// [`ActiveTarget`] (for handle pinning) and the derived
+    /// [`ReadResolution`] (for the open-time security decision).
+    ///
+    /// Serving both from a single `resolver.get` closes the TOCTOU window in
+    /// `open`: reading the target for pinning and then re-resolving for the
+    /// Hidden/Current/Snapshot decision could straddle a `Current -> Snapshot`
+    /// activation change, letting an open be judged against one target while
+    /// the handle pinned another. A snapshot decision must never be served from
+    /// the live source, so both derive from the same observed target.
+    ///
+    /// Returns `(None, Source)` when no resolver is attached or for
+    /// skill-discover, matching the no-resolver default (no pinning).
+    pub(super) fn resolve_skill_read_pinned(
+        &self,
+        skill_name: &str,
+    ) -> (Option<ActiveTarget>, ReadResolution) {
         if skill_name == "skill-discover" {
-            return ReadResolution::Source;
+            return (None, ReadResolution::Source);
         }
         let resolver = match self.active_resolver.as_ref() {
             Some(r) => r,
-            None => return ReadResolution::Source,
+            None => return (None, ReadResolution::Source),
         };
-        match resolver.get(skill_name) {
-            // Default: skills the ledger has no opinion on
-            // are treated as not-yet-certified and stay hidden until a
-            // future hook handler installs a target for them.
+        let target = resolver.get(skill_name);
+        // Default: skills the ledger has no opinion on are treated as
+        // not-yet-certified and stay hidden until a future hook handler
+        // installs a target for them.
+        let resolution = match &target {
             None => ReadResolution::Hidden,
-            Some(ActiveTarget::Hidden { .. }) => ReadResolution::Hidden,
-            Some(ActiveTarget::Current { .. }) => ReadResolution::Source,
-            Some(ActiveTarget::Snapshot {
-                snapshot_dir,
-                version,
-            }) => {
-                let dir = self.snapshot_read_dir(skill_name, &snapshot_dir);
-                ReadResolution::Snapshot { dir, version }
-            }
-        }
+            Some(t) => self.resolve_from_target(skill_name, t),
+        };
+        (target, resolution)
     }
 
     /// Rewrite a `snapshot_dir` from the resolver so reads bypass the
@@ -225,6 +237,19 @@ impl SkillFs {
         category: &str,
         skill_name: &str,
     ) -> ReadResolution {
+        self.resolve_hermes_nested_read_pinned(category, skill_name)
+            .1
+    }
+
+    /// Single-read counterpart of [`Self::resolve_hermes_nested_read`], mirroring
+    /// [`Self::resolve_skill_read_pinned`] for the Hermes layout: the nested
+    /// skill's `ActiveTarget` is read once and used for both the open-time
+    /// decision and handle pinning, closing the same TOCTOU window.
+    pub(super) fn resolve_hermes_nested_read_pinned(
+        &self,
+        category: &str,
+        skill_name: &str,
+    ) -> (Option<ActiveTarget>, ReadResolution) {
         // Non-skill children of a category (a directory without `SKILL.md`,
         // e.g. `apple/docs`) are plain passthrough — never gated by
         // activation. Without this, an attached resolver has no entry for
@@ -234,25 +259,19 @@ impl SkillFs {
         // here; this guard covers the directory case (including brand-new
         // install/staging dirs that have no `SKILL.md` yet).
         if !self.hermes_nested_is_skill(category, skill_name) {
-            return ReadResolution::Source;
+            return (None, ReadResolution::Source);
         }
         let nested_id = Self::hermes_skill_id(category, skill_name);
         let resolver = match self.active_resolver.as_ref() {
             Some(r) => r,
-            None => return ReadResolution::Source,
+            None => return (None, ReadResolution::Source),
         };
-        match resolver.get(&nested_id) {
+        let target = resolver.get(&nested_id);
+        let resolution = match &target {
             None => ReadResolution::Hidden,
-            Some(ActiveTarget::Hidden { .. }) => ReadResolution::Hidden,
-            Some(ActiveTarget::Current { .. }) => ReadResolution::Source,
-            Some(ActiveTarget::Snapshot {
-                snapshot_dir,
-                version,
-            }) => {
-                let dir = self.snapshot_read_dir(&nested_id, &snapshot_dir);
-                ReadResolution::Snapshot { dir, version }
-            }
-        }
+            Some(t) => self.resolve_from_target(&nested_id, t),
+        };
+        (target, resolution)
     }
 
     /// Compiled SKILL.md for a Hermes nested skill.
@@ -271,7 +290,43 @@ impl SkillFs {
             ReadResolution::Snapshot { dir, .. } => dir.join("SKILL.md"),
         };
         let raw = std::fs::read_to_string(&physical_path).ok()?;
-        Some(compiler::compile(&raw, &self.env_profile))
+        Some(self.transform_pipeline.run(&raw))
+    }
+
+    /// Compiled nested `SKILL.md` honoring a pinned activation target.
+    ///
+    /// Mirrors [`Self::compiled_skill_md_pinned`] for the Hermes layout: when a
+    /// handle carries a pinned [`ActiveTarget`], the read resolves against that
+    /// target instead of re-consulting the live resolver, so a handle opened on
+    /// a snapshot never switches to the live source and a handle opened on the
+    /// live source stays readable after the skill is later hidden.
+    pub(super) fn compiled_hermes_nested_skill_md_pinned(
+        &self,
+        category: &str,
+        skill_name: &str,
+        pinned: Option<&ActiveTarget>,
+    ) -> Option<String> {
+        let resolution = match pinned {
+            // Non-skill category children (e.g. `apple/docs`) are plain
+            // passthrough and never gated; keep them on the source path.
+            Some(_) if !self.hermes_nested_is_skill(category, skill_name) => ReadResolution::Source,
+            Some(target) => {
+                let nested_id = Self::hermes_skill_id(category, skill_name);
+                self.resolve_from_target(&nested_id, target)
+            }
+            None => self.resolve_hermes_nested_read(category, skill_name),
+        };
+        let physical_path = match resolution {
+            ReadResolution::Hidden => return None,
+            ReadResolution::Source => self
+                .source_base()
+                .join(category)
+                .join(skill_name)
+                .join("SKILL.md"),
+            ReadResolution::Snapshot { dir, .. } => dir.join("SKILL.md"),
+        };
+        let raw = std::fs::read_to_string(&physical_path).ok()?;
+        Some(self.transform_pipeline.run(&raw))
     }
 
     /// Physical read dir for a Hermes nested skill.
@@ -285,5 +340,303 @@ impl SkillFs {
             ReadResolution::Source => Some(self.source_base().join(category).join(skill_name)),
             ReadResolution::Snapshot { dir, .. } => Some(dir),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::security::{ActiveSkillResolver, ActiveTarget};
+    use crate::{MountConfig, MountOptions, mount_background_configured};
+    use parking_lot::RwLock;
+    use skillfs_core::transform::TransformPipeline;
+    use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
+    use std::io::Read;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Minimal FUSE-availability probe (mirrors the integration harness) so
+    /// mount-based unit tests skip gracefully where `/dev/fuse` is unusable.
+    fn fuse_available() -> bool {
+        if !std::path::Path::new("/dev/fuse").exists() {
+            return false;
+        }
+        let dev = std::ffi::CString::new("/dev/fuse").expect("cstring");
+        let fd = unsafe {
+            libc::open(
+                dev.as_ptr(),
+                libc::O_RDWR | libc::O_CLOEXEC | libc::O_NONBLOCK,
+            )
+        };
+        if fd < 0 {
+            return false;
+        }
+        unsafe { libc::close(fd) };
+        std::process::Command::new("fusermount3")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// Classify a resolution into a stable tag for cross-checking against the
+    /// pinned target without requiring `PartialEq` on `ReadResolution`.
+    fn tag(res: &ReadResolution) -> &'static str {
+        match res {
+            ReadResolution::Source => "source",
+            ReadResolution::Snapshot { .. } => "snapshot",
+            ReadResolution::Hidden => "hidden",
+        }
+    }
+
+    fn skillfs_with_resolver(source: &Path, resolver: ActiveSkillResolver) -> SkillFs {
+        let store: SharedSkillStore = Arc::new(RwLock::new(SkillStore::new()));
+        // Empty pipeline: this test exercises resolver logic only and must not
+        // pay for environment detection.
+        SkillFs::new_with_pipeline(
+            source.to_path_buf(),
+            source.to_path_buf(),
+            store,
+            false,
+            TransformPipeline::empty(),
+        )
+        .with_active_resolver(Arc::new(resolver))
+    }
+
+    /// The single-read `resolve_skill_read_pinned` must return a target and a
+    /// resolution that agree, and its resolution must match the legacy
+    /// `resolve_skill_read` entry point. This guards against re-introducing a
+    /// second, independent resolver read in `open` (the TOCTOU window).
+    #[test]
+    fn pinned_read_target_and_resolution_are_consistent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path();
+        let resolver = ActiveSkillResolver::new(src.to_path_buf());
+        resolver.set(
+            "cur",
+            ActiveTarget::Current {
+                source_dir: src.join("cur"),
+            },
+        );
+        resolver.set(
+            "snap",
+            ActiveTarget::Snapshot {
+                snapshot_dir: src.join("snap/.skill-meta/versions/v1"),
+                version: "v1".to_string(),
+            },
+        );
+        resolver.set(
+            "hid",
+            ActiveTarget::Hidden {
+                reason: "risk".to_string(),
+            },
+        );
+        let fs = skillfs_with_resolver(src, resolver);
+
+        for (name, want_target, want_tag) in [
+            ("cur", "current", "source"),
+            ("snap", "snapshot", "snapshot"),
+            ("hid", "hidden", "hidden"),
+            ("absent", "none", "hidden"),
+        ] {
+            let (target, resolution) = fs.resolve_skill_read_pinned(name);
+            // Resolution must agree with the single-decision entry point.
+            assert_eq!(
+                tag(&resolution),
+                tag(&fs.resolve_skill_read(name)),
+                "resolution disagreement for {name}"
+            );
+            // The pinned target and the derived resolution must describe the
+            // same decision — never Current-target with a Snapshot resolution.
+            let target_kind = match &target {
+                None => "none",
+                Some(ActiveTarget::Current { .. }) => "current",
+                Some(ActiveTarget::Snapshot { .. }) => "snapshot",
+                Some(ActiveTarget::Hidden { .. }) => "hidden",
+            };
+            assert_eq!(target_kind, want_target, "target kind for {name}");
+            assert_eq!(tag(&resolution), want_tag, "resolution tag for {name}");
+        }
+    }
+
+    /// The public `SkillFs::new` must keep the directive stage enabled by
+    /// default so embedders that construct it directly still get compiled
+    /// `SKILL.md` (byte-compatible with pre-pipeline SkillFS), not raw content.
+    /// Managed mounts opt out via `new_with_pipeline`.
+    #[test]
+    fn public_new_defaults_to_compiled_skill_md() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path();
+        // A directive that must be stripped (evaluates false on any host) plus
+        // a line that must survive. Raw output would keep the directive markers.
+        std::fs::create_dir_all(src.join("foo")).unwrap();
+        std::fs::write(
+            src.join("foo/SKILL.md"),
+            "<!-- @if os == plan9 -->\nHIDDEN-BRANCH\n<!-- @endif -->\nVISIBLE-LINE\n",
+        )
+        .unwrap();
+
+        let mut store = SkillStore::new();
+        store.load_from_directory(src, &ParseConfig::default());
+        let store: SharedSkillStore = Arc::new(RwLock::new(store));
+
+        // Default public constructor — no `with_directive_enabled` call.
+        let fs = SkillFs::new(src.to_path_buf(), src.to_path_buf(), store, false);
+        assert_eq!(
+            fs.transform_stage_names(),
+            vec!["directive"],
+            "public new must enable the directive stage by default"
+        );
+
+        let out = fs
+            .compiled_skill_md("foo")
+            .expect("skill foo should be readable");
+        assert!(out.contains("VISIBLE-LINE"), "compiled output: {out}");
+        assert!(
+            !out.contains("HIDDEN-BRANCH"),
+            "false directive branch must be stripped: {out}"
+        );
+        assert!(
+            !out.contains("@if"),
+            "directive markers must be stripped: {out}"
+        );
+    }
+
+    /// Building block: the flat pinned-resolution helper consults the resolver
+    /// exactly once per call, returning both the pinned target and the decision
+    /// from a single read. (The end-to-end guard that `open` actually uses this
+    /// single read is `open_reads_resolver_once_end_to_end`.)
+    #[test]
+    fn resolve_skill_read_pinned_reads_resolver_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path();
+        let resolver = Arc::new(ActiveSkillResolver::new(src.to_path_buf()));
+        resolver.set(
+            "web",
+            ActiveTarget::Current {
+                source_dir: src.join("web"),
+            },
+        );
+        let store: SharedSkillStore = Arc::new(RwLock::new(SkillStore::new()));
+        let fs = SkillFs::new_with_pipeline(
+            src.to_path_buf(),
+            src.to_path_buf(),
+            store,
+            false,
+            TransformPipeline::empty(),
+        )
+        .with_active_resolver(resolver.clone());
+
+        let before = resolver.get_call_count();
+        let _ = fs.resolve_skill_read_pinned("web");
+        assert_eq!(
+            resolver.get_call_count() - before,
+            1,
+            "one pinned resolution must be a single resolver read"
+        );
+        // A second resolution is a second single read — never batched or doubled.
+        let _ = fs.resolve_skill_read_pinned("web");
+        assert_eq!(resolver.get_call_count() - before, 2);
+    }
+
+    /// Same single-read guarantee for the Hermes nested pinned-resolution
+    /// boundary.
+    #[test]
+    fn resolve_hermes_nested_read_pinned_reads_resolver_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path();
+        // hermes_nested_is_skill checks for a physical SKILL.md.
+        std::fs::create_dir_all(src.join("cloud/deploy")).unwrap();
+        std::fs::write(src.join("cloud/deploy/SKILL.md"), "x\n").unwrap();
+
+        let resolver = Arc::new(ActiveSkillResolver::new(src.to_path_buf()));
+        resolver.set(
+            "cloud/deploy",
+            ActiveTarget::Current {
+                source_dir: src.join("cloud/deploy"),
+            },
+        );
+        let store: SharedSkillStore = Arc::new(RwLock::new(SkillStore::new()));
+        let fs = SkillFs::new_with_pipeline(
+            src.to_path_buf(),
+            src.to_path_buf(),
+            store,
+            false,
+            TransformPipeline::empty(),
+        )
+        .with_active_resolver(resolver.clone());
+
+        let before = resolver.get_call_count();
+        let _ = fs.resolve_hermes_nested_read_pinned("cloud", "deploy");
+        assert_eq!(
+            resolver.get_call_count() - before,
+            1,
+            "one nested pinned resolution must be a single resolver read"
+        );
+    }
+
+    /// End-to-end TOCTOU guard at the real `open` boundary, timing-independent.
+    ///
+    /// An `open`-decision scope (thread-local, see [`open_decision_scope`])
+    /// tallies only the resolver reads made inside the `open` callback, so
+    /// `lookup`/`getattr`/`read` reads never count and the assertion has no
+    /// dependence on kernel entry/attr cache timing. A single agent `open` must
+    /// read the activation target exactly once, so the decision and the
+    /// handle's pinned target come from one snapshot. The pre-fix `open` read
+    /// the resolver twice (pin + decide), which this counts as 2 and fails on.
+    #[test]
+    fn open_reads_activation_target_once_end_to_end() {
+        if !fuse_available() {
+            eprintln!("SKIP open_reads_activation_target_once_end_to_end: FUSE unavailable");
+            return;
+        }
+        let src_dir = tempfile::tempdir().unwrap();
+        let mnt_dir = tempfile::tempdir().unwrap();
+        let src = src_dir.path();
+        std::fs::create_dir_all(src.join("web")).unwrap();
+        std::fs::write(src.join("web/SKILL.md"), "# Current\n").unwrap();
+
+        let resolver = Arc::new(ActiveSkillResolver::new(src.to_path_buf()));
+        resolver.set(
+            "web",
+            ActiveTarget::Current {
+                source_dir: src.join("web"),
+            },
+        );
+
+        let mut store = SkillStore::new();
+        store.load_from_directory(src, &ParseConfig::default());
+        let store: SharedSkillStore = Arc::new(RwLock::new(store));
+
+        // `_handle` unmounts on drop (best-effort, never panics), so cleanup is
+        // automatic even if an assertion below panics.
+        let _handle = mount_background_configured(
+            mnt_dir.path(),
+            src,
+            store,
+            MountOptions::default(),
+            false,
+            MountConfig {
+                active_resolver: Some(resolver.clone()),
+                ..MountConfig::default()
+            },
+        )
+        .expect("mount");
+        std::thread::sleep(Duration::from_millis(300));
+
+        let path = mnt_dir.path().join("skills/web/SKILL.md");
+        let before = resolver.open_decision_reads();
+        let mut f = std::fs::File::open(&path).expect("open");
+        let mut buf = String::new();
+        f.read_to_string(&mut buf).expect("read");
+        let open_reads = resolver.open_decision_reads() - before;
+
+        assert_eq!(buf, "# Current\n", "should serve Current live content");
+        assert_eq!(
+            open_reads, 1,
+            "open must read the activation target exactly once (2 = pre-fix TOCTOU double read); got {open_reads}"
+        );
     }
 }

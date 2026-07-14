@@ -13,6 +13,8 @@ use fuser::{
     FUSE_ROOT_ID, FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty,
     ReplyEntry, ReplyOpen, ReplyStatfs, ReplyXattr, Request,
 };
+use skillfs_core::os_adapter::OsAdapterStage;
+use skillfs_core::transform::{DirectiveStage, TransformPipeline};
 use skillfs_core::{SharedSkillStore, env::EnvironmentProfile, views::ViewsConfig};
 use tracing::{info, warn};
 
@@ -47,8 +49,16 @@ pub struct SkillFs {
     store: SharedSkillStore,
     handles: HandleManager,
     inodes: InodeManager,
-    /// Runtime environment for SKILL.md conditional compilation.
-    env_profile: EnvironmentProfile,
+    /// Ordered read-time transform pipeline applied to `SKILL.md` bytes.
+    ///
+    /// Constructed empty; `mount_inner` enables stages from configuration. The
+    /// directive/compiler stage, when enabled, always runs first; the opt-in OS
+    /// adapter, when configured, runs second, preserving the fixed
+    /// `directive -> os_adapter` order. Either stage may be absent (adapter-only
+    /// or fully raw). Built once at mount startup so the per-read hot path only
+    /// runs in-memory string work. Environment detection happens only when the
+    /// directive stage is enabled.
+    transform_pipeline: TransformPipeline,
     /// View configuration loaded from skillfs-views.toml (if present).
     views_config: Option<ViewsConfig>,
     /// Pre-opened fd to source dir (in-place mode). Bypasses the FUSE mount
@@ -127,13 +137,41 @@ impl SkillFs {
     /// `in_place`: the FUSE mount will be placed on `source` itself, so all
     /// physical reads must go through the pre-opened fd (`/proc/self/fd/{n}`)
     /// to bypass the FUSE layer.
+    ///
+    /// The read-time transform pipeline defaults to the directive/compiler
+    /// stage enabled (byte-for-byte compatible with pre-pipeline SkillFS), so
+    /// embedders that construct `SkillFs` directly keep compiling `SKILL.md` on
+    /// read. This detects the runtime [`EnvironmentProfile`]. Managed mounts go
+    /// through [`Self::new_with_pipeline`] instead, which lets `mount_inner`
+    /// build an adapter-only or empty pipeline without paying for detection.
     pub fn new(
         mountpoint: PathBuf,
         source: PathBuf,
         store: SharedSkillStore,
         in_place: bool,
     ) -> Self {
-        let env_profile = EnvironmentProfile::detect();
+        Self::new_with_pipeline(
+            mountpoint,
+            source,
+            store,
+            in_place,
+            TransformPipeline::directive_only(EnvironmentProfile::detect()),
+        )
+    }
+
+    /// Crate-internal constructor accepting a preconfigured transform pipeline.
+    ///
+    /// `mount_inner` uses this to install the pipeline it derived from mount
+    /// configuration — enabling the directive stage (and thus environment
+    /// detection) only when configured, so an adapter-only or fully-raw mount
+    /// never runs `EnvironmentProfile::detect`.
+    pub(crate) fn new_with_pipeline(
+        mountpoint: PathBuf,
+        source: PathBuf,
+        store: SharedSkillStore,
+        in_place: bool,
+        transform_pipeline: TransformPipeline,
+    ) -> Self {
         // Load views config from the source directory if present.
         let views_config = ViewsConfig::load(&source);
         if views_config.is_some() {
@@ -179,7 +217,7 @@ impl SkillFs {
             store,
             handles: HandleManager::new(),
             inodes: InodeManager::new(),
-            env_profile,
+            transform_pipeline,
             views_config,
             source_dirfd,
             in_place,
@@ -404,6 +442,39 @@ impl SkillFs {
     pub fn with_skill_layout(mut self, layout: SkillLayout) -> Self {
         self.skill_layout = layout;
         self
+    }
+
+    /// Enable or disable the directive/compiler transform stage.
+    ///
+    /// Enabling it detects the runtime [`EnvironmentProfile`] and binds a fresh
+    /// [`DirectiveStage`]; disabling it clears the stage. Environment detection
+    /// (which probes the command whitelist via `which`) therefore happens
+    /// **only** when the directive stage is enabled — an adapter-only or fully
+    /// raw pipeline never probes the environment. Idempotent — the stage can
+    /// never be present twice.
+    pub fn with_directive_enabled(mut self, enabled: bool) -> Self {
+        let stage = enabled.then(|| DirectiveStage::new(EnvironmentProfile::detect()));
+        self.transform_pipeline.set_directive(stage);
+        self
+    }
+
+    /// Set the opt-in OS adapter as the second transform stage.
+    ///
+    /// The stage always runs after the directive/compiler stage, preserving
+    /// the fixed `directive -> os_adapter` order. Only `SKILL.md` reads flow
+    /// through the pipeline, so the adapter never sees other file types. The
+    /// stage is pre-compiled (rules already parsed, validated, and specialized
+    /// for the resolved target), so no YAML parsing, OS detection, or I/O
+    /// occurs on the per-read hot path. Idempotent — the adapter can never be
+    /// present twice.
+    pub fn with_os_adapter_stage(mut self, stage: OsAdapterStage) -> Self {
+        self.transform_pipeline.set_os_adapter(stage);
+        self
+    }
+
+    /// Ordered transform stage names, for content-free init diagnostics.
+    pub(crate) fn transform_stage_names(&self) -> Vec<&'static str> {
+        self.transform_pipeline.stage_names()
     }
 
     /// Parse a FUSE path using this filesystem's layout and in-place mode.

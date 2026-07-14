@@ -7,6 +7,7 @@ use std::fmt;
 use std::path::Path;
 
 use serde::Deserialize;
+use skillfs_core::os_adapter::{OsAdapterError, OsAdapterStage, TargetSelector};
 
 use super::activation::ActivationMode;
 use super::activation_reload::ReloadMode;
@@ -30,6 +31,45 @@ pub struct SecurityConfig {
     pub install: Option<InstallSection>,
     pub control_socket: Option<ControlSocketSection>,
     pub skills: Option<SkillsSection>,
+    pub transforms: Option<TransformsSection>,
+}
+
+/// `[transforms]` — read-time `SKILL.md` transform configuration.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransformsSection {
+    pub directive: Option<DirectiveSection>,
+    pub os_adapter: Option<OsAdapterSection>,
+}
+
+/// `[transforms.directive]` — the conditional-compiler stage.
+///
+/// Enabled by default; the section only needs to appear to disable it. When the
+/// section is absent, directive compilation stays enabled so existing mounts
+/// keep byte-for-byte compatible output.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirectiveSection {
+    /// Enable the directive/compiler stage. Absent field defaults to `true`.
+    pub enabled: Option<bool>,
+}
+
+/// `[transforms.os_adapter]` — opt-in OS adapter stage.
+///
+/// The stage rewrites distribution-specific literals in `SKILL.md` using the
+/// externally supplied rule artifact at `rules_path`. Disabled by default; when
+/// `enabled = true`, `rules_path` is required and the artifact is loaded and
+/// validated once at mount startup.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OsAdapterSection {
+    /// Enable the OS adapter stage. Defaults to `false`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Target OS selector: `"auto"` (default), `"ubuntu"`, or `"alinux"`.
+    pub target_os: Option<String>,
+    /// Path to the read-only rule artifact.
+    pub rules_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -370,6 +410,34 @@ impl SecurityConfig {
                 }
             }
         }
+        if let Some(adapter) = self.transforms.as_ref().and_then(|t| t.os_adapter.as_ref()) {
+            if adapter.enabled {
+                let has_rules = adapter
+                    .rules_path
+                    .as_deref()
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false);
+                if !has_rules {
+                    return Err(ConfigError::InvalidValue {
+                        field: "transforms.os_adapter.rules_path",
+                        value: String::new(),
+                        allowed: "non-empty path when transforms.os_adapter.enabled = true",
+                    });
+                }
+            }
+            if let Some(value) = adapter.target_os.as_deref() {
+                match value {
+                    "auto" | "ubuntu" | "alinux" => {}
+                    other => {
+                        return Err(ConfigError::InvalidValue {
+                            field: "transforms.os_adapter.target_os",
+                            value: other.to_string(),
+                            allowed: "auto, ubuntu, alinux",
+                        });
+                    }
+                }
+            }
+        }
         if let Some(ref cs) = self.control_socket {
             let has_path = cs
                 .path
@@ -588,6 +656,61 @@ impl SecurityConfig {
             .as_ref()
             .and_then(|s| s.layout.as_deref())
             .filter(|s| !s.trim().is_empty())
+    }
+
+    /// Whether the directive/compiler transform stage is enabled.
+    ///
+    /// Defaults to `true` when `[transforms.directive]` (or its `enabled` field)
+    /// is absent, so existing configurations preserve current behavior. Set
+    /// `enabled = false` to disable only the directive stage; the OS adapter
+    /// remains independently opt-in.
+    pub fn directive_enabled(&self) -> bool {
+        self.transforms
+            .as_ref()
+            .and_then(|t| t.directive.as_ref())
+            .and_then(|d| d.enabled)
+            .unwrap_or(true)
+    }
+
+    /// Build the opt-in OS adapter stage from `[transforms.os_adapter]`.
+    ///
+    /// Returns `Ok(None)` when the section is absent or `enabled = false`, so
+    /// the default read pipeline (directive stage only) is preserved.
+    ///
+    /// When enabled, the rule artifact is read, parsed, validated, and
+    /// specialized for the resolved target OS here — once, before the mount
+    /// begins. `target_os = "auto"` reads `/etc/os-release`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OsAdapterError`] when the rule artifact is missing/unreadable,
+    /// the YAML is malformed, a rule is invalid, the resolved target has
+    /// duplicate/ambiguous patterns, or `target_os = auto` cannot map the host
+    /// distribution. Callers must surface this before mounting. `rules_path`
+    /// presence and `target_os` validity are already enforced by [`Self::load`].
+    pub fn build_os_adapter_stage(&self) -> Result<Option<OsAdapterStage>, OsAdapterError> {
+        let Some(adapter) = self
+            .transforms
+            .as_ref()
+            .and_then(|t| t.os_adapter.as_ref())
+            .filter(|a| a.enabled)
+        else {
+            return Ok(None);
+        };
+        // `rules_path` presence is guaranteed by validate() when enabled.
+        let rules_path = adapter
+            .rules_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_default();
+        let selector = adapter
+            .target_os
+            .as_deref()
+            .and_then(TargetSelector::parse)
+            .unwrap_or(TargetSelector::Auto);
+        let stage = OsAdapterStage::load(Path::new(rules_path), selector)?;
+        Ok(Some(stage))
     }
 
     /// Validate that the backing root is configured and accessible when
@@ -1692,6 +1815,137 @@ post_publish_write_patterns = [".openclaw/**"]
         std::fs::write(&path, "[skills]\nlayout = \"categorized\"\n").unwrap();
         let result = SecurityConfig::load(&path);
         assert!(matches!(result, Err(ConfigError::InvalidValue { .. })));
+    }
+
+    // -----------------------------------------------------------------------
+    // transforms.os_adapter config tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn directive_enabled_defaults_true_when_absent() {
+        let cfg: SecurityConfig = toml::from_str("").unwrap();
+        assert!(cfg.directive_enabled());
+        let cfg: SecurityConfig =
+            toml::from_str("[transforms.os_adapter]\nenabled = false\n").unwrap();
+        assert!(cfg.directive_enabled());
+    }
+
+    #[test]
+    fn directive_can_be_disabled() {
+        let cfg: SecurityConfig =
+            toml::from_str("[transforms.directive]\nenabled = false\n").unwrap();
+        assert!(!cfg.directive_enabled());
+        let cfg: SecurityConfig =
+            toml::from_str("[transforms.directive]\nenabled = true\n").unwrap();
+        assert!(cfg.directive_enabled());
+    }
+
+    #[test]
+    fn directive_section_without_enabled_defaults_true() {
+        let cfg: SecurityConfig = toml::from_str("[transforms.directive]\n").unwrap();
+        assert!(cfg.directive_enabled());
+    }
+
+    #[test]
+    fn os_adapter_absent_returns_none() {
+        let cfg: SecurityConfig = toml::from_str("").unwrap();
+        assert!(cfg.build_os_adapter_stage().unwrap().is_none());
+    }
+
+    #[test]
+    fn os_adapter_disabled_returns_none() {
+        let toml = r#"
+[transforms.os_adapter]
+enabled = false
+rules_path = "/nonexistent/rules.yaml"
+"#;
+        let cfg: SecurityConfig = toml::from_str(toml).unwrap();
+        // Disabled: never touches the (missing) rules file.
+        assert!(cfg.build_os_adapter_stage().unwrap().is_none());
+    }
+
+    #[test]
+    fn os_adapter_enabled_without_rules_path_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(&path, "[transforms.os_adapter]\nenabled = true\n").unwrap();
+        let result = SecurityConfig::load(&path);
+        assert!(
+            matches!(
+                result,
+                Err(ConfigError::InvalidValue {
+                    field: "transforms.os_adapter.rules_path",
+                    ..
+                })
+            ),
+            "enabled without rules_path must fail: {result:?}"
+        );
+    }
+
+    #[test]
+    fn os_adapter_invalid_target_os_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(
+            &path,
+            "[transforms.os_adapter]\nenabled = true\nrules_path = \"/r.yaml\"\ntarget_os = \"fedora\"\n",
+        )
+        .unwrap();
+        let result = SecurityConfig::load(&path);
+        assert!(
+            matches!(
+                result,
+                Err(ConfigError::InvalidValue {
+                    field: "transforms.os_adapter.target_os",
+                    ..
+                })
+            ),
+            "invalid target_os must fail: {result:?}"
+        );
+    }
+
+    #[test]
+    fn os_adapter_enabled_missing_rules_file_errors_at_build() {
+        let toml = r#"
+[transforms.os_adapter]
+enabled = true
+target_os = "alinux"
+rules_path = "/definitely/missing/os-rules.yaml"
+"#;
+        let cfg: SecurityConfig = toml::from_str(toml).unwrap();
+        let err = cfg.build_os_adapter_stage().unwrap_err();
+        // Actionable read error before any mount happens.
+        assert!(format!("{err}").contains("cannot read rules file"));
+    }
+
+    #[test]
+    fn os_adapter_valid_config_builds_stage() {
+        let dir = tempfile::tempdir().unwrap();
+        let rules = dir.path().join("rules.yaml");
+        std::fs::write(
+            &rules,
+            "- ubuntu: \"apt-get install -y \"\n  alinux: \"dnf install -y \"\n  direction: bidirectional\n  auto_apply: always\n",
+        )
+        .unwrap();
+        let toml = format!(
+            "[transforms.os_adapter]\nenabled = true\ntarget_os = \"alinux\"\nrules_path = \"{}\"\n",
+            rules.display()
+        );
+        let cfg: SecurityConfig = toml::from_str(&toml).unwrap();
+        let stage = cfg.build_os_adapter_stage().unwrap().expect("stage built");
+        assert_eq!(stage.target().as_str(), "alinux");
+    }
+
+    #[test]
+    fn transforms_unknown_field_rejected() {
+        let toml = r#"
+[transforms.os_adapter]
+enabled = true
+rules_path = "/r.yaml"
+bogus = 1
+"#;
+        let result: Result<SecurityConfig, _> = toml::from_str(toml);
+        assert!(result.is_err());
     }
 
     #[test]

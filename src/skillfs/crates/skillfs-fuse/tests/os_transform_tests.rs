@@ -1,0 +1,678 @@
+//! FUSE integration tests for the read-time OS-adapter transform stage.
+//!
+//! These pin the issue #1450 contract: activation target selection happens
+//! before transformation; only `SKILL.md` is adapted; the adapter is opt-in and
+//! byte-transparent when disabled; `getattr` size and partial reads agree with
+//! the full transformed bytes; source and snapshot bytes are never mutated by a
+//! read; Current/Snapshot/Hidden all behave; flat and Hermes layouts share the
+//! pipeline; and an open handle stays pinned to its selected target.
+
+#![allow(clippy::too_many_arguments)]
+
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use parking_lot::RwLock;
+use skillfs_core::os_adapter::{OsAdapterStage, OsTarget, TargetSelector};
+use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
+use skillfs_fuse::security::{ActiveSkillResolver, ActiveTarget};
+use skillfs_fuse::{MountConfig, MountHandle, MountOptions, mount_background_configured};
+
+#[path = "common/mod.rs"]
+mod common;
+
+use crate::common::MountFixture;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rule artifact + stage helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Representative bidirectional rules covering package-manager verbs, a
+/// `-dev`/`-devel` package name, a service unit, and a filesystem path.
+const RULES_YAML: &str = r#"
+- ubuntu: "sudo apt-get install -y "
+  alinux: "sudo dnf install -y "
+  direction: bidirectional
+  auto_apply: always
+- ubuntu: "apt-get install -y "
+  alinux: "dnf install -y "
+  direction: bidirectional
+  auto_apply: always
+- ubuntu: "libssl-dev"
+  alinux: "openssl-devel"
+  direction: bidirectional
+  auto_apply: always
+- ubuntu: "apache2.service"
+  alinux: "httpd.service"
+  direction: bidirectional
+  auto_apply: always
+- ubuntu: "/etc/apt/sources.list.d/"
+  alinux: "/etc/yum.repos.d/"
+  direction: bidirectional
+  auto_apply: always
+"#;
+
+/// SKILL.md body written in Ubuntu style. Contains no `<!-- @if -->` directives
+/// and none of the compiler's heuristic triggers (pip/venv/npm), so the
+/// directive stage is a no-op and only the OS adapter changes bytes.
+const UBUNTU_SKILL_MD: &str = "# Setup\n\nRun `sudo apt-get install -y libssl-dev`.\n\
+     Enable apache2.service. Repos live in /etc/apt/sources.list.d/.\n";
+
+/// The same content in Alinux style.
+const ALINUX_SKILL_MD: &str = "# Setup\n\nRun `sudo dnf install -y openssl-devel`.\n\
+     Enable httpd.service. Repos live in /etc/yum.repos.d/.\n";
+
+/// Write the rule artifact into a dedicated tempdir (kept alive by the caller)
+/// and build a stage for `target`.
+fn stage_for(target: OsTarget) -> (tempfile::TempDir, OsAdapterStage) {
+    let dir = tempfile::tempdir().expect("rules tempdir");
+    let path = dir.path().join("os-rules.yaml");
+    std::fs::write(&path, RULES_YAML).expect("write rules");
+    let selector = match target {
+        OsTarget::Alinux => TargetSelector::Alinux,
+        OsTarget::Ubuntu => TargetSelector::Ubuntu,
+    };
+    let stage = OsAdapterStage::load(&path, selector).expect("load stage");
+    (dir, stage)
+}
+
+/// Seed a flat skill dir with a specific SKILL.md body (no frontmatter needed —
+/// the transform operates on the raw served bytes).
+fn seed_skill(src: &Path, name: &str, skill_md: &str) {
+    let dir = src.join(name);
+    std::fs::create_dir_all(&dir).expect("skill dir");
+    std::fs::write(dir.join("SKILL.md"), skill_md).expect("SKILL.md");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Local fixture: resolver + OS adapter, normal mode
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Normal-mode mount that injects both an [`ActiveSkillResolver`] and an
+/// [`OsAdapterStage`]. Exposes the resolver `Arc` so tests can flip activation
+/// targets after the mount is live (pinned-open test).
+struct AdapterMount {
+    source: tempfile::TempDir,
+    mountpoint: tempfile::TempDir,
+    resolver: Option<Arc<ActiveSkillResolver>>,
+    handle: Option<MountHandle>,
+    _rules: tempfile::TempDir,
+}
+
+impl AdapterMount {
+    fn new<S, R>(target: OsTarget, seed: S, resolver_builder: R) -> Self
+    where
+        S: FnOnce(&Path),
+        R: FnOnce(&Path) -> Option<Arc<ActiveSkillResolver>>,
+    {
+        let (rules_dir, stage) = stage_for(target);
+        let source = tempfile::tempdir().expect("source tempdir");
+        seed(source.path());
+        let resolver = resolver_builder(source.path());
+        let mountpoint = tempfile::tempdir().expect("mount tempdir");
+
+        let mut store = SkillStore::new();
+        store.load_from_directory(source.path(), &ParseConfig::default());
+        let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+        let handle = mount_background_configured(
+            mountpoint.path(),
+            source.path(),
+            shared,
+            MountOptions::default(),
+            false,
+            MountConfig {
+                active_resolver: resolver.clone(),
+                os_adapter: Some(stage),
+                ..MountConfig::default()
+            },
+        )
+        .expect("mount_background_configured");
+        std::thread::sleep(Duration::from_millis(300));
+
+        Self {
+            source,
+            mountpoint,
+            resolver,
+            handle: Some(handle),
+            _rules: rules_dir,
+        }
+    }
+
+    fn skill_md(&self, name: &str) -> PathBuf {
+        self.mountpoint
+            .path()
+            .join("skills")
+            .join(name)
+            .join("SKILL.md")
+    }
+
+    fn source_skill_md(&self, name: &str) -> PathBuf {
+        self.source.path().join(name).join("SKILL.md")
+    }
+}
+
+impl Drop for AdapterMount {
+    fn drop(&mut self) {
+        if let Some(h) = self.handle.take() {
+            drop(h);
+        }
+        let mp = self.mountpoint.path().to_path_buf();
+        std::thread::sleep(Duration::from_millis(150));
+        let _ = std::process::Command::new("fusermount3")
+            .args(["-u", &mp.to_string_lossy()])
+            .output();
+    }
+}
+
+fn current_result(skill: &str) -> skillfs_fuse::security::LedgerResolveResult {
+    let json = format!(
+        r#"{{"schemaVersion":1,"skillName":"{skill}","status":"pass","decision":"current","currentVersion":"v000001","trustedVersion":"v000001"}}"#
+    );
+    skillfs_fuse::security::LedgerResolveResult::from_json_str(&json).expect("current json")
+}
+
+fn fallback_result(skill: &str, segment: &str) -> skillfs_fuse::security::LedgerResolveResult {
+    let json = format!(
+        r#"{{"schemaVersion":1,"skillName":"{skill}","status":"deny","decision":"fallback","currentVersion":"v000003","trustedVersion":"{segment}","target":".skill-meta/versions/{segment}","targetKind":"relative_to_skill_dir","reason":"risk"}}"#
+    );
+    skillfs_fuse::security::LedgerResolveResult::from_json_str(&json).expect("fallback json")
+}
+
+fn hidden_result(skill: &str) -> skillfs_fuse::security::LedgerResolveResult {
+    let json = format!(
+        r#"{{"schemaVersion":1,"skillName":"{skill}","status":"deny","decision":"hidden","reason":"no trusted version"}}"#
+    );
+    skillfs_fuse::security::LedgerResolveResult::from_json_str(&json).expect("hidden json")
+}
+
+fn write_snapshot(source: &Path, skill: &str, version: &str, skill_md: &str) {
+    let dir = source
+        .join(skill)
+        .join(".skill-meta/versions")
+        .join(version);
+    std::fs::create_dir_all(&dir).expect("snapshot dir");
+    std::fs::write(dir.join("SKILL.md"), skill_md).expect("snapshot SKILL.md");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Local fixture: resolver + OS adapter, in-place Hermes mode
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// In-place Hermes mount with both an [`ActiveSkillResolver`] and an
+/// [`OsAdapterStage`], exposing the resolver so tests can flip a nested skill's
+/// activation target after a handle is open.
+struct HermesAdapterMount {
+    source: tempfile::TempDir,
+    resolver: Arc<ActiveSkillResolver>,
+    handle: Option<MountHandle>,
+    _rules: tempfile::TempDir,
+}
+
+impl HermesAdapterMount {
+    fn new<S>(seed: S, resolver_builder: impl FnOnce(&Path) -> Arc<ActiveSkillResolver>) -> Self
+    where
+        S: FnOnce(&Path),
+    {
+        let (rules_dir, stage) = stage_for(OsTarget::Alinux);
+        let source = tempfile::tempdir().expect("source tempdir");
+        seed(source.path());
+        let resolver = resolver_builder(source.path());
+
+        let mut store = SkillStore::new();
+        store.load_from_directory(source.path(), &ParseConfig::default());
+        let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+        let handle = mount_background_configured(
+            source.path(),
+            source.path(),
+            shared,
+            MountOptions::default(),
+            true,
+            MountConfig {
+                active_resolver: Some(resolver.clone()),
+                os_adapter: Some(stage),
+                skill_layout: Some(skillfs_fuse::SkillLayout::Hermes),
+                ..MountConfig::default()
+            },
+        )
+        .expect("mount_background_configured");
+        std::thread::sleep(Duration::from_millis(300));
+
+        Self {
+            source,
+            resolver,
+            handle: Some(handle),
+            _rules: rules_dir,
+        }
+    }
+
+    fn nested_skill_md(&self, category: &str, skill: &str) -> PathBuf {
+        self.source
+            .path()
+            .join(category)
+            .join(skill)
+            .join("SKILL.md")
+    }
+}
+
+impl Drop for HermesAdapterMount {
+    fn drop(&mut self) {
+        if let Some(h) = self.handle.take() {
+            drop(h);
+        }
+        let mp = self.source.path().to_path_buf();
+        std::thread::sleep(Duration::from_millis(150));
+        let _ = std::process::Command::new("fusermount3")
+            .args(["-u", &mp.to_string_lossy()])
+            .output();
+    }
+}
+
+/// Seed a Hermes nested skill: `<category>/<skill>/SKILL.md`.
+fn seed_nested(src: &Path, category: &str, skill: &str, skill_md: &str) {
+    let dir = src.join(category).join(skill);
+    std::fs::create_dir_all(&dir).expect("nested dir");
+    std::fs::write(dir.join("SKILL.md"), skill_md).expect("nested SKILL.md");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Opt-in / disabled behavior
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn os_adapter_disabled_by_default_preserves_skill_md() {
+    skip_if_no_fuse!();
+    let fx = MountFixture::normal(|src| seed_skill(src, "web", UBUNTU_SKILL_MD));
+    let got = std::fs::read_to_string(fx.skill_path("web").join("SKILL.md")).expect("read");
+    // No adapter configured: Ubuntu content survives untouched.
+    assert_eq!(got, UBUNTU_SKILL_MD);
+    assert!(!got.contains("dnf"));
+}
+
+#[test]
+fn ubuntu_to_alinux_transforms_skill_md() {
+    skip_if_no_fuse!();
+    let (_rules, stage) = stage_for(OsTarget::Alinux);
+    let fx =
+        MountFixture::normal_with_os_adapter(|src| seed_skill(src, "web", UBUNTU_SKILL_MD), stage);
+    let got = std::fs::read_to_string(fx.skill_path("web").join("SKILL.md")).expect("read");
+    assert!(
+        got.contains("sudo dnf install -y openssl-devel"),
+        "got: {got}"
+    );
+    assert!(got.contains("httpd.service"));
+    assert!(got.contains("/etc/yum.repos.d/"));
+    assert!(!got.contains("apt-get"));
+    assert!(!got.contains("libssl-dev"));
+}
+
+#[test]
+fn alinux_to_ubuntu_transforms_skill_md() {
+    skip_if_no_fuse!();
+    let (_rules, stage) = stage_for(OsTarget::Ubuntu);
+    let fx =
+        MountFixture::normal_with_os_adapter(|src| seed_skill(src, "web", ALINUX_SKILL_MD), stage);
+    let got = std::fs::read_to_string(fx.skill_path("web").join("SKILL.md")).expect("read");
+    assert!(
+        got.contains("sudo apt-get install -y libssl-dev"),
+        "got: {got}"
+    );
+    assert!(got.contains("apache2.service"));
+    assert!(got.contains("/etc/apt/sources.list.d/"));
+    assert!(!got.contains("dnf"));
+    assert!(!got.contains("openssl-devel"));
+}
+
+#[test]
+fn passthrough_non_skill_md_is_not_transformed() {
+    skip_if_no_fuse!();
+    let (_rules, stage) = stage_for(OsTarget::Alinux);
+    let fx = MountFixture::normal_with_os_adapter(
+        |src| {
+            seed_skill(src, "web", UBUNTU_SKILL_MD);
+            // A sibling Markdown + shell file must NOT be adapted.
+            std::fs::write(src.join("web/notes.md"), UBUNTU_SKILL_MD).unwrap();
+            std::fs::write(src.join("web/setup.sh"), "apt-get install -y libssl-dev\n").unwrap();
+        },
+        stage,
+    );
+    let notes = std::fs::read_to_string(fx.skill_path("web").join("notes.md")).expect("notes");
+    let sh = std::fs::read_to_string(fx.skill_path("web").join("setup.sh")).expect("sh");
+    assert_eq!(notes, UBUNTU_SKILL_MD);
+    assert!(sh.contains("apt-get install -y libssl-dev"));
+}
+
+#[test]
+fn adapter_only_pipeline_skips_directive_compilation() {
+    skip_if_no_fuse!();
+    let (_rules, stage) = stage_for(OsTarget::Alinux);
+    // A directive block plus an apt-get command. With the directive stage
+    // disabled, the markers survive and only the OS adapter rewrites bytes.
+    let body = "<!-- @if os == linux -->\nrun apt-get install -y libssl-dev\n<!-- @endif -->\n";
+    let fx = MountFixture::normal_with_transforms(
+        |src| seed_skill(src, "web", body),
+        Some(false),
+        Some(stage),
+    );
+    let got = std::fs::read_to_string(fx.skill_path("web").join("SKILL.md")).expect("read");
+    assert!(
+        got.contains("<!-- @if os == linux -->"),
+        "directive not stripped: {got}"
+    );
+    assert!(
+        got.contains("run dnf install -y openssl-devel"),
+        "adapter not applied: {got}"
+    );
+}
+
+#[test]
+fn both_stages_disabled_serves_raw_content() {
+    skip_if_no_fuse!();
+    // Directive off and no adapter: the selected bytes are served verbatim,
+    // including directive markers and Ubuntu-style commands.
+    let body = "<!-- @if os == linux -->\napt-get install -y libssl-dev\n<!-- @endif -->\n";
+    let fx =
+        MountFixture::normal_with_transforms(|src| seed_skill(src, "web", body), Some(false), None);
+    let got = std::fs::read_to_string(fx.skill_path("web").join("SKILL.md")).expect("read");
+    assert_eq!(got, body);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// getattr size and partial reads agree with transformed bytes
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn getattr_size_matches_transformed_bytes() {
+    skip_if_no_fuse!();
+    let (_rules, stage) = stage_for(OsTarget::Alinux);
+    let fx =
+        MountFixture::normal_with_os_adapter(|src| seed_skill(src, "web", UBUNTU_SKILL_MD), stage);
+    let path = fx.skill_path("web").join("SKILL.md");
+    let content = std::fs::read(&path).expect("read");
+    let size = std::fs::metadata(&path).expect("stat").len();
+    assert_eq!(
+        size as usize,
+        content.len(),
+        "getattr size must equal read len"
+    );
+    // Adaptation shrinks the content, so it must differ from the source size.
+    let src_size = std::fs::metadata(fx.source_skill_path("web").join("SKILL.md"))
+        .unwrap()
+        .len();
+    assert_ne!(size, src_size, "transformed size should differ from source");
+}
+
+#[test]
+fn offset_and_partial_reads_match_full_read() {
+    skip_if_no_fuse!();
+    let (_rules, stage) = stage_for(OsTarget::Alinux);
+    let fx =
+        MountFixture::normal_with_os_adapter(|src| seed_skill(src, "web", UBUNTU_SKILL_MD), stage);
+    let path = fx.skill_path("web").join("SKILL.md");
+    let full = std::fs::read(&path).expect("full read");
+
+    // Reassemble via small offset reads to exercise the FUSE offset path.
+    let mut file = std::fs::File::open(&path).expect("open");
+    let mut assembled = Vec::new();
+    let mut buf = [0u8; 7];
+    loop {
+        let n = file.read(&mut buf).expect("chunk read");
+        if n == 0 {
+            break;
+        }
+        assembled.extend_from_slice(&buf[..n]);
+    }
+    assert_eq!(
+        assembled, full,
+        "chunked reads must reconstruct full content"
+    );
+
+    // Explicit mid-content offset read.
+    let off = full.len() / 2;
+    file.seek(SeekFrom::Start(off as u64)).expect("seek");
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).expect("tail read");
+    assert_eq!(tail, full[off..], "offset read must match slice of full");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Activation: Current / Snapshot / Hidden with the adapter enabled
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn current_activation_transforms_live_source() {
+    skip_if_no_fuse!();
+    let mount = AdapterMount::new(
+        OsTarget::Alinux,
+        |src| seed_skill(src, "web", UBUNTU_SKILL_MD),
+        |root| {
+            let r = ActiveSkillResolver::new(root.to_path_buf());
+            r.set_from_resolve(&current_result("web")).unwrap();
+            Some(Arc::new(r))
+        },
+    );
+    let got = std::fs::read_to_string(mount.skill_md("web")).expect("read");
+    assert!(got.contains("dnf install -y openssl-devel"), "got: {got}");
+    // Live source bytes are untouched by the read.
+    let src = std::fs::read_to_string(mount.source_skill_md("web")).unwrap();
+    assert_eq!(src, UBUNTU_SKILL_MD);
+}
+
+#[test]
+fn snapshot_activation_transforms_snapshot_never_live_source() {
+    skip_if_no_fuse!();
+    // Live SKILL.md carries a marker that must never surface through a
+    // fallback read; the snapshot carries the Ubuntu content to transform.
+    let live = "# LIVE-ONLY apt-get install -y libssl-dev\n";
+    let mount = AdapterMount::new(
+        OsTarget::Alinux,
+        |src| {
+            seed_skill(src, "web", live);
+            write_snapshot(src, "web", "v000002", UBUNTU_SKILL_MD);
+        },
+        |root| {
+            let r = ActiveSkillResolver::new(root.to_path_buf());
+            r.set_from_resolve(&fallback_result("web", "v000002"))
+                .unwrap();
+            Some(Arc::new(r))
+        },
+    );
+    let got = std::fs::read_to_string(mount.skill_md("web")).expect("read");
+    // Snapshot content, transformed.
+    assert!(got.contains("dnf install -y openssl-devel"), "got: {got}");
+    // The live-only marker must never appear (no snapshot->live fallback).
+    assert!(
+        !got.contains("LIVE-ONLY"),
+        "must not read live source: {got}"
+    );
+    // Snapshot bytes on disk stay raw (Ubuntu) after the transformed read.
+    let snap = std::fs::read_to_string(
+        mount
+            .source
+            .path()
+            .join("web/.skill-meta/versions/v000002/SKILL.md"),
+    )
+    .unwrap();
+    assert_eq!(snap, UBUNTU_SKILL_MD);
+}
+
+#[test]
+fn hidden_skill_returns_enoent_and_skips_transform() {
+    skip_if_no_fuse!();
+    let mount = AdapterMount::new(
+        OsTarget::Alinux,
+        |src| seed_skill(src, "web", UBUNTU_SKILL_MD),
+        |root| {
+            let r = ActiveSkillResolver::new(root.to_path_buf());
+            r.set_from_resolve(&hidden_result("web")).unwrap();
+            Some(Arc::new(r))
+        },
+    );
+    let err = std::fs::read_to_string(mount.skill_md("web")).unwrap_err();
+    assert_eq!(err.raw_os_error(), Some(libc::ENOENT));
+}
+
+#[test]
+fn pinned_open_target_stable_after_activation_update() {
+    skip_if_no_fuse!();
+    let mount = AdapterMount::new(
+        OsTarget::Alinux,
+        |src| seed_skill(src, "web", UBUNTU_SKILL_MD),
+        |root| {
+            let r = ActiveSkillResolver::new(root.to_path_buf());
+            r.set_from_resolve(&current_result("web")).unwrap();
+            Some(Arc::new(r))
+        },
+    );
+
+    // Open the handle while the skill is Current.
+    let mut file = std::fs::File::open(mount.skill_md("web")).expect("open");
+
+    // Flip the resolver to Hidden after the handle is open.
+    if let Some(resolver) = &mount.resolver {
+        resolver.set_from_resolve(&hidden_result("web")).unwrap();
+    }
+
+    // The pinned handle still serves the transformed Current content.
+    let mut got = String::new();
+    file.read_to_string(&mut got).expect("read pinned");
+    assert!(got.contains("dnf install -y openssl-devel"), "got: {got}");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hermes nested layout shares the same pipeline
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn hermes_nested_skill_md_is_transformed() {
+    skip_if_no_fuse!();
+    let (_rules, stage) = stage_for(OsTarget::Alinux);
+    let fx = MountFixture::in_place_hermes_with_os_adapter(
+        |src| {
+            // category/skill/SKILL.md nested layout.
+            let dir = src.join("cloud").join("deploy");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), UBUNTU_SKILL_MD).unwrap();
+        },
+        stage,
+    );
+    let nested = fx
+        .mountpoint()
+        .join("cloud")
+        .join("deploy")
+        .join("SKILL.md");
+    let got = std::fs::read_to_string(&nested).expect("read nested");
+    assert!(got.contains("dnf install -y openssl-devel"), "got: {got}");
+    assert!(!got.contains("apt-get"));
+}
+
+#[test]
+fn hermes_current_to_hidden_after_open_stays_readable() {
+    skip_if_no_fuse!();
+    let mount = HermesAdapterMount::new(
+        |src| seed_nested(src, "cloud", "deploy", UBUNTU_SKILL_MD),
+        |root| {
+            let r = ActiveSkillResolver::new(root.to_path_buf());
+            r.set(
+                "cloud/deploy",
+                ActiveTarget::Current {
+                    source_dir: root.join("cloud/deploy"),
+                },
+            );
+            Arc::new(r)
+        },
+    );
+
+    // Open while Current.
+    let mut file = std::fs::File::open(mount.nested_skill_md("cloud", "deploy")).expect("open");
+    // Flip the nested skill to Hidden after the handle is open.
+    mount.resolver.set(
+        "cloud/deploy",
+        ActiveTarget::Hidden {
+            reason: "test hidden".to_string(),
+        },
+    );
+
+    // The pinned handle still serves the transformed Current content.
+    let mut got = String::new();
+    file.read_to_string(&mut got).expect("read pinned");
+    assert!(got.contains("dnf install -y openssl-devel"), "got: {got}");
+
+    // A fresh open now observes the Hidden decision (ENOENT), confirming the
+    // resolver flip took effect and the earlier handle was genuinely pinned.
+    let err = std::fs::File::open(mount.nested_skill_md("cloud", "deploy")).unwrap_err();
+    assert_eq!(err.raw_os_error(), Some(libc::ENOENT));
+}
+
+#[test]
+fn hermes_snapshot_to_current_after_open_stays_snapshot() {
+    skip_if_no_fuse!();
+    let live = "# LIVE-ONLY apt-get install -y libssl-dev\n";
+    let mount = HermesAdapterMount::new(
+        |src| {
+            seed_nested(src, "cloud", "deploy", live);
+            write_snapshot(src, "cloud/deploy", "v000002", UBUNTU_SKILL_MD);
+        },
+        |root| {
+            let r = ActiveSkillResolver::new(root.to_path_buf());
+            r.set(
+                "cloud/deploy",
+                ActiveTarget::Snapshot {
+                    snapshot_dir: root.join("cloud/deploy/.skill-meta/versions/v000002"),
+                    version: "v000002".to_string(),
+                },
+            );
+            Arc::new(r)
+        },
+    );
+
+    // While still resolving to Snapshot: getattr size equals the transformed
+    // snapshot length, and a partial (offset) read matches the full read.
+    let path = mount.nested_skill_md("cloud", "deploy");
+    let full = std::fs::read(&path).expect("full read");
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len() as usize,
+        full.len(),
+        "getattr size must match transformed bytes"
+    );
+    let mut probe = std::fs::File::open(&path).expect("probe open");
+    probe.seek(SeekFrom::Start(3)).expect("seek");
+    let mut tail = Vec::new();
+    probe.read_to_end(&mut tail).expect("tail");
+    assert_eq!(tail, full[3..], "offset read must match slice of full");
+
+    // Open the handle we will keep pinned across the flip.
+    let mut file = std::fs::File::open(&path).expect("open");
+
+    // Flip to Current after the handle is open.
+    mount.resolver.set(
+        "cloud/deploy",
+        ActiveTarget::Current {
+            source_dir: mount.source.path().join("cloud/deploy"),
+        },
+    );
+
+    // The pinned handle still serves Snapshot content, not the live source.
+    // Read a bounded prefix (valid for both snapshot and live sizes) so the
+    // assertion is immune to the kernel re-stat'ing the inode to the shorter
+    // Current size after the flip — the point under test is *which target* the
+    // handle reads from, which the leading marker distinguishes: the snapshot
+    // begins with "# Setup" while the live source begins with "# LIVE-ONLY".
+    let mut prefix = [0u8; 7];
+    file.read_exact(&mut prefix).expect("read pinned prefix");
+    assert_eq!(
+        &prefix, b"# Setup",
+        "pinned handle must read snapshot, not live"
+    );
+
+    // A fresh open now observes Current: the live-only marker appears, proving
+    // the flip took effect and the earlier handle stayed pinned to the snapshot.
+    let fresh = std::fs::read_to_string(&path).expect("fresh read");
+    assert!(
+        fresh.contains("LIVE-ONLY"),
+        "fresh open should read live: {fresh}"
+    );
+}

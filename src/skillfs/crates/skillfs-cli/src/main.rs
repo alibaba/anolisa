@@ -705,6 +705,22 @@ async fn cmd_mount(
         None => None,
     };
 
+    // Build the opt-in OS adapter transform stage from
+    // `[transforms.os_adapter]`. Loading, YAML/schema validation, and (for
+    // `target_os = "auto"`) `/etc/os-release` detection all happen here, before
+    // the mount begins, so a missing/invalid rule artifact or an unrecognized
+    // auto target OS produces an actionable startup error instead of a silently
+    // disabled adapter. `None` config keeps the default directive-only pipeline.
+    let os_adapter_stage = match file_config.as_ref() {
+        Some(cfg) => cfg.build_os_adapter_stage().map_err(|e| format!("{e}"))?,
+        None => None,
+    };
+
+    // Directive/compiler stage toggle. `None` (no config) keeps the default
+    // (enabled); a config file supplies the resolved value, which defaults to
+    // enabled unless `[transforms.directive] enabled = false` is set.
+    let directive_enabled: Option<bool> = file_config.as_ref().map(|cfg| cfg.directive_enabled());
+
     // Parse activation mode: CLI flag (if present) overrides config file.
     let activation_mode = match activation_mode_raw.as_deref() {
         Some(raw) => ActivationMode::parse(raw)
@@ -2255,6 +2271,8 @@ async fn cmd_mount(
                 post_publish_controller,
                 runtime_metrics: Some(mount_runtime_metrics),
                 skill_layout,
+                os_adapter: os_adapter_stage,
+                directive_enabled,
             },
         )
     });
