@@ -156,6 +156,8 @@ pub(crate) enum ResolutionSource {
     ComponentIndex,
     /// Site-local `[backends.rpm.package_map]`.
     RepoPackageMap,
+    /// Package identity retained by an existing managed component record.
+    InstalledState,
     /// RPM metadata declares or provides `anolisa-component(...)` on host.
     InstalledRpmProvides,
     /// RPM repository metadata declares or provides `anolisa-component(...)`.

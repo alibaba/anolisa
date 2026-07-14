@@ -6,6 +6,7 @@
 
 use super::*;
 
+use anolisa_core::lock::{InstallLock, LockError};
 use anolisa_core::state::InstalledState;
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError};
@@ -625,6 +626,9 @@ pub struct FakeInstaller {
     pub install_succeeds: bool,
     pub installed: RefCell<Option<PackageInfo>>,
     pub install_calls: Cell<usize>,
+    /// Optional lock path probed from inside `install`.
+    pub lock_probe: Option<PathBuf>,
+    pub lock_was_held: Cell<bool>,
 }
 
 impl FakeInstaller {
@@ -637,6 +641,8 @@ impl FakeInstaller {
             install_succeeds: true,
             installed: RefCell::new(None),
             install_calls: Cell::new(0),
+            lock_probe: None,
+            lock_was_held: Cell::new(false),
         }
     }
     pub fn with_origin(mut self, repo: &str) -> Self {
@@ -645,6 +651,10 @@ impl FakeInstaller {
     }
     pub fn failing_install(mut self) -> Self {
         self.install_succeeds = false;
+        self
+    }
+    pub fn expect_lock_held(mut self, path: PathBuf) -> Self {
+        self.lock_probe = Some(path);
         self
     }
 
@@ -718,6 +728,12 @@ impl PackageTransaction for FakeInstaller {
     fn install(&self, package: &str) -> Result<(), PackageTransactionError> {
         self.install_calls.set(self.install_calls.get() + 1);
         assert_eq!(package, self.package, "install targeted the wrong package");
+        if let Some(path) = &self.lock_probe {
+            self.lock_was_held.set(matches!(
+                InstallLock::acquire(path),
+                Err(LockError::Held { .. })
+            ));
+        }
         if !self.install_succeeds {
             return Err(PackageTransactionError::TransactionFailed {
                 command: "dnf".to_string(),
@@ -746,6 +762,7 @@ pub struct FakeQuery {
     pub available_provides: Vec<(String, Vec<String>)>,
     pub package_provides: Vec<(String, Vec<String>)>,
     pub available_package_provides: Vec<(String, Vec<String>)>,
+    pub unexpected_installed: Vec<(String, String)>,
     pub multi_version: Vec<String>,
     pub origin_fails: bool,
     /// Simulate a host with no rpm/dnf: every rpmdb-touching query returns
@@ -759,6 +776,16 @@ impl PackageQuery for FakeQuery {
         if self.command_missing {
             return Err(PackageQueryError::CommandMissing {
                 command: "rpm".to_string(),
+            });
+        }
+        if let Some((_, detail)) = self
+            .unexpected_installed
+            .iter()
+            .find(|(name, _)| name == package)
+        {
+            return Err(PackageQueryError::UnexpectedOutput {
+                command: "rpm".to_string(),
+                detail: detail.clone(),
             });
         }
         if self.multi_version.iter().any(|p| p == package) {

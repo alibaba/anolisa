@@ -82,6 +82,15 @@ impl RpmTarget {
         }
     }
 
+    fn from_installed_state(component: &str, package: &str) -> Self {
+        Self {
+            component: component.to_string(),
+            package: package.to_string(),
+            source: ResolutionSource::InstalledState,
+            legacy_adopt: false,
+        }
+    }
+
     pub(crate) fn label(&self) -> String {
         if self.component == self.package {
             self.package.clone()
@@ -255,6 +264,7 @@ fn rpm_installed_target_allowed(
     if matches!(
         target.source,
         ResolutionSource::RepoPackageMap
+            | ResolutionSource::InstalledState
             | ResolutionSource::InstalledRpmProvides
             | ResolutionSource::AvailableRpmProvides
     ) || target.legacy_adopt
@@ -266,6 +276,67 @@ fn rpm_installed_target_allowed(
         .provided_capabilities_installed(&target.package)?
         .iter()
         .any(|capability| rpm_capability_matches_component(capability, &expected)))
+}
+
+enum TrackedRpmSituation {
+    ManagedAbsent(RpmTarget),
+    ManagedPresent(RpmTarget),
+    ObservedAbsent(RpmTarget),
+    ObservedPresent {
+        target: RpmTarget,
+        info: PackageInfo,
+    },
+}
+
+fn probe_tracked_rpm(
+    state: &InstalledState,
+    component: &str,
+    package_override: Option<&str>,
+    query: &dyn PackageQuery,
+    command: &str,
+) -> Result<Option<TrackedRpmSituation>, CliError> {
+    let Some(existing) = state.find_object(ObjectKind::Component, component) else {
+        return Ok(None);
+    };
+    let ownership = existing.effective_ownership();
+    let observed = match ownership {
+        Ownership::RpmManaged => false,
+        Ownership::RpmObserved => true,
+        Ownership::RawManaged => return Ok(None),
+    };
+    let Some(recorded_package) = existing
+        .rpm_metadata
+        .as_ref()
+        .map(|metadata| metadata.package_name.trim())
+        .filter(|package| !package.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    if let Some(requested_package) = package_override {
+        if observed {
+            refuse_observed_repoint(state, component, requested_package, command)?;
+        } else if requested_package != recorded_package {
+            return Err(CliError::InvalidArgument {
+                command: command.to_string(),
+                reason: format!(
+                    "component '{component}' is managed through RPM package '{recorded_package}', not '{requested_package}'; refusing to reinstall a different package"
+                ),
+            });
+        }
+    }
+
+    let target = RpmTarget::from_installed_state(component, recorded_package);
+    match query.query_installed(recorded_package) {
+        Ok(Some(info)) if observed => {
+            Ok(Some(TrackedRpmSituation::ObservedPresent { target, info }))
+        }
+        Ok(Some(_)) => Ok(Some(TrackedRpmSituation::ManagedPresent(target))),
+        Ok(None) if observed => Ok(Some(TrackedRpmSituation::ObservedAbsent(target))),
+        Ok(None) => Ok(Some(TrackedRpmSituation::ManagedAbsent(target))),
+        Err(PackageQueryError::CommandMissing { .. }) => Err(rpm_tooling_missing_error(command)),
+        Err(err) => Err(pkg_query_err(err, command)),
+    }
 }
 
 pub(crate) fn rpm_capability_matches_component(capability: &str, expected: &str) -> bool {
@@ -312,15 +383,45 @@ pub(crate) fn route_rpm_adopt(
 
     let situation = match situation {
         Some(s) => s,
-        None => probe_rpm_situation(
+        None => match probe_tracked_rpm(
+            installed,
             component,
             args.package.as_deref(),
-            repo_config.backends.get("rpm"),
-            component_index,
-            ResolutionUse::Install,
             exec.query,
             command,
-        )?,
+        )? {
+            Some(TrackedRpmSituation::ManagedAbsent(target)) => RpmSituation::Absent { target },
+            Some(TrackedRpmSituation::ManagedPresent(target)) => {
+                return Err(CliError::InvalidArgument {
+                    command: command.to_string(),
+                    reason: format!(
+                        "component '{}' is already tracked as rpm-managed and RPM package '{}' is installed; use `anolisa status {}` to inspect it or `anolisa repair {}` to reconcile its metadata",
+                        target.component, target.package, target.component, target.component
+                    ),
+                });
+            }
+            Some(TrackedRpmSituation::ObservedAbsent(target)) => {
+                return Err(CliError::InvalidArgument {
+                    command: command.to_string(),
+                    reason: format!(
+                        "component '{}' is rpm-observed and package '{}' is missing; ANOLISA does not own its installation — run `anolisa forget {}` first, then install it as rpm-managed",
+                        target.component, target.package, target.component
+                    ),
+                });
+            }
+            Some(TrackedRpmSituation::ObservedPresent { target, info }) => {
+                RpmSituation::Adoptable { target, info }
+            }
+            None => probe_rpm_situation(
+                component,
+                args.package.as_deref(),
+                repo_config.backends.get("rpm"),
+                component_index,
+                ResolutionUse::Install,
+                exec.query,
+                command,
+            )?,
+        },
     };
 
     match situation {
@@ -343,14 +444,8 @@ pub(crate) fn route_rpm_adopt(
             if source == BackendSource::Explicit {
                 ensure_component_backend_compatible(installed, &target.component, "rpm", command)?;
             }
-            execute_delegated_install(
-                exec,
-                ctx,
-                layout,
-                command,
-                &target.component,
-                &target.package,
-            )
+            let expectation = DelegatedInstallExpectation::capture(installed, &target.component);
+            execute_delegated_install(exec, ctx, layout, command, &target.package, expectation)
         }
         RpmSituation::NotAnolisaComponent => Err(CliError::InvalidArgument {
             command: command.to_string(),
@@ -420,7 +515,7 @@ fn refuse_observed_repoint(
     if let Some(prev) = existing
         .rpm_metadata
         .as_ref()
-        .map(|m| m.package_name.as_str())
+        .map(|m| m.package_name.trim())
         && !prev.is_empty()
         && prev != new_package
     {
@@ -716,8 +811,97 @@ pub(crate) struct DelegatedInstallPayload {
     warnings: Vec<String>,
 }
 
-/// Install a not-yet-present RPM component by delegating to `dnf install`, then
-/// record it as ANOLISA-managed `rpm-managed` state.
+/// State authority used when an absent RPM package is installed through dnf.
+#[derive(Debug, Clone, Copy)]
+enum DelegatedInstallDisposition {
+    /// No ANOLISA object exists; installation creates a new managed record.
+    Fresh,
+    /// A managed object exists but its RPM is missing; preserve and refresh it.
+    ReinstallManaged,
+}
+
+/// Canonical component identity and object snapshot selected by RPM routing.
+///
+/// Capturing both together prevents callers from pairing a package alias with
+/// an object from a different component. The locked execution path compares
+/// the complete object because any concurrent metadata write invalidates the
+/// route decision; the command fails before dnf instead of guessing whether a
+/// changed field is benign.
+#[derive(Debug, Clone)]
+pub(crate) struct DelegatedInstallExpectation {
+    component: String,
+    object: Option<InstalledObject>,
+}
+
+impl DelegatedInstallExpectation {
+    /// Captures the canonical component from the state snapshot used to route
+    /// the delegated install.
+    pub(crate) fn capture(state: &InstalledState, component: &str) -> Self {
+        Self {
+            component: component.to_string(),
+            object: state.find_object(ObjectKind::Component, component).cloned(),
+        }
+    }
+
+    fn verify_locked(&self, state: &InstalledState, command: &str) -> Result<(), CliError> {
+        if state.find_object(ObjectKind::Component, &self.component) == self.object.as_ref() {
+            return Ok(());
+        }
+        Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "component '{}' changed while this RPM install was being prepared; dnf was not run — inspect it with `anolisa status {}` and retry",
+                self.component, self.component
+            ),
+        })
+    }
+}
+
+fn classify_delegated_install(
+    existing: Option<&InstalledObject>,
+    component: &str,
+    package: &str,
+    command: &str,
+) -> Result<DelegatedInstallDisposition, CliError> {
+    let Some(existing) = existing else {
+        return Ok(DelegatedInstallDisposition::Fresh);
+    };
+    match existing.effective_ownership() {
+        Ownership::RpmManaged => {
+            if let Some(recorded_package) = existing
+                .rpm_metadata
+                .as_ref()
+                .map(|metadata| metadata.package_name.trim())
+                && !recorded_package.is_empty()
+                && recorded_package != package
+            {
+                return Err(CliError::InvalidArgument {
+                    command: command.to_string(),
+                    reason: format!(
+                        "component '{component}' is managed through RPM package '{recorded_package}', not '{package}'; refusing to reinstall a different package"
+                    ),
+                });
+            }
+            Ok(DelegatedInstallDisposition::ReinstallManaged)
+        }
+        Ownership::RpmObserved => Err(CliError::InvalidArgument {
+            command: command.to_string(),
+            reason: format!(
+                "component '{component}' is rpm-observed and package '{package}' is missing; ANOLISA does not own its installation — run `anolisa forget {component}` first, then install it as rpm-managed"
+            ),
+        }),
+        ownership => Err(CliError::InvalidArgument {
+            command: command.to_string(),
+            reason: format!(
+                "component '{component}' is tracked as {} and cannot be reinstalled through RPM",
+                ownership.label()
+            ),
+        }),
+    }
+}
+
+/// Install a missing RPM by delegating to dnf, then create or refresh its
+/// ANOLISA-managed state.
 ///
 /// This is the write-side mirror of [`execute_adopt`]: where adopt only
 /// observes an already-installed package, delegated install drives the package
@@ -725,15 +909,18 @@ pub(crate) struct DelegatedInstallPayload {
 /// (`owns_removal=true`). ANOLISA never fetches bytes itself — dnf owns the
 /// file transaction. Gated on root for the real run; `--dry-run` previews the
 /// `dnf install` without touching the host.
-fn execute_delegated_install(
+pub(crate) fn execute_delegated_install(
     exec: &RpmExec,
     ctx: &CliContext,
     layout: &FsLayout,
     command: &str,
-    component: &str,
     package: &str,
+    expectation: DelegatedInstallExpectation,
 ) -> Result<InstallOutcome, CliError> {
+    let component = expectation.component.as_str();
     let mut warnings: Vec<String> = Vec::new();
+    let disposition =
+        classify_delegated_install(expectation.object.as_ref(), component, package, command)?;
 
     // Dry-run: preview the dnf transaction with best-effort repo candidates.
     // Never needs root, never writes state.
@@ -783,7 +970,21 @@ fn execute_delegated_install(
         });
     }
 
-    // dnf install — delegate the file transaction.
+    // The package transaction and state commit share one lock. The route into
+    // this function used an unlocked state snapshot, so reload and compare it
+    // before dnf can mutate rpmdb.
+    let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("failed to acquire install lock: {err}"),
+    })?;
+    let state = common::load_installed_state(ctx, command).map_err(|err| CliError::Runtime {
+        command: command.to_string(),
+        reason: err.reason(),
+    })?;
+    expectation.verify_locked(&state, command)?;
+    ensure_component_backend_compatible(&state, component, "rpm", command)?;
+
+    // dnf install — delegate the file transaction while retaining the lock.
     exec.txn
         .install(package)
         .map_err(|err| txn_install_err(err, command))?;
@@ -824,12 +1025,14 @@ fn execute_delegated_install(
         }
     };
 
-    let (operation_id, snapshot_warnings) = persist_delegated_install(
+    let (operation_id, snapshot_warnings) = persist_delegated_install_locked(
         ctx,
         layout,
+        state,
         command,
         component,
         package,
+        disposition,
         &info,
         source_repo.as_deref(),
         &warnings,
@@ -861,35 +1064,20 @@ fn execute_delegated_install(
 /// (`managed=true`, `adopted=false`, [`Ownership::RpmManaged`]) — the file
 /// transaction was ANOLISA-driven, so a later uninstall delegates back to dnf.
 #[allow(clippy::too_many_arguments)]
-fn persist_delegated_install(
+fn persist_delegated_install_locked(
     ctx: &CliContext,
     layout: &FsLayout,
+    mut state: InstalledState,
     command: &str,
     component: &str,
     package: &str,
+    disposition: DelegatedInstallDisposition,
     info: &PackageInfo,
     source_repo: Option<&str>,
     warnings: &[String],
 ) -> Result<(String, Vec<String>), CliError> {
     let evr = info.version.to_string();
     let started_at = now_iso8601();
-
-    // Acquire the lock, then load state inside it so a concurrent writer is not
-    // clobbered — mirrors `execute_adopt`/`execute_raw` ordering.
-    let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
-        command: command.to_string(),
-        reason: format!("failed to acquire install lock: {err}"),
-    })?;
-    let mut state =
-        common::load_installed_state(ctx, command).map_err(|err| CliError::Runtime {
-            command: command.to_string(),
-            reason: format!("failed to load installed state: {err}"),
-        })?;
-
-    // Re-validate against the freshly-reloaded state: a concurrent raw install
-    // may have won the lock and recorded the component first. Refuse rather than
-    // overwrite its provenance with rpm-managed.
-    ensure_component_backend_compatible(&state, component, "rpm", command)?;
 
     let lock_ts = Utc::now();
     let operation_id = format!(
@@ -898,43 +1086,69 @@ fn persist_delegated_install(
         lock_ts.timestamp_subsec_nanos()
     );
 
-    // Delegated install is system-scope by construction (route_rpm_adopt
-    // rejects user mode before reaching the Absent branch).
     state.install_mode = StateInstallMode::System;
     state.prefix = layout.prefix.clone();
-    state.upsert_object(InstalledObject {
-        kind: ObjectKind::Component,
-        name: component.to_string(),
-        version: evr.clone(),
-        status: ObjectStatus::Installed,
-        manifest_digest: None,
-        // Not an ANOLISA-delivered raw artifact; dnf resolved the source.
-        distribution_source: None,
-        raw_package: None,
-        install_backend: Some("rpm".to_string()),
-        ownership: Some(Ownership::RpmManaged),
-        rpm_metadata: Some(RpmMetadata {
-            package_name: info.name.clone(),
-            evr: Some(evr.clone()),
-            arch: Some(info.arch.clone()),
-            source_repo: source_repo.map(str::to_string),
+    match disposition {
+        DelegatedInstallDisposition::Fresh => state.upsert_object(InstalledObject {
+            kind: ObjectKind::Component,
+            name: component.to_string(),
+            version: evr.clone(),
+            status: ObjectStatus::Installed,
+            manifest_digest: None,
+            // Not an ANOLISA-delivered raw artifact; dnf resolved the source.
+            distribution_source: None,
+            raw_package: None,
+            install_backend: Some("rpm".to_string()),
+            ownership: Some(Ownership::RpmManaged),
+            rpm_metadata: Some(RpmMetadata {
+                package_name: info.name.clone(),
+                evr: Some(evr.clone()),
+                arch: Some(info.arch.clone()),
+                source_repo: source_repo.map(str::to_string),
+            }),
+            installed_at: started_at.clone(),
+            last_operation_id: Some(operation_id.clone()),
+            managed: true,
+            adopted: false,
+            subscription_scope: Default::default(),
+            enabled_features: Vec::new(),
+            component_refs: Vec::new(),
+            files: Vec::new(),
+            external_modified_files: Vec::new(),
+            services: Vec::new(),
+            health: Vec::new(),
+            provisioned_packages: Vec::new(),
         }),
-        installed_at: started_at.clone(),
-        last_operation_id: Some(operation_id.clone()),
-        // ANOLISA delegated the install and owns the removal (owns_removal=true).
-        managed: true,
-        // Not an adoption: ANOLISA drove the install.
-        adopted: false,
-        subscription_scope: Default::default(),
-        enabled_features: Vec::new(),
-        component_refs: Vec::new(),
-        // dnf owns the file transaction; RPM-owned files stay out of state.
-        files: Vec::new(),
-        external_modified_files: Vec::new(),
-        services: Vec::new(),
-        health: Vec::new(),
-        provisioned_packages: Vec::new(),
-    });
+        DelegatedInstallDisposition::ReinstallManaged => {
+            let object = state
+                .find_object_mut(ObjectKind::Component, component)
+                .ok_or_else(|| CliError::Runtime {
+                    command: command.to_string(),
+                    reason: format!(
+                        "component '{component}' vanished while its RPM was being reinstalled"
+                    ),
+                })?;
+            object.version = evr.clone();
+            object.status = ObjectStatus::Installed;
+            object.install_backend = Some("rpm".to_string());
+            object.ownership = Some(Ownership::RpmManaged);
+            object.managed = true;
+            object.adopted = false;
+            object.last_operation_id = Some(operation_id.clone());
+            let metadata = object.rpm_metadata.get_or_insert_with(|| RpmMetadata {
+                package_name: info.name.clone(),
+                evr: None,
+                arch: None,
+                source_repo: None,
+            });
+            metadata.package_name = info.name.clone();
+            metadata.evr = Some(evr.clone());
+            metadata.arch = Some(info.arch.clone());
+            if source_repo.is_some() {
+                metadata.source_repo = source_repo.map(str::to_string);
+            }
+        }
+    }
     state.operations.push(OperationRecord {
         id: operation_id.clone(),
         command: command.to_string(),

@@ -512,11 +512,9 @@ fn adopt_refuses_to_downgrade_concurrent_rpm_managed_install() {
 }
 
 #[test]
-fn reinstall_of_rpm_managed_refuses_instead_of_downgrading() {
-    // Full install entrypoint (not execute_adopt directly): re-running
-    // `install` on an already rpm-managed component routes ExistingState ->
-    // route_rpm_adopt -> execute_adopt. The downgrade guard must refuse here
-    // too, rather than silently overwriting the managed record with observed.
+fn install_of_present_rpm_managed_component_refuses_without_dnf() {
+    // The full entrypoint must classify this as Present and stop before the
+    // NoTxn transaction double, which panics if dnf is invoked.
     let (_tmp, ctx) = system_ctx_with_raw_repo(false);
     let layout = common::resolve_layout(&ctx);
     let mut state = InstalledState {
@@ -557,7 +555,7 @@ fn reinstall_of_rpm_managed_refuses_instead_of_downgrading() {
         .save(&layout.state_dir.join("installed.toml"))
         .expect("seed rpm-managed record");
 
-    // rpmdb still has the package, so the re-probe yields Adoptable.
+    // rpmdb still has the package, so the managed-state probe yields Present.
     let q = FakeQuery {
         installed: vec![(
             "copilot-shell".to_string(),
@@ -568,6 +566,7 @@ fn reinstall_of_rpm_managed_refuses_instead_of_downgrading() {
     let err = handle_one_with_query("copilot-shell".to_string(), args("copilot-shell"), &ctx, &q)
         .expect_err("re-install of rpm-managed must refuse");
     assert_eq!(err.code(), "INVALID_ARGUMENT");
+    assert!(err.reason().contains("status"), "got: {}", err.reason());
     assert!(err.reason().contains("repair"), "got: {}", err.reason());
 
     let obj = load_state(&ctx)
@@ -617,11 +616,13 @@ fn adopt_origin_failure_degrades_to_none() {
 #[test]
 fn delegated_install_writes_rpm_managed_state() {
     let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    let layout = common::resolve_layout(&ctx);
     let fake = FakeInstaller::new(
         "copilot-shell",
         pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
     )
-    .with_origin("anolisa");
+    .with_origin("anolisa")
+    .expect_lock_held(layout.lock_file);
     let exec = RpmExec {
         query: &fake,
         txn: &fake,
@@ -634,6 +635,10 @@ fn delegated_install_writes_rpm_managed_state() {
         .expect("delegated install ok");
     assert_eq!(outcome, InstallOutcome::Installed);
     assert_eq!(fake.install_calls.get(), 1, "dnf install must run once");
+    assert!(
+        fake.lock_was_held.get(),
+        "install lock must remain held while dnf runs"
+    );
 
     let state = load_state(&ctx);
     let obj = state
@@ -652,6 +657,345 @@ fn delegated_install_writes_rpm_managed_state() {
     assert_eq!(meta.arch.as_deref(), Some("x86_64"));
     assert_eq!(meta.source_repo.as_deref(), Some("anolisa"));
     assert!(state.operations[0].id.starts_with("op-install-"));
+}
+
+fn tracked_rpm_component(component: &str, ownership: Ownership) -> InstalledObject {
+    let observed = ownership == Ownership::RpmObserved;
+    let rpm = ownership != Ownership::RawManaged;
+    InstalledObject {
+        kind: ObjectKind::Component,
+        name: component.to_string(),
+        version: "2.2.0-1.al8".to_string(),
+        status: if observed {
+            ObjectStatus::Adopted
+        } else {
+            ObjectStatus::Installed
+        },
+        manifest_digest: Some("preserve-manifest-digest".to_string()),
+        distribution_source: None,
+        raw_package: None,
+        install_backend: Some(if rpm { "rpm" } else { "raw" }.to_string()),
+        ownership: Some(ownership),
+        rpm_metadata: rpm.then(|| RpmMetadata {
+            package_name: "copilot-shell".to_string(),
+            evr: Some("2.2.0-1.al8".to_string()),
+            arch: Some("x86_64".to_string()),
+            source_repo: Some("old-repo".to_string()),
+        }),
+        installed_at: "2026-06-01T10:00:00Z".to_string(),
+        last_operation_id: Some("op-prior".to_string()),
+        managed: !observed,
+        adopted: observed,
+        subscription_scope: Default::default(),
+        enabled_features: vec!["feature-a".to_string()],
+        component_refs: vec!["legacy-ref".to_string()],
+        files: Vec::new(),
+        external_modified_files: Vec::new(),
+        services: Vec::new(),
+        health: Vec::new(),
+        provisioned_packages: vec!["dependency-a".to_string()],
+    }
+}
+
+fn seed_tracked_rpm(ctx: &CliContext, component: &str, ownership: Ownership) -> InstalledObject {
+    let layout = common::resolve_layout(ctx);
+    let object = tracked_rpm_component(component, ownership);
+    let mut state = InstalledState {
+        install_mode: StateInstallMode::System,
+        prefix: layout.prefix.clone(),
+        ..Default::default()
+    };
+    state.upsert_object(object.clone());
+    state
+        .save(&layout.state_dir.join("installed.toml"))
+        .expect("seed tracked RPM state");
+    object
+}
+
+#[test]
+fn delegated_install_lock_failure_precedes_dnf() {
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    let layout = common::resolve_layout(&ctx);
+    let _held = anolisa_core::lock::InstallLock::acquire(&layout.lock_file).expect("hold lock");
+    let fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+    );
+    let exec = RpmExec {
+        query: &fake,
+        txn: &fake,
+        is_root: true,
+    };
+    let mut a = args("copilot-shell");
+    a.backend = Some("rpm".to_string());
+
+    let err = handle_one_with_exec("copilot-shell".to_string(), a, &ctx, &exec)
+        .expect_err("held lock must fail before dnf");
+    assert!(err.reason().contains("install lock"));
+    assert_eq!(fake.install_calls.get(), 0, "dnf must not run before lock");
+}
+
+#[test]
+fn delegated_install_corrupt_locked_state_is_runtime_error_before_dnf() {
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    let layout = common::resolve_layout(&ctx);
+    std::fs::write(layout.state_dir.join("installed.toml"), "not = [valid toml")
+        .expect("write corrupt state");
+    let fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+    );
+    let exec = RpmExec {
+        query: &fake,
+        txn: &fake,
+        is_root: true,
+    };
+    let expectation =
+        DelegatedInstallExpectation::capture(&InstalledState::default(), "copilot-shell");
+
+    let err = execute_delegated_install(
+        &exec,
+        &ctx,
+        &layout,
+        "install copilot-shell",
+        "copilot-shell",
+        expectation,
+    )
+    .expect_err("corrupt state must fail before dnf");
+    assert_eq!(err.code(), "EXECUTION_FAILED");
+    assert!(err.reason().contains("failed to load installed state"));
+    assert_eq!(fake.install_calls.get(), 0, "dnf must not run");
+}
+
+#[test]
+fn delegated_install_rechecks_state_under_lock() {
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    let layout = common::resolve_layout(&ctx);
+    seed_tracked_rpm(&ctx, "copilot-shell", Ownership::RawManaged);
+    let fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+    );
+    let exec = RpmExec {
+        query: &fake,
+        txn: &fake,
+        is_root: true,
+    };
+    let expectation =
+        DelegatedInstallExpectation::capture(&InstalledState::default(), "copilot-shell");
+
+    let err = execute_delegated_install(
+        &exec,
+        &ctx,
+        &layout,
+        "install copilot-shell",
+        "copilot-shell",
+        expectation,
+    )
+    .expect_err("state added after routing must block dnf");
+    assert!(err.reason().contains("changed"));
+    assert_eq!(fake.install_calls.get(), 0);
+}
+
+#[test]
+fn delegated_install_reinstalls_managed_rpm_without_erasing_metadata() {
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    let before = seed_tracked_rpm(&ctx, "copilot-shell", Ownership::RpmManaged);
+    let fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "aarch64"),
+    );
+    let exec = RpmExec {
+        query: &fake,
+        txn: &fake,
+        is_root: true,
+    };
+
+    let outcome = handle_one_with_exec(
+        "copilot-shell".to_string(),
+        args("copilot-shell"),
+        &ctx,
+        &exec,
+    )
+    .expect("tracked managed RPM may be reinstalled");
+    assert_eq!(outcome, InstallOutcome::Installed);
+    assert_eq!(fake.install_calls.get(), 1);
+
+    let state = load_state(&ctx);
+    let after = state
+        .find_object(ObjectKind::Component, "copilot-shell")
+        .expect("tracked object remains");
+    assert_eq!(after.version, "2.3.0-1.al8");
+    assert_eq!(after.status, ObjectStatus::Installed);
+    assert_eq!(after.ownership, Some(Ownership::RpmManaged));
+    assert_eq!(after.installed_at, before.installed_at);
+    assert_eq!(after.manifest_digest, before.manifest_digest);
+    assert_eq!(after.enabled_features, before.enabled_features);
+    assert_eq!(after.component_refs, before.component_refs);
+    assert_eq!(after.provisioned_packages, before.provisioned_packages);
+    let metadata = after.rpm_metadata.as_ref().expect("rpm metadata");
+    assert_eq!(metadata.arch.as_deref(), Some("aarch64"));
+    assert_eq!(metadata.source_repo.as_deref(), Some("old-repo"));
+    assert_ne!(after.last_operation_id, before.last_operation_id);
+}
+
+#[test]
+fn delegated_install_refuses_missing_observed_rpm() {
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    seed_tracked_rpm(&ctx, "copilot-shell", Ownership::RpmObserved);
+    let fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+    );
+    let exec = RpmExec {
+        query: &fake,
+        txn: &fake,
+        is_root: true,
+    };
+
+    let err = handle_one_with_exec(
+        "copilot-shell".to_string(),
+        args("copilot-shell"),
+        &ctx,
+        &exec,
+    )
+    .expect_err("observed package must not become managed implicitly");
+    assert!(err.reason().contains("rpm-observed"));
+    assert!(err.reason().contains("forget copilot-shell"));
+    assert_eq!(fake.install_calls.get(), 0);
+}
+
+#[test]
+fn delegated_install_refuses_missing_observed_rpm_without_current_resolution() {
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    seed_tracked_rpm(&ctx, "cosh", Ownership::RpmObserved);
+    let query = FakeQuery::default();
+
+    let err = handle_one_with_query("cosh".to_string(), args("cosh"), &ctx, &query)
+        .expect_err("observed state must provide a deterministic forget path");
+
+    assert!(err.reason().contains("rpm-observed"));
+    assert!(err.reason().contains("copilot-shell"));
+    assert!(err.reason().contains("forget cosh"));
+    assert!(!err.reason().contains("not an ANOLISA RPM component"));
+}
+
+#[test]
+fn delegated_install_uses_recorded_package_for_managed_component_alias() {
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    seed_tracked_rpm(&ctx, "cosh", Ownership::RpmManaged);
+    let fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+    );
+    let exec = RpmExec {
+        query: &fake,
+        txn: &fake,
+        is_root: true,
+    };
+
+    let outcome = handle_one_with_exec("cosh".to_string(), args("cosh"), &ctx, &exec)
+        .expect("state package identity must allow alias reinstall");
+    assert_eq!(outcome, InstallOutcome::Installed);
+    assert_eq!(fake.install_calls.get(), 1);
+
+    let state = load_state(&ctx);
+    let object = state
+        .find_object(ObjectKind::Component, "cosh")
+        .expect("managed alias remains canonical");
+    assert_eq!(object.version, "2.3.0-1.al8");
+    assert_eq!(
+        object
+            .rpm_metadata
+            .as_ref()
+            .map(|metadata| metadata.package_name.as_str()),
+        Some("copilot-shell")
+    );
+}
+
+#[test]
+fn delegated_install_normalizes_recorded_managed_package() {
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    seed_tracked_rpm(&ctx, "cosh", Ownership::RpmManaged);
+    let layout = common::resolve_layout(&ctx);
+    let mut state = load_state(&ctx);
+    state
+        .find_object_mut(ObjectKind::Component, "cosh")
+        .and_then(|object| object.rpm_metadata.as_mut())
+        .expect("rpm metadata")
+        .package_name = " copilot-shell ".to_string();
+    state
+        .save(&layout.state_dir.join("installed.toml"))
+        .expect("save normalized-state fixture");
+
+    let fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+    );
+    let exec = RpmExec {
+        query: &fake,
+        txn: &fake,
+        is_root: true,
+    };
+
+    let outcome = handle_one_with_exec("cosh".to_string(), args("cosh"), &ctx, &exec)
+        .expect("persisted package whitespace must be normalized consistently");
+    assert_eq!(outcome, InstallOutcome::Installed);
+    assert_eq!(fake.install_calls.get(), 1);
+    assert_eq!(
+        load_state(&ctx)
+            .find_object(ObjectKind::Component, "cosh")
+            .and_then(|object| object.rpm_metadata.as_ref())
+            .map(|metadata| metadata.package_name.as_str()),
+        Some("copilot-shell")
+    );
+}
+
+#[test]
+fn delegated_install_rejects_package_override_different_from_managed_state() {
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    seed_tracked_rpm(&ctx, "cosh", Ownership::RpmManaged);
+    let fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+    );
+    let exec = RpmExec {
+        query: &fake,
+        txn: &fake,
+        is_root: true,
+    };
+    let mut install_args = args("cosh");
+    install_args.package = Some("replacement-shell".to_string());
+
+    let err = handle_one_with_exec("cosh".to_string(), install_args, &ctx, &exec)
+        .expect_err("managed package identity must not be repointed");
+    assert!(err.reason().contains("copilot-shell"));
+    assert!(err.reason().contains("replacement-shell"));
+    assert_eq!(fake.install_calls.get(), 0);
+}
+
+#[test]
+fn managed_rpm_query_parse_error_is_not_reported_as_multi_version() {
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    seed_tracked_rpm(&ctx, "copilot-shell", Ownership::RpmManaged);
+    let query = FakeQuery {
+        unexpected_installed: vec![(
+            "copilot-shell".to_string(),
+            "expected 5 fields, got 4".to_string(),
+        )],
+        ..Default::default()
+    };
+
+    let err = handle_one_with_query(
+        "copilot-shell".to_string(),
+        args("copilot-shell"),
+        &ctx,
+        &query,
+    )
+    .expect_err("malformed rpm output must remain a query error");
+    assert_eq!(err.code(), "EXECUTION_FAILED");
+    assert!(err.reason().contains("expected 5 fields, got 4"));
+    assert!(!err.reason().contains("multiple installed versions"));
 }
 
 #[test]

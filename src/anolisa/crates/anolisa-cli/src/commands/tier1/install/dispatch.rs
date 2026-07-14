@@ -36,7 +36,13 @@ pub(crate) fn handle_one(
     let layout = common::resolve_layout(ctx);
     let env = anolisa_env::EnvService::detect();
     let repo_config = common::load_repo_config(ctx, &layout, COMMAND, RepoPersistPolicy::Require)?;
-    let rpm_repo = if rpm_repo_required(&component, &args, ctx, &repo_config)? {
+    let identity = load_install_identity(component, ctx)?;
+    let rpm_repo = if rpm_repo_required(
+        &identity.component,
+        &args,
+        &identity.installed,
+        &repo_config,
+    ) {
         configured_rpm_repo_source(&repo_config, &env)?
     } else {
         None
@@ -55,7 +61,7 @@ pub(crate) fn handle_one(
         None => RpmTransaction::system(),
     };
     let exec = RpmExec::new(&query, &txn, privilege::is_root());
-    handle_one_with_config(component, args, ctx, &exec, layout, env, repo_config)
+    handle_one_with_config(identity, args, ctx, &exec, layout, env, repo_config)
 }
 
 /// Core of [`handle_one`] with the RPM execution dependencies injected, so
@@ -72,11 +78,12 @@ pub(crate) fn handle_one_with_exec(
     let layout = common::resolve_layout(ctx);
     let env = anolisa_env::EnvService::detect();
     let repo_config = common::load_repo_config(ctx, &layout, COMMAND, RepoPersistPolicy::Require)?;
-    handle_one_with_config(component, args, ctx, exec, layout, env, repo_config)
+    let identity = load_install_identity(component, ctx)?;
+    handle_one_with_config(identity, args, ctx, exec, layout, env, repo_config)
 }
 
 fn handle_one_with_config(
-    component: String,
+    identity: InstallIdentity,
     args: InstallArgs,
     ctx: &CliContext,
     exec: &RpmExec,
@@ -84,13 +91,12 @@ fn handle_one_with_config(
     env: anolisa_env::EnvFacts,
     repo_config: RepoConfig,
 ) -> Result<InstallOutcome, CliError> {
-    let command = format!("install {component}");
-    let installed = common::load_installed_state(ctx, COMMAND)?;
-
-    // Resolve package aliases (e.g., "copilot-shell" → "cosh") before Layer 1
-    // backend selection, so ExistingState detection and compatibility checks
-    // use the canonical component name stored in state.
-    let component = common::lookup_component_name(&component, &installed, ctx, COMMAND);
+    let InstallIdentity {
+        requested_component,
+        component,
+        installed,
+    } = identity;
+    let command = format!("install {requested_component}");
 
     let mut rpm_component_index: Option<ComponentIndex> = None;
 
@@ -185,6 +191,27 @@ fn handle_one_with_config(
     )
 }
 
+/// Load the routing snapshot and resolve package aliases before constructing
+/// backend clients, so repository selection and execution use one identity.
+struct InstallIdentity {
+    requested_component: String,
+    component: String,
+    installed: InstalledState,
+}
+
+fn load_install_identity(
+    requested_component: String,
+    ctx: &CliContext,
+) -> Result<InstallIdentity, CliError> {
+    let installed = common::load_installed_state(ctx, COMMAND)?;
+    let component = common::lookup_component_name(&requested_component, &installed, ctx, COMMAND);
+    Ok(InstallIdentity {
+        requested_component,
+        component,
+        installed,
+    })
+}
+
 pub(crate) fn configured_rpm_repo_source(
     repo_config: &RepoConfig,
     env: &anolisa_env::EnvFacts,
@@ -226,25 +253,24 @@ pub(crate) fn require_configured_rpm_backend(
 pub(crate) fn rpm_repo_required(
     component: &str,
     args: &InstallArgs,
-    ctx: &CliContext,
+    installed: &InstalledState,
     repo_config: &RepoConfig,
-) -> Result<bool, CliError> {
+) -> bool {
     if args
         .backend
         .as_deref()
         .map(RepoConfig::canonical_backend_name)
         == Some("rpm")
     {
-        return Ok(true);
+        return true;
     }
     if args.backend.is_none() && repo_config.default_backend == "rpm" {
-        return Ok(true);
+        return true;
     }
-    let installed = common::load_installed_state(ctx, COMMAND)?;
-    Ok(installed
+    installed
         .find_object(ObjectKind::Component, component)
         .and_then(installed_backend_label)
-        == Some("rpm"))
+        == Some("rpm")
 }
 
 /// Existing raw-backend trunk: repo.toml → base_url → package → resolve →
@@ -589,9 +615,93 @@ base_url = "https://repo.example/alinux/$releasever/agentic-os/$basearch/os/"
         )
         .expect("parse repo without resolving rpm variables");
         let a = args("copilot-shell");
+        let installed = common::load_installed_state(&ctx, COMMAND).expect("load state");
         assert!(
-            !rpm_repo_required("copilot-shell", &a, &ctx, &repo).expect("check requirement"),
+            !rpm_repo_required("copilot-shell", &a, &installed, &repo),
             "raw default with no rpm state must not resolve the rpm backend"
+        );
+    }
+
+    #[test]
+    fn managed_rpm_package_alias_requires_configured_repo() {
+        let tmp = tempdir().expect("tmpdir");
+        let prefix = tmp.path().join("install-root");
+        let layout = FsLayout::system(Some(prefix.clone()));
+        let raw_root = tmp.path().join("raw-repo");
+        std::fs::create_dir_all(raw_root.join("v1")).expect("create raw repo");
+        std::fs::create_dir_all(&layout.etc_dir).expect("create etc dir");
+        std::fs::create_dir_all(&layout.state_dir).expect("create state dir");
+        std::fs::write(
+            raw_root.join("v1/components.toml"),
+            r#"schema_version = 1
+
+[[components]]
+name = "cosh"
+
+[[components.backends]]
+kind = "rpm"
+package = "copilot-shell"
+
+[[components.aliases]]
+kind = "rpm-package"
+name = "copilot-shell"
+"#,
+        )
+        .expect("write component index");
+        std::fs::write(
+            layout.etc_dir.join("repo.toml"),
+            format!(
+                r#"schema_version = 1
+default_backend = "raw"
+
+[backends.raw]
+base_url = "file://{}"
+
+[backends.rpm]
+base_url = "https://repo.example/anolisa"
+"#,
+                raw_root.display()
+            ),
+        )
+        .expect("write repo config");
+
+        std::fs::write(
+            layout.state_dir.join("installed.toml"),
+            format!(
+                r#"schema_version = 4
+updated_at = "2026-07-14T00:00:00Z"
+install_mode = "system"
+prefix = "{}"
+anolisa_version = "test"
+
+[[objects]]
+kind = "component"
+name = "cosh"
+version = "2.2.0-1.al8"
+status = "installed"
+install_backend = "rpm"
+ownership = "rpm_managed"
+installed_at = "2026-07-14T00:00:00Z"
+"#,
+                layout.prefix.display()
+            ),
+        )
+        .expect("write state");
+
+        let ctx = ctx_with_prefix(false, Some(prefix));
+        let repo = RepoConfig::load(&layout, false).expect("load repo").config;
+        let identity = load_install_identity("copilot-shell".to_string(), &ctx)
+            .expect("resolve package alias");
+
+        assert_eq!(identity.component, "cosh");
+        assert!(
+            rpm_repo_required(
+                &identity.component,
+                &args("copilot-shell"),
+                &identity.installed,
+                &repo
+            ),
+            "an existing rpm-managed component must select the configured RPM repo even when addressed by package alias"
         );
     }
 }
