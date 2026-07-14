@@ -641,7 +641,10 @@ build_anolisa() {
         version=$(grep -m1 '^version = ' "${ANOLISA_DIR}/Cargo.toml" | sed 's/version = "\(.*\)"/\1/' 2>/dev/null || true)
     fi
     if [ -z "$version" ]; then
-        err "Cannot determine anolisa version. Set VERSION env or ensure Cargo.toml exists."
+        version=$(grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' "$spec_in" | head -1)
+    fi
+    if [ -z "$version" ]; then
+        err "Cannot determine anolisa version. Set VERSION env or ensure Cargo.toml/spec exists."
         return 1
     fi
 
@@ -1114,6 +1117,7 @@ usage() {
     echo "  tokenless                 Build tokenless RPM"
     echo "  agent-memory              Build agent-memory RPM"
     echo "  skillfs                   Build skillfs RPM"
+    echo "  cosh-ng                   Build cosh-ng RPM"
     echo "  anolisa                   Build anolisa RPM"
     echo "  gvisor-runsc              Build gvisor-runsc RPM (sandbox)"
     echo "  containerd-shim-runsc-v1  Build containerd-shim-runsc-v1 RPM (sandbox)"
