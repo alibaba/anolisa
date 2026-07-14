@@ -264,6 +264,13 @@ directive-only (the default), adapter-only (directive disabled), or neither —
 an empty pipeline serves the selected raw bytes unchanged. Initialization
 diagnostics report the actual enabled stage list, including an empty list.
 
+| Directive | OS adapter | Agent-visible `SKILL.md` |
+| --- | --- | --- |
+| enabled (default) | disabled (default) | Legacy compiler output |
+| enabled | enabled | Compiler output, then OS adaptation |
+| disabled | enabled | OS adaptation of raw selected bytes |
+| disabled | disabled | Raw selected bytes |
+
 Transforms never modify source files, snapshots, activation metadata, or the
 rule artifact. Hidden skills stay `ENOENT` and never enter the pipeline; a
 snapshot read is transformed from the snapshot and never falls back to the live
@@ -290,10 +297,19 @@ flags). It is disabled unless explicitly enabled. When enabled without a
 `rules_path`, it uses the built-in catalog:
 
 ```toml
+# /etc/skillfs/skillfs-security.toml
+[transforms.directive]
+enabled = true
+
 [transforms.os_adapter]
 enabled = true
-target_os = "auto"                 # auto | ubuntu | alinux
-# rules_path = "/etc/skillfs/ubuntu-alinux.yaml"   # optional external override
+target_os = "alinux" # auto | ubuntu | alinux
+# rules_path = "/etc/skillfs/ubuntu-alinux.custom.yaml"
+```
+
+```bash
+skillfs mount /path/to/skills /mnt/skillfs \
+  --config /etc/skillfs/skillfs-security.toml
 ```
 
 SkillFS **ships a built-in 311-rule Ubuntu/Alinux catalog** embedded in the
@@ -312,6 +328,14 @@ and containers without a separate file. It remains opt-in.
   loads and validates the chosen artifact once at mount startup; the per-read
   hot path performs only in-memory substitution — no model, network, or
   subprocess call at any point.
+- TOML does not enable individual rules. `rules_path` replaces, rather than
+  merges with, the built-in catalog. To keep the defaults while enabling a
+  protected rule or adding a local mapping, copy
+  `crates/skillfs-core/assets/ubuntu-alinux.yaml` from the source checkout,
+  edit the copy, and configure its absolute path. Change the selected rule from
+  `auto_apply: never` to `always`, or append a complete custom rule. The
+  artifact is loaded once at mount startup, so remount after editing it. There
+  is currently no catalog overlay, hot reload, or export command.
 
 In the built-in catalog, high-confidence rules are `auto_apply: always` while
 medium- and low-confidence rules are included but `auto_apply: never`, so they

@@ -259,6 +259,13 @@ adapter-only (directive disabled), or neither — an empty pipeline serves the
 selected raw bytes unchanged. Initialization diagnostics report the actual
 enabled stage list.
 
+| Directive | OS adapter | Agent-visible `SKILL.md` |
+| --- | --- | --- |
+| enabled (default) | disabled (default) | Legacy compiler output |
+| enabled | enabled | Compiler output, then OS adaptation |
+| disabled | enabled | OS adaptation of raw selected bytes |
+| disabled | disabled | Raw selected bytes |
+
 The pipeline only affects the bytes an agent reads. Source files, trusted
 snapshots, activation metadata, and the rule artifact are never modified.
 Hidden skills stay hidden and never enter the pipeline; a fallback read is
@@ -287,10 +294,19 @@ The OS adapter is disabled by default and configured through the existing
 `rules_path`, it uses the built-in catalog:
 
 ```toml
+# /etc/skillfs/skillfs-security.toml
+[transforms.directive]
+enabled = true
+
 [transforms.os_adapter]
 enabled = true
-target_os = "auto"                 # auto | ubuntu | alinux
-# rules_path = "/etc/skillfs/ubuntu-alinux.yaml"   # optional external override
+target_os = "alinux" # auto | ubuntu | alinux
+# rules_path = "/etc/skillfs/ubuntu-alinux.custom.yaml"
+```
+
+```bash
+skillfs mount /path/to/skills /mnt/skillfs \
+  --config /etc/skillfs/skillfs-security.toml
 ```
 
 SkillFS ships a **built-in 311-rule Ubuntu/Alinux catalog** embedded in the
@@ -311,6 +327,11 @@ rules are included but `auto_apply: never` (documented yet never applied).
   loads and validates the chosen artifact once at startup; the per-read path
   performs only in-memory substitution and never parses YAML, reads
   `/etc/os-release`, spawns processes, or makes network/LLM calls.
+- TOML controls which stages run, the target OS, and the rule artifact. The YAML
+  artifact controls individual mappings and eligibility. There is no per-rule
+  TOML switch.
+
+### Enabling Protected Rules and Adding Custom Rules
 
 The rule artifact — built-in or external — is a top-level YAML sequence. Each
 rule declares the literal for each OS side, a `direction`, and a required
@@ -322,6 +343,49 @@ rule declares the literal for each OS side, a `direction`, and a required
   direction: bidirectional          # bidirectional | ubuntu_to_alinux_only | alinux_to_ubuntu_only
   auto_apply: always                # always | never — REQUIRED
 ```
+
+`rules_path` is a **complete replacement**, not an overlay. To retain all
+built-in mappings and customize only selected entries, copy the repository asset
+from a source checkout:
+
+```bash
+cp src/skillfs/crates/skillfs-core/assets/ubuntu-alinux.yaml \
+  /etc/skillfs/ubuntu-alinux.custom.yaml
+```
+
+Then set `rules_path = "/etc/skillfs/ubuntu-alinux.custom.yaml"` in the TOML
+configuration. An absolute path avoids dependence on the mount process working
+directory.
+
+To opt a protected medium- or low-confidence rule into local policy, change its
+`auto_apply` value in the copied artifact. For example:
+
+```yaml
+- ubuntu: "ufw"
+  alinux: "firewalld"
+  direction: ubuntu_to_alinux_only
+  auto_apply: always
+  confidence: low
+  notes: "enabled by local policy"
+```
+
+Append complete entries to define local mappings:
+
+```yaml
+- ubuntu: "acme-agent-dev"
+  alinux: "acme-agent-devel"
+  direction: bidirectional
+  auto_apply: always
+  confidence: high
+  notes: "local package mapping"
+```
+
+`ubuntu`, `alinux`, `direction`, and `auto_apply` are required.
+`confidence` and `notes` are optional inert annotations. The external file
+must also retain any built-in rules you still want: SkillFS does not merge it
+with the embedded catalog. Rules are loaded once when the mount starts; remount
+after editing the file. There is currently no catalog overlay, hot reload,
+per-rule identifier, or export command.
 
 - `auto_apply` is required on every rule, including external override artifacts;
   only `auto_apply: always` rules are applied, and only in a direction the
