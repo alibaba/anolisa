@@ -1109,6 +1109,15 @@ export async function loadCliConfig(
     }
   }
 
+  // Export the resolved session id so child processes (shell tool, MCP
+  // servers, user `!cmd` escapes) inherit COSH_SESSION_ID, enabling per-run
+  // cross-plane correlation with AgentSight. Idempotent: no-op when the id
+  // was already inherited from the parent env.
+  const resolvedSessionId = config.getSessionId();
+  if (resolvedSessionId) {
+    process.env['COSH_SESSION_ID'] = resolvedSessionId;
+  }
+
   return config;
 }
 
