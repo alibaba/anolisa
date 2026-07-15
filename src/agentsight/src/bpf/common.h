@@ -65,15 +65,28 @@ static inline u32 get_task_ns_pid(struct task_struct *task)
 {
   unsigned int level = 0;
   struct pid *pid = NULL;
+  /* Read from the thread-group leader so we return the PROCESS-level (tgid)
+   * namespace pid, not the calling thread's ns tid. A syscall may run on a
+   * worker thread (e.g. aiohttp/uvloop performs getaddrinfo in a thread pool),
+   * in which case the raw current-task PIDTYPE_PID is a per-thread tid. Reading
+   * the leader keeps event->pid == process pid so it correlates with sslsniff
+   * and cmdline/DNS discovery. For a typical single-threaded process the
+   * leader is the task itself. */
+  struct task_struct *leader = BPF_CORE_READ(task, group_leader);
+  /* Defensive: group_leader is never NULL in practice, but if a CO-RE read
+   * ever yields 0 fall back to task so we degrade to the prior (per-thread)
+   * behaviour instead of dereferencing a NULL leader. */
+  if (!leader)
+    leader = task;
 
   if (bpf_core_type_exists(struct pid_link))
   {
-    struct task_struct___older_v50 *t = (void *)task;
+    struct task_struct___older_v50 *t = (void *)leader;
     pid = BPF_CORE_READ(t, pids[PIDTYPE_PID].pid);
   }
   else
   {
-    pid = BPF_CORE_READ(task, thread_pid);
+    pid = BPF_CORE_READ(leader, thread_pid);
   }
 
   level = BPF_CORE_READ(pid, level);
