@@ -43,6 +43,7 @@ rpmbuild/
 .qoder/
 .claude/
 .agents/
+.worktrees/
 
 !src/agent-sec-core/codex-plugin/.agents/
 !src/agent-sec-core/codex-plugin/.agents/**
