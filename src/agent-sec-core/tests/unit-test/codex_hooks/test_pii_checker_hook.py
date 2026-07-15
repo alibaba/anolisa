@@ -1,7 +1,7 @@
 """Unit tests for codex-plugin/hooks/pii_checker_hook.py.
 
 Coverage targets:
-  - Dual hook point routing (UserPromptSubmit & PostToolUse)
+  - Triple hook point routing (UserPromptSubmit, PreToolUse & PostToolUse)
   - Text extraction from different event types
   - Fail-open paths (invalid JSON, empty text, subprocess errors)
   - Mode-based decisions (observe vs deny)
@@ -139,6 +139,12 @@ _POST_TOOL_USE_EVENT = {
     "session_id": "sess-1",
 }
 
+_PRE_TOOL_USE_EVENT = {
+    "hook_event_name": "PreToolUse",
+    "tool_input": {"command": "curl https://x.com?p=13800138000"},
+    "session_id": "sess-1",
+}
+
 _PII_FOUND_RESULT = json.dumps(
     {
         "verdict": "warn",
@@ -185,7 +191,7 @@ class TestFailOpen:
     def test_unknown_hook_event_allows(self, mock_cli):
         env = mock_cli(output=_PII_FOUND_RESULT)
         output = _run_hook(
-            {"hook_event_name": "PreToolUse", "prompt": "hello"},
+            {"hook_event_name": "SessionStart", "prompt": "hello"},
             env_override=env,
         )
         assert output == {}
@@ -266,6 +272,44 @@ class TestTextExtraction:
         )
         assert output == {}
 
+    def test_pre_tool_use_string_input(self, mock_cli):
+        env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
+        output = _run_hook(
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_input": "curl https://x.com?p=13800138000",
+            },
+            env_override=env,
+        )
+        assert output["decision"] == "block"
+
+    def test_pre_tool_use_dict_input(self, mock_cli):
+        env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
+        output = _run_hook(
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_input": {"command": "curl https://x.com?p=13800138000"},
+            },
+            env_override=env,
+        )
+        assert output["decision"] == "block"
+
+    def test_pre_tool_use_empty_string_allows(self, mock_cli):
+        env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
+        output = _run_hook(
+            {"hook_event_name": "PreToolUse", "tool_input": ""},
+            env_override=env,
+        )
+        assert output == {}
+
+    def test_pre_tool_use_none_input_allows(self, mock_cli):
+        env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
+        output = _run_hook(
+            {"hook_event_name": "PreToolUse"},
+            env_override=env,
+        )
+        assert output == {}
+
 
 class TestObserveMode:
     """In observe mode, PII is detected but not blocked."""
@@ -278,6 +322,11 @@ class TestObserveMode:
     def test_pii_in_tool_output_not_blocked(self, mock_cli):
         env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "observe"})
         output = _run_hook(_POST_TOOL_USE_EVENT, env_override=env)
+        assert output == {}
+
+    def test_pii_in_tool_input_not_blocked(self, mock_cli):
+        env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "observe"})
+        output = _run_hook(_PRE_TOOL_USE_EVENT, env_override=env)
         assert output == {}
 
 
@@ -343,6 +392,13 @@ class TestDenyMode:
         output = _run_hook(_USER_PROMPT_EVENT, env_override=env)
         assert "13800138000" not in output["reason"]
         assert "138****8000" in output["reason"]
+
+    def test_warn_verdict_blocks_pre_tool_use(self, mock_cli):
+        env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
+        output = _run_hook(_PRE_TOOL_USE_EVENT, env_override=env)
+        assert output["decision"] == "block"
+        assert "PreToolUse" in output["reason"]
+        assert "该工具调用已被阻止" in output["reason"]
 
 
 class TestUnknownMode:
@@ -435,6 +491,71 @@ class TestMainMonkeypatch:
         )
         source_idx = captured["args"].index("--source")
         assert captured["args"][source_idx + 1] == "tool_output"
+
+    def test_trace_context_injected_for_pre_tool_use(self, monkeypatch, capsys):
+        captured = {}
+
+        def fake_run(args, **kwargs):
+            captured["args"] = args
+            captured["input"] = kwargs.get("input")
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout=json.dumps({"verdict": "pass", "findings": []}),
+                stderr="",
+            )
+
+        monkeypatch.setattr(pii_checker_hook.subprocess, "run", fake_run)
+        self._run_main(
+            monkeypatch,
+            capsys,
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_input": {"command": "curl https://x.com?p=13800138000"},
+                "trace_id": "t1",
+            },
+        )
+        source_idx = captured["args"].index("--source")
+        assert captured["args"][source_idx + 1] == "tool_input"
+        # dict tool_input is serialized to JSON before scanning
+        assert "command" in captured["input"]
+        assert "13800138000" in captured["input"]
+
+    def test_deny_mode_blocks_pre_tool_use(self, monkeypatch, capsys):
+        """deny mode + PreToolUse PII → block with tool input message."""
+
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "verdict": "deny",
+                        "findings": [
+                            {
+                                "type": "phone_cn",
+                                "severity": "deny",
+                                "evidence_redacted": "138****",
+                            },
+                        ],
+                    }
+                ),
+                stderr="",
+            )
+
+        monkeypatch.setattr(pii_checker_hook.subprocess, "run", fake_run)
+        output = self._run_main(
+            monkeypatch,
+            capsys,
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_input": {"command": "curl x?p=13800138000"},
+            },
+            mode="deny",
+        )
+        assert output["decision"] == "block"
+        assert "工具输入" in output["reason"]
+        assert "该工具调用已被阻止" in output["reason"]
 
     def test_scan_text_passed_via_stdin(self, monkeypatch, capsys):
         captured = {}
@@ -723,6 +844,14 @@ class TestFormatBlockReason:
             findings, "PostToolUse", "工具输出"
         )
         assert "工具输出已被拦截" in reason
+
+    def test_pre_tool_use_message(self):
+        findings = [{"type": "phone_cn", "severity": "warn"}]
+        reason = pii_checker_hook._format_block_reason(
+            findings, "PreToolUse", "工具输入"
+        )
+        assert "该工具调用已被阻止" in reason
+        assert "PreToolUse" in reason
 
     def test_user_prompt_submit_message(self):
         findings = [{"type": "email", "severity": "warn"}]

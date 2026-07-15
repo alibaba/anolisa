@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
 """Codex hook for PII (Personal Identifiable Information) detection.
 
-Supports TWO hook points via a single script (routed by hook_event_name):
+Supports THREE hook points via a single script (routed by hook_event_name):
   - UserPromptSubmit: scans user prompt before it reaches the model.
+  - PreToolUse: scans tool input before the tool executes.
   - PostToolUse: scans tool output before it enters model context.
 
-Protection direction: prevent PII from flowing INTO the LLM provider.
-The user already knows their own PII — the goal is to stop it from being
-sent to a third-party model service or leaking via model responses.
+Protection direction:
+  - UserPromptSubmit / PostToolUse: prevent PII from flowing INTO the LLM
+    provider (user prompt / tool output → model).
+  - PreToolUse: prevent PII from flowing OUT via a tool call (exfiltration),
+    e.g. curl-ing a phone number to an external endpoint or writing PII to
+    a file. This is the only point to catch PII before the tool executes.
 
 Modes (controlled by PII_CHECKER_MODE env var, default: observe):
   - observe: silent pass-through, only audit trail via agent-sec-cli events.
              Even if PII is detected, content will NOT be blocked.
   - deny: block when PII is detected.
           UserPromptSubmit: reject the prompt (user must rephrase).
+          PreToolUse: block the tool call (the tool will not execute).
           PostToolUse: replace tool output with reason text (model won't see PII).
 
 Protocol note: Codex hook protocol is binary (allow/block). There is NO
@@ -116,6 +121,8 @@ def _format_block_reason(
 
     if hook_event == "UserPromptSubmit":
         lines.append("请移除敏感信息后重新提交。")
+    elif hook_event == "PreToolUse":
+        lines.append("该工具调用已被阻止，敏感信息不会外发。")
     else:
         lines.append("工具输出已被拦截，原始内容不会进入模型上下文。")
 
@@ -142,6 +149,20 @@ def _extract_scan_text(input_data: dict, hook_event: str) -> str | None:
             return text
         return None
 
+    if hook_event == "PreToolUse":
+        tool_input = input_data.get("tool_input")
+        if tool_input is None:
+            return None
+        # tool_input is a serde_json::Value — could be string, object, array
+        if isinstance(tool_input, str):
+            return tool_input if tool_input.strip() else None
+        # For non-string types, serialize to text for scanning
+        try:
+            text = json.dumps(tool_input, ensure_ascii=False)
+            return text if text.strip() else None
+        except (TypeError, ValueError):
+            return None
+
     if hook_event == "PostToolUse":
         tool_response = input_data.get("tool_response")
         if tool_response is None:
@@ -161,6 +182,8 @@ def _extract_scan_text(input_data: dict, hook_event: str) -> str | None:
 
 def _source_for_event(hook_event: str) -> str:
     """Return the --source argument value for agent-sec-cli."""
+    if hook_event == "PreToolUse":
+        return "tool_input"
     if hook_event == "PostToolUse":
         return "tool_output"
     return "user_input"
@@ -168,6 +191,8 @@ def _source_for_event(hook_event: str) -> str:
 
 def _source_desc_for_event(hook_event: str) -> str:
     """Return human-readable source description for block reason."""
+    if hook_event == "PreToolUse":
+        return "工具输入"
     if hook_event == "PostToolUse":
         return "工具输出"
     return "用户输入"
@@ -185,7 +210,7 @@ def main() -> None:
 
     # 2. Determine which hook event we're handling
     hook_event = input_data.get("hook_event_name", "")
-    if hook_event not in ("UserPromptSubmit", "PostToolUse"):
+    if hook_event not in ("UserPromptSubmit", "PreToolUse", "PostToolUse"):
         return  # unknown event, fail-open
 
     # 3. Extract text to scan

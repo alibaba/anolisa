@@ -18,6 +18,12 @@
             "type": "command",
             "command": "python3 ${PLUGIN_ROOT}/hooks/observability_hook.py",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/pii_checker_hook.py",
+            "timeout": 10,
+            "statusMessage": "Checking for PII in tool input..."
           }
         ]
       }

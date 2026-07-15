@@ -96,7 +96,7 @@ do_install() {
     info "   请选择信任 (Trust) 以下 hook 使其生效："
     info "   - code_scanner_hook.py   (PreToolUse/Bash)"
     info "   - prompt_scanner_hook.py (UserPromptSubmit)"
-    info "   - pii_checker_hook.py    (UserPromptSubmit + PostToolUse)"
+    info "   - pii_checker_hook.py    (UserPromptSubmit + PostToolUse + PreToolUse)"
     info "   - skill_ledger_hook.py   (UserPromptSubmit)"
     info "   - observability_hook.py  (UserPromptSubmit + PreToolUse + PostToolUse + Stop)"
     echo ""

