@@ -516,6 +516,18 @@ pub fn ensure_default_agents_config(path: &Path) -> anyhow::Result<()> {
 
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read existing config at {path:?}"))?;
+
+    // If the file is not valid JSON at all, leave it untouched so the caller's
+    // load_from_file → parse_json_rules surfaces "JSON parse error: ..." and
+    // AgentSight::new emits its `Failed to load config from {path:?}: {e},
+    // using embedded defaults` warn log. Auto-upgrade is only meaningful for
+    // *valid* JSON whose schema_version is outdated; silently overwriting an
+    // invalid file masks the parse error and breaks the documented fallback
+    // contract (see issue #1502).
+    if serde_json::from_str::<serde_json::Value>(&content).is_err() {
+        return Ok(());
+    }
+
     let on_disk_version = extract_schema_version(&content);
 
     if on_disk_version >= Some(CURRENT_SCHEMA_VERSION) {
@@ -2073,5 +2085,60 @@ mod tests {
             extract_schema_version(&content),
             Some(CURRENT_SCHEMA_VERSION)
         );
+    }
+
+    #[test]
+    fn ensure_default_agents_config_leaves_invalid_json_untouched() {
+        // Regression for issue #1502: an unparseable config file must NOT be
+        // silently backed up + overwritten with the default. The caller's
+        // load_from_file → parse_json_rules surfaces "JSON parse error: ..."
+        // and AgentSight::new emits its "using embedded defaults" warn log.
+        // Auto-upgrade is only meaningful for valid JSON with an outdated
+        // schema_version.
+        let dir = unique_temp_dir();
+        let path = dir.join("agentsight.json");
+        let invalid = "NOT_VALID_JSON_AT_ALL{{{";
+        std::fs::write(&path, invalid).unwrap();
+        ensure_default_agents_config(&path).unwrap();
+        // File content must be unchanged — no silent overwrite.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), invalid);
+        // No backup file should be created either.
+        let parent = path.parent().unwrap();
+        let backups: Vec<_> = std::fs::read_dir(parent)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("agentsight.json.bak.")
+            })
+            .collect();
+        assert!(
+            backups.is_empty(),
+            "invalid JSON must not trigger backup+overwrite"
+        );
+    }
+
+    #[test]
+    fn ensure_default_agents_config_leaves_truncated_json_untouched() {
+        // Same regression, with a truncated-JSON variant (parses as partial
+        // JSON, fails serde_json::from_str). Should also be left untouched.
+        let dir = unique_temp_dir();
+        let path = dir.join("agentsight.json");
+        let truncated = r#"{"cmdline": {"allow": [{"rule": ["*cosh*""#;
+        std::fs::write(&path, truncated).unwrap();
+        ensure_default_agents_config(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), truncated);
+        let parent = path.parent().unwrap();
+        let backups: Vec<_> = std::fs::read_dir(parent)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("agentsight.json.bak.")
+            })
+            .collect();
+        assert!(backups.is_empty());
     }
 }
