@@ -1796,8 +1796,13 @@ fn hermes_security_activation_file_passes_gate() {
         .expect("spawn skillfs");
 
     std::thread::sleep(std::time::Duration::from_secs(2));
-    let _ = child.kill();
+    stop_mount_child(&mut child, mount.path());
     let output = child.wait_with_output().expect("wait");
+    assert!(
+        !is_mounted(mount.path()),
+        "test mount must be removed after child shutdown: {}",
+        mount.path().display()
+    );
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
@@ -1895,8 +1900,13 @@ fn hermes_layout_without_security_passes_gate() {
         .expect("spawn skillfs");
 
     std::thread::sleep(std::time::Duration::from_secs(2));
-    let _ = child.kill();
+    stop_mount_child(&mut child, mount.path());
     let output = child.wait_with_output().expect("wait");
+    assert!(
+        !is_mounted(mount.path()),
+        "test mount must be removed after child shutdown: {}",
+        mount.path().display()
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !stderr.contains("incompatible"),
