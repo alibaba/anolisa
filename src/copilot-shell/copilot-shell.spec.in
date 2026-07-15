@@ -35,6 +35,14 @@ make install DESTDIR=%{buildroot} PREFIX=%{_prefix}
 install -d %{buildroot}%{_datadir}/anolisa/components/cosh
 install -m 0644 component.toml %{buildroot}%{_datadir}/anolisa/components/cosh/component.toml
 
+# anolisa resolves {bindir} to /usr/local/bin for system scope (FHS),
+# but this RPM installs binaries under /usr/bin (PREFIX=/usr).
+# Add compatibility symlinks so health checks find cosh at {bindir}/cosh.
+install -d %{buildroot}/usr/local/bin
+ln -sf %{_bindir}/cosh    %{buildroot}/usr/local/bin/cosh
+ln -sf %{_bindir}/co      %{buildroot}/usr/local/bin/co
+ln -sf %{_bindir}/copilot %{buildroot}/usr/local/bin/copilot
+
 # Install cosh-switch script
 cat > %{buildroot}%{_bindir}/cosh-switch << 'EOF'
 #!/bin/bash
@@ -84,6 +92,9 @@ EOF
 %license %{_docdir}/%{name}/LICENSE
 %doc %{_docdir}/%{name}/README.md
 %{_prefix}/lib/%{name}
+/usr/local/bin/cosh
+/usr/local/bin/co
+/usr/local/bin/copilot
 %{_datadir}/%{name}
 %{_datadir}/anolisa/components/cosh/component.toml
 %{_bindir}/co
