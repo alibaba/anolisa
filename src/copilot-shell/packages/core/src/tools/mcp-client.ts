@@ -103,6 +103,7 @@ export class McpClient {
     private readonly workspaceContext: WorkspaceContext,
     private readonly debugMode: boolean,
     private readonly sendSdkMcpMessage?: SendSdkMcpMessage,
+    private readonly childProcessEnv?: Record<string, string>,
   ) {
     this.client = new Client({
       name: `qwen-cli-mcp-client-${this.serverName}`,
@@ -205,6 +206,7 @@ export class McpClient {
       this.serverConfig,
       this.debugMode,
       this.sendSdkMcpMessage,
+      this.childProcessEnv,
     );
   }
 
@@ -540,6 +542,7 @@ export async function connectAndDiscover(
       debugMode,
       workspaceContext,
       sendSdkMcpMessage,
+      cliConfig.getChildProcessEnv(mcpServerConfig.env),
     );
 
     mcpClient.onerror = (error) => {
@@ -773,6 +776,7 @@ export async function connectToMcpServer(
   debugMode: boolean,
   workspaceContext: WorkspaceContext,
   sendSdkMcpMessage?: SendSdkMcpMessage,
+  childProcessEnv?: Record<string, string>,
 ): Promise<Client> {
   const mcpClient = new Client({
     name: 'qwen-code-mcp-client',
@@ -830,6 +834,7 @@ export async function connectToMcpServer(
       mcpServerConfig,
       debugMode,
       sendSdkMcpMessage,
+      childProcessEnv,
     );
     try {
       await mcpClient.connect(transport, {
@@ -1191,6 +1196,7 @@ export async function createTransport(
   mcpServerConfig: MCPServerConfig,
   debugMode: boolean,
   sendSdkMcpMessage?: SendSdkMcpMessage,
+  childProcessEnv?: Record<string, string>,
 ): Promise<Transport> {
   if (isSdkMcpServerConfig(mcpServerConfig)) {
     if (!sendSdkMcpMessage) {
@@ -1346,10 +1352,12 @@ export async function createTransport(
     const transport = new StdioClientTransport({
       command: mcpServerConfig.command,
       args: mcpServerConfig.args || [],
-      env: {
-        ...process.env,
-        ...(mcpServerConfig.env || {}),
-      } as Record<string, string>,
+      env:
+        childProcessEnv ??
+        ({
+          ...process.env,
+          ...(mcpServerConfig.env || {}),
+        } as Record<string, string>),
       cwd: mcpServerConfig.cwd,
       stderr: 'pipe',
     });

@@ -260,6 +260,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
           combinedSignal,
           shouldUsePty,
           shellExecutionConfig ?? {},
+          this.config.getChildProcessEnv(),
         );
 
       if (pid && setPidCallback) {

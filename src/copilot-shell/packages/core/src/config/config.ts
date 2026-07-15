@@ -305,6 +305,8 @@ export interface AutoMemoryConfig {
 
 export interface ConfigParameters {
   sessionId?: string;
+  /** Correlation ID pinned to child process environments. */
+  subprocessSessionId?: string;
   sessionData?: ResumedSessionData;
   embeddingModel?: string;
   targetDir: string;
@@ -450,6 +452,7 @@ export interface ConfigInitializeOptions {
 
 export class Config {
   private sessionId: string;
+  private readonly subprocessSessionId: string;
   private sessionData?: ResumedSessionData;
   private toolRegistry!: ToolRegistry;
   private promptRegistry!: PromptRegistry;
@@ -572,6 +575,7 @@ export class Config {
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
+    this.subprocessSessionId = params.subprocessSessionId ?? this.sessionId;
     this.sessionData = params.sessionData;
     this.embeddingModel = params.embeddingModel ?? DEFAULT_QWEN_EMBEDDING_MODEL;
     this.fileSystemService = new StandardFileSystemService();
@@ -952,6 +956,17 @@ export class Config {
 
   getSessionId(): string {
     return this.sessionId;
+  }
+
+  /** Builds a child environment pinned to this config's launcher correlation. */
+  getChildProcessEnv(
+    overrides: Record<string, string> = {},
+  ): Record<string, string> {
+    return {
+      ...process.env,
+      ...overrides,
+      COSH_SESSION_ID: this.subprocessSessionId,
+    } as Record<string, string>;
   }
 
   private currentRunId: string | undefined = undefined;

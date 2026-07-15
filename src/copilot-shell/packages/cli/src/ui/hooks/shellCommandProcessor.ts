@@ -233,6 +233,7 @@ export const useShellCommandProcessor = (
             abortSignal,
             config.getShouldUseNodePtyShell(),
             shellExecutionConfig,
+            config.getChildProcessEnv(),
           );
 
           console.log(terminalHeight, terminalWidth);

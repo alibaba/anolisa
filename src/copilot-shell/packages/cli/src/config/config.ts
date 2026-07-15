@@ -956,22 +956,23 @@ export async function loadCliConfig(
     }
   }
 
-  // Adopt a launcher-provided correlation id (exported as COSH_SESSION_ID
-  // by the cosh wrapper) so this run's own session id matches what AgentSight
-  // scrapes from /proc/<pid>/environ, enabling per-run cross-plane correlation.
-  // Precedence: --continue/--resume > COSH_SESSION_ID env > minted uuid
-  // (Config mints one when sessionId is left undefined). Unauthenticated hint.
-  if (!sessionId) {
-    const envSessionId = process.env['COSH_SESSION_ID'];
-    if (envSessionId && envSessionId.length > 0) {
-      sessionId = envSessionId;
-    }
+  // COSH_SESSION_ID identifies the launcher process, not an ACP chat. ACP can
+  // host multiple chats, so only non-ACP sessions adopt it; child processes
+  // retain it for AgentSight correlation.
+  const envSessionId = process.env['COSH_SESSION_ID'];
+  const launcherSessionId =
+    envSessionId && envSessionId.length > 0 ? envSessionId : undefined;
+  const subprocessSessionId = launcherSessionId ?? sessionId;
+
+  if (!sessionId && !isAcpMode && launcherSessionId) {
+    sessionId = launcherSessionId;
   }
 
   const modelProvidersConfig = settings.modelProviders;
 
   const config = new Config({
     sessionId,
+    subprocessSessionId,
     sessionData,
     embeddingModel: DEFAULT_QWEN_EMBEDDING_MODEL,
     targetDir: cwd,

@@ -301,6 +301,35 @@ describe('mcp-client', () => {
       });
     });
 
+    it('should use a config-scoped environment for command transport', async () => {
+      const mockedTransport = vi
+        .spyOn(SdkClientStdioLib, 'StdioClientTransport')
+        .mockReturnValue({} as SdkClientStdioLib.StdioClientTransport);
+      const childProcessEnv = {
+        FOO: 'bar',
+        COSH_SESSION_ID: 'launcher-correlation',
+      };
+
+      await createTransport(
+        'test-server',
+        {
+          command: 'test-command',
+          env: { COSH_SESSION_ID: 'server-override' },
+        },
+        false,
+        undefined,
+        childProcessEnv,
+      );
+
+      expect(mockedTransport).toHaveBeenCalledWith({
+        command: 'test-command',
+        args: [],
+        cwd: undefined,
+        env: childProcessEnv,
+        stderr: 'pipe',
+      });
+    });
+
     describe('useGoogleCredentialProvider', () => {
       it('should use GoogleCredentialProvider when specified', async () => {
         const transport = await createTransport(
