@@ -485,13 +485,13 @@ async fn run(cli: Cli, raw_args: Vec<String>) -> Result<(), Box<dyn std::error::
             primary_count,
             dry_run,
         } => {
-            let start = std::time::Instant::now();
+            let _guard = SlsLogGuard::new("classify");
             let result = cmd_classify(source, primary_count, dry_run).await;
-            sls_ops::log_command("classify", start, err_reason(&result));
+            _guard.set_reason(err_reason(&result));
             result
         }
         Commands::Validate { source, format } => {
-            let start = std::time::Instant::now();
+            let _guard = SlsLogGuard::new("validate");
             let (result, validation_failed) = cmd_validate(source, format).await;
             // A validation failure exits non-zero but is not a command error;
             // record it with a concise err_reason before exiting.
@@ -500,7 +500,7 @@ async fn run(cli: Cli, raw_args: Vec<String>) -> Result<(), Box<dyn std::error::
                 None if validation_failed => Some("validation failed".to_string()),
                 None => None,
             };
-            sls_ops::log_command("validate", start, reason);
+            _guard.set_reason(reason);
             if result.is_ok() && validation_failed {
                 std::process::exit(1);
             }
@@ -510,9 +510,9 @@ async fn run(cli: Cli, raw_args: Vec<String>) -> Result<(), Box<dyn std::error::
             source,
             enabled_only,
         } => {
-            let start = std::time::Instant::now();
+            let _guard = SlsLogGuard::new("list");
             let result = cmd_list(source, enabled_only).await;
-            sls_ops::log_command("list", start, err_reason(&result));
+            _guard.set_reason(err_reason(&result));
             result
         }
         Commands::Stop { mountpoint } => managed::run_stop(&mountpoint),
@@ -524,6 +524,48 @@ async fn run(cli: Cli, raw_args: Vec<String>) -> Result<(), Box<dyn std::error::
 fn err_reason<T>(result: &Result<T, Box<dyn std::error::Error>>) -> Option<String> {
     result.as_ref().err().map(|e| e.to_string())
 }
+
+/// RAII guard that ensures `sls_ops::log_command` runs on drop, even if the
+/// command panics (e.g. `println!` panicking on a broken pipe when stdout is
+/// piped to `head`). The error reason and completion status are stored in
+/// cells and updated after the command returns; on panic unwind, the guard
+/// logs with a "panic" reason so the SLS ops entry is never lost.
+struct SlsLogGuard {
+    ops_name: String,
+    start: std::time::Instant,
+    err_reason: std::cell::Cell<Option<String>>,
+    completed: std::cell::Cell<bool>,
+}
+
+impl SlsLogGuard {
+    fn new(ops_name: &str) -> Self {
+        Self {
+            ops_name: ops_name.to_string(),
+            start: std::time::Instant::now(),
+            err_reason: std::cell::Cell::new(None),
+            completed: std::cell::Cell::new(false),
+        }
+    }
+
+    /// Set the error reason after the command completes (Ok -> None).
+    fn set_reason(&self, reason: Option<String>) {
+        self.err_reason.set(reason);
+        self.completed.set(true);
+    }
+}
+
+impl Drop for SlsLogGuard {
+    fn drop(&mut self) {
+        let reason = if self.completed.get() {
+            self.err_reason.take()
+        } else {
+            // Command panicked before calling set_reason.
+            Some("panic".to_string())
+        };
+        sls_ops::log_command(&self.ops_name, self.start, reason);
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 // Mount Command
