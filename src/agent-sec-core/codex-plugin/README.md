@@ -124,7 +124,7 @@ codex-plugin/
         ├── hooks.json                      ← Hook 声明配置
         ├── code_scanner_hook.py            ← PreToolUse: 代码安全扫描
         ├── prompt_scanner_hook.py          ← UserPromptSubmit: Prompt 注入检测
-        ├── pii_checker_hook.py             ← UserPromptSubmit + PostToolUse: PII 检测
+        ├── pii_checker_hook.py             ← UserPromptSubmit + PreToolUse + PostToolUse: PII 检测
         ├── skill_ledger_hook.py            ← UserPromptSubmit: Skill 完整性验证
         ├── observability_hook.py           ← Turn/Tool 生命周期可观测记录
         └── trace_context.py                ← 链路追踪工具库
@@ -136,7 +136,7 @@ codex-plugin/
 |-----------|--------|---------|------|
 | `code_scanner_hook.py` | PreToolUse | `Bash` | 扫描 shell 命令，检测反弹shell、危险删除等 |
 | `prompt_scanner_hook.py` | UserPromptSubmit | (all) | 检测用户输入中的 prompt 注入攻击 |
-| `pii_checker_hook.py` | UserPromptSubmit + PostToolUse | (all) | 检测用户输入和工具输出中的 PII，deny 模式下阻断对应 payload（不支持脱敏放行） |
+| `pii_checker_hook.py` | UserPromptSubmit + PreToolUse + PostToolUse | (all) | 检测用户输入、工具输入和工具输出中的 PII，deny 模式下阻断对应 payload（不支持脱敏放行） |
 | `skill_ledger_hook.py` | UserPromptSubmit | (all) | 解析 prompt 中的 $skill-name，验证 skill 文件完整性和签名 |
 | `observability_hook.py` | UserPromptSubmit + PreToolUse + PostToolUse + Stop | (all) | 记录 Turn/Tool 生命周期；不改变 Codex 决策 |
 
@@ -157,6 +157,14 @@ Codex Hook 与 `agent-sec-cli observability` 的映射如下：
 
 Codex 当前没有 `BeforeModel` / `AfterModel` Hook，因此本插件不会生成
 `before_llm_call` / `after_llm_call` 或伪造 Token、TTFB、模型请求耗时等指标。
+
+### PII PreToolUse 覆盖范围与性能说明
+
+`pii_checker_hook.py` 在 **PreToolUse** 上**不设置 matcher，对所有工具调用生效**（与 `code_scanner_hook.py` 仅匹配 `Bash` 不同）。这是刻意设计：PII 外发路径不限于 shell 命令，也可能经由 MCP 等其他工具流出，因此需覆盖 `Bash` 之外的全部工具，避免遗漏 PII 外发路径。
+
+代价是每次工具调用都会 spawn 一次 `agent-sec-cli scan-pii` 子进程，在工具调用密集的场景（如代码搜索迭代）下可能带来额外延迟。后续可通过复用常驻 worker、避免每次重启 `agent-sec-cli` 来降低这部分开销；该性能优化属于后续工作，不在本 PR 范围内。
+
+> 空工具输入（`{}` / `[]` / `null`）会被短路跳过，不触发扫描子进程。
 
 ## 调试
 
@@ -188,6 +196,10 @@ echo '{"prompt":"$test-hello 帮我打个招呼","cwd":"/root"}' | \
 
 # 测试 PII 检测（UserPromptSubmit）
 echo '{"hook_event_name":"UserPromptSubmit","prompt":"我的手机号是13800138000","session_id":"test","turn_id":"t1","cwd":"/tmp","model":"o3","permission_mode":"default"}' | \
+  PII_CHECKER_MODE=deny python3 hooks-plugin/hooks/pii_checker_hook.py
+
+# 测试 PII 检测（PreToolUse）
+echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"curl https://x.com?p=13800138000"},"session_id":"test","turn_id":"t1","cwd":"/tmp","model":"o3","permission_mode":"default","tool_use_id":"call_1"}' | \
   PII_CHECKER_MODE=deny python3 hooks-plugin/hooks/pii_checker_hook.py
 
 # 测试 PII 检测（PostToolUse）

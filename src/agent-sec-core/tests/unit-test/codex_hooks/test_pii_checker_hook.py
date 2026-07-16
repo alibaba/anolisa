@@ -310,6 +310,26 @@ class TestTextExtraction:
         )
         assert output == {}
 
+    def test_pre_tool_use_empty_dict_allows(self, mock_cli):
+        # Empty dict serializes to "{}" (non-empty string) but has no PII;
+        # the hook must short-circuit and NOT call scan-pii. If it did scan,
+        # the mock would return PII and deny mode would block.
+        env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
+        output = _run_hook(
+            {"hook_event_name": "PreToolUse", "tool_input": {}},
+            env_override=env,
+        )
+        assert output == {}
+
+    def test_pre_tool_use_empty_list_allows(self, mock_cli):
+        # Empty list serializes to "[]" — same short-circuit as empty dict.
+        env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "deny"})
+        output = _run_hook(
+            {"hook_event_name": "PreToolUse", "tool_input": []},
+            env_override=env,
+        )
+        assert output == {}
+
 
 class TestObserveMode:
     """In observe mode, PII is detected but not blocked."""

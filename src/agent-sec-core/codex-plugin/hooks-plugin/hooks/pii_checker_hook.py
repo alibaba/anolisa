@@ -159,9 +159,13 @@ def _extract_scan_text(input_data: dict, hook_event: str) -> str | None:
         # For non-string types, serialize to text for scanning
         try:
             text = json.dumps(tool_input, ensure_ascii=False)
-            return text if text.strip() else None
         except (TypeError, ValueError):
             return None
+        # Empty containers serialize to non-empty strings ("{}", "[]",
+        # "null") but carry no PII — skip to avoid a wasted scan-pii call.
+        if not text.strip() or text in ("{}", "[]", "null"):
+            return None
+        return text
 
     if hook_event == "PostToolUse":
         tool_response = input_data.get("tool_response")
@@ -173,9 +177,13 @@ def _extract_scan_text(input_data: dict, hook_event: str) -> str | None:
         # For non-string types, serialize to text for scanning
         try:
             text = json.dumps(tool_response, ensure_ascii=False)
-            return text if text.strip() else None
         except (TypeError, ValueError):
             return None
+        # Empty containers serialize to non-empty strings ("{}", "[]",
+        # "null") but carry no PII — skip to avoid a wasted scan-pii call.
+        if not text.strip() or text in ("{}", "[]", "null"):
+            return None
+        return text
 
     return None
 
