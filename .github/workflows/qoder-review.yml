@@ -784,12 +784,28 @@ jobs:
             esac
           }
 
+          add_component_review_guidance() {
+            local component_name="$1"
+            [[ "$component_name" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || return 0
+            add_review_guidance_file \
+              "src/${component_name}/develop-skills/${component_name}-code-review/SKILL.md"
+          }
+
           add_context_file() {
             local name="$1"
             [[ -f "$name" ]] || return 0
             case " ${context_files[*]-} " in
               *" ${name} "*) ;;
               *) context_files+=("$name") ;;
+            esac
+          }
+
+          add_review_guidance_file() {
+            local name="$1"
+            [[ -f "$name" ]] || return 0
+            case " ${review_guidance_files[*]-} " in
+              *" ${name} "*) ;;
+              *) review_guidance_files+=("$name") ;;
             esac
           }
 
@@ -804,6 +820,7 @@ jobs:
           }
 
           context_files=()
+          review_guidance_files=()
           add_context_file "AGENTS.md"
           component="$REQUESTED_COMPONENT"
 
@@ -834,12 +851,24 @@ jobs:
           while IFS= read -r changed_file; do
             [[ -n "$changed_file" ]] || continue
             add_nearest_agents "$changed_file"
+            case "$changed_file" in
+              src/*/*)
+                changed_component="${changed_file#src/}"
+                changed_component="${changed_component%%/*}"
+                add_component_review_guidance "$changed_component"
+                ;;
+            esac
           done < "$files_file"
           add_component_context "$component"
+          add_component_review_guidance "$component"
 
           context_manifest="$(printf '%s\n' "${context_files[@]}")"
+          review_guidance_manifest="(none)"
+          if [[ "${#review_guidance_files[@]}" -gt 0 ]]; then
+            review_guidance_manifest="$(printf '%s\n' "${review_guidance_files[@]}")"
+          fi
           changed_files="$(sed -n '1,120p' "$files_file")"
-          review_policy=".github/review/general.md"
+          review_policy=".github/review/review.md"
 
           if [[ ! -f "$review_policy" ]]; then
             echo "Missing Qoder review policy: $review_policy" >&2
@@ -859,6 +888,9 @@ jobs:
 
           CONTEXT_MANIFEST:
           ${context_manifest}
+
+          REVIEW_GUIDANCE_MANIFEST:
+          ${review_guidance_manifest}
 
           PR_CONTEXT_UNTRUSTED:
           ${PR_CONTEXT}
