@@ -121,6 +121,19 @@ impl IndexHandle {
         store.search_hybrid(query, query_vec, top_k)
     }
 
+    /// Synchronously upsert a single file into the BM25 index. Used by
+    /// `memory_observe` to make freshly written memories immediately
+    /// searchable, closing the race window between the file write and the
+    /// notify watcher's next debounce flush (~200 ms).
+    ///
+    /// The notify watcher will later process the same inotify event and
+    /// issue a redundant upsert — this is harmless because `upsert` is
+    /// idempotent (DELETE + INSERT on the same rowid).
+    pub fn reindex_file(&self, rel_path: &str, body: &str, mtime_ms: i64, size: u64) -> Result<()> {
+        let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        store.upsert(rel_path, mtime_ms, size, body, None)
+    }
+
     /// Compact the index: mark old, never-accessed files as cold.
     pub fn compact(&self, cold_after_days: u64) -> Result<usize> {
         let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());

@@ -133,6 +133,19 @@ pub fn memory_observe(
     }
 
     let n = svc.write(&path, &body, false)?;
+
+    // Synchronously upsert the new observation into the BM25 index so it
+    // is immediately searchable by auto-recall hooks. Without this, the
+    // notify watcher's debounce (~200 ms) creates a window where a
+    // `before_prompt_build` hook firing right after `memory_observe`
+    // returns empty results and silently skips injection (#1462).
+    if let Some(ref index) = svc.index {
+        let mtime_ms = Utc::now().timestamp_millis();
+        if let Err(e) = index.reindex_file(&path, &body, mtime_ms, n) {
+            tracing::warn!("synchronous reindex after observe failed for {path}: {e}");
+        }
+    }
+
     svc.audit_log(AuditEntry::new(TOOL).path(path.clone()).bytes(n));
     Ok(path)
 }
