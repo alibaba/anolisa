@@ -81,3 +81,13 @@ dest = "{datadir}/extensions/{component}/"
 
 [adapters.bundle]
 entry = "cosh-extension.json"
+
+[[adapters]]
+framework = "qwencode"
+adapter_type = "extension"
+plugin_id = "tokenless"
+source = "adapters/qwencode"
+dest = "{datadir}/adapters/{component}/qwencode/"
+
+[adapters.bundle]
+entry = "qwen-extension.json"
