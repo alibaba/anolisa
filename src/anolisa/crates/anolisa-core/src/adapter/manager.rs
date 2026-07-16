@@ -2220,8 +2220,9 @@ fn allowed_adapter_types(framework: &str) -> Option<&'static [&'static str]> {
         // Qoder installs a directory-named plugin and activates it via
         // settings.json entries: plugin only (no extension / skill_bundle).
         "qoder" => Some(&["plugin"]),
-        // Filesystem-extension framework: extension only, no plugin default.
-        "cosh" => Some(&["extension"]),
+        // Extension frameworks require an explicit type. Qwen Code delegates
+        // artifact and activation mutations to its native CLI.
+        "cosh" | "qwencode" => Some(&["extension"]),
         _ => None,
     }
 }
@@ -2528,13 +2529,19 @@ fn plan_disable_report(claim: &AdapterClaim) -> DisableReport {
             ));
             None
         }
+        DriverPayload::QwenCode(q) => {
+            cleanup_ids.push(&q.plugin_resource);
+            messages
+                .push("would remove the Qwen Code activation policy via the qwen CLI".to_string());
+            None
+        }
     };
 
     // Whether disable uninstalls (Claude Code / Qoder semantics) rather than
     // unregisters (registry-only). Purely cosmetic for the plan text.
     let plugin_verb = if matches!(
         claim.driver_payload,
-        DriverPayload::ClaudeCode(_) | DriverPayload::Qoder(_)
+        DriverPayload::ClaudeCode(_) | DriverPayload::Qoder(_) | DriverPayload::QwenCode(_)
     ) {
         "uninstall"
     } else {
@@ -2878,6 +2885,7 @@ mod tests {
         assert!(ok("cosh", Some("extension")));
         assert!(ok("qoder", Some("plugin")));
         assert!(ok("qoder", None), "qoder defaults to plugin");
+        assert!(ok("qwencode", Some("extension")));
     }
 
     #[test]
@@ -2934,9 +2942,23 @@ mod tests {
     }
 
     #[test]
+    fn qwencode_requires_extension_type() {
+        for adapter_type in [Some("plugin"), Some("skill_bundle"), None] {
+            let error = validate_adapter_type_for_framework("tokenless", "qwencode", adapter_type)
+                .expect_err(&format!("qwencode + {adapter_type:?} must be rejected"));
+            assert!(
+                matches!(error, AdapterError::InvalidAdapterInput { .. }),
+                "qwencode + {adapter_type:?}: got {error:?}"
+            );
+        }
+        validate_adapter_type_for_framework("tokenless", "qwencode", Some("extension"))
+            .expect("qwencode + extension must pass");
+    }
+
+    #[test]
     fn framework_type_matrix_is_silent_for_unknown_framework() {
         // No built-in driver: this gate defers to UnknownFramework.
-        validate_adapter_type_for_framework("tokenless", "qwencode", Some("extension"))
+        validate_adapter_type_for_framework("tokenless", "gemini", Some("extension"))
             .expect("unknown framework must not be rejected by the type gate");
     }
 

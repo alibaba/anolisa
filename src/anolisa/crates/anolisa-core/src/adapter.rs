@@ -30,6 +30,7 @@ pub mod hermes;
 pub mod manager;
 pub mod openclaw;
 pub mod qoder;
+pub mod qwencode;
 pub mod registry;
 mod util;
 

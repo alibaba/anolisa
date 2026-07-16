@@ -198,6 +198,8 @@ pub enum AdapterConditionKind {
     ResourceBundleMatches,
     /// The plugin is still present in the framework registry.
     PluginRegistered,
+    /// The framework-native activation policy currently enables the plugin.
+    ActivationEnabled,
     /// A marketplace source is still registered (future drivers).
     MarketplaceRegistered,
     /// A claimed directory tree still exists unmodified (future drivers).

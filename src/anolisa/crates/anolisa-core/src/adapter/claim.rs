@@ -389,6 +389,9 @@ pub enum DriverPayload {
     /// Qoder (qodercli) driver payload.
     #[serde(rename = "qoder")]
     Qoder(QoderClaim),
+    /// Qwen Code driver payload.
+    #[serde(rename = "qwencode")]
+    QwenCode(QwenCodeClaim),
 }
 
 /// OpenClaw driver payload. Holds only [`ClaimResource::id`] references —
@@ -506,6 +509,19 @@ pub struct QoderClaim {
     /// Full hook entries ANOLISA owns in `settings.json`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub managed_hook_specs: Vec<QoderManagedHook>,
+}
+
+/// Qwen Code driver payload. Qwen owns extension artifacts and activation
+/// state through its CLI; the receipt references the exact native extension
+/// entry and plugin identity ANOLISA verifies before enabling or uninstalling.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QwenCodeClaim {
+    /// Resource id of the Qwen-managed extension entry
+    /// ([`ClaimResourceKind::ExternalPath`]).
+    pub extension_dir_resource: String,
+    /// Resource id of the installed extension
+    /// ([`ClaimResourceKind::FrameworkPlugin`]).
+    pub plugin_resource: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -1359,6 +1375,68 @@ mod tests {
         sample_qoder_claim()
             .validate(&layout, &allowed)
             .expect("qoder claim under allowed roots must pass");
+    }
+
+    #[test]
+    fn qwencode_claim_round_trips_and_validates() {
+        let claim = AdapterClaim {
+            claim_schema: CLAIM_SCHEMA_VERSION,
+            component: "tokenless".to_string(),
+            framework: "qwencode".to_string(),
+            plugin_id: Some("tokenless".to_string()),
+            adapter_type: Some("extension".to_string()),
+            enabled_at: "2026-07-16T10:30:45Z".to_string(),
+            resource_root: PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/qwencode"),
+            bundle_digest: Some("sha256:0wen".to_string()),
+            driver_schema: DRIVER_SCHEMA_VERSION,
+            status: ClaimStatus::Enabled,
+            resources: vec![
+                ClaimResource {
+                    id: "qwencode_extension_dir".to_string(),
+                    purpose: "qwencode_extension_dir".to_string(),
+                    kind: ClaimResourceKind::ExternalPath {
+                        path: PathBuf::from("/home/alice/.qwen/extensions/tokenless"),
+                    },
+                },
+                ClaimResource {
+                    id: "qwencode_plugin".to_string(),
+                    purpose: "qwencode_plugin".to_string(),
+                    kind: ClaimResourceKind::FrameworkPlugin {
+                        framework: "qwencode".to_string(),
+                        plugin_id: "tokenless".to_string(),
+                    },
+                },
+            ],
+            driver_payload: DriverPayload::QwenCode(QwenCodeClaim {
+                extension_dir_resource: "qwencode_extension_dir".to_string(),
+                plugin_resource: "qwencode_plugin".to_string(),
+            }),
+        };
+
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct Wrapper {
+            adapter_claims: Vec<AdapterClaim>,
+        }
+        let wrapper = Wrapper {
+            adapter_claims: vec![claim.clone()],
+        };
+        let text = toml::to_string_pretty(&wrapper).expect("serialize Qwen Code to TOML");
+        let parsed: Wrapper = toml::from_str(&text).expect("parse Qwen Code from TOML");
+        assert_eq!(
+            wrapper, parsed,
+            "Qwen Code round-trip mismatch; TOML:\n{text}"
+        );
+
+        let json = serde_json::to_string(&claim).expect("serialize Qwen Code JSON");
+        let back: AdapterClaim = serde_json::from_str(&json).expect("parse Qwen Code JSON");
+        assert_eq!(claim, back);
+
+        claim
+            .validate(
+                &FsLayout::system(None),
+                &[PathBuf::from("/home/alice/.qwen")],
+            )
+            .expect("Qwen Code claim under allowed root must pass");
     }
 
     /// A forged qoder receipt pointing its settings resource at `~/.ssh` or
