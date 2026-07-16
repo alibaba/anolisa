@@ -34,8 +34,16 @@ def allow_output() -> str:
 
 
 def deny_output(reason: str) -> str:
-    """Return a blocking Qoder HookOutput JSON string."""
-    return dumps_hook_output({"decision": "deny", "reason": reason})
+    """Return a blocking Qoder HookOutput JSON string.
+
+    ``reason`` is the internal block justification; ``systemMessage`` is the
+    user-visible text that Qoder renders in the terminal when the hook blocks
+    a prompt.  Both are set to the same notice so the user can see why their
+    input was rejected.
+    """
+    return dumps_hook_output(
+        {"decision": "deny", "reason": reason, "systemMessage": reason}
+    )
 
 
 def pre_tool_decision_output(decision: str, reason: str | None = None) -> str:

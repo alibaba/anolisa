@@ -139,7 +139,11 @@ def test_common_outputs_qoder_hook_shapes() -> None:
     pre_tool = json.loads(qoder_hook_common.pre_tool_decision_output("deny", "nope"))
     post_tool = json.loads(qoder_hook_common.post_tool_output_replacement("redacted"))
 
-    assert deny == {"decision": "deny", "reason": "blocked"}
+    assert deny == {
+        "decision": "deny",
+        "reason": "blocked",
+        "systemMessage": "blocked",
+    }
     assert pre_tool == {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",

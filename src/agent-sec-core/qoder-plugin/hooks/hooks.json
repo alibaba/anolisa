@@ -12,6 +12,15 @@
             "args": ["${QODER_PLUGIN_ROOT}/hooks/pii_checker_hook.py"],
             "timeout": 10,
             "statusMessage": "Checking prompt for PII..."
+          },
+          {
+            "type": "command",
+            "name": "agent-sec-prompt-scan",
+            "description": "Scans user prompts for injection and jailbreak attempts",
+            "command": "python3",
+            "args": ["${QODER_PLUGIN_ROOT}/hooks/prompt_scanner_hook.py"],
+            "timeout": 15,
+            "statusMessage": "Checking prompt for injection attacks..."
           }
         ]
       }
