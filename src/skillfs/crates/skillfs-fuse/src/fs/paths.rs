@@ -409,10 +409,15 @@ impl SkillFs {
     /// never enter activation gating. The probe hits the physical source
     /// via `source_base()` so it bypasses the FUSE over-mount in in-place
     /// mode.
+    ///
+    /// Uses the shared no-follow regular-file `SKILL.md` predicate so path
+    /// classification, store discovery, activation enumeration, and the
+    /// resolver all agree on what a Skill is (a symlinked or non-regular
+    /// `SKILL.md` is not a marker).
     pub(super) fn hermes_nested_is_skill(&self, category: &str, skill_name: &str) -> bool {
-        self.hermes_skill_physical_dir(category, skill_name)
-            .join("SKILL.md")
-            .exists()
+        skillfs_core::store::has_regular_skill_md(
+            &self.hermes_skill_physical_dir(category, skill_name),
+        )
     }
 
     /// Whether the direct category child `<category>/<name>` physically
@@ -436,7 +441,13 @@ impl SkillFs {
     /// (`category/skill/SKILL.md`); the lexical parser classifies every
     /// top-level entry as a category container, so callers reclassify a
     /// top-level skill back into the flat skill path types.
+    ///
+    /// Uses the shared no-follow regular-file `SKILL.md` predicate: a
+    /// directory whose only `SKILL.md` is a symlink or other non-regular
+    /// object is a category (its real nested Skills resolve), consistent
+    /// with store discovery and the resolver — never a phantom top-level
+    /// Skill that has no activation key and would fail closed to hidden.
     pub(super) fn hermes_is_top_level_skill(&self, name: &str) -> bool {
-        self.source_base().join(name).join("SKILL.md").exists()
+        skillfs_core::store::has_regular_skill_md(&self.source_base().join(name))
     }
 }

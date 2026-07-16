@@ -23,7 +23,8 @@ use std::time::Duration;
 use parking_lot::RwLock;
 use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
 use skillfs_fuse::security::{
-    ACTIVATION_XATTR, ActiveSkillResolver, ActiveTarget, bootstrap_activation, load_activation,
+    ACTIVATION_XATTR, ActiveSkillResolver, ActiveTarget, bootstrap_activation,
+    enumerate_hermes_skill_ids, load_activation,
 };
 use skillfs_fuse::{MountConfig, MountHandle, MountOptions, mount_background_configured};
 
@@ -340,6 +341,184 @@ fn activation_mode_off_preserves_original_behavior() {
 
     let md = std::fs::read_to_string(mount.skill_md("alpha")).expect("read SKILL.md");
     assert!(!md.is_empty(), "SKILL.md should be readable");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hermes: a symlinked top-level SKILL.md is a category, not a top-level skill.
+//
+// Regression (marker-consistency across all layers): a directory whose only
+// SKILL.md is a symlink is not a Skill. `top` must be a category, and its real
+// nested child `top/child` (regular SKILL.md) must be classified with the
+// nested id "top/child" by enumeration/resolver AND stay reachable through
+// readdir with activation keyed on that id. Previously `hermes_is_top_level_skill`
+// followed the symlink, reclassified `top` as a flat skill "top" that had no
+// activation key, and fail-closed-hid the entire directory.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn hermes_symlinked_top_marker_is_category_nested_child_visible() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+
+    let source = tempfile::tempdir().expect("source tempdir");
+    let src = source.path();
+    std::fs::create_dir_all(src.join("top/child")).unwrap();
+    // `top`'s only SKILL.md is a symlink → not a valid marker.
+    let real = src.join("real-marker.md");
+    std::fs::write(&real, "---\nname: r\ndescription: d\n---\n").unwrap();
+    std::os::unix::fs::symlink(&real, src.join("top/SKILL.md")).unwrap();
+    // Nested child has a real regular SKILL.md, activated to a snapshot.
+    std::fs::write(
+        src.join("top/child/SKILL.md"),
+        "---\nname: child\ndescription: live\n---\nlive body\n",
+    )
+    .unwrap();
+    write_snapshot(
+        src,
+        "top/child",
+        "v000001.snapshot",
+        "---\nname: child\ndescription: snapshot\n---\nSNAPSHOT BODY\n",
+    );
+    write_activation(
+        src,
+        "top/child",
+        r#"{"schemaVersion": 1, "target": ".skill-meta/versions/v000001.snapshot"}"#,
+    );
+
+    // Every layer must agree on the id: enumeration yields "top/child",
+    // never "top".
+    let ids = enumerate_hermes_skill_ids(src);
+    assert!(
+        ids.contains(&"top/child".to_string()),
+        "enumeration must yield nested id top/child, got {ids:?}"
+    );
+    assert!(
+        !ids.iter().any(|i| i == "top"),
+        "symlink-marker top must NOT be a top-level skill id, got {ids:?}"
+    );
+
+    let resolver = ActiveSkillResolver::new(src);
+    bootstrap_activation(src, &ids, &resolver);
+
+    let mut store = SkillStore::new();
+    store.load_from_directory(src, &ParseConfig::default());
+    let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+
+    // Normal mode: mountpoint is separate from the source, so the resolver
+    // and readdir gating read the physical source directly (no over-mount
+    // recursion). Hermes exposes nested skills at /skills/<category>/<skill>.
+    let mountpoint = tempfile::tempdir().expect("mount tempdir");
+    let handle = mount_background_configured(
+        mountpoint.path(),
+        src,
+        shared,
+        MountOptions::default(),
+        false,
+        MountConfig {
+            skill_layout: Some(skillfs_fuse::SkillLayout::Hermes),
+            active_resolver: Some(Arc::new(resolver)),
+            ..MountConfig::default()
+        },
+    )
+    .expect("mount_background_configured");
+    std::thread::sleep(Duration::from_millis(300));
+
+    let skills_root = mountpoint.path().join("skills");
+    // Capture first, then always unmount so the failure path never leaks the
+    // mount.
+    let root = sorted_dir(&skills_root);
+    let top_listing = std::fs::read_dir(skills_root.join("top")).map(|it| {
+        let mut v: Vec<String> = it
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        v.sort();
+        v
+    });
+    let child_md = std::fs::read_to_string(skills_root.join("top/child/SKILL.md"));
+
+    drop(handle);
+    std::thread::sleep(Duration::from_millis(150));
+    let _ = std::process::Command::new("fusermount3")
+        .args(["-u", &mountpoint.path().to_string_lossy()])
+        .output();
+
+    assert!(
+        root.contains(&"top".to_string()),
+        "category `top` must be listed under /skills (not hidden), got {root:?}"
+    );
+    let top_listing = top_listing.expect("read_dir /skills/top");
+    assert!(
+        top_listing.contains(&"child".to_string()),
+        "activated nested skill `child` must be visible under category `top` via id \
+         top/child (not fail-closed-hidden as a phantom top-level skill), got {top_listing:?}"
+    );
+    let content = child_md.expect("/skills/top/child/SKILL.md must be readable");
+    assert!(
+        content.contains("SNAPSHOT BODY"),
+        "activated nested skill must serve its snapshot via id top/child, got {content:?}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Flat: a symlinked Skill directory is not a managed Skill.
+//
+// Regression (cross-layer symlink consistency): `<root>/linked-skill ->
+// <outside>/real-skill`. The resolver descends with openat(O_NOFOLLOW) and
+// rejects the symlinked component, so store discovery must reject it too —
+// otherwise SkillFS would list/activate/read a Skill the resolver refuses to
+// resolve, and the ledger could misread that as "not managed" and direct-
+// fallback. The store-driven /skills view must not expose it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn flat_symlinked_skill_dir_not_exposed_as_managed_skill() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    let real = outside.path().join("outside-skill");
+    std::fs::create_dir(&real).unwrap();
+    std::fs::write(
+        real.join("SKILL.md"),
+        "---\nname: outside\ndescription: d\n---\nbody\n",
+    )
+    .unwrap();
+    let real_for_seed = real.clone();
+
+    let mount = ActivationMount::new(
+        move |src| {
+            create_skill_dir(src, "genuine");
+            std::os::unix::fs::symlink(&real_for_seed, src.join("linked-skill")).unwrap();
+        },
+        // No resolver: exercises the pure store-driven /skills view.
+        |_src| None,
+    );
+
+    let listing = sorted_dir(&mount.skills_dir());
+    assert!(
+        listing.contains(&"genuine".to_string()),
+        "the real skill must be listed, got {listing:?}"
+    );
+    assert!(
+        !listing.contains(&"linked-skill".to_string()),
+        "a symlinked Skill directory must not be exposed under /skills (matches the \
+         resolver's O_NOFOLLOW rejection), got {listing:?}"
+    );
+    // Lookup / read of the symlinked skill must fail — it is not a managed
+    // Skill, consistent with the resolver refusing to resolve it.
+    let err = std::fs::metadata(mount.skill_md("linked-skill")).unwrap_err();
+    assert_eq!(
+        err.raw_os_error(),
+        Some(libc::ENOENT),
+        "symlinked Skill must not be resolvable as a managed skill"
+    );
+    // `outside` (the symlink target) outlives `mount`: locals drop in reverse
+    // declaration order, so `mount` is torn down before `outside` here.
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

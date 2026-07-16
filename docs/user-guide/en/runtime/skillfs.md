@@ -474,7 +474,7 @@ startup validation.
 ### Control Socket
 
 The trusted control socket is the preferred production path for activation
-writes:
+writes and for the read-only resolver query:
 
 ```bash
 skillfs mount /path/to/skills /mnt/skillfs \
@@ -488,6 +488,25 @@ The socket requires `--security --activation-mode file`, is mutually exclusive
 with `--decision-command`, and requires a pinned trusted peer executable. Peer
 validation uses Linux peer credentials and executable identity checks.
 
+#### Endpoint and priority
+
+The control plane is opt-in and authenticated. The endpoint is resolved by
+priority:
+
+1. CLI `--control-socket <PATH>`
+2. `[control_socket].path` in the config file
+3. the default per-user endpoint `/run/user/<uid>/skillfs/control.sock`
+
+A trusted peer with no explicit path uses the default endpoint; an explicit
+path with no trusted peer is a configuration error; neither leaves the control
+plane off. The default endpoint never falls back to `/tmp` or `/var/tmp` — if
+`/run/user/<uid>` is unavailable, startup fails with an actionable error and
+you must pass `--control-socket` explicitly. A second instance never unlinks an
+active endpoint; only a confirmed-stale socket that SkillFS owns is reclaimed.
+
+No `register`, `mountId`, or `generation` handshake is required — the endpoint
+is stable per UID and the resolver is queried directly.
+
 Supported JSONL request examples:
 
 ```json
@@ -495,7 +514,36 @@ Supported JSONL request examples:
 {"schemaVersion":"1","method":"status"}
 {"schemaVersion":"1","method":"meta.writeActivation","skillName":"demo-weather","activation":{"schemaVersion":1,"target":null}}
 {"schemaVersion":"1","method":"meta.setActivationXattr","skillName":"demo-weather","activation":{"schemaVersion":1,"target":null}}
+{"schemaVersion":"1","method":"skill.resolveLiveSource","canonicalSkillDir":"/path/to/skills/apple/apple-notes"}
 ```
+
+#### `skill.resolveLiveSource`
+
+A read-only query that maps a canonical Skill directory to its physical
+live/backing source. The only business parameter is `canonicalSkillDir`. It has
+three distinct outcomes:
+
+- **`managed=true`** — the path is inside the managed canonical root and
+  resolves to a valid live Skill directory. The response includes the derived
+  `skillId`, `relativeSkillDir`, the physical `liveSkillDir`, the live
+  directory's `identity` (`device`, `inode`), and `transport` (`shared_path`).
+  The query is read-only: it triggers no scan, manifest build, policy decision,
+  or activation write.
+- **`managed=false`** — the request is well-formed and `canonicalSkillDir` is a
+  valid absolute path outside the managed root (`reason: not_managed`). This is
+  a normal success; the caller may manage that directory directly.
+- **structured error** — a non-absolute path, an illegal `..` segment, a
+  symlink/path escape, a management/reserved directory, a missing Skill
+  directory, an invalid layout / missing `SKILL.md`, an unreadable live source,
+  or peer-authentication failure. These are never disguised as `managed=false`.
+
+The skill id is derived from the canonical relative path, so both flat
+(`my-skill`) and Hermes nested (`apple/apple-notes`) layouts resolve to full
+ids. S1 implements a single source runtime; the endpoint is shared across
+future multiple canonical roots.
+
+> Note: `skill.resolveLiveSource` (SkillFS S1) is a read-only resolver. notify
+> v2 and deletion-state semantics are not part of S1.
 
 ### Trusted Mount-path Writer
 
@@ -580,8 +628,8 @@ shares the same file for compatibility.
 | `--notify-socket <PATH>` | Send mutation events to an external daemon |
 | `--activation-events-log <PATH>` | Write activation protocol events as JSONL |
 | `--audit-log <PATH>` | Write filesystem audit events as JSONL |
-| `--control-socket <PATH>` | Accept trusted activation write requests |
-| `--trusted-peer-exe <PATH>` | Pin the trusted control socket peer |
+| `--control-socket <PATH>` | Override the control socket endpoint (default: `/run/user/<uid>/skillfs/control.sock`) |
+| `--trusted-peer-exe <PATH>` | Pin the trusted control socket peer (enables the control plane on the default endpoint if no path is given) |
 | `--trusted-writer-exe <PATH>` | Pin a trusted mount-path writer |
 | `--ledger-backing-root <PATH>` | Provide a daemon-visible source view |
 | `--decision-command <CMD>` | Use legacy external decision mode |

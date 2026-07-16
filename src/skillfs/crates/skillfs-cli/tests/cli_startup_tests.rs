@@ -80,6 +80,58 @@ fn empty_source() -> tempfile::TempDir {
     dir
 }
 
+/// Connect to a control socket, send `ping`, and return the one-line
+/// response. Proves the server is alive; the response is either a `pong`
+/// or a `permission_denied` (the test binary may fail peer verification),
+/// both of which carry the `schemaVersion` envelope.
+fn probe_control_socket(path: &Path) -> Option<String> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+    let mut stream = UnixStream::connect(path).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(3))).ok()?;
+    writeln!(stream, r#"{{"schemaVersion":"1","method":"ping"}}"#).ok()?;
+    stream.flush().ok()?;
+    let mut reader = BufReader::new(&stream);
+    let mut response = String::new();
+    match reader.read_line(&mut response) {
+        Ok(n) if n > 0 => Some(response),
+        _ => None,
+    }
+}
+
+/// True when a control-socket response is an authenticated `pong` — proves
+/// both that the server is alive AND that the connecting peer passed
+/// verification. Requires the trusted peer to be the test binary itself.
+fn response_is_authenticated_pong(resp: &str) -> bool {
+    resp.contains("\"schemaVersion\"") && resp.contains("\"pong\":true")
+}
+
+/// Best-effort FUSE availability check for gating vs. failing. Mirrors the
+/// process-level gate in scripts/test.sh.
+fn fuse_available() -> bool {
+    Path::new("/dev/fuse").exists()
+        && Command::new("fusermount3")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+}
+
+/// Path of the running test binary — used as the trusted peer so the
+/// test's own probe connection authenticates and receives a real `pong`.
+fn test_exe() -> String {
+    std::env::current_exe()
+        .expect("current_exe")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Serializes tests that bind the OS-global default endpoint
+/// `/run/user/<uid>/skillfs/control.sock`, which only one instance can hold
+/// at a time. cargo runs tests in parallel threads, so without this two
+/// default-endpoint tests would race for the same path.
+static DEFAULT_ENDPOINT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn security_without_decision_command_fails_startup() {
     let source = empty_source();
@@ -1168,6 +1220,386 @@ fn non_tmp_transport_paths_pass_gate() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// #1262: PrivateTmp daemon-facing control-plane gates
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The resolver control plane is daemon-facing too: the daemon connects to
+// the control socket and the resolver opens the physical live source. With
+// PrivateTmp=true the daemon cannot see /tmp or /var/tmp, so a control-plane
+// source fallback, backing root, or explicit socket under those roots must
+// fail fast — even when notify / events-log are not configured.
+
+#[test]
+fn control_plane_only_source_under_tmp_fails_before_mount() {
+    // Control plane enabled via a trusted peer (default endpoint, no
+    // explicit socket) and no backing root: the resolver's live root falls
+    // back to the source. A source under /tmp must be rejected, pointing at
+    // --ledger-backing-root, even though notify/events-log are absent.
+    let source = empty_source(); // under /tmp
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
+            "--trusted-peer-exe",
+            &test_exe(),
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("source")
+            && combined.contains("/tmp or /var/tmp")
+            && combined.contains("PrivateTmp=true")
+            && combined.contains("--ledger-backing-root"),
+        "expected PrivateTmp source-fallback rejection for control plane, got: {combined}"
+    );
+}
+
+#[test]
+fn control_plane_backing_root_under_tmp_fails_before_setup() {
+    // Control plane enabled with a backing root under /tmp must be rejected
+    // before any bind mount, naming --ledger-backing-root.
+    let source = non_tmp_dir();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let backing = format!("/tmp/{}", unique_leaf("skillfs-privtmp-cp-backing"));
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
+            "--trusted-peer-exe",
+            &test_exe(),
+            "--ledger-backing-root",
+            &backing,
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("--ledger-backing-root")
+            && combined.contains("/tmp or /var/tmp")
+            && combined.contains("PrivateTmp=true"),
+        "expected PrivateTmp backing-root rejection for control plane, got: {combined}"
+    );
+    assert!(
+        !Path::new(&backing).exists(),
+        "backing root dir must not be created when the gate rejects it"
+    );
+}
+
+#[test]
+fn control_socket_under_tmp_fails_before_mount() {
+    // An explicit --control-socket under /tmp is daemon-facing: the daemon
+    // connects to it with PrivateTmp=true and could not see it. The source
+    // is non-tmp so the socket path is the one that trips the gate.
+    let source = non_tmp_dir();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let socket = format!("/tmp/{}", unique_leaf("skillfs-privtmp-control.sock"));
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
+            "--control-socket",
+            &socket,
+            "--trusted-peer-exe",
+            &test_exe(),
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("--control-socket")
+            && combined.contains("/tmp or /var/tmp")
+            && combined.contains("PrivateTmp=true")
+            && combined.contains("/run/"),
+        "expected PrivateTmp control-socket rejection, got: {combined}"
+    );
+    assert!(
+        !Path::new(&socket).exists(),
+        "control socket must not be bound on a rejected startup"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn control_socket_symlink_to_tmp_fails_before_mount() {
+    // A control socket whose parent directory symlinks to a real /tmp
+    // directory canonicalizes to a PrivateTmp-invisible path and must be
+    // rejected, mirroring the backing-root / events-log symlink handling.
+    let source = non_tmp_dir();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    // Real /tmp directory the symlink resolves through to.
+    let tmp_target = tempfile::tempdir().expect("tmp target");
+    // Symlink lives under a non-tmp parent so only canonicalization reveals
+    // the /tmp destination.
+    let parent = non_tmp_dir();
+    let link = parent.path().join("control-link");
+    std::os::unix::fs::symlink(tmp_target.path(), &link).expect("create symlink");
+    let socket = link.join("control.sock");
+
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
+            "--control-socket",
+            socket.to_str().unwrap(),
+            "--trusted-peer-exe",
+            &test_exe(),
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("--control-socket")
+            && combined.contains("/tmp or /var/tmp")
+            && combined.contains("PrivateTmp=true"),
+        "expected PrivateTmp rejection for symlinked control socket, got: {combined}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn control_socket_ancestor_symlink_missing_parent_to_tmp_fails() {
+    // The socket's direct parent (`missing-parent`) does not exist yet, and
+    // an ancestor (`link`) is a symlink into /tmp. A parent-only
+    // canonicalize would fall back to the raw lexical path (no /tmp prefix)
+    // and wrongly pass; resolution must climb to the deepest existing
+    // ancestor (`link` → /tmp) and still reject before any socket is bound.
+    let source = non_tmp_dir();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let tmp_target = tempfile::tempdir().expect("tmp target");
+    let parent = non_tmp_dir();
+    let link = parent.path().join("cp-ancestor-link");
+    std::os::unix::fs::symlink(tmp_target.path(), &link).expect("create symlink");
+    // `missing-parent` does not exist under the symlink target.
+    let socket = link.join("missing-parent").join("control.sock");
+
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
+            "--control-socket",
+            socket.to_str().unwrap(),
+            "--trusted-peer-exe",
+            &test_exe(),
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("--control-socket")
+            && combined.contains("/tmp or /var/tmp")
+            && combined.contains("PrivateTmp=true"),
+        "expected PrivateTmp rejection for ancestor-symlink socket, got: {combined}"
+    );
+    // The socket must not have been bound under the real /tmp target.
+    assert!(
+        !tmp_target
+            .path()
+            .join("missing-parent")
+            .join("control.sock")
+            .exists(),
+        "socket must not be bound under the /tmp symlink target on a rejected startup"
+    );
+}
+
+#[test]
+fn control_plane_cli_socket_with_config_trusted_peer_passes_gate() {
+    // Mixed configuration: --control-socket on the CLI, trusted peer from
+    // the config file. Both are daemon-visible (non-tmp), so the control
+    // plane comes up and answers an authenticated pong.
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE unavailable; cannot bring up the control socket");
+        return;
+    }
+    let source = non_tmp_dir();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let sock_dir = non_tmp_dir();
+    let sock_path = sock_dir.path().join("skillfs.sock");
+    let config_dir = tempfile::tempdir().expect("config dir");
+    let config_path = config_dir.path().join("security.toml");
+    // Only the trusted peer comes from config; the socket path is CLI-only.
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+[activation]
+mode = "file"
+
+[control_socket]
+trusted_peer_exe = "{}"
+"#,
+            test_exe()
+        ),
+    )
+    .unwrap();
+
+    let mut child = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--config",
+            config_path.to_str().unwrap(),
+            "--control-socket",
+            sock_path.to_str().unwrap(),
+        ])
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn skillfs");
+
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let child_alive = matches!(child.try_wait(), Ok(None));
+    let socket_exists = sock_path.exists();
+    let probe = if socket_exists {
+        probe_control_socket(&sock_path)
+    } else {
+        None
+    };
+    stop_mount_child(&mut child, mount.path());
+    let output = child.wait_with_output();
+
+    assert!(
+        child_alive,
+        "child exited before binding the mixed CLI-socket/config-peer control socket: {:?}",
+        output.map(|o| String::from_utf8_lossy(&o.stderr).into_owned())
+    );
+    assert!(
+        socket_exists,
+        "FUSE is available but the mixed-config control socket {} was not created",
+        sock_path.display()
+    );
+    let resp = probe.expect("mixed-config control socket must respond");
+    assert!(
+        response_is_authenticated_pong(&resp),
+        "mixed-config control socket did not return an authenticated pong: {resp}"
+    );
+}
+
+#[test]
+fn control_plane_config_socket_with_cli_trusted_peer_passes_gate() {
+    // Reverse mixed configuration: socket path from the config file, trusted
+    // peer from the CLI. The config loader must NOT reject the path-only
+    // config, and the post-merge gate must accept the CLI-supplied peer, so
+    // the control plane comes up and answers an authenticated pong.
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE unavailable; cannot bring up the control socket");
+        return;
+    }
+    let source = non_tmp_dir();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let sock_dir = non_tmp_dir();
+    let sock_path = sock_dir.path().join("skillfs.sock");
+    let config_dir = tempfile::tempdir().expect("config dir");
+    let config_path = config_dir.path().join("security.toml");
+    // Only the socket path comes from config; the trusted peer is CLI-only.
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+[activation]
+mode = "file"
+
+[control_socket]
+path = "{}"
+"#,
+            sock_path.display()
+        ),
+    )
+    .unwrap();
+
+    let mut child = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--config",
+            config_path.to_str().unwrap(),
+            "--trusted-peer-exe",
+            &test_exe(),
+        ])
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn skillfs");
+
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let child_alive = matches!(child.try_wait(), Ok(None));
+    let socket_exists = sock_path.exists();
+    let probe = if socket_exists {
+        probe_control_socket(&sock_path)
+    } else {
+        None
+    };
+    stop_mount_child(&mut child, mount.path());
+    let output = child.wait_with_output();
+
+    assert!(
+        child_alive,
+        "child exited before binding the config-socket/CLI-peer control socket: {:?}",
+        output.map(|o| String::from_utf8_lossy(&o.stderr).into_owned())
+    );
+    assert!(
+        socket_exists,
+        "FUSE is available but the config-socket/CLI-peer control socket {} was not created",
+        sock_path.display()
+    );
+    let resp = probe.expect("config-socket/CLI-peer control socket must respond");
+    assert!(
+        response_is_authenticated_pong(&resp),
+        "config-socket/CLI-peer control socket did not return an authenticated pong: {resp}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // PID file cleanup tests
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1436,13 +1868,17 @@ fn control_socket_without_trusted_peer_exe_fails_startup() {
         String::from_utf8_lossy(&out.stderr),
     );
     assert!(
-        combined.contains("--control-socket") && combined.contains("requires --trusted-peer-exe"),
-        "expected requires-trusted-peer-exe error, got: {combined}"
+        combined.contains("--control-socket") && combined.contains("requires a trusted peer"),
+        "expected requires-trusted-peer error, got: {combined}"
     );
 }
 
 #[test]
-fn trusted_peer_exe_without_control_socket_fails_startup() {
+fn trusted_peer_exe_without_security_fails_startup() {
+    // A trusted peer with no explicit --control-socket enables the control
+    // plane on the default per-user endpoint, so it is no longer rejected
+    // for "requires --control-socket". It still requires --security like
+    // any control-plane configuration.
     let source = empty_source();
     let mount = tempfile::tempdir().expect("mount tempdir");
     let out = Command::new(bin_path())
@@ -1462,15 +1898,23 @@ fn trusted_peer_exe_without_control_socket_fails_startup() {
         String::from_utf8_lossy(&out.stderr),
     );
     assert!(
-        combined.contains("--trusted-peer-exe") && combined.contains("requires --control-socket"),
-        "expected requires-control-socket error, got: {combined}"
+        combined.contains("requires --security"),
+        "expected requires-security error, got: {combined}"
+    );
+    assert!(
+        !combined.contains("requires --control-socket"),
+        "trusted-peer-exe alone must no longer require --control-socket: {combined}"
     );
 }
 
 #[test]
 fn control_socket_trusted_peer_exe_nonexistent_fails() {
-    let source = empty_source();
+    // Daemon-visible source and socket so the trusted-peer-exe validation
+    // is the gate that fires — not the PrivateTmp gate on a /tmp fixture.
+    let source = non_tmp_dir();
     let mount = tempfile::tempdir().expect("mount tempdir");
+    let sock_dir = non_tmp_dir();
+    let sock_path = sock_dir.path().join("skillfs.sock");
     let out = Command::new(bin_path())
         .args([
             "mount",
@@ -1480,7 +1924,7 @@ fn control_socket_trusted_peer_exe_nonexistent_fails() {
             "--activation-mode",
             "file",
             "--control-socket",
-            "/tmp/test-skillfs.sock",
+            sock_path.to_str().unwrap(),
             "--trusted-peer-exe",
             "/nonexistent/binary/path",
         ])
@@ -1500,8 +1944,12 @@ fn control_socket_trusted_peer_exe_nonexistent_fails() {
 
 #[test]
 fn control_socket_trusted_peer_exe_directory_fails() {
-    let source = empty_source();
+    // Daemon-visible source and socket so the trusted-peer-exe validation
+    // is the gate that fires — not the PrivateTmp gate on a /tmp fixture.
+    let source = non_tmp_dir();
     let mount = tempfile::tempdir().expect("mount tempdir");
+    let sock_dir = non_tmp_dir();
+    let sock_path = sock_dir.path().join("skillfs.sock");
     let dir = tempfile::tempdir().expect("directory for test");
     let out = Command::new(bin_path())
         .args([
@@ -1512,7 +1960,7 @@ fn control_socket_trusted_peer_exe_directory_fails() {
             "--activation-mode",
             "file",
             "--control-socket",
-            "/tmp/test-skillfs.sock",
+            sock_path.to_str().unwrap(),
             "--trusted-peer-exe",
             dir.path().to_str().unwrap(),
         ])
@@ -1553,7 +2001,7 @@ fn control_socket_without_security_fails_startup() {
         String::from_utf8_lossy(&out.stderr),
     );
     assert!(
-        combined.contains("--control-socket requires --security"),
+        combined.contains("control socket requires --security"),
         "expected requires-security error, got: {combined}"
     );
 }
@@ -1582,7 +2030,7 @@ fn control_socket_without_activation_mode_file_fails_startup() {
         String::from_utf8_lossy(&out.stderr),
     );
     assert!(
-        combined.contains("--control-socket requires --activation-mode file"),
+        combined.contains("control socket requires --activation-mode file"),
         "expected requires-activation-mode-file error, got: {combined}"
     );
 }
@@ -1701,11 +2149,21 @@ fn supervise_missing_instance_fails() {
 
 #[test]
 fn control_socket_created_and_accepts_ping() {
-    let source = empty_source();
+    // FUSE is required to bring up the mount and the control socket. Gate
+    // explicitly rather than silently passing when the socket never binds.
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE unavailable; cannot bring up the control socket");
+        return;
+    }
+    // Daemon-visible source and socket: with the control plane enabled the
+    // PrivateTmp gate rejects a daemon-facing source/socket under /tmp.
+    let source = non_tmp_dir();
     let mount = tempfile::tempdir().expect("mount tempdir");
-    let sock_dir = tempfile::tempdir().expect("socket dir");
+    let sock_dir = non_tmp_dir();
     let sock_path = sock_dir.path().join("skillfs.sock");
 
+    // Trusted peer = this test binary, so our own probe authenticates and
+    // must receive a real pong (not a permission_denied).
     let mut child = Command::new(bin_path())
         .args([
             "mount",
@@ -1717,7 +2175,7 @@ fn control_socket_created_and_accepts_ping() {
             "--control-socket",
             sock_path.to_str().unwrap(),
             "--trusted-peer-exe",
-            bin_path(),
+            &test_exe(),
         ])
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -1726,48 +2184,278 @@ fn control_socket_created_and_accepts_ping() {
 
     std::thread::sleep(std::time::Duration::from_secs(2));
 
+    // Capture state before teardown so the failure path never leaks the
+    // mount (all assertions run after stop_mount_child).
+    let child_alive = matches!(child.try_wait(), Ok(None));
     let socket_exists = sock_path.exists();
-
-    let server_responded = if socket_exists {
-        use std::io::{BufRead, BufReader};
-        use std::os::unix::net::UnixStream;
-        match UnixStream::connect(&sock_path) {
-            Ok(stream) => {
-                stream
-                    .set_read_timeout(Some(std::time::Duration::from_secs(3)))
-                    .ok();
-                // The server verifies peer identity before reading the
-                // request, so the test binary may be rejected with
-                // permission_denied. Either a pong or a permission_denied
-                // response proves the server is alive.
-                let mut reader = BufReader::new(&stream);
-                let mut response = String::new();
-                match reader.read_line(&mut response) {
-                    Ok(n) if n > 0 => {
-                        response.contains("\"schemaVersion\"")
-                            && (response.contains("\"pong\":true")
-                                || response.contains("\"permission_denied\""))
-                    }
-                    _ => false,
-                }
-            }
-            Err(_) => false,
-        }
+    let probe = if socket_exists {
+        probe_control_socket(&sock_path)
     } else {
-        false
+        None
     };
 
     stop_mount_child(&mut child, mount.path());
-    let _ = child.wait();
+    let output = child.wait_with_output();
 
-    if socket_exists {
-        assert!(
-            server_responded,
-            "control socket was created but server did not respond"
-        );
-    } else {
-        eprintln!("SKIP: control socket not created (FUSE mount likely unavailable)");
+    assert!(
+        child_alive,
+        "child exited before binding the control socket: {:?}",
+        output.map(|o| String::from_utf8_lossy(&o.stderr).into_owned())
+    );
+    assert!(
+        socket_exists,
+        "FUSE is available but the control socket {} was not created",
+        sock_path.display()
+    );
+    let resp = probe.expect("control socket must respond");
+    assert!(
+        response_is_authenticated_pong(&resp),
+        "control socket did not return an authenticated pong: {resp}"
+    );
+}
+
+#[test]
+fn control_socket_default_endpoint_used_when_no_path() {
+    // A trusted peer with no explicit --control-socket binds the default
+    // per-user endpoint /run/user/<uid>/skillfs/control.sock.
+    let _serial = DEFAULT_ENDPOINT_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let uid_out = Command::new("id").arg("-u").output().expect("id -u");
+    let uid = String::from_utf8_lossy(&uid_out.stdout).trim().to_string();
+    let runtime_dir = format!("/run/user/{uid}");
+    if !std::path::Path::new(&runtime_dir).is_dir() {
+        eprintln!("SKIP: {runtime_dir} unavailable; cannot test default endpoint");
+        return;
     }
+    let default_sock = format!("{runtime_dir}/skillfs/control.sock");
+
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE unavailable; cannot test default endpoint end-to-end");
+        return;
+    }
+    // Refuse to run if the default endpoint is already occupied — otherwise
+    // a pre-existing listener would make this test a false positive.
+    let sock_path = std::path::PathBuf::from(&default_sock);
+    if sock_path.exists() {
+        eprintln!("SKIP: default endpoint {default_sock} already in use");
+        return;
+    }
+
+    // Daemon-visible source: with the control plane enabled and no backing
+    // root, the resolver's live root falls back to the source, so a source
+    // under /tmp would be rejected by the PrivateTmp gate.
+    let source = non_tmp_dir();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    // Trusted peer = this test binary, so our own probe authenticates and
+    // receives a real pong (not a permission_denied that could mask a
+    // different instance answering on a pre-existing socket).
+    let mut child = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
+            // No --control-socket: the default endpoint must be used.
+            "--trusted-peer-exe",
+            &test_exe(),
+        ])
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn skillfs");
+
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    // The child must still be running: a dead child means startup failed,
+    // which is a real failure now that FUSE is known available.
+    let child_alive = matches!(child.try_wait(), Ok(None));
+    let socket_exists = sock_path.exists();
+    let uid_ok = if socket_exists {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(&sock_path).map(|m| m.uid()).ok()
+    } else {
+        None
+    };
+    let probe = if socket_exists {
+        probe_control_socket(&sock_path)
+    } else {
+        None
+    };
+
+    stop_mount_child(&mut child, mount.path());
+    let output = child.wait_with_output();
+
+    assert!(
+        child_alive,
+        "child exited before binding the default endpoint: {:?}",
+        output.map(|o| String::from_utf8_lossy(&o.stderr).into_owned())
+    );
+    assert!(
+        socket_exists,
+        "FUSE is available but the default endpoint {default_sock} was not created"
+    );
+    // Under /run/user, never a public temp directory.
+    assert!(
+        !default_sock.contains("/tmp") && !default_sock.contains("/var/tmp"),
+        "default endpoint must not use a public temp dir"
+    );
+    // Owned by the current uid.
+    let our_uid: u32 = uid.parse().expect("uid");
+    assert_eq!(
+        uid_ok,
+        Some(our_uid),
+        "default endpoint must be owned by us"
+    );
+    // An authenticated pong proves a live server that trusts this binary —
+    // not some other instance that pre-occupied the path.
+    let resp = probe.expect("default endpoint must respond");
+    assert!(
+        response_is_authenticated_pong(&resp),
+        "default endpoint did not return an authenticated pong: {resp}"
+    );
+}
+
+#[test]
+fn control_socket_config_only_default_endpoint() {
+    // Config-only trusted peer (no path, no CLI control-socket flags) must
+    // enable the control plane on the default per-user endpoint — the
+    // config loader no longer rejects a trusted_peer_exe without a path.
+    let _serial = DEFAULT_ENDPOINT_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let uid_out = Command::new("id").arg("-u").output().expect("id -u");
+    let uid = String::from_utf8_lossy(&uid_out.stdout).trim().to_string();
+    let runtime_dir = format!("/run/user/{uid}");
+    if !Path::new(&runtime_dir).is_dir() {
+        eprintln!("SKIP: {runtime_dir} unavailable; cannot test default endpoint");
+        return;
+    }
+    let default_sock = format!("{runtime_dir}/skillfs/control.sock");
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE unavailable; cannot test default endpoint end-to-end");
+        return;
+    }
+    let sock_path = std::path::PathBuf::from(&default_sock);
+    if sock_path.exists() {
+        eprintln!("SKIP: default endpoint {default_sock} already in use");
+        return;
+    }
+
+    // Daemon-visible source (see the sibling default-endpoint test): the
+    // PrivateTmp gate rejects a /tmp source-fallback when the control plane
+    // is enabled.
+    let source = non_tmp_dir();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let config_dir = tempfile::tempdir().expect("config dir");
+    let config_path = config_dir.path().join("security.toml");
+    // Only a trusted peer, no [control_socket].path.
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+[activation]
+mode = "file"
+
+[control_socket]
+trusted_peer_exe = "{}"
+"#,
+            test_exe()
+        ),
+    )
+    .unwrap();
+
+    let mut child = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--config",
+            config_path.to_str().unwrap(),
+        ])
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn skillfs");
+
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let child_alive = matches!(child.try_wait(), Ok(None));
+    let socket_exists = sock_path.exists();
+    let probe = if socket_exists {
+        probe_control_socket(&sock_path)
+    } else {
+        None
+    };
+
+    stop_mount_child(&mut child, mount.path());
+    let output = child.wait_with_output();
+
+    assert!(
+        child_alive,
+        "child exited before binding the config-only default endpoint: {:?}",
+        output.map(|o| String::from_utf8_lossy(&o.stderr).into_owned())
+    );
+    assert!(
+        socket_exists,
+        "FUSE is available but the config-only default endpoint was not created"
+    );
+    let resp = probe.expect("config-only default endpoint must respond");
+    assert!(
+        response_is_authenticated_pong(&resp),
+        "config-only default endpoint did not return an authenticated pong: {resp}"
+    );
+}
+
+#[test]
+fn control_socket_in_place_without_backing_root_fails_startup() {
+    // An in-place mount (source == mountpoint) with the control plane
+    // enabled must require --ledger-backing-root: the FUSE over-mount hides
+    // the physical source, so the resolver would otherwise read the
+    // current/fallback/hidden view instead of the live source. This must
+    // fail startup, not silently mount.
+    //
+    // Daemon-visible source and socket so the PrivateTmp gate passes and the
+    // in-place backing-root gate is the one that fires.
+    let source = non_tmp_dir();
+    let sock_dir = non_tmp_dir();
+    let sock_path = sock_dir.path().join("skillfs.sock");
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            // Same path → in-place mount.
+            source.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
+            "--control-socket",
+            sock_path.to_str().unwrap(),
+            "--trusted-peer-exe",
+            bin_path(),
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(
+        !out.status.success(),
+        "in-place control-socket mount without backing root must fail startup"
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("--ledger-backing-root"),
+        "error must require --ledger-backing-root, got: {combined}"
+    );
+    // The socket must not have been created — startup failed first.
+    assert!(
+        !sock_path.exists(),
+        "no control socket must be bound on a rejected startup"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1847,10 +2535,24 @@ fn hermes_decision_command_rejected() {
 }
 
 #[test]
-fn hermes_control_socket_rejected() {
-    let source = empty_source();
+fn hermes_control_socket_allowed() {
+    // The read-only resolver derives full nested skill ids from the
+    // canonical path, so Hermes layout is compatible with the control
+    // socket. The blanket incompatibility gate has been removed. Prove a
+    // live, authenticated server actually comes up — not merely that no
+    // "incompatible" text was printed (which an unrelated startup failure
+    // could mask).
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE unavailable; cannot bring up the Hermes control socket");
+        return;
+    }
+    // Daemon-visible source and socket so the PrivateTmp gate does not
+    // reject the control plane on a /tmp fixture.
+    let source = non_tmp_dir();
     let mount = tempfile::tempdir().expect("mount tempdir");
-    let out = Command::new(bin_path())
+    let sock_dir = non_tmp_dir();
+    let sock_path = sock_dir.path().join("skillfs.sock");
+    let mut child = Command::new(bin_path())
         .args([
             "mount",
             source.path().to_str().unwrap(),
@@ -1861,24 +2563,56 @@ fn hermes_control_socket_rejected() {
             "--activation-mode",
             "file",
             "--control-socket",
-            "/tmp/test-hermes.sock",
+            sock_path.to_str().unwrap(),
             "--trusted-peer-exe",
-            bin_path(),
+            &test_exe(),
+            "--foreground",
         ])
-        .output()
-        .expect("invoke skillfs");
-    assert!(
-        !out.status.success(),
-        "hermes + control-socket must fail startup"
-    );
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn skillfs");
+
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    // Capture all state before teardown so the failure path never leaks the
+    // mount (assertions run after stop_mount_child).
+    let child_alive = matches!(child.try_wait(), Ok(None));
+    let socket_exists = sock_path.exists();
+    let probe = if socket_exists {
+        probe_control_socket(&sock_path)
+    } else {
+        None
+    };
+    stop_mount_child(&mut child, mount.path());
+    let output = child.wait_with_output().expect("wait");
+    let still_mounted = is_mounted(mount.path());
     let combined = format!(
         "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    assert!(
+        !still_mounted,
+        "test mount must be removed after child shutdown: {}",
+        mount.path().display()
     );
     assert!(
-        combined.contains("incompatible"),
-        "error must mention incompatibility: {combined}"
+        !combined.contains("incompatible"),
+        "hermes + control-socket must not trigger an incompatibility gate: {combined}"
+    );
+    assert!(
+        child_alive,
+        "child exited before binding the Hermes control socket: {combined}"
+    );
+    assert!(
+        socket_exists,
+        "FUSE is available but the Hermes control socket was not created: {combined}"
+    );
+    let resp = probe.expect("hermes control socket must respond");
+    assert!(
+        response_is_authenticated_pong(&resp),
+        "hermes control socket server did not return an authenticated pong: {resp}"
     );
 }
 
@@ -1959,9 +2693,21 @@ command = "agent-sec-cli skill-ledger"
 }
 
 #[test]
-fn hermes_config_control_socket_rejected() {
-    let source = empty_source();
+fn hermes_config_control_socket_allowed() {
+    // Config-sourced Hermes + control socket is allowed: the read-only
+    // resolver derives full nested skill ids, so no incompatibility gate
+    // fires. Prove a live, authenticated server comes up rather than just
+    // asserting the absence of "incompatible".
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE unavailable; cannot bring up the Hermes control socket");
+        return;
+    }
+    // Daemon-visible source and socket so the PrivateTmp gate does not
+    // reject the control plane on a /tmp fixture.
+    let source = non_tmp_dir();
     let mount = tempfile::tempdir().expect("mount tempdir");
+    let sock_dir = non_tmp_dir();
+    let sock_path = sock_dir.path().join("skillfs.sock");
     let config_dir = tempfile::tempdir().expect("config dir");
     let config_path = config_dir.path().join("security.toml");
     std::fs::write(
@@ -1975,15 +2721,16 @@ layout = "hermes"
 mode = "file"
 
 [control_socket]
-path = "/tmp/test-hermes-config.sock"
+path = "{}"
 trusted_peer_exe = "{}"
 "#,
-            bin_path()
+            sock_path.display(),
+            test_exe()
         ),
     )
     .unwrap();
 
-    let out = Command::new(bin_path())
+    let mut child = Command::new(bin_path())
         .args([
             "mount",
             source.path().to_str().unwrap(),
@@ -1991,20 +2738,52 @@ trusted_peer_exe = "{}"
             "--security",
             "--config",
             config_path.to_str().unwrap(),
+            "--foreground",
         ])
-        .output()
-        .expect("invoke skillfs");
-    assert!(
-        !out.status.success(),
-        "hermes (config) + control-socket (config) must fail"
-    );
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn skillfs");
+
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    // Capture all state before teardown so the failure path never leaks the
+    // mount (assertions run after stop_mount_child).
+    let child_alive = matches!(child.try_wait(), Ok(None));
+    let socket_exists = sock_path.exists();
+    let probe = if socket_exists {
+        probe_control_socket(&sock_path)
+    } else {
+        None
+    };
+    stop_mount_child(&mut child, mount.path());
+    let output = child.wait_with_output().expect("wait");
+    let still_mounted = is_mounted(mount.path());
     let combined = format!(
         "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    assert!(
+        !still_mounted,
+        "test mount must be removed after child shutdown: {}",
+        mount.path().display()
     );
     assert!(
-        combined.contains("incompatible"),
-        "config-sourced hermes + control-socket must be rejected: {combined}"
+        !combined.contains("incompatible"),
+        "config-sourced hermes + control-socket must not trigger an incompatibility gate: {combined}"
+    );
+    assert!(
+        child_alive,
+        "child exited before binding the config-sourced Hermes control socket: {combined}"
+    );
+    assert!(
+        socket_exists,
+        "FUSE is available but the config-sourced Hermes control socket was not created: {combined}"
+    );
+    let resp = probe.expect("hermes (config) control socket must respond");
+    assert!(
+        response_is_authenticated_pong(&resp),
+        "hermes (config) control socket server did not return an authenticated pong: {resp}"
     );
 }

@@ -432,7 +432,8 @@ skillfs mount /path/to/skills /path/to/skills \
 
 ### Control Socket
 
-可信 control socket 是生产环境推荐的 activation 写入路径：
+可信 control socket 是生产环境推荐的 activation 写入路径，也承载只读的
+resolver 查询：
 
 ```bash
 skillfs mount /path/to/skills /mnt/skillfs \
@@ -446,6 +447,23 @@ skillfs mount /path/to/skills /mnt/skillfs \
 并且必须指定可信 peer executable。Peer 校验使用 Linux peer credential 和
 executable identity。
 
+#### Endpoint 与优先级
+
+control plane 是 opt-in 且需认证的。endpoint 按优先级解析：
+
+1. CLI `--control-socket <PATH>`
+2. 配置文件 `[control_socket].path`
+3. 默认的每用户 endpoint `/run/user/<uid>/skillfs/control.sock`
+
+仅配置可信 peer 而未给显式 path 时使用默认 endpoint；仅给显式 path 而未配置可信
+peer 为配置错误；两者都没有则 control plane 保持关闭。默认 endpoint 绝不 fallback
+到 `/tmp` 或 `/var/tmp`——若 `/run/user/<uid>` 不可用，启动会返回明确且可操作的
+错误，此时必须显式传入 `--control-socket`。第二个实例绝不会 unlink 处于活跃状态
+的 endpoint；只有确认属于 SkillFS 且为 stale 的 socket 才会被回收。
+
+无需 `register`、`mountId` 或 `generation` 握手——endpoint 按 UID 稳定，resolver
+可直接查询。
+
 支持的 JSONL 请求示例：
 
 ```json
@@ -453,7 +471,30 @@ executable identity。
 {"schemaVersion":"1","method":"status"}
 {"schemaVersion":"1","method":"meta.writeActivation","skillName":"demo-weather","activation":{"schemaVersion":1,"target":null}}
 {"schemaVersion":"1","method":"meta.setActivationXattr","skillName":"demo-weather","activation":{"schemaVersion":1,"target":null}}
+{"schemaVersion":"1","method":"skill.resolveLiveSource","canonicalSkillDir":"/path/to/skills/apple/apple-notes"}
 ```
+
+#### `skill.resolveLiveSource`
+
+只读查询，将 canonical Skill 目录映射到其物理 live/backing source。业务参数只有
+`canonicalSkillDir`，结果分三态：
+
+- **`managed=true`**——路径位于受管 canonical root 内且对应有效 live Skill 目录。
+  响应包含推导出的 `skillId`、`relativeSkillDir`、物理 `liveSkillDir`、live 目录的
+  `identity`（`device`、`inode`）以及 `transport`（`shared_path`）。查询是只读的：
+  不触发 scan、manifest、policy decide 或 activation write。
+- **`managed=false`**——请求格式合法且 `canonicalSkillDir` 是位于受管 root 之外的
+  合法绝对路径（`reason: not_managed`）。这是正常成功响应，调用方可直接管理该目录。
+- **structured error**——非绝对路径、非法 `..` 段、symlink/path 逃逸、管理/保留目录、
+  Skill 目录不存在、布局无效/缺少 `SKILL.md`、live source 不可安全访问，或 peer
+  认证失败。这些绝不会伪装成 `managed=false`。
+
+skillId 由 canonical 相对路径推导，因此 flat（`my-skill`）和 Hermes nested
+（`apple/apple-notes`）布局都会解析为完整 id。S1 只实现单 source runtime；该 endpoint
+在未来多 canonical root 场景下仍共享。
+
+> 说明：`skill.resolveLiveSource`（SkillFS S1）是只读 resolver。notify v2 与删除态
+> 语义不属于 S1。
 
 ### Trusted Mount-path Writer
 
@@ -530,8 +571,8 @@ mount-session summary 仍共享同一个文件。
 | `--notify-socket <PATH>` | 向外部 daemon 发送 mutation event |
 | `--activation-events-log <PATH>` | 写 activation protocol events JSONL |
 | `--audit-log <PATH>` | 写 filesystem audit events JSONL |
-| `--control-socket <PATH>` | 接收可信 activation 写请求 |
-| `--trusted-peer-exe <PATH>` | 固定可信 control socket peer |
+| `--control-socket <PATH>` | 覆盖 control socket endpoint（默认 `/run/user/<uid>/skillfs/control.sock`） |
+| `--trusted-peer-exe <PATH>` | 固定可信 control socket peer（未给 path 时在默认 endpoint 启用 control plane） |
 | `--trusted-writer-exe <PATH>` | 固定可信 mount-path writer |
 | `--ledger-backing-root <PATH>` | 提供 daemon 可见的 source view |
 | `--decision-command <CMD>` | 使用旧 external decision 模式 |

@@ -17,6 +17,7 @@
 //! {"schemaVersion":"1","method":"status"}
 //! {"schemaVersion":"1","method":"meta.writeActivation","skillName":"demo-weather","activation":{"schemaVersion":1,"target":null}}
 //! {"schemaVersion":"1","method":"meta.setActivationXattr","skillName":"demo-weather","activation":{"schemaVersion":1,"target":null}}
+//! {"schemaVersion":"1","method":"skill.resolveLiveSource","canonicalSkillDir":"/canonical/skills/apple/apple-notes"}
 //! ```
 //!
 //! Response:
@@ -24,8 +25,18 @@
 //! {"schemaVersion":"1","ok":true,"result":{"pong":true}}
 //! {"schemaVersion":"1","ok":true,"result":{"status":"ready"}}
 //! {"schemaVersion":"1","ok":true,"result":{"outcome":"updated"}}
+//! {"schemaVersion":"1","ok":true,"result":{"managed":true,"canonicalSkillDir":"...","skillId":"apple/apple-notes","relativeSkillDir":"apple/apple-notes","liveSkillDir":"...","identity":{"device":42,"inode":1001},"transport":"shared_path"}}
+//! {"schemaVersion":"1","ok":true,"result":{"managed":false,"canonicalSkillDir":"...","reason":"not_managed"}}
 //! {"schemaVersion":"1","ok":false,"error":{"code":"permission_denied","message":"..."}}
 //! ```
+//!
+//! ## `skill.resolveLiveSource`
+//!
+//! A read-only query that maps a caller-supplied canonical Skill directory
+//! to its physical live/backing source. It is O(path depth): it opens the
+//! live Skill directory one path component at a time and never scans the
+//! whole Skill root. It has no side effects — no scan, manifest, policy
+//! decision, or activation write. See `dispatch_resolve_live_source`.
 //!
 //! ## Security
 //!
@@ -44,6 +55,8 @@ use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use crate::path::SkillLayout;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracing::{debug, info, warn};
@@ -80,15 +93,40 @@ pub struct TrustedPeerConfig {
 }
 
 /// Runtime context for methods that need filesystem access
-/// (e.g. `meta.writeActivation`, `meta.setActivationXattr`).
+/// (e.g. `meta.writeActivation`, `meta.setActivationXattr`,
+/// `skill.resolveLiveSource`).
 ///
 /// Passed through `ControlSocketServer::new()` and threaded into
-/// `handle_connection()` so write methods can access the source root,
+/// `handle_connection()` so methods can access the canonical/live roots,
 /// active resolver, and protocol event writer. Read-only methods
 /// (`ping`, `status`) ignore the context.
+///
+/// This context keeps the two skill roots explicit:
+///
+/// * `canonical_root` — the user-visible Skill root the external ledger
+///   addresses. Incoming `canonicalSkillDir` paths are checked for
+///   lexical containment against this root, and the relative skill id is
+///   derived from it.
+/// * `source_root` — the live / backing root whose physical content stays
+///   accessible after the FUSE over-mount. Write methods `openat` against
+///   it, and `skill.resolveLiveSource` opens the live Skill directory
+///   under it to report the physical backing path and its identity.
+///
+/// In the common single-source in-place mount the two roots resolve to
+/// the same tree (or a bind-mount alias of it), but they are stored
+/// separately so a query never crosses the canonical / FUSE / live
+/// boundary implicitly.
 #[derive(Clone)]
 pub struct ControlSocketContext {
+    /// User-visible canonical Skill root used for containment checks and
+    /// relative skill-id derivation.
+    pub canonical_root: PathBuf,
+    /// Live / backing root whose physical content is opened for reads and
+    /// activation writes.
     pub source_root: PathBuf,
+    /// Skill layout of the mount. `skill.resolveLiveSource` uses it to
+    /// enforce the same Flat / Hermes Skill boundaries as the FUSE layer.
+    pub layout: SkillLayout,
     pub resolver: Option<Arc<ActiveSkillResolver>>,
     pub protocol_event_writer: Option<Arc<dyn ProtocolEventWriter>>,
 }
@@ -96,7 +134,9 @@ pub struct ControlSocketContext {
 impl std::fmt::Debug for ControlSocketContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ControlSocketContext")
+            .field("canonical_root", &self.canonical_root)
             .field("source_root", &self.source_root)
+            .field("layout", &self.layout)
             .field("resolver", &self.resolver.is_some())
             .field(
                 "protocol_event_writer",
@@ -447,6 +487,7 @@ pub fn dispatch_request(
         "status" => ControlResponse::ok(serde_json::json!({ "status": "ready" })),
         "meta.writeActivation" => dispatch_meta_write_activation(raw, ctx),
         "meta.setActivationXattr" => dispatch_meta_set_activation_xattr(raw, ctx),
+        "skill.resolveLiveSource" => dispatch_resolve_live_source(raw, ctx),
         other => ControlResponse::err("unknown_method", format!("unknown method '{other}'")),
     }
 }
@@ -896,14 +937,83 @@ fn set_activation_xattr_fd(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// skill.resolveLiveSource (read-only)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Dispatch `skill.resolveLiveSource`.
+///
+/// A read-only query mapping a caller-supplied canonical Skill directory to
+/// its physical live/backing source. The path/layout resolution and
+/// response construction live in [`super::resolver`]; this dispatcher only
+/// validates the request envelope, forwards the canonical/live roots and
+/// layout from the context, and maps the resolver outcome onto a control
+/// response. Three distinct outcomes:
+///
+/// * `managed = true` — the path resolves to a valid live Skill directory
+///   under the managed canonical root.
+/// * `managed = false` — a valid absolute path outside the managed root; a
+///   normal success the caller may fall back on.
+/// * structured error — never disguised as `managed = false`.
+fn dispatch_resolve_live_source(
+    raw: &serde_json::Value,
+    ctx: Option<&ControlSocketContext>,
+) -> ControlResponse {
+    let ctx = match ctx {
+        Some(c) => c,
+        None => {
+            return ControlResponse::err(
+                "not_configured",
+                "skill.resolveLiveSource requires a configured canonical and live root",
+            );
+        }
+    };
+
+    let canonical_skill_dir = match raw.get("canonicalSkillDir").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            return ControlResponse::err(
+                "invalid_request",
+                "missing or non-string 'canonicalSkillDir' field",
+            );
+        }
+    };
+
+    match super::resolver::resolve_live_source(
+        &ctx.canonical_root,
+        &ctx.source_root,
+        ctx.layout,
+        canonical_skill_dir,
+    ) {
+        Ok(result) => ControlResponse::ok(result),
+        Err(e) => ControlResponse::err(e.code, e.message),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Socket path preflight
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
 pub enum SocketPreflightError {
     ParentDoesNotExist(PathBuf),
+    /// The existing path is a symlink, regular file, directory, or other
+    /// non-socket object. It is never deleted.
     ExistingPathNotSocket(PathBuf),
+    /// The existing socket is owned by a different uid. It is never
+    /// deleted.
+    ExistingSocketWrongOwner {
+        path: PathBuf,
+        uid: u32,
+    },
+    /// A live listener is accepting connections on the existing socket.
+    /// A second instance must not unlink an active endpoint.
+    ActiveListener(PathBuf),
+    /// The liveness probe could not prove the socket is stale (e.g.
+    /// `EACCES`, `EINTR`, resource exhaustion). Only a definitive
+    /// `ECONNREFUSED` is treated as stale; everything else fails closed.
+    ProbeInconclusive(PathBuf, std::io::Error),
     UnlinkFailed(PathBuf, std::io::Error),
+    Stat(PathBuf, std::io::Error),
 }
 
 impl std::fmt::Display for SocketPreflightError {
@@ -917,16 +1027,52 @@ impl std::fmt::Display for SocketPreflightError {
                 "path '{}' exists but is not a socket; refusing to overwrite",
                 p.display()
             ),
+            Self::ExistingSocketWrongOwner { path, uid } => write!(
+                f,
+                "socket '{}' is owned by uid {uid}; refusing to unlink a socket \
+                 we do not own",
+                path.display()
+            ),
+            Self::ActiveListener(p) => write!(
+                f,
+                "socket '{}' has an active listener; another instance owns this \
+                 endpoint",
+                p.display()
+            ),
+            Self::ProbeInconclusive(p, e) => write!(
+                f,
+                "cannot determine liveness of socket '{}' ({e}); refusing to \
+                 unlink",
+                p.display()
+            ),
             Self::UnlinkFailed(p, e) => {
-                write!(f, "failed to unlink existing socket '{}': {e}", p.display())
+                write!(f, "failed to unlink stale socket '{}': {e}", p.display())
             }
+            Self::Stat(p, e) => write!(f, "failed to stat '{}': {e}", p.display()),
         }
     }
 }
 
 impl std::error::Error for SocketPreflightError {}
 
+/// Preflight the socket path, safely reclaiming only a confirmed-stale
+/// socket that we own.
+///
+/// Called while the lifecycle lock is held, so no other lock-aware
+/// instance can be serving this endpoint. The checks are still defensive:
+///
+/// * A missing path is fine — the caller will bind.
+/// * A non-socket object (symlink, regular file, directory) is never
+///   deleted; startup fails closed.
+/// * A socket owned by a different uid is never deleted.
+/// * A socket is reclaimed only when a non-blocking connect probe returns
+///   a definitive `ECONNREFUSED` (no listener). A successful connect means
+///   a live listener (a non-lock-aware instance may still be serving it),
+///   and any other probe error (`EACCES`, `EINTR`, resource exhaustion, …)
+///   is inconclusive — both fail closed rather than unlink.
 pub fn preflight_socket_path(path: &Path) -> Result<(), SocketPreflightError> {
+    use std::os::unix::fs::MetadataExt;
+
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {
             return Err(SocketPreflightError::ParentDoesNotExist(
@@ -935,32 +1081,237 @@ pub fn preflight_socket_path(path: &Path) -> Result<(), SocketPreflightError> {
         }
     }
 
-    if path.exists() {
-        let meta = std::fs::symlink_metadata(path)
-            .map_err(|e| SocketPreflightError::UnlinkFailed(path.to_path_buf(), e))?;
-        let file_type = meta.file_type();
-        if !file_type.is_socket() {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(SocketPreflightError::Stat(path.to_path_buf(), e)),
+    };
+
+    // `symlink_metadata` does not follow links, so a symlink reports its
+    // own type here. Classify the object; only an owned socket is a
+    // reclamation candidate.
+    let our_uid = unsafe { libc::geteuid() };
+    match classify_socket_object(meta.file_type().is_socket(), meta.uid(), our_uid) {
+        SocketObjectClass::NotSocket => {
             return Err(SocketPreflightError::ExistingPathNotSocket(
                 path.to_path_buf(),
             ));
         }
-        std::fs::remove_file(path)
-            .map_err(|e| SocketPreflightError::UnlinkFailed(path.to_path_buf(), e))?;
+        SocketObjectClass::WrongOwner(uid) => {
+            return Err(SocketPreflightError::ExistingSocketWrongOwner {
+                path: path.to_path_buf(),
+                uid,
+            });
+        }
+        SocketObjectClass::OwnedSocket => {}
     }
 
-    Ok(())
+    // Probe liveness while holding the lifecycle lock. Only a definitive
+    // ECONNREFUSED proves the socket is stale and safe to reclaim; a live
+    // listener or any inconclusive error fails closed. The probe retries a
+    // bounded number of times so a socket whose previous owner's listener is
+    // still finishing teardown (transiently EAGAIN/EINPROGRESS) settles to
+    // ECONNREFUSED rather than being misread as a live listener — which
+    // otherwise makes a fast restart fail to reclaim its own endpoint.
+    match probe_socket_liveness(path) {
+        SocketLiveness::Stale => {
+            std::fs::remove_file(path)
+                .map_err(|e| SocketPreflightError::UnlinkFailed(path.to_path_buf(), e))?;
+            Ok(())
+        }
+        SocketLiveness::Live => Err(SocketPreflightError::ActiveListener(path.to_path_buf())),
+        SocketLiveness::Inconclusive(e) => Err(SocketPreflightError::ProbeInconclusive(
+            path.to_path_buf(),
+            e,
+        )),
+    }
 }
 
-/// Ensure the socket parent directory exists with permissions `0o700`.
+/// Result of probing whether a socket path has a live listener.
+enum SocketLiveness {
+    /// A listener accepted, or was persistently unconnectable-but-present
+    /// (backlog full) across every retry — the endpoint is live and must
+    /// never be reclaimed.
+    Live,
+    /// The kernel returned `ECONNREFUSED` — no listener, the socket file is
+    /// stale and safe to reclaim.
+    Stale,
+    /// The probe never reached a definitive result; liveness is unknown.
+    Inconclusive(std::io::Error),
+}
+
+/// Outcome of a single non-blocking `connect(2)` attempt.
+enum ProbeOnce {
+    /// `connect` returned 0: a listener accepted — definitively live.
+    Connected,
+    /// `ECONNREFUSED`: no listener — definitively stale.
+    Refused,
+    /// A non-definitive result (`EAGAIN`/`EINPROGRESS` — backlog full or
+    /// pending — or a resource/other error). Ambiguous on a single attempt;
+    /// the caller retries before drawing a conclusion.
+    Ambiguous(std::io::Error),
+}
+
+/// Non-blocking `connect(2)` probe against an `AF_UNIX` socket path. Bounded
+/// (never blocks) and precise: only a definitive `ECONNREFUSED` is treated
+/// as stale.
+///
+/// A single connect is ambiguous while a previous owner's listener is
+/// mid-teardown: for a short window after the listener fd is closed, a stale
+/// socket transiently reports `EAGAIN`/`EINPROGRESS` before the kernel
+/// settles the endpoint to `ECONNREFUSED`. Classifying that transient state
+/// as a live listener would refuse to reclaim a genuinely stale socket and
+/// make a fast restart fail. The lifecycle flock guarantees mutual exclusion
+/// but not that teardown has completed, so the probe retries on any
+/// non-definitive result:
+///
+/// * a genuinely live listener connects (or is persistently backlog-full)
+///   across every retry, so it is reported `Live` and never unlinked;
+/// * a stale socket settles to `ECONNREFUSED` within the retry window and is
+///   reported `Stale`.
+///
+/// The common cases (immediate connect or immediate refusal) return on the
+/// first attempt with no delay; the retry budget is capped so the probe
+/// always terminates quickly.
+fn probe_socket_liveness(path: &Path) -> SocketLiveness {
+    const MAX_ATTEMPTS: u32 = 40;
+    const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(5);
+
+    resolve_socket_liveness(
+        MAX_ATTEMPTS,
+        || probe_socket_liveness_once(path),
+        || std::thread::sleep(RETRY_DELAY),
+    )
+}
+
+/// Retry state machine over single-probe outcomes, factored out of the
+/// `connect(2)` syscall so it can be covered deterministically with injected
+/// outcomes (the real socket teardown almost always yields `ECONNREFUSED`
+/// immediately, so a live-socket test cannot reliably reach the retry path).
+///
+/// Returns `Stale` on the first `Refused` and `Live` on the first
+/// `Connected`; otherwise retries up to `max_attempts` on `Ambiguous`,
+/// invoking `wait` between attempts (a real sleep in production, a no-op in
+/// tests). If no definitive result ever appears, a persistent
+/// backlog-full/pending signal (`EAGAIN`/`EINPROGRESS`) is reported `Live`
+/// (never unlinked) and any other persistent error is `Inconclusive` (fail
+/// closed).
+fn resolve_socket_liveness(
+    max_attempts: u32,
+    mut probe: impl FnMut() -> ProbeOnce,
+    mut wait: impl FnMut(),
+) -> SocketLiveness {
+    let mut last_err: Option<std::io::Error> = None;
+    for attempt in 0..max_attempts {
+        match probe() {
+            ProbeOnce::Connected => return SocketLiveness::Live,
+            ProbeOnce::Refused => return SocketLiveness::Stale,
+            ProbeOnce::Ambiguous(e) => last_err = Some(e),
+        }
+        if attempt + 1 < max_attempts {
+            wait();
+        }
+    }
+
+    // Never observed a definitive result. A persistently backlog-full live
+    // listener lands here (EAGAIN/EINPROGRESS every attempt): keep it Live so
+    // it is never unlinked. Any other persistent error is inconclusive and
+    // fails closed.
+    match last_err {
+        Some(e) => match e.raw_os_error() {
+            Some(libc::EAGAIN) | Some(libc::EINPROGRESS) => SocketLiveness::Live,
+            _ => SocketLiveness::Inconclusive(e),
+        },
+        None => SocketLiveness::Inconclusive(std::io::Error::other("probe produced no result")),
+    }
+}
+
+/// One non-blocking `connect(2)` attempt; see [`probe_socket_liveness`].
+fn probe_socket_liveness_once(path: &Path) -> ProbeOnce {
+    use std::os::unix::ffi::OsStrExt;
+
+    let bytes = path.as_os_str().as_bytes();
+    // sun_path must be NUL-terminated and fit the sockaddr_un buffer.
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if bytes.len() >= std::mem::size_of_val(&addr.sun_path) {
+        return ProbeOnce::Ambiguous(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "socket path too long for sockaddr_un",
+        ));
+    }
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (i, b) in bytes.iter().enumerate() {
+        addr.sun_path[i] = *b as libc::c_char;
+    }
+
+    let fd = unsafe {
+        libc::socket(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            0,
+        )
+    };
+    if fd < 0 {
+        return ProbeOnce::Ambiguous(std::io::Error::last_os_error());
+    }
+    let _guard = FdGuard(fd);
+
+    let rc = unsafe {
+        libc::connect(
+            fd,
+            &addr as *const libc::sockaddr_un as *const libc::sockaddr,
+            std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+        )
+    };
+    if rc == 0 {
+        return ProbeOnce::Connected;
+    }
+    let err = std::io::Error::last_os_error();
+    match err.raw_os_error() {
+        // No listener bound to the path: stale.
+        Some(libc::ECONNREFUSED) => ProbeOnce::Refused,
+        // Backlog full / connection pending / resource or other error:
+        // ambiguous on a single attempt — let the caller retry.
+        _ => ProbeOnce::Ambiguous(err),
+    }
+}
+
+/// Classification of an existing object at the socket path, excluding the
+/// live-listener probe (which needs a connect attempt).
+#[derive(Debug, PartialEq, Eq)]
+enum SocketObjectClass {
+    /// Not a socket (symlink, regular file, directory, …): never delete.
+    NotSocket,
+    /// A socket owned by another uid: never delete.
+    WrongOwner(u32),
+    /// A socket owned by the current uid: a stale-reclamation candidate.
+    OwnedSocket,
+}
+
+/// Pure classification used by [`preflight_socket_path`]. Kept separate so
+/// the wrong-owner and non-socket branches are unit-testable without a
+/// second uid.
+fn classify_socket_object(is_socket: bool, owner_uid: u32, our_uid: u32) -> SocketObjectClass {
+    if !is_socket {
+        SocketObjectClass::NotSocket
+    } else if owner_uid != our_uid {
+        SocketObjectClass::WrongOwner(owner_uid)
+    } else {
+        SocketObjectClass::OwnedSocket
+    }
+}
+
+/// Ensure the socket parent directory exists, is a directory (not a
+/// symlink), is owned by the current uid, and has permissions `0o700`.
 ///
 /// - If the parent does not exist, creates it (and ancestors) and sets
 ///   permissions to `0o700`.
-/// - If the parent exists, verifies it is a directory (not a symlink)
-///   and sets permissions to `0o700`.
-/// - Fails closed if the parent is not a directory or permissions
-///   cannot be set.
+/// - If the parent exists, verifies it is a directory, owned by the
+///   current euid, and tightens permissions to `0o700`.
+/// - Fails closed if the parent is not a directory, is owned by another
+///   uid, or permissions cannot be set.
 pub fn secure_socket_parent(socket_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     let parent = match socket_path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
@@ -983,10 +1334,199 @@ pub fn secure_socket_parent(socket_path: &Path) -> Result<(), Box<dyn std::error
         .into());
     }
 
+    let our_uid = unsafe { libc::geteuid() };
+    if meta.uid() != our_uid {
+        return Err(format!(
+            "socket parent '{}' is owned by uid {}; expected the current uid {our_uid}",
+            parent.display(),
+            meta.uid()
+        )
+        .into());
+    }
+
     let perms = std::fs::Permissions::from_mode(0o700);
     std::fs::set_permissions(parent, perms)?;
 
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Default endpoint
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Error resolving the default control socket endpoint.
+#[derive(Debug)]
+pub enum DefaultEndpointError {
+    /// The per-user runtime directory `/run/user/<uid>` does not exist.
+    RuntimeDirMissing(PathBuf),
+    /// `/run/user/<uid>` exists but is not a directory.
+    RuntimeDirNotDir(PathBuf),
+}
+
+impl std::fmt::Display for DefaultEndpointError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RuntimeDirMissing(p) => write!(
+                f,
+                "default control socket endpoint unavailable: '{}' does not exist; \
+                 pass --control-socket <PATH> explicitly (the default never falls \
+                 back to /tmp or /var/tmp)",
+                p.display()
+            ),
+            Self::RuntimeDirNotDir(p) => write!(
+                f,
+                "default control socket endpoint unavailable: '{}' is not a directory; \
+                 pass --control-socket <PATH> explicitly",
+                p.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DefaultEndpointError {}
+
+/// The default control socket endpoint path for `uid`:
+/// `/run/user/<uid>/skillfs/control.sock`.
+///
+/// Pure: does not touch the filesystem. Deliberately anchored on the
+/// per-user runtime directory and never on `/tmp` or `/var/tmp`.
+pub fn default_control_socket_path(uid: u32) -> PathBuf {
+    PathBuf::from(format!("/run/user/{uid}/skillfs/control.sock"))
+}
+
+/// Resolution of the effective control socket endpoint from the merged
+/// explicit path (CLI value already merged over the config value) and
+/// whether a trusted peer is configured.
+///
+/// Priority: an explicit path always wins; otherwise a trusted peer
+/// selects the default per-user endpoint; otherwise the control plane is
+/// disabled. An explicit path without a trusted peer is a configuration
+/// error — the control plane is always authenticated.
+#[derive(Debug, PartialEq, Eq)]
+pub enum EndpointResolution {
+    /// Neither an explicit path nor a trusted peer: control plane off.
+    Disabled,
+    /// Explicit path with a trusted peer: use the path verbatim.
+    Explicit(PathBuf),
+    /// Trusted peer with no explicit path: bind the default endpoint.
+    UseDefault,
+    /// Explicit path without a trusted peer: configuration error.
+    MissingTrustedPeer(PathBuf),
+}
+
+/// Classify the control socket endpoint from the merged explicit path and
+/// whether a trusted peer is configured. Pure: performs no filesystem
+/// access.
+pub fn classify_control_socket_endpoint(
+    explicit_path: Option<&Path>,
+    has_trusted_peer: bool,
+) -> EndpointResolution {
+    match (explicit_path, has_trusted_peer) {
+        (Some(p), true) => EndpointResolution::Explicit(p.to_path_buf()),
+        (Some(p), false) => EndpointResolution::MissingTrustedPeer(p.to_path_buf()),
+        (None, true) => EndpointResolution::UseDefault,
+        (None, false) => EndpointResolution::Disabled,
+    }
+}
+
+/// Resolve the default control socket endpoint for the current user,
+/// validating that the per-user runtime directory `/run/user/<uid>` exists
+/// and is a directory.
+///
+/// The `skillfs/` leaf under it is created (0700) at bind time by
+/// [`secure_socket_parent`]; this function refuses to invent a
+/// `/run/user/<uid>` that the system did not provide, and never falls back
+/// to a public temporary directory.
+pub fn resolve_default_control_socket_endpoint() -> Result<PathBuf, DefaultEndpointError> {
+    let uid = unsafe { libc::geteuid() };
+    let runtime_dir = PathBuf::from(format!("/run/user/{uid}"));
+    match std::fs::metadata(&runtime_dir) {
+        Ok(meta) if meta.is_dir() => Ok(default_control_socket_path(uid)),
+        Ok(_) => Err(DefaultEndpointError::RuntimeDirNotDir(runtime_dir)),
+        Err(_) => Err(DefaultEndpointError::RuntimeDirMissing(runtime_dir)),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Lifecycle lock
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Path of the lifecycle lock file guarding a socket endpoint:
+/// the socket path with a `.lock` suffix appended.
+fn lifecycle_lock_path(socket_path: &Path) -> PathBuf {
+    let mut os = socket_path.as_os_str().to_owned();
+    os.push(".lock");
+    PathBuf::from(os)
+}
+
+/// A non-blocking advisory lock (`flock(LOCK_EX | LOCK_NB)`) guarding a
+/// single control socket endpoint for the lifetime of the server.
+///
+/// The kernel releases the lock automatically when the process exits, so a
+/// crashed instance never wedges the endpoint. The lock file itself is
+/// intentionally left in place on clean shutdown to avoid a delete/reopen
+/// race between a departing and an arriving instance.
+struct LifecycleLock {
+    // Held for RAII: dropping closes the fd and releases the flock.
+    _file: std::fs::File,
+}
+
+/// Acquire the lifecycle lock for `socket_path` without blocking.
+///
+/// Returns an error if another instance already holds the lock (the
+/// endpoint is live) or the lock file cannot be created.
+fn acquire_lifecycle_lock(socket_path: &Path) -> Result<LifecycleLock, Box<dyn std::error::Error>> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+
+    let lock_path = lifecycle_lock_path(socket_path);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&lock_path)
+        .map_err(|e| {
+            format!(
+                "failed to open lifecycle lock '{}': {e}",
+                lock_path.display()
+            )
+        })?;
+
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() == Some(libc::EWOULDBLOCK) {
+            return Err(format!(
+                "another skillfs instance already owns the control socket endpoint '{}'",
+                socket_path.display()
+            )
+            .into());
+        }
+        return Err(format!(
+            "failed to acquire lifecycle lock '{}': {e}",
+            lock_path.display()
+        )
+        .into());
+    }
+
+    Ok(LifecycleLock { _file: file })
+}
+
+/// Read the `(dev, ino)` identity of the object at `path` without
+/// following symlinks. Returns `None` if it does not exist or is not a
+/// socket.
+fn socket_identity(path: &Path) -> Option<FileId> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.file_type().is_socket() {
+        return None;
+    }
+    Some(FileId {
+        dev: meta.dev(),
+        ino: meta.ino(),
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1004,36 +1544,53 @@ pub struct ControlSocketHandle {
     socket_path: PathBuf,
     shutdown: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// `(dev, ino)` of the socket this instance bound. On shutdown the
+    /// path is unlinked only if it still resolves to this identity, so a
+    /// path replaced by another object after bind is never deleted.
+    bound_identity: Option<FileId>,
+    /// Held for the server's lifetime; released on shutdown/drop.
+    _lifecycle_lock: LifecycleLock,
 }
 
 impl ControlSocketHandle {
     pub fn shutdown(mut self) {
-        self.shutdown.store(true, Ordering::SeqCst);
-
-        // Connect to the socket to unblock the accept() call.
-        let _ = UnixStream::connect(&self.socket_path);
-
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-
-        // Clean up socket file.
-        let _ = std::fs::remove_file(&self.socket_path);
+        self.stop_and_cleanup();
     }
 
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
     }
+
+    /// Stop the accept loop, join the thread, and remove the socket file
+    /// only if it still resolves to the identity this instance bound.
+    fn stop_and_cleanup(&mut self) {
+        // Signal the non-blocking accept loop to exit. It polls the flag,
+        // so shutdown is bounded and does not depend on connecting to the
+        // socket path (which may have been replaced).
+        self.shutdown.store(true, Ordering::SeqCst);
+
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+
+        // Only remove the socket if it is still the exact object we bound.
+        // If the path was replaced by another socket or object, leave it.
+        match (self.bound_identity, socket_identity(&self.socket_path)) {
+            (Some(bound), Some(current)) if bound == current => {
+                let _ = std::fs::remove_file(&self.socket_path);
+            }
+            _ => {}
+        }
+    }
 }
 
 impl Drop for ControlSocketHandle {
     fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::SeqCst);
-        let _ = UnixStream::connect(&self.socket_path);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+        // `shutdown()` consumes self and would have taken the thread; if
+        // the handle is dropped without an explicit shutdown, clean up.
+        if self.thread.is_some() {
+            self.stop_and_cleanup();
         }
-        let _ = std::fs::remove_file(&self.socket_path);
     }
 }
 
@@ -1056,10 +1613,18 @@ impl ControlSocketServer {
     pub fn start(self) -> Result<ControlSocketHandle, Box<dyn std::error::Error>> {
         // Secure socket parent directory to 0o700 before bind to
         // eliminate the bind-to-chmod permission window. Runs before
-        // preflight so that create_dir_all satisfies the parent
-        // existence check.
+        // the lifecycle lock so that create_dir_all provides the parent
+        // the lock file lives in.
         secure_socket_parent(&self.config.socket_path)?;
 
+        // Acquire the non-blocking lifecycle lock before touching the
+        // socket path. A second instance targeting the same endpoint
+        // fails here instead of unlinking a live socket.
+        let lifecycle_lock = acquire_lifecycle_lock(&self.config.socket_path)?;
+
+        // Reclaim only a confirmed-stale, owned socket (checked while the
+        // lock is held). Fails closed on non-sockets, wrong owner, or a
+        // live listener.
         preflight_socket_path(&self.config.socket_path)?;
 
         let listener = UnixListener::bind(&self.config.socket_path)?;
@@ -1071,6 +1636,10 @@ impl ControlSocketServer {
             let perms = std::fs::Permissions::from_mode(0o600);
             std::fs::set_permissions(&self.config.socket_path, perms)?;
         }
+
+        // Record the bound socket identity so shutdown only removes the
+        // exact object we created, never a replacement at the same path.
+        let bound_identity = socket_identity(&self.config.socket_path);
 
         let shutdown = self.shutdown.clone();
         let config = self.config.clone();
@@ -1095,9 +1664,15 @@ impl ControlSocketServer {
             socket_path,
             shutdown,
             thread: Some(thread),
+            bound_identity,
+            _lifecycle_lock: lifecycle_lock,
         })
     }
 }
+
+/// Poll interval for the non-blocking accept loop. Bounds shutdown
+/// latency without a per-request thread or a self-pipe.
+const ACCEPT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
 fn run_server_loop(
     listener: &UnixListener,
@@ -1105,31 +1680,34 @@ fn run_server_loop(
     ctx: Option<&ControlSocketContext>,
     shutdown: &AtomicBool,
 ) {
+    // Non-blocking accept + shutdown-flag poll. This makes shutdown
+    // reliable and bounded even if the socket path is later replaced by
+    // another object (connecting to the path to unblock a blocking
+    // accept would not work in that case). Connections are still handled
+    // one at a time on this single thread — no thread-per-request.
     listener
-        .set_nonblocking(false)
-        .unwrap_or_else(|e| warn!("failed to set listener blocking: {e}"));
+        .set_nonblocking(true)
+        .unwrap_or_else(|e| warn!("failed to set listener non-blocking: {e}"));
 
-    for stream_result in listener.incoming() {
-        if shutdown.load(Ordering::SeqCst) {
-            break;
-        }
-
-        let stream = match stream_result {
-            Ok(s) => s,
+    while !shutdown.load(Ordering::SeqCst) {
+        match listener.accept() {
+            Ok((stream, _addr)) => {
+                if shutdown.load(Ordering::SeqCst) {
+                    break;
+                }
+                handle_connection(stream, config, ctx);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(ACCEPT_POLL_INTERVAL);
+            }
             Err(e) => {
                 if shutdown.load(Ordering::SeqCst) {
                     break;
                 }
                 warn!("control socket accept error: {e}");
-                continue;
+                std::thread::sleep(ACCEPT_POLL_INTERVAL);
             }
-        };
-
-        if shutdown.load(Ordering::SeqCst) {
-            break;
         }
-
-        handle_connection(stream, config, ctx);
     }
 
     debug!("control socket server loop exited");
@@ -1147,6 +1725,9 @@ fn handle_connection(
     config: &ControlSocketConfig,
     ctx: Option<&ControlSocketContext>,
 ) {
+    // The listener is non-blocking; ensure the accepted stream is blocking
+    // so the read timeout governs the per-connection hold time.
+    let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(CONNECTION_READ_TIMEOUT));
 
     let peer_identity = match identify_peer(&stream) {
@@ -1240,6 +1821,94 @@ fn send_response(stream: &UnixStream, resp: &ControlResponse) -> std::io::Result
 mod tests {
     use super::*;
 
+    // ── Liveness retry state machine (deterministic, injected probes) ────
+    //
+    // The real `connect(2)` teardown almost always yields ECONNREFUSED on the
+    // first attempt, so the live-socket integration test cannot reliably
+    // reach the Ambiguous retry branch. These drive `resolve_socket_liveness`
+    // with scripted single-probe outcomes to pin every branch.
+
+    fn eagain() -> std::io::Error {
+        std::io::Error::from_raw_os_error(libc::EAGAIN)
+    }
+
+    /// Build a probe closure that returns the given outcomes in order, then
+    /// repeats the final outcome for any further attempts.
+    fn scripted(outcomes: Vec<ProbeOnce>) -> impl FnMut() -> ProbeOnce {
+        let mut i = 0usize;
+        move || {
+            // Reconstruct each outcome fresh (io::Error is not Clone).
+            let idx = i.min(outcomes.len().saturating_sub(1));
+            i += 1;
+            match &outcomes[idx] {
+                ProbeOnce::Connected => ProbeOnce::Connected,
+                ProbeOnce::Refused => ProbeOnce::Refused,
+                ProbeOnce::Ambiguous(e) => ProbeOnce::Ambiguous(std::io::Error::from_raw_os_error(
+                    e.raw_os_error().unwrap_or(libc::EIO),
+                )),
+            }
+        }
+    }
+
+    #[test]
+    fn liveness_ambiguous_then_refused_is_stale() {
+        // EAGAIN/EINPROGRESS that later settles to ECONNREFUSED → Stale.
+        let probe = scripted(vec![
+            ProbeOnce::Ambiguous(eagain()),
+            ProbeOnce::Ambiguous(std::io::Error::from_raw_os_error(libc::EINPROGRESS)),
+            ProbeOnce::Refused,
+        ]);
+        let r = resolve_socket_liveness(40, probe, || {});
+        assert!(matches!(r, SocketLiveness::Stale));
+    }
+
+    #[test]
+    fn liveness_persistent_ambiguous_backlog_is_live() {
+        // Persistent EAGAIN (backlog-full live listener) → Live, never unlink.
+        let probe = || ProbeOnce::Ambiguous(eagain());
+        let r = resolve_socket_liveness(5, probe, || {});
+        assert!(matches!(r, SocketLiveness::Live));
+    }
+
+    #[test]
+    fn liveness_persistent_other_error_is_inconclusive() {
+        // Persistent non-backlog error (e.g. EACCES) → fail closed.
+        let probe = || ProbeOnce::Ambiguous(std::io::Error::from_raw_os_error(libc::EACCES));
+        let r = resolve_socket_liveness(5, probe, || {});
+        match r {
+            SocketLiveness::Inconclusive(e) => {
+                assert_eq!(e.raw_os_error(), Some(libc::EACCES));
+            }
+            _ => panic!("expected Inconclusive"),
+        }
+    }
+
+    #[test]
+    fn liveness_connected_is_immediately_live() {
+        // A definitive connect on the first attempt → Live, no retries.
+        let mut attempts = 0u32;
+        let probe = || {
+            attempts += 1;
+            ProbeOnce::Connected
+        };
+        let r = resolve_socket_liveness(40, probe, || panic!("must not wait after Connected"));
+        assert!(matches!(r, SocketLiveness::Live));
+        assert_eq!(attempts, 1, "Connected must return on the first attempt");
+    }
+
+    #[test]
+    fn liveness_refused_is_immediately_stale() {
+        // A definitive refusal on the first attempt → Stale, no retries.
+        let mut attempts = 0u32;
+        let probe = || {
+            attempts += 1;
+            ProbeOnce::Refused
+        };
+        let r = resolve_socket_liveness(40, probe, || panic!("must not wait after Refused"));
+        assert!(matches!(r, SocketLiveness::Stale));
+        assert_eq!(attempts, 1, "Refused must return on the first attempt");
+    }
+
     // ── Protocol parse / serialize ───────────────────────────────────────
 
     #[test]
@@ -1331,7 +2000,9 @@ mod tests {
 
     fn test_ctx(source_root: &Path) -> ControlSocketContext {
         ControlSocketContext {
+            canonical_root: source_root.to_path_buf(),
             source_root: source_root.to_path_buf(),
+            layout: SkillLayout::Flat,
             resolver: Some(Arc::new(ActiveSkillResolver::new(source_root))),
             protocol_event_writer: None,
         }
@@ -1525,7 +2196,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("alpha")).unwrap();
         let ctx = ControlSocketContext {
+            canonical_root: dir.path().to_path_buf(),
             source_root: dir.path().to_path_buf(),
+            layout: SkillLayout::Flat,
             resolver: None,
             protocol_event_writer: None,
         };
@@ -1556,7 +2229,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("alpha")).unwrap();
         let ctx = ControlSocketContext {
+            canonical_root: dir.path().to_path_buf(),
             source_root: dir.path().to_path_buf(),
+            layout: SkillLayout::Flat,
             resolver: None,
             protocol_event_writer: None,
         };
@@ -1667,7 +2342,9 @@ mod tests {
 
         let resolver = Arc::new(ActiveSkillResolver::new(dir.path()));
         let ctx = ControlSocketContext {
+            canonical_root: dir.path().to_path_buf(),
             source_root: dir.path().to_path_buf(),
+            layout: SkillLayout::Flat,
             resolver: Some(resolver.clone()),
             protocol_event_writer: None,
         };
@@ -1699,7 +2376,9 @@ mod tests {
 
         let resolver = Arc::new(ActiveSkillResolver::new(dir.path()));
         let ctx = ControlSocketContext {
+            canonical_root: dir.path().to_path_buf(),
             source_root: dir.path().to_path_buf(),
+            layout: SkillLayout::Flat,
             resolver: Some(resolver.clone()),
             protocol_event_writer: None,
         };
@@ -1885,6 +2564,213 @@ mod tests {
         let path = dir.path().join("new.sock");
         let result = preflight_socket_path(&path);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn preflight_symlink_not_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::write(&target, "x").unwrap();
+        let link = dir.path().join("link.sock");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let result = preflight_socket_path(&link);
+        assert!(matches!(
+            result,
+            Err(SocketPreflightError::ExistingPathNotSocket(_))
+        ));
+        // The symlink must not have been deleted.
+        assert!(
+            std::fs::symlink_metadata(&link).is_ok(),
+            "symlink must not be deleted"
+        );
+    }
+
+    // ── Socket-object classification ─────────────────────────────────────
+
+    #[test]
+    fn classify_socket_object_non_socket_never_deleted() {
+        assert_eq!(
+            classify_socket_object(false, 1000, 1000),
+            SocketObjectClass::NotSocket
+        );
+    }
+
+    #[test]
+    fn classify_socket_object_wrong_owner_never_deleted() {
+        // A socket owned by a different uid must never be reclaimed.
+        assert_eq!(
+            classify_socket_object(true, 999, 1000),
+            SocketObjectClass::WrongOwner(999)
+        );
+    }
+
+    #[test]
+    fn classify_socket_object_owned_socket_is_reclaim_candidate() {
+        assert_eq!(
+            classify_socket_object(true, 1000, 1000),
+            SocketObjectClass::OwnedSocket
+        );
+    }
+
+    // ── Default endpoint + priority ──────────────────────────────────────
+
+    #[test]
+    fn default_endpoint_path_is_under_run_user_never_tmp() {
+        let p = default_control_socket_path(1000);
+        assert_eq!(p, PathBuf::from("/run/user/1000/skillfs/control.sock"));
+        let s = p.to_string_lossy();
+        assert!(
+            !s.contains("/tmp"),
+            "default endpoint must not use /tmp: {s}"
+        );
+        assert!(
+            !s.contains("/var/tmp"),
+            "default endpoint must not use /var/tmp: {s}"
+        );
+    }
+
+    #[test]
+    fn resolve_default_endpoint_is_run_user_or_actionable_error() {
+        let uid = unsafe { libc::geteuid() };
+        match resolve_default_control_socket_endpoint() {
+            Ok(p) => {
+                // When /run/user/<uid> exists, the resolved path is the
+                // per-user endpoint and never a public temp directory.
+                assert_eq!(p, default_control_socket_path(uid));
+                let s = p.to_string_lossy();
+                assert!(!s.contains("/tmp") && !s.contains("/var/tmp"));
+            }
+            Err(e) => {
+                // When it is unavailable, the error is clear and actionable.
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("--control-socket"),
+                    "error must be actionable: {msg}"
+                );
+                assert!(
+                    msg.contains(&format!("/run/user/{uid}")),
+                    "error must name the runtime dir: {msg}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn endpoint_priority_cli_over_config_over_default() {
+        // CLI value wins over config (the `or_else` merge in cmd_mount is
+        // applied first, then classified here).
+        let cli = Some(PathBuf::from("/cli.sock"));
+        let config = Some(PathBuf::from("/config.sock"));
+        let merged = cli.clone().or(config.clone());
+        assert_eq!(
+            classify_control_socket_endpoint(merged.as_deref(), true),
+            EndpointResolution::Explicit(PathBuf::from("/cli.sock"))
+        );
+
+        // Config value wins over the default when there is no CLI value.
+        let merged2: Option<PathBuf> = None.or(config);
+        assert_eq!(
+            classify_control_socket_endpoint(merged2.as_deref(), true),
+            EndpointResolution::Explicit(PathBuf::from("/config.sock"))
+        );
+
+        // Trusted peer, no explicit path → default endpoint.
+        assert_eq!(
+            classify_control_socket_endpoint(None, true),
+            EndpointResolution::UseDefault
+        );
+    }
+
+    #[test]
+    fn endpoint_explicit_path_without_trusted_peer_is_error() {
+        assert_eq!(
+            classify_control_socket_endpoint(Some(Path::new("/x.sock")), false),
+            EndpointResolution::MissingTrustedPeer(PathBuf::from("/x.sock"))
+        );
+    }
+
+    #[test]
+    fn endpoint_neither_disables_control_plane() {
+        assert_eq!(
+            classify_control_socket_endpoint(None, false),
+            EndpointResolution::Disabled
+        );
+    }
+
+    // ── skill.resolveLiveSource dispatch plumbing ────────────────────────
+    //
+    // The resolver behavior suite (managed/not-managed/errors, layout
+    // boundaries, identity, no-side-effects) lives in `super::resolver`'s
+    // unit tests against the pure `resolve_live_source`. These tests cover
+    // only the control-socket dispatch layer: context threading and
+    // envelope validation.
+
+    fn resolver_ctx(canonical_root: &Path, live_root: &Path) -> ControlSocketContext {
+        ControlSocketContext {
+            canonical_root: canonical_root.to_path_buf(),
+            source_root: live_root.to_path_buf(),
+            layout: SkillLayout::Flat,
+            // The read-only resolver must work without an active resolver.
+            resolver: None,
+            protocol_event_writer: None,
+        }
+    }
+
+    fn seed_skill(root: &Path, rel: &str) {
+        let dir = root.join(rel);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: x\ndescription: y\n---\nbody\n",
+        )
+        .unwrap();
+    }
+
+    fn resolve_req(canonical_skill_dir: &str) -> serde_json::Value {
+        serde_json::json!({
+            "schemaVersion": "1",
+            "method": "skill.resolveLiveSource",
+            "canonicalSkillDir": canonical_skill_dir,
+        })
+    }
+
+    #[test]
+    fn resolve_missing_canonical_field_is_invalid_request() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = resolver_ctx(root.path(), root.path());
+        let raw = serde_json::json!({
+            "schemaVersion": "1",
+            "method": "skill.resolveLiveSource",
+        });
+        let resp = dispatch_resolve_live_source(&raw, Some(&ctx));
+        assert!(!resp.ok);
+        assert_eq!(resp.error.unwrap().code, "invalid_request");
+    }
+
+    #[test]
+    fn resolve_without_context_is_not_configured() {
+        let raw = resolve_req("/x/y");
+        let resp = dispatch_resolve_live_source(&raw, None);
+        assert!(!resp.ok);
+        assert_eq!(resp.error.unwrap().code, "not_configured");
+    }
+
+    #[test]
+    fn resolve_dispatches_via_dispatch_request() {
+        // The method is reachable through the top-level dispatcher and
+        // threads the context roots + layout into the resolver.
+        let root = tempfile::tempdir().unwrap();
+        seed_skill(root.path(), "my-skill");
+        let ctx = resolver_ctx(root.path(), root.path());
+        let raw = resolve_req(root.path().join("my-skill").to_str().unwrap());
+        let req = ControlRequest {
+            schema_version: "1".to_string(),
+            method: "skill.resolveLiveSource".to_string(),
+        };
+        let resp = dispatch_request(&req, &raw, Some(&ctx));
+        assert!(resp.ok);
+        assert_eq!(resp.result.unwrap()["managed"], true);
     }
 
     // ── Peer verification ────────────────────────────────────────────────
@@ -2636,7 +3522,9 @@ mod tests {
             let writer =
                 Arc::new(super::super::super::protocol_events::InMemoryProtocolEventWriter::new());
             let ctx = ControlSocketContext {
+                canonical_root: source_root.to_path_buf(),
                 source_root: source_root.to_path_buf(),
+                layout: SkillLayout::Flat,
                 resolver: Some(resolver),
                 protocol_event_writer: Some(writer),
             };
@@ -2719,7 +3607,9 @@ mod tests {
 
             let socket_path = dir.path().join("test.sock");
             let ctx = ControlSocketContext {
+                canonical_root: source.path().to_path_buf(),
                 source_root: source.path().to_path_buf(),
+                layout: SkillLayout::Flat,
                 resolver: None,
                 protocol_event_writer: None,
             };
@@ -2963,7 +3853,9 @@ mod tests {
 
             let socket_path = dir.path().join("test.sock");
             let ctx = ControlSocketContext {
+                canonical_root: source.path().to_path_buf(),
                 source_root: source.path().to_path_buf(),
+                layout: SkillLayout::Flat,
                 resolver: None,
                 protocol_event_writer: None,
             };
@@ -3084,6 +3976,391 @@ mod tests {
                 libc::lremovexattr(c_path.as_ptr(), c_name.as_ptr());
             }
             true
+        }
+
+        // ── skill.resolveLiveSource over the socket ──────────────────
+
+        fn seed_skill_dir(root: &Path, rel: &str) {
+            let dir = root.join(rel);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), "---\nname: x\ndescription: y\n---\n").unwrap();
+        }
+
+        #[test]
+        fn server_resolve_live_source_managed() {
+            // start_server_with_context uses the default (Flat) layout, so
+            // seed a flat skill. Nested/Hermes boundary behavior is covered
+            // by the resolver module's own unit tests.
+            let dir = tempfile::tempdir().unwrap();
+            let source = tempfile::tempdir().unwrap();
+            seed_skill_dir(source.path(), "my-skill");
+            let (socket_path, handle) = start_server_with_context(dir.path(), source.path());
+
+            let canonical = source.path().join("my-skill");
+            let req = serde_json::json!({
+                "schemaVersion": "1",
+                "method": "skill.resolveLiveSource",
+                "canonicalSkillDir": canonical.to_string_lossy(),
+            });
+            let resp_str = connect_and_send(&socket_path, &req.to_string());
+            let resp: ControlResponse = serde_json::from_str(&resp_str).unwrap();
+            assert!(resp.ok, "expected ok, got {resp:?}");
+            let r = resp.result.unwrap();
+            assert_eq!(r["managed"], true);
+            assert_eq!(r["skillId"], "my-skill");
+            assert_eq!(r["transport"], "shared_path");
+
+            handle.shutdown();
+        }
+
+        #[test]
+        fn server_resolve_live_source_not_managed() {
+            let dir = tempfile::tempdir().unwrap();
+            let source = tempfile::tempdir().unwrap();
+            let other = tempfile::tempdir().unwrap();
+            let (socket_path, handle) = start_server_with_context(dir.path(), source.path());
+
+            let req = serde_json::json!({
+                "schemaVersion": "1",
+                "method": "skill.resolveLiveSource",
+                "canonicalSkillDir": other.path().join("x").to_string_lossy(),
+            });
+            let resp_str = connect_and_send(&socket_path, &req.to_string());
+            let resp: ControlResponse = serde_json::from_str(&resp_str).unwrap();
+            assert!(resp.ok);
+            let r = resp.result.unwrap();
+            assert_eq!(r["managed"], false);
+            assert_eq!(r["reason"], "not_managed");
+
+            handle.shutdown();
+        }
+
+        #[test]
+        fn server_resolve_live_source_relative_path_error() {
+            let dir = tempfile::tempdir().unwrap();
+            let source = tempfile::tempdir().unwrap();
+            let (socket_path, handle) = start_server_with_context(dir.path(), source.path());
+
+            let req = serde_json::json!({
+                "schemaVersion": "1",
+                "method": "skill.resolveLiveSource",
+                "canonicalSkillDir": "relative/path",
+            });
+            let resp_str = connect_and_send(&socket_path, &req.to_string());
+            let resp: ControlResponse = serde_json::from_str(&resp_str).unwrap();
+            assert!(!resp.ok);
+            assert_eq!(resp.error.unwrap().code, "invalid_canonical_path");
+
+            handle.shutdown();
+        }
+
+        #[test]
+        fn server_resolve_live_source_untrusted_peer_rejected() {
+            let dir = tempfile::tempdir().unwrap();
+            let source = tempfile::tempdir().unwrap();
+            seed_skill_dir(source.path(), "my-skill");
+
+            let socket_path = dir.path().join("test.sock");
+            let ctx = ControlSocketContext {
+                canonical_root: source.path().to_path_buf(),
+                source_root: source.path().to_path_buf(),
+                layout: SkillLayout::Flat,
+                resolver: None,
+                protocol_event_writer: None,
+            };
+            let config = ControlSocketConfig {
+                socket_path: socket_path.clone(),
+                trusted_peer: TrustedPeerConfig {
+                    exe_path: PathBuf::from("/nonexistent/binary"),
+                    exe_file_id: FileId { dev: 0, ino: 0 },
+                    uid: None,
+                    gid: None,
+                },
+            };
+            let handle = ControlSocketServer::new(config)
+                .with_context(ctx)
+                .start()
+                .unwrap();
+
+            let req = serde_json::json!({
+                "schemaVersion": "1",
+                "method": "skill.resolveLiveSource",
+                "canonicalSkillDir": source.path().join("my-skill").to_string_lossy(),
+            });
+            let mut stream = UnixStream::connect(&socket_path).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let _ = writeln!(stream, "{req}");
+            let _ = stream.flush();
+            let mut reader = BufReader::new(&stream);
+            let mut response = String::new();
+            reader.read_line(&mut response).unwrap();
+            let resp: ControlResponse = serde_json::from_str(&response).unwrap();
+            assert!(!resp.ok);
+            assert_eq!(resp.error.unwrap().code, "permission_denied");
+
+            handle.shutdown();
+        }
+
+        #[test]
+        fn burst_mixed_queries_independent_and_deadlock_free() {
+            let dir = tempfile::tempdir().unwrap();
+            let source = tempfile::tempdir().unwrap();
+            seed_skill_dir(source.path(), "my-skill");
+            let (socket_path, handle) = start_server_with_context(dir.path(), source.path());
+
+            let managed_path = source.path().join("my-skill");
+            let outside = tempfile::tempdir().unwrap();
+            let not_managed_path = outside.path().join("x");
+
+            let mut managed_ok = 0;
+            let mut not_managed_ok = 0;
+            let mut invalid_ok = 0;
+
+            const ITERATIONS: usize = 120;
+            for i in 0..ITERATIONS {
+                let (req, expect): (serde_json::Value, &str) = match i % 3 {
+                    0 => (
+                        serde_json::json!({
+                            "schemaVersion": "1",
+                            "method": "skill.resolveLiveSource",
+                            "canonicalSkillDir": managed_path.to_string_lossy(),
+                        }),
+                        "managed",
+                    ),
+                    1 => (
+                        serde_json::json!({
+                            "schemaVersion": "1",
+                            "method": "skill.resolveLiveSource",
+                            "canonicalSkillDir": not_managed_path.to_string_lossy(),
+                        }),
+                        "not_managed",
+                    ),
+                    _ => (
+                        // Malformed: relative canonicalSkillDir.
+                        serde_json::json!({
+                            "schemaVersion": "1",
+                            "method": "skill.resolveLiveSource",
+                            "canonicalSkillDir": "relative/path",
+                        }),
+                        "invalid",
+                    ),
+                };
+
+                let resp_str = connect_and_send(&socket_path, &req.to_string());
+                // Each response is a single, complete, independent JSON line.
+                let resp: ControlResponse = serde_json::from_str(&resp_str)
+                    .unwrap_or_else(|e| panic!("iteration {i}: bad response '{resp_str}': {e}"));
+
+                match expect {
+                    "managed" => {
+                        assert!(resp.ok, "iteration {i}: {resp:?}");
+                        let r = resp.result.unwrap();
+                        assert_eq!(r["managed"], true);
+                        assert_eq!(r["skillId"], "my-skill");
+                        managed_ok += 1;
+                    }
+                    "not_managed" => {
+                        assert!(resp.ok);
+                        assert_eq!(resp.result.unwrap()["managed"], false);
+                        not_managed_ok += 1;
+                    }
+                    _ => {
+                        assert!(!resp.ok);
+                        assert_eq!(resp.error.unwrap().code, "invalid_canonical_path");
+                        invalid_ok += 1;
+                    }
+                }
+            }
+
+            assert_eq!(managed_ok + not_managed_ok + invalid_ok, ITERATIONS);
+            assert!(managed_ok >= 40 && not_managed_ok >= 40 && invalid_ok >= 40);
+
+            handle.shutdown();
+        }
+
+        // ── Socket lifecycle ─────────────────────────────────────────
+
+        #[test]
+        fn second_instance_fails_while_socket_active() {
+            let dir = tempfile::tempdir().unwrap();
+            let socket_path = dir.path().join("test.sock");
+            let handle1 = ControlSocketServer::new(ControlSocketConfig {
+                socket_path: socket_path.clone(),
+                trusted_peer: self_exe_config(),
+            })
+            .start()
+            .unwrap();
+
+            // A second instance must fail (lifecycle lock held) and must
+            // NOT unlink the active socket.
+            let result2 = ControlSocketServer::new(ControlSocketConfig {
+                socket_path: socket_path.clone(),
+                trusted_peer: self_exe_config(),
+            })
+            .start();
+            assert!(result2.is_err(), "second instance must fail to start");
+            assert!(socket_path.exists(), "active socket must not be removed");
+
+            // The first instance is still serving.
+            let resp_str =
+                connect_and_send(&socket_path, r#"{"schemaVersion":"1","method":"ping"}"#);
+            assert!(resp_str.contains("\"ok\":true"));
+
+            handle1.shutdown();
+        }
+
+        #[test]
+        fn lifecycle_lock_does_not_block_unbounded() {
+            let dir = tempfile::tempdir().unwrap();
+            let socket_path = dir.path().join("test.sock");
+            let handle1 = ControlSocketServer::new(ControlSocketConfig {
+                socket_path: socket_path.clone(),
+                trusted_peer: self_exe_config(),
+            })
+            .start()
+            .unwrap();
+
+            let start = std::time::Instant::now();
+            let result2 = ControlSocketServer::new(ControlSocketConfig {
+                socket_path: socket_path.clone(),
+                trusted_peer: self_exe_config(),
+            })
+            .start();
+            let elapsed = start.elapsed();
+            assert!(result2.is_err());
+            assert!(
+                elapsed < std::time::Duration::from_secs(1),
+                "non-blocking lock must fail fast, took {elapsed:?}"
+            );
+
+            handle1.shutdown();
+        }
+
+        #[test]
+        fn stale_socket_is_recovered() {
+            let dir = tempfile::tempdir().unwrap();
+            let socket_path = dir.path().join("test.sock");
+            // Leave a stale socket file behind (std does not unlink on drop)
+            // and recover it immediately — no pre-settling. This exercises
+            // the real "listener just closed, restart now" path, where the
+            // bounded-retry preflight probe must let the endpoint settle to
+            // ECONNREFUSED and reclaim it rather than misreading a teardown
+            // transient as a live listener.
+            {
+                let _l = UnixListener::bind(&socket_path).unwrap();
+            }
+            assert!(socket_path.exists());
+
+            let handle = ControlSocketServer::new(ControlSocketConfig {
+                socket_path: socket_path.clone(),
+                trusted_peer: self_exe_config(),
+            })
+            .start()
+            .expect("stale socket must be recoverable");
+
+            let resp_str =
+                connect_and_send(&socket_path, r#"{"schemaVersion":"1","method":"ping"}"#);
+            assert!(resp_str.contains("\"ok\":true"));
+
+            handle.shutdown();
+        }
+
+        #[test]
+        fn start_refuses_symlink_at_socket_path() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("target");
+            std::fs::write(&target, "x").unwrap();
+            let socket_path = dir.path().join("test.sock");
+            std::os::unix::fs::symlink(&target, &socket_path).unwrap();
+
+            let result = ControlSocketServer::new(ControlSocketConfig {
+                socket_path: socket_path.clone(),
+                trusted_peer: self_exe_config(),
+            })
+            .start();
+            assert!(result.is_err(), "symlink at socket path must fail closed");
+            assert!(
+                std::fs::symlink_metadata(&socket_path)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "symlink must not be deleted"
+            );
+        }
+
+        #[test]
+        fn start_refuses_regular_file_at_socket_path() {
+            let dir = tempfile::tempdir().unwrap();
+            let socket_path = dir.path().join("test.sock");
+            std::fs::write(&socket_path, "not a socket").unwrap();
+
+            let result = ControlSocketServer::new(ControlSocketConfig {
+                socket_path: socket_path.clone(),
+                trusted_peer: self_exe_config(),
+            })
+            .start();
+            assert!(result.is_err(), "regular file at socket path must fail");
+            assert!(socket_path.exists(), "regular file must not be deleted");
+            assert_eq!(
+                std::fs::read_to_string(&socket_path).unwrap(),
+                "not a socket"
+            );
+        }
+
+        #[test]
+        fn shutdown_does_not_delete_replaced_path() {
+            let dir = tempfile::tempdir().unwrap();
+            let socket_path = dir.path().join("test.sock");
+            let handle = ControlSocketServer::new(ControlSocketConfig {
+                socket_path: socket_path.clone(),
+                trusted_peer: self_exe_config(),
+            })
+            .start()
+            .unwrap();
+
+            // Replace the socket with a different object after bind.
+            std::fs::remove_file(&socket_path).unwrap();
+            std::fs::write(&socket_path, "replacement").unwrap();
+
+            handle.shutdown();
+
+            // The replacement object must survive: shutdown only removes the
+            // exact socket identity this instance bound.
+            assert!(
+                socket_path.exists(),
+                "replacement object must not be deleted"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&socket_path).unwrap(),
+                "replacement"
+            );
+        }
+
+        #[test]
+        fn socket_and_parent_permissions() {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = tempfile::tempdir().unwrap();
+            let parent = dir.path().join("sock-parent");
+            let socket_path = parent.join("test.sock");
+            let handle = ControlSocketServer::new(ControlSocketConfig {
+                socket_path: socket_path.clone(),
+                trusted_peer: self_exe_config(),
+            })
+            .start()
+            .unwrap();
+
+            let parent_mode = std::fs::metadata(&parent).unwrap().permissions().mode() & 0o777;
+            assert_eq!(parent_mode, 0o700, "parent must be 0700");
+            let sock_mode = std::fs::metadata(&socket_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(sock_mode, 0o600, "socket must be 0600");
+
+            handle.shutdown();
         }
     }
 }

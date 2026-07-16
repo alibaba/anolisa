@@ -458,6 +458,19 @@ SkillFS 不在文件系统核心中执行扫描、签名校验或风险判断。
 - `--control-socket <PATH>` 配合 `--trusted-peer-exe <PATH>` 启动可信 Unix
   socket control plane。可信 peer 可通过 `meta.writeActivation`、
   `meta.setActivationXattr` 等方法写 activation JSON 或 xattr。
+- control plane 是 opt-in 且需认证的。endpoint 按优先级解析：CLI
+  `--control-socket` > 配置 `[control_socket].path` > 默认的每用户 endpoint
+  `/run/user/<uid>/skillfs/control.sock`。仅配置 trusted peer 而未给显式
+  path 时使用默认 endpoint；仅给显式 path 而未配置 trusted peer 为配置错误；
+  两者都没有则 control plane 保持关闭。默认 endpoint 绝不 fallback 到 `/tmp`
+  或 `/var/tmp`，第二个实例也绝不 unlink 处于活跃状态的 endpoint。
+- `skill.resolveLiveSource` 是只读查询，将调用方给定的 canonical Skill 目录
+  映射到物理 live/backing source。返回 `managed=true`（含推导出的
+  `skillId`、`relativeSkillDir`、`liveSkillDir` 以及实际 live 目录的
+  `(device, inode)` identity）、对 managed root 之外的合法路径返回
+  `managed=false`，或返回 structured error。skillId 由 canonical 相对路径推导，
+  因此 flat（`my-skill`）和 Hermes nested（`apple/apple-notes`）布局都会解析
+  为完整 id。无需 `register`、`mountId` 或 `generation`。
 
 ## 文档
 
@@ -469,6 +482,7 @@ SkillFS 不在文件系统核心中执行扫描、签名校验或风险判断。
 - [docs/testing/posix-external-harness.md](docs/testing/posix-external-harness.md) - external POSIX harness 用法。
 - [docs/security/external-decision-protocol.md](docs/security/external-decision-protocol.md) - decision-command JSON 协议。
 - [docs/security/runtime-activation-implementation-plan.md](docs/security/runtime-activation-implementation-plan.md) - activation、notify、reload 与 backing-root 集成。
+- [docs/design/control-socket-resolver.md](docs/design/control-socket-resolver.md) - control socket 默认 endpoint 与只读 `skill.resolveLiveSource` resolver（SkillFS S1）。
 - [docs/skillfs-filesystem-capability-record.md](docs/skillfs-filesystem-capability-record.md) - 长期维护的 filesystem capability record。
 - [POSIX_FS_TEST_MATRIX.csv](POSIX_FS_TEST_MATRIX.csv) - POSIX 测试矩阵与当前覆盖。
 - [POSIX_FS_REFERENCES.md](POSIX_FS_REFERENCES.md) - POSIX、FUSE 和项目参考资料。

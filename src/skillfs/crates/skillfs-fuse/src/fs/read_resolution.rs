@@ -82,7 +82,7 @@ impl SkillFs {
             return true;
         }
         match self.skill_read_dir(skill_name) {
-            Some(dir) => dir.join("SKILL.md").exists(),
+            Some(dir) => skillfs_core::store::has_regular_skill_md(&dir),
             None => false,
         }
     }

@@ -473,7 +473,9 @@ impl SkillFs {
                             if self.is_pending_install(&nested_id) {
                                 continue;
                             }
-                            if has_resolver && entry.path().join("SKILL.md").exists() {
+                            if has_resolver
+                                && skillfs_core::store::has_regular_skill_md(&entry.path())
+                            {
                                 let resolution = self.resolve_hermes_nested_read(category, &name);
                                 if matches!(resolution, ReadResolution::Hidden) {
                                     continue;
@@ -1126,7 +1128,8 @@ impl SkillFs {
                                 continue;
                             }
                             if has_resolver && entry.path().is_dir() {
-                                let is_skill_leaf = entry.path().join("SKILL.md").exists();
+                                let is_skill_leaf =
+                                    skillfs_core::store::has_regular_skill_md(&entry.path());
                                 if is_skill_leaf {
                                     let resolution =
                                         self.resolve_hermes_nested_read(category, &name);

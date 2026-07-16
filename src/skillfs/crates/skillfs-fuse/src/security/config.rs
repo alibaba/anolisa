@@ -434,32 +434,13 @@ impl SecurityConfig {
         }
         self.parse_os_adapter_config()
             .map_err(ConfigError::OsAdapter)?;
-        if let Some(ref cs) = self.control_socket {
-            let has_path = cs
-                .path
-                .as_deref()
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false);
-            let has_exe = cs
-                .trusted_peer_exe
-                .as_deref()
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false);
-            if has_path && !has_exe {
-                return Err(ConfigError::InvalidValue {
-                    field: "control_socket.trusted_peer_exe",
-                    value: String::new(),
-                    allowed: "non-empty path when control_socket.path is set",
-                });
-            }
-            if !has_path && has_exe {
-                return Err(ConfigError::InvalidValue {
-                    field: "control_socket.path",
-                    value: String::new(),
-                    allowed: "non-empty path when control_socket.trusted_peer_exe is set",
-                });
-            }
-        }
+        // Cross-field control-socket integrity ("a socket path requires a
+        // trusted peer") is intentionally NOT validated here. Config values
+        // are merged with the CLI later (CLI overrides config, and either
+        // field may come from either source), so validating a single field
+        // in isolation at load time would reject valid combinations such as
+        // a config-file socket path completed by a CLI `--trusted-peer-exe`.
+        // The mutual-requirement gate runs once, after the merge, in the CLI.
         Ok(())
     }
 
@@ -1564,9 +1545,14 @@ path = "  "
     }
 
     #[test]
-    fn control_socket_path_without_exe_rejected() {
+    fn control_socket_path_without_exe_accepted_at_load() {
+        // Config load must NOT reject a socket path that lacks a trusted
+        // peer: the peer can still arrive from the CLI (`--trusted-peer-exe`)
+        // during the later merge. The "socket requires a peer" rule is
+        // enforced once, after merge, in the CLI — validating a single field
+        // in isolation here would break `config socket + CLI peer`.
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bad.toml");
+        let path = dir.path().join("path-only.toml");
         std::fs::write(
             &path,
             r#"
@@ -1575,23 +1561,17 @@ path = "/run/skillfs/skillfs.sock"
 "#,
         )
         .unwrap();
-        let result = SecurityConfig::load(&path);
-        assert!(
-            matches!(
-                result,
-                Err(ConfigError::InvalidValue {
-                    field: "control_socket.trusted_peer_exe",
-                    ..
-                })
-            ),
-            "path without trusted_peer_exe must fail: {result:?}"
-        );
+        let cfg = SecurityConfig::load(&path).expect("path-only control_socket must load");
+        assert_eq!(cfg.control_socket_path(), Some("/run/skillfs/skillfs.sock"));
+        assert!(cfg.control_socket_trusted_peer_exe().is_none());
     }
 
     #[test]
-    fn control_socket_exe_without_path_rejected() {
+    fn control_socket_exe_without_path_uses_default_endpoint() {
+        // A trusted peer with no explicit path is valid: SkillFS binds the
+        // default per-user endpoint. Config loading must accept it.
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bad.toml");
+        let path = dir.path().join("ok.toml");
         std::fs::write(
             &path,
             r#"
@@ -1600,16 +1580,11 @@ trusted_peer_exe = "/usr/local/bin/agent-sec-cli"
 "#,
         )
         .unwrap();
-        let result = SecurityConfig::load(&path);
-        assert!(
-            matches!(
-                result,
-                Err(ConfigError::InvalidValue {
-                    field: "control_socket.path",
-                    ..
-                })
-            ),
-            "trusted_peer_exe without path must fail: {result:?}"
+        let cfg = SecurityConfig::load(&path).expect("trusted_peer_exe without path is valid");
+        assert!(cfg.control_socket_path().is_none());
+        assert_eq!(
+            cfg.control_socket_trusted_peer_exe(),
+            Some("/usr/local/bin/agent-sec-cli")
         );
     }
 

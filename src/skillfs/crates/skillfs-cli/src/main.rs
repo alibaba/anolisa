@@ -226,18 +226,20 @@ enum Commands {
         ledger_backing_root: Option<PathBuf>,
 
         /// Unix domain socket path for the trusted peer control
-        /// channel. When set, SkillFS creates a control socket at this
-        /// path and accepts connections from trusted peers. Peer
-        /// identity is verified via `SO_PEERCRED` + executable identity.
-        /// Requires `--trusted-peer-exe`. Linux only.
+        /// channel. Overrides the default per-user endpoint
+        /// `/run/user/<uid>/skillfs/control.sock`. SkillFS creates a
+        /// control socket at this path and accepts connections from
+        /// trusted peers; peer identity is verified via `SO_PEERCRED` +
+        /// executable identity. Requires `--trusted-peer-exe`. Linux only.
         #[arg(long, value_name = "PATH", help_heading = help_text::HEADING_TRUSTED_PEER)]
         control_socket: Option<PathBuf>,
 
         /// Trusted peer executable path for control socket
         /// authentication. The peer's `/proc/<pid>/exe` must match this
         /// canonical path and its on-disk `(dev, ino)` file identity.
-        /// Requires `--control-socket`. The path must exist and be a
-        /// regular file.
+        /// The path must exist and be a regular file. Enables the control
+        /// plane; with no `--control-socket` it binds the default per-user
+        /// endpoint `/run/user/<uid>/skillfs/control.sock`.
         #[arg(long, value_name = "PATH", help_heading = help_text::HEADING_TRUSTED_PEER)]
         trusted_peer_exe: Option<PathBuf>,
 
@@ -264,8 +266,9 @@ enum Commands {
         /// top-level skill/SKILL.md).
         ///
         /// Hermes mode supports --security --activation-mode file
-        /// for nested skill activation and notify. Incompatible with
-        /// --decision-command and --control-socket.
+        /// for nested skill activation and notify, and the read-only
+        /// `skill.resolveLiveSource` control socket query. Incompatible
+        /// with --decision-command.
         #[arg(long, value_name = "MODE", help_heading = help_text::HEADING_MOUNT)]
         skill_layout: Option<String>,
     },
@@ -602,25 +605,54 @@ fn finish_sls(guard: Option<SlsOpsGuard>, reason: Option<String>) {
 /// out-of-band change happened.
 const DRIFT_DEBOUNCE_MS: u64 = 200;
 
-/// Compute the expected canonical path a daemon-facing directory will
-/// resolve to, without requiring the leaf to exist.
+/// Resolve the canonical path a daemon-facing path will occupy, resolving
+/// symlinks in **every** existing ancestor even when one or more trailing
+/// components do not exist yet.
 ///
-/// Mirrors the parent-canonicalize + leaf-join shape used by
-/// `LedgerBackingRoot::setup`: the parent must resolve, but the final
-/// component may be created later. Falls back to the input path when the
-/// parent cannot be canonicalized so the caller still gets a best-effort
-/// answer instead of silently skipping the check.
-fn expected_daemon_facing_path(p: &Path) -> PathBuf {
-    let parent = p
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    match parent.canonicalize() {
-        Ok(parent_canon) => match p.file_name() {
-            Some(leaf) => parent_canon.join(leaf),
-            None => parent_canon,
-        },
-        Err(_) => p.to_path_buf(),
+/// A plain parent-only canonicalize (used previously) resolves only the
+/// direct parent, and falls back to the raw input when that parent does not
+/// exist. That misses `link-to-tmp/missing/leaf`, where `link-to-tmp` is a
+/// symlink into `/tmp` but `missing` does not exist yet: the raw lexical
+/// path shows no `/tmp` prefix, yet the object is created under `/tmp`. This
+/// walk climbs to the deepest existing ancestor, canonicalizes it (resolving
+/// the whole symlink chain), and re-appends the remaining components.
+///
+/// Returns `None` when the path cannot be reliably resolved (no existing
+/// ancestor, or an ancestor cannot be canonicalized) so the caller can fail
+/// closed instead of trusting an unverified lexical prefix.
+fn resolve_daemon_facing_path(p: &Path) -> Option<PathBuf> {
+    let mut trailing: Vec<std::ffi::OsString> = Vec::new();
+    let mut cursor = p;
+    loop {
+        // `exists()` follows symlinks, which is exactly what we want for
+        // ancestors: a symlinked ancestor pointing at an existing directory
+        // is the deepest resolvable point, and `canonicalize` resolves it.
+        if cursor.exists() {
+            let base = cursor.canonicalize().ok()?;
+            let mut result = base;
+            for name in trailing.iter().rev() {
+                result.push(name);
+            }
+            return Some(result);
+        }
+        // No filename (e.g. a trailing `..`) means we cannot reason about
+        // the path safely — fail closed.
+        let name = cursor.file_name()?;
+        trailing.push(name.to_os_string());
+        match cursor.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => cursor = parent,
+            _ => {
+                // Reached the top with no existing ancestor. For an absolute
+                // path this only happens if `/` is missing; for a relative
+                // path, anchor at the current directory.
+                let base = Path::new(".").canonicalize().ok()?;
+                let mut result = base;
+                for name in trailing.iter().rev() {
+                    result.push(name);
+                }
+                return Some(result);
+            }
+        }
     }
 }
 
@@ -651,18 +683,15 @@ fn daemon_facing_path_under_private_tmp(candidate: &Path) -> bool {
 /// Return `true` when an operator-supplied daemon-facing argument resolves
 /// under a private-tmp root.
 ///
-/// Checks both the parent-canonicalize + leaf shape (so a not-yet-created
-/// leaf is still evaluated) and, when the path already exists, its fully
-/// canonicalized form. The latter closes a symlink bypass such as
-/// `/run/.../x -> /tmp/real`, which passes the shape check but is resolved
-/// to a PrivateTmp-invisible path once the daemon follows it.
+/// Resolution climbs to the deepest existing ancestor and canonicalizes it,
+/// so an ancestor symlink into `/tmp` is caught even when trailing
+/// components (e.g. a not-yet-created parent directory) do not exist. A path
+/// that cannot be reliably resolved is treated as unsafe (fail closed).
 fn daemon_facing_arg_under_private_tmp(path: &Path) -> bool {
-    daemon_facing_path_under_private_tmp(&expected_daemon_facing_path(path))
-        || path
-            .canonicalize()
-            .ok()
-            .as_deref()
-            .is_some_and(daemon_facing_path_under_private_tmp)
+    match resolve_daemon_facing_path(path) {
+        Some(resolved) => daemon_facing_path_under_private_tmp(&resolved),
+        None => true,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -841,40 +870,68 @@ async fn cmd_mount(
         );
     }
 
+    // ── Trusted peer control socket: merge CLI over config ──────────
+    //
+    // Merge CLI flags with the config file (CLI overrides config) here,
+    // BEFORE any control-plane validation, so the mutual-requirement,
+    // semantic, endpoint-classification, and backing-root checks all see a
+    // single merged view. This is the only place `control_socket` /
+    // `trusted_peer_exe` are resolved; there is no second merge later.
+    let control_socket = control_socket.or_else(|| {
+        file_config
+            .as_ref()
+            .and_then(|c| c.control_socket_path().map(PathBuf::from))
+    });
+    let trusted_peer_exe = trusted_peer_exe.or_else(|| {
+        file_config
+            .as_ref()
+            .and_then(|c| c.control_socket_trusted_peer_exe().map(PathBuf::from))
+    });
+    let trusted_peer_uid = trusted_peer_uid.or_else(|| {
+        file_config
+            .as_ref()
+            .and_then(|c| c.control_socket_trusted_peer_uid())
+    });
+    let trusted_peer_gid = trusted_peer_gid.or_else(|| {
+        file_config
+            .as_ref()
+            .and_then(|c| c.control_socket_trusted_peer_gid())
+    });
+
     // Control socket gates — mutual requirement first, then semantic
     // gates. Must fire before the generic security source check so the
-    // error message names the actual problem.
-    match (&control_socket, &trusted_peer_exe) {
-        (Some(p), None) => {
-            return Err(format!(
-                "--control-socket {} requires --trusted-peer-exe",
-                p.display()
-            )
-            .into());
-        }
-        (None, Some(p)) => {
-            return Err(format!(
-                "--trusted-peer-exe {} requires --control-socket",
-                p.display()
-            )
-            .into());
-        }
-        _ => {}
+    // error message names the actual problem. All operate on the merged
+    // values above.
+    //
+    // A trusted peer without an explicit socket path is valid: the
+    // control plane binds the default per-user endpoint (resolved below).
+    // Only an explicit socket path without a trusted peer is an error —
+    // the control plane is always authenticated.
+    if let (Some(p), None) = (&control_socket, &trusted_peer_exe) {
+        return Err(format!(
+            "--control-socket {} requires a trusted peer (--trusted-peer-exe \
+             or [control_socket].trusted_peer_exe)",
+            p.display()
+        )
+        .into());
     }
-    if control_socket.is_some() {
+    // The control plane is enabled by either an explicit socket path or a
+    // trusted peer (which selects the default endpoint).
+    let control_plane_enabled = control_socket.is_some() || trusted_peer_exe.is_some();
+    if control_plane_enabled {
         if !security {
-            return Err("--control-socket requires --security (the control socket \
+            return Err("control socket requires --security (the control socket \
                  writes activation state through the active resolver)"
                 .into());
         }
         if activation_mode != ActivationMode::File {
-            return Err("--control-socket requires --activation-mode file (the \
+            return Err("control socket requires --activation-mode file (the \
                  control socket writes activation files consumed by the \
                  file-based activation path)"
                 .into());
         }
         if parsed_decision_command.is_some() {
-            return Err("--control-socket and --decision-command are mutually \
+            return Err("control socket and --decision-command are mutually \
                  exclusive (control socket is the daemon-driven activation \
                  path; --decision-command is the CLI-driven refresh path)"
                 .into());
@@ -1149,26 +1206,35 @@ async fn cmd_mount(
             .map_err(|e| format!("{}", e))?;
     }
 
-    // #1262 PrivateTmp gate. When daemon-driven activation is enabled,
+    // #1262 PrivateTmp gate. When a daemon-facing operation is enabled,
     // agent-sec-core.service runs with PrivateTmp=true and therefore
     // cannot see the host /tmp or /var/tmp. Any daemon-facing path under
     // those roots makes the daemon reject notify, fail to tail the events
-    // log, or time out the activation reload, which hides the affected
-    // skills. Fail fast here — before the audit sink is opened, the
-    // mountpoint is auto-created, or any backing root bind mount runs — so
-    // a rejected config leaves no side effects behind. The pure
-    // inside-source guards above keep their own error ordering; this only
-    // adds a check, never a side effect.
+    // log, time out the activation reload, or be unable to reach the
+    // control socket / open the live source the resolver reports — all of
+    // which hide the affected skills. Fail fast here — before the audit
+    // sink is opened, the mountpoint is auto-created, or any backing root
+    // bind mount runs — so a rejected config leaves no side effects behind.
+    // The pure inside-source guards above keep their own error ordering;
+    // this only adds a check, never a side effect.
+    //
+    // This gate protects both the daemon-driven activation transport
+    // (notify / events log) and the resolver control plane (the control
+    // socket transport and the live source it resolves).
     //
     // Guarded paths (all daemon-facing):
-    //   * backing root, or the source fallback (the daemon's scan target);
+    //   * backing root, or the source fallback (the daemon's scan target
+    //     and the resolver's live root);
     //   * --activation-events-log (the daemon tails this JSONL file);
-    //   * --notify-socket (the daemon owns this Unix socket).
+    //   * --notify-socket (the daemon owns this Unix socket);
+    //   * --control-socket (the daemon connects to this Unix socket; the
+    //     default /run/user/<uid>/... endpoint is always daemon-visible and
+    //     is therefore not checked here).
     // A plain agent-visible mountpoint under /tmp is NOT guarded.
-    let daemon_driven_activation = security
+    let daemon_facing_ops = security
         && activation_mode == ActivationMode::File
-        && (notify_socket.is_some() || activation_events_log.is_some());
-    if daemon_driven_activation {
+        && (notify_socket.is_some() || activation_events_log.is_some() || control_plane_enabled);
+    if daemon_facing_ops {
         // Daemon-facing root: the backing root when set, otherwise the
         // source is what the daemon scans directly.
         if let Some(ref br_path) = ledger_backing_root {
@@ -1221,6 +1287,25 @@ async fn cmd_mount(
                      activation would break and the affected skills be hidden. Use a \
                      daemon-visible path such as /run/user/$UID/skillfs-ledger/... or \
                      /run/skillfs-ledger/... instead.",
+                    p.display()
+                )
+                .into());
+            }
+        }
+        // Explicit control socket. The daemon connects to this socket to
+        // issue resolver queries, so a path under /tmp or /var/tmp is
+        // invisible to it. Only an explicit path is checked: when the
+        // control plane uses the default endpoint (`control_socket` is
+        // None) the path is always under /run/user/<uid> and daemon-visible.
+        if let Some(ref p) = control_socket {
+            if daemon_facing_arg_under_private_tmp(p) {
+                return Err(format!(
+                    "--control-socket {} resolves under /tmp or /var/tmp, which the \
+                     agent-sec-core.service daemon cannot see because it runs with \
+                     PrivateTmp=true. The daemon connects to this socket, so the resolver \
+                     control plane would be unreachable. Use the default \
+                     /run/user/$UID/skillfs/control.sock endpoint (omit --control-socket) \
+                     or another daemon-visible /run/... path instead.",
                     p.display()
                 )
                 .into());
@@ -1288,9 +1373,15 @@ async fn cmd_mount(
     // In-place mount with daemon-facing operations requires a backing root.
     // Without it, daemon_root would fall back to source which becomes the
     // FUSE over-mount path — the daemon cannot scan through FUSE.
+    //
+    // The control plane (control socket / resolver) is a daemon-facing
+    // operation too: `skill.resolveLiveSource` must open the physical live
+    // source, not the FUSE current/fallback/hidden view. `control_plane_enabled`
+    // was computed above from the merged CLI+config values.
     let has_daemon_ops = notify_socket.is_some()
         || activation_events_log.is_some()
-        || reload_mode == ReloadMode::Poll;
+        || reload_mode == ReloadMode::Poll
+        || control_plane_enabled;
     if in_place
         && security
         && activation_mode == ActivationMode::File
@@ -1298,18 +1389,22 @@ async fn cmd_mount(
         && backing_root.is_none()
     {
         return Err(
-            "in-place mount with activation/notify requires --ledger-backing-root \
-             (the FUSE over-mount makes the source path inaccessible to the daemon)"
+            "in-place mount with activation/notify/control-socket requires \
+             --ledger-backing-root (the FUSE over-mount makes the source path \
+             inaccessible to the daemon and the resolver)"
                 .into(),
         );
     }
 
-    // daemon_root: the path used for all daemon-facing operations.
-    // When a backing root is set, use it; otherwise fall back to the source.
+    // daemon_root: the path used for all daemon-facing operations. When a
+    // backing root is set, use it; otherwise fall back to the canonical
+    // (absolute) source path so daemon-facing paths — including the
+    // resolver's live root — are always absolute regardless of the CWD the
+    // mount was launched from.
     let daemon_root: PathBuf = backing_root
         .as_ref()
         .map(|br| br.path().to_path_buf())
-        .unwrap_or_else(|| source.clone());
+        .unwrap_or_else(|| source_canon.clone());
 
     // Load skills into store
     info!("loading skills from source directory");
@@ -1719,69 +1814,53 @@ async fn cmd_mount(
             _ => None,
         };
 
-    // ── Trusted peer control socket ────────────────────────────────
+    // ── Trusted peer control socket: resolve the effective endpoint ──
     //
-    // Merge CLI flags with config file. CLI overrides config.
-    let control_socket = control_socket.or_else(|| {
-        file_config
-            .as_ref()
-            .and_then(|c| c.control_socket_path().map(PathBuf::from))
-    });
-    let trusted_peer_exe = trusted_peer_exe.or_else(|| {
-        file_config
-            .as_ref()
-            .and_then(|c| c.control_socket_trusted_peer_exe().map(PathBuf::from))
-    });
-    let trusted_peer_uid = trusted_peer_uid.or_else(|| {
-        file_config
-            .as_ref()
-            .and_then(|c| c.control_socket_trusted_peer_uid())
-    });
-    let trusted_peer_gid = trusted_peer_gid.or_else(|| {
-        file_config
-            .as_ref()
-            .and_then(|c| c.control_socket_trusted_peer_gid())
-    });
-
-    // Re-check mutual requirement after config merge (the early gate
-    // only covers CLI args; config-file values are merged above).
-    match (&control_socket, &trusted_peer_exe) {
-        (Some(p), None) => {
-            return Err(format!(
-                "--control-socket {} requires --trusted-peer-exe",
-                p.display()
-            )
-            .into());
+    // CLI/config values were merged and validated earlier (mutual
+    // requirement, semantic gates, backing-root gate). Here we only
+    // classify the endpoint by priority:
+    //   1. --control-socket / [control_socket].path (merged earlier)
+    //   2. the default per-user endpoint, when a trusted peer is set but
+    //      no explicit path is given.
+    let effective_socket_path: Option<PathBuf> = {
+        use skillfs_fuse::security::control_socket::{
+            EndpointResolution, classify_control_socket_endpoint,
+            resolve_default_control_socket_endpoint,
+        };
+        match classify_control_socket_endpoint(
+            control_socket.as_deref(),
+            trusted_peer_exe.is_some(),
+        ) {
+            EndpointResolution::Explicit(path) => Some(path),
+            EndpointResolution::UseDefault => {
+                // Trusted peer, no explicit path: bind the default per-user
+                // endpoint. Never falls back to /tmp or /var/tmp.
+                Some(resolve_default_control_socket_endpoint().map_err(|e| e.to_string())?)
+            }
+            // The mutual-requirement gate above already rejected an explicit
+            // path without a trusted peer.
+            EndpointResolution::MissingTrustedPeer(p) => {
+                return Err(format!(
+                    "--control-socket {} requires --trusted-peer-exe",
+                    p.display()
+                )
+                .into());
+            }
+            EndpointResolution::Disabled => None,
         }
-        (None, Some(p)) => {
-            return Err(format!(
-                "--trusted-peer-exe {} requires --control-socket",
-                p.display()
-            )
-            .into());
-        }
-        _ => {}
-    }
+    };
 
-    // Hermes + control-socket gate (post config merge).
+    // Build ControlSocketConfig when the control plane is enabled.
     //
-    // Control socket skill-name validation does not accept nested ids.
-    // This gate runs after both CLI and config-file values are merged.
-    if skill_layout == Some(skillfs_fuse::SkillLayout::Hermes) && control_socket.is_some() {
-        return Err("--skill-layout hermes is incompatible with \
-                 --control-socket (control socket skill-name validation \
-                 does not accept nested ids)"
-            .into());
-    }
-
-    // Build ControlSocketConfig when both are set.
+    // Hermes layout is compatible: the read-only resolver derives full
+    // nested skill ids from the canonical path. Nested activation *writes*
+    // still return an invalid-skill-name error inside the write methods —
+    // enabling the resolver does not widen the write protocol.
     let control_socket_config: Option<ControlSocketConfig> =
-        match (&control_socket, &trusted_peer_exe) {
+        match (&effective_socket_path, &trusted_peer_exe) {
             (Some(socket_path), Some(exe_path)) => {
                 #[cfg(not(target_os = "linux"))]
-                return Err(
-                    "--control-socket requires Linux (SO_PEERCRED, /proc/<pid>/exe)".into(),
-                );
+                return Err("control socket requires Linux (SO_PEERCRED, /proc/<pid>/exe)".into());
 
                 #[cfg(target_os = "linux")]
                 {
@@ -2102,7 +2181,13 @@ async fn cmd_mount(
     // Start control socket server before the FUSE mount.
     let control_socket_handle = if let Some(cs_config) = control_socket_config {
         let ctx = ControlSocketContext {
+            // Canonical root: the user-visible Skill root the ledger
+            // addresses. Live root (source_root): the physical backing
+            // tree that stays accessible under the FUSE over-mount.
+            canonical_root: source_canon.clone(),
             source_root: daemon_root.clone(),
+            // Layout drives the resolver's Flat / Hermes Skill boundary.
+            layout: skill_layout.unwrap_or_default(),
             resolver: active_resolver.clone(),
             protocol_event_writer: Some(protocol_event_writer.clone()),
         };
