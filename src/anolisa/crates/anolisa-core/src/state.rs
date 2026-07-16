@@ -41,7 +41,7 @@ use crate::manifest::ServiceScope;
 /// component manifest as the migration authority.
 pub const STATE_SCHEMA_VERSION: u32 = 4;
 
-fn is_legacy_rpm_backend(backend: Option<&str>) -> bool {
+pub(crate) fn is_legacy_rpm_backend(backend: Option<&str>) -> bool {
     matches!(backend, Some("rpm" | "yum"))
 }
 
