@@ -486,14 +486,18 @@ build_tokenless() {
     # Copy full source tree (including vendored rtk), excluding build artifacts and VCS
     # Note: third_party/rtk must be included — it's built separately via --manifest-path
     # Adapter config files (manifest.json, package.json, openclaw.plugin.json, plugin.yaml)
-    # are excluded because they are generated from .in templates by
-    # stamp-adapter-templates during rpmbuild %build (make build-openclaw-plugin).
+    # and the component contract (component.toml) are excluded because they are
+    # generated from .in templates by stamp-adapter-templates during rpmbuild
+    # %build (make build-openclaw-plugin). Excluding them ensures the RPM build
+    # always regenerates from the authoritative .in template, preventing stale
+    # contracts from shipping (see GH-1470).
     tar -cf - -C "$TOKEN_DIR" \
         --exclude='target' \
         --exclude='.git' \
         --exclude='node_modules' \
         --exclude='__pycache__' \
         --exclude='*.pyc' \
+        --exclude='.anolisa/component.toml' \
         --exclude='adapters/tokenless/manifest.json' \
         --exclude='adapters/tokenless/openclaw/package.json' \
         --exclude='adapters/tokenless/openclaw/openclaw.plugin.json' \
