@@ -156,10 +156,20 @@ impl CoshCore {
             None => return Outcome::Deny,
         };
 
+        if self.config.agent.allowed_tools.contains(tool_name) {
+            return Outcome::Allow;
+        }
+
         let kind = tool.kind();
 
         if kind == ToolKind::ReadOnly {
             return Outcome::Allow;
+        }
+
+        // MCP servers are external programs. Do not infer their side effects
+        // from a server-provided description or schema.
+        if kind == ToolKind::Mcp {
+            return Outcome::RequireApproval;
         }
 
         if mode == "suggest" {
@@ -1445,6 +1455,58 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
 
+    #[test]
+    fn allowlisted_tools_bypass_strict_approval() {
+        let mut config = CoreConfig::default();
+        config.agent.approval_mode = "strict".to_string();
+        config.agent.allowed_tools.insert("shell".to_string());
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(CountingShellTool {
+            calls: Arc::new(AtomicUsize::new(0)),
+        }));
+        let core = CoshCore::new(config, Box::new(MockProvider::new(Vec::new())), tools);
+
+        assert_eq!(
+            core.classify_tool("shell", &serde_json::json!({})),
+            Outcome::Allow
+        );
+    }
+
+    #[test]
+    fn mcp_tools_require_approval_outside_trust_mode() {
+        for mode in ["auto", "balanced", "suggest", "strict"] {
+            let mut config = CoreConfig::default();
+            config.agent.approval_mode = mode.to_string();
+            let mut tools = ToolRegistry::new();
+            tools.register(Box::new(TestMcpTool));
+            let core = CoshCore::new(config, Box::new(MockProvider::new(Vec::new())), tools);
+
+            assert_eq!(
+                core.classify_tool("mcp__remote__search", &serde_json::json!({})),
+                Outcome::RequireApproval,
+                "MCP tool should require approval in {mode} mode"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_mcp_allowlist_entry_bypasses_approval() {
+        let mut config = CoreConfig::default();
+        config.agent.approval_mode = "strict".to_string();
+        config
+            .agent
+            .allowed_tools
+            .insert("mcp__remote__search".to_string());
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(TestMcpTool));
+        let core = CoshCore::new(config, Box::new(MockProvider::new(Vec::new())), tools);
+
+        assert_eq!(
+            core.classify_tool("mcp__remote__search", &serde_json::json!({})),
+            Outcome::Allow
+        );
+    }
+
     #[async_trait]
     impl Tool for CountingShellTool {
         fn name(&self) -> &str {
@@ -1476,6 +1538,35 @@ mod tests {
         ) -> Result<ToolResult, String> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(ToolResult::success("provider-native shell executed"))
+        }
+    }
+
+    struct TestMcpTool;
+
+    #[async_trait]
+    impl Tool for TestMcpTool {
+        fn name(&self) -> &str {
+            "mcp__remote__search"
+        }
+
+        fn description(&self) -> &str {
+            "test MCP tool"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+
+        fn kind(&self) -> ToolKind {
+            ToolKind::Mcp
+        }
+
+        async fn invoke(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> Result<ToolResult, String> {
+            Ok(ToolResult::success("called"))
         }
     }
 

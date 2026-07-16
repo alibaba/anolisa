@@ -20,6 +20,9 @@ pub struct CoreConfig {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub skills: SkillsConfig,
+    /// Trusted MCP client connections loaded from system or user configuration.
+    #[serde(default)]
+    pub mcp: McpConfig,
     #[serde(default)]
     pub session: SessionConfig,
     #[serde(default)]
@@ -135,6 +138,44 @@ pub struct SkillsConfig {
     pub enabled: bool,
     #[serde(default)]
     pub custom_paths: Vec<String>,
+}
+
+/// Configuration for locally managed MCP client connections.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct McpConfig {
+    /// Server definitions keyed by a stable, user-visible server name.
+    #[serde(default)]
+    pub servers: HashMap<String, McpServerConfig>,
+}
+
+/// A trusted stdio MCP server that cosh-core may start and call.
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpServerConfig {
+    /// Executable launched directly without a shell.
+    pub command: String,
+    /// Arguments passed to the configured executable.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Explicit environment variables available to the child process.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    /// Startup and request timeout in milliseconds.
+    #[serde(default = "default_mcp_timeout_ms")]
+    pub timeout_ms: u64,
+    /// Server startup and tool discovery timeout in milliseconds.
+    #[serde(default = "default_mcp_startup_timeout_ms")]
+    pub startup_timeout_ms: u64,
+    /// `None` exposes every server tool; an empty list exposes none.
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
+}
+
+fn default_mcp_timeout_ms() -> u64 {
+    10_000
+}
+
+fn default_mcp_startup_timeout_ms() -> u64 {
+    30_000
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -308,6 +349,7 @@ struct PartialCoreConfig {
     agent: Option<PartialAgentConfig>,
     hooks: Option<PartialHooksConfig>,
     skills: Option<PartialSkillsConfig>,
+    mcp: Option<McpConfig>,
     session: Option<PartialSessionConfig>,
     logging: Option<PartialLoggingConfig>,
 }
@@ -444,6 +486,9 @@ fn apply_user_layer(config: &mut CoreConfig, layer: &PartialCoreConfig) {
                 .insert(provider_id.clone(), provider.clone());
         }
     }
+    if let Some(ref mcp) = layer.mcp {
+        config.mcp.servers.extend(mcp.servers.clone());
+    }
     apply_common_layers(config, layer);
 }
 
@@ -462,6 +507,12 @@ fn apply_project_layer(config: &mut CoreConfig, layer: &PartialCoreConfig, path:
             );
         }
         apply_ai_preferences(&mut config.ai, ai);
+    }
+    if layer.mcp.is_some() {
+        eprintln!(
+            "[cosh-core] Warning: ignoring MCP servers from project config {}",
+            path.display()
+        );
     }
     apply_common_layers(config, layer);
 }
@@ -1075,6 +1126,28 @@ max_tool_calls_per_turn = 20
     }
 
     #[test]
+    fn parse_stdio_mcp_config() {
+        let toml_str = r#"
+[mcp.servers.filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
+timeout_ms = 5000
+allowed_tools = ["read_file", "list_directory"]
+
+[mcp.servers.filesystem.env]
+API_KEY = "${FILESYSTEM_API_KEY}"
+"#;
+
+        let config: CoreConfig = toml::from_str(toml_str).unwrap();
+        let server = config.mcp.servers.get("filesystem").unwrap();
+        assert_eq!(server.command, "npx");
+        assert_eq!(server.timeout_ms, 5000);
+        assert_eq!(server.startup_timeout_ms, 30_000);
+        assert_eq!(server.allowed_tools.as_ref().unwrap().len(), 2);
+        assert_eq!(server.env["API_KEY"], "${FILESYSTEM_API_KEY}");
+    }
+
+    #[test]
     fn parse_ecs_ram_role_auth_source() {
         let toml_str = r#"
 [ai]
@@ -1333,6 +1406,33 @@ auth_source = "ecs_ram_role"
         assert!(config.ai.active_provider.is_none());
         assert!(config.ai.providers.is_empty());
         assert_eq!(config.ai.active_model.as_deref(), Some("project-model"));
+    }
+
+    #[test]
+    fn project_mcp_config_is_ignored() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user_path = tmp.path().join("user-config.toml");
+        let project_path = tmp.path().join("project-config.toml");
+        std::fs::write(
+            &user_path,
+            r#"
+[mcp.servers.user]
+command = "user-server"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &project_path,
+            r#"
+[mcp.servers.untrusted]
+command = "project-server"
+"#,
+        )
+        .unwrap();
+
+        let config = CoreConfig::load_from_paths(None, Some(&user_path), Some(&project_path));
+        assert!(config.mcp.servers.contains_key("user"));
+        assert!(!config.mcp.servers.contains_key("untrusted"));
     }
 
     #[test]

@@ -15,6 +15,7 @@ cosh-core includes a set of built-in tools for LLM to invoke during conversation
 | `todo` | Other | Manage task lists |
 | `ask_user_question` | Other | Ask user a question and wait for response |
 | `cosh_shell_evidence` | ShellEvidence | Get terminal output as evidence (requires `--enable-shell-evidence-tool`) |
+| `mcp__<server>__<tool>` | Mcp | Tool discovered from a trusted stdio MCP server |
 
 ## Tool Classification
 
@@ -24,19 +25,20 @@ pub enum ToolKind {
     FileEdit,       // Modifies file contents
     ShellExec,      // Executes arbitrary shell commands
     ShellEvidence,  // Reads terminal output history
+    Mcp,            // Calls an external MCP server tool
     Other,          // Side-effect-free auxiliary operations
 }
 ```
 
 Classification determines the default behavior under approval modes:
 
-| Approval Mode | ReadOnly | FileEdit | ShellExec | ShellEvidence | Other |
-|--------------|----------|----------|-----------|---------------|-------|
-| `trust` | Auto | Auto | Auto | Auto | Auto |
-| `auto` | Auto | Auto | Approval | Auto | Auto |
-| `balanced` | Auto | Approval | Approval | Auto | Approval |
-| `suggest` | Auto | Approval | Approval | Auto | Approval |
-| `strict` | Auto | Approval | Approval | Auto | Approval |
+| Approval Mode | ReadOnly | FileEdit | ShellExec | ShellEvidence | MCP | Other |
+|--------------|----------|----------|-----------|---------------|-----|-------|
+| `trust` | Auto | Auto | Auto | Auto | Auto | Auto |
+| `auto` | Auto | Auto | Approval | Auto | Approval | Auto |
+| `balanced` | Auto | Approval | Approval | Auto | Approval | Approval |
+| `suggest` | Auto | Approval | Approval | Auto | Approval | Approval |
+| `strict` | Auto | Approval | Approval | Auto | Approval | Approval |
 
 > **Note**: `ask_user_question` and `cosh_shell_evidence` tools always bypass the approval flow and auto-execute regardless of mode.
 
@@ -90,3 +92,10 @@ With this, `shell` and `edit` tools auto-execute under any approval mode without
 Tools are managed uniformly via `ToolRegistry`. The default tool set is created via `ToolRegistry::with_defaults()`. `--enable-shell-evidence-tool` additionally registers the `cosh_shell_evidence` tool.
 
 Custom tools can be injected via the extension system. See [extensions.md](extensions.md).
+
+## MCP Tools
+
+MCP tools are dynamically discovered only when `cosh-core --headless` starts.
+Each configured server receives `initialize`, then `tools/list`; a model call to
+the registered name is forwarded as `tools/call`. See [Configuration](../configuration.md#mcp-stdio-servers)
+for the trusted-server configuration and supported transport boundary.

@@ -77,6 +77,7 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> 
     if args.enable_shell_evidence_tool {
         tools = tools.with_shell_evidence();
     }
+    crate::tool::mcp::register_configured_tools(&mut tools, &config.mcp.servers).await;
     if let Some(selection) = args.tools.as_deref() {
         tools.retain_selected_tools(selection)?;
     }

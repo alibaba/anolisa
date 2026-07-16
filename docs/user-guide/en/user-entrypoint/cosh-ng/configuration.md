@@ -44,6 +44,20 @@ enabled = true
 # Custom skill search paths
 custom_paths = []
 
+[mcp.servers.filesystem]
+# Only stdio servers are supported in this release.
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
+# Startup/discovery timeout; first npx launch may download its package.
+startup_timeout_ms = 30000
+# Timeout for a subsequent tools/call request.
+timeout_ms = 10000
+# Omit to expose all discovered tools. Use [] to expose none.
+allowed_tools = ["read_file", "list_directory"]
+
+[mcp.servers.filesystem.env]
+FILESYSTEM_API_KEY = "${FILESYSTEM_API_KEY}"
+
 [session]
 # Root for workspace-scoped provider conversations
 persist_dir = "~/.copilot-shell/cosh-core/sessions"
@@ -59,6 +73,31 @@ The project layer is loaded from
 through `--workspace` or the session-management request. Relative
 `session.persist_dir` values are resolved from that workspace, not from the
 Core process's launcher directory.
+
+## MCP stdio Servers
+
+`cosh-core --headless` can start configured stdio MCP servers, call
+`tools/list`, and register each permitted tool as `mcp__<server>__<tool>`.
+The first release supports `initialize`, `tools/list`, and `tools/call`; it
+does not support HTTP/SSE transports, OAuth, or hosting cosh-core as an MCP
+server.
+
+MCP server definitions are read only from `/etc/copilot-shell/config.toml` and
+`~/.copilot-shell/config.toml`. Project-level `.copilot-shell/config.toml` is
+ignored for MCP to prevent a checked-out project from starting arbitrary local
+programs. Commands are launched directly rather than through a shell.
+
+`command`, `args`, and values under `env` support `${NAME}` environment
+expansion. The child process receives only `HOME`, `PATH`, `TMPDIR`, `LANG`,
+and the explicitly configured `env` values. `startup_timeout_ms` defaults to
+30000 and covers process startup plus tool discovery; `timeout_ms` defaults to
+10000 for subsequent requests. Tool output is limited to 64 KiB before it
+enters the Agent context.
+
+Every MCP tool requires user approval in `auto`, `balanced`, `suggest`, and
+`strict` modes. Only the existing `trust` mode bypasses that approval. Use
+`allowed_tools` to restrict discovery: omit it to expose all tools, provide a
+list to expose named tools, or set `[]` to disable every tool from that server.
 
 ## cosh-shell Configuration
 
@@ -115,10 +154,10 @@ Valid values: `error`, `warn`, `info`, `debug`, `trace`
 
 ## Approval Mode Reference
 
-| Mode | ReadOnly Tools | FileEdit Tools | ShellExec Tools |
+| Mode | ReadOnly Tools | FileEdit Tools | ShellExec Tools | MCP Tools |
 |------|----------------|----------------|-----------------|
-| `trust` | Auto-execute | Auto-execute | Auto-execute |
-| `auto` | Auto-execute | Auto-execute | Require approval |
-| `balanced` | Auto-execute | Require approval | Require approval |
-| `suggest` | Auto-execute | Require approval | Require approval |
-| `strict` | Auto-execute | Require approval | Require approval |
+| `trust` | Auto-execute | Auto-execute | Auto-execute | Auto-execute |
+| `auto` | Auto-execute | Auto-execute | Require approval | Require approval |
+| `balanced` | Auto-execute | Require approval | Require approval | Require approval |
+| `suggest` | Auto-execute | Require approval | Require approval | Require approval |
+| `strict` | Auto-execute | Require approval | Require approval | Require approval |

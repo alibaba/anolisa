@@ -127,6 +127,14 @@ Key fields for Agents: `ok` (success?), `error.recoverable` (retry-worthy?), `er
 4. **Classified errors** — `recoverable` tells Agent whether to retry
 5. **Dry-run** — `--dry-run` on all write operations, preview before execute
 
+## MCP tools
+
+`cosh-core --headless` can connect to trusted local MCP servers over stdio,
+discover their tools at startup, and expose them to the Agent as
+`mcp__<server>__<tool>`. MCP servers are configured in user or system config;
+their tools require approval unless the session uses `trust` mode. See the
+[MCP configuration reference](../../docs/user-guide/en/user-entrypoint/cosh-ng/configuration.md#mcp-stdio-servers).
+
 ## Logging
 
 All binaries use structured logging via `tracing`. Logs are written to `~/.copilot-shell/logs/` with daily rotation.

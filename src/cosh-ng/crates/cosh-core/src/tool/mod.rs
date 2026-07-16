@@ -1,5 +1,6 @@
 pub mod edit;
 pub mod grep;
+pub mod mcp;
 pub mod read_file;
 pub mod shell;
 pub mod shell_evidence;
@@ -23,6 +24,8 @@ pub enum ToolKind {
     FileEdit,
     ShellExec,
     ShellEvidence,
+    /// An external tool discovered from a configured MCP server.
+    Mcp,
     Other,
 }
 
@@ -86,6 +89,11 @@ impl ToolRegistry {
 
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
         self.tools.get(name).map(|t| t.as_ref())
+    }
+
+    /// Returns whether a tool name has already been registered.
+    pub fn contains(&self, name: &str) -> bool {
+        self.tools.contains_key(name)
     }
 
     pub fn names(&self) -> Vec<String> {
