@@ -496,6 +496,17 @@ skillId 由 canonical 相对路径推导，因此 flat（`my-skill`）和 Hermes
 > 说明：`skill.resolveLiveSource`（SkillFS S1）是只读 resolver。notify v2 与删除态
 > 语义不属于 S1。
 
+#### Notify v2
+
+`skill_ledger.skillfs_notify_change` 使用 schema version 2。业务 payload 只包含
+`canonicalSkillDir`、完整 `skillId`、`eventKind` 和相对 `paths`。Flat id 保持完整
+（`weather`），Hermes id 保留两个分量（`category/weather`）。SkillFS 会排序、去重
+paths；空数组表示需要重新扫描整个 Skill，也用于超过路径数量上限的情况。
+
+canonical 目录由用户可见的 source root 推导。物理 live/backing root 只供 activation
+和 S1 resolver 使用，因此通知不会暴露 backing 路径。daemon 必须直接接受 v2，并返回
+`schemaVersion=2` 与 `accepted=true`；不提供 v1 fallback 或协商。
+
 ### Trusted Mount-path Writer
 
 `--trusted-writer-exe <PATH>` 是 mount path 可信写入兼容门禁。新生产集成优先使用

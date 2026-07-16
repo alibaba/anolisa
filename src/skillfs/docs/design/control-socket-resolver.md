@@ -285,9 +285,9 @@ it.
 
 Deferred to S2 and not implemented here:
 
-- notify v2 (the future notify payload is agreed to carry only
-  `canonicalSkillDir`, the full `skillId`, `eventKind`, and relative
-  paths); the existing notify protocol is unchanged in S1.
+- notify v2 (implemented separately in
+  [SkillFS Notify v2](notify-v2.md)); the existing notify protocol is
+  unchanged in S1.
 - `register` / `unregister`, `mountId`, `generation`, `sourceId`,
   `resolverSocket`, and `integrationProtocolVersion`.
 - deletion-state semantics (tombstone / `exists`); S1 does not add these

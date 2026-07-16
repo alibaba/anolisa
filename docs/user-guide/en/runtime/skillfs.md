@@ -545,6 +545,21 @@ future multiple canonical roots.
 > Note: `skill.resolveLiveSource` (SkillFS S1) is a read-only resolver. notify
 > v2 and deletion-state semantics are not part of S1.
 
+#### Notify v2
+
+`skill_ledger.skillfs_notify_change` uses schema version 2. Its business
+payload contains only `canonicalSkillDir`, the complete `skillId`, `eventKind`,
+and relative `paths`. Flat ids stay intact (`weather`), and Hermes ids retain
+both components (`category/weather`). SkillFS sorts and deduplicates paths; an
+empty array requests a whole-Skill rescan, including when the path limit is
+exceeded.
+
+The canonical directory is derived from the user-visible source root. The
+physical live/backing root remains private to activation and the S1 resolver,
+so backing paths never appear in notifications. The daemon must accept v2
+directly and return `schemaVersion=2` with `accepted=true`; there is no v1
+fallback or negotiation.
+
 ### Trusted Mount-path Writer
 
 `--trusted-writer-exe <PATH>` is a compatibility gate for trusted writers that

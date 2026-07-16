@@ -38,8 +38,10 @@ use super::path::is_skill_meta_path;
 use super::protocol_events::{NoopProtocolEventWriter, ProtocolEvent, ProtocolEventWriter};
 use super::refresh::MutationKind;
 
+/// Daemon method used for SkillFS change notifications.
 pub const NOTIFY_METHOD: &str = "skill_ledger.skillfs_notify_change";
-pub const NOTIFY_SCHEMA_VERSION: u64 = 1;
+/// Notify request and response schema version accepted by SkillFS.
+pub const NOTIFY_SCHEMA_VERSION: u64 = 2;
 pub const DEFAULT_NOTIFY_TIMEOUT_MS: u64 = 5000;
 pub const DEFAULT_NOTIFY_DEBOUNCE_MS: u64 = 300;
 /// Maximum number of relative paths per notification. Exceeding this sends
@@ -118,18 +120,24 @@ pub struct NotifyChangeEvent {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+/// Versioned notify parameters sent inside the daemon request envelope.
 pub struct NotifyParams {
+    /// Protocol version; only v2 is supported.
     pub schema_version: u64,
-    pub skill_dir: String,
-    pub skill_name: String,
+    /// User-visible absolute Skill directory addressed by the ledger.
+    pub canonical_skill_dir: String,
+    /// Complete Skill id relative to the canonical root.
+    pub skill_id: String,
+    /// Last mutation kind observed in the debounce window.
     pub event_kind: String,
+    /// Sorted changed paths relative to the canonical Skill directory.
     pub paths: Vec<String>,
 }
 
 impl NotifyChangeEvent {
     pub fn new(
-        skill_dir: impl Into<String>,
-        skill_name: impl Into<String>,
+        canonical_skill_dir: impl Into<String>,
+        skill_id: impl Into<String>,
         event_kind: NotifyEventKind,
         paths: Vec<String>,
         timeout_ms: u64,
@@ -139,8 +147,8 @@ impl NotifyChangeEvent {
             method: NOTIFY_METHOD,
             params: NotifyParams {
                 schema_version: NOTIFY_SCHEMA_VERSION,
-                skill_dir: skill_dir.into(),
-                skill_name: skill_name.into(),
+                canonical_skill_dir: canonical_skill_dir.into(),
+                skill_id: skill_id.into(),
                 event_kind: event_kind.as_str().to_string(),
                 paths,
             },
@@ -265,9 +273,21 @@ fn validate_response(body: &str) -> Result<(), NotifyError> {
         });
     }
 
-    let accepted = parsed
+    let data = parsed
         .get("data")
-        .and_then(|d| d.get("accepted"))
+        .and_then(|value| value.as_object())
+        .ok_or_else(|| NotifyError::InvalidResponse {
+            body: body.trim().to_string(),
+        })?;
+    let schema_version = data.get("schemaVersion").and_then(|value| value.as_u64());
+    if schema_version != Some(NOTIFY_SCHEMA_VERSION) {
+        return Err(NotifyError::InvalidResponse {
+            body: body.trim().to_string(),
+        });
+    }
+
+    let accepted = data
+        .get("accepted")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     if !accepted {
@@ -296,11 +316,18 @@ pub struct InMemoryNotifyClient {
 }
 
 #[derive(Debug, Clone)]
+/// Notify v2 values recorded by [`InMemoryNotifyClient`].
 pub struct CapturedNotify {
-    pub skill_name: String,
+    /// Captured protocol schema version.
+    pub schema_version: u64,
+    /// Captured complete Skill id.
+    pub skill_id: String,
+    /// Captured mutation kind.
     pub event_kind: String,
+    /// Captured relative paths.
     pub paths: Vec<String>,
-    pub skill_dir: String,
+    /// Captured user-visible canonical Skill directory.
+    pub canonical_skill_dir: String,
 }
 
 impl InMemoryNotifyClient {
@@ -324,10 +351,11 @@ impl InMemoryNotifyClient {
 impl NotifyClient for InMemoryNotifyClient {
     fn send(&self, event: &NotifyChangeEvent) -> Result<(), NotifyError> {
         self.events.lock().push(CapturedNotify {
-            skill_name: event.params.skill_name.clone(),
+            schema_version: event.params.schema_version,
+            skill_id: event.params.skill_id.clone(),
             event_kind: event.params.event_kind.clone(),
             paths: event.params.paths.clone(),
-            skill_dir: event.params.skill_dir.clone(),
+            canonical_skill_dir: event.params.canonical_skill_dir.clone(),
         });
         Ok(())
     }
@@ -380,7 +408,7 @@ struct NotifyInner {
     /// A5: watcher registrar for auto-tracking skills observed through
     /// notify. Set post-construction via `set_watcher_registrar`.
     watcher_registrar: Mutex<Option<Arc<dyn WatcherRegistrar>>>,
-    source_root: PathBuf,
+    canonical_root: PathBuf,
     debounce: Duration,
     timeout_ms: u64,
     pending: Mutex<HashMap<String, NotifyPendingState>>,
@@ -390,7 +418,7 @@ struct NotifyInner {
 
 #[derive(Debug, Clone)]
 struct NotifyPendingState {
-    skill_name: String,
+    skill_id: String,
     event_kind: NotifyEventKind,
     paths: HashSet<String>,
     fire_at: Instant,
@@ -405,13 +433,13 @@ enum NotifyCommand {
 impl NotifyController {
     pub fn new(
         client: Arc<dyn NotifyClient>,
-        source_root: impl Into<PathBuf>,
+        canonical_root: impl Into<PathBuf>,
         debounce: Duration,
         timeout_ms: u64,
     ) -> Arc<Self> {
         Self::new_with_protocol_writer(
             client,
-            source_root,
+            canonical_root,
             debounce,
             timeout_ms,
             Arc::new(NoopProtocolEventWriter),
@@ -420,14 +448,14 @@ impl NotifyController {
 
     pub fn new_with_protocol_writer(
         client: Arc<dyn NotifyClient>,
-        source_root: impl Into<PathBuf>,
+        canonical_root: impl Into<PathBuf>,
         debounce: Duration,
         timeout_ms: u64,
         protocol_event_writer: Arc<dyn ProtocolEventWriter>,
     ) -> Arc<Self> {
         Self::new_full(
             client,
-            source_root,
+            canonical_root,
             debounce,
             timeout_ms,
             protocol_event_writer,
@@ -437,7 +465,7 @@ impl NotifyController {
 
     pub fn new_with_reload(
         client: Arc<dyn NotifyClient>,
-        source_root: impl Into<PathBuf>,
+        canonical_root: impl Into<PathBuf>,
         debounce: Duration,
         timeout_ms: u64,
         protocol_event_writer: Arc<dyn ProtocolEventWriter>,
@@ -445,7 +473,7 @@ impl NotifyController {
     ) -> Arc<Self> {
         Self::new_full(
             client,
-            source_root,
+            canonical_root,
             debounce,
             timeout_ms,
             protocol_event_writer,
@@ -455,7 +483,7 @@ impl NotifyController {
 
     fn new_full(
         client: Arc<dyn NotifyClient>,
-        source_root: impl Into<PathBuf>,
+        canonical_root: impl Into<PathBuf>,
         debounce: Duration,
         timeout_ms: u64,
         protocol_event_writer: Arc<dyn ProtocolEventWriter>,
@@ -467,7 +495,7 @@ impl NotifyController {
             protocol_event_writer,
             reload_controller,
             watcher_registrar: Mutex::new(None),
-            source_root: source_root.into(),
+            canonical_root: canonical_root.into(),
             debounce,
             timeout_ms,
             pending: Mutex::new(HashMap::new()),
@@ -515,11 +543,11 @@ impl NotifyController {
     /// `false` when filtered (skill-discover, `.skill-meta/**`, lifecycle).
     pub fn observe(
         &self,
-        skill_name: &str,
+        skill_id: &str,
         relative_path: Option<&Path>,
         kind: MutationKind,
     ) -> bool {
-        if !is_notify_eligible(skill_name) {
+        if !is_notify_eligible(skill_id) {
             return false;
         }
         if let Some(rel) = relative_path {
@@ -533,15 +561,14 @@ impl NotifyController {
         let fire_at = now + self.inner.debounce;
         {
             let mut pending = self.inner.pending.lock();
-            let entry =
-                pending
-                    .entry(skill_name.to_string())
-                    .or_insert_with(|| NotifyPendingState {
-                        skill_name: skill_name.to_string(),
-                        event_kind,
-                        paths: HashSet::new(),
-                        fire_at,
-                    });
+            let entry = pending
+                .entry(skill_id.to_string())
+                .or_insert_with(|| NotifyPendingState {
+                    skill_id: skill_id.to_string(),
+                    event_kind,
+                    paths: HashSet::new(),
+                    fire_at,
+                });
             entry.fire_at = fire_at;
             entry.event_kind = event_kind;
             if let Some(rel) = relative_path {
@@ -559,11 +586,11 @@ impl NotifyController {
     /// Convenience wrapper matching `RefreshController::observe_mutation`.
     pub fn observe_mutation(
         &self,
-        skill_name: &str,
+        skill_id: &str,
         relative_path: Option<&Path>,
         kind: MutationKind,
     ) -> bool {
-        self.observe(skill_name, relative_path, kind)
+        self.observe(skill_id, relative_path, kind)
     }
 
     /// Drain and send all pending notifications synchronously. Test helper.
@@ -590,22 +617,26 @@ impl NotifyController {
     /// path.
     ///
     /// Returns the number of reconcile events emitted.
-    pub fn emit_startup_reconcile(&self, skill_names: &[String]) -> usize {
+    pub fn emit_startup_reconcile(&self, skill_ids: &[String]) -> usize {
         let mut count = 0;
-        for name in skill_names {
-            if !is_notify_eligible(name) {
+        for skill_id in skill_ids {
+            if !is_notify_eligible(skill_id) {
                 continue;
             }
-            let skill_dir = self.inner.source_root.join(name);
-            let skill_dir_str = skill_dir.to_string_lossy().to_string();
+            let canonical_skill_dir = self.inner.canonical_root.join(skill_id);
+            let canonical_skill_dir = canonical_skill_dir.to_string_lossy().to_string();
 
-            let protocol_event =
-                ProtocolEvent::new(&skill_dir_str, name.as_str(), "reconcile", Vec::new());
+            let protocol_event = ProtocolEvent::new(
+                &canonical_skill_dir,
+                skill_id.as_str(),
+                "reconcile",
+                Vec::new(),
+            );
             self.inner.protocol_event_writer.emit(&protocol_event);
 
             let event = NotifyChangeEvent::new(
-                &skill_dir_str,
-                name.as_str(),
+                &canonical_skill_dir,
+                skill_id.as_str(),
                 NotifyEventKind::Reconcile,
                 Vec::new(),
                 self.inner.timeout_ms,
@@ -613,13 +644,13 @@ impl NotifyController {
 
             if let Err(e) = self.inner.client.send(&event) {
                 warn!(
-                    skill = %name,
+                    skill = %skill_id,
                     error = %e,
                     "reconcile: failed to send reconcile notification"
                 );
             } else {
                 debug!(
-                    skill = %name,
+                    skill = %skill_id,
                     "reconcile: startup reconcile notification sent"
                 );
             }
@@ -663,10 +694,10 @@ impl NotifyController {
     /// worker. Bypasses the debounce window (fire_at = now) but does NOT
     /// block the calling thread on socket send or activation reload poll.
     /// The worker picks it up on its next iteration.
-    pub fn enqueue_immediate(&self, skill_name: &str, kind: MutationKind, paths: Vec<String>) {
+    pub fn enqueue_immediate(&self, skill_id: &str, kind: MutationKind, paths: Vec<String>) {
         let event_kind = NotifyEventKind::from_mutation_kind(kind);
         let state = NotifyPendingState {
-            skill_name: skill_name.to_string(),
+            skill_id: skill_id.to_string(),
             event_kind,
             paths: paths.into_iter().collect(),
             fire_at: Instant::now(),
@@ -674,7 +705,7 @@ impl NotifyController {
         self.inner
             .pending
             .lock()
-            .insert(skill_name.to_string(), state);
+            .insert(skill_id.to_string(), state);
         let _ = self.inner.sender.send(NotifyCommand::Wakeup);
         self.inner.notify.notify_one();
     }
@@ -717,8 +748,8 @@ impl NotifyInner {
     }
 
     fn send_one(&self, state: NotifyPendingState) {
-        let skill_dir = self.source_root.join(&state.skill_name);
-        let skill_dir_str = skill_dir.to_string_lossy().to_string();
+        let canonical_skill_dir = self.canonical_root.join(&state.skill_id);
+        let canonical_skill_dir = canonical_skill_dir.to_string_lossy().to_string();
 
         // A3: snapshot activation freshness BEFORE sending the notify so
         // the poll baseline predates the daemon's activation write.
@@ -726,7 +757,7 @@ impl NotifyInner {
         let pre_notify_freshness = self
             .reload_controller
             .as_ref()
-            .map(|r| r.snapshot_freshness(&state.skill_name));
+            .map(|r| r.snapshot_freshness(&state.skill_id));
 
         let paths: Vec<String> = if state.paths.len() > MAX_NOTIFY_PATHS {
             Vec::new()
@@ -738,16 +769,16 @@ impl NotifyInner {
 
         // Write protocol event log regardless of notify outcome.
         let protocol_event = ProtocolEvent::new(
-            &skill_dir_str,
-            &state.skill_name,
+            &canonical_skill_dir,
+            &state.skill_id,
             state.event_kind.as_str(),
             paths.clone(),
         );
         self.protocol_event_writer.emit(&protocol_event);
 
         let event = NotifyChangeEvent::new(
-            skill_dir_str.clone(),
-            state.skill_name.clone(),
+            canonical_skill_dir.clone(),
+            state.skill_id.clone(),
             state.event_kind,
             paths,
             self.timeout_ms,
@@ -755,17 +786,17 @@ impl NotifyInner {
 
         if let Err(e) = self.client.send(&event) {
             warn!(
-                skill = %state.skill_name,
+                skill = %state.skill_id,
                 error = %e,
                 "notify: failed to send change notification; \
                  current activation mapping unchanged"
             );
             // A5: daemon unreachable — register for watcher convergence
             // so a later daemon repair can still be observed.
-            self.register_with_watcher(&state.skill_name);
+            self.register_with_watcher(&state.skill_id);
         } else {
             debug!(
-                skill = %state.skill_name,
+                skill = %state.skill_id,
                 event_kind = state.event_kind.as_str(),
                 "notify: change notification accepted"
             );
@@ -776,12 +807,12 @@ impl NotifyInner {
             let baseline = pre_notify_freshness
                 .expect("reload_controller presence implies freshness was captured");
             debug!(
-                skill = %state.skill_name,
+                skill = %state.skill_id,
                 "notify: starting activation reload poll"
             );
-            let outcome = reload.poll_reload_skill(&state.skill_name, baseline);
+            let outcome = reload.poll_reload_skill(&state.skill_id, baseline);
             debug!(
-                skill = %state.skill_name,
+                skill = %state.skill_id,
                 outcome = ?outcome,
                 "notify: activation reload poll completed"
             );
@@ -790,13 +821,13 @@ impl NotifyInner {
             // so late activation writes are still caught by the
             // background convergence loop.
             if matches!(outcome, super::activation_reload::ReloadOutcome::Timeout) {
-                self.register_with_watcher(&state.skill_name);
+                self.register_with_watcher(&state.skill_id);
             }
 
             // A4: emit reload outcome as a protocol event.
             let reload_event = ProtocolEvent::with_reload_outcome(
-                &skill_dir_str,
-                &state.skill_name,
+                &canonical_skill_dir,
+                &state.skill_id,
                 outcome.as_protocol_label(),
             );
             self.protocol_event_writer.emit(&reload_event);
@@ -880,8 +911,8 @@ mod tests {
             method: NOTIFY_METHOD,
             params: NotifyParams {
                 schema_version: NOTIFY_SCHEMA_VERSION,
-                skill_dir: "/srv/skills/tianqi-weather".to_string(),
-                skill_name: "tianqi-weather".to_string(),
+                canonical_skill_dir: "/srv/skills/category/tianqi-weather".to_string(),
+                skill_id: "category/tianqi-weather".to_string(),
                 event_kind: "write".to_string(),
                 paths: vec!["SKILL.md".to_string()],
             },
@@ -890,13 +921,33 @@ mod tests {
         };
 
         let json = serde_json::to_value(&event).unwrap();
+        let envelope = json.as_object().unwrap();
+        assert_eq!(envelope.len(), 5);
         assert_eq!(json["id"], "skillfs-42");
         assert_eq!(json["method"], "skill_ledger.skillfs_notify_change");
-        assert_eq!(json["params"]["schemaVersion"], 1);
-        assert_eq!(json["params"]["skillDir"], "/srv/skills/tianqi-weather");
-        assert_eq!(json["params"]["skillName"], "tianqi-weather");
+        let params = json["params"].as_object().unwrap();
+        assert_eq!(params.len(), 5);
+        assert_eq!(json["params"]["schemaVersion"], 2);
+        assert_eq!(
+            json["params"]["canonicalSkillDir"],
+            "/srv/skills/category/tianqi-weather"
+        );
+        assert_eq!(json["params"]["skillId"], "category/tianqi-weather");
         assert_eq!(json["params"]["eventKind"], "write");
         assert_eq!(json["params"]["paths"], serde_json::json!(["SKILL.md"]));
+        for forbidden in [
+            "skillDir",
+            "skillName",
+            "mountId",
+            "generation",
+            "resolverSocket",
+            "sourceId",
+        ] {
+            assert!(
+                !params.contains_key(forbidden),
+                "unexpected field: {forbidden}"
+            );
+        }
         assert_eq!(json["trace_context"], serde_json::json!({}));
         assert_eq!(json["timeout_ms"], 5000);
     }
@@ -972,15 +1023,34 @@ mod tests {
         client.send(&event).unwrap();
         assert_eq!(client.len(), 1);
         let events = client.events();
-        assert_eq!(events[0].skill_name, "alpha");
+        assert_eq!(events[0].schema_version, 2);
+        assert_eq!(events[0].skill_id, "alpha");
         assert_eq!(events[0].event_kind, "write");
         assert_eq!(events[0].paths, vec!["SKILL.md"]);
     }
 
     #[test]
     fn validate_response_accepts_ok_accepted() {
-        let body = r#"{"ok":true,"data":{"schemaVersion":1,"accepted":true}}"#;
+        let body = r#"{"ok":true,"data":{"schemaVersion":2,"accepted":true}}"#;
         assert!(validate_response(body).is_ok());
+    }
+
+    #[test]
+    fn validate_response_rejects_v1_schema() {
+        let body = r#"{"ok":true,"data":{"schemaVersion":1,"accepted":true}}"#;
+        assert!(matches!(
+            validate_response(body),
+            Err(NotifyError::InvalidResponse { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_response_rejects_missing_schema() {
+        let body = r#"{"ok":true,"data":{"accepted":true}}"#;
+        assert!(matches!(
+            validate_response(body),
+            Err(NotifyError::InvalidResponse { .. })
+        ));
     }
 
     #[test]
@@ -994,7 +1064,7 @@ mod tests {
 
     #[test]
     fn validate_response_rejects_accepted_false() {
-        let body = r#"{"ok":true,"data":{"accepted":false}}"#;
+        let body = r#"{"ok":true,"data":{"schemaVersion":2,"accepted":false}}"#;
         assert!(matches!(
             validate_response(body),
             Err(NotifyError::Rejected { .. })
@@ -1015,7 +1085,7 @@ mod tests {
         let body = r#"{"ok":true}"#;
         assert!(matches!(
             validate_response(body),
-            Err(NotifyError::Rejected { .. })
+            Err(NotifyError::InvalidResponse { .. })
         ));
     }
 
@@ -1087,7 +1157,7 @@ mod tests {
         assert_eq!(processed, 1, "five observations must collapse to one");
         let events = client.events();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].skill_name, "alpha");
+        assert_eq!(events[0].skill_id, "alpha");
         ctrl.shutdown();
     }
 
@@ -1111,9 +1181,7 @@ mod tests {
         assert_eq!(processed, 1);
         let events = client.events();
         assert_eq!(events.len(), 1);
-        let mut paths = events[0].paths.clone();
-        paths.sort();
-        assert_eq!(paths, vec!["SKILL.md", "scripts/run.sh"]);
+        assert_eq!(events[0].paths, vec!["SKILL.md", "scripts/run.sh"]);
         ctrl.shutdown();
     }
 
@@ -1155,7 +1223,7 @@ mod tests {
     }
 
     #[test]
-    fn controller_source_root_appears_in_skill_dir() {
+    fn controller_canonical_root_appears_in_flat_skill_dir() {
         let client = Arc::new(InMemoryNotifyClient::new());
         let ctrl = NotifyController::new(
             client.clone(),
@@ -1166,7 +1234,36 @@ mod tests {
         ctrl.observe("weather", Some(Path::new("SKILL.md")), MutationKind::Write);
         ctrl.flush_for_testing();
         let events = client.events();
-        assert_eq!(events[0].skill_dir, "/home/user/skills/weather");
+        assert_eq!(events[0].schema_version, 2);
+        assert_eq!(events[0].skill_id, "weather");
+        assert_eq!(events[0].canonical_skill_dir, "/home/user/skills/weather");
+        ctrl.shutdown();
+    }
+
+    #[test]
+    fn controller_preserves_hermes_full_skill_id() {
+        let client = Arc::new(InMemoryNotifyClient::new());
+        let ctrl = NotifyController::new(
+            client.clone(),
+            "/home/user/skills",
+            Duration::from_millis(50),
+            5000,
+        );
+        ctrl.observe(
+            "category/weather",
+            Some(Path::new("scripts/run.sh")),
+            MutationKind::Write,
+        );
+        ctrl.flush_for_testing();
+
+        let events = client.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].skill_id, "category/weather");
+        assert_eq!(
+            events[0].canonical_skill_dir,
+            "/home/user/skills/category/weather"
+        );
+        assert_eq!(events[0].paths, vec!["scripts/run.sh"]);
         ctrl.shutdown();
     }
 
@@ -1205,7 +1302,7 @@ mod tests {
             assert_eq!(ctrl.flush_for_testing(), 1);
             let events = client.events();
             assert_eq!(events.len(), 1);
-            assert_eq!(events[0].skill_name, "alpha");
+            assert_eq!(events[0].skill_id, "alpha");
             // Drop the Arc — Drop sends Shutdown, the worker returns,
             // the private runtime thread exits cleanly.
             drop(ctrl);
@@ -1543,7 +1640,7 @@ mod tests {
         // Verify notify still works with default noop writer.
         let events = client.events();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].skill_name, "alpha");
+        assert_eq!(events[0].skill_id, "alpha");
         ctrl.shutdown();
     }
 
@@ -1577,10 +1674,12 @@ mod tests {
         let notify_events = client.events();
         assert_eq!(notify_events.len(), 2);
         let mut notify_names: Vec<String> =
-            notify_events.iter().map(|e| e.skill_name.clone()).collect();
+            notify_events.iter().map(|e| e.skill_id.clone()).collect();
         notify_names.sort();
         assert_eq!(notify_names, vec!["alpha", "beta"]);
         for e in &notify_events {
+            assert_eq!(e.schema_version, 2);
+            assert_eq!(e.canonical_skill_dir, format!("/srv/skills/{}", e.skill_id));
             assert_eq!(e.event_kind, "reconcile");
             assert!(e.paths.is_empty());
         }
@@ -1624,9 +1723,7 @@ mod tests {
         let notify_events = client.events();
         assert_eq!(notify_events.len(), 2);
         assert!(
-            notify_events
-                .iter()
-                .all(|e| e.skill_name != "skill-discover"),
+            notify_events.iter().all(|e| e.skill_id != "skill-discover"),
             "skill-discover must not appear in notify events"
         );
 
@@ -1657,7 +1754,7 @@ mod tests {
         assert_eq!(count, 1, "lifecycle roots must be filtered");
         let notify_events = client.events();
         assert_eq!(notify_events.len(), 1);
-        assert_eq!(notify_events[0].skill_name, "alpha");
+        assert_eq!(notify_events[0].skill_id, "alpha");
 
         ctrl.shutdown();
     }
@@ -1717,7 +1814,10 @@ mod tests {
         ctrl.emit_startup_reconcile(&["weather".to_string()]);
 
         let notify_events = client.events();
-        assert_eq!(notify_events[0].skill_dir, "/home/user/skills/weather");
+        assert_eq!(
+            notify_events[0].canonical_skill_dir,
+            "/home/user/skills/weather"
+        );
 
         let proto_events = writer.events();
         assert_eq!(proto_events[0].skill_dir, "/home/user/skills/weather");
@@ -1758,7 +1858,7 @@ mod tests {
             use std::io::Write;
             let mut writer = std::io::BufWriter::new(&stream);
             writer
-                .write_all(br#"{"ok":true,"data":{"schemaVersion":1,"accepted":true}}"#)
+                .write_all(br#"{"ok":true,"data":{"schemaVersion":2,"accepted":true}}"#)
                 .unwrap();
             writer.write_all(b"\n").unwrap();
             writer.flush().unwrap();

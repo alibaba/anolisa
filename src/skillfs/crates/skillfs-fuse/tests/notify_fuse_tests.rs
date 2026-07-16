@@ -20,7 +20,8 @@ use parking_lot::RwLock;
 use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
 use skillfs_fuse::security::{
     ActivationReloadController, ActiveSkillResolver, ActiveTarget, FailingNotifyClient,
-    InMemoryNotifyClient, InMemoryProtocolEventWriter, NoopNotifyClient, NotifyController,
+    InMemoryNotifyClient, InMemoryProtocolEventWriter, NoopNotifyClient, NotifyChangeEvent,
+    NotifyClient, NotifyController, NotifyError, UnixSocketNotifyClient,
 };
 use skillfs_fuse::{MountConfig, MountHandle, MountOptions, mount_background_configured};
 
@@ -241,7 +242,7 @@ fn write_triggers_one_notify() {
 
     let events = client.events();
     assert_eq!(events.len(), 1, "one write should produce one notify");
-    assert_eq!(events[0].skill_name, "alpha");
+    assert_eq!(events[0].skill_id, "alpha");
     assert!(events[0].paths.contains(&"SKILL.md".to_string()));
 }
 
@@ -330,6 +331,42 @@ fn notify_failure_does_not_affect_read_view() {
     );
 }
 
+#[derive(Debug, Default)]
+struct RejectingNotifyClient;
+
+impl NotifyClient for RejectingNotifyClient {
+    fn send(&self, _event: &NotifyChangeEvent) -> Result<(), NotifyError> {
+        Err(NotifyError::Rejected {
+            body: r#"{"ok":true,"data":{"schemaVersion":2,"accepted":false}}"#.to_string(),
+        })
+    }
+}
+
+#[test]
+fn notify_rejection_does_not_affect_read_view() {
+    skip_if_no_fuse!();
+
+    let fixture = NotifyActivatedMountFixture::new(
+        Arc::new(RejectingNotifyClient),
+        |src| {
+            create_skill(src, "alpha");
+        },
+        &["alpha"],
+    );
+
+    let skill_md = fixture.skill_path("alpha").join("SKILL.md");
+    std::fs::write(&skill_md, "---\nname: alpha\ndescription: rejected\n---\n").unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    fixture.notify_controller.flush_for_testing();
+
+    let contents = std::fs::read_to_string(&skill_md).unwrap();
+    assert!(contents.contains("alpha"));
+    assert!(matches!(
+        fixture.resolver.get("alpha"),
+        Some(ActiveTarget::Current { .. })
+    ));
+}
+
 #[test]
 fn create_file_triggers_notify() {
     skip_if_no_fuse!();
@@ -346,7 +383,86 @@ fn create_file_triggers_notify() {
 
     let events = client.events();
     assert!(!events.is_empty(), "file creation must trigger notify");
-    assert_eq!(events[0].skill_name, "alpha");
+    assert_eq!(events[0].skill_id, "alpha");
+}
+
+#[test]
+fn same_skill_rename_reports_old_and_new_relative_paths() {
+    skip_if_no_fuse!();
+
+    let client = Arc::new(InMemoryNotifyClient::new());
+    let fixture = NotifyMountFixture::new(client.clone(), |src| {
+        create_skill(src, "alpha");
+        std::fs::write(src.join("alpha/old.txt"), "rename me").unwrap();
+    });
+
+    let skill_dir = fixture.skill_path("alpha");
+    std::fs::rename(skill_dir.join("old.txt"), skill_dir.join("new.txt")).unwrap();
+    fixture.wait_for_notify(1, &client);
+
+    let events = client.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].schema_version, 2);
+    assert_eq!(events[0].skill_id, "alpha");
+    assert_eq!(events[0].event_kind, "rename");
+    assert_eq!(events[0].paths, vec!["new.txt", "old.txt"]);
+}
+
+#[test]
+fn fuse_mutation_reaches_fake_daemon_as_notify_v2() {
+    skip_if_no_fuse!();
+
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+
+    let socket_dir = tempfile::tempdir().unwrap();
+    let socket_path = socket_dir.path().join("sec-core.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let (request_tx, request_rx) = std::sync::mpsc::sync_channel(1);
+    let daemon = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(&stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        request_tx.send(line).unwrap();
+
+        let mut writer = std::io::BufWriter::new(&stream);
+        writer
+            .write_all(br#"{"ok":true,"data":{"schemaVersion":2,"accepted":true}}"#)
+            .unwrap();
+        writer.write_all(b"\n").unwrap();
+        writer.flush().unwrap();
+    });
+
+    let client = Arc::new(UnixSocketNotifyClient::new(
+        &socket_path,
+        Duration::from_secs(5),
+    ));
+    let fixture = NotifyMountFixture::new(client, |src| {
+        create_skill(src, "alpha");
+    });
+    let expected_canonical_dir = fixture.source.path().join("alpha");
+
+    std::fs::write(fixture.skill_path("alpha").join("config.json"), "{}").unwrap();
+
+    let request = request_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("fake daemon must receive FUSE mutation notify");
+    let request: serde_json::Value = serde_json::from_str(request.trim()).unwrap();
+    assert_eq!(request["method"], "skill_ledger.skillfs_notify_change");
+    assert_eq!(request["params"]["schemaVersion"], 2);
+    assert_eq!(
+        request["params"]["canonicalSkillDir"],
+        expected_canonical_dir.to_string_lossy().as_ref()
+    );
+    assert_eq!(request["params"]["skillId"], "alpha");
+    assert!(
+        request["params"]["paths"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("config.json"))
+    );
+    daemon.join().unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -623,6 +739,7 @@ fn startup_reconcile_spawn_produces_events() {
     let notify_events = client.events();
     assert_eq!(notify_events.len(), 2);
     for e in &notify_events {
+        assert_eq!(e.schema_version, 2);
         assert_eq!(e.event_kind, "reconcile");
     }
 
@@ -950,7 +1067,7 @@ fn inbox_install_complete_triggers_notify_controller() {
         !events.is_empty(),
         "inbox .install-complete sentinel must trigger notify_controller"
     );
-    assert_eq!(events[0].skill_name, "alpha");
+    assert_eq!(events[0].skill_id, "alpha");
     assert_ne!(
         events[0].event_kind, "install-complete",
         "protocol events must use real mutation kinds, not install-complete"
@@ -987,7 +1104,7 @@ fn open_trunc_skill_md_triggers_notify() {
         !events.is_empty(),
         "O_TRUNC on SKILL.md must trigger notify"
     );
-    assert_eq!(events[0].skill_name, "alpha");
+    assert_eq!(events[0].skill_id, "alpha");
 }
 
 /// P2b regression: `open(O_RDONLY|O_TRUNC)` on a passthrough file must
@@ -1022,7 +1139,7 @@ fn open_rdonly_trunc_passthrough_triggers_notify() {
         !events.is_empty(),
         "O_RDONLY|O_TRUNC on passthrough file must trigger notify"
     );
-    assert_eq!(events[0].skill_name, "alpha");
+    assert_eq!(events[0].skill_id, "alpha");
 }
 
 /// P2b+ regression: `open(O_WRONLY|O_TRUNC)` on a passthrough file must
@@ -1057,7 +1174,7 @@ fn open_wronly_trunc_passthrough_triggers_notify() {
         !events.is_empty(),
         "O_WRONLY|O_TRUNC on passthrough file must trigger notify"
     );
-    assert_eq!(events[0].skill_name, "alpha");
+    assert_eq!(events[0].skill_id, "alpha");
 }
 
 /// P2c regression: successful `symlink` creation must trigger notify.
@@ -1080,7 +1197,7 @@ fn symlink_creation_triggers_notify() {
 
     let events = client.events();
     assert!(!events.is_empty(), "symlink creation must trigger notify");
-    assert_eq!(events[0].skill_name, "alpha");
+    assert_eq!(events[0].skill_id, "alpha");
 }
 
 /// P2d regression: successful `link` (hardlink) must trigger notify.
@@ -1104,7 +1221,7 @@ fn hardlink_creation_triggers_notify() {
 
     let events = client.events();
     assert!(!events.is_empty(), "hardlink creation must trigger notify");
-    assert_eq!(events[0].skill_name, "alpha");
+    assert_eq!(events[0].skill_id, "alpha");
 }
 
 /// P2e regression: successful FIFO (`mknod`) must trigger notify.
@@ -1139,5 +1256,5 @@ fn fifo_creation_triggers_notify() {
         !events.is_empty(),
         "FIFO (mknod) creation must trigger notify"
     );
-    assert_eq!(events[0].skill_name, "alpha");
+    assert_eq!(events[0].skill_id, "alpha");
 }

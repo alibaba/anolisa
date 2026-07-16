@@ -1682,11 +1682,10 @@ async fn cmd_mount(
                 socket_path.clone(),
                 std::time::Duration::from_millis(notify_timeout_ms),
             ));
-            let source_for_notify = daemon_root.clone();
             let ctrl = if let Some(ref reload) = reload_controller {
                 NotifyController::new_with_reload(
                     client,
-                    source_for_notify,
+                    source_canon.clone(),
                     std::time::Duration::from_millis(DEFAULT_NOTIFY_DEBOUNCE_MS),
                     notify_timeout_ms,
                     protocol_event_writer.clone(),
@@ -1695,7 +1694,7 @@ async fn cmd_mount(
             } else {
                 NotifyController::new_with_protocol_writer(
                     client,
-                    source_for_notify,
+                    source_canon.clone(),
                     std::time::Duration::from_millis(DEFAULT_NOTIFY_DEBOUNCE_MS),
                     notify_timeout_ms,
                     protocol_event_writer.clone(),
@@ -1713,7 +1712,7 @@ async fn cmd_mount(
             let ctrl = if let Some(ref reload) = reload_controller {
                 NotifyController::new_with_reload(
                     client,
-                    daemon_root.clone(),
+                    source_canon.clone(),
                     std::time::Duration::from_millis(DEFAULT_NOTIFY_DEBOUNCE_MS),
                     DEFAULT_NOTIFY_TIMEOUT_MS,
                     protocol_event_writer.clone(),
@@ -1722,7 +1721,7 @@ async fn cmd_mount(
             } else {
                 NotifyController::new_with_protocol_writer(
                     client,
-                    daemon_root.clone(),
+                    source_canon.clone(),
                     std::time::Duration::from_millis(DEFAULT_NOTIFY_DEBOUNCE_MS),
                     DEFAULT_NOTIFY_TIMEOUT_MS,
                     protocol_event_writer.clone(),

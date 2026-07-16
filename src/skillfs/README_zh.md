@@ -440,6 +440,8 @@ SkillFS 不在文件系统核心中执行扫描、签名校验或风险判断。
 - `/.skillfs-inbox/<skill>/...` 是 hidden 或 new skill 的安装/修复入口；
   写入落到 source，完成信号可触发外部安全流程。
 - `--notify-socket <PATH>` 将 debounce 后的 skill mutation 通知发给外部 daemon。
+  Notify v2 使用 canonical 路径和完整 flat/Hermes `skillId` 标识 Skill；
+  live/backing 路径通过独立 resolver 解析。
 - `--activation-events-log <PATH>` 将 activation protocol events 写成 JSONL。
 - `--activation-reload-mode poll` 在 notify events 后重读 activation state，
   无需 remount 即可更新 resolver。
@@ -483,6 +485,7 @@ SkillFS 不在文件系统核心中执行扫描、签名校验或风险判断。
 - [docs/security/external-decision-protocol.md](docs/security/external-decision-protocol.md) - decision-command JSON 协议。
 - [docs/security/runtime-activation-implementation-plan.md](docs/security/runtime-activation-implementation-plan.md) - activation、notify、reload 与 backing-root 集成。
 - [docs/design/control-socket-resolver.md](docs/design/control-socket-resolver.md) - control socket 默认 endpoint 与只读 `skill.resolveLiveSource` resolver（SkillFS S1）。
+- [docs/design/notify-v2.md](docs/design/notify-v2.md) - daemon change notification 的 canonical Skill 身份和 live-root 解耦（SkillFS S2）。
 - [docs/skillfs-filesystem-capability-record.md](docs/skillfs-filesystem-capability-record.md) - 长期维护的 filesystem capability record。
 - [POSIX_FS_TEST_MATRIX.csv](POSIX_FS_TEST_MATRIX.csv) - POSIX 测试矩阵与当前覆盖。
 - [POSIX_FS_REFERENCES.md](POSIX_FS_REFERENCES.md) - POSIX、FUSE 和项目参考资料。

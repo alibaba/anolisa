@@ -486,7 +486,8 @@ Related security surfaces:
   new skills; writes land in the source tree and completion can trigger the
   external security flow.
 - `--notify-socket <PATH>` sends debounced skill mutation notifications to an
-  external daemon.
+  external daemon. Notify v2 identifies the Skill with its canonical path and
+  complete flat or Hermes `skillId`; live/backing paths are resolved separately.
 - `--activation-events-log <PATH>` writes activation protocol events as JSONL.
 - `--activation-reload-mode poll` re-reads activation state after notify events
   and updates the resolver without a remount.
@@ -545,6 +546,9 @@ Related security surfaces:
 - [docs/design/control-socket-resolver.md](docs/design/control-socket-resolver.md)
   - Control socket default endpoint and the read-only
     `skill.resolveLiveSource` resolver (SkillFS S1).
+- [docs/design/notify-v2.md](docs/design/notify-v2.md) - Canonical Skill
+  identity and live-root separation for daemon change notifications (SkillFS
+  S2).
 - [docs/skillfs-filesystem-capability-record.md](docs/skillfs-filesystem-capability-record.md)
   - Long-lived filesystem capability record.
 - [POSIX_FS_TEST_MATRIX.csv](POSIX_FS_TEST_MATRIX.csv) - POSIX test matrix and
