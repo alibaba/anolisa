@@ -148,17 +148,24 @@ pub struct McpConfig {
     pub servers: HashMap<String, McpServerConfig>,
 }
 
-/// A trusted stdio MCP server that cosh-core may start and call.
+/// A trusted MCP server that cosh-core may start locally or contact over HTTP.
 #[derive(Debug, Clone, Deserialize)]
 pub struct McpServerConfig {
-    /// Executable launched directly without a shell.
+    /// Executable for a locally managed stdio server, launched without a shell.
+    #[serde(default)]
     pub command: String,
+    /// Streamable HTTP endpoint. Mutually exclusive with `command`.
+    #[serde(default)]
+    pub url: Option<String>,
     /// Arguments passed to the configured executable.
     #[serde(default)]
     pub args: Vec<String>,
     /// Explicit environment variables available to the child process.
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// Optional static bearer token for an HTTP server.
+    #[serde(default)]
+    pub bearer_token: Option<String>,
     /// Startup and request timeout in milliseconds.
     #[serde(default = "default_mcp_timeout_ms")]
     pub timeout_ms: u64,
@@ -1145,6 +1152,22 @@ API_KEY = "${FILESYSTEM_API_KEY}"
         assert_eq!(server.startup_timeout_ms, 30_000);
         assert_eq!(server.allowed_tools.as_ref().unwrap().len(), 2);
         assert_eq!(server.env["API_KEY"], "${FILESYSTEM_API_KEY}");
+    }
+
+    #[test]
+    fn parse_streamable_http_mcp_config() {
+        let toml_str = r#"
+[mcp.servers.remote]
+url = "https://mcp.example.com/mcp"
+bearer_token = "${MCP_TOKEN}"
+allowed_tools = ["search"]
+"#;
+
+        let config: CoreConfig = toml::from_str(toml_str).unwrap();
+        let server = config.mcp.servers.get("remote").unwrap();
+        assert_eq!(server.command, "");
+        assert_eq!(server.url.as_deref(), Some("https://mcp.example.com/mcp"));
+        assert_eq!(server.bearer_token.as_deref(), Some("${MCP_TOKEN}"));
     }
 
     #[test]

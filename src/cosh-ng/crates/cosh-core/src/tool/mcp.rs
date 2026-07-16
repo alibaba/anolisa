@@ -1,26 +1,198 @@
 //! Minimal stdio MCP client support for dynamically discovered agent tools.
 
+mod http;
+mod oauth;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
 
-use crate::config::McpServerConfig;
+use crate::cli::{McpArgs, McpCommand};
+use crate::config::{CoreConfig, McpServerConfig};
+use crate::state::{self, MCP_SERVERS_STATE};
 
 use super::{Tool, ToolContext, ToolKind, ToolRegistry, ToolResult};
 
 const CLIENT_NAME: &str = "cosh-ng";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
+pub(super) const HTTP_MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+const HTTP_MCP_COMPATIBLE_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 const MAX_TOOL_NAME_LEN: usize = 64;
 const MAX_TOOL_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_MCP_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_TOOL_LIST_PAGES: usize = 100;
+const MAX_DISCOVERED_TOOLS: usize = 1_000;
+const MAX_DISCOVERED_TOOL_BYTES: usize = 1024 * 1024;
+
+pub(super) fn initialize_params(protocol_version: &str) -> Value {
+    json!({
+        "protocolVersion": protocol_version,
+        "capabilities": {},
+        "clientInfo": { "name": CLIENT_NAME, "version": CLIENT_VERSION }
+    })
+}
+
+pub(super) fn validate_http_endpoint(endpoint: &str) -> Result<reqwest::Url, String> {
+    let endpoint = reqwest::Url::parse(endpoint)
+        .map_err(|error| format!("invalid MCP HTTP endpoint: {error}"))?;
+    if !matches!(endpoint.scheme(), "http" | "https") {
+        return Err("MCP HTTP endpoint must use http or https".to_string());
+    }
+    let loopback = matches!(
+        endpoint.host_str(),
+        Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
+    );
+    if endpoint.scheme() == "http" && !loopback {
+        return Err("MCP HTTP endpoint must use HTTPS unless it is a loopback URL".to_string());
+    }
+    Ok(endpoint)
+}
+
+/// Runs an explicit MCP management command without starting the agent runtime.
+pub(crate) async fn run_command(args: McpArgs, config: &CoreConfig) -> Result<(), String> {
+    match args.command {
+        McpCommand::List => print_server_list(config),
+        McpCommand::Connect { server } => {
+            let inspection = inspect_server(&server, config, "connected", true).await?;
+            state::remove_disabled(MCP_SERVERS_STATE, &server)?;
+            print_json(&inspection)
+        }
+        McpCommand::Inspect { server } => {
+            let inspection = inspect_server(&server, config, "inspected", false).await?;
+            print_json(&inspection)
+        }
+        McpCommand::Refresh { server } => {
+            let inspection = inspect_server(&server, config, "refreshed", false).await?;
+            print_json(&inspection)
+        }
+        McpCommand::Disconnect { server } => {
+            configured_server(config, &server)?;
+            state::add_disabled(MCP_SERVERS_STATE, &server)?;
+            let credentials_removed = oauth::remove_credentials(&server)?;
+            print_json(&McpDisconnectResult {
+                server,
+                disabled: true,
+                credentials_removed,
+            })
+        }
+        McpCommand::Login { server, manual } => {
+            let server_config = configured_server(config, &server)?;
+            oauth::login(&server, server_config, manual).await
+        }
+        McpCommand::Logout { server } => oauth::logout(&server),
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct McpServerStatus {
+    server: String,
+    transport: &'static str,
+    enabled: bool,
+    has_credentials: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct McpToolStatus {
+    name: String,
+    exposed_name: String,
+    description: String,
+}
+
+#[derive(Debug, Serialize)]
+struct McpServerInspection {
+    server: String,
+    action: &'static str,
+    transport: &'static str,
+    tools: Vec<McpToolStatus>,
+}
+
+#[derive(Debug, Serialize)]
+struct McpDisconnectResult {
+    server: String,
+    disabled: bool,
+    credentials_removed: bool,
+}
+
+fn configured_server<'a>(
+    config: &'a CoreConfig,
+    server: &str,
+) -> Result<&'a McpServerConfig, String> {
+    config
+        .mcp
+        .servers
+        .get(server)
+        .ok_or_else(|| format!("MCP server '{server}' is not configured"))
+}
+
+fn transport(config: &McpServerConfig) -> &'static str {
+    if config.url.is_some() {
+        "streamable_http"
+    } else {
+        "stdio"
+    }
+}
+
+fn print_json(value: &impl Serialize) -> Result<(), String> {
+    let output = serde_json::to_string_pretty(value)
+        .map_err(|error| format!("failed to serialize MCP status: {error}"))?;
+    println!("{output}");
+    Ok(())
+}
+
+fn print_server_list(config: &CoreConfig) -> Result<(), String> {
+    let disabled = state::load_disabled(MCP_SERVERS_STATE);
+    let mut servers = Vec::new();
+    for (server, server_config) in &config.mcp.servers {
+        servers.push(McpServerStatus {
+            server: server.clone(),
+            transport: transport(server_config),
+            enabled: !disabled.contains(server),
+            has_credentials: server_config.bearer_token.is_some()
+                || oauth::has_credentials(server)?,
+        });
+    }
+    servers.sort_by(|left, right| left.server.cmp(&right.server));
+    print_json(&servers)
+}
+
+async fn inspect_server(
+    server: &str,
+    config: &CoreConfig,
+    action: &'static str,
+    allow_disconnected: bool,
+) -> Result<McpServerInspection, String> {
+    let server_config = configured_server(config, server)?;
+    if !allow_disconnected && state::load_disabled(MCP_SERVERS_STATE).contains(server) {
+        return Err(format!(
+            "MCP server '{server}' is disconnected; run 'cosh-core mcp connect {server}'"
+        ));
+    }
+    let (client, tools) = McpClient::connect(server, server_config).await?;
+    let tools = tools
+        .into_iter()
+        .filter(|tool| tool_is_allowed(&tool.name, server_config.allowed_tools.as_deref()))
+        .map(|tool| McpToolStatus {
+            exposed_name: exposed_tool_name(server, &tool.name),
+            name: tool.name,
+            description: tool.description,
+        })
+        .collect();
+    client.close().await?;
+    Ok(McpServerInspection {
+        server: server.to_string(),
+        action,
+        transport: transport(server_config),
+        tools,
+    })
+}
 
 /// Connects to every configured trusted server and registers its discovered tools.
 ///
@@ -30,10 +202,15 @@ pub async fn register_configured_tools(
     registry: &mut ToolRegistry,
     servers: &HashMap<String, McpServerConfig>,
 ) {
+    let disabled = state::load_disabled(MCP_SERVERS_STATE);
     let mut names: Vec<_> = servers.keys().collect();
     names.sort();
 
     for server_name in names {
+        if disabled.contains(server_name) {
+            tracing::info!(server = server_name, "MCP server is disconnected");
+            continue;
+        }
         let Some(config) = servers.get(server_name) else {
             continue;
         };
@@ -146,7 +323,8 @@ struct McpClient {
     server_name: String,
     timeout: Duration,
     startup_timeout: Duration,
-    connection: Mutex<StdioConnection>,
+    protocol_version: Mutex<String>,
+    connection: Mutex<McpConnection>,
 }
 
 impl McpClient {
@@ -154,9 +332,6 @@ impl McpClient {
         server_name: &str,
         config: &McpServerConfig,
     ) -> Result<(Self, Vec<DiscoveredTool>), String> {
-        if config.command.trim().is_empty() {
-            return Err("MCP command must not be empty".to_string());
-        }
         if config.timeout_ms == 0 {
             return Err("MCP timeout_ms must be greater than zero".to_string());
         }
@@ -164,37 +339,100 @@ impl McpClient {
             return Err("MCP startup_timeout_ms must be greater than zero".to_string());
         }
 
-        let connection = StdioConnection::spawn(config).await?;
+        let (connection, protocol_version) = match (&config.url, config.command.trim().is_empty()) {
+            (Some(_), false) => {
+                return Err(
+                    "MCP server config must specify either url or command, not both".to_string(),
+                )
+            }
+            (Some(url), true) => (
+                McpConnection::Http(http::HttpConnection::new(
+                    server_name,
+                    url,
+                    config.bearer_token.as_deref(),
+                    config.oauth.resource.as_deref(),
+                )?),
+                HTTP_MCP_PROTOCOL_VERSION,
+            ),
+            (None, true) => return Err("MCP command or url must be configured".to_string()),
+            (None, false) => (
+                McpConnection::Stdio(StdioConnection::spawn(config).await?),
+                MCP_PROTOCOL_VERSION,
+            ),
+        };
         let client = Self {
             server_name: server_name.to_string(),
             timeout: Duration::from_millis(config.timeout_ms),
             startup_timeout: Duration::from_millis(config.startup_timeout_ms),
+            protocol_version: Mutex::new(protocol_version.to_string()),
             connection: Mutex::new(connection),
         };
 
-        client.initialize().await?;
-        let tools = client.list_tools().await?;
+        if let Err(error) = client.initialize().await {
+            if error != http::LEGACY_FALLBACK_ERROR {
+                return Err(error);
+            }
+            let url = config
+                .url
+                .as_deref()
+                .ok_or_else(|| "MCP legacy fallback requires an HTTP endpoint".to_string())?;
+            let legacy = http::LegacyHttpConnection::connect(
+                server_name,
+                url,
+                config.bearer_token.as_deref(),
+                config.oauth.resource.as_deref(),
+            )
+            .await?;
+            *client.connection.lock().await = McpConnection::LegacyHttp(legacy);
+            *client.protocol_version.lock().await = "2024-11-05".to_string();
+            client.initialize().await?;
+        }
+        let tools = timeout(client.startup_timeout, client.list_tools())
+            .await
+            .map_err(|_| {
+                format!(
+                    "MCP tool discovery timed out for server {}",
+                    client.server_name
+                )
+            })??;
         Ok((client, tools))
     }
 
     async fn initialize(&self) -> Result<(), String> {
-        self.request_with_timeout(
-            self.startup_timeout,
-            "initialize",
-            json!({
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": { "name": CLIENT_NAME, "version": CLIENT_VERSION }
-            }),
-        )
-        .await?;
-        self.notify("notifications/initialized", json!({})).await
+        let requested_protocol_version = self.protocol_version().await;
+        let result = self
+            .request_once_with_timeout(
+                self.startup_timeout,
+                "initialize",
+                initialize_params(&requested_protocol_version),
+            )
+            .await?;
+        let protocol_version = result
+            .get("protocolVersion")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "MCP initialize response has no protocolVersion".to_string())?;
+        if !supports_protocol_version(&requested_protocol_version, protocol_version) {
+            return Err(format!(
+                "MCP server {} negotiated unsupported protocol version {protocol_version}",
+                self.server_name
+            ));
+        }
+        *self.protocol_version.lock().await = protocol_version.to_string();
+        if result.pointer("/capabilities/tools").is_none() {
+            return Err(format!(
+                "MCP server {} does not advertise tools capability",
+                self.server_name
+            ));
+        }
+        self.notify_once("notifications/initialized", json!({}))
+            .await
     }
 
     async fn list_tools(&self) -> Result<Vec<DiscoveredTool>, String> {
         let mut cursor: Option<String> = None;
         let mut seen_cursors = HashSet::new();
         let mut tools = Vec::new();
+        let mut tool_bytes = 0;
 
         for _ in 0..MAX_TOOL_LIST_PAGES {
             let mut params = serde_json::Map::new();
@@ -210,6 +448,19 @@ impl McpClient {
                 .ok_or_else(|| "MCP tools/list response has no tools array".to_string())?;
 
             for raw_tool in page {
+                let serialized = serde_json::to_vec(raw_tool)
+                    .map_err(|error| format!("failed to measure MCP tools/list item: {error}"))?;
+                tool_bytes += serialized.len();
+                if tool_bytes > MAX_DISCOVERED_TOOL_BYTES {
+                    return Err(format!(
+                        "MCP tools/list exceeded maximum total size of {MAX_DISCOVERED_TOOL_BYTES} bytes"
+                    ));
+                }
+                if tools.len() == MAX_DISCOVERED_TOOLS {
+                    return Err(format!(
+                        "MCP tools/list exceeded maximum tool count of {MAX_DISCOVERED_TOOLS}"
+                    ));
+                }
                 let name = raw_tool
                     .get("name")
                     .and_then(Value::as_str)
@@ -274,27 +525,118 @@ impl McpClient {
         method: &str,
         params: Value,
     ) -> Result<Value, String> {
+        let result = self
+            .request_once_with_timeout(request_timeout, method, params.clone())
+            .await;
+        if matches!(&result, Err(error) if error == http::SESSION_EXPIRED_ERROR) {
+            self.initialize().await?;
+            return self
+                .request_once_with_timeout(request_timeout, method, params)
+                .await;
+        }
+        result
+    }
+
+    async fn request_once_with_timeout(
+        &self,
+        request_timeout: Duration,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, String> {
+        let protocol_version = self.protocol_version().await;
         let mut connection = self.connection.lock().await;
-        timeout(request_timeout, connection.request(method, params))
+        timeout(
+            request_timeout,
+            connection.request(&protocol_version, method, params),
+        )
+        .await
+        .map_err(|_| {
+            format!(
+                "MCP request '{method}' timed out for server {}",
+                self.server_name
+            )
+        })?
+    }
+
+    async fn notify_once(&self, method: &str, params: Value) -> Result<(), String> {
+        let protocol_version = self.protocol_version().await;
+        let mut connection = self.connection.lock().await;
+        timeout(
+            self.timeout,
+            connection.notify(&protocol_version, method, params),
+        )
+        .await
+        .map_err(|_| {
+            format!(
+                "MCP notification '{method}' timed out for server {}",
+                self.server_name
+            )
+        })?
+    }
+
+    async fn protocol_version(&self) -> String {
+        self.protocol_version.lock().await.clone()
+    }
+
+    async fn close(&self) -> Result<(), String> {
+        let protocol_version = self.protocol_version().await;
+        let mut connection = self.connection.lock().await;
+        timeout(self.timeout, connection.close(&protocol_version))
             .await
             .map_err(|_| {
                 format!(
-                    "MCP request '{method}' timed out for server {}",
+                    "MCP session close timed out for server {}",
                     self.server_name
                 )
             })?
     }
+}
 
-    async fn notify(&self, method: &str, params: Value) -> Result<(), String> {
-        let mut connection = self.connection.lock().await;
-        timeout(self.timeout, connection.notify(method, params))
-            .await
-            .map_err(|_| {
-                format!(
-                    "MCP notification '{method}' timed out for server {}",
-                    self.server_name
-                )
-            })?
+fn supports_protocol_version(requested: &str, negotiated: &str) -> bool {
+    negotiated == requested
+        || (requested == HTTP_MCP_PROTOCOL_VERSION
+            && HTTP_MCP_COMPATIBLE_PROTOCOL_VERSIONS.contains(&negotiated))
+}
+
+enum McpConnection {
+    Stdio(StdioConnection),
+    Http(http::HttpConnection),
+    LegacyHttp(http::LegacyHttpConnection),
+}
+
+impl McpConnection {
+    async fn request(
+        &mut self,
+        protocol_version: &str,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, String> {
+        match self {
+            Self::Stdio(connection) => connection.request(method, params).await,
+            Self::Http(connection) => connection.request(protocol_version, method, params).await,
+            Self::LegacyHttp(connection) => connection.request(method, params).await,
+        }
+    }
+
+    async fn notify(
+        &mut self,
+        protocol_version: &str,
+        method: &str,
+        params: Value,
+    ) -> Result<(), String> {
+        match self {
+            Self::Stdio(connection) => connection.notify(method, params).await,
+            Self::Http(connection) => connection.notify(protocol_version, method, params).await,
+            Self::LegacyHttp(connection) => connection.notify(method, params).await,
+        }
+    }
+
+    async fn close(&mut self, protocol_version: &str) -> Result<(), String> {
+        match self {
+            Self::Stdio(_) => Ok(()),
+            Self::Http(connection) => connection.close(protocol_version).await,
+            Self::LegacyHttp(_) => Ok(()),
+        }
     }
 }
 
@@ -363,6 +705,10 @@ impl StdioConnection {
                 message => vec![message],
             };
             for message in messages {
+                if message.get("method").is_some() && message.get("id").is_some() {
+                    self.respond_to_server_request(message).await?;
+                    continue;
+                }
                 if message.get("id").and_then(Value::as_u64) != Some(id) {
                     continue;
                 }
@@ -428,6 +774,27 @@ impl StdioConnection {
             "params": params,
         }))
         .await
+    }
+
+    async fn respond_to_server_request(&mut self, message: Value) -> Result<(), String> {
+        let id = message
+            .get("id")
+            .cloned()
+            .ok_or_else(|| "MCP server request has no id".to_string())?;
+        let method = message
+            .get("method")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "MCP server request has no method".to_string())?;
+        let response = if method == "ping" {
+            json!({ "jsonrpc": "2.0", "id": id, "result": {} })
+        } else {
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": { "code": -32601, "message": "Method not found" }
+            })
+        };
+        self.write_message(response).await
     }
 
     async fn write_message(&mut self, message: Value) -> Result<(), String> {
@@ -567,6 +934,7 @@ fn truncate_output(output: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::path::PathBuf;
 
     use super::*;
@@ -585,13 +953,39 @@ mod tests {
         std::fs::write(&script_path, script).unwrap();
         let config = McpServerConfig {
             command: "sh".to_string(),
+            url: None,
             args: vec![script_path.to_string_lossy().to_string()],
             env: HashMap::new(),
+            bearer_token: None,
+            oauth: Default::default(),
             timeout_ms: 1_000,
             startup_timeout_ms: 1_000,
             allowed_tools: None,
         };
         (dir, config)
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &std::path::Path) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.previous {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
     }
 
     #[test]
@@ -600,6 +994,40 @@ mod tests {
             exposed_tool_name("github tools", "read/issue"),
             "mcp__github_tools__read_issue"
         );
+    }
+
+    #[test]
+    fn accepts_known_http_protocol_versions() {
+        for version in HTTP_MCP_COMPATIBLE_PROTOCOL_VERSIONS {
+            assert!(supports_protocol_version(
+                HTTP_MCP_PROTOCOL_VERSION,
+                version
+            ));
+        }
+        assert!(!supports_protocol_version(
+            HTTP_MCP_PROTOCOL_VERSION,
+            "2099-01-01"
+        ));
+        assert!(!supports_protocol_version(
+            MCP_PROTOCOL_VERSION,
+            "2024-11-05"
+        ));
+        assert!(supports_protocol_version(
+            HTTP_MCP_PROTOCOL_VERSION,
+            "2024-11-05"
+        ));
+    }
+
+    #[test]
+    fn initialize_params_include_required_client_fields() {
+        let params = initialize_params(HTTP_MCP_PROTOCOL_VERSION);
+        assert_eq!(
+            params["protocolVersion"],
+            Value::String(HTTP_MCP_PROTOCOL_VERSION.to_string())
+        );
+        assert!(params["capabilities"].is_object());
+        assert!(params["clientInfo"]["name"].is_string());
+        assert!(params["clientInfo"]["version"].is_string());
     }
 
     #[test]
@@ -620,6 +1048,84 @@ mod tests {
         assert!(result.output.ends_with("[MCP output truncated]"));
     }
 
+    #[test]
+    fn server_status_redacts_credentials() {
+        let status = McpServerStatus {
+            server: "remote".to_string(),
+            transport: "streamable_http",
+            enabled: true,
+            has_credentials: true,
+        };
+        let output = serde_json::to_string(&status).unwrap();
+        assert!(output.contains("has_credentials"));
+        assert!(!output.contains("access_token"));
+        assert!(!output.contains("refresh_token"));
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "the process-wide test environment must remain isolated while the client connects"
+    )]
+    async fn lifecycle_commands_manage_server_state() {
+        let _lock = crate::state::TEST_STATE_LOCK.lock().unwrap();
+        let states = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let _states_dir = EnvVarGuard::set("COSH_STATES_DIR", states.path());
+        let _home_dir = EnvVarGuard::set("HOME", home.path());
+        let (_dir, server) = fake_server(
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}}}}' ;;
+    *'"method":"tools/list"'*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"Echo input","inputSchema":{"type":"object"}}]}}' ;;
+  esac
+done
+"#,
+        );
+        let mut config = CoreConfig::default();
+        config.mcp.servers.insert("fake".to_string(), server);
+
+        let inspection = inspect_server("fake", &config, "inspected", false)
+            .await
+            .unwrap();
+        assert_eq!(inspection.tools.len(), 1);
+        assert_eq!(inspection.tools[0].exposed_name, "mcp__fake__echo");
+
+        run_command(
+            McpArgs {
+                command: McpCommand::Disconnect {
+                    server: "fake".to_string(),
+                },
+            },
+            &config,
+        )
+        .await
+        .unwrap();
+        assert!(state::load_disabled(MCP_SERVERS_STATE).contains("fake"));
+        assert!(inspect_server("fake", &config, "inspected", false)
+            .await
+            .unwrap_err()
+            .contains("is disconnected"));
+
+        run_command(
+            McpArgs {
+                command: McpCommand::Connect {
+                    server: "fake".to_string(),
+                },
+            },
+            &config,
+        )
+        .await
+        .unwrap();
+        assert!(!state::load_disabled(MCP_SERVERS_STATE).contains("fake"));
+
+        let refreshed = inspect_server("fake", &config, "refreshed", false)
+            .await
+            .unwrap();
+        assert_eq!(refreshed.action, "refreshed");
+    }
+
     #[tokio::test]
     async fn discovers_and_invokes_stdio_tool() {
         let (_dir, config) = fake_server(
@@ -627,7 +1133,7 @@ mod tests {
 while IFS= read -r line; do
   case "$line" in
     *'"method":"initialize"'*)
-      printf '%s\n' '[{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fake","version":"1.0"}}}]'
+      printf '%s\n' '[{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"fake","version":"1.0"}}}]'
       ;;
     *'"method":"tools/list"'*)
       printf '%s\n' '[{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"Echo input","inputSchema":{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}}]}}]'
@@ -656,6 +1162,35 @@ done
     }
 
     #[tokio::test]
+    async fn answers_server_ping_while_waiting_for_stdio_response() {
+        let (_dir, config) = fake_server(
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":"server-ping","method":"ping","params":{}}'
+      IFS= read -r response
+      case "$response" in
+        *'"id":"server-ping"'*'"result":{}'*) ;;
+        *) exit 1 ;;
+      esac
+      id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}}}}\n' "$id"
+      ;;
+    *'"method":"tools/list"'*)
+      id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[]}}\n' "$id"
+      ;;
+  esac
+done
+"#,
+        );
+
+        let (_, tools) = McpClient::connect("fake", &config).await.unwrap();
+        assert!(tools.is_empty());
+    }
+
+    #[tokio::test]
     async fn rejects_repeated_tool_list_cursor() {
         let (_dir, config) = fake_server(
             r#"#!/bin/sh
@@ -663,7 +1198,7 @@ while IFS= read -r line; do
   case "$line" in
     *'"method":"initialize"'*)
       id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
-      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}}}}\n' "$id"
       ;;
     *'"method":"tools/list"'*)
       id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
@@ -687,7 +1222,7 @@ done
             r#"#!/bin/sh
 while IFS= read -r line; do
   case "$line" in
-    *'"method":"initialize"'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{}}' ;;
+    *'"method":"initialize"'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}}}}' ;;
     *'"method":"tools/list"'*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}}' ;;
   esac
 done

@@ -46,7 +46,7 @@ enabled = true
 custom_paths = []
 
 [mcp.servers.filesystem]
-# 当前版本仅支持 stdio Server。
+# 本地 stdio Server。
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
 # 启动和发现超时；首次 npx 运行可能需要下载包。
@@ -56,8 +56,16 @@ timeout_ms = 10000
 # 省略时暴露全部已发现工具；设为 [] 时不暴露任何工具。
 allowed_tools = ["read_file", "list_directory"]
 
-[mcp.servers.filesystem.env]
-FILESYSTEM_API_KEY = "${FILESYSTEM_API_KEY}"
+[mcp.servers.remote-search]
+# Streamable HTTP endpoint；不要同时配置 `url` 与 `command`。
+url = "https://mcp.example.com/mcp"
+# 若使用静态 token 而非 OAuth，取消下行注释：
+# bearer_token = "${REMOTE_SEARCH_TOKEN}"
+allowed_tools = ["search"]
+
+# OAuth 配置可选；默认使用服务发现和动态客户端注册。
+[mcp.servers.remote-search.oauth]
+scopes = ["search"]
 
 [session]
 # 按工作空间隔离的 provider 对话根目录
@@ -73,26 +81,48 @@ level = "warn"
 是 `--workspace` 或会话管理请求传入的路径。相对 `session.persist_dir` 从该
 工作空间解析，而不是从 Core 进程的启动目录解析。
 
-## MCP stdio Server
+## MCP Server
 
-`cosh-core --headless` 可以启动已配置的 stdio MCP Server，调用
+`cosh-core --headless` 可以启动已配置的 stdio MCP Server，或连接已配置的
+Streamable HTTP MCP endpoint，调用
 `tools/list`，并将允许的工具注册为 `mcp__<server>__<tool>`。第一版支持
-`initialize`、`tools/list` 和 `tools/call`；暂不支持 HTTP/SSE transport、OAuth，
-也不能将 cosh-core 作为 MCP Server 对外托管。
+`initialize`、`tools/list` 和 `tools/call`。HTTP Server 可返回 JSON 或 SSE。Streamable
+HTTP Server 可通过 `cosh-core mcp login <server>` 使用 OAuth；凭据与配置分开保存。也支持
+`2024-11-05` 的旧 HTTP+SSE Server，并会自动 fallback。暂不支持将 cosh-core 作为 MCP Server
+对外托管。
 
 MCP Server 定义只从 `/etc/copilot-shell/config.toml` 和
 `~/.copilot-shell/config.toml` 读取。为避免检出的项目自动启动任意本地程序，
-项目级 `.copilot-shell/config.toml` 中的 MCP 配置会被忽略。命令以直接启动的方式执行，
-不会经过 shell。
+项目级 `.copilot-shell/config.toml` 中的 MCP 配置会被忽略。每个 Server 必须只配置
+`command`（stdio）或 `url`（Streamable HTTP）之一。命令以直接启动的方式执行，不会经过 shell。
 
 `command`、`args` 与 `env` 中的值支持 `${NAME}` 环境变量展开。子进程仅继承
 `HOME`、`PATH`、`TMPDIR`、`LANG`，以及显式配置的 `env` 值。`startup_timeout_ms`
-默认 30000，覆盖进程启动和工具发现；后续请求的 `timeout_ms` 默认 10000。工具输出进入
-Agent 上下文前限制为 64 KiB。
+默认 30000，覆盖进程启动和工具发现；后续请求的 `timeout_ms` 默认 10000。HTTP 的 `url`
+与 `bearer_token` 也支持 `${NAME}` 展开；Bearer token 只会发送给该 endpoint。远端 MCP
+endpoint 必须使用 HTTPS；仅 loopback endpoint 可使用 HTTP。工具输出进入
+Agent 上下文前限制为 64 KiB。OAuth 要求 HTTP Server 未配置 `bearer_token`；使用
+`cosh-core mcp logout <server>` 可删除已保存的凭据。
 
-在 `auto`、`balanced`、`suggest` 与 `strict` 模式下，所有 MCP 工具都需要用户审批；
-只有已有的 `trust` 模式会跳过审批。`allowed_tools` 可限制发现范围：省略表示暴露全部工具，
-配置列表表示仅暴露指定工具，设为 `[]` 则禁用该 Server 的所有工具。
+使用以下短生命周期命令管理已配置的 Server。JSON 状态只包含 `has_credentials`，
+不会包含 access token 或 refresh token。
+
+```bash
+cosh-core mcp list
+cosh-core mcp inspect <server>
+cosh-core mcp refresh <server>
+cosh-core mcp disconnect <server>
+cosh-core mcp connect <server>
+```
+
+`inspect` 和 `refresh` 都会连接 Server、重新发现工具、输出结果后退出。`disconnect`
+会阻止 headless 启动时连接该 Server，并删除已保存的 OAuth 凭据。`connect` 会先验证
+工具发现成功，再重新启用已断开的 Server。
+
+`[mcp.servers.<name>].allowed_tools` 用于限制发现范围：省略表示暴露全部工具，配置列表表示
+仅暴露指定工具，设为 `[]` 则禁用该 Server 的所有工具。其他情况下，MCP 工具在 `auto`、
+`balanced`、`suggest` 与 `strict` 模式下需要审批。`[agent].allowed_tools` 或
+`--allowed-tools` 可为精确的注册工具名跳过审批，例如 `mcp__remote_search__search`。
 
 ## cosh-shell 配置
 
