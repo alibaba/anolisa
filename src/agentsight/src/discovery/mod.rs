@@ -32,5 +32,7 @@ pub mod scanner;
 
 pub use agent::{AgentInfo, DiscoveredAgent};
 pub use connection_scanner::{ConnectionScanResult, ConnectionScanner, IpDomainCache};
-pub use matcher::{CmdlineGlobMatcher, ProcessContext, match_cmdline_glob, match_domain_glob};
+pub use matcher::{
+    CmdlineGlobMatcher, HttpReportFilter, ProcessContext, match_cmdline_glob, match_domain_glob,
+};
 pub use scanner::AgentScanner;
