@@ -645,12 +645,13 @@ fn record_from_object(
     // catalog is loaded — fresh checkouts without a packaged catalog still
     // get integrity-only behavior.
     //
-    // rpm-observed objects are exempt: ANOLISA owns none of their files and
-    // does not lay out the raw artifact tree, so the manifest health checks
-    // (which assume that layout) would spuriously escalate an adopted row to
-    // degraded/failed (§8, review P2). The status stays `adopted`.
+    // RpmManaged and RpmObserved objects both use the file layout selected by
+    // RPM macros rather than ANOLISA's raw-backend layout. Manifest health
+    // probes assume the raw layout, so applying them to either RPM ownership
+    // can spuriously escalate a valid package. RPM status remains adjudicated
+    // by the rpmdb drift probe after this projection.
     let manifest_status = match catalog {
-        Some(cat) if !obj.is_rpm_observed() => {
+        Some(cat) if !obj.effective_ownership().is_rpm() => {
             let (manifest_entries, escalated) =
                 manifest_health_probe(layout, cat, install_mode, obj, &integrity_status);
             health.extend(manifest_entries);
@@ -2973,6 +2974,88 @@ mod tests {
         assert_eq!(obs[0].rpm_package.as_deref(), Some("copilot-shell"));
         assert_eq!(obs[0].rpm_evr.as_deref(), Some("2.3.0-1.al8"));
         assert_eq!(obs[0].rpm_source_repo.as_deref(), Some("@System"));
+    }
+
+    #[test]
+    fn rpm_managed_row_skips_raw_layout_health_probe() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let layout = test_layout(dir.path());
+        let state_path = layout.state_dir.join("installed.toml");
+        let manifest = r#"
+            [component]
+            name = "cosh"
+            version = "2.3.0-1.al8"
+
+            [[health_checks]]
+            name = "launcher"
+            kind = "command"
+            command = "{bindir}/cosh --version"
+        "#;
+        let (catalog, _guard) = catalog_with_component("cosh", manifest);
+        let catalogs = ScopedCatalogs::from_entries(vec![(state_path.clone(), catalog)]);
+        let query = FakeQuery {
+            installed: vec![(
+                "copilot-shell".to_string(),
+                pkg_info("copilot-shell", "2.3.0", "1.al8"),
+            )],
+            origins: Vec::new(),
+        };
+        let project = |object: InstalledObject| {
+            let mut state = InstalledState::default();
+            state.upsert_object(object);
+            let root = ScopedStateRoot {
+                scope: StateScope::System,
+                layout: layout.clone(),
+                state_path: state_path.clone(),
+                writable: true,
+                state,
+            };
+            let view = StateView {
+                writable: root.clone(),
+                visible_roots: vec![root],
+                warnings: Vec::new(),
+            };
+            select_components_from_view(&view, &catalogs, Some("cosh"), None, Some(&query))
+        };
+
+        let mut rpm_managed = component_object("cosh", "2.3.0-1.al8", ObjectStatus::Installed);
+        rpm_managed.install_backend = Some("rpm".to_string());
+        rpm_managed.ownership = Some(Ownership::RpmManaged);
+        rpm_managed.rpm_metadata = Some(rpm_meta("copilot-shell", "2.3.0-1.al8"));
+        let rpm_records = project(rpm_managed);
+        let rpm = &rpm_records[0];
+
+        assert_eq!(rpm.status, "installed");
+        assert!(
+            !rpm.health
+                .iter()
+                .any(|entry| entry.name == "cosh:command:launcher"),
+            "RPM rows must not run raw-layout manifest commands",
+        );
+        assert!(
+            !rpm.health
+                .iter()
+                .any(|entry| entry.status == "command_error"),
+            "RPM rows must not report raw-layout command failures",
+        );
+        assert!(
+            !rpm.health.iter().any(|entry| entry.name == "rpm:drift"),
+            "matching rpmdb EVR must remain installed without drift",
+        );
+
+        let mut raw_managed = component_object("cosh", "2.3.0-1.al8", ObjectStatus::Installed);
+        raw_managed.install_backend = Some("raw".to_string());
+        raw_managed.ownership = Some(Ownership::RawManaged);
+        let raw_records = project(raw_managed);
+        let raw = &raw_records[0];
+
+        assert_eq!(raw.status, "failed");
+        let launcher = raw
+            .health
+            .iter()
+            .find(|entry| entry.name == "cosh:command:launcher")
+            .expect("raw-managed launcher health entry");
+        assert_eq!(launcher.status, "command_error");
     }
 
     /// Configurable [`PackageQuery`] for the observed-probe tests.
