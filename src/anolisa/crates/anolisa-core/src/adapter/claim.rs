@@ -389,6 +389,9 @@ pub enum DriverPayload {
     /// Qoder (qodercli) driver payload.
     #[serde(rename = "qoder")]
     Qoder(QoderClaim),
+    /// Qwen Code driver payload.
+    #[serde(rename = "qwencode")]
+    QwenCode(QwenCodeClaim),
 }
 
 /// OpenClaw driver payload. Holds only [`ClaimResource::id`] references —
@@ -430,6 +433,17 @@ pub struct HermesClaim {
 /// directory.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CoshClaim {
+    /// Resource id of the delivered extension directory
+    /// ([`ClaimResourceKind::ExternalPath`]).
+    pub extension_dir_resource: String,
+}
+
+/// Qwen Code driver payload. Holds only [`ClaimResource::id`]
+/// references. Qwen Code is extension-based: ANOLISA drops an
+/// auto-discovered extension tree into the user's Qwen Code home and
+/// takes over only that directory, mirroring the Cosh extension model.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QwenCodeClaim {
     /// Resource id of the delivered extension directory
     /// ([`ClaimResourceKind::ExternalPath`]).
     pub extension_dir_resource: String,
@@ -1243,6 +1257,41 @@ mod tests {
         claim
             .validate(&layout, &allowed)
             .expect("cosh claim under allowed roots must pass");
+    }
+
+    #[test]
+    fn qwencode_claim_round_trips_and_validates() {
+        let claim = AdapterClaim {
+            claim_schema: CLAIM_SCHEMA_VERSION,
+            component: "tokenless".to_string(),
+            framework: "qwencode".to_string(),
+            plugin_id: Some("tokenless".to_string()),
+            adapter_type: Some("extension".to_string()),
+            enabled_at: "2026-07-04T10:30:45Z".to_string(),
+            resource_root: PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/qwencode"),
+            bundle_digest: Some("sha256:qw3n".to_string()),
+            driver_schema: DRIVER_SCHEMA_VERSION,
+            status: ClaimStatus::Enabled,
+            resources: vec![ClaimResource {
+                id: "qwencode_extension_dir".to_string(),
+                purpose: "qwencode_extension_dir".to_string(),
+                kind: ClaimResourceKind::ExternalPath {
+                    path: PathBuf::from("/home/alice/.qwen/extensions/tokenless"),
+                },
+            }],
+            driver_payload: DriverPayload::QwenCode(QwenCodeClaim {
+                extension_dir_resource: "qwencode_extension_dir".to_string(),
+            }),
+        };
+        let json = serde_json::to_string(&claim).expect("serialize QwenCode JSON");
+        let back: AdapterClaim = serde_json::from_str(&json).expect("parse QwenCode JSON");
+        assert_eq!(claim, back);
+
+        let layout = FsLayout::system(None);
+        let allowed = vec![PathBuf::from("/home/alice/.qwen")];
+        claim
+            .validate(&layout, &allowed)
+            .expect("qwencode claim under allowed roots must pass");
     }
 
     #[test]

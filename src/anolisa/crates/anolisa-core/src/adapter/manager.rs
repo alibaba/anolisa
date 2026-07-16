@@ -2220,8 +2220,9 @@ fn allowed_adapter_types(framework: &str) -> Option<&'static [&'static str]> {
         // Qoder installs a directory-named plugin and activates it via
         // settings.json entries: plugin only (no extension / skill_bundle).
         "qoder" => Some(&["plugin"]),
-        // Filesystem-extension framework: extension only, no plugin default.
-        "cosh" => Some(&["extension"]),
+        // Filesystem-extension frameworks: extension only, no plugin
+        // default.
+        "cosh" | "qwencode" => Some(&["extension"]),
         _ => None,
     }
 }
@@ -2497,6 +2498,10 @@ fn plan_disable_report(claim: &AdapterClaim) -> DisableReport {
         }
         DriverPayload::Cosh(c) => {
             cleanup_ids.push(&c.extension_dir_resource);
+            None
+        }
+        DriverPayload::QwenCode(q) => {
+            cleanup_ids.push(&q.extension_dir_resource);
             None
         }
         DriverPayload::Codex(c) => {
@@ -2876,6 +2881,7 @@ mod tests {
         assert!(ok("claude-code", Some("plugin")));
         assert!(ok("claude-code", None));
         assert!(ok("cosh", Some("extension")));
+        assert!(ok("qwencode", Some("extension")));
         assert!(ok("qoder", Some("plugin")));
         assert!(ok("qoder", None), "qoder defaults to plugin");
     }
@@ -2934,9 +2940,23 @@ mod tests {
     }
 
     #[test]
+    fn qwencode_requires_extension_type() {
+        for at in [Some("plugin"), Some("skill_bundle"), None] {
+            let err = validate_adapter_type_for_framework("tokenless", "qwencode", at)
+                .expect_err(&format!("qwencode + {at:?} must be rejected"));
+            assert!(
+                matches!(err, AdapterError::InvalidAdapterInput { .. }),
+                "qwencode + {at:?}: got {err:?}"
+            );
+        }
+        validate_adapter_type_for_framework("tokenless", "qwencode", Some("extension"))
+            .expect("qwencode + extension must pass");
+    }
+
+    #[test]
     fn framework_type_matrix_is_silent_for_unknown_framework() {
         // No built-in driver: this gate defers to UnknownFramework.
-        validate_adapter_type_for_framework("tokenless", "qwencode", Some("extension"))
+        validate_adapter_type_for_framework("tokenless", "some-other-fw", Some("extension"))
             .expect("unknown framework must not be rejected by the type gate");
     }
 
