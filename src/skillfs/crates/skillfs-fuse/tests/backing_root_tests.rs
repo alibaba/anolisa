@@ -77,11 +77,10 @@ fn notify_v2_uses_canonical_root_with_backing_root() {
     let client = Arc::new(InMemoryNotifyClient::new());
     let writer = Arc::new(InMemoryProtocolEventWriter::new());
 
-    // The CLI passes the canonical root to notify while activation
-    // bootstrap/reload receive the distinct live root.
     let ctrl = NotifyController::new_with_protocol_writer(
         client.clone(),
         canonical_root.path().to_path_buf(),
+        live_root.path().to_path_buf(),
         Duration::from_millis(50),
         5000,
         writer.clone(),
@@ -122,7 +121,52 @@ fn notify_v2_uses_canonical_root_with_backing_root() {
         canonical_skill_dir,
         live_root.path().display()
     );
-    assert_eq!(writer.events()[0].skill_dir, *canonical_skill_dir);
+
+    let protocol_events = writer.events();
+    assert_eq!(protocol_events[0].schema_version, 1);
+    assert_eq!(protocol_events[0].skill_name, "alpha");
+    assert_eq!(
+        protocol_events[0].skill_dir,
+        live_root.path().join("alpha").to_string_lossy().to_string()
+    );
+    assert!(
+        !protocol_events[0]
+            .skill_dir
+            .starts_with(canonical_root.path().to_string_lossy().as_ref()),
+        "protocol event skillDir '{}' must not use canonical root '{}'",
+        protocol_events[0].skill_dir,
+        canonical_root.path().display()
+    );
+
+    let count = ctrl.emit_startup_reconcile(&["alpha".to_string()]);
+    assert_eq!(count, 1);
+
+    let notify_events = client.events();
+    let reconcile_notify = notify_events
+        .iter()
+        .find(|event| event.event_kind == "reconcile")
+        .expect("startup reconcile notify event");
+    assert_eq!(reconcile_notify.schema_version, 2);
+    assert_eq!(reconcile_notify.skill_id, "alpha");
+    assert_eq!(
+        reconcile_notify.canonical_skill_dir,
+        canonical_root
+            .path()
+            .join("alpha")
+            .to_string_lossy()
+            .to_string()
+    );
+
+    let protocol_events = writer.events();
+    let reconcile_protocol = protocol_events
+        .iter()
+        .find(|event| event.event_kind == "reconcile")
+        .expect("startup reconcile protocol event");
+    assert_eq!(reconcile_protocol.schema_version, 1);
+    assert_eq!(
+        reconcile_protocol.skill_dir,
+        live_root.path().join("alpha").to_string_lossy().to_string()
+    );
 }
 
 #[test]

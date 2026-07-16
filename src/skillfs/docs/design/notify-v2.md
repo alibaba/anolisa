@@ -40,6 +40,22 @@ or `sourceId`.
 There is no v1 fallback or runtime version negotiation. SkillFS and the daemon
 must switch directly to v2.
 
+## Relationship to N3 Event Logs
+
+S2 upgrades only the socket notify request. The N3 activation protocol event
+log is a separate JSONL protocol, not a notify v1 fallback, a dual-send path,
+or a runtime negotiation mechanism.
+
+N3 remains schema v1 and keeps its existing fields: `schemaVersion`, `time`,
+`skillDir`, `skillName`, `eventKind`, `paths`, and optional `reloadOutcome`.
+When an in-place mount uses a backing root, N3 `skillDir` continues to use the
+daemon/live backing root so event-log consumers can read the live source
+without traversing the FUSE over-mount.
+
+The two protocols may share a controller implementation, but they must not
+share an ambiguous root. Socket notify v2 derives `canonicalSkillDir` from the
+canonical root; N3 event logs derive `skillDir` from the protocol-event root.
+
 ## Response
 
 SkillFS accepts a response only when the daemon envelope has `ok=true` and its

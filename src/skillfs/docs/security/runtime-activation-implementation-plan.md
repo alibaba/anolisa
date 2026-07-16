@@ -187,13 +187,19 @@ Scope:
 
 - Add a Unix socket client for `skill_ledger.skillfs_notify_change`.
 - Send one NDJSON request frame per debounced skill change.
-- Include `schemaVersion`, `skillDir`, `skillName`, `eventKind`, and relative
-  `paths`.
+- Socket notify v2 includes `schemaVersion=2`, `canonicalSkillDir`, the full
+  `skillId`, `eventKind`, and relative `paths`.
+- Derive `canonicalSkillDir` from the canonical source root. When the daemon
+  needs the live source, it resolves that canonical path through the S1
+  resolver instead of receiving a backing-root path in the notify payload.
 - Treat successful send as event acceptance, not as security approval.
 - On failure, write diagnostics and keep serving the existing trusted mapping.
-- Add a separate JSONL writer for the protocol event schema.
-- Fields: `schemaVersion`, `time`, `skillDir`, `skillName`, `eventKind`,
-  `paths`.
+- Add a separate JSONL writer for the N3 activation protocol event schema.
+- Protocol event log v1 fields remain `schemaVersion`, `time`, `skillDir`,
+  `skillName`, `eventKind`, `paths`, and optional `reloadOutcome`.
+- In in-place/backing-root mode, protocol event `skillDir` uses the
+  daemon/live backing root so existing event-log consumers can read the live
+  source without traversing the FUSE over-mount.
 - Keep it separate from the existing audit stream and security event stream.
 - Do not rely on this log as the only source of truth; daemon reconcile must
   re-read current disk state.
@@ -337,8 +343,9 @@ external daemon
   -> writes .skill-meta/activation.json and activation xattr
 
 SkillFS
-  -> sends notify skillDir under the ledger backing root
-  -> bootstraps/reloads activation from the same backing root
+  -> sends socket notify v2 canonicalSkillDir under the canonical source root
+  -> writes N3 protocol event skillDir under the ledger backing root
+  -> bootstraps/reloads activation from the ledger backing root
   -> exposes hidden/current/fallback through the FUSE view
 ```
 
@@ -356,9 +363,11 @@ Scope:
 - For non-in-place mounts, allow the same concept to be used as a normalized
   daemon working path. It may point at the source directly or at a private
   alias, but SkillFS should present one consistent path shape to the daemon.
-- Use the backing root for notify `skillDir`, activation bootstrap,
-  activation reload, startup reconcile, activation watching, and any future
-  source-side daemon-facing event payloads.
+- Use the canonical source root for socket notify v2 `canonicalSkillDir`.
+- Use the backing root for N3 protocol event `skillDir`, activation
+  bootstrap, activation reload, startup reconcile event-log entries,
+  activation watching, and any future source-side daemon-facing event
+  payloads.
 - Keep the agent-visible FUSE path unchanged. Agents should not need to know
   whether a backing root exists.
 - Validate that the backing root is outside the agent-visible mount path and
@@ -389,8 +398,11 @@ Acceptance criteria:
   the daemon through the backing root.
 - A fallback skill serves the trusted snapshot through the FUSE path while
   the daemon still scans the live current source through the backing root.
-- Notify payloads use the backing-root `skillDir`; the daemon does not need
-  to infer in-place vs non-in-place mount mode.
+- Socket notify v2 payloads use canonical `canonicalSkillDir` plus the full
+  `skillId`; the daemon resolves live source paths through the S1 resolver and
+  does not infer in-place vs non-in-place mount mode from notify fields.
+- N3 protocol event log payloads keep schema v1 and use backing-root
+  `skillDir` so existing event-log consumers can read the live source.
 - Activation bootstrap, reload, reconcile, and activation watching all use
   the same backing root.
 - Backing-root setup fails closed when ownership, parent permissions, path
@@ -494,10 +506,10 @@ Direct final-skill pending install is implemented in I3 below.
 
 **Backing root requirement:** In in-place/security mode with activation or
 notify enabled, the daemon-facing backing root must exist and be accessible
-at startup. All daemon-facing operations (notify `skillDir`, activation
-bootstrap, activation reload, startup reconcile, activation watcher) use
-the backing root path. The agent-visible FUSE mount path must never appear
-in notify payloads.
+at startup. Activation bootstrap, activation reload, activation watcher, and
+N3 protocol event-log `skillDir` use the backing root path. Socket notify v2
+uses canonical `canonicalSkillDir` and the full `skillId`; it does not send the
+backing root or the agent-visible FUSE over-mount path.
 
 Out of scope for I2:
 

@@ -157,9 +157,9 @@ pub struct ActivationEventsSection {
 #[serde(deny_unknown_fields)]
 pub struct LedgerSection {
     /// Private source-side work path for external daemons.
-    /// When set, all daemon-facing operations (notify skillDir,
-    /// activation bootstrap, activation reload, startup reconcile,
-    /// activation watcher) use this path instead of the source.
+    /// When set, activation bootstrap, reload, watching, and N3 protocol
+    /// event `skillDir` use this path instead of the source. Socket notify v2
+    /// retains the canonical source root for `canonicalSkillDir`.
     pub backing_root: Option<String>,
 }
 

@@ -409,6 +409,7 @@ struct NotifyInner {
     /// notify. Set post-construction via `set_watcher_registrar`.
     watcher_registrar: Mutex<Option<Arc<dyn WatcherRegistrar>>>,
     canonical_root: PathBuf,
+    protocol_event_root: PathBuf,
     debounce: Duration,
     timeout_ms: u64,
     pending: Mutex<HashMap<String, NotifyPendingState>>,
@@ -437,8 +438,10 @@ impl NotifyController {
         debounce: Duration,
         timeout_ms: u64,
     ) -> Arc<Self> {
+        let canonical_root = canonical_root.into();
         Self::new_with_protocol_writer(
             client,
+            canonical_root.clone(),
             canonical_root,
             debounce,
             timeout_ms,
@@ -449,6 +452,7 @@ impl NotifyController {
     pub fn new_with_protocol_writer(
         client: Arc<dyn NotifyClient>,
         canonical_root: impl Into<PathBuf>,
+        protocol_event_root: impl Into<PathBuf>,
         debounce: Duration,
         timeout_ms: u64,
         protocol_event_writer: Arc<dyn ProtocolEventWriter>,
@@ -456,6 +460,7 @@ impl NotifyController {
         Self::new_full(
             client,
             canonical_root,
+            protocol_event_root,
             debounce,
             timeout_ms,
             protocol_event_writer,
@@ -466,6 +471,7 @@ impl NotifyController {
     pub fn new_with_reload(
         client: Arc<dyn NotifyClient>,
         canonical_root: impl Into<PathBuf>,
+        protocol_event_root: impl Into<PathBuf>,
         debounce: Duration,
         timeout_ms: u64,
         protocol_event_writer: Arc<dyn ProtocolEventWriter>,
@@ -474,6 +480,7 @@ impl NotifyController {
         Self::new_full(
             client,
             canonical_root,
+            protocol_event_root,
             debounce,
             timeout_ms,
             protocol_event_writer,
@@ -484,6 +491,7 @@ impl NotifyController {
     fn new_full(
         client: Arc<dyn NotifyClient>,
         canonical_root: impl Into<PathBuf>,
+        protocol_event_root: impl Into<PathBuf>,
         debounce: Duration,
         timeout_ms: u64,
         protocol_event_writer: Arc<dyn ProtocolEventWriter>,
@@ -496,6 +504,7 @@ impl NotifyController {
             reload_controller,
             watcher_registrar: Mutex::new(None),
             canonical_root: canonical_root.into(),
+            protocol_event_root: protocol_event_root.into(),
             debounce,
             timeout_ms,
             pending: Mutex::new(HashMap::new()),
@@ -625,9 +634,11 @@ impl NotifyController {
             }
             let canonical_skill_dir = self.inner.canonical_root.join(skill_id);
             let canonical_skill_dir = canonical_skill_dir.to_string_lossy().to_string();
+            let protocol_skill_dir = self.inner.protocol_event_root.join(skill_id);
+            let protocol_skill_dir = protocol_skill_dir.to_string_lossy().to_string();
 
             let protocol_event = ProtocolEvent::new(
-                &canonical_skill_dir,
+                &protocol_skill_dir,
                 skill_id.as_str(),
                 "reconcile",
                 Vec::new(),
@@ -750,6 +761,8 @@ impl NotifyInner {
     fn send_one(&self, state: NotifyPendingState) {
         let canonical_skill_dir = self.canonical_root.join(&state.skill_id);
         let canonical_skill_dir = canonical_skill_dir.to_string_lossy().to_string();
+        let protocol_skill_dir = self.protocol_event_root.join(&state.skill_id);
+        let protocol_skill_dir = protocol_skill_dir.to_string_lossy().to_string();
 
         // A3: snapshot activation freshness BEFORE sending the notify so
         // the poll baseline predates the daemon's activation write.
@@ -769,7 +782,7 @@ impl NotifyInner {
 
         // Write protocol event log regardless of notify outcome.
         let protocol_event = ProtocolEvent::new(
-            &canonical_skill_dir,
+            &protocol_skill_dir,
             &state.skill_id,
             state.event_kind.as_str(),
             paths.clone(),
@@ -826,7 +839,7 @@ impl NotifyInner {
 
             // A4: emit reload outcome as a protocol event.
             let reload_event = ProtocolEvent::with_reload_outcome(
-                &canonical_skill_dir,
+                &protocol_skill_dir,
                 &state.skill_id,
                 outcome.as_protocol_label(),
             );
@@ -1328,6 +1341,7 @@ mod tests {
         let ctrl = NotifyController::new_with_protocol_writer(
             client.clone(),
             "/srv/skills",
+            "/srv/skills",
             Duration::from_millis(50),
             5000,
             writer.clone(),
@@ -1352,6 +1366,7 @@ mod tests {
         let ctrl = NotifyController::new_with_protocol_writer(
             client,
             "/srv/skills",
+            "/srv/skills",
             Duration::from_millis(50),
             5000,
             writer.clone(),
@@ -1372,6 +1387,7 @@ mod tests {
         let writer = Arc::new(InMemoryProtocolEventWriter::new());
         let ctrl = NotifyController::new_with_protocol_writer(
             client,
+            "/srv/skills",
             "/srv/skills",
             Duration::from_millis(50),
             5000,
@@ -1395,6 +1411,7 @@ mod tests {
         let writer = Arc::new(InMemoryProtocolEventWriter::new());
         let ctrl = NotifyController::new_with_protocol_writer(
             client,
+            "/srv/skills",
             "/srv/skills",
             Duration::from_millis(50),
             5000,
@@ -1423,6 +1440,7 @@ mod tests {
         let ctrl = NotifyController::new_with_protocol_writer(
             client,
             "/srv/skills",
+            "/srv/skills",
             Duration::from_millis(50),
             5000,
             writer.clone(),
@@ -1450,6 +1468,7 @@ mod tests {
         let ctrl = NotifyController::new_with_protocol_writer(
             client,
             "/srv/skills",
+            "/srv/skills",
             Duration::from_millis(50),
             5000,
             writer.clone(),
@@ -1468,6 +1487,7 @@ mod tests {
         let writer = Arc::new(InMemoryProtocolEventWriter::new());
         let ctrl = NotifyController::new_with_protocol_writer(
             client,
+            "/srv/skills",
             "/srv/skills",
             Duration::from_millis(50),
             5000,
@@ -1494,6 +1514,7 @@ mod tests {
         let ctrl = NotifyController::new_with_protocol_writer(
             client,
             "/srv/skills",
+            "/srv/skills",
             Duration::from_millis(50),
             5000,
             writer.clone(),
@@ -1519,6 +1540,7 @@ mod tests {
         let ctrl = NotifyController::new_with_protocol_writer(
             client,
             "/srv/skills",
+            "/srv/skills",
             Duration::from_millis(50),
             5000,
             writer.clone(),
@@ -1541,6 +1563,7 @@ mod tests {
         let writer = Arc::new(InMemoryProtocolEventWriter::new());
         let ctrl = NotifyController::new_with_protocol_writer(
             client,
+            "/srv/skills",
             "/srv/skills",
             Duration::from_millis(50),
             5000,
@@ -1589,6 +1612,7 @@ mod tests {
         let client = Arc::new(InMemoryNotifyClient::new());
         let ctrl = NotifyController::new_with_protocol_writer(
             client,
+            "/srv/skills",
             "/srv/skills",
             Duration::from_millis(50),
             5000,
@@ -1660,6 +1684,7 @@ mod tests {
         let ctrl = NotifyController::new_with_protocol_writer(
             client.clone(),
             "/srv/skills",
+            "/srv/skills",
             Duration::from_millis(50),
             5000,
             writer.clone(),
@@ -1707,6 +1732,7 @@ mod tests {
         let ctrl = NotifyController::new_with_protocol_writer(
             client.clone(),
             "/srv/skills",
+            "/srv/skills",
             Duration::from_millis(50),
             5000,
             writer.clone(),
@@ -1737,6 +1763,7 @@ mod tests {
         let ctrl = NotifyController::new_with_protocol_writer(
             client.clone(),
             "/srv/skills",
+            "/srv/skills",
             Duration::from_millis(50),
             5000,
             writer.clone(),
@@ -1765,6 +1792,7 @@ mod tests {
         let writer = Arc::new(InMemoryProtocolEventWriter::new());
         let ctrl = NotifyController::new_with_protocol_writer(
             client,
+            "/srv/skills",
             "/srv/skills",
             Duration::from_millis(50),
             5000,
@@ -1805,6 +1833,7 @@ mod tests {
         let writer = Arc::new(InMemoryProtocolEventWriter::new());
         let ctrl = NotifyController::new_with_protocol_writer(
             client.clone(),
+            "/home/user/skills",
             "/home/user/skills",
             Duration::from_millis(50),
             5000,
@@ -1943,6 +1972,7 @@ mod tests {
         let writer = Arc::new(InMemoryProtocolEventWriter::new());
         let ctrl = NotifyController::new_with_reload(
             client.clone(),
+            dir.path().to_path_buf(),
             dir.path().to_path_buf(),
             Duration::from_millis(50),
             5000,

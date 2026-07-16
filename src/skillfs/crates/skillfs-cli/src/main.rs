@@ -23,12 +23,13 @@ use skillfs_fuse::security::{
     ControlSocketServer, DEFAULT_NOTIFY_DEBOUNCE_MS, DEFAULT_NOTIFY_TIMEOUT_MS,
     DEFAULT_RELOAD_INTERVAL_MS, DEFAULT_RELOAD_TIMEOUT_MS, DecisionCommand,
     InstallerStagingController, JsonlProtocolEventWriter, JsonlSecurityEventWriter, LedgerAdapter,
-    LedgerBackingRoot, NoopProtocolEventWriter, NoopSecurityEventWriter, NotifyController,
-    ProtocolEventWriter, RefreshController, ReloadMode, RuntimeDecisionOutcome, RuntimeMetricsSink,
-    RuntimeMetricsWriter, SecurityConfig, SecurityEventWriter, SecurityModeConfig,
-    SessionStatsWriter, SkillfsSessionStats, SourceDriftObserver, StagingMatcher,
-    SummaryWriteOutcome, TrustedPeerConfig, TrustedWriterConfig, UnixSocketNotifyClient,
-    bootstrap_activation, resolve_events_path, resolve_protocol_events_path, spawn_drift_watcher,
+    LedgerBackingRoot, NoopProtocolEventWriter, NoopSecurityEventWriter, NotifyClient,
+    NotifyController, ProtocolEventWriter, RefreshController, ReloadMode, RuntimeDecisionOutcome,
+    RuntimeMetricsSink, RuntimeMetricsWriter, SecurityConfig, SecurityEventWriter,
+    SecurityModeConfig, SessionStatsWriter, SkillfsSessionStats, SourceDriftObserver,
+    StagingMatcher, SummaryWriteOutcome, TrustedPeerConfig, TrustedWriterConfig,
+    UnixSocketNotifyClient, bootstrap_activation, resolve_events_path,
+    resolve_protocol_events_path, spawn_drift_watcher,
 };
 use skillfs_fuse::{FuseError as FuseErr, MountConfig, MountOptions, mount_configured};
 use tokio::signal;
@@ -37,6 +38,60 @@ use tracing::{debug, error, info, warn};
 mod help_text;
 mod managed;
 mod sls_ops;
+
+#[derive(Clone, Debug)]
+struct MountRuntimeRoots {
+    notify_canonical_root: PathBuf,
+    daemon_root: PathBuf,
+}
+
+impl MountRuntimeRoots {
+    fn from_mount(canonical_source: &Path, ledger_backing_root: Option<&Path>) -> Self {
+        Self {
+            notify_canonical_root: canonical_source.to_path_buf(),
+            daemon_root: ledger_backing_root
+                .unwrap_or(canonical_source)
+                .to_path_buf(),
+        }
+    }
+
+    fn notify_canonical_root(&self) -> &Path {
+        &self.notify_canonical_root
+    }
+
+    fn daemon_root(&self) -> &Path {
+        &self.daemon_root
+    }
+}
+
+fn build_notify_controller(
+    client: Arc<dyn NotifyClient>,
+    roots: &MountRuntimeRoots,
+    notify_timeout_ms: u64,
+    protocol_event_writer: Arc<dyn ProtocolEventWriter>,
+    reload_controller: Option<Arc<ActivationReloadController>>,
+) -> Arc<NotifyController> {
+    if let Some(reload) = reload_controller {
+        NotifyController::new_with_reload(
+            client,
+            roots.notify_canonical_root().to_path_buf(),
+            roots.daemon_root().to_path_buf(),
+            std::time::Duration::from_millis(DEFAULT_NOTIFY_DEBOUNCE_MS),
+            notify_timeout_ms,
+            protocol_event_writer,
+            reload,
+        )
+    } else {
+        NotifyController::new_with_protocol_writer(
+            client,
+            roots.notify_canonical_root().to_path_buf(),
+            roots.daemon_root().to_path_buf(),
+            std::time::Duration::from_millis(DEFAULT_NOTIFY_DEBOUNCE_MS),
+            notify_timeout_ms,
+            protocol_event_writer,
+        )
+    }
+}
 
 // ---------------------------------------------------------------------------
 // CLI Arguments
@@ -1355,7 +1410,8 @@ async fn cmd_mount(
     //
     // When the operator provides --ledger-backing-root, SkillFS creates a
     // private source alias (bind mount) before the FUSE over-mount becomes
-    // active. All daemon-facing operations then use the backing root path.
+    // active. Daemon live-source operations and N3 protocol events then use
+    // the backing root path; socket notify v2 keeps canonical source identity.
     // Fail-closed: unsafe backing root rejects startup.
     let backing_root: Option<LedgerBackingRoot> = if let Some(ref br_path) = ledger_backing_root {
         let br = LedgerBackingRoot::setup(&source_canon, br_path, &mount_canon, in_place)
@@ -1363,7 +1419,7 @@ async fn cmd_mount(
         info!(
             backing_root = %br.path().display(),
             in_place,
-            "ledger backing root enabled — daemon-facing operations will use this path"
+            "ledger backing root enabled for live-source operations"
         );
         Some(br)
     } else {
@@ -1396,15 +1452,14 @@ async fn cmd_mount(
         );
     }
 
-    // daemon_root: the path used for all daemon-facing operations. When a
-    // backing root is set, use it; otherwise fall back to the canonical
-    // (absolute) source path so daemon-facing paths — including the
-    // resolver's live root — are always absolute regardless of the CWD the
-    // mount was launched from.
-    let daemon_root: PathBuf = backing_root
-        .as_ref()
-        .map(|br| br.path().to_path_buf())
-        .unwrap_or_else(|| source_canon.clone());
+    // Select the path contracts once for all later production wiring. Socket
+    // notify v2 keeps canonical source identity, while daemon live-source
+    // operations and N3 protocol events use the backing root when configured.
+    let runtime_roots = MountRuntimeRoots::from_mount(
+        &source_canon,
+        backing_root.as_ref().map(LedgerBackingRoot::path),
+    );
+    let daemon_root = runtime_roots.daemon_root().to_path_buf();
 
     // Load skills into store
     info!("loading skills from source directory");
@@ -1682,24 +1737,13 @@ async fn cmd_mount(
                 socket_path.clone(),
                 std::time::Duration::from_millis(notify_timeout_ms),
             ));
-            let ctrl = if let Some(ref reload) = reload_controller {
-                NotifyController::new_with_reload(
-                    client,
-                    source_canon.clone(),
-                    std::time::Duration::from_millis(DEFAULT_NOTIFY_DEBOUNCE_MS),
-                    notify_timeout_ms,
-                    protocol_event_writer.clone(),
-                    reload.clone(),
-                )
-            } else {
-                NotifyController::new_with_protocol_writer(
-                    client,
-                    source_canon.clone(),
-                    std::time::Duration::from_millis(DEFAULT_NOTIFY_DEBOUNCE_MS),
-                    notify_timeout_ms,
-                    protocol_event_writer.clone(),
-                )
-            };
+            let ctrl = build_notify_controller(
+                client,
+                &runtime_roots,
+                notify_timeout_ms,
+                protocol_event_writer.clone(),
+                reload_controller.clone(),
+            );
             info!(
                 socket = %socket_path.display(),
                 timeout_ms = notify_timeout_ms,
@@ -1709,24 +1753,13 @@ async fn cmd_mount(
             Some(ctrl)
         } else if activation_events_log.is_some() {
             let client = Arc::new(skillfs_fuse::security::NoopNotifyClient);
-            let ctrl = if let Some(ref reload) = reload_controller {
-                NotifyController::new_with_reload(
-                    client,
-                    source_canon.clone(),
-                    std::time::Duration::from_millis(DEFAULT_NOTIFY_DEBOUNCE_MS),
-                    DEFAULT_NOTIFY_TIMEOUT_MS,
-                    protocol_event_writer.clone(),
-                    reload.clone(),
-                )
-            } else {
-                NotifyController::new_with_protocol_writer(
-                    client,
-                    source_canon.clone(),
-                    std::time::Duration::from_millis(DEFAULT_NOTIFY_DEBOUNCE_MS),
-                    DEFAULT_NOTIFY_TIMEOUT_MS,
-                    protocol_event_writer.clone(),
-                )
-            };
+            let ctrl = build_notify_controller(
+                client,
+                &runtime_roots,
+                DEFAULT_NOTIFY_TIMEOUT_MS,
+                protocol_event_writer.clone(),
+                reload_controller.clone(),
+            );
             info!("notify: protocol event log only (no socket)");
             Some(ctrl)
         } else {
@@ -2897,4 +2930,197 @@ async fn cmd_list(source: PathBuf, enabled_only: bool) -> Result<(), Box<dyn std
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use parking_lot::Mutex;
+    use skillfs_fuse::security::{
+        ActiveSkillResolver, InMemoryProtocolEventWriter, MutationKind, NOTIFY_METHOD,
+        NotifyChangeEvent, NotifyClient, NotifyError,
+    };
+
+    use super::*;
+
+    #[derive(Debug, Clone)]
+    struct CapturedNotify {
+        schema_version: u64,
+        method: &'static str,
+        canonical_skill_dir: String,
+        skill_id: String,
+        event_kind: String,
+        paths: Vec<String>,
+    }
+
+    struct ActivationWritingNotifyClient {
+        activation_path: PathBuf,
+        events: Mutex<Vec<CapturedNotify>>,
+    }
+
+    impl ActivationWritingNotifyClient {
+        fn new(activation_path: PathBuf) -> Self {
+            Self {
+                activation_path,
+                events: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn events(&self) -> Vec<CapturedNotify> {
+            self.events.lock().clone()
+        }
+    }
+
+    impl NotifyClient for ActivationWritingNotifyClient {
+        fn send(&self, event: &NotifyChangeEvent) -> Result<(), NotifyError> {
+            self.events.lock().push(CapturedNotify {
+                schema_version: event.params.schema_version,
+                method: event.method,
+                canonical_skill_dir: event.params.canonical_skill_dir.clone(),
+                skill_id: event.params.skill_id.clone(),
+                event_kind: event.params.event_kind.clone(),
+                paths: event.params.paths.clone(),
+            });
+            let before = std::fs::metadata(&self.activation_path)
+                .ok()
+                .and_then(|metadata| metadata.modified().ok());
+            for _ in 0..100 {
+                std::thread::sleep(Duration::from_millis(15));
+                std::fs::write(
+                    &self.activation_path,
+                    r#"{"schemaVersion": 1, "target": ".skill-meta/versions/v000001.snapshot"}"#,
+                )
+                .expect("write activation during notify");
+                let after = std::fs::metadata(&self.activation_path)
+                    .ok()
+                    .and_then(|metadata| metadata.modified().ok());
+                if before.map_or(after.is_some(), |before| {
+                    after.is_some_and(|after| after > before)
+                }) {
+                    return Ok(());
+                }
+            }
+            panic!("activation mtime did not advance");
+        }
+    }
+
+    fn seed_skill(root: &Path, skill_id: &str) -> PathBuf {
+        let skill_dir = root.join(skill_id);
+        let snapshot = skill_dir.join(".skill-meta/versions/v000001.snapshot");
+        std::fs::create_dir_all(&snapshot).expect("create snapshot");
+        std::fs::write(
+            snapshot.join("SKILL.md"),
+            format!("---\nname: {skill_id}\ndescription: fixture\n---\n"),
+        )
+        .expect("write snapshot skill");
+        skill_dir.join(".skill-meta/activation.json")
+    }
+
+    #[test]
+    fn mount_runtime_roots_preserve_notify_identity_and_select_live_root() {
+        let canonical_root = Path::new("/srv/skills");
+        let backing_root = Path::new("/run/skillfs-ledger/skills");
+
+        let direct = MountRuntimeRoots::from_mount(canonical_root, None);
+        assert_eq!(direct.notify_canonical_root(), canonical_root);
+        assert_eq!(direct.daemon_root(), canonical_root);
+
+        let backed = MountRuntimeRoots::from_mount(canonical_root, Some(backing_root));
+        assert_eq!(backed.notify_canonical_root(), canonical_root);
+        assert_eq!(backed.daemon_root(), backing_root);
+        assert_ne!(backed.notify_canonical_root(), backed.daemon_root());
+    }
+
+    #[test]
+    fn notify_controller_wiring_splits_canonical_and_event_roots() {
+        let canonical_root = tempfile::tempdir().unwrap();
+        let daemon_root = tempfile::tempdir().unwrap();
+        let skill_id = "category/alpha";
+        let activation_path = seed_skill(daemon_root.path(), skill_id);
+        seed_skill(canonical_root.path(), skill_id);
+
+        let client = Arc::new(ActivationWritingNotifyClient::new(activation_path));
+        let writer = Arc::new(InMemoryProtocolEventWriter::new());
+        let resolver = Arc::new(ActiveSkillResolver::new(
+            canonical_root.path().to_path_buf(),
+        ));
+        let reload_controller = Arc::new(ActivationReloadController::new(
+            daemon_root.path().to_path_buf(),
+            resolver,
+            Duration::from_millis(1),
+            Duration::from_millis(250),
+        ));
+        let runtime_roots =
+            MountRuntimeRoots::from_mount(canonical_root.path(), Some(daemon_root.path()));
+
+        assert_eq!(runtime_roots.notify_canonical_root(), canonical_root.path());
+        assert_eq!(runtime_roots.daemon_root(), daemon_root.path());
+
+        let ctrl = build_notify_controller(
+            client.clone(),
+            &runtime_roots,
+            DEFAULT_NOTIFY_TIMEOUT_MS,
+            writer.clone(),
+            Some(reload_controller),
+        );
+
+        let count = ctrl.emit_startup_reconcile(&[skill_id.to_string()]);
+        assert_eq!(count, 1);
+
+        ctrl.observe(skill_id, Some(Path::new("SKILL.md")), MutationKind::Write);
+        ctrl.flush_for_testing();
+
+        let notify_events = client.events();
+        assert_eq!(notify_events.len(), 2);
+        for event in &notify_events {
+            assert_eq!(event.method, NOTIFY_METHOD);
+            assert_eq!(event.schema_version, 2);
+            assert_eq!(event.skill_id, skill_id);
+            assert!(
+                event
+                    .canonical_skill_dir
+                    .starts_with(canonical_root.path().to_string_lossy().as_ref())
+            );
+            assert!(
+                !event
+                    .canonical_skill_dir
+                    .starts_with(daemon_root.path().to_string_lossy().as_ref()),
+                "notify canonicalSkillDir must not expose daemon root"
+            );
+        }
+        assert_eq!(notify_events[0].event_kind, "reconcile");
+        assert!(notify_events[0].paths.is_empty());
+        assert_eq!(notify_events[1].event_kind, "write");
+        assert_eq!(notify_events[1].paths, vec!["SKILL.md"]);
+
+        let protocol_events = writer.events();
+        assert_eq!(protocol_events.len(), 3);
+        assert_eq!(protocol_events[0].schema_version, 1);
+        assert_eq!(protocol_events[0].event_kind, "reconcile");
+        assert_eq!(protocol_events[1].event_kind, "write");
+        assert_eq!(
+            protocol_events[2].reload_outcome.as_deref(),
+            Some("activation_updated")
+        );
+        for event in &protocol_events {
+            assert_eq!(event.skill_name, skill_id);
+            assert!(
+                event
+                    .skill_dir
+                    .starts_with(daemon_root.path().to_string_lossy().as_ref()),
+                "protocol event skillDir must use daemon root"
+            );
+            assert!(
+                !event
+                    .skill_dir
+                    .starts_with(canonical_root.path().to_string_lossy().as_ref()),
+                "protocol event skillDir must not use canonical root"
+            );
+        }
+
+        ctrl.shutdown();
+    }
 }

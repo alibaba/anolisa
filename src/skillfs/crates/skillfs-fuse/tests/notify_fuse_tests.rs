@@ -514,6 +514,7 @@ impl ReloadMountFixture {
         let notify_ctrl = NotifyController::new_with_reload(
             client,
             source.path().to_path_buf(),
+            source.path().to_path_buf(),
             Duration::from_millis(50),
             5000,
             Arc::new(skillfs_fuse::security::NoopProtocolEventWriter),
@@ -685,6 +686,7 @@ fn startup_reconcile_spawn_produces_events() {
     let writer = Arc::new(InMemoryProtocolEventWriter::new());
     let ctrl = NotifyController::new_with_protocol_writer(
         client.clone(),
+        source.path().to_path_buf(),
         source.path().to_path_buf(),
         Duration::from_millis(50),
         5000,
