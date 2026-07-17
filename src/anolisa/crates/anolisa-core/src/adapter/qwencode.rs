@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! qwen extensions link <resource_root>
-//! qwen extensions enable <plugin>
+//! qwen extensions enable <plugin>  # only when native policy disables it
 //! ```
 //!
 //! The driver never writes `extension-store/state.json` or
@@ -16,12 +16,13 @@
 //! `.qwen-extension-install.json` records `type = "link"` and its source is
 //! exactly the receipt's resource root.
 //!
-//! Env contract: `QWEN_BIN` overrides the executable; `QWEN_HOME` follows
-//! Qwen's path semantics (tilde expansion and relative paths resolved from the
-//! current working directory).
+//! Env contract: `QWEN_BIN` overrides the executable. `QWEN_HOME` follows
+//! Qwen's process-environment and user-level `.env` bootstrap semantics,
+//! including tilde expansion and relative paths resolved from the current
+//! working directory.
 
 use std::collections::BTreeMap;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
@@ -97,11 +98,17 @@ impl FrameworkDriver for QwenCodeDriver {
                 reason: "resource root does not exist or is not a directory".to_string(),
             });
         }
-        let entry = ctx
-            .declared_bundle_entry
-            .as_deref()
-            .unwrap_or(QWEN_MANIFEST);
-        let manifest = root.join(entry);
+        if let Some(entry) = ctx.declared_bundle_entry.as_deref()
+            && entry != QWEN_MANIFEST
+        {
+            return Err(AdapterError::BundleInvalid {
+                root: root.clone(),
+                reason: format!(
+                    "Qwen bundle entry must be the native root manifest '{QWEN_MANIFEST}', got '{entry}'"
+                ),
+            });
+        }
+        let manifest = root.join(QWEN_MANIFEST);
         let bytes = std::fs::read(&manifest).map_err(|source| AdapterError::BundleInvalid {
             root: root.clone(),
             reason: format!(
@@ -152,7 +159,7 @@ impl FrameworkDriver for QwenCodeDriver {
                 reason: "cannot resolve Qwen home (no HOME and no QWEN_HOME)".to_string(),
             })?;
         let source = bundle.resource_root.display().to_string();
-        let link = build_qwen_command(&home, ["extensions", "link", source.as_str()]);
+        let link = build_qwen_link_command(&home, &source);
         Ok(DriverPlan {
             framework: self.name().to_string(),
             component: ctx.component.clone(),
@@ -221,15 +228,16 @@ impl FrameworkDriver for QwenCodeDriver {
         let layout = QwenLayout::from_claim(claim)?;
         ensure_current_home(&layout, ctx)?;
         ensure_supported_version(&layout.home, ctx)?;
+        let activation = probe_activation(&layout, ctx)?;
+        ensure_activation_readable(&activation)?;
 
         match probe_registration(&layout, claim, ctx)? {
             RegistrationProbe::Owned => {}
             RegistrationProbe::Absent => {
                 let source = claim.resource_root.display().to_string();
-                let output = ctx.ops.run_framework_cli(build_qwen_command(
-                    &layout.home,
-                    ["extensions", "link", source.as_str()],
-                ))?;
+                let output = ctx
+                    .ops
+                    .run_framework_cli(build_qwen_link_command(&layout.home, &source))?;
                 if !output.success() {
                     return Err(AdapterError::FrameworkCli {
                         program: qwen_program(),
@@ -262,23 +270,34 @@ impl FrameworkDriver for QwenCodeDriver {
             }
         }
 
-        let output = ctx.ops.run_framework_cli(build_qwen_command(
-            &layout.home,
-            ["extensions", "enable", layout.plugin.as_str()],
-        ))?;
-        if !output.success() {
-            return Err(AdapterError::FrameworkCli {
-                program: qwen_program(),
-                reason: cli_failure_reason("extensions enable", &output),
-            });
-        }
-
         match probe_activation(&layout, ctx)? {
             ActivationProbe::Enabled { .. } => Ok(()),
+            ActivationProbe::Disabled(_) => {
+                let output = ctx.ops.run_framework_cli(build_qwen_command(
+                    &layout.home,
+                    ["extensions", "enable", layout.plugin.as_str()],
+                ))?;
+                if !output.success() {
+                    return Err(AdapterError::FrameworkCli {
+                        program: qwen_program(),
+                        reason: cli_failure_reason("extensions enable", &output),
+                    });
+                }
+                match probe_activation(&layout, ctx)? {
+                    ActivationProbe::Enabled { .. } => Ok(()),
+                    other => Err(AdapterError::FrameworkCli {
+                        program: qwen_program(),
+                        reason: format!(
+                            "'extensions enable' exited successfully but activation postcondition failed: {}",
+                            other.reason()
+                        ),
+                    }),
+                }
+            }
             other => Err(AdapterError::FrameworkCli {
                 program: qwen_program(),
                 reason: format!(
-                    "'extensions enable' exited successfully but activation postcondition failed: {}",
+                    "refusing to mutate unreadable Qwen activation state: {}",
                     other.reason()
                 ),
             }),
@@ -299,8 +318,36 @@ impl FrameworkDriver for QwenCodeDriver {
         let registration_status = registration.status();
         let activation = probe_activation(&layout, ctx)?;
         let activation_status = activation.status();
-        let verification_supported = registration_status != ConditionStatus::Unknown
-            && activation_status != ConditionStatus::Unknown;
+        let (version_status, version_reason) = if detect.detected {
+            match qwen_version(&layout.home, ctx) {
+                Ok(version) if version >= MIN_QWEN_VERSION => (ConditionStatus::True, None),
+                Ok(version) => (
+                    ConditionStatus::False,
+                    Some(format!(
+                        "Qwen {version} is unsupported; qwencode adapters require >= {MIN_QWEN_VERSION}"
+                    )),
+                ),
+                Err(error) => (ConditionStatus::Unknown, Some(error.to_string())),
+            }
+        } else {
+            (
+                ConditionStatus::False,
+                Some("qwen CLI is unavailable; version cannot be verified".to_string()),
+            )
+        };
+        let (verification_status, verification_reason) = if version_status != ConditionStatus::True
+        {
+            (version_status, version_reason)
+        } else if registration_status == ConditionStatus::Unknown
+            || activation_status == ConditionStatus::Unknown
+        {
+            (
+                ConditionStatus::Unknown,
+                Some("Qwen native registration or activation state is unreadable".to_string()),
+            )
+        } else {
+            (ConditionStatus::True, None)
+        };
 
         let conditions = vec![
             AdapterCondition {
@@ -328,10 +375,8 @@ impl FrameworkDriver for QwenCodeDriver {
             },
             AdapterCondition {
                 kind: AdapterConditionKind::VerificationSupported,
-                status: bool_status(verification_supported),
-                reason: (!verification_supported).then(|| {
-                    "Qwen native registration or activation state is unreadable".to_string()
-                }),
+                status: verification_status,
+                reason: verification_reason,
                 resource: None,
             },
         ];
@@ -341,6 +386,7 @@ impl FrameworkDriver for QwenCodeDriver {
             bundle_status,
             registration_status,
             activation_status,
+            verification_status,
         );
         Ok(AdapterStatusReport {
             summary,
@@ -360,6 +406,11 @@ impl FrameworkDriver for QwenCodeDriver {
 
         let registration = probe_registration(&layout, claim, ctx)?;
         let activation = probe_activation(&layout, ctx)?;
+        if let ActivationProbe::Unknown(reason) = &activation {
+            return Ok(incomplete(format!(
+                "Qwen activation state is unreadable; refusing native cleanup: {reason}"
+            )));
+        }
         if matches!(registration, RegistrationProbe::Absent) && activation.is_clean() {
             return Ok(DisableReport {
                 cleanup_complete: true,
@@ -397,10 +448,9 @@ impl FrameworkDriver for QwenCodeDriver {
                 )));
             }
             let source = claim.resource_root.display().to_string();
-            let output = ctx.ops.run_framework_cli(build_qwen_command(
-                &layout.home,
-                ["extensions", "link", source.as_str()],
-            ))?;
+            let output = ctx
+                .ops
+                .run_framework_cli(build_qwen_link_command(&layout.home, &source))?;
             if !output.success()
                 || !matches!(
                     probe_registration(&layout, claim, ctx)?,
@@ -705,7 +755,30 @@ fn probe_activation(layout: &QwenLayout, ctx: &DriverCtx) -> Result<ActivationPr
     }
 }
 
+fn ensure_activation_readable(activation: &ActivationProbe) -> Result<(), AdapterError> {
+    if let ActivationProbe::Unknown(reason) = activation {
+        return Err(AdapterError::FrameworkCli {
+            program: qwen_program(),
+            reason: format!("refusing to mutate unreadable Qwen activation state: {reason}"),
+        });
+    }
+    Ok(())
+}
+
 fn ensure_supported_version(home: &Path, ctx: &DriverCtx) -> Result<(), AdapterError> {
+    let version = qwen_version(home, ctx)?;
+    if version < MIN_QWEN_VERSION {
+        return Err(AdapterError::FrameworkCli {
+            program: qwen_program(),
+            reason: format!(
+                "Qwen {version} is unsupported; qwencode adapters require >= {MIN_QWEN_VERSION}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn qwen_version(home: &Path, ctx: &DriverCtx) -> Result<Version, AdapterError> {
     let output = ctx
         .ops
         .run_framework_cli(build_qwen_command(home, ["--version"]))?;
@@ -724,15 +797,7 @@ fn ensure_supported_version(home: &Path, ctx: &DriverCtx) -> Result<(), AdapterE
                 version_output.trim()
             ),
         })?;
-    if version < MIN_QWEN_VERSION {
-        return Err(AdapterError::FrameworkCli {
-            program: qwen_program(),
-            reason: format!(
-                "Qwen {version} is unsupported; qwencode adapters require >= {MIN_QWEN_VERSION}"
-            ),
-        });
-    }
-    Ok(())
+    Ok(version)
 }
 
 fn ensure_current_home(layout: &QwenLayout, ctx: &DriverCtx) -> Result<(), AdapterError> {
@@ -809,6 +874,7 @@ where
     FrameworkCommand {
         program: qwen_program(),
         args: args.into_iter().map(Into::into).collect(),
+        stdin: None,
         env_set: vec![
             ("QWEN_HOME".to_string(), home.display().to_string()),
             ("NO_COLOR".to_string(), "1".to_string()),
@@ -817,6 +883,14 @@ where
         path_prepend: Vec::new(),
         timeout: CLI_TIMEOUT,
     }
+}
+
+fn build_qwen_link_command(home: &Path, source: &str) -> FrameworkCommand {
+    let mut command = build_qwen_command(home, ["extensions", "link", source]);
+    // `qwen extensions link` has no consent flag in Qwen 0.17. ANOLISA's
+    // explicit enable operation supplies the native prompt response directly.
+    command.stdin = Some(b"y\n".to_vec());
+    command
 }
 
 fn qwen_program() -> String {
@@ -828,7 +902,82 @@ fn qwen_program() -> String {
 
 fn qwen_home(user_home: Option<&Path>) -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
-    resolve_qwen_home(user_home, &cwd, std::env::var_os("QWEN_HOME").as_deref())
+    let configured = std::env::var_os("QWEN_HOME")
+        .filter(|value| !value.is_empty())
+        .or_else(|| user_home.and_then(qwen_home_from_user_env));
+    resolve_qwen_home(user_home, &cwd, configured.as_deref())
+}
+
+fn qwen_home_from_user_env(user_home: &Path) -> Option<OsString> {
+    // Match Qwen's preResolveHomeEnvOverrides order. It ignores unreadable
+    // files and keeps the first non-empty QWEN_HOME value.
+    [user_home.join(".qwen").join(".env"), user_home.join(".env")]
+        .into_iter()
+        .find_map(|path| {
+            let contents = std::fs::read_to_string(path).ok()?;
+            parse_qwen_home_env(&contents).map(OsString::from)
+        })
+}
+
+fn parse_qwen_home_env(contents: &str) -> Option<String> {
+    contents.lines().find_map(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return None;
+        }
+        let line = line
+            .strip_prefix("export")
+            .filter(|rest| rest.starts_with(char::is_whitespace))
+            .map(str::trim_start)
+            .unwrap_or(line);
+        let (key, raw_value) = line.split_once('=')?;
+        if key.trim() != "QWEN_HOME" {
+            return None;
+        }
+        let value = parse_dotenv_value(raw_value)?;
+        (!value.is_empty()).then_some(value)
+    })
+}
+
+fn parse_dotenv_value(raw: &str) -> Option<String> {
+    let raw = raw.trim_start();
+    let Some(quote) = raw
+        .chars()
+        .next()
+        .filter(|value| matches!(value, '\'' | '"' | '`'))
+    else {
+        return Some(
+            raw.split('#')
+                .next()
+                .unwrap_or_default()
+                .trim_end()
+                .to_string(),
+        );
+    };
+
+    let mut value = String::new();
+    let mut escaped = false;
+    for character in raw[quote.len_utf8()..].chars() {
+        if escaped {
+            match (quote, character) {
+                ('"', 'n') => value.push('\n'),
+                ('"', 'r') => value.push('\r'),
+                (_, value_character) if value_character == quote => value.push(value_character),
+                (_, value_character) => {
+                    value.push('\\');
+                    value.push(value_character);
+                }
+            }
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == quote {
+            return Some(value);
+        } else {
+            value.push(character);
+        }
+    }
+    None
 }
 
 fn resolve_qwen_home(
@@ -965,6 +1114,7 @@ fn summarize(
     bundle: ConditionStatus,
     registration: ConditionStatus,
     activation: ConditionStatus,
+    verification: ConditionStatus,
 ) -> AdapterSummary {
     if claim_status == ClaimStatus::CleanupFailed {
         return AdapterSummary::CleanupFailed;
@@ -973,12 +1123,14 @@ fn summarize(
         || bundle == ConditionStatus::False
         || registration == ConditionStatus::False
         || activation == ConditionStatus::False
+        || verification == ConditionStatus::False
     {
         return AdapterSummary::Degraded;
     }
     if bundle == ConditionStatus::Unknown
         || registration == ConditionStatus::Unknown
         || activation == ConditionStatus::Unknown
+        || verification == ConditionStatus::Unknown
     {
         return AdapterSummary::Unknown;
     }
@@ -1121,6 +1273,11 @@ mod tests {
             match command.args.as_slice() {
                 [version] if version == "--version" => Ok(self.success(self.version.clone())),
                 [extensions, link, source] if extensions == "extensions" && link == "link" => {
+                    assert_eq!(
+                        command.stdin.as_deref(),
+                        Some(&b"y\n"[..]),
+                        "Qwen link must receive explicit native consent"
+                    );
                     if self.link_effect {
                         let extension_dir = self.home.join("extensions").join("tokenless");
                         std::fs::create_dir_all(&extension_dir).map_err(|source| {
@@ -1305,12 +1462,7 @@ mod tests {
                     "extensions".to_string(),
                     "link".to_string(),
                     resource.display().to_string()
-                ],
-                vec![
-                    "extensions".to_string(),
-                    "enable".to_string(),
-                    "tokenless".to_string()
-                ],
+                ]
             ]
         );
         let report = driver.status(&claim, &ctx).expect("status");
@@ -1416,6 +1568,33 @@ mod tests {
     }
 
     #[test]
+    fn enable_refuses_unreadable_activation_before_mutation() {
+        let guard = EnvGuard::acquire();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let user_home = tmp.path().join("home");
+        std::fs::create_dir_all(&user_home).expect("home");
+        guard.set_bin(&fake_qwen(tmp.path()));
+        let home = user_home.join(".qwen");
+        let resource = resource_root(tmp.path());
+        let enablement = home.join("extensions").join(ENABLEMENT_FILE);
+        std::fs::create_dir_all(enablement.parent().expect("extensions dir"))
+            .expect("mkdir extensions");
+        std::fs::write(&enablement, b"{not-json").expect("malformed enablement");
+        let ops = SimOps::new(home.clone(), user_home.clone());
+        let layout = anolisa_platform::fs_layout::FsLayout::user(user_home.clone());
+        let ctx = ctx(&resource, &user_home, &ops, &layout);
+        let driver = QwenCodeDriver::new();
+        let claim = prepare_claim(&driver, &ctx).expect("claim");
+
+        let error = driver
+            .apply_enable(&claim, &ctx)
+            .expect_err("malformed shared state must fail closed");
+        assert!(matches!(error, AdapterError::FrameworkCli { .. }));
+        assert_eq!(ops.commands(), vec![vec!["--version".to_string()]]);
+        assert!(!home.join("extensions").join("tokenless").exists());
+    }
+
+    #[test]
     fn disable_uninstalls_owned_registration_and_policy() {
         let guard = EnvGuard::acquire();
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1470,6 +1649,30 @@ mod tests {
     }
 
     #[test]
+    fn disable_refuses_unreadable_activation_before_mutation() {
+        let guard = EnvGuard::acquire();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let user_home = tmp.path().join("home");
+        std::fs::create_dir_all(&user_home).expect("home");
+        guard.set_bin(&fake_qwen(tmp.path()));
+        let home = user_home.join(".qwen");
+        let resource = resource_root(tmp.path());
+        seed_owned_link(&home, &resource);
+        std::fs::write(home.join("extensions").join(ENABLEMENT_FILE), b"{not-json")
+            .expect("malformed enablement");
+        let ops = SimOps::new(home.clone(), user_home.clone());
+        let layout = anolisa_platform::fs_layout::FsLayout::user(user_home.clone());
+        let ctx = ctx(&resource, &user_home, &ops, &layout);
+        let driver = QwenCodeDriver::new();
+        let claim = prepare_claim(&driver, &ctx).expect("claim");
+
+        let report = driver.disable(&claim, &ctx).expect("disable");
+        assert!(!report.cleanup_complete);
+        assert!(ops.commands().is_empty());
+        assert!(home.join("extensions").join("tokenless").exists());
+    }
+
+    #[test]
     fn unsupported_version_fails_before_mutation() {
         let guard = EnvGuard::acquire();
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1492,6 +1695,31 @@ mod tests {
     }
 
     #[test]
+    fn status_degrades_when_qwen_version_is_unsupported() {
+        let guard = EnvGuard::acquire();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let user_home = tmp.path().join("home");
+        std::fs::create_dir_all(&user_home).expect("home");
+        guard.set_bin(&fake_qwen(tmp.path()));
+        let home = user_home.join(".qwen");
+        let resource = resource_root(tmp.path());
+        seed_owned_link(&home, &resource);
+        let mut ops = SimOps::new(home, user_home.clone());
+        ops.version = "0.16.9".to_string();
+        let layout = anolisa_platform::fs_layout::FsLayout::user(user_home.clone());
+        let ctx = ctx(&resource, &user_home, &ops, &layout);
+        let driver = QwenCodeDriver::new();
+        let claim = prepare_claim(&driver, &ctx).expect("claim");
+
+        let report = driver.status(&claim, &ctx).expect("status");
+        assert_eq!(report.summary, AdapterSummary::Degraded);
+        assert!(report.conditions.iter().any(|condition| {
+            condition.kind == AdapterConditionKind::VerificationSupported
+                && condition.status == ConditionStatus::False
+        }));
+    }
+
+    #[test]
     fn qwen_home_matches_qwen_path_resolution() {
         let user_home = Path::new("/home/alice");
         let cwd = Path::new("/work/project");
@@ -1507,6 +1735,58 @@ mod tests {
             resolve_qwen_home(Some(user_home), cwd, Some(OsStr::new(""))),
             Some(PathBuf::from("/home/alice/.qwen"))
         );
+    }
+
+    #[test]
+    fn qwen_home_matches_user_env_bootstrap_order() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let user_home = tmp.path().join("home");
+        std::fs::create_dir_all(user_home.join(".qwen")).expect("qwen home");
+        std::fs::write(
+            user_home.join(".qwen").join(".env"),
+            "QWEN_HOME=\"~/from-qwen-env\"\n",
+        )
+        .expect("qwen env");
+        std::fs::write(
+            user_home.join(".env"),
+            "export QWEN_HOME=~/from-home-env # lower priority\n",
+        )
+        .expect("home env");
+
+        let configured = qwen_home_from_user_env(&user_home).expect("configured home");
+        assert_eq!(
+            resolve_qwen_home(
+                Some(&user_home),
+                Path::new("/work/project"),
+                Some(&configured)
+            ),
+            Some(user_home.join("from-qwen-env"))
+        );
+
+        std::fs::write(user_home.join(".qwen").join(".env"), "OTHER=value\n")
+            .expect("qwen env without home");
+        let configured = qwen_home_from_user_env(&user_home).expect("fallback home");
+        assert_eq!(configured, OsString::from("~/from-home-env"));
+    }
+
+    #[test]
+    fn read_bundle_rejects_non_native_manifest_entry() {
+        let guard = EnvGuard::acquire();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let user_home = tmp.path().join("home");
+        std::fs::create_dir_all(&user_home).expect("home");
+        guard.set_bin(&fake_qwen(tmp.path()));
+        let resource = resource_root(tmp.path());
+        let ops = SimOps::new(user_home.join(".qwen"), user_home.clone());
+        let layout = anolisa_platform::fs_layout::FsLayout::user(user_home.clone());
+        let mut ctx = ctx(&resource, &user_home, &ops, &layout);
+        ctx.declared_bundle_entry = Some("alternate.json".to_string());
+
+        let error = QwenCodeDriver::new()
+            .read_bundle(&ctx)
+            .expect_err("alternate manifest must be rejected");
+        assert!(matches!(error, AdapterError::BundleInvalid { .. }));
+        assert!(ops.commands().is_empty());
     }
 
     #[test]

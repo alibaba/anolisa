@@ -610,6 +610,7 @@ fn base_cmd(args: Vec<String>, home: &Path, user_home: Option<&Path>) -> Framewo
     FrameworkCommand {
         program: openclaw_bin(),
         args,
+        stdin: None,
         env_set: vec![(
             "OPENCLAW_STATE_DIR".to_string(),
             home.to_string_lossy().into_owned(),

@@ -25,7 +25,7 @@
 //!    directory wins.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread::{self, JoinHandle};
@@ -1897,7 +1897,11 @@ fn run_capture(cmd: &FrameworkCommand) -> Result<CliOutput, AdapterError> {
     let mut command = Command::new(&cmd.program);
     command
         .args(&cmd.args)
-        .stdin(Stdio::null())
+        .stdin(if cmd.stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -1917,6 +1921,22 @@ fn run_capture(cmd: &FrameworkCommand) -> Result<CliOutput, AdapterError> {
             reason: format!("failed to spawn: {source}"),
         }
     })?;
+
+    if let Some(input) = &cmd.stdin {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| AdapterError::FrameworkCli {
+                program: cmd.program.clone(),
+                reason: "failed to open child stdin".to_string(),
+            })?;
+        stdin
+            .write_all(input)
+            .map_err(|source| AdapterError::FrameworkCli {
+                program: cmd.program.clone(),
+                reason: format!("failed to write child stdin: {source}"),
+            })?;
+    }
 
     let stdout_handle = child.stdout.take().map(|r| spawn_drain(r, OUTPUT_CAP));
     let stderr_handle = child.stderr.take().map(|r| spawn_drain(r, OUTPUT_CAP));
@@ -2685,6 +2705,7 @@ mod tests {
         let cmd = FrameworkCommand {
             program: "/bin/sh".to_string(),
             args: vec!["-c".to_string(), "printf hello; exit 0".to_string()],
+            stdin: None,
             env_set: Vec::new(),
             env_remove: Vec::new(),
             path_prepend: Vec::new(),
@@ -2697,10 +2718,29 @@ mod tests {
     }
 
     #[test]
+    fn run_capture_writes_configured_stdin() {
+        let cmd = FrameworkCommand {
+            program: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "IFS= read -r answer; [ \"$answer\" = yes ]".to_string(),
+            ],
+            stdin: Some(b"yes\n".to_vec()),
+            env_set: Vec::new(),
+            env_remove: Vec::new(),
+            path_prepend: Vec::new(),
+            timeout: Duration::from_secs(5),
+        };
+        let out = run_capture(&cmd).expect("run");
+        assert!(out.success(), "{out:?}");
+    }
+
+    #[test]
     fn run_capture_reports_nonzero_exit() {
         let cmd = FrameworkCommand {
             program: "/bin/sh".to_string(),
             args: vec!["-c".to_string(), "exit 3".to_string()],
+            stdin: None,
             env_set: Vec::new(),
             env_remove: Vec::new(),
             path_prepend: Vec::new(),
@@ -2716,6 +2756,7 @@ mod tests {
         let cmd = FrameworkCommand {
             program: "/bin/sh".to_string(),
             args: vec!["-c".to_string(), "sleep 30".to_string()],
+            stdin: None,
             env_set: Vec::new(),
             env_remove: Vec::new(),
             path_prepend: Vec::new(),
@@ -2731,6 +2772,7 @@ mod tests {
         let cmd = FrameworkCommand {
             program: "/no/such/binary/xyz".to_string(),
             args: Vec::new(),
+            stdin: None,
             env_set: Vec::new(),
             env_remove: Vec::new(),
             path_prepend: Vec::new(),

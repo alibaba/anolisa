@@ -783,6 +783,7 @@ fn base_cmd(program: &str, args: Vec<String>) -> FrameworkCommand {
     FrameworkCommand {
         program: program.to_string(),
         args,
+        stdin: None,
         env_set: Vec::new(),
         env_remove: Vec::new(),
         path_prepend: Vec::new(),

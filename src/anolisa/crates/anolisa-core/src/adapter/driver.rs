@@ -244,6 +244,8 @@ pub struct FrameworkCommand {
     pub program: String,
     /// Argument vector. Each element is passed verbatim; no shell parsing.
     pub args: Vec<String>,
+    /// Optional bytes written to the child's stdin before the pipe is closed.
+    pub stdin: Option<Vec<u8>>,
     /// Environment variables to set on the child.
     pub env_set: Vec<(String, String)>,
     /// Environment variables to remove from the child.

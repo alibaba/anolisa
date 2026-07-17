@@ -538,6 +538,7 @@ fn base_cmd(args: Vec<String>) -> FrameworkCommand {
     FrameworkCommand {
         program: hermes_bin(),
         args,
+        stdin: None,
         env_set: Vec::new(),
         env_remove: Vec::new(),
         path_prepend: Vec::new(),
