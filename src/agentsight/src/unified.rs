@@ -742,7 +742,9 @@ impl AgentSight {
                 &self.pid_agent_name_cache,
             );
 
-            // Backfill TokenRecord.agent from pid_agent_name_cache, falling back to comm
+            // Backfill TokenRecord.agent from pid_agent_name_cache, falling back
+            // to the *process* comm (/proc/<pid>/comm) and only then the event's
+            // per-event thread comm (which may be e.g. "HTTP client").
             for ar in &mut analysis_results {
                 if let crate::analyzer::AnalysisResult::Token(t) = ar {
                     if t.agent.is_none() {
@@ -750,6 +752,7 @@ impl AgentSight {
                             .pid_agent_name_cache
                             .get(&t.pid)
                             .cloned()
+                            .or_else(|| crate::discovery::scanner::read_comm(t.pid))
                             .or_else(|| Some(t.comm.clone()));
                     }
                 }

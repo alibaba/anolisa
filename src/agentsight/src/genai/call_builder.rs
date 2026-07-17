@@ -212,7 +212,12 @@ impl GenAIBuilder {
             token_usage,
             error,
             pid: pid_i32,
-            process_name: http.comm.clone(),
+            // Process name = the *process* comm (/proc/<pid>/comm), not the SSL
+            // event's per-event thread comm (which may be a library worker-thread
+            // name such as "HTTP client"). Falls back to the event comm only when
+            // /proc is unreadable (process already gone).
+            process_name: crate::discovery::scanner::read_comm(http.pid)
+                .unwrap_or_else(|| http.comm.clone()),
             agent_name: Some(agent_name.clone()),
             metadata: {
                 let mut meta = HashMap::new();
