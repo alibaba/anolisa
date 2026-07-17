@@ -56,19 +56,73 @@ pub(super) fn provider_output_preview(
 }
 
 pub(super) fn redact_sensitive_output(text: &str) -> (String, bool) {
-    let (redacted, _) = redact_home_path(text);
+    let (redacted, changed, _) = redact_sensitive_output_with_policy(text);
+    (redacted, changed)
+}
+
+pub(super) fn redact_sensitive_output_with_policy(text: &str) -> (String, bool, bool) {
+    let (redacted, home_changed) = redact_home_path(text);
+    let (redacted, private_key_changed) = redact_private_key_blocks(&redacted);
+    let mut changed = home_changed || private_key_changed;
+    let mut confirmation_required = private_key_changed;
 
     let mut lines = Vec::new();
-    let mut changed = false;
     for line in redacted.lines() {
         let (line, line_changed) = redact_sensitive_line(line);
         changed |= line_changed;
+        confirmation_required |= line_changed;
         lines.push(line);
     }
     let mut output = lines.join("\n");
     if text.ends_with('\n') {
         output.push('\n');
     }
+    (output, changed, confirmation_required)
+}
+
+fn redact_private_key_blocks(text: &str) -> (String, bool) {
+    const BEGIN: &str = "-----BEGIN ";
+    const END: &str = "-----END ";
+    const SUFFIX: &str = "PRIVATE KEY-----";
+
+    let mut output = String::with_capacity(text.len());
+    let mut cursor = 0;
+    let mut changed = false;
+    while let Some(relative_begin) = text[cursor..].find(BEGIN) {
+        let begin = cursor + relative_begin;
+        let marker_tail = &text[begin + BEGIN.len()..];
+        let Some(relative_begin_end) = marker_tail.find(SUFFIX) else {
+            break;
+        };
+        let begin_end = begin + BEGIN.len() + relative_begin_end + SUFFIX.len();
+        if text[begin..begin_end].contains('\n') {
+            output.push_str(&text[cursor..begin + BEGIN.len()]);
+            cursor = begin + BEGIN.len();
+            continue;
+        }
+
+        output.push_str(&text[cursor..begin]);
+        output.push_str("<redacted private key block>");
+        changed = true;
+        let after_begin = &text[begin_end..];
+        let Some(relative_end) = after_begin.find(END) else {
+            cursor = text.len();
+            break;
+        };
+        let end = begin_end + relative_end;
+        let end_tail = &text[end + END.len()..];
+        let Some(relative_end_marker) = end_tail.find(SUFFIX) else {
+            cursor = text.len();
+            break;
+        };
+        let end_marker_end = end + END.len() + relative_end_marker + SUFFIX.len();
+        if text[end..end_marker_end].contains('\n') {
+            cursor = text.len();
+            break;
+        }
+        cursor = end_marker_end;
+    }
+    output.push_str(&text[cursor..]);
     (output, changed)
 }
 
@@ -228,9 +282,14 @@ pub(super) fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> (String, boo
         return (value.to_string(), false);
     }
 
-    let mut end = max_bytes.min(value.len());
+    const MARKER: &str = "... <truncated>";
+    if max_bytes <= MARKER.len() {
+        return (MARKER[..max_bytes].to_string(), true);
+    }
+
+    let mut end = (max_bytes - MARKER.len()).min(value.len());
     while end > 0 && !value.is_char_boundary(end) {
         end -= 1;
     }
-    (format!("{}... <truncated>", &value[..end]), true)
+    (format!("{}{MARKER}", &value[..end]), true)
 }

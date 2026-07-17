@@ -1,8 +1,72 @@
 use super::*;
+use crate::types::{MemoryPressureFacts, MetricsConfidence};
+use std::collections::BTreeSet;
 
 struct FakeHook {
     matcher: HookMatcher,
     severity: FindingSeverity,
+}
+
+struct SpoofingBuiltinHook {
+    matcher: HookMatcher,
+}
+
+struct TypedMemoryHook {
+    matcher: HookMatcher,
+}
+
+impl BuiltinHook for TypedMemoryHook {
+    fn id(&self) -> &str {
+        &self.matcher.id
+    }
+
+    fn matcher(&self) -> &HookMatcher {
+        &self.matcher
+    }
+
+    fn evaluate(&self, _input: &HookInput) -> Option<HookFinding> {
+        Some(HookFinding {
+            hook_id: "memory-pressure".to_string(),
+            severity: FindingSeverity::Warning,
+            title: "changed presentation".to_string(),
+            description: "changed presentation".to_string(),
+            suggestion: "diagnose".to_string(),
+            skill: None,
+            cli_hint: None,
+            context_refs: Vec::new(),
+        })
+    }
+
+    fn builtin_facts(&self, _input: &HookInput) -> Option<BuiltinFindingFacts> {
+        Some(BuiltinFindingFacts::MemoryPressure(MemoryPressureFacts {
+            confidence: MetricsConfidence::High,
+            available_ratio: 0.08,
+            swap_ratio: Some(0.25),
+        }))
+    }
+}
+
+impl BuiltinHook for SpoofingBuiltinHook {
+    fn id(&self) -> &str {
+        &self.matcher.id
+    }
+
+    fn matcher(&self) -> &HookMatcher {
+        &self.matcher
+    }
+
+    fn evaluate(&self, _input: &HookInput) -> Option<HookFinding> {
+        Some(HookFinding {
+            hook_id: "payload-controlled-id".to_string(),
+            severity: FindingSeverity::Warning,
+            title: "test".to_string(),
+            description: "desc".to_string(),
+            suggestion: "fix it".to_string(),
+            skill: None,
+            cli_hint: None,
+            context_refs: Vec::new(),
+        })
+    }
 }
 
 impl BuiltinHook for FakeHook {
@@ -82,6 +146,7 @@ fn evaluate_returns_sorted_findings() {
             terminal_output_ref: None,
             terminal_output_bytes: 0,
         },
+        shell_environment_generation: None,
     };
 
     let findings = engine.evaluate(&block);
@@ -123,9 +188,65 @@ fn evaluate_with_disabled_skips_matching_hook() {
             terminal_output_ref: None,
             terminal_output_bytes: 0,
         },
+        shell_environment_generation: None,
     };
     let disabled = HashSet::from(["disabled-hook".to_string()]);
 
     assert!(engine.evaluate_with_disabled(&block, &disabled).is_empty());
     assert_eq!(engine.evaluate(&block).len(), 1);
+}
+
+#[test]
+fn builtin_provenance_uses_registered_hook_id_not_payload_hook_id() {
+    let mut engine = HookEngine::new();
+    engine.register(Box::new(SpoofingBuiltinHook {
+        matcher: HookMatcher {
+            id: "registered-builtin".to_string(),
+            commands: vec![],
+            command_patterns: vec![],
+            command_regex: None,
+            min_output_bytes: None,
+            exit_codes: None,
+            trigger: HookTrigger::OnComplete,
+        },
+    }));
+
+    let findings = engine.evaluate(&make_block("ls"));
+
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].hook_id, "payload-controlled-id");
+    assert_eq!(
+        findings[0].provenance(),
+        &HookProvenance::Builtin {
+            producer_registration_ids: BTreeSet::from(["registered-builtin".to_string()]),
+        }
+    );
+}
+
+#[test]
+fn engine_attaches_builtin_facts_outside_external_payload() {
+    let mut engine = HookEngine::new();
+    engine.register(Box::new(TypedMemoryHook {
+        matcher: HookMatcher {
+            id: "memory-pressure".to_string(),
+            commands: vec![],
+            command_patterns: vec![],
+            command_regex: None,
+            min_output_bytes: None,
+            exit_codes: None,
+            trigger: HookTrigger::OnComplete,
+        },
+    }));
+
+    let findings = engine.evaluate(&make_block("free -m"));
+
+    assert_eq!(findings.len(), 1);
+    assert!(matches!(
+        findings[0].builtin_facts.as_ref(),
+        Some(BuiltinFindingFacts::MemoryPressure(MemoryPressureFacts {
+            confidence: MetricsConfidence::High,
+            available_ratio: 0.08,
+            swap_ratio: Some(0.25),
+        }))
+    ));
 }

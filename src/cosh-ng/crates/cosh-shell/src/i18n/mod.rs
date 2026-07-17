@@ -60,12 +60,12 @@ mod tests {
         let i18n = I18n::new(Language::EnUs);
         let text = i18n.format(
             MessageId::StartupAdapterLine,
-            &[("adapter", "qwen"), ("shell", "bash")],
+            &[("adapter", "qwen"), ("shell", "bash"), ("approval", "auto")],
         );
 
         assert!(text.contains("qwen"));
         assert!(text.contains("bash"));
-        assert!(text.contains("{mode}"));
+        assert!(text.contains("{analysis}"));
     }
 
     #[test]
@@ -77,7 +77,10 @@ mod tests {
             .contains("/config language"));
         assert!(i18n
             .t(MessageId::RecommendationFooter)
-            .contains("[Copy] [Insert] [Details]"));
+            .contains("未执行任何命令"));
+        assert!(!i18n
+            .t(MessageId::RecommendationFooter)
+            .contains("[Details]"));
         assert!(i18n.t(MessageId::ApprovalToolInputLabel).contains("Tool"));
         assert!(i18n.t(MessageId::HelpSummaryConfig).contains("语言"));
         assert!(i18n

@@ -1,6 +1,8 @@
 use crate::tools::{classify_command_interaction, OutputStability};
 use crate::types::{CommandBlock, CommandStatus};
 
+const PROVIDER_COMMAND_MAX_BYTES: usize = 4 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderCommandFacts {
     pub id: String,
@@ -16,6 +18,7 @@ pub struct ProviderCommandFacts {
 }
 
 pub fn redact_provider_command_text(command: &str) -> String {
+    let (command, _) = super::output_text::redact_sensitive_output(command);
     let mut redacted = Vec::new();
     let mut redact_next = false;
     for token in command.split_whitespace() {
@@ -42,7 +45,22 @@ pub fn redact_provider_command_text(command: &str) -> String {
             redacted.push(token.to_string());
         }
     }
-    redacted.join(" ")
+    truncate_provider_command(redacted.join(" "))
+}
+
+fn truncate_provider_command(mut command: String) -> String {
+    const MARKER: &str = " ... <truncated>";
+    if command.len() <= PROVIDER_COMMAND_MAX_BYTES {
+        return command;
+    }
+
+    let mut end = PROVIDER_COMMAND_MAX_BYTES - MARKER.len();
+    while !command.is_char_boundary(end) {
+        end -= 1;
+    }
+    command.truncate(end);
+    command.push_str(MARKER);
+    command
 }
 
 pub fn terminal_output_id(shell_session_id: &str, command_id: &str) -> String {
@@ -66,14 +84,25 @@ pub fn provider_safe_command_facts(block: &CommandBlock) -> ProviderCommandFacts
     ProviderCommandFacts {
         id: block.id.clone(),
         command: redact_provider_command_text(&block.command),
-        cwd: block.cwd.clone(),
-        end_cwd: block.end_cwd.clone(),
+        cwd: redact_home_path(&block.cwd),
+        end_cwd: redact_home_path(&block.end_cwd),
         status,
         exit_code: block.exit_code,
         duration_ms: block.duration_ms,
         output_bytes: block.output.terminal_output_bytes,
         output_id,
         output_stability,
+    }
+}
+
+fn redact_home_path(value: &str) -> String {
+    let Ok(home) = std::env::var("HOME") else {
+        return value.to_string();
+    };
+    if home.is_empty() {
+        value.to_string()
+    } else {
+        value.replace(&home, "~")
     }
 }
 
@@ -152,4 +181,32 @@ pub fn provider_safe_command_fact_line(block: &CommandBlock) -> String {
         output_id = facts.output_id,
         output_stability = facts.output_stability,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_command_redacts_private_key_blocks_before_token_redaction() {
+        let command = "printf '%s' '-----BEGIN PRIVATE KEY-----\nsuper-secret-key-material\n-----END PRIVATE KEY-----' --token token-value";
+
+        let redacted = redact_provider_command_text(command);
+
+        assert!(redacted.contains("<redacted private key block>"));
+        assert!(redacted.contains("--token <redacted>"));
+        assert!(!redacted.contains("super-secret-key-material"));
+        assert!(!redacted.contains("token-value"));
+    }
+
+    #[test]
+    fn provider_command_is_utf8_safely_bounded() {
+        let command = format!("tool {} secret={}", "你".repeat(2_000), "x".repeat(8_000));
+
+        let redacted = redact_provider_command_text(&command);
+
+        assert!(redacted.len() <= PROVIDER_COMMAND_MAX_BYTES);
+        assert!(redacted.ends_with(" ... <truncated>"));
+        assert!(!redacted.contains(&"x".repeat(100)));
+    }
 }

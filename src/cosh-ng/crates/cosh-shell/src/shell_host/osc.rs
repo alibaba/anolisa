@@ -1,11 +1,14 @@
+use std::collections::HashSet;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
+use super::model::ShellEnvironmentObserver;
 use crate::types::{
-    CommandOrigin, ShellEvent, ShellEventKind, ShellHandoffRequest, SESSION_OUTPUT_REF_MAX_BYTES,
+    CommandOrigin, ShellEnvironmentSnapshot, ShellEvent, ShellEventKind, ShellHandoffRequest,
+    SESSION_OUTPUT_REF_MAX_BYTES,
 };
 
 #[cfg(test)]
@@ -23,6 +26,7 @@ const UNDERLINE_OFF: &[u8] = b"\x1b[24m";
 const ERASE_TO_END_OF_SCREEN: &[u8] = b"\x1b[J";
 const ERASE_TO_END_OF_LINE: &[u8] = b"\x1b[K";
 const BEL: u8 = b'\x07';
+const SHELL_PATH_MAX_BYTES: usize = 8 * 1024;
 
 #[derive(Debug)]
 struct CurrentCommand {
@@ -32,6 +36,7 @@ struct CurrentCommand {
     origin: CommandOrigin,
     started_at_ms: u64,
     output_start: usize,
+    shell_environment_generation: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -52,6 +57,8 @@ pub(super) struct OscParser {
     pub(super) captured_output_ref_bytes: usize,
     pending_command_origin: Option<PendingCommandOrigin>,
     pending_handoff_echo: Option<PendingHandoffEcho>,
+    pub(super) shell_environment_snapshot: Option<ShellEnvironmentSnapshot>,
+    environment_observer: Option<ShellEnvironmentObserver>,
 }
 
 #[derive(Debug, Clone)]
@@ -94,7 +101,14 @@ impl OscParser {
             captured_output_ref_bytes: 0,
             pending_command_origin: None,
             pending_handoff_echo: None,
+            shell_environment_snapshot: None,
+            environment_observer: None,
         }
+    }
+
+    pub(super) fn with_environment_observer(mut self, observer: ShellEnvironmentObserver) -> Self {
+        self.environment_observer = Some(observer);
+        self
     }
 
     pub(super) fn register_pending_handoff_origin(&mut self, request: &ShellHandoffRequest) {
@@ -154,6 +168,7 @@ impl OscParser {
                     component: Some("osc_parser".to_string()),
                     message: Some(format!("marker parse failed: {err}")),
                     command_origin: None,
+                    shell_environment_generation: None,
                 }),
             }
         }
@@ -164,7 +179,19 @@ impl OscParser {
             return Ok(());
         }
 
-        let session_id = marker.session_id.unwrap_or_else(|| self.session_id.clone());
+        if marker
+            .session_id
+            .as_deref()
+            .is_some_and(|session_id| session_id != self.session_id)
+        {
+            return Ok(());
+        }
+
+        let environment_generation = self.observe_shell_environment(&marker);
+        let session_id = marker
+            .session_id
+            .clone()
+            .unwrap_or_else(|| self.session_id.clone());
         let timestamp = marker.timestamp_ms.unwrap_or_else(now_ms);
 
         match marker.event.as_str() {
@@ -191,10 +218,20 @@ impl OscParser {
                     origin,
                     started_at_ms: timestamp,
                     output_start: self.clean.len(),
+                    shell_environment_generation: marker
+                        .path_trusted
+                        .unwrap_or(false)
+                        .then_some(environment_generation)
+                        .flatten(),
                 });
-                self.events.push(ShellEvent::command_started_with_origin(
+                let mut event = ShellEvent::command_started_with_origin(
                     session_id, command_id, command, cwd, timestamp, origin,
-                ));
+                );
+                event.shell_environment_generation = self
+                    .current
+                    .as_ref()
+                    .and_then(|current| current.shell_environment_generation);
+                self.events.push(event);
             }
             "precmd" => {
                 let Some(current) = self.current.take() else {
@@ -218,6 +255,7 @@ impl OscParser {
                         component: None,
                         message: None,
                         command_origin: None,
+                        shell_environment_generation: None,
                     });
                     return Ok(());
                 };
@@ -252,12 +290,52 @@ impl OscParser {
                 event.duration_ms = Some(timestamp.saturating_sub(current.started_at_ms));
                 event.terminal_output_bytes = Some(output.len() as u64);
                 event.command_origin = Some(current.origin);
+                event.shell_environment_generation = current.shell_environment_generation;
                 self.events.push(event);
             }
             _ => {}
         }
 
         Ok(())
+    }
+
+    fn observe_shell_environment(&mut self, marker: &Marker) -> Option<u64> {
+        if !matches!(marker.event.as_str(), "precmd" | "preexec") {
+            return None;
+        }
+        if marker.session_id.as_deref() != Some(self.session_id.as_str()) {
+            return None;
+        }
+        let path = marker.path.as_deref()?;
+        if path.len() > SHELL_PATH_MAX_BYTES {
+            return None;
+        }
+        let normalized = normalize_shell_path(path);
+        let marker_sequence = self
+            .shell_environment_snapshot
+            .as_ref()
+            .map_or(Some(1), |snapshot| snapshot.marker_sequence.checked_add(1))?;
+        let generation = self
+            .shell_environment_snapshot
+            .as_ref()
+            .map_or(Some(1), |snapshot| {
+                if snapshot.path == normalized {
+                    Some(snapshot.generation)
+                } else {
+                    snapshot.generation.checked_add(1)
+                }
+            })?;
+        let snapshot = ShellEnvironmentSnapshot {
+            session_id: self.session_id.clone(),
+            marker_sequence,
+            generation,
+            path: normalized,
+        };
+        self.shell_environment_snapshot = Some(snapshot.clone());
+        if let Some(observer) = &self.environment_observer {
+            observer.observe(snapshot);
+        }
+        Some(generation)
     }
 
     fn consume_pending_command_origin(&mut self, command: &str) -> CommandOrigin {
@@ -437,6 +515,7 @@ impl OscParser {
         event.duration_ms = Some(ended_at.saturating_sub(current.started_at_ms));
         event.terminal_output_bytes = Some(output.len() as u64);
         event.command_origin = Some(current.origin);
+        event.shell_environment_generation = current.shell_environment_generation;
         self.events.push(event);
         Ok(())
     }
@@ -503,6 +582,7 @@ impl OscParser {
             component: Some(reason.to_string()),
             message: Some("input intercepted before reaching bash".to_string()),
             command_origin: None,
+            shell_environment_generation: None,
         });
     }
 
@@ -511,6 +591,14 @@ impl OscParser {
             "control",
             "control input observed while relaying to bash",
             Some(input),
+        );
+    }
+
+    pub(super) fn push_shell_input_activity_event(&mut self) {
+        self.push_self_session_input_event(
+            "shell_input",
+            "user input observed while relaying to shell",
+            None,
         );
     }
 
@@ -545,6 +633,7 @@ impl OscParser {
             component: Some(component.to_string()),
             message: Some(message.to_string()),
             command_origin: None,
+            shell_environment_generation: None,
         });
     }
 }
@@ -564,6 +653,8 @@ struct Marker {
     command: Option<String>,
     reason: Option<String>,
     status: Option<i32>,
+    path: Option<String>,
+    path_trusted: Option<bool>,
 }
 
 fn command_finished_event(
@@ -606,8 +697,36 @@ fn command_finished_event(
                 }
             }),
             command_origin: None,
+            shell_environment_generation: None,
         },
     }
+}
+
+fn normalize_shell_path(path: &str) -> String {
+    let mut seen = HashSet::new();
+    path.split(':')
+        .filter_map(normalize_absolute_path)
+        .filter(|entry| seen.insert(entry.clone()))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+fn normalize_absolute_path(value: &str) -> Option<String> {
+    let path = Path::new(value);
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut normalized = PathBuf::from("/");
+    for component in path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::CurDir => {}
+            Component::ParentDir => normalized.push(".."),
+            Component::Normal(part) => normalized.push(part),
+            Component::Prefix(_) => return None,
+        }
+    }
+    Some(normalized.to_string_lossy().into_owned())
 }
 
 fn command_origin_from_handoff_request(request: &ShellHandoffRequest) -> CommandOrigin {

@@ -189,7 +189,9 @@ pub(super) fn complete_tool_invocation(
 ) {
     let incoming_id = invocation_id;
     let invocation_id = resolve_tool_invocation_id(state, run_id, incoming_id, event_index);
-    let transcript_seen = state.control.provider_shell_transcript_seen(&invocation_id);
+    let transcript_seen = state
+        .control
+        .provider_shell_transcript_seen(run_id, &invocation_id);
     let Some(idx) = state
         .activity
         .tool_invocations
@@ -225,6 +227,7 @@ pub(super) fn complete_tool_invocation(
         .is_some_and(|record| {
             shell_success_uses_transcript_surface(
                 state,
+                run_id,
                 &invocation_id,
                 &record.presentation,
                 status,
@@ -251,6 +254,7 @@ pub(super) fn complete_tool_invocation(
 
 fn shell_success_uses_transcript_surface(
     state: &InlineState,
+    run_id: &str,
     invocation_id: &str,
     presentation: &ToolPresentation,
     status: &str,
@@ -259,11 +263,11 @@ fn shell_success_uses_transcript_surface(
     matches!(status, "success" | "completed")
         && matches!(presentation.kind, ToolPresentationKind::ShellCommand)
         && (transcript_seen
-            || (state.control.provider_tool_is_shell(invocation_id)
+            || (state.control.provider_tool_is_shell(run_id, invocation_id)
                 && state
                     .control
                     .provider_tool()
-                    .output_text(invocation_id)
+                    .output_text(run_id, invocation_id)
                     .is_some()))
 }
 

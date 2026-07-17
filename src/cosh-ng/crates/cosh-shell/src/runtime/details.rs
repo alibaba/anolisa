@@ -679,6 +679,7 @@ mod tests {
                 terminal_output_ref: output_ref.map(ToString::to_string),
                 terminal_output_bytes: 123,
             },
+            shell_environment_generation: None,
         }
     }
 

@@ -46,6 +46,7 @@ where
     let mut native_candidate_echoed_len = 0;
     let mut replayed_prompt_prefix: Option<Vec<u8>> = None;
     let mut pending_terminal_restore = PendingTerminalRecovery::default();
+    let mut pending_prompt_restore = None;
     loop {
         sync_outer_terminal_winsize(master.as_raw_fd(), child.id(), last_winsize)?;
         if restore_terminal_after_interrupted_command(
@@ -64,7 +65,10 @@ where
             prompt,
             &mut native_candidate_echoed_len,
         )?;
-        let mut observer_action = event_observer(&parser.events, output)?;
+        let mut observer_action = merge_pending_prompt_restore(
+            event_observer(&parser.events, output)?,
+            &mut pending_prompt_restore,
+        );
         observer_action = resolve_pty_emit(
             master,
             child.id(),
@@ -79,14 +83,16 @@ where
             recovery_request_file,
             handoff_request_file,
         )?;
+        remember_pending_prompt_restore(&observer_action, &mut pending_prompt_restore);
         update_input_mode(input_mode, &observer_action);
         let mut hold_shell_output = observer_action.hold_shell_output();
         if !hold_shell_output && parser.display.len() > display_start {
-            write_pending_display(
+            write_pending_display_preserving_prompt_ghost(
                 parser,
                 output,
                 &mut display_start,
                 &mut replayed_prompt_prefix,
+                input_mode,
             )?;
             output.flush()?;
         }
@@ -108,7 +114,10 @@ where
                             output.flush()?;
                             display_start = cut;
                         }
-                        observer_action = event_observer(&parser.events, output)?;
+                        observer_action = merge_pending_prompt_restore(
+                            event_observer(&parser.events, output)?,
+                            &mut pending_prompt_restore,
+                        );
                         observer_action = resolve_pty_emit(
                             master,
                             child.id(),
@@ -123,19 +132,27 @@ where
                             recovery_request_file,
                             handoff_request_file,
                         )?;
+                        remember_pending_prompt_restore(
+                            &observer_action,
+                            &mut pending_prompt_restore,
+                        );
                         update_input_mode(input_mode, &observer_action);
                         hold_shell_output = observer_action.hold_shell_output();
                         if !hold_shell_output && parser.display.len() > display_start {
-                            write_pending_display(
+                            write_pending_display_preserving_prompt_ghost(
                                 parser,
                                 output,
                                 &mut display_start,
                                 &mut replayed_prompt_prefix,
+                                input_mode,
                             )?;
                             output.flush()?;
                         }
                     }
-                    observer_action = event_observer(&parser.events, output)?;
+                    observer_action = merge_pending_prompt_restore(
+                        event_observer(&parser.events, output)?,
+                        &mut pending_prompt_restore,
+                    );
                     observer_action = resolve_pty_emit(
                         master,
                         child.id(),
@@ -150,14 +167,16 @@ where
                         recovery_request_file,
                         handoff_request_file,
                     )?;
+                    remember_pending_prompt_restore(&observer_action, &mut pending_prompt_restore);
                     update_input_mode(input_mode, &observer_action);
                     hold_shell_output = observer_action.hold_shell_output();
                     if !hold_shell_output && parser.display.len() > display_start {
-                        write_pending_display(
+                        write_pending_display_preserving_prompt_ghost(
                             parser,
                             output,
                             &mut display_start,
                             &mut replayed_prompt_prefix,
+                            input_mode,
                         )?;
                         output.flush()?;
                     }
@@ -207,7 +226,10 @@ where
             prompt,
             &mut native_candidate_echoed_len,
         )?;
-        observer_action = event_observer(&parser.events, output)?;
+        observer_action = merge_pending_prompt_restore(
+            event_observer(&parser.events, output)?,
+            &mut pending_prompt_restore,
+        );
         observer_action = resolve_pty_emit(
             master,
             child.id(),
@@ -222,14 +244,16 @@ where
             recovery_request_file,
             handoff_request_file,
         )?;
+        remember_pending_prompt_restore(&observer_action, &mut pending_prompt_restore);
         update_input_mode(input_mode, &observer_action);
         hold_shell_output = observer_action.hold_shell_output();
         if !hold_shell_output && parser.display.len() > display_start {
-            write_pending_display(
+            write_pending_display_preserving_prompt_ghost(
                 parser,
                 output,
                 &mut display_start,
                 &mut replayed_prompt_prefix,
+                input_mode,
             )?;
             output.flush()?;
         }
@@ -272,6 +296,28 @@ fn write_pending_display<W: Write>(
     )?;
     *display_start = display_end;
     Ok(())
+}
+
+fn write_pending_display_preserving_prompt_ghost<W: Write>(
+    parser: &OscParser,
+    output: &mut W,
+    display_start: &mut usize,
+    replayed_prompt_prefix: &mut Option<Vec<u8>>,
+    input_mode: &Arc<Mutex<RawInputMode>>,
+) -> io::Result<()> {
+    write_pending_display(parser, output, display_start, replayed_prompt_prefix)?;
+    let ghost_text = input_mode.lock().ok().and_then(|mode| match &*mode {
+        RawInputMode::PromptGhost { text, .. } => Some(text.clone()),
+        _ => None,
+    });
+    if let Some(text) = ghost_text {
+        write_prompt_ghost(output, &text)?;
+    }
+    Ok(())
+}
+
+fn write_prompt_ghost<W: Write>(output: &mut W, text: &str) -> io::Result<()> {
+    write!(output, "\x1b[s\x1b[2m {text}\x1b[0m\x1b[u")
 }
 
 fn write_display_slice<W: Write>(
@@ -317,6 +363,7 @@ fn drain_raw_input_events<W: Write>(
     let native_mode = prompt.is_empty();
     while let Ok(event) = input_events.try_recv() {
         match event {
+            RawInputEvent::ShellInputActivity => parser.push_shell_input_activity_event(),
             RawInputEvent::CtrlC => {
                 parser.push_control_event("ctrl_c");
             }
@@ -359,6 +406,16 @@ fn drain_raw_input_events<W: Write>(
             }
             RawInputEvent::PromptGhostDismissed => {
                 parser.push_prompt_ghost_event("dismissed");
+            }
+            RawInputEvent::PromptGhostIntercept {
+                input,
+                suggestion_id,
+            } => {
+                let session_id = parser.session_id.clone();
+                let component = suggestion_id
+                    .map(|id| format!("prompt_ghost:{id}"))
+                    .unwrap_or_else(|| "prompt_ghost".to_string());
+                parser.push_intercept_event(&session_id, input, None, &component);
             }
             RawInputEvent::CandidateClearLine => {
                 if native_mode {
@@ -465,6 +522,32 @@ fn shell_has_completed_foreground_command(events: &[ShellEvent]) -> bool {
     })
 }
 
+fn merge_pending_prompt_restore(
+    observed: RawObserverAction,
+    pending: &mut Option<RawObserverAction>,
+) -> RawObserverAction {
+    match observed {
+        action @ RawObserverAction::RestorePrompt { .. } => {
+            pending.take();
+            action
+        }
+        action @ RawObserverAction::Continue => pending.take().unwrap_or(action),
+        action => {
+            pending.take();
+            action
+        }
+    }
+}
+
+fn remember_pending_prompt_restore(
+    action: &RawObserverAction,
+    pending: &mut Option<RawObserverAction>,
+) {
+    if matches!(action, RawObserverAction::RestorePrompt { .. }) {
+        *pending = Some(action.clone());
+    }
+}
+
 fn sync_outer_terminal_winsize(
     master_fd: i32,
     child_pid: u32,
@@ -548,30 +631,37 @@ fn resolve_pty_emit<W: Write>(
             parser.push_control_event("timeout_interrupt");
             Ok(RawObserverAction::Continue)
         }
-        RawObserverAction::RestorePrompt { ghost_text } => {
+        RawObserverAction::RestorePrompt {
+            ghost_text,
+            ghost_route,
+        } => {
             output.flush()?;
-            if parser.display.len() > *display_start {
-                return Ok(RawObserverAction::Continue);
-            }
             let raw_prompt = parser.last_prompt_display();
             let prompt = prompt_replay_bytes(raw_prompt);
             if prompt.is_empty() {
-                write_all_pty(master, b"\n")?;
+                return Ok(RawObserverAction::RestorePrompt {
+                    ghost_text,
+                    ghost_route,
+                });
+            }
+            if parser.display.len() > *display_start {
+                write_pending_display(parser, output, display_start, replayed_prompt_prefix)?;
             } else {
-                if let Some(text) = &ghost_text {
-                    if let Ok(mut mode) = input_mode.lock() {
-                        *mode = RawInputMode::PromptGhost(text.clone());
-                    }
-                }
                 output.write_all(prompt)?;
-                if let Some(text) = &ghost_text {
-                    write!(output, "\x1b[s\x1b[2m {text}\x1b[0m\x1b[u")?;
-                }
-                output.flush()?;
                 mark_pending_prompt_replayed(parser, raw_prompt, display_start);
                 *replayed_prompt_prefix = Some(raw_prompt.to_vec());
             }
-            Ok(RawObserverAction::RestorePrompt { ghost_text })
+            if let Some(text) = &ghost_text {
+                if let Ok(mut mode) = input_mode.lock() {
+                    *mode = RawInputMode::PromptGhost {
+                        text: text.clone(),
+                        route: ghost_route,
+                    };
+                }
+                write_prompt_ghost(output, text)?;
+            }
+            output.flush()?;
+            Ok(RawObserverAction::Continue)
         }
         other => Ok(other),
     }
@@ -820,5 +910,105 @@ mod tests {
 
         assert_eq!(String::from_utf8_lossy(&output), "bash-4.4$ echo ok\r\n");
         assert!(replayed_prompt_prefix.is_none());
+    }
+
+    #[test]
+    fn prompt_restore_waits_through_passive_observer_cycles() {
+        let restore = RawObserverAction::RestorePrompt {
+            ghost_text: Some("analyze failure".to_string()),
+            ghost_route: Default::default(),
+        };
+        let mut pending = None;
+        remember_pending_prompt_restore(&restore, &mut pending);
+
+        assert_eq!(
+            merge_pending_prompt_restore(RawObserverAction::Continue, &mut pending),
+            restore
+        );
+        assert!(pending.is_none());
+    }
+
+    #[test]
+    fn active_observer_action_supersedes_waiting_prompt_restore() {
+        let restore = RawObserverAction::RestorePrompt {
+            ghost_text: Some("analyze failure".to_string()),
+            ghost_route: Default::default(),
+        };
+        let mut pending = Some(restore);
+
+        let observed = RawObserverAction::HoldShellOutput;
+        assert_eq!(
+            merge_pending_prompt_restore(observed.clone(), &mut pending),
+            observed
+        );
+        assert!(pending.is_none());
+    }
+
+    #[test]
+    fn foreground_passthrough_cancels_waiting_prompt_restore() {
+        let restore = RawObserverAction::RestorePrompt {
+            ghost_text: Some("analyze failure".to_string()),
+            ghost_route: Default::default(),
+        };
+        let mut pending = Some(restore);
+
+        assert_eq!(
+            merge_pending_prompt_restore(RawObserverAction::RawPassthrough, &mut pending),
+            RawObserverAction::RawPassthrough
+        );
+        assert!(pending.is_none());
+    }
+
+    #[test]
+    fn prompt_fragment_after_restore_keeps_ghost_last_on_screen() {
+        let mut parser = parser_for_test("fragmented-prompt-ghost");
+        feed_shell_ready(&mut parser);
+        parser
+            .feed(b"\x1b]0;root@host\x07")
+            .expect("feed title fragment");
+        let mut output = Vec::new();
+        let mut display_start = 0;
+        let mut replayed_prompt_prefix = None;
+        let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+        let mut pending_terminal_restore = PendingTerminalRecovery::default();
+        let mut null = File::open("/dev/null").expect("open null");
+
+        let action = resolve_pty_emit(
+            &mut null,
+            1,
+            -1,
+            &mut parser,
+            &mut output,
+            &input_mode,
+            RawObserverAction::RestorePrompt {
+                ghost_text: Some("objdump".to_string()),
+                ghost_route: Default::default(),
+            },
+            &mut display_start,
+            &mut replayed_prompt_prefix,
+            &mut pending_terminal_restore,
+            Path::new("/tmp/cosh-test-recovery"),
+            Path::new("/tmp/cosh-test-handoff"),
+        )
+        .expect("restore prompt");
+        assert_eq!(action, RawObserverAction::Continue);
+
+        parser
+            .feed(b"\x1b[?2004h[root@host]# ")
+            .expect("feed prompt fragment");
+        write_pending_display_preserving_prompt_ghost(
+            &parser,
+            &mut output,
+            &mut display_start,
+            &mut replayed_prompt_prefix,
+            &input_mode,
+        )
+        .expect("write prompt fragment");
+
+        assert!(
+            output.ends_with(b"\x1b[s\x1b[2m objdump\x1b[0m\x1b[u"),
+            "{}",
+            String::from_utf8_lossy(&output)
+        );
     }
 }

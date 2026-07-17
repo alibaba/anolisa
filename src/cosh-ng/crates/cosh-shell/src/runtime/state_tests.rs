@@ -2,7 +2,9 @@ use std::time::{Duration, Instant};
 
 use crate::agent::run::PendingAgentRequest;
 use crate::hooks::state::HookRuntimeState;
-use crate::runtime::prelude::{AgentMode, AgentRequest, CommandBlock, CommandStatus, OutputRefs};
+use crate::runtime::prelude::{
+    AgentMode, AgentRequest, AgentRunOrigin, CommandBlock, CommandStatus, OutputRefs,
+};
 use crate::runtime::state::{
     ActivityState, AgentRunState, AnalysisThrottle, ApprovalRequestKind, ApprovalRequestStatus,
     ApprovalState, ContinuityState, ControlState, ProviderShellRequestKind, QuestionState,
@@ -29,6 +31,7 @@ fn approval_state_generates_request_ids_from_owned_queue() {
     state.requests.push(RuntimeApprovalRequest {
         id: "req-1".to_string(),
         run_id: "run-1".to_string(),
+        origin: AgentRunOrigin::Standard,
         session_id: "session-1".to_string(),
         cwd: "/tmp".to_string(),
         source: "agent",
@@ -70,6 +73,20 @@ fn agent_run_state_prioritizes_requests_before_held_text() {
 }
 
 #[test]
+fn agent_run_queue_keeps_runtime_only_origin() {
+    let mut state = AgentRunState::default();
+    let mut pending = pending_agent_request("insight", false);
+    pending.origin = AgentRunOrigin::InsightPrompt;
+
+    state.queue_request(pending);
+
+    assert_eq!(
+        state.queued_requests.front().map(|request| request.origin),
+        Some(AgentRunOrigin::InsightPrompt)
+    );
+}
+
+#[test]
 fn hook_runtime_state_tracks_blocks_followed_by_user_input() {
     let mut state = HookRuntimeState::default();
 
@@ -99,9 +116,59 @@ fn remaining_runtime_state_owners_keep_their_own_defaults() {
     assert!(continuity.facts.items.is_empty());
 }
 
+#[test]
+fn interactive_shell_handoffs_are_isolated_by_run_and_tool_id() {
+    let mut control = ControlState::default();
+    assert!(control.record_provider_shell_command_from_tool_call(
+        "run-1",
+        "tool-1",
+        r#"{"command":"sudo first"}"#,
+    ));
+    control.record_provider_tool_output_delta(
+        "run-1",
+        "tool-1",
+        "stderr",
+        "sudo: a terminal is required\n",
+    );
+    let first = control
+        .queue_interactive_shell_handoff_for_tool_failure(
+            "run-1",
+            "tool-1",
+            "error",
+            AgentRunOrigin::InsightPrompt,
+        )
+        .expect("first handoff");
+
+    assert!(control.record_provider_shell_command_from_tool_call(
+        "run-2",
+        "tool-1",
+        r#"{"command":"sudo second"}"#,
+    ));
+    control.record_provider_tool_output_delta(
+        "run-2",
+        "tool-1",
+        "stderr",
+        "sudo: a terminal is required\n",
+    );
+    let second = control
+        .queue_interactive_shell_handoff_for_tool_failure(
+            "run-2",
+            "tool-1",
+            "error",
+            AgentRunOrigin::AutoFailure,
+        )
+        .expect("second handoff");
+
+    assert_ne!(first.id, second.id);
+    assert_eq!(second.run_id, "run-2");
+    assert_eq!(second.command, "sudo second");
+    assert_eq!(second.origin, AgentRunOrigin::AutoFailure);
+}
+
 fn pending_agent_request(id: &str, before_held_text: bool) -> PendingAgentRequest {
     PendingAgentRequest {
         request: agent_request(id),
+        origin: AgentRunOrigin::Standard,
         selectable_after_event_index: None,
         before_held_text,
     }
@@ -127,6 +194,7 @@ fn agent_request(id: &str) -> AgentRequest {
                 terminal_output_ref: None,
                 terminal_output_bytes: 0,
             },
+            shell_environment_generation: None,
         },
         context_blocks: Vec::new(),
         context_hints: Vec::new(),

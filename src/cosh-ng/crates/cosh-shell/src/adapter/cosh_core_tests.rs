@@ -26,6 +26,7 @@ fn test_request() -> AgentRequest {
                 terminal_output_ref: None,
                 terminal_output_bytes: 0,
             },
+            shell_environment_generation: None,
         },
         context_blocks: vec![],
         context_hints: vec![],
@@ -79,17 +80,20 @@ fn prepare_invocation_approval_modes() {
 }
 
 #[test]
-fn prepare_invocation_prompt_leaves_shell_tool_trigger_to_cosh_core() {
+fn prepare_invocation_prompt_includes_cosh_shell_contract() {
     let inv = test_adapter().prepare_invocation(&test_request(), CoshApprovalMode::Auto);
 
     assert!(inv
         .prompt
         .contains("Handle this natural-language shell prompt request"));
-    assert!(!inv.prompt.contains("cosh-shell Agent contract"));
-    assert!(!inv
+    assert!(inv.prompt.contains("cosh-shell Agent contract"));
+    assert!(inv
         .prompt
         .contains("Always emit a provider permission request"));
-    assert!(!inv.prompt.contains("cosh-core adapter compatibility"));
+    assert!(inv.prompt.contains("State the diagnostic conclusion first"));
+    assert!(inv
+        .prompt
+        .contains("at most one primary recommendation command"));
 }
 
 #[test]

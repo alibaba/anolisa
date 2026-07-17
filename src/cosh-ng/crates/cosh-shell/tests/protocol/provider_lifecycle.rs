@@ -65,6 +65,7 @@ fn make_request(id: &str) -> AgentRequest {
                 terminal_output_ref: None,
                 terminal_output_bytes: 0,
             },
+            shell_environment_generation: None,
         },
         context_blocks: Vec::new(),
         context_hints: Vec::new(),

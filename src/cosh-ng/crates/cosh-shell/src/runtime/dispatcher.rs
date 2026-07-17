@@ -3,14 +3,16 @@ use std::io::Write;
 use crate::activity::runtime::{record_approved_shell_handoff_blocks, render_activity_rows};
 use crate::agent::events::flush_held_agent_events;
 use crate::agent::failed_command::{
-    block_end_event_index, render_failed_command_cards, render_post_failure_actions,
-    should_auto_analyze_failed_block, start_agent_for_block, FailedCommandAgentStartOptions,
-    FailedCommandAnalysisTrigger,
+    block_end_event_index, collect_failed_command_insights, failed_command_candidate,
+    failed_command_intervention, render_post_failure_actions, start_agent_for_block,
+    FailedCommandAgentStartOptions, FailedCommandAnalysisTrigger,
 };
 use crate::agent::intercept::render_intercept_agent_guidance;
 use crate::agent::poll::{poll_active_agent_run, poll_active_agent_run_deferred};
-use crate::agent::run::{start_agent_run, stop_active_agent_run_without_rendering};
+use crate::agent::run::{start_agent_run_with_origin, stop_active_agent_run_without_rendering};
 use crate::approval::runtime::render_approval_actions;
+use crate::insight::model::InterventionDecision;
+use crate::insight::policy::InterventionGates;
 use crate::question::runtime::{
     render_question_answer_actions, render_question_cancel_actions, render_question_focus_actions,
     render_question_input_actions, render_question_toggle_actions,
@@ -24,6 +26,7 @@ use crate::runtime::hooks::{
     handle_consultation_events, record_blocks_followed_by_user_input, record_command_hook_findings,
     render_queued_hook_consultation, render_recorded_hook_findings,
 };
+use crate::runtime::insight::render_pending_command_insight;
 use crate::runtime::prelude::{
     build_command_blocks, findings_from_blocks, AdapterInstance, CommandBlock, ShellEvent,
     ShellEventKind,
@@ -178,7 +181,7 @@ fn render_inline_guidance_from_batch<W: Write>(
     record_blocks_followed_by_user_input(events, &ledger.blocks, state);
     handle_consultation_events(action_events, &ledger.blocks, adapter, state, output)?;
     render_queued_hook_consultation(state, output)?;
-    record_command_hook_findings(events, &ledger.blocks, state);
+    record_command_hook_findings(events, &ledger.blocks, state, event_index_base);
     render_recorded_hook_findings(&ledger.blocks, state, output)?;
     render_intercept_agent_guidance(
         action_events,
@@ -197,11 +200,57 @@ fn render_inline_guidance_from_batch<W: Write>(
     )?;
 
     let analysis_mode = state.analysis_mode;
-    for block in ledger
+    let auto_runtime_available =
+        state.agent_run.active.is_none() && pending_card_capture(state).is_none();
+    let auto_blocks = ledger
         .blocks
         .iter()
-        .filter(|block| should_auto_analyze_failed_block(events, block, analysis_mode))
-    {
+        .rev()
+        .filter(|block| {
+            auto_runtime_available
+                && block.origin == crate::types::CommandOrigin::UserInteractive
+                && !state.hooks.block_followed_by_user_input(&block.id)
+                && block_end_event_index(events, block).is_some_and(|idx| idx >= event_index_base)
+        })
+        .collect::<Vec<_>>();
+    for block in auto_blocks {
+        if state.agent_run.active.is_some() {
+            break;
+        }
+        let Some(candidate) = failed_command_candidate(events, block) else {
+            continue;
+        };
+        let user_has_not_continued = !state.hooks.block_followed_by_user_input(&block.id);
+        let gates = InterventionGates {
+            same_dispatch_batch: block_end_event_index(events, block)
+                .is_some_and(|idx| idx >= event_index_base),
+            input_empty: user_has_not_continued,
+            foreground_idle: !shell_busy,
+            active_runtime_idle: state.agent_run.active.is_none()
+                && pending_card_capture(state).is_none(),
+            user_has_not_continued,
+            user_interactive_origin: block.origin == crate::types::CommandOrigin::UserInteractive,
+            budget_available: !state.insight_budget.is_suppressed(
+                &candidate.suppression_key,
+                candidate.severity,
+                block.ended_at_ms,
+            ),
+        };
+        if !matches!(
+            failed_command_intervention(events, block, &candidate, analysis_mode, gates),
+            InterventionDecision::AutoAnalyze { .. }
+        ) {
+            continue;
+        }
+        if state.insight_budget.should_suppress(
+            candidate.suppression_key,
+            candidate.severity,
+            block.ended_at_ms,
+        ) {
+            continue;
+        }
+        // Auto starts from the same precmd batch, whose native prompt is already cached.
+        state.agent_run.native_prompt_after_run = true;
         start_agent_for_block(
             block,
             &ledger.blocks,
@@ -217,7 +266,12 @@ fn render_inline_guidance_from_batch<W: Write>(
         output.flush()?;
     }
 
-    render_failed_command_cards(events, &ledger.blocks, state, output)?;
+    collect_failed_command_insights(events, &ledger.blocks, state, output, event_index_base)?;
+    if pending_card_capture(state).is_none() {
+        render_pending_command_insight(state, output)?;
+    } else {
+        state.pending_command_insight = None;
+    }
 
     render_post_failure_actions(
         action_events,
@@ -263,7 +317,8 @@ fn render_owned_shell_prompt<W: Write>(
     }
 
     if std::env::var("COSH_SHELL_ISOLATED").is_ok() {
-        write!(output, "cosh-osc$ ")?;
+        let prompt = std::env::var("COSH_POC_PS1").unwrap_or_else(|_| "cosh-osc$ ".to_string());
+        write!(output, "{prompt}")?;
     } else {
         state.trigger_pty_prompt = true;
     }
@@ -342,8 +397,8 @@ impl ActivityConsumer {
         let handoff_activity_ids = record_approved_shell_handoff_blocks(state, blocks);
         render_activity_rows(state, &handoff_activity_ids, output)?;
         if !card_capture_pending && state.agent_run.active.is_none() {
-            for request in shell_handoff_continuation_requests(state) {
-                start_agent_run(&request, adapter, state, output, None)?;
+            for (request, origin) in shell_handoff_continuation_requests(state) {
+                start_agent_run_with_origin(&request, origin, adapter, state, output, None)?;
             }
         }
         Ok(Vec::new())

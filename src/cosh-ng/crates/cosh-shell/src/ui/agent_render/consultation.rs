@@ -78,10 +78,9 @@ impl RatatuiInlineRenderer {
             content_width,
         ));
         lines.push(format!(
-            "  [{}] [{}] [Details] {}",
+            "  [{}] [{}]",
             i18n.t(crate::MessageId::HookConsultationAnalyzeAction),
-            i18n.t(crate::MessageId::HookConsultationIgnoreAction),
-            model.details_id
+            i18n.t(crate::MessageId::HookConsultationIgnoreAction)
         ));
         lines
     }
@@ -167,7 +166,6 @@ fn render_consultation_card(
             ),
             Style::default().fg(Color::DarkGray),
         ),
-        Span::raw(format!(" [Details] {}", model.details_id)),
     ]))
     .render(chunks[3], buffer);
 }
@@ -225,7 +223,12 @@ mod tests {
         assert!(!rendered.contains("Hook:"), "{rendered}");
         assert!(!rendered.contains("Confidence:"), "{rendered}");
         assert!(!rendered.contains("reason:"), "{rendered}");
-        assert!(rendered.contains("[Analyze] [Ignore] [Details] hook-cmd-1-memory-pressure"));
+        assert!(rendered.contains("[Analyze] [Ignore]"));
+        assert!(!rendered.contains("[Details]"), "{rendered}");
+        assert!(
+            !rendered.contains("hook-cmd-1-memory-pressure"),
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -244,7 +247,12 @@ mod tests {
         assert!(rendered.contains("Available memory is low [critical]:"));
         assert!(rendered.contains("发现: Available memory is low and swap usage is high."));
         assert!(rendered.contains("建议动作: Analyze the output before taking action."));
-        assert!(rendered.contains("[分析] [忽略] [Details] hook-cmd-1-memory-pressure"));
+        assert!(rendered.contains("[分析] [忽略]"));
+        assert!(!rendered.contains("[Details]"), "{rendered}");
+        assert!(
+            !rendered.contains("hook-cmd-1-memory-pressure"),
+            "{rendered}"
+        );
         assert!(!rendered.contains("Confidence:"), "{rendered}");
         assert!(!rendered.contains("置信度:"), "{rendered}");
         assert!(!rendered.contains("[Analyze]"), "{rendered}");

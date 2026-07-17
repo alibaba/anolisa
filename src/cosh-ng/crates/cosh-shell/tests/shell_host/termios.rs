@@ -48,18 +48,13 @@ fn transparent_bash_preserves_user_stty_modes() {
 
     let ledger = ledger_from_output(&output);
     let command_output = ledger_output_refs_text(&ledger);
-    assert!(command_output.contains("__ECHO_OFF__"), "{command_output}");
-    assert!(!command_output.contains("__ECHO_ON__"), "{command_output}");
-    assert!(command_output.contains("__ISIG_OFF__"), "{command_output}");
-    assert!(!command_output.contains("__ISIG_ON__"), "{command_output}");
-    assert!(
-        command_output.contains("__ICANON_OFF__"),
-        "{command_output}"
-    );
-    assert!(
-        !command_output.contains("__ICANON_ON__"),
-        "{command_output}"
-    );
+    let output_lines = command_output.lines().map(str::trim).collect::<Vec<_>>();
+    assert!(output_lines.contains(&"__ECHO_OFF__"), "{command_output}");
+    assert!(!output_lines.contains(&"__ECHO_ON__"), "{command_output}");
+    assert!(output_lines.contains(&"__ISIG_OFF__"), "{command_output}");
+    assert!(!output_lines.contains(&"__ISIG_ON__"), "{command_output}");
+    assert!(output_lines.contains(&"__ICANON_OFF__"), "{command_output}");
+    assert!(!output_lines.contains(&"__ICANON_ON__"), "{command_output}");
     assert!(ledger
         .blocks
         .iter()

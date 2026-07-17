@@ -122,6 +122,11 @@ pub(crate) fn request_can_receive_host_executed_result(
         && request.provider_shell_request_kind.is_control_permission()
         && request.request_id.is_some()
         && request.tool_use_id.is_some()
+        && state
+            .agent_run
+            .active
+            .as_ref()
+            .is_some_and(|run| run.request.id == request.run_id)
         && active_provider_supports_host_executed_shell(state)
 }
 
@@ -192,6 +197,7 @@ pub(crate) fn approval_resolution_agent_request(request: &RuntimeApprovalRequest
                 terminal_output_ref: None,
                 terminal_output_bytes: 0,
             },
+            shell_environment_generation: None,
         },
         context_blocks: Vec::new(),
         context_hints: Vec::new(),
@@ -278,6 +284,7 @@ mod tests {
         RuntimeApprovalRequest {
             id: "req-1".to_string(),
             run_id: "run-1".to_string(),
+            origin: AgentRunOrigin::Standard,
             session_id: "sess-1".to_string(),
             cwd: "/tmp".to_string(),
             source: "control-protocol",

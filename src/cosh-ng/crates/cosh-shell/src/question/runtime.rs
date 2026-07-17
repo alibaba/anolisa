@@ -14,6 +14,8 @@ pub(crate) struct RuntimeUserQuestion {
     allow_free_text: bool,
     selection_mode: QuestionSelectionMode,
     provider_request_id: Option<String>,
+    provider_owner_request_id: Option<String>,
+    origin: AgentRunOrigin,
     answer: Option<String>,
 }
 
@@ -22,7 +24,9 @@ pub(crate) struct QuestionAnswerRun {
     question: String,
     answer: String,
     provider_request_id: Option<String>,
+    provider_owner_request_id: Option<String>,
     pub(crate) request: AgentRequest,
+    pub(crate) origin: AgentRunOrigin,
 }
 
 pub(crate) fn pending_question_capture(state: &InlineState) -> Option<RawInputCapture> {
@@ -91,13 +95,20 @@ pub(crate) fn render_question_answer_actions<W: Write>(
         };
 
         render_question_answer_notice(state, &answer_run, output)?;
-        if respond_question_answer_to_provider(state, &answer_run) {
-            output.flush()?;
-            continue;
+        match respond_question_answer_to_provider(state, &answer_run) {
+            ProviderQuestionResponse::Responded => {
+                output.flush()?;
+                continue;
+            }
+            ProviderQuestionResponse::OwnerUnavailable => {}
+            ProviderQuestionResponse::NotProviderBacked
+            | ProviderQuestionResponse::DeliveryFailed => {
+                stop_active_agent_run_without_rendering(state, output)?;
+            }
         }
-        stop_active_agent_run_without_rendering(state, output)?;
-        start_agent_run(
+        start_agent_run_with_origin(
             &answer_run.request,
+            answer_run.origin,
             adapter,
             state,
             output,
@@ -109,17 +120,31 @@ pub(crate) fn render_question_answer_actions<W: Write>(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderQuestionResponse {
+    NotProviderBacked,
+    Responded,
+    OwnerUnavailable,
+    DeliveryFailed,
+}
+
 fn respond_question_answer_to_provider(
     state: &InlineState,
     answer_run: &QuestionAnswerRun,
-) -> bool {
+) -> ProviderQuestionResponse {
     let Some(request_id) = answer_run.provider_request_id.as_ref() else {
-        return false;
+        return ProviderQuestionResponse::NotProviderBacked;
+    };
+    let Some(owner_request_id) = answer_run.provider_owner_request_id.as_ref() else {
+        return ProviderQuestionResponse::OwnerUnavailable;
     };
     let Some(active_run) = state.agent_run.active.as_ref() else {
-        return true;
+        return ProviderQuestionResponse::OwnerUnavailable;
     };
-    active_run
+    if active_run.request.id != *owner_request_id {
+        return ProviderQuestionResponse::OwnerUnavailable;
+    };
+    if active_run
         .handle
         .respond_approval(ApprovalResponse {
             request_id: request_id.clone(),
@@ -130,6 +155,11 @@ fn respond_question_answer_to_provider(
             },
         })
         .is_ok()
+    {
+        ProviderQuestionResponse::Responded
+    } else {
+        ProviderQuestionResponse::DeliveryFailed
+    }
 }
 
 pub(crate) fn render_question_cancel_actions<W: Write>(
@@ -157,6 +187,16 @@ pub(crate) fn render_question_cancel_actions<W: Write>(
         else {
             continue;
         };
+        let active_run_owns_question = state.questions.items[question_index]
+            .provider_owner_request_id
+            .as_ref()
+            .is_some_and(|owner_request_id| {
+                state
+                    .agent_run
+                    .active
+                    .as_ref()
+                    .is_some_and(|run| run.request.id == *owner_request_id)
+            });
 
         clear_active_question_panel(state, output)?;
         state.questions.items[question_index].answer = Some(String::new());
@@ -165,7 +205,9 @@ pub(crate) fn render_question_cancel_actions<W: Write>(
         }
         state.questions.active_panel_id = None;
         state.questions.active_panel_height = 0;
-        stop_active_agent_run_without_rendering(state, output)?;
+        if active_run_owns_question {
+            stop_active_agent_run_without_rendering(state, output)?;
+        }
         state.agent_run.needs_prompt_after_run = true;
         output.flush()?;
     }
@@ -385,6 +427,7 @@ pub(crate) fn agent_request_from_pending_question_answer(
     let raw_answer = question_answer_text_from_event(event)?;
     let answer = resolve_question_answer(&state.questions.items[question_index], &raw_answer)?;
     let question = state.questions.items[question_index].question.clone();
+    let origin = state.questions.items[question_index].origin;
     let mut request = agent_request_from_intercepted_input(event, sequence, true)?;
     let user_input = format!("Answer to pending Agent question: {question}\nUser answer: {answer}");
     request.id = format!("agent-answer-{question_id}-{sequence}");
@@ -403,7 +446,11 @@ pub(crate) fn agent_request_from_pending_question_answer(
         provider_request_id: state.questions.items[question_index]
             .provider_request_id
             .clone(),
+        provider_owner_request_id: state.questions.items[question_index]
+            .provider_owner_request_id
+            .clone(),
         request,
+        origin,
     })
 }
 
@@ -506,6 +553,8 @@ fn is_question_answer_card_event(event: &ShellEvent) -> bool {
 pub(crate) fn record_user_questions(
     state: &mut InlineState,
     governed_events: &[GovernedEvent],
+    origin: AgentRunOrigin,
+    provider_owner_request_id: Option<&str>,
 ) -> Vec<String> {
     let mut ids = Vec::new();
     for event in governed_events {
@@ -532,6 +581,8 @@ pub(crate) fn record_user_questions(
             allow_free_text: *allow_free_text,
             selection_mode: *selection_mode,
             provider_request_id: provider_request_id.clone(),
+            provider_owner_request_id: provider_owner_request_id.map(ToString::to_string),
+            origin,
             answer: None,
         });
         state.questions.pending_id = Some(id.clone());
@@ -590,39 +641,5 @@ pub(crate) fn render_user_questions<W: Write>(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn record_user_questions_localizes_empty_question_fallback() {
-        let mut state = InlineState {
-            language: Language::ZhCn,
-            ..InlineState::default()
-        };
-        let events = vec![GovernedEvent {
-            decision: GovernanceDecision::Display,
-            policy_decision: GovernancePolicyDecision::DisplayOnly,
-            event: AgentEvent::UserQuestion {
-                run_id: "run-1".to_string(),
-                provider_request_id: None,
-                question: String::new(),
-                options: Vec::new(),
-                allow_free_text: true,
-                selection_mode: QuestionSelectionMode::Single,
-            },
-            reason: "display".to_string(),
-            display_text: String::new(),
-            auto_execute: false,
-        }];
-
-        let ids = record_user_questions(&mut state, &events);
-
-        assert_eq!(ids, vec!["q-1".to_string()]);
-        assert_eq!(state.questions.items[0].question, "Agent 需要你的输入");
-        let mut output = Vec::new();
-        render_user_questions(&mut state, &ids, &mut output).expect("render question");
-        let text = String::from_utf8(output).expect("utf8 question");
-        assert!(text.contains("Agent 需要你的输入"), "{text}");
-        assert!(!text.contains("Agent needs your input"), "{text}");
-    }
-}
+#[path = "tests.rs"]
+mod tests;

@@ -10,7 +10,7 @@ mod relay_action;
 mod spawn;
 
 pub(crate) use mode::{update_input_mode, RawInputMode};
-pub use mode::{RawInputCapture, RawObserverAction};
+pub use mode::{PromptGhostRoute, RawInputCapture, RawObserverAction};
 pub(crate) use pty::{
     set_pty_winsize, signal_foreground_process_group, signal_process_group, write_all_pty,
 };
@@ -22,6 +22,7 @@ pub(super) const CTRL_U: u8 = 0x15;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RawInputEvent {
+    ShellInputActivity,
     CtrlC,
     CandidateRedraw {
         input: Vec<u8>,
@@ -30,6 +31,10 @@ pub(crate) enum RawInputEvent {
     CandidateCommit(Vec<u8>),
     PromptGhostClear,
     PromptGhostDismissed,
+    PromptGhostIntercept {
+        input: String,
+        suggestion_id: Option<String>,
+    },
     CandidateClearLine,
     UserIntercept(String, InterceptReason),
     CardFocus(String, usize),

@@ -6,6 +6,7 @@ pub(crate) fn record_approval_requests(
     state: &mut InlineState,
     governed_events: &[GovernedEvent],
     run_request: Option<&AgentRequest>,
+    origin: AgentRunOrigin,
     ignore_tool_calls: bool,
 ) -> Vec<String> {
     let mut ids = Vec::new();
@@ -23,6 +24,7 @@ pub(crate) fn record_approval_requests(
             &session_id,
             &cwd,
             original_user_request.as_deref(),
+            origin,
             ignore_tool_calls,
         );
 
@@ -85,6 +87,7 @@ pub(crate) fn approval_request_from_governed_event(
     state: &InlineState,
     event: &GovernedEvent,
     run_request: Option<&AgentRequest>,
+    origin: AgentRunOrigin,
     ignore_tool_calls: bool,
 ) -> Option<RuntimeApprovalRequest> {
     let session_id = run_request
@@ -100,6 +103,7 @@ pub(crate) fn approval_request_from_governed_event(
         &session_id,
         &cwd,
         original_user_request.as_deref(),
+        origin,
         ignore_tool_calls,
     )
 }
@@ -110,6 +114,7 @@ fn approval_request_from_event(
     session_id: &str,
     cwd: &str,
     original_user_request: Option<&str>,
+    origin: AgentRunOrigin,
     ignore_tool_calls: bool,
 ) -> Option<RuntimeApprovalRequest> {
     if event.policy_decision != GovernancePolicyDecision::NeedsUserApproval {
@@ -139,6 +144,7 @@ fn approval_request_from_event(
             Some(RuntimeApprovalRequest {
                 id: next_approval_id(state),
                 run_id: run_id.clone(),
+                origin,
                 session_id: session_id.to_string(),
                 cwd: cwd.to_string(),
                 source: "agent",
@@ -165,6 +171,7 @@ fn approval_request_from_event(
             Some(RuntimeApprovalRequest {
                 id: next_approval_id(state),
                 run_id: run_id.clone(),
+                origin,
                 session_id: session_id.to_string(),
                 cwd: cwd.to_string(),
                 source: "agent",
@@ -206,6 +213,7 @@ fn approval_request_from_event(
             Some(RuntimeApprovalRequest {
                 id: next_approval_id(state),
                 run_id: run_id.clone(),
+                origin,
                 session_id: session_id.to_string(),
                 cwd: cwd.to_string(),
                 source: "control-protocol",

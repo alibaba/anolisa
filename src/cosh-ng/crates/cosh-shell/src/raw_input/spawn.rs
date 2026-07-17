@@ -89,7 +89,10 @@ where
                             continue;
                         }
                     }
-                    RawInputMode::PromptGhost(ghost_text) => {
+                    RawInputMode::PromptGhost {
+                        text: ghost_text,
+                        route,
+                    } => {
                         card_state.reset();
                         let mut relay = InputRelayContext {
                             master: &mut master,
@@ -100,7 +103,8 @@ where
                             native_line_state: &mut native_line_state,
                             exit_tracker: &mut exit_tracker,
                         };
-                        if relay_prompt_ghost_input(&buffer[..n], &ghost_text, &mut relay)? {
+                        if relay_prompt_ghost_input(&buffer[..n], &ghost_text, &route, &mut relay)?
+                        {
                             continue;
                         }
                     }
@@ -181,7 +185,10 @@ pub(crate) fn spawn_raw_action_relay(
                                 continue;
                             }
                         }
-                        RawInputMode::PromptGhost(ghost_text) => {
+                        RawInputMode::PromptGhost {
+                            text: ghost_text,
+                            route,
+                        } => {
                             card_state.reset();
                             let mut relay = InputRelayContext {
                                 master: &mut master,
@@ -192,7 +199,7 @@ pub(crate) fn spawn_raw_action_relay(
                                 native_line_state: &mut native_line_state,
                                 exit_tracker: &mut exit_tracker,
                             };
-                            if relay_prompt_ghost_input(&bytes, &ghost_text, &mut relay)? {
+                            if relay_prompt_ghost_input(&bytes, &ghost_text, &route, &mut relay)? {
                                 continue;
                             }
                         }

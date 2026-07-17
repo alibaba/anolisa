@@ -18,6 +18,8 @@ mod display_policy;
 mod feedback_policy;
 #[path = "runtime_tests/hint_details.rs"]
 mod hint_details;
+#[path = "runtime_tests/memory_insight.rs"]
+mod memory_insight;
 #[path = "runtime_tests/session_input.rs"]
 mod session_input;
 #[path = "runtime_tests/suppression_budget.rs"]
@@ -90,6 +92,7 @@ fn block(exit_code: i32) -> CommandBlock {
             terminal_output_ref: Some("/tmp/out".to_string()),
             terminal_output_bytes: 10,
         },
+        shell_environment_generation: None,
     }
 }
 
@@ -143,7 +146,7 @@ fn command_hook_findings_skip_user_interrupted_exit_one() {
     );
     let events = vec![started, ctrl_c, finished];
 
-    record_command_hook_findings(&events, &[block], &mut state);
+    record_command_hook_findings(&events, &[block], &mut state, 0);
 
     assert!(state.hooks.findings.is_empty());
 }
@@ -163,7 +166,7 @@ fn command_hook_findings_skip_interactive_cancel_output_without_ctrl_c_event() {
     block.command = "sudo df -h".to_string();
     block.output.terminal_output_ref = Some(output_ref);
 
-    record_command_hook_findings(&[], &[block], &mut state);
+    record_command_hook_findings(&[], &[block], &mut state, 0);
 
     assert!(state.hooks.findings.is_empty());
 }

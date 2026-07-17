@@ -83,6 +83,11 @@ pub(crate) fn run_raw(adapter_name: &str, shell_kind: RawShellKind) -> i32 {
         || std::env::var("COSH_SHELL_ISOLATED").as_deref() == Ok("1");
     if isolated {
         config.native_mode = false;
+        if let Ok(prompt) = std::env::var("COSH_POC_PS1") {
+            if !prompt.is_empty() {
+                config.prompt = prompt;
+            }
+        }
     }
     if config.native_mode {
         config.input_classifier = config.input_classifier.with_conservative(true);
@@ -102,6 +107,10 @@ pub(crate) fn run_raw(adapter_name: &str, shell_kind: RawShellKind) -> i32 {
 
     let adapter = build_adapter(kind);
     let mut inline_state = InlineState::with_raw_session_dir(&config.work_dir);
+    let snapshot_publisher = inline_state.shell_rewrite.start_worker();
+    config.set_shell_environment_observer(move |snapshot| {
+        snapshot_publisher.publish(snapshot);
+    });
     if startup_health_scan_enabled_for_env(&cosh_config.health) {
         inline_state.startup_health.pending =
             Some(spawn_startup_health_scan(cosh_config.health.clone()));
@@ -147,6 +156,9 @@ pub(crate) fn run_raw(adapter_name: &str, shell_kind: RawShellKind) -> i32 {
             return 2;
         }
     };
+
+    config.clear_shell_environment_observer();
+    inline_state.shell_rewrite.shutdown();
 
     match raw_result {
         Ok(output) => output.exit_status.unwrap_or(0),

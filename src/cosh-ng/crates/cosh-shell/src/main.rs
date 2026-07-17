@@ -18,6 +18,8 @@ mod hooks;
 mod i18n;
 #[allow(dead_code, unused_imports)]
 mod input;
+#[allow(dead_code)]
+mod insight;
 #[allow(dead_code, unused_imports)]
 mod journal;
 #[allow(dead_code, unused_imports)]

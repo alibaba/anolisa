@@ -2,11 +2,9 @@ use std::fs;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{render_inline_guidance, shell_has_active_foreground_command};
-use crate::hooks::state::RuntimeHookDisplay;
 use crate::runtime::prelude::{
     default_builtin_hooks, AdapterInstance, ExternalHookConfig, ExternalHookSource,
-    FakeAgentAdapter, FindingSeverity, HookEngine, HookMatcher, HookTrigger, ShellEvent,
-    ShellEventKind,
+    FakeAgentAdapter, HookEngine, HookMatcher, HookTrigger, ShellEvent, ShellEventKind,
 };
 use crate::runtime::state::InlineState;
 
@@ -126,15 +124,19 @@ fn inline_natural_language_intercept_waits_for_open_command_to_finish() {
 
     let rendered = String::from_utf8(output).expect("utf8 output");
     assert!(rendered.contains("Thinking..."));
-    assert!(rendered.contains("Received shell prompt request: 你好"));
+    let expected = match crate::language_config_status().effective {
+        crate::Language::EnUs => "Received shell prompt request: 你好",
+        crate::Language::ZhCn => "已收到 Shell 提示请求：你好",
+    };
+    assert!(rendered.contains(expected));
     assert!(!shell_has_active_foreground_command(&events));
 }
 
 #[test]
-fn smart_mode_top_memory_finding_renders_consultation_card() {
+fn smart_mode_top_memory_finding_uses_insight_owner_without_consultation() {
     let output_ref = write_hook_output("top-card", TOP_MEMORY_PRESSURE_OUTPUT);
     let events = command_events(
-        "top -b -n1 | head -20",
+        "top -b -n1",
         &output_ref,
         TOP_MEMORY_PRESSURE_OUTPUT.len() as u64,
     );
@@ -143,39 +145,27 @@ fn smart_mode_top_memory_finding_renders_consultation_card() {
     let mut output = Vec::new();
 
     render_inline_guidance(&events, &adapter, "bash", &mut state, &mut output)
-        .expect("queue hook card");
+        .expect("record memory insight");
 
     assert!(state.hooks.pending_consultation.is_none());
-    assert_eq!(state.hooks.pending_consultation_queue.len(), 1);
-    assert!(output.is_empty());
-
-    std::thread::sleep(Duration::from_millis(300));
-    render_inline_guidance(&events, &adapter, "bash", &mut state, &mut output)
-        .expect("render queued hook card");
-
-    let rendered = String::from_utf8(output).expect("utf8 output");
-    assert!(rendered.contains("Available memory is low"), "{rendered}");
-    assert!(rendered.contains("Finding:"), "{rendered}");
-    assert!(rendered.contains("Recommended action:"), "{rendered}");
-    assert!(!rendered.contains("Hook: memory-pressure"), "{rendered}");
-    assert!(
-        !rendered.contains("Confidence: high; reason: allowed"),
-        "{rendered}"
-    );
-    assert!(rendered.contains("[Analyze] [Ignore]"), "{rendered}");
-    assert!(
-        rendered.contains("[Details] hook-cmd-1-memory-pressure"),
-        "{rendered}"
-    );
-    assert!(state.hooks.pending_consultation.is_some());
-    assert_eq!(state.hooks.pending_consultation_queue.len(), 0);
+    assert!(state.hooks.pending_consultation_queue.is_empty());
+    assert!(state.hooks.findings.is_empty());
+    assert!(state.pending_command_insight.is_none());
+    assert!(matches!(
+        state.pending_input_ghost_route,
+        crate::raw_input::PromptGhostRoute::AgentIntercept { .. }
+    ));
+    assert!(state.pending_input_ghost_binding.is_some());
+    assert!(String::from_utf8(output)
+        .expect("utf8 output")
+        .contains("Insight:"));
 }
 
 #[test]
 fn smart_mode_success_finding_after_next_input_is_silent_without_card() {
     let output_ref = write_hook_output("top-continued-input", TOP_MEMORY_PRESSURE_OUTPUT);
     let mut events = command_events(
-        "top -b -n1 | head -20",
+        "top -b -n1",
         &output_ref,
         TOP_MEMORY_PRESSURE_OUTPUT.len() as u64,
     );
@@ -194,16 +184,35 @@ fn smart_mode_success_finding_after_next_input_is_silent_without_card() {
     assert!(!rendered.contains("Hook finding"), "{rendered}");
     assert!(!rendered.contains("[Analyze] [Ignore]"), "{rendered}");
     assert!(state.hooks.pending_consultation.is_none());
-    assert!(state.hooks.findings.iter().any(|hint| {
-        hint.display == RuntimeHookDisplay::Silent && hint.display_reason == "user-continued-input"
-    }));
+    assert!(state.hooks.findings.is_empty());
+    assert!(state.pending_command_insight.is_none());
 }
 
 #[test]
-fn analyze_consultation_starts_agent_with_hook_finding() {
-    let output_ref = write_hook_output("top-analyze", TOP_MEMORY_PRESSURE_OUTPUT);
+fn smart_mode_memory_finding_after_component_input_is_silent() {
+    let output_ref = write_hook_output("top-component-input", TOP_MEMORY_PRESSURE_OUTPUT);
     let mut events = command_events(
-        "top -b -n1 | head -20",
+        "top -b -n1",
+        &output_ref,
+        TOP_MEMORY_PRESSURE_OUTPUT.len() as u64,
+    );
+    let mut continued = ShellEvent::user_input_intercepted("test-session", "approve");
+    continued.component = Some("shell_input".to_string());
+    events.push(continued);
+    let mut state = state_with_builtin_hooks();
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+
+    render_inline_guidance(&events, &adapter, "bash", &mut state, &mut Vec::new())
+        .expect("record silent memory finding");
+
+    assert!(state.pending_command_insight.is_none());
+}
+
+#[test]
+fn builtin_memory_insight_does_not_offer_legacy_analyze_action() {
+    let output_ref = write_hook_output("top-analyze", TOP_MEMORY_PRESSURE_OUTPUT);
+    let events = command_events(
+        "top -b -n1",
         &output_ref,
         TOP_MEMORY_PRESSURE_OUTPUT.len() as u64,
     );
@@ -212,68 +221,25 @@ fn analyze_consultation_starts_agent_with_hook_finding() {
     let mut output = Vec::new();
 
     render_inline_guidance(&events, &adapter, "bash", &mut state, &mut output)
-        .expect("queue hook card");
-    std::thread::sleep(Duration::from_millis(300));
-    render_inline_guidance(&events, &adapter, "bash", &mut state, &mut output)
-        .expect("render queued hook card");
-    let card_id = state
-        .hooks
-        .pending_consultation
-        .as_ref()
-        .expect("pending consultation")
-        .card_id
-        .clone();
-    let mut approve = ShellEvent::user_input_intercepted("test-session", card_id);
-    approve.component = Some("card".to_string());
-    approve.message = Some("approve".to_string());
-    approve.started_at_ms = Some(220);
-    events.push(approve);
-
-    render_inline_guidance(&events, &adapter, "bash", &mut state, &mut output)
-        .expect("handle hook analyze");
-    std::thread::sleep(Duration::from_millis(20));
-    render_inline_guidance(&events, &adapter, "bash", &mut state, &mut output)
-        .expect("poll hook analyze");
+        .expect("record memory insight");
 
     let rendered = String::from_utf8(output).expect("utf8 output");
-    assert!(
-        rendered.contains("╭ Agent") || rendered.contains("Agent:"),
-        "{rendered}"
-    );
-    assert!(
-        rendered.contains("Evidence excerpt received by fake adapter"),
-        "{rendered}"
-    );
-    let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(!rendered.contains("Inspect output_ref"), "{rendered}");
-    assert!(normalized.contains("MiB Mem"), "{rendered}");
-    assert!(normalized.contains("java"), "{rendered}");
-    let hook_hint = state
-        .hooks
-        .findings
-        .iter()
-        .find(|hint| hint.id == "hook-cmd-1-memory-pressure")
-        .expect("memory-pressure hook finding");
-    assert_eq!(
-        hook_hint.related_hook_ids,
-        vec!["high-memory-process".to_string()]
-    );
-    assert_eq!(hook_hint.topic, "memory");
-    assert_eq!(hook_hint.entity_key, "system-memory");
-    assert_eq!(hook_hint.effective_severity, FindingSeverity::Critical);
-    assert_eq!(
-        hook_hint.suppression_key,
-        "memory:system-memory:memory-pressure:top:user_interactive"
-    );
-    assert!(hook_hint.recommended_skill.is_none());
-    assert_eq!(hook_hint.output_ref.as_deref(), Some(output_ref.as_str()));
+    assert!(!rendered.contains("[Analyze] [Ignore]"), "{rendered}");
+    assert!(state.agent_run.active.is_none());
+    assert!(state.hooks.findings.is_empty());
+    assert!(state.pending_command_insight.is_none());
+    assert!(matches!(
+        state.pending_input_ghost_route,
+        crate::raw_input::PromptGhostRoute::AgentIntercept { .. }
+    ));
+    assert!(state.pending_input_ghost_binding.is_some());
 }
 
 #[test]
-fn ignore_consultation_does_not_start_agent() {
+fn builtin_memory_insight_does_not_offer_legacy_ignore_action() {
     let output_ref = write_hook_output("top-ignore", TOP_MEMORY_PRESSURE_OUTPUT);
-    let mut events = command_events(
-        "top -b -n1 | head -20",
+    let events = command_events(
+        "top -b -n1",
         &output_ref,
         TOP_MEMORY_PRESSURE_OUTPUT.len() as u64,
     );
@@ -282,35 +248,24 @@ fn ignore_consultation_does_not_start_agent() {
     let mut output = Vec::new();
 
     render_inline_guidance(&events, &adapter, "bash", &mut state, &mut output)
-        .expect("queue hook card");
-    std::thread::sleep(Duration::from_millis(300));
-    render_inline_guidance(&events, &adapter, "bash", &mut state, &mut output)
-        .expect("render queued hook card");
-    let card_id = state
-        .hooks
-        .pending_consultation
-        .as_ref()
-        .expect("pending consultation")
-        .card_id
-        .clone();
-    let mut deny = ShellEvent::user_input_intercepted("test-session", card_id);
-    deny.component = Some("card".to_string());
-    deny.message = Some("deny".to_string());
-    deny.started_at_ms = Some(220);
-    events.push(deny);
-
-    render_inline_guidance(&events, &adapter, "bash", &mut state, &mut output)
-        .expect("handle hook ignore");
+        .expect("record memory insight");
 
     assert!(state.agent_run.active.is_none());
     assert!(state.hooks.pending_consultation.is_none());
+    assert!(state.hooks.pending_consultation_queue.is_empty());
+    assert!(state.pending_command_insight.is_none());
+    assert!(matches!(
+        state.pending_input_ghost_route,
+        crate::raw_input::PromptGhostRoute::AgentIntercept { .. }
+    ));
+    assert!(state.pending_input_ghost_binding.is_some());
 }
 
 #[test]
-fn smart_mode_ps_warning_renders_hint_without_card() {
+fn smart_mode_ps_warning_uses_insight_owner_without_hook_hint() {
     let output_ref = write_hook_output("ps-hint", PS_HIGH_MEMORY_OUTPUT);
     let events = command_events(
-        "ps aux --sort=-%mem | head",
+        "ps aux --sort=-%mem",
         &output_ref,
         PS_HIGH_MEMORY_OUTPUT.len() as u64,
     );
@@ -322,13 +277,16 @@ fn smart_mode_ps_warning_renders_hint_without_card() {
         .expect("render hook hint");
 
     let rendered = String::from_utf8(output).expect("utf8 output");
-    assert!(rendered.contains("Hook finding"), "{rendered}");
-    assert!(
-        rendered.contains("Use /hooks analyze|ignore|details hook-cmd-1-high-memory-process."),
-        "{rendered}"
-    );
+    assert!(!rendered.contains("Hook finding"), "{rendered}");
     assert!(!rendered.contains("[Analyze] [Ignore]"), "{rendered}");
     assert!(state.hooks.pending_consultation.is_none());
+    assert!(state.hooks.findings.is_empty());
+    assert!(state.pending_command_insight.is_none());
+    assert!(matches!(
+        state.pending_input_ghost_route,
+        crate::raw_input::PromptGhostRoute::AgentIntercept { .. }
+    ));
+    assert!(state.pending_input_ghost_binding.is_some());
 }
 
 #[cfg(unix)]

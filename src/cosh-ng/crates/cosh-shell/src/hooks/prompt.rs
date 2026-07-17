@@ -103,11 +103,10 @@ pub(crate) fn prompt_hint_for_finding(
 }
 
 pub(crate) fn finding_markdown_for_aggregate(
-    block: &CommandBlock,
+    _block: &CommandBlock,
     aggregate: &AggregatedHookFinding,
     i18n: I18n,
 ) -> String {
-    let output_id = command_output_id(block);
     let mut lines = vec![
         format!("## {}", i18n.t(MessageId::HookFindingMarkdownTitle)),
         String::new(),
@@ -122,10 +121,6 @@ pub(crate) fn finding_markdown_for_aggregate(
         i18n.format(
             MessageId::HookFindingMarkdownFindingLine,
             &[("finding", aggregate.primary.title.as_str())],
-        ),
-        i18n.format(
-            MessageId::HookFindingMarkdownOutputRefLine,
-            &[("output_ref", output_id.as_str())],
         ),
         i18n.format(
             MessageId::HookFindingMarkdownSuggestionLine,

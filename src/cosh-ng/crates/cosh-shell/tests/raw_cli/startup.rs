@@ -16,7 +16,9 @@ fn raw_cli_startup_banner_renders_when_enabled() {
     assert!(output.contains("cosh-shell"), "{output}");
     assert!(output.contains("Adapter: fake"), "{output}");
     assert!(output.contains("Shell: bash"), "{output}");
-    assert!(output.contains("Mode: auto"), "{output}");
+    assert!(output.contains("Approval: auto"), "{output}");
+    assert!(output.contains("Analysis: smart"), "{output}");
+    assert!(!output.contains("Mode: auto"), "{output}");
     assert!(output.contains("/help"), "{output}");
     assert!(output.contains("/hooks"), "{output}");
     assert!(!output.contains("/explain"), "{output}");
@@ -53,8 +55,43 @@ fn raw_cli_startup_banner_uses_zh_language_env() {
     assert!(output.contains("cosh-shell"), "{output}");
     assert!(output.contains("后端: fake"), "{output}");
     assert!(output.contains("Shell: bash"), "{output}");
-    assert!(output.contains("模式: auto"), "{output}");
+    assert!(output.contains("审批: auto"), "{output}");
+    assert!(output.contains("分析: smart"), "{output}");
+    assert!(!output.contains("模式: auto"), "{output}");
     assert!(output.contains("/help"), "{output}");
+}
+
+#[test]
+fn raw_cli_startup_banner_reports_effective_modes() {
+    let output = run_raw_cli_with_env(
+        "fake",
+        "exit\n",
+        &[
+            ("COSH_SHELL_STARTUP_BANNER", "1"),
+            ("COSH_SHELL_APPROVAL_MODE", "trust"),
+            ("COSH_SHELL_ANALYSIS_MODE", "manual"),
+            ("TERM", "xterm-256color"),
+        ],
+    );
+
+    assert!(output.contains("Approval: trust"), "{output}");
+    assert!(output.contains("Analysis: manual"), "{output}");
+}
+
+#[test]
+fn raw_cli_plain_startup_banner_keeps_both_modes() {
+    let output = run_raw_cli_with_env(
+        "fake",
+        "exit\n",
+        &[
+            ("COSH_SHELL_STARTUP_BANNER", "1"),
+            ("COSH_SHELL_RENDER", "plain"),
+            ("TERM", "xterm-256color"),
+        ],
+    );
+
+    assert!(output.contains("Approval: auto"), "{output}");
+    assert!(output.contains("Analysis: smart"), "{output}");
 }
 
 #[test]
@@ -770,7 +807,8 @@ fn raw_cli_default_agent_mode_defers_safe_fallback_tool() {
         ],
     );
 
-    assert!(output.contains("Mode: auto"), "{output}");
+    assert!(output.contains("Approval: auto"), "{output}");
+    assert!(output.contains("Analysis: smart"), "{output}");
     assert!(output.contains("Deferred req-1"), "{output}");
     assert!(output.contains("$ git status"), "{output}");
     assert!(!output.contains("Approval req-"), "{output}");

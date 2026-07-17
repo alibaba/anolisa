@@ -364,6 +364,7 @@ mod tests {
                     terminal_output_ref: None,
                     terminal_output_bytes: 0,
                 },
+                shell_environment_generation: None,
             },
             context_blocks: Vec::new(),
             context_hints: Vec::new(),
@@ -379,6 +380,7 @@ mod tests {
         let renderer = RatatuiInlineRenderer::for_terminal();
         ActiveAgentRun {
             request,
+            origin: AgentRunOrigin::Standard,
             handle,
             provider_name: "fake",
             language: Language::EnUs,

@@ -1,3 +1,4 @@
+use super::model::ShellEnvironmentObserver;
 use super::osc::*;
 use crate::types::{
     CommandOrigin, ShellEventKind, ShellHandoffRequest, COMMAND_OUTPUT_REF_MAX_BYTES,
@@ -145,6 +146,295 @@ fn pending_handoff_origin_mismatch_becomes_unknown() {
         .find(|event| event.kind == ShellEventKind::CommandStarted)
         .expect("command started");
     assert_eq!(event.command_origin, Some(CommandOrigin::Unknown));
+}
+
+#[test]
+fn trusted_preexec_path_reuses_and_advances_normalized_generation() {
+    let mut parser = parser_for_test("path-generation");
+
+    feed_environment_marker(
+        &mut parser,
+        "precmd",
+        None,
+        "/first:/first:relative:/second/",
+        false,
+        Some("path-generation"),
+    );
+    assert_eq!(
+        parser
+            .shell_environment_snapshot
+            .as_ref()
+            .unwrap()
+            .generation,
+        1
+    );
+    assert_eq!(
+        parser
+            .shell_environment_snapshot
+            .as_ref()
+            .unwrap()
+            .marker_sequence,
+        1
+    );
+    assert_eq!(
+        parser.shell_environment_snapshot.as_ref().unwrap().path,
+        "/first:/second"
+    );
+
+    feed_environment_marker(
+        &mut parser,
+        "preexec",
+        Some("echo one"),
+        "/first:/second",
+        true,
+        Some("path-generation"),
+    );
+    let first = parser
+        .events
+        .iter()
+        .find(|event| event.kind == ShellEventKind::CommandStarted)
+        .expect("first command start");
+    assert_eq!(first.shell_environment_generation, Some(1));
+    assert_eq!(
+        parser
+            .shell_environment_snapshot
+            .as_ref()
+            .unwrap()
+            .marker_sequence,
+        2
+    );
+    feed_precmd(&mut parser, 0);
+    let completed = parser
+        .events
+        .iter()
+        .find(|event| event.kind == ShellEventKind::CommandCompleted)
+        .expect("first command completion");
+    assert_eq!(completed.shell_environment_generation, Some(1));
+
+    feed_environment_marker(
+        &mut parser,
+        "preexec",
+        Some("echo two"),
+        "/third:/second",
+        true,
+        Some("path-generation"),
+    );
+    let second = parser
+        .events
+        .iter()
+        .filter(|event| event.kind == ShellEventKind::CommandStarted)
+        .nth(1)
+        .expect("second command start");
+    assert_eq!(second.shell_environment_generation, Some(2));
+    assert_eq!(
+        parser
+            .shell_environment_snapshot
+            .as_ref()
+            .unwrap()
+            .marker_sequence,
+        3
+    );
+}
+
+#[test]
+fn untrusted_or_invalid_environment_marker_never_binds_generation() {
+    let mut parser = parser_for_test("path-untrusted");
+
+    feed_environment_marker(
+        &mut parser,
+        "precmd",
+        None,
+        "/provisional",
+        false,
+        Some("path-untrusted"),
+    );
+    feed_environment_marker(
+        &mut parser,
+        "preexec",
+        Some("echo untrusted"),
+        "/provisional",
+        false,
+        Some("path-untrusted"),
+    );
+    let untrusted = parser
+        .events
+        .iter()
+        .find(|event| event.kind == ShellEventKind::CommandStarted)
+        .expect("untrusted command start");
+    assert_eq!(untrusted.shell_environment_generation, None);
+    feed_precmd(&mut parser, 0);
+
+    feed_environment_marker(
+        &mut parser,
+        "preexec",
+        Some("echo wrong-session"),
+        "/wrong",
+        true,
+        Some("different-session"),
+    );
+    assert_eq!(
+        parser
+            .events
+            .iter()
+            .filter(|event| event.kind == ShellEventKind::CommandStarted)
+            .count(),
+        1
+    );
+    assert_eq!(
+        parser
+            .shell_environment_snapshot
+            .as_ref()
+            .unwrap()
+            .marker_sequence,
+        2
+    );
+
+    let oversized = format!("/{}", "x".repeat(8192));
+    feed_environment_marker(
+        &mut parser,
+        "preexec",
+        Some("echo oversized"),
+        &oversized,
+        true,
+        Some("path-untrusted"),
+    );
+    let oversized_start = parser
+        .events
+        .iter()
+        .filter(|event| event.kind == ShellEventKind::CommandStarted)
+        .nth(1)
+        .expect("oversized command start");
+    assert_eq!(oversized_start.shell_environment_generation, None);
+    assert_eq!(
+        parser
+            .shell_environment_snapshot
+            .as_ref()
+            .unwrap()
+            .marker_sequence,
+        2
+    );
+}
+
+#[test]
+fn path_snapshot_accepts_exact_eight_kibibyte_boundary() {
+    let mut parser = parser_for_test("path-eight-kib");
+    let path = format!("/{}", "x".repeat(8191));
+
+    feed_environment_marker(
+        &mut parser,
+        "preexec",
+        Some("echo boundary"),
+        &path,
+        true,
+        Some("path-eight-kib"),
+    );
+
+    let start = parser
+        .events
+        .iter()
+        .find(|event| event.kind == ShellEventKind::CommandStarted)
+        .expect("boundary command start");
+    assert_eq!(start.shell_environment_generation, Some(1));
+    assert_eq!(
+        parser.shell_environment_snapshot.as_ref().unwrap().path,
+        path
+    );
+}
+
+#[test]
+fn environment_marker_with_wrong_token_does_not_update_state() {
+    let mut parser = parser_for_test("path-wrong-token");
+    let marker = serde_json::json!({
+        "event": "preexec",
+        "token": "wrong-token",
+        "session_id": "path-wrong-token",
+        "command": "echo forged",
+        "cwd": "/tmp",
+        "path": "/forged",
+        "path_trusted": true,
+        "status": 0,
+    });
+    let bytes = format!("\x1b]1337;COSH;{marker}\x07");
+
+    parser.feed(bytes.as_bytes()).expect("feed forged marker");
+
+    assert!(parser.shell_environment_snapshot.is_none());
+    assert!(parser.events.is_empty());
+}
+
+#[test]
+fn completion_keeps_generation_captured_at_command_start() {
+    let mut parser = parser_for_test("path-completion-stable");
+    feed_environment_marker(
+        &mut parser,
+        "preexec",
+        Some("echo stable"),
+        "/at-start",
+        true,
+        Some("path-completion-stable"),
+    );
+
+    feed_environment_marker(
+        &mut parser,
+        "precmd",
+        None,
+        "/after-command",
+        false,
+        Some("path-completion-stable"),
+    );
+
+    let completed = parser
+        .events
+        .iter()
+        .find(|event| event.kind == ShellEventKind::CommandCompleted)
+        .expect("completed command");
+    assert_eq!(completed.shell_environment_generation, Some(1));
+    assert_eq!(
+        parser
+            .shell_environment_snapshot
+            .as_ref()
+            .unwrap()
+            .generation,
+        2
+    );
+}
+
+#[test]
+fn accepted_environment_snapshots_are_forwarded_without_events_or_journal_fields() {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut parser = parser_for_test("path-observer").with_environment_observer(
+        ShellEnvironmentObserver::new(move |snapshot| {
+            sender.send(snapshot).expect("forward snapshot");
+        }),
+    );
+
+    feed_environment_marker(
+        &mut parser,
+        "precmd",
+        None,
+        "/provisional",
+        false,
+        Some("path-observer"),
+    );
+    feed_environment_marker(
+        &mut parser,
+        "preexec",
+        Some("echo observed"),
+        "/authoritative",
+        true,
+        Some("path-observer"),
+    );
+
+    let provisional = receiver.recv().expect("provisional snapshot");
+    let authoritative = receiver.recv().expect("authoritative snapshot");
+    assert_eq!(provisional.path, "/provisional");
+    assert_eq!(authoritative.path, "/authoritative");
+    assert!(parser.events.iter().all(|event| {
+        serde_json::to_value(event)
+            .expect("serialize event")
+            .get("path")
+            .is_none()
+    }));
 }
 
 #[test]
@@ -358,4 +648,28 @@ fn feed_precmd(parser: &mut OscParser, status: i32) {
         "\x1b]1337;COSH;{{\"event\":\"precmd\",\"token\":\"test-marker-token\",\"status\":{status},\"cwd\":\"/tmp\"}}\x07"
     );
     parser.feed(marker.as_bytes()).expect("feed precmd");
+}
+
+fn feed_environment_marker(
+    parser: &mut OscParser,
+    event: &str,
+    command: Option<&str>,
+    path: &str,
+    path_trusted: bool,
+    session_id: Option<&str>,
+) {
+    let marker = serde_json::json!({
+        "event": event,
+        "token": TEST_MARKER_TOKEN,
+        "session_id": session_id,
+        "command": command,
+        "cwd": "/tmp",
+        "path": path,
+        "path_trusted": path_trusted,
+        "status": 0,
+    });
+    let bytes = format!("\x1b]1337;COSH;{marker}\x07");
+    parser
+        .feed(bytes.as_bytes())
+        .expect("feed environment marker");
 }

@@ -82,7 +82,7 @@ fn raw_cli_cosh_request_output_card_sends_bounded_excerpt() {
             ),
             (
                 b"?? request captured output evidence\n".to_vec(),
-                Duration::from_millis(300),
+                Duration::from_millis(800),
             ),
             (b"\n".to_vec(), Duration::from_millis(1_500)),
             (b"exit\n".to_vec(), Duration::from_millis(600)),

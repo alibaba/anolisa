@@ -113,6 +113,9 @@ fn start_shell_session(
 
     let child = command.spawn()?;
     let mut parser = OscParser::new(config.session_id.clone(), output_ref_dir, marker_token);
+    if let Some(observer) = config.shell_environment_observer.clone() {
+        parser = parser.with_environment_observer(observer);
+    }
     push_shell_started_event(&mut parser, config);
 
     Ok(PtySession {

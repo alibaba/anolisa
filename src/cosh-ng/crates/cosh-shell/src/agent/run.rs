@@ -7,8 +7,23 @@ use crate::evidence::request::ParsedCoshRequest;
 use crate::evidence::stream::{CoshRequestAuditRecord, CoshRequestStreamFilter};
 use crate::runtime::prelude::*;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum AgentRunOrigin {
+    #[default]
+    Standard,
+    InsightPrompt,
+    AutoFailure,
+}
+
+impl AgentRunOrigin {
+    pub(crate) fn is_insight_triggered(self) -> bool {
+        matches!(self, Self::InsightPrompt | Self::AutoFailure)
+    }
+}
+
 pub(crate) struct ActiveAgentRun {
     pub(crate) request: AgentRequest,
+    pub(crate) origin: AgentRunOrigin,
     pub(crate) handle: AgentRunHandle,
     pub(crate) provider_name: &'static str,
     pub(crate) language: Language,
@@ -72,6 +87,7 @@ pub(crate) struct PendingHookNotification {
 #[derive(Debug, Clone)]
 pub(crate) struct PendingAgentRequest {
     pub(crate) request: AgentRequest,
+    pub(crate) origin: AgentRunOrigin,
     pub(crate) selectable_after_event_index: Option<usize>,
     pub(crate) before_held_text: bool,
 }
@@ -83,8 +99,27 @@ pub(crate) fn start_agent_run<W: Write>(
     output: &mut W,
     selectable_after_event_index: Option<usize>,
 ) -> std::io::Result<()> {
+    start_agent_run_with_origin(
+        request,
+        AgentRunOrigin::Standard,
+        adapter,
+        state,
+        output,
+        selectable_after_event_index,
+    )
+}
+
+pub(crate) fn start_agent_run_with_origin<W: Write>(
+    request: &AgentRequest,
+    origin: AgentRunOrigin,
+    adapter: &AdapterInstance,
+    state: &mut InlineState,
+    output: &mut W,
+    selectable_after_event_index: Option<usize>,
+) -> std::io::Result<()> {
     start_agent_run_with_queue_policy(
         request,
+        origin,
         adapter,
         state,
         output,
@@ -95,6 +130,7 @@ pub(crate) fn start_agent_run<W: Write>(
 
 fn start_agent_run_with_queue_policy<W: Write>(
     request: &AgentRequest,
+    origin: AgentRunOrigin,
     adapter: &AdapterInstance,
     state: &mut InlineState,
     output: &mut W,
@@ -106,6 +142,7 @@ fn start_agent_run_with_queue_policy<W: Write>(
             state,
             PendingAgentRequest {
                 request: request.clone(),
+                origin,
                 selectable_after_event_index,
                 before_held_text,
             },
@@ -127,6 +164,7 @@ fn start_agent_run_with_queue_policy<W: Write>(
     state.startup_health.poll_ready();
     attach_continuity_prompt_hint(&mut request, state);
     finalize_agent_request_skill_context(&mut request, state.startup_health.report.as_ref());
+    enforce_insight_context_budget(&mut request);
     let provider_mode = provider_mode_for_agent_run(&request, state.approval_mode);
     let handle = adapter.start_cancellable(request.clone(), provider_mode);
     let now = Instant::now();
@@ -135,6 +173,7 @@ fn start_agent_run_with_queue_policy<W: Write>(
     state.shell_evidence.clear_recent_shell_tool_outputs();
     state.agent_run.active = Some(ActiveAgentRun {
         request,
+        origin,
         handle,
         provider_name: adapter.name(),
         language: state.language,
@@ -182,6 +221,43 @@ fn attach_continuity_prompt_hint(request: &mut AgentRequest, state: &InlineState
     }
 }
 
+fn enforce_insight_context_budget(request: &mut AgentRequest) {
+    if !request
+        .context_hints
+        .iter()
+        .any(|hint| hint.starts_with("insight_evidence\n"))
+    {
+        return;
+    }
+
+    while serialized_context_hint_bytes(&request.context_hints)
+        > crate::insight::evidence::PROVIDER_CONTEXT_MAX_BYTES
+    {
+        if let Some(index) = request
+            .context_hints
+            .iter()
+            .rposition(|hint| !hint.starts_with("insight_evidence\n"))
+        {
+            request.context_hints.remove(index);
+            continue;
+        }
+        if request.context_hints.len() > 1 {
+            request.context_hints.pop();
+            continue;
+        }
+        let hint = &mut request.context_hints[0];
+        let mut end = crate::insight::evidence::PROVIDER_CONTEXT_MAX_BYTES.min(hint.len());
+        while !hint.is_char_boundary(end) {
+            end -= 1;
+        }
+        hint.truncate(end);
+    }
+}
+
+fn serialized_context_hint_bytes(hints: &[String]) -> usize {
+    hints.iter().map(String::len).sum::<usize>() + hints.len().saturating_sub(1)
+}
+
 pub(crate) fn stop_active_agent_run_without_rendering<W: Write>(
     state: &mut InlineState,
     output: &mut W,
@@ -219,6 +295,49 @@ mod tests {
         HealthSeverity,
     };
     use crate::types::STARTUP_HEALTH_FOLLOW_UP_BINDING_HINT;
+
+    #[test]
+    fn only_insight_origins_use_strict_result_presentation() {
+        assert!(!AgentRunOrigin::Standard.is_insight_triggered());
+        assert!(AgentRunOrigin::InsightPrompt.is_insight_triggered());
+        assert!(AgentRunOrigin::AutoFailure.is_insight_triggered());
+    }
+
+    #[test]
+    fn final_insight_context_never_exceeds_provider_budget() {
+        let mut request = test_agent_request();
+        request.context_hints = vec![
+            "x".repeat(crate::insight::evidence::PROVIDER_CONTEXT_MAX_BYTES),
+            "insight_evidence\ntarget_facts:\ncommand_id=cmd-1".to_string(),
+        ];
+
+        finalize_agent_request_skill_context(&mut request, None);
+        enforce_insight_context_budget(&mut request);
+
+        assert!(
+            serialized_context_hint_bytes(&request.context_hints)
+                <= crate::insight::evidence::PROVIDER_CONTEXT_MAX_BYTES
+        );
+        assert_eq!(request.context_hints.len(), 1);
+        assert!(request.context_hints[0].starts_with("insight_evidence\n"));
+    }
+
+    #[test]
+    fn malformed_oversized_insight_payload_is_utf8_safely_bounded() {
+        let mut request = test_agent_request();
+        request.context_hints = vec![format!(
+            "insight_evidence\n{}",
+            "界".repeat(crate::insight::evidence::PROVIDER_CONTEXT_MAX_BYTES)
+        )];
+
+        enforce_insight_context_budget(&mut request);
+
+        assert!(
+            serialized_context_hint_bytes(&request.context_hints)
+                <= crate::insight::evidence::PROVIDER_CONTEXT_MAX_BYTES
+        );
+        assert!(request.context_hints[0].is_char_boundary(request.context_hints[0].len()));
+    }
 
     #[test]
     fn health_context_hint_is_not_attached_to_free_form_request() {
@@ -313,6 +432,7 @@ mod tests {
                     terminal_output_ref: None,
                     terminal_output_bytes: 0,
                 },
+                shell_environment_generation: None,
             },
             context_blocks: Vec::new(),
             context_hints: Vec::new(),

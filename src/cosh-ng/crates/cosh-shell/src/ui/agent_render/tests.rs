@@ -757,6 +757,8 @@ fn recommendation_panel_renders_display_only_commands() {
     let commands = vec!["pwd".to_string(), "echo $PATH".to_string()];
     let text = renderer
         .recommendation_panel_lines(RecommendationPanelModel {
+            title: "Recommendations",
+            summary: None,
             commands: &commands,
         })
         .join("\n");
@@ -766,7 +768,8 @@ fn recommendation_panel_renders_display_only_commands() {
     assert!(text.contains("2. echo $PATH"), "{text}");
     assert!(text.contains("│  1. pwd"), "{text}");
     assert!(text.contains("│  2. echo $PATH"), "{text}");
-    assert!(text.contains("[Copy] [Insert] [Details]"), "{text}");
+    assert!(!text.contains("[Copy] [Insert]"), "{text}");
+    assert!(!text.contains("[Details]"), "{text}");
     assert!(text.contains("display-only"), "{text}");
     assert!(!text.contains("/allow N"), "{text}");
     assert_rendered_width(&text, 100);
@@ -780,6 +783,8 @@ fn recommendation_panel_wraps_long_commands_without_dropping_tail() {
     ];
     let text = renderer
         .recommendation_panel_lines(RecommendationPanelModel {
+            title: "Recommendations",
+            summary: None,
             commands: &commands,
         })
         .join("\n");
@@ -787,7 +792,8 @@ fn recommendation_panel_wraps_long_commands_without_dropping_tail() {
     assert!(text.contains("cargo test --package cosh-shell"), "{text}");
     assert!(text.contains("raw_cli_streaming_tool_approval"), "{text}");
     assert!(text.contains("--test-threads=1"), "{text}");
-    assert!(text.contains("[Copy] [Insert] [Details]"), "{text}");
+    assert!(!text.contains("[Copy] [Insert]"), "{text}");
+    assert!(!text.contains("[Details]"), "{text}");
     assert!(text.contains("display-only"), "{text}");
     assert_rendered_width(&text, 56);
 }
@@ -801,11 +807,14 @@ fn recommendation_panel_keeps_card_border_aligned_to_renderer_width() {
     ];
     let text = renderer
         .recommendation_panel_lines(RecommendationPanelModel {
+            title: "Recommendations",
+            summary: Some("Disk usage is high."),
             commands: &commands,
         })
         .join("\n");
 
     assert!(text.contains("Recommendations"), "{text}");
+    assert!(text.contains("Disk usage is high."), "{text}");
     assert!(text.contains("中文-smoke.txt"), "{text}");
     assert!(text.contains("🧪"), "{text}");
     assert_rendered_width(&text, 54);
@@ -818,15 +827,16 @@ fn recommendation_panel_uses_zh_labels_without_translating_commands() {
     let commands = vec!["cat /tmp/cosh-shell-中文-smoke.txt".to_string()];
     let text = renderer
         .recommendation_panel_lines(RecommendationPanelModel {
+            title: "建议下一步",
+            summary: Some("磁盘使用率偏高。"),
             commands: &commands,
         })
         .join("\n");
 
-    assert!(text.contains("推荐"), "{text}");
-    assert!(
-        text.contains("[Copy] [Insert] [Details] - 仅展示"),
-        "{text}"
-    );
+    assert!(text.contains("建议下一步"), "{text}");
+    assert!(text.contains("磁盘使用率偏高。"), "{text}");
+    assert!(text.contains("仅展示：未执行任何命令"), "{text}");
+    assert!(!text.contains("[Details]"), "{text}");
     assert!(
         text.contains("cat /tmp/cosh-shell-中文-smoke.txt"),
         "{text}"
@@ -883,14 +893,17 @@ fn zh_cards_keep_40_and_80_column_widths() {
         let commands = vec!["cat /tmp/cosh-shell-中文-smoke.txt".to_string()];
         let recommendation = renderer
             .recommendation_panel_lines(RecommendationPanelModel {
+                title: "推荐",
+                summary: None,
                 commands: &commands,
             })
             .join("\n");
         assert!(recommendation.contains("推荐"), "{recommendation}");
         assert!(
-            recommendation.contains("[Copy] [Insert] [Details] - 仅展示"),
+            recommendation.contains("仅展示：未执行任何命令"),
             "{recommendation}"
         );
+        assert!(!recommendation.contains("[Details]"), "{recommendation}");
         assert_rendered_width(&recommendation, width as usize);
         assert_box_lines_aligned(&recommendation, width as usize);
     }
@@ -911,6 +924,8 @@ fn recommendation_panel_write_preserves_ratatui_styles_for_terminal_output() {
         .write_recommendation_panel(
             &mut output,
             RecommendationPanelModel {
+                title: "Recommendations",
+                summary: None,
                 commands: &commands,
             },
         )
@@ -922,7 +937,8 @@ fn recommendation_panel_write_preserves_ratatui_styles_for_terminal_output() {
     assert!(clean.contains("Recommendations"), "{clean}");
     assert!(clean.contains("1. pwd"), "{clean}");
     assert!(clean.contains("│  1. pwd"), "{clean}");
-    assert!(clean.contains("[Copy] [Insert] [Details]"), "{clean}");
+    assert!(!clean.contains("[Copy] [Insert]"), "{clean}");
+    assert!(!clean.contains("[Details]"), "{clean}");
 }
 
 #[test]
@@ -931,6 +947,8 @@ fn plain_recommendation_panel_keeps_display_only_commands() {
     let commands = vec!["pwd".to_string(), "echo $PATH".to_string()];
     let text = renderer
         .recommendation_panel_lines(RecommendationPanelModel {
+            title: "Recommendations",
+            summary: None,
             commands: &commands,
         })
         .join("\n");
@@ -938,7 +956,8 @@ fn plain_recommendation_panel_keeps_display_only_commands() {
     assert!(text.contains("Recommendations:"), "{text}");
     assert!(text.contains("  1. pwd"), "{text}");
     assert!(text.contains("  2. echo $PATH"), "{text}");
-    assert!(text.contains("[Copy] [Insert] [Details]"), "{text}");
+    assert!(!text.contains("[Copy] [Insert]"), "{text}");
+    assert!(!text.contains("[Details]"), "{text}");
     assert!(text.contains("display-only"), "{text}");
     assert!(!text.contains("/allow N"), "{text}");
     assert!(!text.contains('╭'), "{text}");
@@ -953,6 +972,8 @@ fn plain_recommendation_panel_wraps_long_commands_without_dropping_tail() {
     ];
     let text = renderer
         .recommendation_panel_lines(RecommendationPanelModel {
+            title: "Recommendations",
+            summary: None,
             commands: &commands,
         })
         .join("\n");
@@ -965,7 +986,8 @@ fn plain_recommendation_panel_wraps_long_commands_without_dropping_tail() {
     assert!(text.contains("     raw_cli"), "{text}");
     assert!(text.contains("raw_cli_streaming_tool_approval"), "{text}");
     assert!(text.contains("--test-threads=1"), "{text}");
-    assert!(text.contains("[Copy] [Insert] [Details]"), "{text}");
+    assert!(!text.contains("[Copy] [Insert]"), "{text}");
+    assert!(!text.contains("[Details]"), "{text}");
     assert!(text.contains("display-only"), "{text}");
     assert!(!text.contains("/allow N"), "{text}");
     assert!(!text.contains('╭'), "{text}");

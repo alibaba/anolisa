@@ -118,13 +118,12 @@ fn fake_agent_and_governance_form_recommend_only_loop() {
         .expect("confirmed request");
 
     let agent_events = FakeAgentAdapter.run(&request).expect("fake adapter");
-    assert!(agent_events.iter().any(|event| matches!(
-        event,
-        AgentEvent::Recommendation {
-            auto_execute: false,
-            ..
-        }
-    )));
+    assert!(agent_events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::TextDelta { .. })));
+    assert!(!agent_events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::Recommendation { .. })));
 
     let governed = govern_agent_events(&agent_events, &Policy::default());
     assert_eq!(governed.events.len(), agent_events.len());
@@ -139,7 +138,7 @@ fn fake_agent_and_governance_form_recommend_only_loop() {
     );
     assert!(transcript
         .iter()
-        .any(|line| line.contains("Display-only: recommendations are not executed automatically")));
+        .any(|line| line.contains("failed with exit code") || line.contains("以退出码")));
 }
 
 #[test]
@@ -446,13 +445,12 @@ fn fake_and_qwen_use_same_agent_adapter_boundary() {
         .run(&request)
         .expect("qwen adapter");
 
-    assert!(fake_events.iter().any(|event| matches!(
-        event,
-        AgentEvent::Recommendation {
-            auto_execute: false,
-            ..
-        }
-    )));
+    assert!(fake_events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::TextDelta { .. })));
+    assert!(!fake_events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::Recommendation { .. })));
     assert!(qwen_events.iter().any(|event| matches!(
         event,
         AgentEvent::TextDelta { text, .. }
@@ -463,6 +461,29 @@ fn fake_and_qwen_use_same_agent_adapter_boundary() {
     assert_eq!(governed.events.len(), qwen_events.len());
     assert_eq!(governed.audit.len(), qwen_events.len());
     assert!(governed.events.iter().all(|event| !event.auto_execute));
+}
+
+#[test]
+fn fake_bound_insight_ignores_free_form_fixture_keywords() {
+    let ledger = build_command_blocks(&failed_command_events());
+    let findings = findings_from_blocks(&ledger.blocks);
+    let mut request =
+        agent_request_after_confirmation("session-1", &ledger.blocks[0], &findings, true)
+            .expect("confirmed request");
+    request.user_input = Some("tool recommendation fixture".to_string());
+    request
+        .context_hints
+        .push("__cosh_request_source=insight_prompt".to_string());
+
+    let events = FakeAgentAdapter.run(&request).expect("fake adapter");
+
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::TextDelta { .. })));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolCall { .. } | AgentEvent::Recommendation { .. } | AgentEvent::Action { .. }
+    )));
 }
 
 #[test]

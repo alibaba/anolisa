@@ -3,7 +3,9 @@ use super::MessageId;
 pub(super) fn message(id: MessageId) -> &'static str {
     match id {
         MessageId::StartupTitle => "cosh-shell",
-        MessageId::StartupAdapterLine => "后端: {adapter} · Shell: {shell} · 模式: {mode}",
+        MessageId::StartupAdapterLine => {
+            "后端: {adapter} · Shell: {shell} · 审批: {approval} · 分析: {analysis}"
+        }
         MessageId::StartupCwdLine => "cwd: {cwd}",
         MessageId::StartupCommandsLine => "/help · /mode · /hooks",
         MessageId::StartupHooksNoneSummary => "启动 hooks: 未配置。",
@@ -26,7 +28,7 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::HelpSummaryAuth => "配置 AI 服务商凭证",
         MessageId::HelpSummaryConfig => "配置界面语言",
         MessageId::HelpSummaryModeApproval => "切换审批模式",
-        MessageId::HelpSummaryModeAnalysis => "切换分析策略",
+        MessageId::HelpSummaryModeAnalysis => "选择建议模式、自动分析或关闭主动介入",
         MessageId::HelpSummaryAgent => "发起明确的 Agent 请求",
         MessageId::HelpSummaryExplain => "分析上一个失败命令",
         MessageId::HelpSummaryCancel => "取消正在运行的 Agent 工作",
@@ -269,11 +271,26 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::AnalysisModeSetBody => "模式已设置为 {mode}。",
         MessageId::AnalysisModeUnknownBody => "未知分析模式: {mode}",
         MessageId::AnalysisModeUsageFooter => "使用 /mode analysis smart|auto|manual。",
-        MessageId::AnalysisModeSmartFooter => "命令失败时评估 hooks；展示发现供你复核。",
-        MessageId::AnalysisModeAutoFooter => {
-            "命令失败时评估 hooks；只对真实失败自动触发 Agent 分析。"
+        MessageId::AnalysisModeSmartFooter => {
+            "命令失败或系统诊断输出有价值时评估；展示洞察供你复核。"
         }
-        MessageId::AnalysisModeManualFooter => "已禁用 hooks 和自动分析；使用 slash 命令手动触发。",
+        MessageId::AnalysisModeAutoFooter => {
+            "仅对少量高置信故障自动触发 Agent 分析；其他情况仍先提示。"
+        }
+        MessageId::AnalysisModeManualFooter => {
+            "已关闭被动建议和自动分析；使用 slash 命令手动触发。"
+        }
+        MessageId::AnalysisModeCardSmartLine => "{marker}[ smart  ] 建议模式（推荐）",
+        MessageId::AnalysisModeCardAutoLine => {
+            "{marker}[ auto   ] 自动分析（命令失败后可能自动启动 Agent）"
+        }
+        MessageId::AnalysisModeCardManualLine => "{marker}[ manual ] 关闭主动介入",
+        MessageId::AnalysisModeCardFooter => {
+            "按键: Left/Right 或 Tab/Shift-Tab 选择 | Enter 应用 | Esc 取消"
+        }
+        MessageId::AnalysisModeRemainsBody => "模式仍为 {mode}。",
+        MessageId::AnalysisModeCancelBody => "模式未改变: {mode}。",
+        MessageId::AnalysisModeCancelFooter => "没有执行 shell 命令。",
         MessageId::AgentThinking => "正在思考...",
         MessageId::AgentThinkingElapsed => "正在思考... {elapsed}s · {detail}",
         MessageId::AgentRecoveryTitle => "Agent 恢复",
@@ -330,9 +347,6 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::InterceptNoticeTitle => "AI 请求",
         MessageId::InterceptNoticeBody => "正在把输入交给 Agent: {input}",
         MessageId::InterceptNoticeFooter => "该输入已在进入 Bash 前被拦截。",
-        MessageId::FailedCommandCardTitle => "命令失败",
-        MessageId::FailedCommandCardBody => "`{command}` 退出码为 {exit_code}; id: {id}",
-        MessageId::FailedCommandCardFooter => "[Analyze] [Dismiss] [Details]",
         MessageId::FailedAnalysisCancelledTitle => "Agent 已取消",
         MessageId::FailedAnalysisCancelledBody => "已取消 `{command}` 的待处理分析",
         MessageId::FailedAnalysisCancelNoActiveBody => "当前没有等待取消的 Agent 运行",
@@ -343,17 +357,48 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::HookAutoAnalyzedTitle => "Hook 自动分析",
         MessageId::HookAutoAnalyzedBody => "`{command}` 退出码为 {exit_code}",
         MessageId::HookAutoAnalyzedFooter => "Agent 分析正在启动。",
+        MessageId::InsightLabel => "洞察：",
+        MessageId::InsightCommandTypoSummary => "发现可能的命令拼写错误",
+        MessageId::InsightPermissionDeniedSummary => "命令因权限不足被拒绝",
+        MessageId::InsightBuildOrTestFailureSummary => "构建或测试失败",
+        MessageId::InsightRuntimeExceptionSummary => "程序发生未捕获异常",
+        MessageId::InsightAbnormalSignalSummary => "命令因异常信号而终止",
+        MessageId::InsightMemoryPressureSummary => "当前内存压力需要关注",
+        MessageId::InsightHighMemoryProcessSummary => "{process} 的内存占用异常偏高",
+        MessageId::InsightHighMemoryProcessGenericSummary => "有进程的内存占用异常偏高",
+        MessageId::InsightMemoryRootCauseSummary => "内存压力可能与 {process} 有关",
+        MessageId::InsightMemoryRootCauseGenericSummary => "内存压力可能与高内存进程有关",
+        MessageId::InsightPermissionDeniedPrompt => {
+            "分析这次权限失败，先判断限制来源并给出最小权限建议"
+        }
+        MessageId::InsightBuildOrTestFailurePrompt => "分析这次构建或测试失败，定位首个可行动错误",
+        MessageId::InsightRuntimeExceptionPrompt => {
+            "分析这次未捕获异常，确认直接原因及是否需要修复"
+        }
+        MessageId::InsightAbnormalSignalPrompt => {
+            "分析命令异常终止，确认信号事实并给出一个安全检查"
+        }
+        MessageId::InsightMemoryPressurePrompt => "基于当前输出分析内存压力，必要时定位主要进程",
+        MessageId::InsightHighMemoryProcessPrompt => {
+            "基于当前输出判断 {process} 是否为主要内存来源"
+        }
+        MessageId::InsightHighMemoryProcessGenericPrompt => "基于当前输出判断主要内存进程",
+        MessageId::InsightMemoryRootCausePrompt => {
+            "基于当前输出确认 {process} 是否为内存压力主要来源"
+        }
+        MessageId::InsightMemoryRootCauseGenericPrompt => "基于当前输出确认内存压力的主要进程来源",
+        MessageId::InsightShellRewriteFirstUseHint => "Tab 填入后按 Enter 执行；继续输入可忽略",
+        MessageId::InsightAgentPromptFirstUseHint => "Tab 填入后按 Enter 提交；继续输入可忽略",
         MessageId::AgentQueuedTitle => "Agent 已排队",
         MessageId::AgentQueuedBodyCommand => "已捕获失败命令: {command}",
         MessageId::AgentQueuedBodyActive => "当前 Agent 运行仍在流式输出。",
         MessageId::AgentQueuedFooter => "当前 Agent 完成后会分析这次失败。",
         MessageId::HookFindingTitle => "Hook 发现",
-        MessageId::HookFindingFooter => "使用 /hooks analyze|ignore|details {hint_id}。",
+        MessageId::HookFindingFooter => "使用 /hooks 查看 Hook 发现。",
         MessageId::HookFindingMarkdownTitle => "命令 Hook 发现",
         MessageId::HookFindingMarkdownHookLine => "- Hook: `{hook_id}`.",
         MessageId::HookFindingMarkdownSeverityLine => "- 严重级别: `{severity}`.",
         MessageId::HookFindingMarkdownFindingLine => "- 发现: {finding}.",
-        MessageId::HookFindingMarkdownOutputRefLine => "- 输出 ID: `{output_ref}`.",
         MessageId::HookFindingMarkdownSuggestionLine => "- 建议: {suggestion}.",
         MessageId::HookFindingMarkdownRelatedTitle => "- 相关发现:",
         MessageId::HookFindingMarkdownRelatedLine => "  - `{hook_id}` [{severity}]: {finding}",
@@ -447,14 +492,14 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::ActivityStatusCompleted => "已完成",
         MessageId::ActivityStatusError => "错误",
         MessageId::ActivityStatusInterrupted => "已中断",
-        MessageId::ActivityToolCalledSummary => "{tool} 已调用：{preview}；[Details] {id}",
-        MessageId::ActivityToolRequestedSummary => "{tool} 请求审批：{preview}；[Details] {id}",
-        MessageId::ActivityToolOutputCapturedSummary => "{stream} 已捕获；[Details] {id}",
+        MessageId::ActivityToolCalledSummary => "{tool} 已调用：{preview}",
+        MessageId::ActivityToolRequestedSummary => "{tool} 请求审批：{preview}",
+        MessageId::ActivityToolOutputCapturedSummary => "{stream} 已捕获",
         MessageId::ActivityProviderNativeShellBypassSummary => {
-            "{tool} 已由 provider 自动批准：{preview}；[Details] {id}"
+            "{tool} 已由 provider 自动批准：{preview}"
         }
         MessageId::ActivityToolNeedsForegroundShellSummary => {
-            "可能需要前台 shell；[Send to shell] {handoff}；[Details] {id}"
+            "可能需要前台 shell；[Send to shell] {handoff}"
         }
         MessageId::ActivityShellHandoffSentSummary => "{approval} 已发送到 shell",
         MessageId::ToolCardReadFileLabel => "读取",
@@ -505,8 +550,10 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::MarkdownCodeWithLanguageLabel => "代码: {language}",
         MessageId::MarkdownTableLabel => "表格",
         MessageId::RecommendationTitle => "推荐",
+        MessageId::RecommendationNextStepTitle => "建议下一步",
+        MessageId::AnalysisResultTitle => "分析结果",
         MessageId::RecommendationEmptyBody => "没有命令推荐",
-        MessageId::RecommendationFooter => "[Copy] [Insert] [Details] - 仅展示",
+        MessageId::RecommendationFooter => "仅展示：未执行任何命令",
         MessageId::RecommendationNoSelectableTitle => "没有可选择的推荐",
         MessageId::RecommendationNoSelectableBody => "当前还没有可选择的推荐",
         MessageId::RecommendationUnavailableTitle => "推荐不可用",
@@ -637,8 +684,8 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::HealthTryReasonServiceState => "配置服务状态异常",
         MessageId::HealthTryReasonHighLoad => "最近负载持续偏高",
         MessageId::HealthTryReasonMissingCoreCheck => "核心健康检查缺失",
-        MessageId::ToolOutputStdoutCapturedSummary => "stdout 已捕获；[Details] {id}",
-        MessageId::ToolOutputStderrCapturedSummary => "stderr 已捕获；[Details] {id}",
+        MessageId::ToolOutputStdoutCapturedSummary => "stdout 已捕获",
+        MessageId::ToolOutputStderrCapturedSummary => "stderr 已捕获",
         MessageId::ToolSummaryExit => "退出码 {exit}",
         MessageId::ToolSummaryBlocked => "tool 请求被 shell broker guard 阻止",
         MessageId::ToolSummaryTimedOut => "tool 请求超时",

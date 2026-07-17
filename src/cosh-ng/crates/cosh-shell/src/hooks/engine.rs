@@ -1,7 +1,12 @@
 #[cfg(test)]
 use crate::hooks::model::HookTrigger;
 use crate::hooks::model::{HookInput, HookMatcher};
-use crate::types::{CommandBlock, CommandOrigin, FindingSeverity, HookFinding};
+#[cfg(test)]
+use crate::types::HookProvenance;
+use crate::types::{
+    BuiltinFindingFacts, CommandBlock, CommandOrigin, EvaluatedHookFinding, FindingSeverity,
+    HookFinding,
+};
 use loader::load_external_hook_configs;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -17,6 +22,9 @@ pub trait BuiltinHook: Send + Sync {
     fn id(&self) -> &str;
     fn matcher(&self) -> &HookMatcher;
     fn evaluate(&self, input: &HookInput) -> Option<HookFinding>;
+    fn builtin_facts(&self, _input: &HookInput) -> Option<BuiltinFindingFacts> {
+        None
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -110,7 +118,7 @@ impl HookEngine {
         ));
     }
 
-    pub fn evaluate(&self, block: &CommandBlock) -> Vec<HookFinding> {
+    pub fn evaluate(&self, block: &CommandBlock) -> Vec<EvaluatedHookFinding> {
         self.evaluate_with_disabled(block, &HashSet::new())
     }
 
@@ -118,7 +126,7 @@ impl HookEngine {
         &self,
         block: &CommandBlock,
         disabled_hooks: &HashSet<String>,
-    ) -> Vec<HookFinding> {
+    ) -> Vec<EvaluatedHookFinding> {
         self.evaluate_with_disabled_and_origin(
             block,
             disabled_hooks,
@@ -131,7 +139,7 @@ impl HookEngine {
         block: &CommandBlock,
         disabled_hooks: &HashSet<String>,
         origin: CommandOrigin,
-    ) -> Vec<HookFinding> {
+    ) -> Vec<EvaluatedHookFinding> {
         let input = runtime::hook_input_from_block(block);
         let mut findings = Vec::new();
         for hook in &self.builtin_hooks {
@@ -140,11 +148,15 @@ impl HookEngine {
             }
             if matcher::matches_command(hook.matcher(), &input) {
                 if let Some(finding) = hook.evaluate(&input) {
-                    findings.push(finding);
+                    findings.push(EvaluatedHookFinding::builtin_with_facts(
+                        hook.id(),
+                        finding,
+                        hook.builtin_facts(&input),
+                    ));
                 }
             }
         }
-        for ext in &self.external_hooks {
+        for (registration_index, ext) in self.external_hooks.iter().enumerate() {
             if disabled_hooks.contains(&ext.matcher.id) {
                 continue;
             }
@@ -156,7 +168,10 @@ impl HookEngine {
             }
             if matcher::matches_command(&ext.matcher, &input) {
                 if let Some(finding) = runtime::run_external_hook(ext, &input) {
-                    findings.push(finding);
+                    findings.push(EvaluatedHookFinding::external(
+                        format!("external:{registration_index}"),
+                        finding,
+                    ));
                 }
             }
         }

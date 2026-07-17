@@ -171,9 +171,7 @@ pub(crate) fn read_shell_evidence_output(
         );
     }
 
-    if approval_mode == CoshApprovalMode::Recommend
-        || excerpt.redaction_status == "excerpt_redacted"
-    {
+    if approval_mode == CoshApprovalMode::Recommend || excerpt.confirmation_required {
         return unavailable(
             "read_output",
             output_id,
@@ -784,6 +782,7 @@ mod tests {
                 terminal_output_ref: output_ref.map(|path| path.to_string_lossy().into_owned()),
                 terminal_output_bytes: 12,
             },
+            shell_environment_generation: None,
         }
     }
 }

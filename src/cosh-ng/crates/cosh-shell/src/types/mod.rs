@@ -2,7 +2,11 @@ use serde::{Deserialize, Serialize};
 
 pub mod hooks;
 
-pub use hooks::{FindingSeverity, HookFinding};
+pub(crate) use hooks::BuiltinFactRecord;
+pub use hooks::{
+    BuiltinFindingFacts, EvaluatedHookFinding, FindingSeverity, HighMemoryProcessFacts,
+    HookFinding, HookProvenance, MemoryPressureFacts, MetricsConfidence, ProcessMemoryFact,
+};
 
 pub const COMMAND_OUTPUT_REF_MAX_BYTES: usize = 1024 * 1024;
 pub const SESSION_OUTPUT_REF_MAX_BYTES: usize = 64 * 1024 * 1024;
@@ -155,6 +159,8 @@ pub struct ShellEvent {
     pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_origin: Option<CommandOrigin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_environment_generation: Option<u64>,
 }
 
 impl ShellEvent {
@@ -182,6 +188,7 @@ impl ShellEvent {
             component: None,
             message: None,
             command_origin: Some(CommandOrigin::UserInteractive),
+            shell_environment_generation: None,
         }
     }
 
@@ -223,6 +230,7 @@ impl ShellEvent {
             component: None,
             message: None,
             command_origin: None,
+            shell_environment_generation: None,
         }
     }
 
@@ -244,6 +252,7 @@ impl ShellEvent {
             component: None,
             message: None,
             command_origin: None,
+            shell_environment_generation: None,
         }
     }
 }
@@ -261,6 +270,14 @@ pub struct OutputRefs {
     pub terminal_output_bytes: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellEnvironmentSnapshot {
+    pub session_id: String,
+    pub marker_sequence: u64,
+    pub generation: u64,
+    pub path: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandBlock {
     pub id: String,
@@ -276,6 +293,8 @@ pub struct CommandBlock {
     pub exit_code: i32,
     pub status: CommandStatus,
     pub output: OutputRefs,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_environment_generation: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -590,7 +609,7 @@ impl Default for Policy {
 
 #[cfg(test)]
 mod tests {
-    use super::{ShellHandoffRequest, SHELL_HANDOFF_BYPASS_PREFIX};
+    use super::{ShellEvent, ShellHandoffRequest, SHELL_HANDOFF_BYPASS_PREFIX};
 
     fn handoff(command: &str) -> Result<ShellHandoffRequest, String> {
         ShellHandoffRequest::new(
@@ -626,5 +645,19 @@ mod tests {
             format!("{SHELL_HANDOFF_BYPASS_PREFIX}printf\tok\n").as_bytes()
         );
         assert_eq!(request.preview_hash, "fnv1a64:7d74cbb1a6f6fb27");
+    }
+
+    #[test]
+    fn shell_event_without_environment_generation_remains_compatible() {
+        let event: ShellEvent = serde_json::from_str(
+            r#"{"kind":"command_started","session_id":"s1","command_id":"c1","command":"echo ok","cwd":"/tmp","end_cwd":null,"exit_code":null,"started_at_ms":1,"ended_at_ms":null,"duration_ms":null,"terminal_output_ref":null,"terminal_output_bytes":null,"input":null,"component":null,"message":null}"#,
+        )
+        .expect("legacy shell event");
+
+        assert_eq!(event.shell_environment_generation, None);
+        assert!(serde_json::to_value(event)
+            .expect("serialize shell event")
+            .get("shell_environment_generation")
+            .is_none());
     }
 }

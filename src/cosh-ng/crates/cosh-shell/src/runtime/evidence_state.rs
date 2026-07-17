@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::agent::run::AgentRunOrigin;
 use crate::evidence::output_policy::{shell_evidence_view, EvidenceFacts, EvidenceView};
 use crate::runtime::prelude::{CommandBlock, ShellHandoffRequest};
 
@@ -153,6 +154,7 @@ pub(crate) enum ShellEvidenceContinuationState {
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeShellCommandCompleted {
     pub(crate) approval_id: Option<String>,
+    pub(crate) origin: AgentRunOrigin,
     pub(crate) provider_request_id: Option<String>,
     pub(crate) tool_use_id: Option<String>,
     pub(crate) shell_session_id: String,
@@ -176,10 +178,12 @@ impl RuntimeShellCommandCompleted {
         handoff: &ShellHandoffRequest,
         block: &CommandBlock,
         status: &'static str,
+        origin: AgentRunOrigin,
     ) -> Self {
         let delivery = ShellEvidenceDelivery::not_attempted();
         Self {
             approval_id: Some(handoff.approval_id.clone()),
+            origin,
             provider_request_id: handoff.request_id.clone(),
             tool_use_id: handoff.tool_use_id.clone(),
             shell_session_id: block.session_id.clone(),
@@ -231,6 +235,8 @@ impl RuntimeShellCommandCompleted {
 
 #[cfg(test)]
 mod tests {
+    use crate::runtime::prelude::AgentRunOrigin;
+
     use super::{
         EvidenceState, RuntimeShellCommandCompleted, ShellEvidenceContinuationState,
         ShellEvidenceDelivery,
@@ -380,6 +386,7 @@ mod tests {
     ) -> RuntimeShellCommandCompleted {
         RuntimeShellCommandCompleted {
             approval_id: approval_id.map(ToString::to_string),
+            origin: AgentRunOrigin::Standard,
             provider_request_id: Some("ctrl-1".to_string()),
             tool_use_id: Some("toolu-1".to_string()),
             shell_session_id: "raw-test".to_string(),

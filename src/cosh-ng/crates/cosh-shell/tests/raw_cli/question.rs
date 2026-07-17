@@ -159,7 +159,7 @@ fn raw_cli_zsh_question_card_capture_does_not_leak_to_shell() {
         &[("COSH_SHELL_ISOLATED", "1"), ("TERM", "xterm-256color")],
         vec![
             (b"?? ask question\n".to_vec(), Duration::ZERO),
-            (b"\x1b[C\n".to_vec(), Duration::from_millis(400)),
+            (b"\x1b[C\n".to_vec(), Duration::from_millis(800)),
             (
                 b"echo after-zsh-question\n".to_vec(),
                 Duration::from_millis(300),

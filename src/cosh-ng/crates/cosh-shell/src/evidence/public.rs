@@ -1,5 +1,9 @@
 pub mod context_window;
+mod model;
+mod output_text;
 mod redaction;
+
+pub(crate) use model::{evidence_capture_status_for_block, EvidenceCaptureStatus};
 
 pub use context_window::{
     build_context_window, build_related_history_index, context_blocks_from_entries,

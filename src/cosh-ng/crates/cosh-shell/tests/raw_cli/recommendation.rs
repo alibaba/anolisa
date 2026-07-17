@@ -2,13 +2,16 @@ use super::*;
 
 #[test]
 fn raw_cli_selects_recommendation_without_executing_it() {
-    let output = run_raw_cli_with_input(
+    let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",
-        "ls /path/that/does/not/exist\n\
-         /explain last error\n\
-         /select 2\n\
-         echo after-select\n\
-         exit 0\n",
+        &[],
+        &[("COSH_SHELL_LANG", "en-US")],
+        vec![
+            (b"?? recommendation fixture\n".to_vec(), Duration::ZERO),
+            (b"/select 2\n".to_vec(), Duration::from_millis(1500)),
+            (b"echo after-select\n".to_vec(), Duration::from_millis(100)),
+            (b"exit 0\n".to_vec(), Duration::from_millis(100)),
+        ],
     );
 
     assert!(output.contains("Recommendations"));
@@ -23,21 +26,30 @@ fn raw_cli_selects_recommendation_without_executing_it() {
 
 #[test]
 fn raw_cli_zh_selects_recommendation_without_executing_it() {
-    let output = run_raw_cli_with_env(
+    let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",
-        "ls /path/that/does/not/exist\n\
-         /explain last error\n\
-         /select 2\n\
-         echo after-select\n\
-         exit 0\n",
+        &[],
         &[("COSH_SHELL_LANG", "zh-CN")],
+        vec![
+            (b"?? recommendation fixture\n".to_vec(), Duration::ZERO),
+            (b"/select 2\n".to_vec(), Duration::from_millis(1500)),
+            (b"echo after-select\n".to_vec(), Duration::from_millis(100)),
+            (b"exit 0\n".to_vec(), Duration::from_millis(100)),
+        ],
     );
 
     assert!(output.contains("推荐"), "{output}");
     assert!(
-        output.contains("[Copy] [Insert] [Details] - 仅展示"),
+        output.contains("用于验证仅展示推荐兼容性的显式 fixture。"),
         "{output}"
     );
+    assert!(
+        !output.contains("Explicit compatibility fixture"),
+        "{output}"
+    );
+    assert!(!output.contains("[Copy] [Insert]"), "{output}");
+    assert!(output.contains("仅展示：未执行任何命令"), "{output}");
+    assert!(!output.contains("[Details]"), "{output}");
     assert!(output.contains("已选择推荐 2"), "{output}");
     assert!(output.contains("echo $PATH"), "{output}");
     assert!(output.contains("仅展示：命令未执行；复制或重新输入后才会运行"));
@@ -52,11 +64,7 @@ fn raw_cli_copy_fallback_shows_recommendation_without_executing_it() {
         &[],
         &[("COSH_SHELL_LANG", "en-US")],
         vec![
-            (b"ls /path/that/does/not/exist\n".to_vec(), Duration::ZERO),
-            (
-                b"/explain last error\n".to_vec(),
-                Duration::from_millis(100),
-            ),
+            (b"?? recommendation fixture\n".to_vec(), Duration::ZERO),
             (b"/copy 1\n".to_vec(), Duration::from_millis(2_000)),
             (b"echo after-copy\n".to_vec(), Duration::from_millis(200)),
             (b"exit 0\n".to_vec(), Duration::from_millis(100)),
@@ -102,13 +110,19 @@ fn raw_cli_zh_select_before_recommendation_uses_catalog_fallback() {
 
 #[test]
 fn raw_cli_select_out_of_range_uses_structured_notice() {
-    let output = run_raw_cli_with_input(
+    let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",
-        "ls /path/that/does/not/exist\n\
-         /explain last error\n\
-         /select 99\n\
-         echo after-missing-select\n\
-         exit\n",
+        &[],
+        &[("COSH_SHELL_LANG", "en-US")],
+        vec![
+            (b"?? recommendation fixture\n".to_vec(), Duration::ZERO),
+            (b"/select 99\n".to_vec(), Duration::from_millis(1500)),
+            (
+                b"echo after-missing-select\n".to_vec(),
+                Duration::from_millis(100),
+            ),
+            (b"exit\n".to_vec(), Duration::from_millis(100)),
+        ],
     );
 
     assert!(output.contains("Recommendation unavailable"), "{output}");

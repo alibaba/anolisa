@@ -2,7 +2,7 @@
 #[path = "mod.rs"]
 mod implementation;
 
-pub use implementation::{RawInputCapture, RawObserverAction, RawRelayAction};
+pub use implementation::{PromptGhostRoute, RawInputCapture, RawObserverAction, RawRelayAction};
 
 pub(crate) use implementation::{
     set_pty_winsize, signal_foreground_process_group, signal_process_group, spawn_raw_action_relay,

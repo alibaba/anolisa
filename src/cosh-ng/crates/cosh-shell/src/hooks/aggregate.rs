@@ -1,8 +1,11 @@
 use super::policy::{classify_command_intent, command_intent_key, CommandIntent};
 use super::prelude::{CommandBlock, CommandOrigin, FindingSeverity, HookFinding};
+use crate::types::{BuiltinFactRecord, HookProvenance};
 
 #[derive(Debug, Clone)]
 pub(crate) struct AggregatedHookFinding {
+    pub(crate) provenance: HookProvenance,
+    pub(crate) builtin_facts: Vec<BuiltinFactRecord>,
     pub(crate) primary: HookFinding,
     pub(crate) related: Vec<HookFinding>,
     pub(crate) recommended_skill: Option<String>,

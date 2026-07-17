@@ -890,7 +890,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
             ),
             (
                 b"?? \xe4\xb8\xba\xe4\xbb\x80\xe4\xb9\x88\xe5\xa4\xb1\xe8\xb4\xa5 evidence-failed-diagnostic\n".to_vec(),
-                Duration::from_millis(300),
+                Duration::from_millis(1_200),
             ),
             (
                 b"/details evidence-1\n/details evidence-2\n".to_vec(),

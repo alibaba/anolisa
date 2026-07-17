@@ -1,4 +1,6 @@
 use crate::command::first_program_token;
+use crate::insight::model::{InsightBinding, OutputExcerptStatus};
+use crate::insight::scope::resolve_execution_scope;
 use crate::types::{
     AgentMode, AgentRequest, CommandBlock, CommandStatus, Finding, FindingKind, Intervention,
     InterventionDecision, OutputRefs, ShellEvent, ShellEventKind,
@@ -123,6 +125,134 @@ pub(crate) fn failed_command_agent_request_after_confirmation(
     Some(request)
 }
 
+pub(crate) fn agent_request_for_auto_failure(
+    session_id: impl Into<String>,
+    block: &CommandBlock,
+    findings: &[Finding],
+) -> AgentRequest {
+    let mut request = AgentRequest {
+        id: format!("agent-request-{}", block.id),
+        session_id: session_id.into(),
+        command_block: block.clone(),
+        context_blocks: Vec::new(),
+        context_hints: vec!["__cosh_request_source=auto_failure_analysis".to_string()],
+        user_input: None,
+        findings: findings
+            .iter()
+            .filter(|finding| finding.command_block_id == block.id)
+            .cloned()
+            .collect(),
+        mode: AgentMode::RecommendOnly,
+        user_confirmed: false,
+        hook_finding: None,
+        recommended_skill: None,
+    };
+    crate::types::set_request_context_binding(
+        &mut request,
+        crate::types::AgentContextBinding::FailedCommand,
+    );
+    request
+}
+
+pub(crate) fn agent_request_from_insight_binding(
+    binding: &InsightBinding,
+    current_session_id: &str,
+    visible_input: &str,
+    blocks: &[CommandBlock],
+    findings: &[Finding],
+) -> Option<AgentRequest> {
+    let input = visible_input.trim();
+    if input.is_empty() || binding.target.source_session_id != current_session_id {
+        return None;
+    }
+    let block = blocks.iter().find(|block| {
+        block.session_id == binding.target.source_session_id
+            && block.id == binding.target.source_command_block_id
+    })?;
+    if resolve_execution_scope(&block.session_id, &block.command) != binding.target.scope {
+        return None;
+    }
+
+    let mut target = binding.target.clone();
+    target.evidence_status = current_insight_evidence_status(block, target.evidence_status);
+    let mut context_hints = insight_target_context_hints(&target);
+    context_hints.push("__cosh_request_source=insight_prompt".to_string());
+    let mut request = AgentRequest {
+        id: format!("agent-request-insight-{}", binding.target.insight_id),
+        session_id: current_session_id.to_string(),
+        command_block: block.clone(),
+        context_blocks: Vec::new(),
+        context_hints,
+        user_input: Some(input.to_string()),
+        findings: findings
+            .iter()
+            .filter(|finding| finding.command_block_id == block.id)
+            .cloned()
+            .collect(),
+        mode: AgentMode::RecommendOnly,
+        user_confirmed: true,
+        hook_finding: None,
+        recommended_skill: None,
+    };
+    if block.exit_code != 0 {
+        crate::types::set_request_context_binding(
+            &mut request,
+            crate::types::AgentContextBinding::FailedCommand,
+        );
+    }
+    Some(request)
+}
+
+fn current_insight_evidence_status(
+    block: &CommandBlock,
+    captured_status: OutputExcerptStatus,
+) -> OutputExcerptStatus {
+    let Some(output_ref) = block.output.terminal_output_ref.as_deref() else {
+        return OutputExcerptStatus::Unavailable;
+    };
+    let path = std::path::Path::new(output_ref);
+    if !path.is_file() {
+        return OutputExcerptStatus::Expired;
+    }
+    match std::fs::read_to_string(path) {
+        Err(_) => OutputExcerptStatus::ReadFailed,
+        Ok(text) if text.trim().is_empty() => OutputExcerptStatus::Empty,
+        Ok(_) if captured_status == OutputExcerptStatus::Truncated => {
+            OutputExcerptStatus::Truncated
+        }
+        Ok(_) => OutputExcerptStatus::Available,
+    }
+}
+
+fn insight_target_context_hints(target: &crate::insight::model::InsightTarget) -> Vec<String> {
+    let mut hints = vec![
+        format!(
+            "__cosh_insight_evidence_status={:?}",
+            target.evidence_status
+        ),
+        format!("__cosh_insight_severity={:?}", target.severity),
+        format!("__cosh_insight_confidence={:?}", target.confidence),
+    ];
+    hints.extend(target.evidence.iter().map(|evidence| {
+        let key = bounded_metadata_component(&evidence.key, 128);
+        let value = bounded_metadata_component(&evidence.value, 512);
+        format!("__cosh_insight_evidence={key}={value}")
+    }));
+    hints
+}
+
+fn bounded_metadata_component(value: &str, max_bytes: usize) -> String {
+    let value = value.replace(['\n', '\r'], " ");
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
+}
+
 pub fn agent_request_from_intercepted_input(
     event: &ShellEvent,
     sequence: usize,
@@ -164,6 +294,7 @@ pub fn agent_request_from_intercepted_input(
                 terminal_output_ref: None,
                 terminal_output_bytes: 0,
             },
+            shell_environment_generation: None,
         },
         context_blocks: Vec::new(),
         context_hints: Vec::new(),
@@ -200,7 +331,6 @@ pub fn event_confirms_failed_command_analysis(event: &ShellEvent) -> bool {
 
     match event.component.as_deref() {
         Some("slash") => matches_failure_analysis_slash(event.input.as_deref()),
-        Some("card") => event.message.as_deref() == Some("failed_command_analyze"),
         None => matches_failure_analysis_slash(event.input.as_deref()),
         _ => false,
     }
@@ -213,7 +343,6 @@ pub fn event_cancels_failed_command_analysis(event: &ShellEvent) -> bool {
 
     match event.component.as_deref() {
         Some("slash") => matches_cancel_slash(event.input.as_deref()),
-        Some("card") => event.message.as_deref() == Some("failed_command_dismiss"),
         None => matches_cancel_slash(event.input.as_deref()),
         _ => false,
     }
@@ -413,9 +542,14 @@ fn guidance_for_finding(kind: &FindingKind) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_request_after_confirmation, approval_command_from_event, event_requests_agent_cancel,
-        failed_command_agent_request_after_confirmation, recommendation_action_from_event,
-        ApprovalCommand, ApprovalCommandKind, RecommendationAction, RecommendationActionKind,
+        agent_request_after_confirmation, agent_request_for_auto_failure,
+        agent_request_from_insight_binding, approval_command_from_event,
+        event_requests_agent_cancel, failed_command_agent_request_after_confirmation,
+        recommendation_action_from_event, ApprovalCommand, ApprovalCommandKind,
+        RecommendationAction, RecommendationActionKind,
+    };
+    use crate::insight::model::{
+        ExecutionScope, InsightBinding, InsightTarget, OutputExcerptStatus,
     };
     use crate::types::{CommandBlock, CommandOrigin, CommandStatus, OutputRefs, ShellEvent};
 
@@ -436,6 +570,7 @@ mod tests {
                 terminal_output_ref: None,
                 terminal_output_bytes: 0,
             },
+            shell_environment_generation: None,
         }
     }
 
@@ -458,6 +593,109 @@ mod tests {
             .context_hints
             .iter()
             .any(|hint| hint == "__cosh_context_binding=failed_command"));
+    }
+
+    #[test]
+    fn auto_failure_builder_marks_system_generated_unconfirmed_request() {
+        let block = failed_block();
+        let findings = super::findings_from_blocks(std::slice::from_ref(&block));
+
+        let request = agent_request_for_auto_failure("session-1", &block, &findings);
+
+        assert_eq!(request.user_input, None);
+        assert!(!request.user_confirmed);
+        assert!(request
+            .context_hints
+            .iter()
+            .any(|hint| hint == "__cosh_request_source=auto_failure_analysis"));
+        assert!(request
+            .context_hints
+            .iter()
+            .any(|hint| hint == "__cosh_context_binding=failed_command"));
+    }
+
+    #[test]
+    fn insight_binding_builder_resolves_original_source_block_once() {
+        let block = failed_block();
+        let blocks = vec![block.clone()];
+        let findings = super::findings_from_blocks(&blocks);
+        let binding = InsightBinding {
+            suggestion_id: "suggestion-1".to_string(),
+            target: InsightTarget {
+                insight_id: "insight-1".to_string(),
+                source_session_id: "session-1".to_string(),
+                source_command_block_id: block.id.clone(),
+                scope: ExecutionScope::local("session-1"),
+                evidence_handle: None,
+                evidence_status: OutputExcerptStatus::Available,
+                severity: crate::insight::model::InsightSeverity::Warning,
+                confidence: crate::insight::model::InsightConfidence::High,
+                evidence: vec![crate::insight::model::InsightEvidence {
+                    key: "failure_class".to_string(),
+                    value: "BuildOrTestFailure".to_string(),
+                }],
+                created_at_ms: 2,
+            },
+        };
+
+        let request = agent_request_from_insight_binding(
+            &binding,
+            "session-1",
+            "analyze the edited question",
+            &blocks,
+            &findings,
+        )
+        .expect("bound request");
+
+        assert_eq!(request.command_block.id, block.id);
+        assert_eq!(
+            request.user_input.as_deref(),
+            Some("analyze the edited question")
+        );
+        assert!(request
+            .context_hints
+            .iter()
+            .any(|hint| hint == "__cosh_insight_evidence_status=Unavailable"));
+        assert!(request
+            .context_hints
+            .iter()
+            .any(|hint| hint == "__cosh_insight_severity=Warning"));
+        assert!(request
+            .context_hints
+            .iter()
+            .any(|hint| hint == "__cosh_insight_confidence=High"));
+        assert!(request
+            .context_hints
+            .iter()
+            .any(|hint| hint == "__cosh_insight_evidence=failure_class=BuildOrTestFailure"));
+        assert!(request
+            .context_hints
+            .iter()
+            .any(|hint| hint == "__cosh_request_source=insight_prompt"));
+        assert!(agent_request_from_insight_binding(
+            &binding,
+            "other-session",
+            "analyze",
+            &blocks,
+            &findings,
+        )
+        .is_none());
+
+        let mut expired_block = block.clone();
+        expired_block.output.terminal_output_ref =
+            Some(format!("/tmp/cosh-expired-output-{}", std::process::id()));
+        let expired = agent_request_from_insight_binding(
+            &binding,
+            "session-1",
+            "analyze",
+            &[expired_block],
+            &findings,
+        )
+        .expect("expired source remains bound");
+        assert!(expired
+            .context_hints
+            .iter()
+            .any(|hint| hint == "__cosh_insight_evidence_status=Expired"));
     }
 
     #[test]

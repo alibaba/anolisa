@@ -45,12 +45,8 @@ fn raw_cli_no_color_keeps_box_layout_when_terminal_supports_it() {
             ("COSH_SHELL_ANALYSIS_MODE", "auto"),
         ],
         vec![
-            (b"ls /path/that/does/not/exist\n".to_vec(), Duration::ZERO),
-            (
-                b"/explain last error\n".to_vec(),
-                Duration::from_millis(500),
-            ),
-            (b"exit 0\n".to_vec(), Duration::from_millis(500)),
+            (b"?? recommendation fixture\n".to_vec(), Duration::ZERO),
+            (b"exit 0\n".to_vec(), Duration::from_millis(1_500)),
         ],
     );
 
@@ -359,12 +355,8 @@ fn raw_cli_dumb_terminal_uses_plain_blocks() {
             ("COSH_SHELL_ANALYSIS_MODE", "auto"),
         ],
         vec![
-            (b"ls /path/that/does/not/exist\n".to_vec(), Duration::ZERO),
-            (
-                b"/explain last error\n".to_vec(),
-                Duration::from_millis(500),
-            ),
-            (b"exit 0\n".to_vec(), Duration::from_millis(500)),
+            (b"?? recommendation fixture\n".to_vec(), Duration::ZERO),
+            (b"exit 0\n".to_vec(), Duration::from_millis(1_500)),
         ],
     );
 
@@ -382,12 +374,8 @@ fn raw_cli_explicit_plain_render_mode_uses_plain_blocks() {
             ("COSH_SHELL_ANALYSIS_MODE", "auto"),
         ],
         vec![
-            (b"ls /path/that/does/not/exist\n".to_vec(), Duration::ZERO),
-            (
-                b"/explain last error\n".to_vec(),
-                Duration::from_millis(500),
-            ),
-            (b"exit 0\n".to_vec(), Duration::from_millis(500)),
+            (b"?? recommendation fixture\n".to_vec(), Duration::ZERO),
+            (b"exit 0\n".to_vec(), Duration::from_millis(1_500)),
         ],
     );
 

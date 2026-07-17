@@ -31,7 +31,10 @@ fn raw_cli_help_renders_slash_command_reference() {
     assert!(!output.contains("/agent"), "{output}");
     assert!(!output.contains("/explain"), "{output}");
     assert!(!output.contains("/cancel"), "{output}");
-    assert!(!output.contains("/details <id>"), "{output}");
+    assert!(!output.contains("/details"), "{output}");
+    assert!(!output.contains("command_id"), "{output}");
+    assert!(!output.contains("output_id"), "{output}");
+    assert!(!output.contains("insight_id"), "{output}");
     assert!(!output.contains("/audit"), "{output}");
     assert!(!output.contains("/select N"), "{output}");
     assert!(!output.contains("/copy N"), "{output}");

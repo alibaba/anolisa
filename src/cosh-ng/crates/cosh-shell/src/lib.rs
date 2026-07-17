@@ -16,6 +16,8 @@ mod hooks;
 
 mod i18n;
 mod input;
+#[allow(dead_code)]
+mod insight;
 #[path = "journal/public.rs"]
 pub mod journal;
 #[path = "ledger/public.rs"]

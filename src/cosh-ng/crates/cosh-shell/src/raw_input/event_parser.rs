@@ -10,6 +10,7 @@ pub(super) struct CandidateLineBuffer {
     pub(super) bytes: Vec<u8>,
     pub(super) relayed_len: usize,
     pub(super) force_agent_intercept: bool,
+    pub(super) forced_agent_suggestion_id: Option<String>,
 }
 
 impl CandidateLineBuffer {
@@ -56,11 +57,13 @@ impl CandidateLineBuffer {
         self.bytes.clear();
         self.relayed_len = 0;
         self.force_agent_intercept = false;
+        self.forced_agent_suggestion_id = None;
     }
 
     pub(super) fn take(&mut self) -> Vec<u8> {
         self.relayed_len = 0;
         self.force_agent_intercept = false;
+        self.forced_agent_suggestion_id = None;
         std::mem::take(&mut self.bytes)
     }
 
@@ -244,11 +247,17 @@ pub(super) fn candidate_line_status(bytes: &[u8]) -> CandidateLineStatus {
     }
 
     let Some(newline_idx) = bytes.iter().position(|byte| matches!(byte, b'\n' | b'\r')) else {
-        if bytes
-            .iter()
-            .any(|byte| *byte == 0x1b || (*byte < 0x20 && !matches!(byte, b'\t')))
-        {
-            return CandidateLineStatus::Unsafe;
+        for (index, byte) in bytes.iter().enumerate() {
+            if *byte == 0x1b {
+                return if incomplete_escape_suffix(&bytes[index..]) {
+                    CandidateLineStatus::Pending
+                } else {
+                    CandidateLineStatus::Unsafe
+                };
+            }
+            if *byte < 0x20 && !matches!(byte, b'\t') {
+                return CandidateLineStatus::Unsafe;
+            }
         }
         return CandidateLineStatus::Pending;
     };
@@ -268,5 +277,14 @@ pub(super) fn candidate_line_status(bytes: &[u8]) -> CandidateLineStatus {
     CandidateLineStatus::Complete {
         line: line.trim_end_matches(['\r', '\n']).to_string(),
         line_len,
+    }
+}
+
+fn incomplete_escape_suffix(bytes: &[u8]) -> bool {
+    match bytes {
+        [0x1b] => true,
+        [0x1b, b'[', parameters @ ..] => parameters.iter().all(|byte| matches!(byte, 0x20..=0x3f)),
+        [0x1b, b'O'] => true,
+        _ => false,
     }
 }

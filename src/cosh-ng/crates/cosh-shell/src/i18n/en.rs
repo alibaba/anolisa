@@ -3,7 +3,9 @@ use super::MessageId;
 pub(super) fn message(id: MessageId) -> &'static str {
     match id {
         MessageId::StartupTitle => "cosh-shell",
-        MessageId::StartupAdapterLine => "Adapter: {adapter} · Shell: {shell} · Mode: {mode}",
+        MessageId::StartupAdapterLine => {
+            "Adapter: {adapter} · Shell: {shell} · Approval: {approval} · Analysis: {analysis}"
+        }
         MessageId::StartupCwdLine => "cwd: {cwd}",
         MessageId::StartupCommandsLine => "/help · /mode · /hooks",
         MessageId::StartupHooksNoneSummary => "Startup hooks: none configured.",
@@ -32,7 +34,9 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::HelpSummaryAuth => "configure AI provider credentials",
         MessageId::HelpSummaryConfig => "configure UI language",
         MessageId::HelpSummaryModeApproval => "change approval mode",
-        MessageId::HelpSummaryModeAnalysis => "change analysis strategy",
+        MessageId::HelpSummaryModeAnalysis => {
+            "choose suggested mode, automatic analysis, or no proactive assistance"
+        }
         MessageId::HelpSummaryAgent => "start an explicit Agent request",
         MessageId::HelpSummaryExplain => "analyze the last failed command",
         MessageId::HelpSummaryCancel => "cancel active Agent work",
@@ -328,14 +332,29 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::AnalysisModeUnknownBody => "Unknown analysis mode: {mode}",
         MessageId::AnalysisModeUsageFooter => "Use /mode analysis smart|auto|manual.",
         MessageId::AnalysisModeSmartFooter => {
-            "Hooks evaluate on failure; findings shown for review."
+            "Failures and useful system-diagnostic output are evaluated; insights are shown for review."
         }
         MessageId::AnalysisModeAutoFooter => {
-            "Hooks evaluate on failure; Agent auto-triggers for real command failures."
+            "Only a narrow set of high-confidence failures auto-starts Agent analysis; other cases remain suggestions."
         }
         MessageId::AnalysisModeManualFooter => {
-            "Hooks and automatic analysis disabled; use slash commands to trigger."
+            "Passive suggestions and automatic analysis are off; use slash commands to trigger analysis."
         }
+        MessageId::AnalysisModeCardSmartLine => {
+            "{marker}[ smart  ] Suggested mode (recommended)"
+        }
+        MessageId::AnalysisModeCardAutoLine => {
+            "{marker}[ auto   ] Automatic analysis (may start Agent after a command failure)"
+        }
+        MessageId::AnalysisModeCardManualLine => {
+            "{marker}[ manual ] Disable proactive assistance"
+        }
+        MessageId::AnalysisModeCardFooter => {
+            "Keys: Left/Right or Tab/Shift-Tab select | Enter apply | Esc cancel"
+        }
+        MessageId::AnalysisModeRemainsBody => "Mode remains {mode}.",
+        MessageId::AnalysisModeCancelBody => "Mode unchanged: {mode}.",
+        MessageId::AnalysisModeCancelFooter => "No shell command ran.",
         MessageId::AgentThinking => "Thinking...",
         MessageId::AgentThinkingElapsed => "Thinking... {elapsed}s · {detail}",
         MessageId::AgentRecoveryTitle => "Agent recovery",
@@ -394,11 +413,6 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::InterceptNoticeTitle => "AI request",
         MessageId::InterceptNoticeBody => "Sending input to Agent: {input}",
         MessageId::InterceptNoticeFooter => "Shell input was intercepted before Bash ran it.",
-        MessageId::FailedCommandCardTitle => "Command failed",
-        MessageId::FailedCommandCardBody => {
-            "`{command}` exited with code {exit_code}; id: {id}"
-        }
-        MessageId::FailedCommandCardFooter => "[Analyze] [Dismiss] [Details]",
         MessageId::FailedAnalysisCancelledTitle => "Agent cancelled",
         MessageId::FailedAnalysisCancelledBody => "cancelled pending analysis for `{command}`",
         MessageId::FailedAnalysisCancelNoActiveBody => {
@@ -413,6 +427,60 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::HookAutoAnalyzedTitle => "Hook auto-analyzed",
         MessageId::HookAutoAnalyzedBody => "`{command}` exited with code {exit_code}",
         MessageId::HookAutoAnalyzedFooter => "Agent analysis is starting.",
+        MessageId::InsightLabel => "Insight: ",
+        MessageId::InsightCommandTypoSummary => "A likely command typo was found",
+        MessageId::InsightPermissionDeniedSummary => "The command was denied by permissions",
+        MessageId::InsightBuildOrTestFailureSummary => "The build or test command failed",
+        MessageId::InsightRuntimeExceptionSummary => {
+            "The program terminated with an unhandled exception"
+        }
+        MessageId::InsightAbnormalSignalSummary => {
+            "The command ended because of an abnormal signal"
+        }
+        MessageId::InsightMemoryPressureSummary => "Current memory pressure needs attention",
+        MessageId::InsightHighMemoryProcessSummary => "{process} is using unusually high memory",
+        MessageId::InsightHighMemoryProcessGenericSummary => {
+            "A process is using unusually high memory"
+        }
+        MessageId::InsightMemoryRootCauseSummary => {
+            "Memory pressure may be related to {process}"
+        }
+        MessageId::InsightMemoryRootCauseGenericSummary => {
+            "Memory pressure may be related to a high-memory process"
+        }
+        MessageId::InsightPermissionDeniedPrompt => {
+            "Analyze the permission failure, identify the boundary, and suggest a least-privilege next step"
+        }
+        MessageId::InsightBuildOrTestFailurePrompt => {
+            "Analyze the build or test failure and identify the first actionable error"
+        }
+        MessageId::InsightRuntimeExceptionPrompt => {
+            "Analyze the uncaught exception, confirm the direct cause, and decide whether it needs repair"
+        }
+        MessageId::InsightAbnormalSignalPrompt => {
+            "Analyze the abnormal termination, confirm the signal fact, and suggest one safe check"
+        }
+        MessageId::InsightMemoryPressurePrompt => {
+            "Analyze memory pressure from the current output and identify a process only if needed"
+        }
+        MessageId::InsightHighMemoryProcessPrompt => {
+            "Use the current output to decide whether {process} is the main memory source"
+        }
+        MessageId::InsightHighMemoryProcessGenericPrompt => {
+            "Use the current output to identify the main memory process"
+        }
+        MessageId::InsightMemoryRootCausePrompt => {
+            "Use the current output to confirm whether {process} is the main source of memory pressure"
+        }
+        MessageId::InsightMemoryRootCauseGenericPrompt => {
+            "Use the current output to confirm the main process source of memory pressure"
+        }
+        MessageId::InsightShellRewriteFirstUseHint => {
+            "Press Tab to fill, then Enter to run; keep typing to ignore"
+        }
+        MessageId::InsightAgentPromptFirstUseHint => {
+            "Press Tab to fill, then Enter to submit; keep typing to ignore"
+        }
         MessageId::AgentQueuedTitle => "Agent queued",
         MessageId::AgentQueuedBodyCommand => "Captured failed command: {command}",
         MessageId::AgentQueuedBodyActive => "Current Agent run is still streaming.",
@@ -420,12 +488,11 @@ pub(super) fn message(id: MessageId) -> &'static str {
             "This failure will be analyzed after the current Agent run finishes."
         }
         MessageId::HookFindingTitle => "Hook finding",
-        MessageId::HookFindingFooter => "Use /hooks analyze|ignore|details {hint_id}.",
+        MessageId::HookFindingFooter => "Use /hooks to review findings.",
         MessageId::HookFindingMarkdownTitle => "Command hook finding",
         MessageId::HookFindingMarkdownHookLine => "- Hook: `{hook_id}`.",
         MessageId::HookFindingMarkdownSeverityLine => "- Severity: `{severity}`.",
         MessageId::HookFindingMarkdownFindingLine => "- Finding: {finding}.",
-        MessageId::HookFindingMarkdownOutputRefLine => "- Output id: `{output_ref}`.",
         MessageId::HookFindingMarkdownSuggestionLine => "- Suggestion: {suggestion}.",
         MessageId::HookFindingMarkdownRelatedTitle => "- Related findings:",
         MessageId::HookFindingMarkdownRelatedLine => "  - `{hook_id}` [{severity}]: {finding}",
@@ -529,14 +596,14 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::ActivityStatusCompleted => "completed",
         MessageId::ActivityStatusError => "error",
         MessageId::ActivityStatusInterrupted => "interrupted",
-        MessageId::ActivityToolCalledSummary => "{tool} called: {preview}; [Details] {id}",
-        MessageId::ActivityToolRequestedSummary => "{tool} requested: {preview}; [Details] {id}",
-        MessageId::ActivityToolOutputCapturedSummary => "{stream} captured; [Details] {id}",
+        MessageId::ActivityToolCalledSummary => "{tool} called: {preview}",
+        MessageId::ActivityToolRequestedSummary => "{tool} requested: {preview}",
+        MessageId::ActivityToolOutputCapturedSummary => "{stream} captured",
         MessageId::ActivityProviderNativeShellBypassSummary => {
-            "{tool} auto-approved by provider: {preview}; [Details] {id}"
+            "{tool} auto-approved by provider: {preview}"
         }
         MessageId::ActivityToolNeedsForegroundShellSummary => {
-            "may require foreground shell; [Send to shell] {handoff}; [Details] {id}"
+            "may require foreground shell; [Send to shell] {handoff}"
         }
         MessageId::ActivityShellHandoffSentSummary => "{approval} sent to shell",
         MessageId::ToolCardReadFileLabel => "Read",
@@ -591,8 +658,10 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::MarkdownCodeWithLanguageLabel => "code: {language}",
         MessageId::MarkdownTableLabel => "table",
         MessageId::RecommendationTitle => "Recommendations",
+        MessageId::RecommendationNextStepTitle => "Suggested next step",
+        MessageId::AnalysisResultTitle => "Analysis result",
         MessageId::RecommendationEmptyBody => "No command recommendations",
-        MessageId::RecommendationFooter => "[Copy] [Insert] [Details] - display-only",
+        MessageId::RecommendationFooter => "display-only: no command was executed",
         MessageId::RecommendationNoSelectableTitle => "No selectable recommendation",
         MessageId::RecommendationNoSelectableBody => {
             "No selectable recommendation is available yet"
@@ -743,8 +812,8 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::HealthTryReasonServiceState => "configured service state is unexpected",
         MessageId::HealthTryReasonHighLoad => "load is elevated across recent windows",
         MessageId::HealthTryReasonMissingCoreCheck => "a core health check is unavailable",
-        MessageId::ToolOutputStdoutCapturedSummary => "stdout captured; [Details] {id}",
-        MessageId::ToolOutputStderrCapturedSummary => "stderr captured; [Details] {id}",
+        MessageId::ToolOutputStdoutCapturedSummary => "stdout captured",
+        MessageId::ToolOutputStderrCapturedSummary => "stderr captured",
         MessageId::ToolSummaryExit => "exit {exit}",
         MessageId::ToolSummaryBlocked => "tool request blocked by shell broker guard",
         MessageId::ToolSummaryTimedOut => "tool request timed out",

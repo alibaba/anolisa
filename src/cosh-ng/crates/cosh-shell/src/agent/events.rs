@@ -2,13 +2,12 @@ use crate::agent::approval_bridge::{render_auto_approved_tool, render_trusted_to
 use crate::agent::heartbeat::{remember_agent_activity, render_agent_pending_tool_status};
 use crate::agent::run::ActiveAgentRun;
 use crate::runtime::prelude::*;
-
 pub(crate) fn render_new_agent_structured_events<W: Write>(
     state: &mut InlineState,
     output: &mut W,
     adapter: &AdapterInstance,
 ) -> std::io::Result<()> {
-    let (events, run_request) = {
+    let (events, run_request, origin) = {
         let Some(active_run) = state.agent_run.active.as_mut() else {
             return Ok(());
         };
@@ -23,16 +22,15 @@ pub(crate) fn render_new_agent_structured_events<W: Write>(
             active_run.prepare_structured_surface(output)?;
         }
         active_run.rendered_governed_event_count = end;
-        (events, active_run.request.clone())
+        (events, active_run.request.clone(), active_run.origin)
     };
-
-    render_agent_structured_events(state, &events, Some(&run_request), output, adapter)
+    render_agent_structured_events(state, &events, Some(&run_request), origin, output, adapter)
 }
-
 pub(crate) fn render_agent_structured_events<W: Write>(
     state: &mut InlineState,
     governed_events: &[GovernedEvent],
     run_request: Option<&AgentRequest>,
+    origin: AgentRunOrigin,
     output: &mut W,
     adapter: &AdapterInstance,
 ) -> std::io::Result<()> {
@@ -43,29 +41,39 @@ pub(crate) fn render_agent_structured_events<W: Write>(
         ActivityRecordPolicy {
             suppress_provider_native_shell: adapter.capabilities().control_protocol,
             shell_evidence_tool_available: shell_evidence_tool_available(state, adapter),
+            origin,
         },
     );
     render_provider_native_shell_transcript(state, &activity_ids, output)?;
     render_activity_rows(state, &activity_ids, output)?;
-    let question_ids = record_user_questions(state, governed_events);
+    let question_ids = record_user_questions(
+        state,
+        governed_events,
+        origin,
+        run_request.map(|request| request.id.as_str()),
+    );
     render_user_questions(state, &question_ids, output)?;
     let auth_ids = crate::auth::runtime::record_auth_required(state, governed_events);
     crate::auth::runtime::render_auth_panel(state, &auth_ids, output)?;
-    if render_trusted_tool(state, governed_events, run_request, output, adapter)? {
+    if render_trusted_tool(state, governed_events, run_request, origin, output, adapter)? {
         return Ok(());
     }
-    if render_auto_approved_tool(state, governed_events, run_request, output, adapter)? {
+    if render_auto_approved_tool(state, governed_events, run_request, origin, output, adapter)? {
         return Ok(());
     }
     if state.approval_mode == CoshApprovalMode::Recommend {
         return Ok(());
     }
-    let approval_ids =
-        record_approval_requests(state, governed_events, run_request, ignore_tool_calls);
+    let approval_ids = record_approval_requests(
+        state,
+        governed_events,
+        run_request,
+        origin,
+        ignore_tool_calls,
+    );
     render_approval_requests(state, &approval_ids, output)?;
     Ok(())
 }
-
 fn shell_evidence_tool_available(state: &InlineState, adapter: &AdapterInstance) -> bool {
     state
         .agent_run
@@ -79,7 +87,6 @@ fn shell_evidence_tool_available(state: &InlineState, adapter: &AdapterInstance)
         })
         .unwrap_or_else(|| adapter.name() == "cosh-core" && adapter.capabilities().control_protocol)
 }
-
 pub(crate) fn render_active_agent_event<W: Write>(
     active_run: &mut ActiveAgentRun,
     event: AgentEvent,
@@ -150,7 +157,6 @@ pub(crate) fn render_active_agent_event<W: Write>(
     }
     Ok(())
 }
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TextHoldReason {
     InteractionPending,
@@ -348,7 +354,6 @@ mod tests {
             display_text: String::new(),
             auto_execute: false,
         };
-
         assert!(!event_may_render_structured_surface(&governed));
     }
 
@@ -367,7 +372,6 @@ mod tests {
             display_text: String::new(),
             auto_execute: false,
         };
-
         assert!(!event_may_render_structured_surface(&governed));
     }
 
@@ -386,7 +390,6 @@ mod tests {
             display_text: String::new(),
             auto_execute: false,
         };
-
         assert!(!event_may_render_structured_surface(&governed));
     }
 
@@ -404,7 +407,6 @@ mod tests {
             display_text: String::new(),
             auto_execute: false,
         };
-
         assert!(event_may_render_structured_surface(&governed));
     }
 
@@ -426,7 +428,6 @@ mod tests {
             display_text: String::new(),
             auto_execute: false,
         };
-
         assert!(event_may_render_structured_surface(&governed));
     }
 
@@ -434,7 +435,6 @@ mod tests {
     fn active_agent_text_delta_suppresses_cosh_request_block() {
         let mut active_run = test_active_run();
         let mut output = Vec::new();
-
         render_active_agent_event(
             &mut active_run,
             AgentEvent::TextDelta {
@@ -654,6 +654,7 @@ mod tests {
                     terminal_output_ref: None,
                     terminal_output_bytes: 0,
                 },
+                shell_environment_generation: None,
             },
             context_blocks: Vec::new(),
             context_hints: Vec::new(),
@@ -669,6 +670,7 @@ mod tests {
         let renderer = RatatuiInlineRenderer::for_terminal();
         ActiveAgentRun {
             request,
+            origin: AgentRunOrigin::Standard,
             handle,
             provider_name: "fake",
             language: Language::EnUs,

@@ -168,6 +168,7 @@ mod tests {
         let mut state = InlineState::default();
         let evidence = RuntimeShellCommandCompleted {
             approval_id: Some("req-1".to_string()),
+            origin: AgentRunOrigin::Standard,
             provider_request_id: Some("ctrl-1".to_string()),
             tool_use_id: Some("toolu-1".to_string()),
             shell_session_id: "raw-test".to_string(),

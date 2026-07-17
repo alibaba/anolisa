@@ -4,10 +4,15 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::activity::runtime::{RuntimeActivityRow, ToolInvocationRecord};
-use crate::agent::run::{ActiveAgentRun, PendingAgentRequest};
+use crate::agent::run::{ActiveAgentRun, AgentRunOrigin, PendingAgentRequest};
 use crate::diagnostics::health::HealthScanReport;
 use crate::hooks::state::HookRuntimeState;
+use crate::insight::correlation::InsightCorrelationState;
+use crate::insight::model::{InsightBinding, InsightCandidate};
+use crate::insight::policy::InterruptionBudget;
+use crate::insight::shell_rewrite::ShellRewriteCatalogService;
 use crate::question::runtime::RuntimeUserQuestion;
+use crate::raw_input::PromptGhostRoute;
 use crate::runtime::events::ShellEventCursor;
 use crate::runtime::evidence_requests::EvidenceRequestState;
 use crate::runtime::evidence_state::EvidenceState;
@@ -60,10 +65,14 @@ pub(crate) struct InlineState {
     pub(crate) analyzed_blocks: HashSet<String>,
     pub(crate) queued_analysis_notices: HashSet<String>,
     pub(crate) canceled_blocks: HashSet<String>,
-    pub(crate) rendered_failed_command_cards: HashSet<String>,
+    pub(crate) evaluated_failed_command_insights: HashSet<String>,
     pub(crate) rendered_startup_banner: bool,
     pub(crate) handled_intercepts: HashSet<String>,
     pub(crate) hooks: HookRuntimeState,
+    pub(crate) insight_correlation: InsightCorrelationState,
+    pub(crate) insight_budget: InterruptionBudget,
+    pub(crate) pending_command_insight: Option<InsightCandidate>,
+    pub(crate) shell_rewrite: ShellRewriteCatalogService,
     pub(crate) handled_confirmations: HashSet<String>,
     pub(crate) handled_cancellations: HashSet<String>,
     pub(crate) handled_cancel_requests: HashSet<String>,
@@ -89,15 +98,19 @@ pub(crate) struct InlineState {
     pub(crate) analysis_throttle: AnalysisThrottle,
     pub(crate) trigger_pty_prompt: bool,
     pub(crate) pending_input_ghost: Option<String>,
+    pub(crate) pending_input_ghost_route: PromptGhostRoute,
     pub(crate) pending_input_ghost_binding: Option<PendingInputGhostBinding>,
+    pub(crate) shown_shell_rewrite_guidance: bool,
+    pub(crate) shown_agent_prompt_guidance: bool,
     pub(crate) pending_shell_handoff_timeout_notice: Option<Duration>,
     pub(crate) continuity: ContinuityState,
     pub(crate) startup_health: StartupHealthState,
 }
 
 #[derive(Clone)]
-pub(crate) struct PendingInputGhostBinding {
-    pub(crate) binding: AgentContextBinding,
+pub(crate) enum PendingInputGhostBinding {
+    AgentContext(AgentContextBinding),
+    Insight(Box<InsightBinding>),
 }
 
 #[derive(Default)]
@@ -571,9 +584,18 @@ pub(crate) struct ControlState {
 }
 
 impl ControlState {
-    pub(crate) fn set_pending_mode_panel(&mut self, selected_option: usize) {
+    pub(crate) fn set_pending_mode_panel(
+        &mut self,
+        kind: RuntimeModePanelKind,
+        selected_option: usize,
+    ) {
         self.pending_mode_panel = Some(RuntimeModePanel {
-            id: format!("mode-{}", self.handled_mode_actions.len() + 1),
+            id: format!(
+                "{}-mode-{}",
+                kind.id_prefix(),
+                self.handled_mode_actions.len() + 1
+            ),
+            kind,
             selected_option,
         });
     }
@@ -683,26 +705,39 @@ impl ControlState {
     }
     pub(crate) fn provider_host_executed_shell_result_delivered(
         &self,
+        run_id: &str,
         request_id: &str,
         tool_use_id: Option<&str>,
     ) -> bool {
         self.provider_tool
-            .host_executed_shell_result_delivered(request_id, tool_use_id)
+            .host_executed_shell_result_delivered(run_id, request_id, tool_use_id)
     }
-    pub(crate) fn claim_provider_shell_transcript_command(&mut self, tool_id: &str) -> bool {
-        self.provider_tool.claim_shell_transcript_command(tool_id)
+    pub(crate) fn claim_provider_shell_transcript_command(
+        &mut self,
+        run_id: &str,
+        tool_id: &str,
+    ) -> bool {
+        self.provider_tool
+            .claim_shell_transcript_command(run_id, tool_id)
     }
-    pub(crate) fn mark_provider_shell_transcript_output(&mut self, tool_id: &str) {
-        self.provider_tool.mark_shell_transcript_output(tool_id);
+    pub(crate) fn mark_provider_shell_transcript_output(&mut self, run_id: &str, tool_id: &str) {
+        self.provider_tool
+            .mark_shell_transcript_output(run_id, tool_id);
     }
-    pub(crate) fn mark_provider_shell_transcript_seen(&mut self, tool_id: &str) {
-        self.provider_tool.mark_shell_transcript_seen(tool_id);
+    pub(crate) fn mark_provider_shell_transcript_seen(&mut self, run_id: &str, tool_id: &str) {
+        self.provider_tool
+            .mark_shell_transcript_seen(run_id, tool_id);
     }
-    pub(crate) fn provider_shell_transcript_output_seen(&self, tool_id: &str) -> bool {
-        self.provider_tool.shell_transcript_output_seen(tool_id)
+    pub(crate) fn provider_shell_transcript_output_seen(
+        &self,
+        run_id: &str,
+        tool_id: &str,
+    ) -> bool {
+        self.provider_tool
+            .shell_transcript_output_seen(run_id, tool_id)
     }
-    pub(crate) fn provider_shell_transcript_seen(&self, tool_id: &str) -> bool {
-        self.provider_tool.shell_transcript_seen(tool_id)
+    pub(crate) fn provider_shell_transcript_seen(&self, run_id: &str, tool_id: &str) -> bool {
+        self.provider_tool.shell_transcript_seen(run_id, tool_id)
     }
     pub(crate) fn mark_provider_foreground_shell_command(&mut self, command: &str) -> bool {
         self.provider_tool.mark_foreground_shell_command(command)
@@ -710,11 +745,16 @@ impl ControlState {
     pub(crate) fn provider_foreground_shell_command_seen(&self, command: &str) -> bool {
         self.provider_tool.foreground_shell_command_seen(command)
     }
-    pub(crate) fn provider_tool_is_shell(&self, tool_id: &str) -> bool {
-        self.provider_tool.is_shell_tool(tool_id)
+    pub(crate) fn provider_tool_is_shell(&self, run_id: &str, tool_id: &str) -> bool {
+        self.provider_tool.is_shell_tool(run_id, tool_id)
     }
-    pub(crate) fn provider_tool_is_control_permission_shell(&self, tool_id: &str) -> bool {
-        self.provider_tool.is_control_permission_shell_tool(tool_id)
+    pub(crate) fn provider_tool_is_control_permission_shell(
+        &self,
+        run_id: &str,
+        tool_id: &str,
+    ) -> bool {
+        self.provider_tool
+            .is_control_permission_shell_tool(run_id, tool_id)
     }
     pub(crate) fn mark_provider_shell_handoff_run(&mut self, run_id: &str) {
         self.provider_shell_handoff_run_ids
@@ -732,9 +772,13 @@ impl ControlState {
         self.provider_tool
             .record_command_from_input(run_id, tool_id, tool_input)
     }
-    pub(crate) fn mark_provider_control_permission_shell_tool(&mut self, tool_id: &str) {
+    pub(crate) fn mark_provider_control_permission_shell_tool(
+        &mut self,
+        run_id: &str,
+        tool_id: &str,
+    ) {
         self.provider_tool
-            .mark_control_permission_shell_tool(tool_id);
+            .mark_control_permission_shell_tool(run_id, tool_id);
     }
     pub(crate) fn record_provider_shell_command_from_tool_call(
         &mut self,
@@ -780,16 +824,18 @@ impl ControlState {
     }
     pub(crate) fn queue_interactive_shell_handoff_for_tool_failure(
         &mut self,
+        run_id: &str,
         tool_id: &str,
         status: &str,
+        origin: AgentRunOrigin,
     ) -> Option<PendingInteractiveShellHandoff> {
         let command = self
             .provider_tool
-            .interactive_failure_command(tool_id, status)?;
+            .interactive_failure_command(run_id, tool_id, status)?;
         if let Some(handoff) = self
             .interactive_shell_handoffs
             .iter()
-            .find(|handoff| handoff.tool_id == tool_id)
+            .find(|handoff| handoff.run_id == run_id && handoff.tool_id == tool_id)
             .cloned()
         {
             return Some(handoff);
@@ -801,6 +847,7 @@ impl ControlState {
             tool_id: command.tool_id.clone(),
             command: command.command.clone(),
             exact_preview: format!("$ {}", command.command),
+            origin,
         };
         self.interactive_shell_handoffs.push(handoff.clone());
         Some(handoff)
@@ -856,6 +903,7 @@ pub(crate) struct PendingInteractiveShellHandoff {
     pub(crate) tool_id: String,
     pub(crate) command: String,
     pub(crate) exact_preview: String,
+    pub(crate) origin: AgentRunOrigin,
 }
 
 #[derive(Debug, Clone)]
@@ -924,7 +972,23 @@ pub(crate) enum AnalysisMode {
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeModePanel {
     pub(crate) id: String,
+    pub(crate) kind: RuntimeModePanelKind,
     pub(crate) selected_option: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeModePanelKind {
+    Approval,
+    Analysis,
+}
+
+impl RuntimeModePanelKind {
+    fn id_prefix(self) -> &'static str {
+        match self {
+            Self::Approval => "approval",
+            Self::Analysis => "analysis",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -957,6 +1021,7 @@ impl AnalysisMode {
 pub(crate) struct RuntimeApprovalRequest {
     pub(crate) id: String,
     pub(crate) run_id: String,
+    pub(crate) origin: AgentRunOrigin,
     pub(crate) session_id: String,
     pub(crate) cwd: String,
     pub(crate) source: &'static str,

@@ -1,6 +1,6 @@
 use crate::runtime::prelude::{
-    redact_provider_command_text, AgentContextBinding, AgentMode, AgentRequest, ApprovalDecision,
-    ApprovalResponse, CommandBlock, CommandStatus, HostExecutedShellMetadata,
+    redact_provider_command_text, AgentContextBinding, AgentMode, AgentRequest, AgentRunOrigin,
+    ApprovalDecision, ApprovalResponse, CommandBlock, CommandStatus, HostExecutedShellMetadata,
     HostExecutedShellResult, OutputRefs, ShellHandoffRequest,
 };
 use crate::runtime::state::{InlineState, RuntimeApprovalRequest};
@@ -13,7 +13,21 @@ pub(crate) fn record_shell_handoff_completion(
     block: &CommandBlock,
     status: &'static str,
 ) -> RuntimeShellCommandCompleted {
-    let mut evidence = RuntimeShellCommandCompleted::from_shell_handoff(handoff, block, status);
+    let origin = state
+        .approvals
+        .requests
+        .iter()
+        .find(|request| request.id == handoff.approval_id)
+        .map(|request| request.origin)
+        .or_else(|| {
+            state
+                .control
+                .find_interactive_shell_handoff(&handoff.approval_id)
+                .map(|handoff| handoff.origin)
+        })
+        .unwrap_or_default();
+    let mut evidence =
+        RuntimeShellCommandCompleted::from_shell_handoff(handoff, block, status, origin);
     let delivery = deliver_host_executed_shell_result_if_supported(state, handoff, &evidence);
     if delivery.delivered {
         state.agent_run.native_prompt_after_run = true;
@@ -43,7 +57,9 @@ pub(crate) fn record_shell_handoff_completion(
     evidence
 }
 
-pub(crate) fn shell_handoff_continuation_requests(state: &mut InlineState) -> Vec<AgentRequest> {
+pub(crate) fn shell_handoff_continuation_requests(
+    state: &mut InlineState,
+) -> Vec<(AgentRequest, AgentRunOrigin)> {
     let mut requests = Vec::new();
     for evidence in state.evidence.claim_pending_shell_handoff_continuations() {
         let Some(approval_id) = evidence.approval_id.as_ref() else {
@@ -61,7 +77,7 @@ pub(crate) fn shell_handoff_continuation_requests(state: &mut InlineState) -> Ve
 
 pub(crate) fn stalled_provider_shell_handoff_continuation_request(
     state: &mut InlineState,
-) -> Option<AgentRequest> {
+) -> Option<(AgentRequest, AgentRunOrigin)> {
     let evidence = state
         .evidence
         .claim_stalled_provider_shell_handoff_continuations()
@@ -89,12 +105,7 @@ fn deliver_host_executed_shell_result_if_supported(
             provider_preview_complete: false,
         };
     };
-    let Some(capabilities) = state
-        .agent_run
-        .active
-        .as_ref()
-        .map(|run| run.handle.control_capabilities())
-    else {
+    let Some(active_run) = state.agent_run.active.as_ref() else {
         return ShellEvidenceDelivery {
             delivered: false,
             status: "provider_run_not_active",
@@ -104,6 +115,17 @@ fn deliver_host_executed_shell_result_if_supported(
             provider_preview_complete: false,
         };
     };
+    if active_run.request.id != handoff.run_id {
+        return ShellEvidenceDelivery {
+            delivered: false,
+            status: "provider_run_not_owner",
+            recovery_reason: Some(
+                "provider run no longer owns the shell handoff; shell evidence continuation required",
+            ),
+            provider_preview_complete: false,
+        };
+    }
+    let capabilities = active_run.handle.control_capabilities();
     if !capabilities.can_handle_host_executed_shell_tool_result {
         return ShellEvidenceDelivery {
             delivered: false,
@@ -118,7 +140,11 @@ fn deliver_host_executed_shell_result_if_supported(
     let Some(claim) = state
         .control
         .provider_tool_mut()
-        .claim_host_executed_shell_result(request_id, handoff.tool_use_id.as_deref())
+        .claim_host_executed_shell_result(
+            &handoff.run_id,
+            request_id,
+            handoff.tool_use_id.as_deref(),
+        )
     else {
         return ShellEvidenceDelivery {
             delivered: true,
@@ -222,7 +248,7 @@ fn host_executed_shell_result_from_view(
 fn shell_handoff_continuation_request(
     evidence: &RuntimeShellCommandCompleted,
     approval: Option<&RuntimeApprovalRequest>,
-) -> AgentRequest {
+) -> (AgentRequest, AgentRunOrigin) {
     let approval_id = evidence.approval_id.as_deref().unwrap_or("<none>");
     let subject = approval
         .map(|request| request.subject.as_str())
@@ -276,6 +302,7 @@ fn shell_handoff_continuation_request(
                 terminal_output_ref: evidence.terminal_output_ref.clone(),
                 terminal_output_bytes: 0,
             },
+            shell_environment_generation: None,
         },
         context_blocks: Vec::new(),
         context_hints: vec![
@@ -296,7 +323,7 @@ fn shell_handoff_continuation_request(
         &mut request,
         AgentContextBinding::ShellHandoffContinuation,
     );
-    request
+    (request, evidence.origin)
 }
 
 #[cfg(test)]
@@ -308,12 +335,69 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use crate::runtime::prelude::{
-        AgentEvent, AgentRunHandle, AgentRunPoll, CoshApprovalMode, CoshCoreAdapter, Language,
-        OutputRefs, RatatuiInlineRenderer,
+        AgentEvent, AgentRunHandle, AgentRunOrigin, AgentRunPoll, CoshApprovalMode,
+        CoshCoreAdapter, Language, OutputRefs, RatatuiInlineRenderer,
     };
 
     use crate::adapter::serialize_host_executed_shell_result;
     use crate::agent::run::ActiveAgentRun;
+
+    #[test]
+    fn interactive_shell_handoff_completion_keeps_run_origin() {
+        let mut state = InlineState::default();
+        assert!(state.control.record_provider_shell_command_from_tool_call(
+            "run-1",
+            "tool-1",
+            r#"{"command":"sudo systemctl status sshd"}"#,
+        ));
+        state.control.record_provider_tool_output_delta(
+            "run-1",
+            "tool-1",
+            "stderr",
+            "sudo: a terminal is required\n",
+        );
+        state
+            .control
+            .queue_interactive_shell_handoff_for_tool_failure(
+                "run-1",
+                "tool-1",
+                "error",
+                AgentRunOrigin::InsightPrompt,
+            )
+            .expect("interactive handoff");
+        let handoff = ShellHandoffRequest::new(
+            "sudo systemctl status sshd",
+            "$ sudo systemctl status sshd",
+            "provider-tool-call",
+            "agent",
+            "handoff-1",
+            "run-1",
+            10,
+        )
+        .expect("shell handoff request");
+        let block = CommandBlock {
+            id: "cmd-1".to_string(),
+            session_id: "raw-session".to_string(),
+            command: "sudo systemctl status sshd".to_string(),
+            origin: Default::default(),
+            cwd: "/repo".to_string(),
+            end_cwd: "/repo".to_string(),
+            started_at_ms: 10,
+            ended_at_ms: 20,
+            duration_ms: 10,
+            exit_code: 0,
+            status: CommandStatus::Completed,
+            output: OutputRefs {
+                terminal_output_ref: None,
+                terminal_output_bytes: 0,
+            },
+            shell_environment_generation: None,
+        };
+
+        let evidence = record_shell_handoff_completion(&mut state, &handoff, &block, "completed");
+
+        assert_eq!(evidence.origin, AgentRunOrigin::InsightPrompt);
+    }
 
     #[test]
     fn host_executed_shell_result_uses_opaque_output_id_without_path() {
@@ -357,9 +441,17 @@ mod tests {
                 terminal_output_ref: Some(output_ref_str.to_string()),
                 terminal_output_bytes: 32,
             },
+            shell_environment_generation: None,
         };
-        let evidence =
-            RuntimeShellCommandCompleted::from_shell_handoff(&handoff, &block, "completed");
+        let evidence = RuntimeShellCommandCompleted::from_shell_handoff(
+            &handoff,
+            &block,
+            "completed",
+            AgentRunOrigin::AutoFailure,
+        );
+        assert_eq!(evidence.origin, AgentRunOrigin::AutoFailure);
+        let (_, continuation_origin) = shell_handoff_continuation_request(&evidence, None);
+        assert_eq!(continuation_origin, AgentRunOrigin::AutoFailure);
 
         let result = host_executed_shell_result(&handoff, &evidence);
 
@@ -455,9 +547,14 @@ mod tests {
                 terminal_output_ref: Some(output_ref_str.to_string()),
                 terminal_output_bytes: preview.len() as u64,
             },
+            shell_environment_generation: None,
         };
-        let evidence =
-            RuntimeShellCommandCompleted::from_shell_handoff(&handoff, &block, "completed");
+        let evidence = RuntimeShellCommandCompleted::from_shell_handoff(
+            &handoff,
+            &block,
+            "completed",
+            AgentRunOrigin::Standard,
+        );
         let result = host_executed_shell_result(&handoff, &evidence);
 
         assert_eq!(result.return_display, None);
@@ -526,9 +623,14 @@ mod tests {
                 terminal_output_ref: Some(output_ref_str.to_string()),
                 terminal_output_bytes: preview.len() as u64,
             },
+            shell_environment_generation: None,
         };
-        let evidence =
-            RuntimeShellCommandCompleted::from_shell_handoff(&handoff, &block, "completed");
+        let evidence = RuntimeShellCommandCompleted::from_shell_handoff(
+            &handoff,
+            &block,
+            "completed",
+            AgentRunOrigin::Standard,
+        );
         let result = host_executed_shell_result(&handoff, &evidence);
 
         let serialized = serialize_host_executed_shell_result("ctrl-escaped", &result);
@@ -591,9 +693,14 @@ mod tests {
                 terminal_output_ref: None,
                 terminal_output_bytes: 32,
             },
+            shell_environment_generation: None,
         };
-        let evidence =
-            RuntimeShellCommandCompleted::from_shell_handoff(&handoff, &block, "completed");
+        let evidence = RuntimeShellCommandCompleted::from_shell_handoff(
+            &handoff,
+            &block,
+            "completed",
+            AgentRunOrigin::Standard,
+        );
 
         let delivery =
             deliver_host_executed_shell_result_if_supported(&mut state, &handoff, &evidence);
@@ -611,10 +718,65 @@ mod tests {
             state
                 .control
                 .provider_tool_mut()
-                .claim_host_executed_shell_result("ctrl-closed", Some("toolu-closed"))
+                .claim_host_executed_shell_result("run-1", "ctrl-closed", Some("toolu-closed"))
                 .is_some(),
             "failed delivery must release duplicate guard claim"
         );
+    }
+
+    #[test]
+    fn host_executed_delivery_does_not_use_an_unrelated_active_run() {
+        let mut request = test_request();
+        request.id = "unrelated-run".to_string();
+        let handle = closed_cosh_core_control_handle(&request);
+        let mut state = InlineState::default();
+        state.agent_run.active = Some(test_active_run(request, handle));
+        let mut handoff = ShellHandoffRequest::new(
+            "df -h",
+            "$ df -h",
+            "provider-tool-call",
+            "agent",
+            "req-owner",
+            "owner-run",
+            10,
+        )
+        .expect("handoff");
+        handoff.request_id = Some("ctrl-owner".to_string());
+        handoff.tool_use_id = Some("toolu-owner".to_string());
+        let evidence = RuntimeShellCommandCompleted::from_shell_handoff(
+            &handoff,
+            &CommandBlock {
+                id: "cmd-owner".to_string(),
+                session_id: "raw-session".to_string(),
+                command: "df -h".to_string(),
+                origin: Default::default(),
+                cwd: "/repo".to_string(),
+                end_cwd: "/repo".to_string(),
+                started_at_ms: 10,
+                ended_at_ms: 20,
+                duration_ms: 10,
+                exit_code: 0,
+                status: CommandStatus::Completed,
+                output: OutputRefs {
+                    terminal_output_ref: None,
+                    terminal_output_bytes: 0,
+                },
+                shell_environment_generation: None,
+            },
+            "completed",
+            AgentRunOrigin::Standard,
+        );
+
+        let delivery =
+            deliver_host_executed_shell_result_if_supported(&mut state, &handoff, &evidence);
+
+        assert!(!delivery.delivered);
+        assert_eq!(delivery.status, "provider_run_not_owner");
+        assert!(state
+            .control
+            .provider_tool_mut()
+            .claim_host_executed_shell_result("owner-run", "ctrl-owner", Some("toolu-owner"))
+            .is_some());
     }
 
     #[test]
@@ -658,9 +820,14 @@ mod tests {
                 terminal_output_ref: None,
                 terminal_output_bytes: 32,
             },
+            shell_environment_generation: None,
         };
-        let evidence =
-            RuntimeShellCommandCompleted::from_shell_handoff(&handoff, &block, "completed");
+        let evidence = RuntimeShellCommandCompleted::from_shell_handoff(
+            &handoff,
+            &block,
+            "completed",
+            AgentRunOrigin::Standard,
+        );
 
         let delivery =
             deliver_host_executed_shell_result_if_supported(&mut state, &handoff, &evidence);
@@ -782,6 +949,7 @@ exit 1
         let renderer = RatatuiInlineRenderer::for_terminal();
         ActiveAgentRun {
             request,
+            origin: AgentRunOrigin::Standard,
             handle,
             provider_name: "cosh-core",
             language: Language::EnUs,
@@ -810,7 +978,7 @@ exit 1
 
     fn test_request() -> AgentRequest {
         AgentRequest {
-            id: "request-1".to_string(),
+            id: "run-1".to_string(),
             session_id: "session-1".to_string(),
             command_block: CommandBlock {
                 id: "cmd-request".to_string(),
@@ -828,6 +996,7 @@ exit 1
                     terminal_output_ref: None,
                     terminal_output_bytes: 0,
                 },
+                shell_environment_generation: None,
             },
             context_blocks: Vec::new(),
             context_hints: Vec::new(),

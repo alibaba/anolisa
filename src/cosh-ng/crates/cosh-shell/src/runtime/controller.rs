@@ -40,6 +40,7 @@ fn render_raw_inline_events<W: Write>(
         if inline_state.trigger_pty_prompt {
             inline_state.trigger_pty_prompt = false;
             inline_state.pending_input_ghost = None;
+            inline_state.pending_input_ghost_route = Default::default();
             inline_state.pending_input_ghost_binding = None;
             return Ok(RawObserverAction::EmitToPtyWithPromptRestore(request));
         }
@@ -52,6 +53,7 @@ fn render_raw_inline_events<W: Write>(
         inline_state.trigger_pty_prompt = false;
         return Ok(RawObserverAction::RestorePrompt {
             ghost_text: inline_state.pending_input_ghost.take(),
+            ghost_route: std::mem::take(&mut inline_state.pending_input_ghost_route),
         });
     }
     let shell_busy = shell_has_active_foreground_command(snapshot.events());
@@ -483,6 +485,7 @@ mod tests {
         let renderer = RatatuiInlineRenderer::for_terminal();
         ActiveAgentRun {
             request,
+            origin: AgentRunOrigin::Standard,
             handle,
             provider_name: "fake",
             language: Language::EnUs,
@@ -529,6 +532,7 @@ mod tests {
                     terminal_output_ref: None,
                     terminal_output_bytes: 0,
                 },
+                shell_environment_generation: None,
             },
             context_blocks: Vec::new(),
             context_hints: Vec::new(),

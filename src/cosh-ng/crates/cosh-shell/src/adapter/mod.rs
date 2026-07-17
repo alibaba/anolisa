@@ -432,12 +432,3 @@ impl PreparedInvocation {
         argv
     }
 }
-
-pub(super) fn first_token(command: &str) -> String {
-    command
-        .split_whitespace()
-        .next()
-        .filter(|token| !token.is_empty())
-        .unwrap_or("command")
-        .to_string()
-}

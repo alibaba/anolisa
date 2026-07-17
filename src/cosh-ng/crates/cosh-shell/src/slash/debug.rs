@@ -260,6 +260,7 @@ mod tests {
                 terminal_output_ref: Some("/tmp/out.txt".to_string()),
                 terminal_output_bytes: 4,
             },
+            shell_environment_generation: None,
         }];
         state.shell_evidence.last_action = Some(crate::runtime::state::ShellEvidenceActionRecord {
             mode: "control_protocol_tool",

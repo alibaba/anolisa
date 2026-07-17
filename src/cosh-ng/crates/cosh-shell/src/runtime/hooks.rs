@@ -61,6 +61,14 @@ use crate::hooks::state::{
     PendingConsultation, PendingConsultationState, RuntimeHookDisplay, RuntimeHookDisplayAction,
     RuntimeHookDisplayEvent, RuntimeHookFinding,
 };
+use crate::insight::memory::{
+    adapt_memory_aggregate, claims_memory_aggregate, MemoryAggregateView, MemoryInsightOutcome,
+};
+use crate::insight::model::InterventionDecision;
+use crate::insight::policy::{
+    decide_candidate_intervention, AnalysisPolicyMode, InterventionGates,
+};
+use crate::runtime::controller::{pending_card_capture, shell_has_active_foreground_command};
 use crate::runtime::state::{AnalysisMode, InlineState};
 #[cfg(test)]
 use crate::types::HookFinding;
@@ -71,6 +79,7 @@ pub(crate) fn record_command_hook_findings(
     events: &[ShellEvent],
     blocks: &[CommandBlock],
     state: &mut InlineState,
+    event_index_base: usize,
 ) {
     for block in blocks {
         if !state.hooks.handled_command_hooks.insert(block.id.clone()) {
@@ -86,8 +95,20 @@ pub(crate) fn record_command_hook_findings(
             &state.hooks.disabled,
             origin,
         );
+        let user_has_not_continued = !state.hooks.block_followed_by_user_input(&block.id);
+        let gates = InterventionGates {
+            same_dispatch_batch: command_end_event_index(events, block)
+                .is_some_and(|idx| idx >= event_index_base),
+            input_empty: user_has_not_continued,
+            foreground_idle: !shell_has_active_foreground_command(events),
+            active_runtime_idle: state.agent_run.active.is_none()
+                && pending_card_capture(state).is_none(),
+            user_has_not_continued,
+            user_interactive_origin: origin == CommandOrigin::UserInteractive,
+            budget_available: true,
+        };
         for aggregate in aggregate_hook_findings(findings) {
-            record_aggregated_hook_finding_with_origin(block, aggregate, origin, state);
+            record_aggregated_hook_finding_with_origin(block, aggregate, origin, gates, state);
         }
     }
 
@@ -137,7 +158,7 @@ fn command_end_event_index(events: &[ShellEvent], block: &CommandBlock) -> Optio
 fn is_followup_user_input_event(event: &ShellEvent, block_id: &str) -> bool {
     match event.kind {
         ShellEventKind::CommandStarted => event.command_id.as_deref() != Some(block_id),
-        ShellEventKind::UserInputIntercepted => event.component.is_none(),
+        ShellEventKind::UserInputIntercepted => true,
         _ => false,
     }
 }
@@ -334,6 +355,7 @@ fn record_aggregated_hook_finding(
         block,
         aggregate,
         CommandOrigin::UserInteractive,
+        InterventionGates::eligible(),
         state,
     );
 }
@@ -342,8 +364,66 @@ fn record_aggregated_hook_finding_with_origin(
     block: &CommandBlock,
     mut aggregate: AggregatedHookFinding,
     origin: CommandOrigin,
+    mut gates: InterventionGates,
     state: &mut InlineState,
 ) {
+    if claims_memory_aggregate(&aggregate.provenance) {
+        if origin != CommandOrigin::UserInteractive {
+            return;
+        }
+        apply_memory_pressure_severity_upgrade(&mut aggregate);
+        refresh_aggregate_metadata(block, &mut aggregate);
+        let memory_view = MemoryAggregateView::new_with_facts(
+            &aggregate.provenance,
+            &aggregate.primary,
+            &aggregate.related,
+            &aggregate.builtin_facts,
+        );
+        match adapt_memory_aggregate(block, memory_view, &mut state.insight_correlation) {
+            MemoryInsightOutcome::Claimed(candidate) => {
+                if let Some(candidate) = candidate.map(|candidate| *candidate) {
+                    gates.budget_available = !state.insight_budget.is_suppressed(
+                        &candidate.suppression_key,
+                        candidate.severity,
+                        block.ended_at_ms,
+                    );
+                    if state.pending_command_insight.is_none()
+                        && matches!(
+                            decide_candidate_intervention(
+                                &candidate,
+                                analysis_policy_mode(state.analysis_mode),
+                                gates,
+                                false,
+                            ),
+                            InterventionDecision::Suggest { .. }
+                        )
+                    {
+                        state.pending_command_insight = Some(candidate);
+                    }
+                }
+                return;
+            }
+            MemoryInsightOutcome::ClaimedError(reason) => {
+                tracing::debug!(
+                    target: "cosh_insight",
+                    command_block_id = %block.id,
+                    reason,
+                    "builtin memory insight adapter failed"
+                );
+                return;
+            }
+            MemoryInsightOutcome::NotClaimed => {
+                tracing::debug!(
+                    target: "cosh_insight",
+                    command_block_id = %block.id,
+                    reason = "claimed-provenance-rejected",
+                    "builtin memory insight adapter failed"
+                );
+                return;
+            }
+        }
+    }
+
     attach_recent_memory_pressure(block, &mut aggregate, state);
     apply_memory_pressure_severity_upgrade(&mut aggregate);
     refresh_aggregate_metadata(block, &mut aggregate);
@@ -397,6 +477,14 @@ fn record_aggregated_hook_finding_with_origin(
         if let Some(hint) = state.hooks.findings.last().cloned() {
             record_hook_display_event_for_hint(&hint, RuntimeHookDisplayAction::Muted, state);
         }
+    }
+}
+
+fn analysis_policy_mode(mode: AnalysisMode) -> AnalysisPolicyMode {
+    match mode {
+        AnalysisMode::Smart => AnalysisPolicyMode::Smart,
+        AnalysisMode::Auto => AnalysisPolicyMode::Auto,
+        AnalysisMode::Manual => AnalysisPolicyMode::Manual,
     }
 }
 

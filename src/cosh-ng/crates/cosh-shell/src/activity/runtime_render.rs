@@ -367,33 +367,39 @@ pub(crate) fn render_provider_native_shell_transcript<W: Write>(
         match row.kind {
             ActivityKind::ToolOutput => {
                 let tool_id = row.subject.as_str();
+                let run_id = row.run_id.as_str();
                 let Some(command) = state
                     .control
                     .provider_tool()
-                    .command(tool_id)
+                    .command(run_id, tool_id)
                     .map(|command| command.command.clone())
                 else {
                     continue;
                 };
-                if state.control.provider_shell_transcript_output_seen(tool_id) {
+                if state
+                    .control
+                    .provider_shell_transcript_output_seen(run_id, tool_id)
+                {
                     continue;
                 }
                 if state
                     .control
-                    .claim_provider_shell_transcript_command(tool_id)
+                    .claim_provider_shell_transcript_command(run_id, tool_id)
                 {
                     writeln!(output, "$ {command}")?;
                 }
                 let text = state
                     .control
                     .provider_tool()
-                    .output_text(tool_id)
+                    .output_text(run_id, tool_id)
                     .unwrap_or_default();
                 output.write_all(text.as_bytes())?;
                 if !text.is_empty() && !text.ends_with('\n') {
                     writeln!(output)?;
                 }
-                state.control.mark_provider_shell_transcript_output(tool_id);
+                state
+                    .control
+                    .mark_provider_shell_transcript_output(run_id, tool_id);
             }
             ActivityKind::Tool => {
                 if matches!(
@@ -403,10 +409,11 @@ pub(crate) fn render_provider_native_shell_transcript<W: Write>(
                     continue;
                 }
                 let tool_id = row.subject.as_str();
+                let run_id = row.run_id.as_str();
                 let Some(command) = state
                     .control
                     .provider_tool()
-                    .command(tool_id)
+                    .command(run_id, tool_id)
                     .map(|command| command.command.clone())
                 else {
                     continue;
@@ -415,17 +422,20 @@ pub(crate) fn render_provider_native_shell_transcript<W: Write>(
                     && state
                         .control
                         .provider_tool()
-                        .output_text(tool_id)
+                        .output_text(run_id, tool_id)
                         .is_none_or(|text| text.trim().is_empty())
                 {
                     continue;
                 }
-                if state.control.provider_shell_transcript_output_seen(tool_id) {
+                if state
+                    .control
+                    .provider_shell_transcript_output_seen(run_id, tool_id)
+                {
                     continue;
                 }
                 if state
                     .control
-                    .claim_provider_shell_transcript_command(tool_id)
+                    .claim_provider_shell_transcript_command(run_id, tool_id)
                 {
                     writeln!(output, "$ {command}")?;
                 }

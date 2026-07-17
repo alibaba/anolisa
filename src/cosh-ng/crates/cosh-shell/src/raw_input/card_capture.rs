@@ -221,7 +221,7 @@ impl CardInputState {
                     idx += 2;
                 }
                 0x1b if input.get(idx + 1).is_none() => {
-                    self.pending_escape.extend_from_slice(&input[idx..]);
+                    events.push(cancel_event(capture));
                     break;
                 }
                 0x1b => match capture {
@@ -633,6 +633,21 @@ impl CardInputState {
             }
             _ => None,
         }
+    }
+}
+
+fn cancel_event(capture: &RawInputCapture) -> RawInputEvent {
+    match capture {
+        RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
+            RawInputEvent::CardCancel(id.clone())
+        }
+        RawInputCapture::Mode { id, .. } => RawInputEvent::ModeCancel(id.clone()),
+        RawInputCapture::Config { id, .. } => RawInputEvent::ConfigCancel(id.clone()),
+        RawInputCapture::ConfigLanguage { id, .. } => {
+            RawInputEvent::ConfigLanguageCancel(id.clone())
+        }
+        RawInputCapture::Question { id, .. } => RawInputEvent::QuestionCancel(id.clone()),
+        RawInputCapture::Evidence { id } => RawInputEvent::EvidenceCancel(id.clone()),
     }
 }
 

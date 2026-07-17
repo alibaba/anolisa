@@ -13,6 +13,7 @@ use super::state::{
     PendingConsultationState, RuntimeHookDisplay, RuntimeHookDisplayAction,
     RuntimeHookDisplayEvent, RuntimeHookFinding,
 };
+use crate::types::HookProvenance;
 
 pub(crate) const INTERRUPTION_BUDGET_WINDOW_MS: u64 = 10 * 60 * 1000;
 pub(crate) const PENDING_CONSULTATION_TTL_MS: u64 = INTERRUPTION_BUDGET_WINDOW_MS;
@@ -246,6 +247,7 @@ fn block_for_pending_consultation(consultation: &PendingConsultation) -> Command
             terminal_output_ref: consultation.output_ref.clone(),
             terminal_output_bytes: 0,
         },
+        shell_environment_generation: None,
     }
 }
 
@@ -255,6 +257,10 @@ fn aggregate_for_pending_consultation(
 ) -> AggregatedHookFinding {
     let effective_severity = finding.severity;
     AggregatedHookFinding {
+        provenance: HookProvenance::External {
+            registration_key: "legacy-pending-consultation".to_string(),
+        },
+        builtin_facts: Vec::new(),
         primary: finding,
         related: Vec::new(),
         recommended_skill: consultation.recommended_skill.clone(),

@@ -5,7 +5,9 @@ use crate::agent::events::{
     flush_cosh_request_filter_into_active_run, render_agent_structured_events,
     render_held_events_into_active_run, state_has_pending_interaction,
 };
-use crate::agent::run::{has_queued_run_before_held_text, start_agent_run, ActiveAgentRun};
+use crate::agent::run::{
+    has_queued_run_before_held_text, start_agent_run_with_origin, ActiveAgentRun,
+};
 use crate::runtime::evidence_requests::{
     record_cosh_requests_from_active_run, render_pending_evidence_requests,
 };
@@ -40,11 +42,12 @@ pub(crate) fn finish_active_agent_run<W: Write>(
     } else {
         None
     };
-    if let Some(fallback) = resume_fallback {
+    if let Some((fallback, origin)) = resume_fallback {
         render_recovery_context_before_notice(state, &active_run, output, adapter)?;
         render_fresh_turn_recovery_notice(state, output)?;
-        start_agent_run(
+        start_agent_run_with_origin(
             &fallback,
+            origin,
             adapter,
             state,
             output,
@@ -94,15 +97,22 @@ pub(crate) fn finish_active_agent_run<W: Write>(
         state,
         &remaining_structured_events,
         Some(&active_run.request),
+        active_run.origin,
         output,
         adapter,
     )?;
     record_selectable_recommendations(
         state,
         &active_run.governed_events,
+        active_run.origin,
         active_run.selectable_after_event_index,
     );
-    render_selectable_recommendations(&active_run.governed_events, active_run.language, output)?;
+    render_selectable_recommendations(
+        &active_run.governed_events,
+        active_run.origin,
+        active_run.language,
+        output,
+    )?;
     record_agent_run_facts(state, &active_run);
     state.auth.state = None;
     if provider_timed_out {
@@ -123,13 +133,14 @@ pub(crate) fn finish_active_agent_run<W: Write>(
     }
     output.flush()?;
 
-    for request in evidence_requests.auto_requests {
-        start_agent_run(&request, adapter, state, output, None)?;
+    for (request, origin) in evidence_requests.auto_requests {
+        start_agent_run_with_origin(&request, origin, adapter, state, output, None)?;
     }
 
     if let Some(pending) = state.agent_run.queued_requests.pop_front() {
-        start_agent_run(
+        start_agent_run_with_origin(
             &pending.request,
+            pending.origin,
             adapter,
             state,
             output,
@@ -180,6 +191,7 @@ fn render_recovery_context_before_notice<W: Write>(
         state,
         &remaining_structured_events,
         Some(&active_run.request),
+        active_run.origin,
         output,
         adapter,
     )

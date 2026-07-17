@@ -1,10 +1,35 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use nix::libc;
 use nix::pty::Winsize;
 
 use crate::input::InputClassifier;
-use crate::types::ShellEvent;
+use crate::types::{ShellEnvironmentSnapshot, ShellEvent};
+
+#[derive(Clone)]
+pub(super) struct ShellEnvironmentObserver(
+    Arc<dyn Fn(ShellEnvironmentSnapshot) + Send + Sync + 'static>,
+);
+
+impl std::fmt::Debug for ShellEnvironmentObserver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ShellEnvironmentObserver")
+    }
+}
+
+impl ShellEnvironmentObserver {
+    pub(super) fn new<F>(observer: F) -> Self
+    where
+        F: Fn(ShellEnvironmentSnapshot) + Send + Sync + 'static,
+    {
+        Self(Arc::new(observer))
+    }
+
+    pub(super) fn observe(&self, snapshot: ShellEnvironmentSnapshot) {
+        (self.0)(snapshot);
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ShellHostConfig {
@@ -18,6 +43,7 @@ pub struct ShellHostConfig {
     pub native_mode: bool,
     pub login_shell: bool,
     pub env_overrides: Vec<(String, String)>,
+    pub(super) shell_environment_observer: Option<ShellEnvironmentObserver>,
 }
 
 impl ShellHostConfig {
@@ -34,12 +60,24 @@ impl ShellHostConfig {
             native_mode: true,
             login_shell: false,
             env_overrides: Vec::new(),
+            shell_environment_observer: None,
         }
     }
 
     pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.env_overrides.push((key.into(), value.into()));
         self
+    }
+
+    pub(crate) fn set_shell_environment_observer<F>(&mut self, observer: F)
+    where
+        F: Fn(ShellEnvironmentSnapshot) + Send + Sync + 'static,
+    {
+        self.shell_environment_observer = Some(ShellEnvironmentObserver::new(observer));
+    }
+
+    pub(crate) fn clear_shell_environment_observer(&mut self) {
+        self.shell_environment_observer = None;
     }
 }
 

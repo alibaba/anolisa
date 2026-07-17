@@ -244,6 +244,44 @@ fn mode_capture_uses_initial_selected_option() {
 }
 
 #[test]
+fn mode_capture_supports_tab_and_shift_tab_navigation() {
+    let capture = RawInputCapture::Mode {
+        id: "mode".to_string(),
+        option_count: 3,
+        selected: 1,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    assert_eq!(
+        state.consume(&capture, b"\t\x1b[Z"),
+        vec![
+            RawInputEvent::ModeFocus("mode".to_string(), 2),
+            RawInputEvent::ModeFocus("mode".to_string(), 1),
+        ]
+    );
+}
+
+#[test]
+fn mode_capture_supports_escape_and_ctrl_c_cancel() {
+    let capture = RawInputCapture::Mode {
+        id: "mode".to_string(),
+        option_count: 3,
+        selected: 0,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    assert_eq!(
+        state.consume(&capture, b"\x1b\x1b\x03"),
+        vec![
+            RawInputEvent::ModeCancel("mode".to_string()),
+            RawInputEvent::ModeCancel("mode".to_string()),
+        ]
+    );
+}
+
+#[test]
 fn config_capture_saves_default_selection_and_cancels_second_option() {
     let capture = RawInputCapture::Config {
         id: "config".to_string(),
@@ -305,8 +343,7 @@ fn approval_capture_handles_split_escape_arrow_sequence() {
     let mut state = CardInputState::default();
     state.apply_capture(&capture);
 
-    assert!(state.consume(&capture, b"\x1b").is_empty());
-    assert!(state.consume(&capture, b"[").is_empty());
+    assert!(state.consume(&capture, b"\x1b[").is_empty());
     assert_eq!(
         state.consume(&capture, b"C\n"),
         vec![
@@ -325,9 +362,8 @@ fn approval_capture_escape_then_enter_cancels_without_submit() {
     let mut state = CardInputState::default();
     state.apply_capture(&capture);
 
-    assert!(state.consume(&capture, b"\x1b").is_empty());
     assert_eq!(
-        state.consume(&capture, b"\n"),
+        state.consume(&capture, b"\x1b"),
         vec![RawInputEvent::CardCancel("req-1".to_string())]
     );
 }
@@ -349,9 +385,8 @@ fn question_capture_ctrl_c_and_escape_cancel_question() {
     );
 
     state.apply_capture(&capture);
-    assert!(state.consume(&capture, b"\x1b").is_empty());
     assert_eq!(
-        state.consume(&capture, b"\n"),
+        state.consume(&capture, b"\x1b"),
         vec![RawInputEvent::QuestionCancel("q-1".to_string())]
     );
 }

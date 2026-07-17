@@ -12,7 +12,7 @@ use ratatui::text::Span;
 use wait_timeout::ChildExt;
 
 const RAW_CLI_TIMEOUT: Duration = Duration::from_secs(30);
-const RAW_CLI_SHARED_PARALLELISM: usize = 4;
+const RAW_CLI_SHARED_PARALLELISM: usize = 1;
 pub(crate) const RAW_CLI_UNSET_ENV: &str = "__cosh_raw_cli_unset_env__";
 
 static RAW_CLI_GIT_FIXTURE: OnceLock<PathBuf> = OnceLock::new();

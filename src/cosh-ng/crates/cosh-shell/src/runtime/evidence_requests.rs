@@ -26,6 +26,7 @@ pub(crate) struct EvidenceRequestState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RuntimeEvidenceRequest {
     pub(super) id: String,
+    pub(super) origin: AgentRunOrigin,
     pub(super) kind: RuntimeEvidenceRequestKind,
     pub(super) ignored_multiple_request_blocks: bool,
     pub(super) audit_id: Option<String>,
@@ -47,7 +48,7 @@ pub(super) enum RuntimeEvidenceRequestKind {
 }
 
 pub(crate) struct RecordedEvidenceRequests {
-    pub(crate) auto_requests: Vec<AgentRequest>,
+    pub(crate) auto_requests: Vec<(AgentRequest, AgentRunOrigin)>,
     pub(crate) card_ids: Vec<String>,
     pub(crate) notices: Vec<String>,
 }
@@ -78,7 +79,7 @@ pub(crate) fn record_cosh_requests_from_active_run(
         parsed.ignored_multiple_request_blocks = true;
     }
     let id = format!("evidence-{}", state.evidence_requests.pending.len() + 1);
-    let request = runtime_request_from_parsed(id.clone(), parsed);
+    let request = runtime_request_from_parsed(id.clone(), parsed, active_run.origin);
     let request = RuntimeEvidenceRequest {
         audit_id: first_parsed_audit_id,
         ..request
@@ -93,7 +94,7 @@ pub(crate) fn record_cosh_requests_from_active_run(
         && !history_request_needs_confirmation(state)
     {
         match agent_request_from_history_request(&state.session_blocks, id_sequence(&id)) {
-            Ok(agent_request) => recorded.auto_requests.push(agent_request),
+            Ok(agent_request) => recorded.auto_requests.push((agent_request, request.origin)),
             Err(message) => recorded.notices.push(message),
         }
     } else {
@@ -176,7 +177,14 @@ pub(crate) fn render_evidence_request_actions<W: Write>(
             EvidenceActionKind::Send => {
                 match agent_request_from_evidence_request(blocks, &request, event_index) {
                     Ok(agent_request) => {
-                        start_agent_run(&agent_request, adapter, state, output, Some(event_index))?;
+                        start_agent_run_with_origin(
+                            &agent_request,
+                            request.origin,
+                            adapter,
+                            state,
+                            output,
+                            Some(event_index),
+                        )?;
                     }
                     Err(message) => {
                         render_evidence_notice(
@@ -208,13 +216,18 @@ pub(crate) fn render_evidence_request_actions<W: Write>(
     Ok(())
 }
 
-fn runtime_request_from_parsed(id: String, parsed: ParsedCoshRequest) -> RuntimeEvidenceRequest {
+fn runtime_request_from_parsed(
+    id: String,
+    parsed: ParsedCoshRequest,
+    origin: AgentRunOrigin,
+) -> RuntimeEvidenceRequest {
     let kind = match parsed.request {
         CoshRequest::History => RuntimeEvidenceRequestKind::History,
         CoshRequest::Output(request) => RuntimeEvidenceRequestKind::Output(request),
     };
     RuntimeEvidenceRequest {
         id,
+        origin,
         kind,
         ignored_multiple_request_blocks: parsed.ignored_multiple_request_blocks,
         audit_id: None,

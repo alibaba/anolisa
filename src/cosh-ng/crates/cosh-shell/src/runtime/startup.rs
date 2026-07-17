@@ -77,7 +77,8 @@ pub(crate) fn render_startup_banner<W: Write>(
             &[
                 ("adapter", adapter.name()),
                 ("shell", shell_label),
-                ("mode", state.approval_mode.label()),
+                ("approval", state.approval_mode.label()),
+                ("analysis", state.analysis_mode.label()),
             ],
         ),
         i18n.format(MessageId::StartupCwdLine, &[("cwd", cwd)]),
@@ -151,8 +152,8 @@ fn startup_health_prompt_ghost(report: &HealthScanReport, i18n: crate::I18n) -> 
 
 fn set_startup_health_prompt_ghost(state: &mut InlineState, prompt: Option<String>) {
     state.pending_input_ghost = prompt.clone();
-    state.pending_input_ghost_binding = prompt.map(|_| PendingInputGhostBinding {
-        binding: AgentContextBinding::StartupHealthFollowUp,
+    state.pending_input_ghost_binding = prompt.map(|_| {
+        PendingInputGhostBinding::AgentContext(AgentContextBinding::StartupHealthFollowUp)
     });
 }
 

@@ -231,6 +231,7 @@ mod tests {
             .queued_requests
             .push_back(PendingAgentRequest {
                 request: agent_request("queued"),
+                origin: AgentRunOrigin::Standard,
                 selectable_after_event_index: None,
                 before_held_text: false,
             });
@@ -394,6 +395,7 @@ mod tests {
                     terminal_output_ref: None,
                     terminal_output_bytes: 0,
                 },
+                shell_environment_generation: None,
             },
             context_blocks: Vec::new(),
             context_hints: Vec::new(),
@@ -413,6 +415,7 @@ mod tests {
         let renderer = RatatuiInlineRenderer::for_terminal();
         ActiveAgentRun {
             request,
+            origin: AgentRunOrigin::Standard,
             handle,
             provider_name: "fake",
             language: Language::EnUs,

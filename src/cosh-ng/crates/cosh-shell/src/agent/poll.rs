@@ -10,7 +10,9 @@ use crate::agent::events::{
 };
 use crate::agent::finish::finish_active_agent_run;
 use crate::agent::heartbeat::render_agent_heartbeat;
-use crate::agent::run::{has_queued_run_before_held_text, start_agent_run, ActiveAgentRun};
+use crate::agent::run::{
+    has_queued_run_before_held_text, start_agent_run_with_origin, ActiveAgentRun,
+};
 use crate::approval::broker::{provider_deny_response, ProviderResponseInput};
 use crate::runtime::evidence_delivery::stalled_provider_shell_handoff_continuation_request;
 use crate::runtime::prelude::*;
@@ -47,7 +49,7 @@ fn poll_active_agent_run_with_policy<W: Write>(
     suppress_heartbeat: bool,
 ) -> std::io::Result<()> {
     let mut should_finish = false;
-    let mut first_text_fallback: Option<(AgentRequest, Option<usize>)> = None;
+    let mut first_text_fallback: Option<(AgentRequest, AgentRunOrigin, Option<usize>)> = None;
     loop {
         let pending_interaction_before_poll = state_has_pending_interaction(state);
         let queued_before_held_text = has_queued_run_before_held_text(state);
@@ -127,17 +129,20 @@ fn poll_active_agent_run_with_policy<W: Write>(
         let event = match active_run.handle.poll_event_timeout(poll_timeout) {
             Ok(AgentRunPoll::Event(event)) => event,
             Ok(AgentRunPoll::Timeout) => {
-                if let Some(fallback) = stalled_provider_shell_fallback {
-                    first_text_fallback = Some((fallback, active_run.selectable_after_event_index));
+                if let Some((fallback, origin)) = stalled_provider_shell_fallback {
+                    first_text_fallback =
+                        Some((fallback, origin, active_run.selectable_after_event_index));
                     break;
                 }
                 if !pending_interaction_before_poll
                     && !queued_before_held_text
                     && !unrendered_interaction_pending
                 {
-                    if let Some(fallback) = shell_handoff_first_text_fallback_request(active_run) {
+                    if let Some((fallback, origin)) =
+                        shell_handoff_first_text_fallback_request(active_run)
+                    {
                         first_text_fallback =
-                            Some((fallback, active_run.selectable_after_event_index));
+                            Some((fallback, origin, active_run.selectable_after_event_index));
                         break;
                     }
                 }
@@ -373,14 +378,15 @@ fn poll_active_agent_run_with_policy<W: Write>(
         }
     }
 
-    if let Some((fallback, selectable_after_event_index)) = first_text_fallback {
+    if let Some((fallback, origin, selectable_after_event_index)) = first_text_fallback {
         if let Some(mut active_run) = state.agent_run.active.take() {
             active_run.handle.cancel();
             active_run.status_animation.clear(output)?;
         }
         render_fresh_turn_recovery_notice(state, output)?;
-        start_agent_run(
+        start_agent_run_with_origin(
             &fallback,
+            origin,
             adapter,
             state,
             output,
@@ -549,7 +555,9 @@ fn active_run_has_pending_provider_native_shell_result(
                 .governed_events
                 .iter()
                 .any(|event| matches!(&event.event, AgentEvent::ToolCompleted { tool_id: completed_tool_id, .. } if completed_tool_id == tool_id))
-            && !state.control.provider_shell_transcript_output_seen(tool_id)
+            && !state
+                .control
+                .provider_shell_transcript_output_seen(&active_run.request.id, tool_id)
     })
 }
 
@@ -627,6 +635,7 @@ mod tests {
                     terminal_output_ref: None,
                     terminal_output_bytes: 0,
                 },
+                shell_environment_generation: None,
             },
             context_blocks: Vec::new(),
             context_hints: Vec::new(),
@@ -642,6 +651,7 @@ mod tests {
         let renderer = RatatuiInlineRenderer::for_terminal();
         ActiveAgentRun {
             request,
+            origin: AgentRunOrigin::Standard,
             handle,
             provider_name: "fake",
             language: Language::EnUs,
