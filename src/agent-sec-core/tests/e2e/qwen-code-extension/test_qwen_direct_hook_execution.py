@@ -54,10 +54,10 @@ def _command_argv(command: str, extension_dir: Path) -> list[str]:
     return shlex.split(expanded)
 
 
-def _event_argv(extension_dir: Path, event_name: str) -> list[str]:
+def _event_argvs(extension_dir: Path, event_name: str) -> list[list[str]]:
     commands = _manifest_hook_commands(extension_dir)[event_name]
-    assert len(commands) == 1
-    return _command_argv(commands[0], extension_dir)
+    assert commands
+    return [_command_argv(command, extension_dir) for command in commands]
 
 
 def _ensure_agent_sec_cli(env: dict[str, str], tmp_path: Path) -> None:
@@ -76,24 +76,28 @@ def _ensure_agent_sec_cli(env: dict[str, str], tmp_path: Path) -> None:
     env["PATH"] = f"{wrapper_dir}{os.pathsep}{env.get('PATH', '')}"
 
 
-def _run_hook(
+def _run_hooks(
     extension_dir: Path,
     input_data: dict,
     *,
     env: dict[str, str],
     cwd: Path,
-) -> subprocess.CompletedProcess:
+) -> list[subprocess.CompletedProcess]:
     event_name = input_data["hook_event_name"]
-    return subprocess.run(
-        _event_argv(extension_dir, event_name),
-        input=json.dumps(input_data),
-        capture_output=True,
-        check=False,
-        cwd=cwd,
-        env=env,
-        text=True,
-        timeout=15,
-    )
+    argvs = _event_argvs(extension_dir, event_name)
+    return [
+        subprocess.run(
+            argv,
+            input=json.dumps(input_data),
+            capture_output=True,
+            check=False,
+            cwd=cwd,
+            env=env,
+            text=True,
+            timeout=15,
+        )
+        for argv in argvs
+    ]
 
 
 def _payload(event_name: str, timestamp: str, **fields) -> dict:
@@ -237,9 +241,10 @@ def test_qwen_observability_lifecycle_records_through_cli(tmp_path) -> None:
     ]
 
     for payload in payloads:
-        proc = _run_hook(extension_dir, payload, env=env, cwd=tmp_path)
-        assert proc.returncode == 0, proc.stderr
-        assert json.loads(proc.stdout) == {}
+        procs = _run_hooks(extension_dir, payload, env=env, cwd=tmp_path)
+        for proc in procs:
+            assert proc.returncode == 0, proc.stderr
+            assert json.loads(proc.stdout) == {}
 
     records = [
         json.loads(line)

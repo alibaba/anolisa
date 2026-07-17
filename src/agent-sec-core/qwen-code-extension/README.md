@@ -66,9 +66,15 @@ Qwen Code 的工具结果回填会再次触发 `UserPromptSubmit`，其中仅包
 没有与 agent-sec-core Observability schema 含义一致的记录类型，因此不会被错误映射到
 agent/tool run；后续应先扩展 schema，再单独挂载。
 
-所有 hook 均异步执行并保持 fail-open：任何脚本、PII 扫描或记录写入异常都不会改变
-Qwen Code 的执行决策。敏感指标在写入前由本地 `scan-pii` 脱敏；脱敏失败时直接丢弃
-对应敏感字段。
+`agent-sec-prompt-scanner` 是同步安全 hook：默认 `PROMPT_SCANNER_MODE=observe`，只记录
+扫描事件且不阻断；设置为 `deny` 后，`agent-sec-cli scan-prompt` 返回 `warn` 或 `deny`
+时会向 Qwen Code 返回拒绝决策并阻断该 prompt。`PROMPT_SCANNER_TIMEOUT` 控制内部
+`agent-sec-cli` 调用超时，默认 10 秒；外层 manifest 为 prompt scanner 预留 15 秒
+command-hook 超时。
+
+`agent-sec-observability` 仍异步执行并保持 fail-open：任何脚本、PII 扫描或记录写入异常
+都不会改变 Qwen Code 的执行决策。敏感指标在写入前由本地 `scan-pii` 脱敏；脱敏失败时
+直接丢弃对应敏感字段。
 
 ## 测试
 

@@ -476,12 +476,26 @@ def test_manifest_mounts_only_supported_observability_events():
     }
 
     assert set(manifest["hooks"]) == expected_events
-    for entries in manifest["hooks"].values():
+    for event_name, entries in manifest["hooks"].items():
         assert len(entries) == 1
         hooks = entries[0]["hooks"]
-        assert len(hooks) == 1
-        assert hooks[0]["name"] == "agent-sec-observability"
-        assert hooks[0]["async"] is True
-        assert hooks[0]["command"] == (
-            'python3 "${extensionPath}${/}hooks${/}observability_hook.py"'
-        )
+        if event_name == "UserPromptSubmit":
+            assert len(hooks) == 2
+            assert hooks[0]["name"] == "agent-sec-prompt-scanner"
+            assert hooks[0].get("async") is None
+            assert hooks[0]["command"] == (
+                'python3 "${extensionPath}${/}hooks${/}prompt_scanner_hook.py"'
+            )
+            assert hooks[0]["timeout"] == 15000
+            assert hooks[1]["name"] == "agent-sec-observability"
+            assert hooks[1]["async"] is True
+            assert hooks[1]["command"] == (
+                'python3 "${extensionPath}${/}hooks${/}observability_hook.py"'
+            )
+        else:
+            assert len(hooks) == 1
+            assert hooks[0]["name"] == "agent-sec-observability"
+            assert hooks[0]["async"] is True
+            assert hooks[0]["command"] == (
+                'python3 "${extensionPath}${/}hooks${/}observability_hook.py"'
+            )

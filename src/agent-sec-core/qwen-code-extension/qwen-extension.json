@@ -1,11 +1,18 @@
 {
   "name": "agent-sec-core-qwen-code-extension",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "ANOLISA security integration for Qwen Code",
   "hooks": {
     "UserPromptSubmit": [
       {
         "hooks": [
+          {
+            "type": "command",
+            "name": "agent-sec-prompt-scanner",
+            "command": "python3 \"${extensionPath}${/}hooks${/}prompt_scanner_hook.py\"",
+            "description": "Scan the Qwen Code user prompt for injection attacks",
+            "timeout": 15000
+          },
           {
             "type": "command",
             "name": "agent-sec-observability",
