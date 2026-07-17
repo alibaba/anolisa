@@ -82,6 +82,12 @@ dest = "{datadir}/extensions/{component}/"
 [adapters.bundle]
 entry = "cosh-extension.json"
 
+# Qwencode extension adapter. Coexists independently with the other
+# adapters above — each adapter is scoped to its own framework driver,
+# and the anolisa CLI selects exactly one framework per session based on
+# the active agent runtime. Enabling qwencode has no effect on openclaw,
+# hermes, qoder, claude-code, codex, or cosh adapters. The qwencode
+# driver loads this extension only when the framework is qwencode.
 [[adapters]]
 framework = "qwencode"
 adapter_type = "extension"

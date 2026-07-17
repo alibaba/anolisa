@@ -129,6 +129,13 @@ impl IndexHandle {
     /// The notify watcher will later process the same inotify event and
     /// issue a redundant upsert — this is harmless because `upsert` is
     /// idempotent (DELETE + INSERT on the same rowid).
+    ///
+    /// Cold-file strategy: `upsert` inserts with `is_cold = 0` (warm) by
+    /// default, which is correct — a freshly observed file should be warm.
+    /// This matches the watcher's own upsert path, so there is no
+    /// behavioural divergence. The `compact()` method only marks files
+    /// cold when `access_count = 0 AND mtime_ms < cutoff`, so a newly
+    /// indexed file is unaffected regardless of which path inserts it.
     pub fn reindex_file(&self, rel_path: &str, body: &str, mtime_ms: i64, size: u64) -> Result<()> {
         let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         store.upsert(rel_path, mtime_ms, size, body, None)

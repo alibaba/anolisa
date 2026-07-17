@@ -1,5 +1,7 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::os::fd::AsFd;
+use std::path::Path;
 
 use crate::audit::AuditEntry;
 use crate::config::MemoryConfig;
@@ -140,7 +142,14 @@ pub fn memory_observe(
     // `before_prompt_build` hook firing right after `memory_observe`
     // returns empty results and silently skips injection (#1462).
     if let Some(ref index) = svc.index {
-        let mtime_ms = Utc::now().timestamp_millis();
+        // Read the actual file mtime from the filesystem rather than
+        // using Utc::now(). The watcher's flush path uses
+        // store::mtime_ms_of(&meta) for time-decay scoring; using a
+        // synthetic timestamp here would create a mismatch with the
+        // subsequent redundant upsert and skew decay-based ranking.
+        let mtime_ms = crate::safe_fs::metadata(svc.mount.root_fd.as_fd(), Path::new(&path))
+            .map(|m| crate::index::store::mtime_ms_of(&m))
+            .unwrap_or_else(|_| Utc::now().timestamp_millis());
         if let Err(e) = index.reindex_file(&path, &body, mtime_ms, n) {
             tracing::warn!("synchronous reindex after observe failed for {path}: {e}");
         }
