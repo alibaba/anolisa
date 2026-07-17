@@ -1,5 +1,5 @@
 //! Rule-artifact schema, direction/eligibility parsing, validation, and
-//! compilation into an ordered literal substitution table.
+//! compilation into an ordered substitution table with per-rule match modes.
 //!
 //! Eligibility is governed **only** by the explicit per-rule `auto_apply`
 //! field. `confidence` and `notes` are accepted as human annotations but carry
@@ -21,6 +21,10 @@ struct RawRule {
     ubuntu: String,
     alinux: String,
     direction: String,
+    /// Optional matching semantics. Missing preserves the historical literal
+    /// substring behavior for existing built-in and external artifacts.
+    #[serde(default, rename = "match")]
+    match_mode: Option<String>,
     /// Explicit eligibility. Optional at the serde layer so a legacy artifact
     /// that omits it fails with a dedicated, indexed [`OsAdapterError`] rather
     /// than an opaque serde "missing field" error.
@@ -34,6 +38,54 @@ struct RawRule {
     #[serde(default)]
     #[allow(dead_code)]
     notes: Option<String>,
+}
+
+/// Matching semantics attached to one compiled source pattern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MatchMode {
+    /// Match the source at any scanned substring position.
+    Literal,
+    /// Require ASCII-alphanumeric boundaries at alphanumeric source edges.
+    Token,
+}
+
+impl MatchMode {
+    fn parse(value: Option<&str>) -> Option<Self> {
+        match value.unwrap_or("literal") {
+            "literal" => Some(Self::Literal),
+            "token" => Some(Self::Token),
+            _ => None,
+        }
+    }
+
+    /// Whether `source` matches `input` at `start` under this mode.
+    pub(crate) fn matches(self, input: &str, start: usize, source: &str) -> bool {
+        let rest = &input[start..];
+        if !rest.starts_with(source) {
+            return false;
+        }
+        if self == Self::Literal {
+            return true;
+        }
+
+        let source_bytes = source.as_bytes();
+        let Some(first) = source_bytes.first() else {
+            return false;
+        };
+        let Some(last) = source_bytes.last() else {
+            return false;
+        };
+        let input_bytes = input.as_bytes();
+        let left_is_bounded = !first.is_ascii_alphanumeric()
+            || start == 0
+            || !input_bytes[start - 1].is_ascii_alphanumeric();
+        let end = start + source.len();
+        let right_is_bounded = !last.is_ascii_alphanumeric()
+            || input_bytes
+                .get(end)
+                .is_none_or(|byte| !byte.is_ascii_alphanumeric());
+        left_is_bounded && right_is_bounded
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,19 +120,40 @@ impl Direction {
 /// Parsed, validated, and direction-filtered substitution table for one target.
 #[derive(Debug)]
 pub(crate) struct CompiledRules {
-    /// Literal `(from, to)` substitutions in file order; applied by a
-    /// single-pass, longest-match scan (file order only breaks length ties,
-    /// which distinct sources cannot produce).
-    pub rules: Vec<(String, String)>,
+    /// Substitutions in file order; applied by a single-pass, longest-match
+    /// scan (file order only breaks length ties, which distinct sources cannot
+    /// produce).
+    pub rules: Vec<CompiledRule>,
     /// Source literals that must be matched-and-preserved during the scan, so a
     /// shorter eligible rule cannot rewrite inside them. These come from rules
     /// that are ineligible for this target — `auto_apply: never`, identity
-    /// (`from == to`), or direction-disallowed — and never appear in `rules`.
-    /// A source that is also an eligible substitution is excluded (substitution
-    /// wins), so protection never suppresses a real mapping.
-    pub protects: Vec<String>,
+    /// (`from == to`), or direction-disallowed. A source/match-mode pair that is
+    /// also an eligible substitution is excluded (substitution wins), so
+    /// protection never suppresses a real mapping. Different modes for the same
+    /// source coexist and are evaluated independently by the scanner.
+    pub protects: Vec<CompiledProtection>,
     /// Number of rules parsed from the artifact (before direction filtering).
     pub total_rules: usize,
+}
+
+/// One eligible compiled substitution.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct CompiledRule {
+    /// Source-side pattern for the resolved direction.
+    pub source: String,
+    /// Replacement emitted when the pattern matches.
+    pub target: String,
+    /// Boundary behavior for this source pattern.
+    pub match_mode: MatchMode,
+}
+
+/// One ineligible source retained as a protection match.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct CompiledProtection {
+    /// Source-side pattern retained verbatim when it matches.
+    pub source: String,
+    /// Boundary behavior for this protection pattern.
+    pub match_mode: MatchMode,
 }
 
 /// Parse `bytes`, validate every rule, and compile the substitutions eligible
@@ -89,8 +162,8 @@ pub(crate) struct CompiledRules {
 /// # Errors
 ///
 /// Returns [`OsAdapterError`] for malformed YAML, an empty rule list, an
-/// invalid `direction`/`auto_apply`, an empty pattern, or duplicate/ambiguous
-/// source patterns for the resolved target.
+/// invalid `direction`/`auto_apply`/`match`, an empty pattern, or
+/// duplicate/ambiguous source patterns for the resolved target.
 pub(crate) fn compile(
     bytes: &[u8],
     target: OsTarget,
@@ -108,14 +181,14 @@ pub(crate) fn compile(
     }
     let total_rules = raw_rules.len();
 
-    let mut rules: Vec<(String, String)> = Vec::new();
+    let mut rules: Vec<CompiledRule> = Vec::new();
     let mut seen: HashMap<String, String> = HashMap::new();
     // Sources of ineligible rules (never / identity / direction-disallowed).
     // Kept so their full span is preserved during the longest-match scan and a
     // shorter eligible rule cannot rewrite inside them. Substitutions win, so we
-    // strip any protect source that is also an eligible substitution afterward.
-    let mut protects: Vec<String> = Vec::new();
-    let mut protect_seen: HashSet<String> = HashSet::new();
+    // strip any source/match-mode pair that is also eligible afterward.
+    let mut protects: Vec<CompiledProtection> = Vec::new();
+    let mut protect_seen: HashSet<(String, MatchMode)> = HashSet::new();
     for (index, raw) in raw_rules.iter().enumerate() {
         let direction =
             Direction::parse(&raw.direction).ok_or_else(|| OsAdapterError::InvalidDirection {
@@ -133,6 +206,12 @@ pub(crate) fn compile(
             }
             None => return Err(OsAdapterError::MissingAutoApply { index }),
         };
+        let match_mode = MatchMode::parse(raw.match_mode.as_deref()).ok_or_else(|| {
+            OsAdapterError::InvalidMatchMode {
+                index,
+                value: raw.match_mode.clone().unwrap_or_default(),
+            }
+        })?;
         if raw.ubuntu.is_empty() {
             return Err(OsAdapterError::EmptyPattern {
                 index,
@@ -158,8 +237,11 @@ pub(crate) fn compile(
         // source so eligibility is not bypassed by a shorter overlapping rule.
         let is_substitution = auto_apply && direction.applies_to(target) && from != to;
         if !is_substitution {
-            if protect_seen.insert(from.clone()) {
-                protects.push(from.clone());
+            if protect_seen.insert((from.clone(), match_mode)) {
+                protects.push(CompiledProtection {
+                    source: from.clone(),
+                    match_mode,
+                });
             }
             continue;
         }
@@ -179,13 +261,24 @@ pub(crate) fn compile(
             });
         }
         seen.insert(from.clone(), to.clone());
-        rules.push((from.clone(), to.clone()));
+        rules.push(CompiledRule {
+            source: from.clone(),
+            target: to.clone(),
+            match_mode,
+        });
     }
 
-    // Substitutions take precedence over protection for the same source, so the
-    // canonical reverse mapping (e.g. `dnf install -y ` -> `apt-get install -y`)
-    // is never suppressed by a direction-disallowed alternate that shares it.
-    protects.retain(|source| !seen.contains_key(source));
+    // Substitutions take precedence over protection for the same source/mode
+    // pair, so the canonical reverse mapping (e.g. `dnf install -y ` ->
+    // `apt-get install -y`) is never suppressed by a direction-disallowed
+    // alternate that shares it.
+    let active_patterns: HashSet<(&str, MatchMode)> = rules
+        .iter()
+        .map(|rule| (rule.source.as_str(), rule.match_mode))
+        .collect();
+    protects.retain(|protection| {
+        !active_patterns.contains(&(protection.source.as_str(), protection.match_mode))
+    });
 
     Ok(CompiledRules {
         rules,
@@ -258,6 +351,23 @@ mod tests {
             compile_str(yaml, OsTarget::Alinux).unwrap_err(),
             OsAdapterError::InvalidAutoApply { .. }
         ));
+    }
+
+    #[test]
+    fn invalid_match_mode_is_rejected() {
+        let yaml = "- ubuntu: a\n  alinux: b\n  direction: bidirectional\n  match: prefix\n  auto_apply: always\n";
+        assert!(matches!(
+            compile_str(yaml, OsTarget::Alinux).unwrap_err(),
+            OsAdapterError::InvalidMatchMode { .. }
+        ));
+    }
+
+    #[test]
+    fn match_mode_defaults_to_literal_and_accepts_token() {
+        let yaml = "- ubuntu: apt\n  alinux: dnf\n  direction: bidirectional\n  auto_apply: always\n- ubuntu: cron\n  alinux: cronie\n  direction: bidirectional\n  match: token\n  auto_apply: always\n";
+        let compiled = compile_str(yaml, OsTarget::Alinux).unwrap();
+        assert_eq!(compiled.rules[0].match_mode, MatchMode::Literal);
+        assert_eq!(compiled.rules[1].match_mode, MatchMode::Token);
     }
 
     #[test]
@@ -344,7 +454,9 @@ mod tests {
         let yaml = "- ubuntu: apt-get\n  alinux: dnf\n  direction: bidirectional\n  auto_apply: always\n  confidence: low\n  notes: applied despite low confidence\n- ubuntu: ufw\n  alinux: firewalld\n  direction: ubuntu_to_alinux_only\n  auto_apply: never\n  confidence: high\n";
         let c = compile_str(yaml, OsTarget::Alinux).unwrap();
         assert_eq!(c.rules.len(), 1);
-        assert_eq!(c.rules[0], ("apt-get".to_string(), "dnf".to_string()));
+        assert_eq!(c.rules[0].source, "apt-get");
+        assert_eq!(c.rules[0].target, "dnf");
+        assert_eq!(c.rules[0].match_mode, MatchMode::Literal);
     }
 
     /// Provider-contract fixture: multiple Ubuntu spellings map to one Alinux
@@ -381,10 +493,8 @@ mod tests {
         // so `ncurses-devel` maps to exactly one Ubuntu spelling.
         let c = compile_str(CANONICAL_REVERSE_FIXTURE, OsTarget::Ubuntu).unwrap();
         assert_eq!(c.rules.len(), 1);
-        assert_eq!(
-            c.rules[0],
-            ("ncurses-devel".to_string(), "libncurses-dev".to_string())
-        );
+        assert_eq!(c.rules[0].source, "ncurses-devel");
+        assert_eq!(c.rules[0].target, "libncurses-dev");
     }
 
     #[test]

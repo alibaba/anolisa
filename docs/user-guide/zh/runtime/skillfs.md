@@ -292,11 +292,11 @@ skillfs mount /path/to/skills /mnt/skillfs \
   --config /etc/skillfs/skillfs-security.toml
 ```
 
-SkillFS **内置一份 312 条规则的 Ubuntu/Alinux 规则目录**，通过仓库资产嵌入二进制，
+SkillFS **内置一份 311 条规则的 Ubuntu/Alinux 规则目录**，通过仓库资产嵌入二进制，
 因此源码构建、RPM 与容器中无需额外文件即可工作，且仍是 opt-in。目录中 257 条为
-`auto_apply: always`，55 条为 `auto_apply: never` protection rule；编译后面向 Alinux
-有 223 条 active substitution，面向 Ubuntu 有 192 条。大多数高置信度规则会应用；
-中/低置信度规则与不安全裸 token 仅用于保护匹配 span。
+`auto_apply: always`，54 条为 `auto_apply: never` protection rule；编译后面向 Alinux
+有 223 条 active substitution，面向 Ubuntu 有 192 条。高置信度规则会应用；中/低
+置信度规则仅用于保护匹配 span。
 
 - `target_os = "auto"` 在挂载启动时读取一次 `/etc/os-release` 的精确 `ID` 选择
   目标：`ubuntu`/`debian` 映射为 Ubuntu，`alinux`/`anolis` 映射为 Alinux。检测是
@@ -319,6 +319,7 @@ SkillFS **内置一份 312 条规则的 Ubuntu/Alinux 规则目录**，通过仓
 - ubuntu: "apt-get install -y "
   alinux: "dnf install -y "
   direction: bidirectional          # bidirectional | ubuntu_to_alinux_only | alinux_to_ubuntu_only
+  match: literal                    # literal | token —— 可选，默认 literal
   auto_apply: always                # always | never —— 必填
 ```
 
@@ -357,27 +358,32 @@ cp src/skillfs/crates/skillfs-core/assets/ubuntu-alinux.yaml \
   notes: "local package mapping"
 ```
 
-`ubuntu`、`alinux`、`direction` 和 `auto_apply` 是必填字段；`confidence` 与
-`notes` 是不影响行为的可选注解。外部文件还必须保留所有仍需使用的内置规则：
-SkillFS 不会将其与嵌入目录合并。规则只在挂载启动时加载一次，修改后需要重新挂载。
-当前没有 catalog overlay、hot reload、逐条规则 id 或 export 命令。
+`ubuntu`、`alinux`、`direction` 和 `auto_apply` 是必填字段；`match` 是可选字段；
+`confidence` 与 `notes` 是不影响行为的可选注解。外部文件还必须保留所有仍需使用的
+内置规则：SkillFS 不会将其与嵌入目录合并。规则只在挂载启动时加载一次，修改后需要
+重新挂载。当前没有 catalog overlay、hot reload、逐条规则 id 或 export 命令。
 
 - `auto_apply` 在每条规则上都是必填的（外部覆盖文件同样如此）；只有
   `auto_apply: always` 的规则会被应用，且仅在目标允许的方向上生效。缺少
   `auto_apply` 的规则文件会被拒绝，并给出指明出错规则序号的错误信息。
 - `confidence` 与 `notes` 作为注解被接受，但不影响行为——资格完全由 `auto_apply`
   决定。
+- `match` 默认 `literal`，所以既有规则文件继续按子串匹配。`match: token` 会在两个
+  方向上检查 source 字母数字边缘的 ASCII 字母数字边界：`cron` 可在 EOF、空白、
+  换行或标点前匹配，但不会命中 `micron`、`crontab`、`cronutils` 或 `cron2` 的内部。
 - 替换是单遍非级联扫描：每个位置优先匹配最长的模式，因此重叠模式不会连锁改写，
   且与文件顺序无关。
 - 不生效的模式（`auto_apply: never`、identity、方向不允许）仍会参与匹配并原样输出，
-  保护整个 span，使更短的可用规则无法改写其内部。同一 source 上，substitution 优先
-  于 protection。
+  保护整个 span，使更短的可用规则无法改写其内部。protection 按 `(source, match)`
+  去重：substitution 只移除相同 source 和 mode 的 protection。不同 mode 可以共存；
+  只有 substitution 自身的 mode 命中当前输入时才优先，否则命中的 protection 仍会
+  保留整个 span。
 - 多对一的正向映射必须显式解决反向歧义：将一条标为 `bidirectional`（规范反向），
   其余标为 `ubuntu_to_alinux_only`。在反向目标上冲突的 `bidirectional` 会被拒绝。
 
 启用后，缺失或不可读的外部 `rules_path`、留空的 `rules_path`、YAML 格式错误、缺失或
-非法的 `direction`/`auto_apply` 值、重复或冲突的模式，或 `target_os = "auto"` 无法
-识别宿主，都会在挂载开始前以可执行的错误信息拒绝挂载。
+非法的 `direction`/`auto_apply` 值、非法的 `match` 值、重复或冲突的模式，或
+`target_os = "auto"` 无法识别宿主，都会在挂载开始前以可执行的错误信息拒绝挂载。
 
 ## 安全集成
 

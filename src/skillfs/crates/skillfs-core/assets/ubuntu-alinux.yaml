@@ -4,6 +4,8 @@
 #   ubuntu      — literal substring as it appears in Ubuntu/Debian-style content
 #   alinux      — literal substring it should be rewritten to on Alinux/Anolis-style
 #   direction   — bidirectional | ubuntu_to_alinux_only | alinux_to_ubuntu_only
+#   match       — literal | token (OPTIONAL; defaults to literal)
+#                 token requires ASCII-alphanumeric boundaries at source edges
 #   auto_apply  — always | never (REQUIRED; the only eligibility field)
 #                 always → SkillFS applies this rule in an allowed direction
 #                 never  → SkillFS loads the rule but never applies it
@@ -23,12 +25,16 @@
 # rewritten again, so results do NOT depend on rule order and overlapping
 # patterns never cascade (e.g. "apache2" never rewrites inside "apache2-utils",
 # and "cron" never re-hits the "crond" a longer rule produced).
+# A `match: token` candidate is considered only when ASCII letters or digits do
+# not touch an alphanumeric edge of its source; omitted `match` stays literal.
 #
 # Ineligible rules (auto_apply: never, identity, or direction-disallowed) still
 # take part in the scan as protection matches: when one is the longest match at
 # a position it is emitted unchanged and skipped, so a shorter eligible rule
-# cannot rewrite inside a span such a rule claims. An eligible substitution
-# always wins over protection for the same source.
+# cannot rewrite inside a span such a rule claims. Protection is deduplicated by
+# (source, match): a substitution removes only the same source/mode protection.
+# Different modes coexist; substitution wins only when its mode also matches,
+# otherwise a matching protection still preserves the source span.
 # ══════════════════════════════════════════════════════════════════
 
 
@@ -988,15 +994,10 @@
 - ubuntu: "cron"
   alinux: "cronie"
   direction: bidirectional
-  auto_apply: never
-  confidence: high
-  notes: bare token is protection-only; use the explicit install command rule
-
-- ubuntu: "apt-get install -y cron"
-  alinux: "dnf install -y cronie"
-  direction: bidirectional
+  match: token
   auto_apply: always
   confidence: high
+  notes: token boundaries prevent matches inside crontab, cronutils, and micron
 
 - ubuntu: "ntp"
   alinux: "chrony"
@@ -1069,6 +1070,7 @@
 - ubuntu: "cron.service"
   alinux: "crond.service"
   direction: bidirectional
+  match: token
   auto_apply: always
   confidence: high
 
@@ -1100,6 +1102,7 @@
 - ubuntu: "systemctl restart cron"
   alinux: "systemctl restart crond"
   direction: bidirectional
+  match: token
   auto_apply: always
   confidence: high
 
@@ -1309,6 +1312,7 @@
 - ubuntu: "service cron"
   alinux: "service crond"
   direction: bidirectional
+  match: token
   auto_apply: always
   confidence: high
 
@@ -1327,6 +1331,7 @@
 - ubuntu: "/etc/init.d/cron"
   alinux: "/etc/init.d/crond"
   direction: bidirectional
+  match: token
   auto_apply: never
   confidence: medium
 

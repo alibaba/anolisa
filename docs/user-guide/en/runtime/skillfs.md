@@ -314,13 +314,13 @@ skillfs mount /path/to/skills /mnt/skillfs \
   --config /etc/skillfs/skillfs-security.toml
 ```
 
-SkillFS ships a **built-in 312-rule Ubuntu/Alinux catalog** embedded in the
+SkillFS ships a **built-in 311-rule Ubuntu/Alinux catalog** embedded in the
 binary from the repository asset, so the adapter works in source builds, RPMs,
 and containers without a separate file. It stays opt-in. The catalog contains
-257 `auto_apply: always` rules and 55 `auto_apply: never` protection rules,
-producing 223 active substitutions toward Alinux and 192 toward Ubuntu. Most
-high-confidence rules are applied; medium- and low-confidence rules and unsafe
-bare-token matches remain protection-only.
+257 `auto_apply: always` rules and 54 `auto_apply: never` protection rules,
+producing 223 active substitutions toward Alinux and 192 toward Ubuntu.
+High-confidence rules are applied; medium- and low-confidence rules remain
+protection-only.
 
 - `target_os = "auto"` reads the exact `/etc/os-release` `ID` once at mount
   startup — `ubuntu`/`debian` map to Ubuntu, `alinux`/`anolis` map to Alinux.
@@ -348,6 +348,7 @@ rule declares the literal for each OS side, a `direction`, and a required
 - ubuntu: "apt-get install -y "
   alinux: "dnf install -y "
   direction: bidirectional          # bidirectional | ubuntu_to_alinux_only | alinux_to_ubuntu_only
+  match: literal                    # literal | token — optional, defaults to literal
   auto_apply: always                # always | never — REQUIRED
 ```
 
@@ -388,11 +389,11 @@ Append complete entries to define local mappings:
 ```
 
 `ubuntu`, `alinux`, `direction`, and `auto_apply` are required.
-`confidence` and `notes` are optional inert annotations. The external file
-must also retain any built-in rules you still want: SkillFS does not merge it
-with the embedded catalog. Rules are loaded once when the mount starts; remount
-after editing the file. There is currently no catalog overlay, hot reload,
-per-rule identifier, or export command.
+`match` is optional; `confidence` and `notes` are optional inert annotations.
+The external file must also retain any built-in rules you still want: SkillFS
+does not merge it with the embedded catalog. Rules are loaded once when the
+mount starts; remount after editing the file. There is currently no catalog
+overlay, hot reload, per-rule identifier, or export command.
 
 - `auto_apply` is required on every rule, including external override artifacts;
   only `auto_apply: always` rules are applied, and only in a direction the
@@ -400,21 +401,29 @@ per-rule identifier, or export command.
   error naming the rule index.
 - `confidence` and `notes` are accepted as annotations with no behavior —
   eligibility is governed solely by `auto_apply`.
+- `match` defaults to `literal`, preserving substring matching for existing
+  artifacts. `match: token` requires ASCII-alphanumeric boundaries at
+  alphanumeric source edges in both directions: `cron` matches at EOF or before
+  whitespace/newlines/punctuation, but not inside `micron`, `crontab`,
+  `cronutils`, or `cron2`.
 - Substitution is a single non-cascading pass; at each position the longest
   matching pattern wins, so overlapping patterns never chain and file order does
   not affect the result.
 - Ineligible patterns (`auto_apply: never`, identity, or direction-disallowed)
   still match and are emitted unchanged, protecting their whole span so a shorter
-  eligible rule cannot rewrite inside them. An eligible substitution wins over
-  protection for the same source.
+  eligible rule cannot rewrite inside them. Protection is deduplicated by
+  `(source, match)`: a substitution removes protection only for the same source
+  and mode. Different modes coexist; substitution wins only when its own mode
+  matches the input, otherwise matching protection still preserves the span.
 - A many-to-one forward mapping must resolve reverse ambiguity explicitly: mark
   one pair `bidirectional` (canonical reverse) and the alternates
   `ubuntu_to_alinux_only`. Colliding `bidirectional` reverses are rejected.
 
 When enabled, a missing/unreadable external `rules_path`, a blank `rules_path`,
-malformed YAML, a missing or invalid `direction`/`auto_apply` value, duplicate
-or ambiguous patterns, or an unrecognized `target_os = "auto"` host reject the
-mount before it starts with an actionable error.
+malformed YAML, a missing or invalid `direction`/`auto_apply` value, an invalid
+`match` value, duplicate or ambiguous patterns, or an unrecognized
+`target_os = "auto"` host reject the mount before it starts with an actionable
+error.
 
 ## Security Integration
 

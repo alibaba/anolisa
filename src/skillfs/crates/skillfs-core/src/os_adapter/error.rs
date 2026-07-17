@@ -68,6 +68,10 @@ pub enum OsAdapterError {
     #[error("os_adapter: rule {index}: unsupported auto_apply '{value}'; allowed: always, never")]
     InvalidAutoApply { index: usize, value: String },
 
+    /// A rule declared an unsupported matching mode.
+    #[error("os_adapter: rule {index}: unsupported match '{value}'; allowed: literal, token")]
+    InvalidMatchMode { index: usize, value: String },
+
     /// A rule declared an empty source or target pattern.
     #[error("os_adapter: rule {index}: '{field}' must not be empty")]
     EmptyPattern { index: usize, field: &'static str },

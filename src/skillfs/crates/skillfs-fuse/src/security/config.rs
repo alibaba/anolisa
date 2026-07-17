@@ -1921,8 +1921,8 @@ target_os = "alinux"
             .unwrap()
             .expect("built-in stage");
         assert_eq!(stage.target().as_str(), "alinux");
-        // The bundled catalog has 312 rules.
-        assert_eq!(stage.total_rules(), 312);
+        // The bundled catalog has 311 rules.
+        assert_eq!(stage.total_rules(), 311);
     }
 
     #[test]
@@ -2025,7 +2025,7 @@ rules_path = "/definitely/missing/os-rules.yaml"
         let stage = cfg.build_os_adapter_stage().unwrap().expect("stage built");
         assert_eq!(stage.target().as_str(), "alinux");
         // A non-empty rules_path overrides the built-in catalog: this artifact
-        // has exactly one rule, not the 312 bundled rules.
+        // has exactly one rule, not the 311 bundled rules.
         assert_eq!(
             stage.total_rules(),
             1,

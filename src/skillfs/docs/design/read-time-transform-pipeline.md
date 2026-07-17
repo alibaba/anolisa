@@ -107,14 +107,15 @@ mapping table — the catalog lives only in the asset.
 
 ### Built-in catalog composition
 
-The bundled catalog carries **312 rules** covering package-manager verbs,
+The bundled catalog carries **311 rules** covering package-manager verbs,
 `-dev`/`-devel` package names, service unit names, and filesystem paths. Each
 rule's eligibility is normalized to an explicit `auto_apply`: 257 rules are
-`auto_apply: always` and 55 are `auto_apply: never` (51 medium-confidence, 3
-low-confidence, and the deliberately protected high-confidence bare `cron`
-token). The corresponding full install command remains eligible. Protected
-rules are documented in the catalog but never substituted — SkillFS performs
-no verification, Repology lookup, network call, subprocess, or LLM review to
+`auto_apply: always` and 54 are `auto_apply: never` (51 medium-confidence and 3
+low-confidence). The high-confidence `cron`/`cronie` mapping is eligible with
+`match: token`, replacing the duplicated install-command entries without
+matching host words such as `crontab` or `cronutils`. Protected rules are
+documented in the catalog but never substituted — SkillFS performs no
+verification, Repology lookup, network call, subprocess, or LLM review to
 promote them. After normalization the catalog produces **223** non-identity
 active substitutions for target Alinux and **192** for target Ubuntu, with no
 duplicate or ambiguous active mapping for either target.
@@ -125,6 +126,10 @@ duplicate or ambiguous active mapping for either target.
   `auto_apply` (`always` | `never`). Eligibility is governed solely by
   `auto_apply`; only `always` rules are applied, and only in a direction the
   resolved target permits.
+- `match` is optional and defaults to `literal`, retaining the historical
+  substring semantics for existing artifacts. `token` requires
+  ASCII-alphanumeric boundaries at alphanumeric source edges; the same mode is
+  applied after source/target reversal.
 - `confidence` and `notes` are accepted but inert — SkillFS attaches no behavior
   to them.
 - An artifact that omits `auto_apply` on any rule is rejected with an indexed
@@ -152,6 +157,12 @@ Neither the replacement text nor already-scanned input is rescanned, so:
   distinct sources of equal length cannot both match at one position, so the
   longest match is unambiguous).
 
+Before a `token` candidate enters longest-match selection, the scanner rejects
+it when an ASCII letter or digit touches an alphanumeric source edge. Thus a
+bounded `cron` maps before EOF, whitespace, newlines, or punctuation, while
+`micron`, `crontab`, `cronutils`, and `cron2` do not match. Literal rules retain
+their previous prefix behavior.
+
 A naive per-rule sequential `replace` would corrupt these cases; the single-pass
 scan is the correctness fix.
 
@@ -163,9 +174,14 @@ rules from the compiled table let a shorter eligible rule rewrite inside a span
 an ineligible rule claims (e.g. the `never` path `/etc/init.d/apache2` becoming
 `/etc/init.d/httpd`, or the identity `postgresql-contrib` becoming
 `postgresql-client-contrib` on reverse), silently bypassing eligibility. An
-eligible substitution always wins over protection for the same source, so a
-direction-disallowed alternate never suppresses the canonical reverse mapping it
-shares a target with.
+Protection is deduplicated by `(source, match)`. An eligible substitution
+removes protection only for the same source and match mode; different modes for
+one source remain in the compiled scanner. When both candidates match, the
+substitution wins their equal-length tie. If its mode rejects the current input,
+the other-mode protection can still preserve the full source span and prevent a
+shorter rule from penetrating it. Thus a direction-disallowed alternate never
+suppresses a matching canonical reverse mapping, while token substitution and
+literal protection can intentionally coexist.
 
 ### Fail-closed OS detection
 

@@ -313,10 +313,10 @@ skillfs mount /path/to/skills /mnt/skillfs \
   --config /etc/skillfs/skillfs-security.toml
 ```
 
-SkillFS **ships a built-in 312-rule Ubuntu/Alinux catalog** embedded in the
+SkillFS **ships a built-in 311-rule Ubuntu/Alinux catalog** embedded in the
 binary from the repository asset, so the adapter works in source builds, RPMs,
 and containers without a separate file. Of those rules, 257 are
-`auto_apply: always` and 55 are `auto_apply: never`; compilation produces 223
+`auto_apply: always` and 54 are `auto_apply: never`; compilation produces 223
 active substitutions toward Alinux and 192 toward Ubuntu. It remains opt-in.
 
 - `target_os = "auto"` detects the host distribution from the exact
@@ -340,9 +340,9 @@ active substitutions toward Alinux and 192 toward Ubuntu. It remains opt-in.
   artifact is loaded once at mount startup, so remount after editing it. There
   is currently no catalog overlay, hot reload, or export command.
 
-In the built-in catalog, most high-confidence rules are `auto_apply: always`;
-medium- and low-confidence rules and deliberately unsafe bare-token matches are
-`auto_apply: never`, so they protect matched spans but are never substituted.
+In the built-in catalog, high-confidence rules are `auto_apply: always`;
+medium- and low-confidence rules are `auto_apply: never`, so they protect
+matched spans but are never substituted.
 The rule artifact — built-in or external — is a top-level YAML sequence. Each
 entry declares the literal strings for each OS side, a `direction`, and an
 explicit `auto_apply` eligibility flag:
@@ -351,6 +351,7 @@ explicit `auto_apply` eligibility flag:
 - ubuntu: "apt-get install -y "
   alinux: "dnf install -y "
   direction: bidirectional          # bidirectional | ubuntu_to_alinux_only | alinux_to_ubuntu_only
+  match: literal                    # literal | token — optional, defaults to literal
   auto_apply: always                # always | never — REQUIRED
 ```
 
@@ -360,6 +361,11 @@ explicit `auto_apply` eligibility flag:
   rejected at mount startup with an error naming the offending rule index.
 - `confidence` and `notes` are accepted as human annotations but carry no
   behavior — eligibility is governed solely by `auto_apply`.
+- `match` is optional and defaults to `literal`, preserving substring matching
+  for existing artifacts. `match: token` requires ASCII-alphanumeric boundaries
+  at alphanumeric source edges in both directions: `cron` matches at EOF or
+  before whitespace/newlines/punctuation, but not inside `micron`, `crontab`,
+  `cronutils`, or `cron2`.
 - Substitution is a single non-cascading pass over the original bytes: at each
   position the longest matching pattern wins (most specific first), so
   overlapping patterns like `apache2` and `apache2-utils` never chain and file
@@ -367,8 +373,10 @@ explicit `auto_apply` eligibility flag:
 - Ineligible patterns (`auto_apply: never`, identity, or direction-disallowed)
   still match and are emitted unchanged, protecting their whole span so a shorter
   eligible rule cannot rewrite inside them (e.g. a `never` `/etc/init.d/apache2`
-  is not touched by the `apache2` rule). An eligible substitution wins over
-  protection for the same source.
+  is not touched by the `apache2` rule). Protection is deduplicated by
+  `(source, match)`: a substitution removes protection only for the same source
+  and mode. Different modes coexist; substitution wins only when its own mode
+  matches the input, otherwise matching protection still preserves the span.
 - A many-to-one forward mapping (several Ubuntu spellings → one Alinux package)
   must resolve reverse ambiguity **explicitly**: mark exactly one pair
   `bidirectional` (the canonical reverse) and the alternates
@@ -376,7 +384,7 @@ explicit `auto_apply` eligibility flag:
   target are rejected as ambiguous.
 
 When `enabled = true`, a missing or unreadable external `rules_path`, a blank
-`rules_path`, malformed YAML, an invalid `direction`/`auto_apply` value,
+`rules_path`, malformed YAML, an invalid `direction`/`auto_apply`/`match` value,
 duplicate or ambiguous patterns, or an unrecognized `target_os = "auto"` host
 all fail the mount before it starts with an actionable error rather than a
 silently disabled adapter.

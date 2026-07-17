@@ -289,9 +289,9 @@ skillfs mount /path/to/skills /mnt/skillfs \
   --config /etc/skillfs/skillfs-security.toml
 ```
 
-SkillFS **内置一份 312 条规则的 Ubuntu/Alinux 规则目录**，通过 `include_bytes!`
+SkillFS **内置一份 311 条规则的 Ubuntu/Alinux 规则目录**，通过 `include_bytes!`
 从仓库资产嵌入二进制，因此源码构建、RPM 与容器中无需额外文件即可工作。其中 257 条
-为 `auto_apply: always`，55 条为 `auto_apply: never`；编译后面向 Alinux 有 223 条
+为 `auto_apply: always`，54 条为 `auto_apply: never`；编译后面向 Alinux 有 223 条
 active substitution，面向 Ubuntu 有 192 条。适配器仍是 opt-in。
 
 - `target_os = "auto"` 在挂载启动时读取一次 `/etc/os-release` 的精确 `ID`
@@ -310,8 +310,8 @@ active substitution，面向 Ubuntu 有 192 条。适配器仍是 opt-in。
   规则文件只在挂载启动时加载一次，修改后需要重新挂载。当前没有 catalog overlay、
   hot reload 或 export 命令。
 
-内置目录中，大多数高置信度规则为 `auto_apply: always`；中/低置信度规则和刻意保护的
-不安全裸 token 为 `auto_apply: never`，因此会保护匹配 span，但不会执行替换。规则文件
+内置目录中，高置信度规则为 `auto_apply: always`；中/低置信度规则为
+`auto_apply: never`，因此会保护匹配 span，但不会执行替换。规则文件
 （内置或外部）是一个顶层 YAML 序列，每条规则声明两侧 OS 的字面量、`direction`
 以及显式的 `auto_apply` 资格标记：
 
@@ -319,6 +319,7 @@ active substitution，面向 Ubuntu 有 192 条。适配器仍是 opt-in。
 - ubuntu: "apt-get install -y "
   alinux: "dnf install -y "
   direction: bidirectional          # bidirectional | ubuntu_to_alinux_only | alinux_to_ubuntu_only
+  match: literal                    # literal | token —— 可选，默认 literal
   auto_apply: always                # always | never —— 必填
 ```
 
@@ -327,19 +328,25 @@ active substitution，面向 Ubuntu 有 192 条。适配器仍是 opt-in。
   `auto_apply` 的规则文件会在挂载启动时被拒绝，并给出指明出错规则序号的错误信息。
 - `confidence` 与 `notes` 作为人类可读注解被接受，但不影响任何行为——资格完全
   由 `auto_apply` 决定。
+- `match` 是可选字段，默认 `literal`，因此既有规则文件继续按子串匹配。
+  `match: token` 会在两个方向上检查 source 字母数字边缘的 ASCII 字母数字边界：
+  `cron` 可在 EOF、空白、换行或标点前匹配，但不会命中 `micron`、`crontab`、
+  `cronutils` 或 `cron2` 的内部。
 - 替换是对原始字节的单遍非级联扫描：每个位置优先匹配最长（最具体）的模式，因此
   `apache2` 与 `apache2-utils` 这类重叠模式不会连锁改写，且与文件顺序无关。
 - 不生效的模式（`auto_apply: never`、identity、方向不允许）仍会参与匹配并原样输出，
   从而保护整个 span，使更短的可用规则无法改写其内部（例如 `never` 的
-  `/etc/init.d/apache2` 不会被 `apache2` 规则改写）。同一 source 上，substitution
-  优先于 protection。
+  `/etc/init.d/apache2` 不会被 `apache2` 规则改写）。protection 按
+  `(source, match)` 去重：substitution 只移除相同 source 和 mode 的 protection。
+  不同 mode 可以共存；只有 substitution 自身的 mode 命中当前输入时才优先，否则
+  命中的 protection 仍会保留整个 span。
 - 多对一的正向映射（多个 Ubuntu 写法 → 同一个 Alinux 包）必须**显式**解决反向
   歧义：恰好将一条标为 `bidirectional`（作为规范反向），其余标为
   `ubuntu_to_alinux_only`。两条在反向目标上冲突的 `bidirectional` 规则会被判定
   为歧义并拒绝。
 
 当 `enabled = true` 时，缺失或不可读的外部 `rules_path`、留空的 `rules_path`、
-YAML 格式错误、非法的 `direction`/`auto_apply` 值、重复或冲突的模式，或
+YAML 格式错误、非法的 `direction`/`auto_apply`/`match` 值、重复或冲突的模式，或
 `target_os = "auto"` 无法识别宿主，都会在挂载开始前以可执行的错误信息失败，而不是
 静默禁用适配器。
 

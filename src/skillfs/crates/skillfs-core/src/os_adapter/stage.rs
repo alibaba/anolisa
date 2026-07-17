@@ -19,18 +19,18 @@ use super::rules;
 /// depending on a separate on-disk file.
 const BUILTIN_RULES: &[u8] = include_bytes!("../../assets/ubuntu-alinux.yaml");
 
-/// The compiled OS-adapter stage: an ordered list of literal `(from, to)`
-/// substitutions specialized for one resolved [`OsTarget`].
+/// The compiled OS-adapter stage: an ordered list of substitutions specialized
+/// for one resolved [`OsTarget`].
 #[derive(Debug)]
 pub struct OsAdapterStage {
     target: OsTarget,
-    /// Ordered literal substitutions; applied by a single-pass, longest-match
-    /// scan per read (see the `TransformStage::apply` impl).
-    rules: Vec<(String, String)>,
+    /// Ordered substitutions; applied by a single-pass, longest-match scan per
+    /// read (see the `TransformStage::apply` impl).
+    rules: Vec<rules::CompiledRule>,
     /// Source literals matched-and-preserved during the scan (ineligible rules:
     /// never / identity / direction-disallowed), so a shorter eligible rule
     /// cannot rewrite inside a span an ineligible rule claims.
-    protects: Vec<String>,
+    protects: Vec<rules::CompiledProtection>,
     /// Content-free digest of the rule artifact bytes, for diagnostics.
     digest: String,
     /// Number of rules parsed from the artifact (before direction filtering).
@@ -44,9 +44,10 @@ impl OsAdapterStage {
     /// # Errors
     ///
     /// Returns [`OsAdapterError`] when the file is missing/unreadable, the YAML
-    /// is malformed, a rule has an invalid `direction`/`auto_apply`/empty
-    /// pattern, the resolved target has duplicate/ambiguous source patterns, or
-    /// `target_os = auto` cannot map `/etc/os-release` to a supported target.
+    /// is malformed, a rule has an invalid `direction`/`auto_apply`/`match`
+    /// value or empty pattern, the resolved target has duplicate/ambiguous
+    /// source patterns, or `target_os = auto` cannot map `/etc/os-release` to a
+    /// supported target.
     pub fn load(rules_path: &Path, selector: TargetSelector) -> Result<Self, OsAdapterError> {
         let bytes = std::fs::read(rules_path).map_err(|source| OsAdapterError::ReadRules {
             path: rules_path.to_path_buf(),
@@ -113,7 +114,7 @@ impl OsAdapterStage {
         self.total_rules
     }
 
-    /// Number of literal substitutions active for the resolved target.
+    /// Number of substitutions active for the resolved target.
     pub fn active_rules(&self) -> usize {
         self.rules.len()
     }
@@ -139,6 +140,10 @@ impl TransformStage for OsAdapterStage {
         // match is unambiguous; compile-time dedup already rejects equal
         // sources.
         //
+        // A token-mode candidate enters longest-match selection only after its
+        // ASCII-alphanumeric source edges satisfy their boundaries. Literal
+        // candidates retain the historical substring behavior.
+        //
         // Ineligible patterns (never / identity / direction-disallowed) also
         // compete in the scan as *protection* matches: when one is the longest
         // match it is emitted verbatim and skipped, so a shorter eligible rule
@@ -152,17 +157,19 @@ impl TransformStage for OsAdapterStage {
             // `Some(to)` substitutes, `None` protects (emit the source as-is).
             let mut best_from: Option<&str> = None;
             let mut best_to: Option<&str> = None;
-            for (from, to) in &self.rules {
-                if rest.starts_with(from.as_str()) && best_from.is_none_or(|b| from.len() > b.len())
+            for rule in &self.rules {
+                if rule.match_mode.matches(input, i, &rule.source)
+                    && best_from.is_none_or(|best| rule.source.len() > best.len())
                 {
-                    best_from = Some(from);
-                    best_to = Some(to);
+                    best_from = Some(&rule.source);
+                    best_to = Some(&rule.target);
                 }
             }
-            for from in &self.protects {
-                if rest.starts_with(from.as_str()) && best_from.is_none_or(|b| from.len() > b.len())
+            for protection in &self.protects {
+                if protection.match_mode.matches(input, i, &protection.source)
+                    && best_from.is_none_or(|best| protection.source.len() > best.len())
                 {
-                    best_from = Some(from);
+                    best_from = Some(&protection.source);
                     best_to = None;
                 }
             }
@@ -279,17 +286,71 @@ mod tests {
         assert_eq!(stage.total_rules(), 6);
     }
 
+    #[test]
+    fn token_match_mode_requires_ascii_alphanumeric_boundaries() {
+        let yaml = "- ubuntu: cron\n  alinux: cronie\n  direction: bidirectional\n  match: token\n  auto_apply: always\n";
+        let alinux = stage_from(yaml, OsTarget::Alinux).unwrap();
+        for (input, expected) in [
+            ("cron", "cronie"),
+            ("cron ", "cronie "),
+            ("cron\n", "cronie\n"),
+            ("cron,", "cronie,"),
+            ("(cron)", "(cronie)"),
+        ] {
+            assert_eq!(alinux.apply(input), expected, "input: {input:?}");
+        }
+        for input in ["crontab", "cronutils", "cron2", "micron"] {
+            assert_eq!(alinux.apply(input), input, "input: {input:?}");
+        }
+
+        let ubuntu = stage_from(yaml, OsTarget::Ubuntu).unwrap();
+        for (input, expected) in [
+            ("cronie", "cron"),
+            ("cronie ", "cron "),
+            ("cronie\n", "cron\n"),
+            ("cronie!", "cron!"),
+        ] {
+            assert_eq!(ubuntu.apply(input), expected, "input: {input:?}");
+        }
+        for input in ["cronietab", "cronieutils", "cronie2", "microcronie"] {
+            assert_eq!(ubuntu.apply(input), input, "input: {input:?}");
+        }
+    }
+
+    #[test]
+    fn omitted_match_mode_preserves_literal_prefix_matching() {
+        let yaml =
+            "- ubuntu: apt\n  alinux: dnf\n  direction: bidirectional\n  auto_apply: always\n";
+        let stage = stage_from(yaml, OsTarget::Alinux).unwrap();
+        assert_eq!(stage.apply("aptitude"), "dnfitude");
+    }
+
+    #[test]
+    fn mixed_modes_keep_protection_when_token_substitution_misses() {
+        let yaml = "- ubuntu: cron\n  alinux: cronie\n  direction: bidirectional\n  match: token\n  auto_apply: always\n- ubuntu: cron\n  alinux: legacy-cron\n  direction: ubuntu_to_alinux_only\n  match: literal\n  auto_apply: never\n- ubuntu: cr\n  alinux: xx\n  direction: ubuntu_to_alinux_only\n  auto_apply: always\n";
+        let stage = stage_from(yaml, OsTarget::Alinux).unwrap();
+
+        // Both four-byte candidates match, so the eligible token substitution
+        // wins the equal-length tie.
+        assert_eq!(stage.apply("cron"), "cronie");
+        // The token boundary fails, but the coexisting literal protection still
+        // claims the full source and blocks the shorter `cr` substitution.
+        assert_eq!(stage.apply("crontab"), "crontab");
+        // The shorter substitution remains active outside the protected source.
+        assert_eq!(stage.apply("crab"), "xxab");
+    }
+
     // -----------------------------------------------------------------------
     // Built-in catalog (bundled default)
     // -----------------------------------------------------------------------
 
     #[test]
     fn builtin_catalog_has_expected_rule_and_eligibility_counts() {
-        // Structural contract of the bundled asset: exactly 312 rules, every
-        // rule carries an explicit auto_apply, split 257 always / 55 never.
+        // Structural contract of the bundled asset: exactly 311 rules, every
+        // rule carries an explicit auto_apply, split 257 always / 54 never.
         let value: serde_yaml::Value = serde_yaml::from_slice(BUILTIN_RULES).unwrap();
         let seq = value.as_sequence().expect("top-level YAML sequence");
-        assert_eq!(seq.len(), 312, "exactly 312 rules");
+        assert_eq!(seq.len(), 311, "exactly 311 rules");
         let (mut always, mut never) = (0usize, 0usize);
         for rule in seq {
             let aa = rule
@@ -303,15 +364,15 @@ mod tests {
             }
         }
         assert_eq!(always, 257, "eligible rules are auto_apply: always");
-        assert_eq!(never, 55, "protected rules are auto_apply: never");
+        assert_eq!(never, 54, "protected rules are auto_apply: never");
     }
 
     #[test]
     fn builtin_catalog_loads_for_explicit_alinux() {
         let stage = OsAdapterStage::load_default(TargetSelector::Alinux).unwrap();
         assert_eq!(stage.target(), OsTarget::Alinux);
-        // 312 rules parsed before direction/eligibility filtering.
-        assert_eq!(stage.total_rules(), 312);
+        // 311 rules parsed before direction/eligibility filtering.
+        assert_eq!(stage.total_rules(), 311);
         // Non-identity active substitutions when converting toward Alinux.
         assert_eq!(stage.active_rules(), 223);
     }
@@ -320,35 +381,84 @@ mod tests {
     fn builtin_catalog_loads_for_explicit_ubuntu() {
         let stage = OsAdapterStage::load_default(TargetSelector::Ubuntu).unwrap();
         assert_eq!(stage.target(), OsTarget::Ubuntu);
-        assert_eq!(stage.total_rules(), 312);
+        assert_eq!(stage.total_rules(), 311);
         assert_eq!(stage.active_rules(), 192);
     }
 
     #[test]
-    fn builtin_cron_rules_require_explicit_install_context() {
+    fn builtin_cron_rules_enforce_token_boundaries() {
         let alinux = OsAdapterStage::load_default(TargetSelector::Alinux).unwrap();
-        assert_eq!(alinux.apply("crontab -e"), "crontab -e");
-        assert_eq!(alinux.apply("micron"), "micron");
-        assert_eq!(
-            alinux.apply("apt-get install -y cron"),
-            "dnf install -y cronie"
-        );
+        for (input, expected) in [
+            ("cron", "cronie"),
+            ("cron ", "cronie "),
+            ("cron\n", "cronie\n"),
+            ("cron,", "cronie,"),
+        ] {
+            assert_eq!(alinux.apply(input), expected, "input: {input:?}");
+        }
+        for input in ["crontab -e", "cronutils", "cron2", "micron"] {
+            assert_eq!(alinux.apply(input), input, "input: {input:?}");
+        }
+        for (input, expected) in [
+            ("sudo apt-get install -y cron", "sudo dnf install -y cronie"),
+            ("apt-get install -y cron", "dnf install -y cronie"),
+            ("sudo apt install -y cron", "sudo dnf install -y cronie"),
+            ("apt install -y cron", "dnf install -y cronie"),
+            ("apt-get install cron", "dnf install -y cronie"),
+            ("apt install cron", "dnf install -y cronie"),
+        ] {
+            assert_eq!(alinux.apply(input), expected, "input: {input}");
+        }
+        for (input, expected) in [
+            ("apt-get install -y crontab", "dnf install -y crontab"),
+            ("apt install -y cronutils", "dnf install -y cronutils"),
+            ("apt-get install cron2", "dnf install -y cron2"),
+        ] {
+            assert_eq!(alinux.apply(input), expected, "input: {input}");
+        }
         assert_eq!(alinux.apply("cron.service"), "crond.service");
         assert_eq!(
             alinux.apply("systemctl restart cron"),
             "systemctl restart crond"
         );
+        assert_eq!(alinux.apply("service cron"), "service crond");
+        assert_eq!(
+            alinux.apply("systemctl restart crontab"),
+            "systemctl restart crontab"
+        );
+        assert_eq!(alinux.apply("service cronutils"), "service cronutils");
 
         let ubuntu = OsAdapterStage::load_default(TargetSelector::Ubuntu).unwrap();
-        assert_eq!(ubuntu.apply("cronietab"), "cronietab");
+        for (input, expected) in [
+            ("cronie", "cron"),
+            ("cronie ", "cron "),
+            ("cronie\n", "cron\n"),
+            ("cronie!", "cron!"),
+        ] {
+            assert_eq!(ubuntu.apply(input), expected, "input: {input:?}");
+        }
+        for input in ["cronietab", "cronieutils", "cronie2", "microcronie"] {
+            assert_eq!(ubuntu.apply(input), input, "input: {input:?}");
+        }
+        for (input, expected) in [
+            ("sudo dnf install -y cronie", "sudo apt-get install -y cron"),
+            ("dnf install -y cronie", "apt-get install -y cron"),
+        ] {
+            assert_eq!(ubuntu.apply(input), expected, "input: {input}");
+        }
         assert_eq!(
-            ubuntu.apply("dnf install -y cronie"),
-            "apt-get install -y cron"
+            ubuntu.apply("dnf install -y cronietab"),
+            "apt-get install -y cronietab"
         );
         assert_eq!(ubuntu.apply("crond.service"), "cron.service");
         assert_eq!(
             ubuntu.apply("systemctl restart crond"),
             "systemctl restart cron"
+        );
+        assert_eq!(ubuntu.apply("service crond"), "service cron");
+        assert_eq!(
+            ubuntu.apply("systemctl restart crondtab"),
+            "systemctl restart crondtab"
         );
     }
 
@@ -475,8 +585,9 @@ mod tests {
                     || (direction == "ubuntu_to_alinux_only" && target == OsTarget::Alinux)
                     || (direction == "alinux_to_ubuntu_only" && target == OsTarget::Ubuntu)
             };
-            // Eligible substitutions first; a substitution wins over any
-            // protection for the same source (mirrors `compile`'s precedence).
+            // Eligible substitutions first; when source and mode both match, a
+            // substitution wins the equal-length protection tie (mirrors the
+            // scan's precedence).
             let mut subs: HashMap<String, String> = HashMap::new();
             for rule in seq {
                 let (source, dest) = sided(rule);
