@@ -181,8 +181,25 @@ fmt-check: ## Check formatting without modifying
 # INSTALL (source build)
 # =============================================================================
 
-install: build install-adapter-resources ## Install binary, config, and adapter to PREFIX
+# install: Install binary, config, and adapter. If release binary + plugin
+# dist already exist (e.g., pre-built by CI/test fixture), skip the
+# expensive build step to avoid timeout on clean ECS (cargo+npm takes
+# >60s; pytest-timeout default is 60s). Set FORCE_BUILD=1 to override.
+install: ## Install binary, config, and adapter to PREFIX
 	@echo "==> Installing to $(DESTDIR)$(BINDIR)..."
+	@if [ ! -f target/release/$(NAME) ] || [ "$(FORCE_BUILD)" = "1" ]; then \
+		echo "==> Binary not found, building..."; \
+		$(MAKE) build; \
+	else \
+		echo "==> Binary already built, skipping cargo+npm rebuild"; \
+	fi
+	@if [ ! -f $(ADAPTER_SRC_DIR)/openclaw/dist/index.js ] || [ "$(FORCE_BUILD)" = "1" ]; then \
+		echo "==> Plugin dist not found, building adapter resources..."; \
+		$(MAKE) install-adapter-resources; \
+	else \
+		echo "==> Adapter resources already built, skipping npm rebuild"; \
+		$(MAKE) install-adapter-resources-staged; \
+	fi
 	install -d -m 0755 $(DESTDIR)$(BINDIR)
 	install -p -m 0755 target/release/$(NAME) $(DESTDIR)$(BINDIR)/
 	install -d -m 0755 $(DESTDIR)$(DATADIR)/agent-memory
@@ -190,6 +207,14 @@ install: build install-adapter-resources ## Install binary, config, and adapter 
 	install -d -m 0755 $(DESTDIR)$(DATADIR)/mcp-servers
 	install -p -m 0644 config/mcp-server.json $(DESTDIR)$(DATADIR)/mcp-servers/agent-memory.json
 	@echo "==> Installed $(NAME) to $(DESTDIR)$(BINDIR)/$(NAME)"
+
+install-adapter-resources-staged: ## Install adapter bundle (no rebuild)
+	@echo "==> Installing adapter resources to $(DESTDIR)$(SHARE_DIR)..."
+	rm -rf $(DESTDIR)$(SHARE_DIR)
+	install -d -m 0755 $(DESTDIR)$(SHARE_DIR)
+	cp -pr $(ADAPTER_SRC_DIR)/. $(DESTDIR)$(SHARE_DIR)/
+	@test -f $(DESTDIR)$(SHARE_DIR)/openclaw/dist/index.js \
+	    || { echo "ERROR: $(DESTDIR)$(SHARE_DIR)/openclaw/dist/index.js missing after install-adapter-resources-staged"; exit 1; }
 
 install-adapter-resources: build-openclaw-plugin ## Install adapter bundle per FHS spec
 	@echo "==> Installing adapter resources to $(DESTDIR)$(SHARE_DIR)..."
