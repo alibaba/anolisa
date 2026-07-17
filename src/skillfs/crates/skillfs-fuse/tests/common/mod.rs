@@ -18,6 +18,7 @@ use std::time::Duration;
 use parking_lot::RwLock;
 use skillfs_core::os_adapter::OsAdapterStage;
 use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
+use skillfs_fuse::security::SkillEventSink;
 use skillfs_fuse::{MountConfig, MountHandle, MountOptions, mount_background_configured};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -172,6 +173,7 @@ impl MountFixture {
             Some(skillfs_fuse::SkillLayout::Hermes),
             None,
             None,
+            None,
         )
     }
 
@@ -187,6 +189,27 @@ impl MountFixture {
             None,
             Some(stage),
             None,
+            None,
+        )
+    }
+
+    /// Mount in normal mode with optional adapter and an audit event sink.
+    pub fn normal_with_transform_audit<F: FnOnce(&Path)>(
+        seed: F,
+        os_adapter: Option<OsAdapterStage>,
+        event_sink: Arc<dyn SkillEventSink>,
+    ) -> Self {
+        let source = tempfile::tempdir().expect("source tempdir");
+        seed(source.path());
+        let mountpoint = tempfile::tempdir().expect("mount tempdir");
+        Self::mount_now_with_layout(
+            MountMode::Normal,
+            source,
+            Some(mountpoint),
+            None,
+            os_adapter,
+            None,
+            Some(event_sink),
         )
     }
 
@@ -209,6 +232,7 @@ impl MountFixture {
             None,
             os_adapter,
             directive_enabled,
+            None,
         )
     }
 
@@ -226,6 +250,26 @@ impl MountFixture {
             Some(skillfs_fuse::SkillLayout::Hermes),
             Some(stage),
             None,
+            None,
+        )
+    }
+
+    /// Mount in in-place Hermes mode with an adapter and audit event sink.
+    pub fn in_place_hermes_with_transform_audit<F: FnOnce(&Path)>(
+        seed: F,
+        stage: OsAdapterStage,
+        event_sink: Arc<dyn SkillEventSink>,
+    ) -> Self {
+        let source = tempfile::tempdir().expect("source tempdir");
+        seed(source.path());
+        Self::mount_now_with_layout(
+            MountMode::InPlace,
+            source,
+            None,
+            Some(skillfs_fuse::SkillLayout::Hermes),
+            Some(stage),
+            None,
+            Some(event_sink),
         )
     }
 
@@ -234,7 +278,7 @@ impl MountFixture {
         source: tempfile::TempDir,
         mountpoint: Option<tempfile::TempDir>,
     ) -> Self {
-        Self::mount_now_with_layout(mode, source, mountpoint, None, None, None)
+        Self::mount_now_with_layout(mode, source, mountpoint, None, None, None, None)
     }
 
     fn mount_now_with_layout(
@@ -244,6 +288,7 @@ impl MountFixture {
         skill_layout: Option<skillfs_fuse::SkillLayout>,
         os_adapter: Option<OsAdapterStage>,
         directive_enabled: Option<bool>,
+        event_sink: Option<Arc<dyn SkillEventSink>>,
     ) -> Self {
         let mut store = SkillStore::new();
         store.load_from_directory(source.path(), &ParseConfig::default());
@@ -257,6 +302,7 @@ impl MountFixture {
         let in_place = matches!(mode, MountMode::InPlace);
 
         let config = MountConfig {
+            event_sink,
             skill_layout,
             os_adapter,
             directive_enabled,

@@ -62,6 +62,28 @@ impl TransformStage for DirectiveStage {
     }
 }
 
+/// Content-free identity of the enabled OS-adapter stage.
+///
+/// This view borrows only the resolved target label and rule-artifact digest;
+/// it does not expose or copy compiled rules or transformed content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OsAdapterMetadata<'a> {
+    target_os: &'static str,
+    rule_digest: &'a str,
+}
+
+impl OsAdapterMetadata<'_> {
+    /// Resolved target OS label (`ubuntu` or `alinux`).
+    pub fn target_os(&self) -> &'static str {
+        self.target_os
+    }
+
+    /// Stable SHA-256 digest of the configured rule artifact.
+    pub fn rule_digest(&self) -> &str {
+        self.rule_digest
+    }
+}
+
 /// A fixed-order, optional set of transform stages applied to `SKILL.md` reads.
 ///
 /// Each stage lives in its own slot, which makes the `directive -> os_adapter`
@@ -121,6 +143,17 @@ impl TransformPipeline {
             current = Some(stage.apply(current.as_deref().unwrap_or(input)));
         }
         current.unwrap_or_else(|| input.to_string())
+    }
+
+    /// Return content-free metadata for the enabled OS adapter.
+    ///
+    /// `None` means the adapter stage is disabled. The returned view borrows the
+    /// stage identity only and never exposes the compiled rule table.
+    pub fn os_adapter_metadata(&self) -> Option<OsAdapterMetadata<'_>> {
+        self.os_adapter.as_ref().map(|stage| OsAdapterMetadata {
+            target_os: stage.target().as_str(),
+            rule_digest: stage.rule_digest(),
+        })
     }
 
     /// Ordered names of the enabled stages, for content-free initialization
@@ -227,5 +260,23 @@ mod tests {
         pipeline.set_os_adapter(apt_adapter());
         pipeline.set_os_adapter(apt_adapter());
         assert_eq!(pipeline.stage_names(), vec!["os_adapter"]);
+    }
+
+    #[test]
+    fn os_adapter_metadata_is_content_free() {
+        assert!(TransformPipeline::empty().os_adapter_metadata().is_none());
+
+        let mut pipeline = TransformPipeline::empty();
+        pipeline.set_os_adapter(apt_adapter());
+        let metadata = pipeline.os_adapter_metadata().expect("adapter metadata");
+        assert_eq!(metadata.target_os(), "alinux");
+        assert_eq!(metadata.rule_digest().len(), 64);
+        assert!(
+            metadata
+                .rule_digest()
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        );
+        assert!(!metadata.rule_digest().contains("apt-get"));
     }
 }

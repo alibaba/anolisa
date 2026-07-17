@@ -726,13 +726,19 @@ impl SkillFs {
                 let fh = self
                     .handles
                     .allocate(ino, flags, None, pinned_target.clone());
-                self.emit_op_event(
+                let detail = if is_mutating_open {
+                    None
+                } else {
+                    self.os_adapter_open_detail()
+                };
+                self.emit_op_event_with_detail(
                     req,
                     &path_type,
                     SkillEventKind::Open,
                     SkillEventAction::Allowed,
                     None,
                     None,
+                    detail,
                 );
                 reply.opened(fh, 0);
             }
@@ -811,13 +817,19 @@ impl SkillFs {
                 let fh = self
                     .handles
                     .allocate(ino, flags, None, pinned_target.clone());
-                self.emit_op_event(
+                let detail = if is_mutating_open {
+                    None
+                } else {
+                    self.os_adapter_open_detail()
+                };
+                self.emit_op_event_with_detail(
                     req,
                     &path_type,
                     SkillEventKind::Open,
                     SkillEventAction::Allowed,
                     None,
                     None,
+                    detail,
                 );
                 reply.opened(fh, 0);
             }

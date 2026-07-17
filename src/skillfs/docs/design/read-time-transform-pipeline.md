@@ -176,12 +176,26 @@ hosts reject the mount. Operators on other distributions must set `target_os`
 explicitly. A present-but-blank `rules_path` is rejected as a misconfiguration
 rather than silently falling back to the built-in catalog.
 
-## 7. Out of scope (first package)
+## 7. Content-free Open audit context
 
-Deliberately not implemented here: persistent transformed-content caching,
-protocol-level transform audit events, additional text-file types, script
-transforms, LLM/network calls in the read path, and rule hot-reload without a
-remount. A future persistent cache would sit *after* stage execution and *below*
-the Agent-visible read boundary, keyed by the selected target and rule digest;
-it is called out so the current no-cache behavior is an explicit choice rather
-than an omission.
+A successful non-mutating Open of a virtual flat or Hermes `SKILL.md` carries a
+stable detail string when the OS adapter is enabled:
+
+```text
+transform=os_adapter target_os=<target> rule_digest=<sha256>
+```
+
+The pipeline exposes only a borrowed metadata view containing the resolved
+target and rule-artifact digest; it never exposes or copies the rule table. The
+event does not include source bytes, transformed bytes, a diff, or rule content.
+Write, staging, pending, passthrough, adapter-disabled, and failed/hidden paths
+are not labeled as adapter transforms. Successful per-syscall Read events remain
+suppressed to avoid audit flooding.
+
+## 8. Out of scope (tracked by #1488)
+
+This change does not store transformed bytes in `HandleEntry`, add a per-open
+cache, add a cross-open LRU, or change the existing `getattr`/`read`
+recomputation behavior. Those cache and handle-lifetime changes are tracked by
+#1488. Additional text-file types, script transforms, LLM/network calls in the
+read path, and rule hot-reload without a remount also remain out of scope.

@@ -489,6 +489,12 @@ SkillFS 支持面向 installer 的生命周期路径：
 `--activation-events-log <PATH>` 写 daemon-driven activation 流程中的 activation
 protocol events JSONL。
 
+启用 OS adapter 后，成功以只读方式打开 flat 或 Hermes 虚拟 `SKILL.md` 时，Open audit
+event 的 `detail` 会包含 content-free adapter context：
+`transform=os_adapter target_os=<target> rule_digest=<sha256>`。其中只记录启用的 stage、
+目标 OS 与规则文件 digest，绝不记录 source content、转换后 content、diff 或规则字面量。
+成功的逐 syscall Read event 仍不输出，避免高频 audit flooding。
+
 ### SLS Ops 和 Runtime Metrics
 
 SkillFS 会 best-effort 写 SLS records 到：

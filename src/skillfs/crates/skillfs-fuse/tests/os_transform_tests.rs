@@ -17,7 +17,10 @@ use std::time::Duration;
 use parking_lot::RwLock;
 use skillfs_core::os_adapter::{OsAdapterStage, OsTarget, TargetSelector};
 use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
-use skillfs_fuse::security::{ActiveSkillResolver, ActiveTarget};
+use skillfs_fuse::security::{
+    ActiveSkillResolver, ActiveTarget, InMemoryEventSink, SkillEventAction, SkillEventKind,
+    SkillEventSink, serialize_event_jsonl,
+};
 use skillfs_fuse::{MountConfig, MountHandle, MountOptions, mount_background_configured};
 
 #[path = "common/mod.rs"]
@@ -598,6 +601,143 @@ fn hermes_nested_skill_md_is_transformed() {
     let got = std::fs::read_to_string(&nested).expect("read nested");
     assert!(got.contains("dnf install -y openssl-devel"), "got: {got}");
     assert!(!got.contains("apt-get"));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Content-free Open audit metadata
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn flat_transformed_open_audits_target_and_digest() {
+    skip_if_no_fuse!();
+    let (_rules, stage) = stage_for(OsTarget::Alinux);
+    let digest = stage.rule_digest().to_string();
+    let sink = Arc::new(InMemoryEventSink::new());
+    let fx = MountFixture::normal_with_transform_audit(
+        |src| seed_skill(src, "web", UBUNTU_SKILL_MD),
+        Some(stage),
+        sink.clone() as Arc<dyn SkillEventSink>,
+    );
+
+    let _file = std::fs::File::open(fx.skill_path("web").join("SKILL.md")).expect("open");
+    let event = sink
+        .events()
+        .into_iter()
+        .find(|event| {
+            event.kind == SkillEventKind::Open
+                && event.action == Some(SkillEventAction::Allowed)
+                && event.skill_name.as_deref() == Some("web")
+                && event.relative_path.as_deref() == Some(Path::new("SKILL.md"))
+        })
+        .expect("flat transformed Open event");
+    let expected = format!("transform=os_adapter target_os=alinux rule_digest={digest}");
+    assert_eq!(event.detail.as_deref(), Some(expected.as_str()));
+
+    let json: serde_json::Value =
+        serde_json::from_str(&serialize_event_jsonl(&event)).expect("audit JSONL");
+    assert_eq!(json["detail"].as_str(), Some(expected.as_str()));
+}
+
+#[test]
+fn hermes_transformed_open_audits_target_and_digest() {
+    skip_if_no_fuse!();
+    let (_rules, stage) = stage_for(OsTarget::Alinux);
+    let digest = stage.rule_digest().to_string();
+    let sink = Arc::new(InMemoryEventSink::new());
+    let fx = MountFixture::in_place_hermes_with_transform_audit(
+        |src| seed_nested(src, "cloud", "deploy", UBUNTU_SKILL_MD),
+        stage,
+        sink.clone() as Arc<dyn SkillEventSink>,
+    );
+
+    let _file = std::fs::File::open(
+        fx.mountpoint()
+            .join("cloud")
+            .join("deploy")
+            .join("SKILL.md"),
+    )
+    .expect("open nested");
+    let event = sink
+        .events()
+        .into_iter()
+        .find(|event| {
+            event.kind == SkillEventKind::Open
+                && event.action == Some(SkillEventAction::Allowed)
+                && event.skill_name.as_deref() == Some("cloud/deploy")
+                && event.relative_path.as_deref() == Some(Path::new("SKILL.md"))
+        })
+        .expect("Hermes transformed Open event");
+    let expected = format!("transform=os_adapter target_os=alinux rule_digest={digest}");
+    assert_eq!(event.detail.as_deref(), Some(expected.as_str()));
+}
+
+#[test]
+fn adapter_detail_is_absent_for_disabled_nonvirtual_and_write_opens() {
+    skip_if_no_fuse!();
+
+    let disabled_sink = Arc::new(InMemoryEventSink::new());
+    let disabled = MountFixture::normal_with_transform_audit(
+        |src| seed_skill(src, "raw", UBUNTU_SKILL_MD),
+        None,
+        disabled_sink.clone() as Arc<dyn SkillEventSink>,
+    );
+    let _file = std::fs::File::open(disabled.skill_path("raw").join("SKILL.md")).expect("open");
+    let disabled_opens = disabled_sink.of_kind(SkillEventKind::Open);
+    assert!(disabled_opens.iter().all(|event| {
+        event
+            .detail
+            .as_deref()
+            .is_none_or(|detail| !detail.contains("transform=os_adapter"))
+    }));
+    assert!(
+        disabled_opens.iter().any(|event| {
+            event.skill_name.as_deref() == Some("raw")
+                && event.relative_path.as_deref() == Some(Path::new("SKILL.md"))
+        }),
+        "adapter-disabled virtual Open event missing"
+    );
+
+    let (_rules, stage) = stage_for(OsTarget::Alinux);
+    let enabled_sink = Arc::new(InMemoryEventSink::new());
+    let enabled = MountFixture::normal_with_transform_audit(
+        |src| {
+            seed_skill(src, "web", UBUNTU_SKILL_MD);
+            std::fs::write(src.join("web/notes.md"), UBUNTU_SKILL_MD).unwrap();
+        },
+        Some(stage),
+        enabled_sink.clone() as Arc<dyn SkillEventSink>,
+    );
+    let _passthrough =
+        std::fs::File::open(enabled.skill_path("web").join("notes.md")).expect("open passthrough");
+    let _write = std::fs::OpenOptions::new()
+        .write(true)
+        .open(enabled.skill_path("web").join("SKILL.md"))
+        .expect("open SKILL.md for write");
+    let opens = enabled_sink.of_kind(SkillEventKind::Open);
+    for event in opens.iter().filter(|event| {
+        event.relative_path.as_deref() == Some(Path::new("notes.md"))
+            || event.relative_path.as_deref() == Some(Path::new("SKILL.md"))
+    }) {
+        assert!(
+            event
+                .detail
+                .as_deref()
+                .is_none_or(|detail| !detail.contains("transform=os_adapter")),
+            "nonvirtual/write Open was mislabeled: {event:?}"
+        );
+    }
+    assert!(
+        opens
+            .iter()
+            .any(|event| event.relative_path.as_deref() == Some(Path::new("notes.md"))),
+        "passthrough Open event missing"
+    );
+    assert!(
+        opens
+            .iter()
+            .any(|event| event.relative_path.as_deref() == Some(Path::new("SKILL.md"))),
+        "write Open event missing"
+    );
 }
 
 #[test]

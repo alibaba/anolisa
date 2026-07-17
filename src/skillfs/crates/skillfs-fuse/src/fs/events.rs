@@ -122,6 +122,22 @@ impl SkillFs {
         errno_value: Option<i32>,
         bytes: Option<u64>,
     ) {
+        self.emit_op_event_with_detail(req, path_type, kind, action, errno_value, bytes, None);
+    }
+
+    /// Emit a normalized operation event with an optional content-free detail.
+    /// Existing call sites use [`Self::emit_op_event`]; only operations with
+    /// meaningful context need this variant.
+    pub(super) fn emit_op_event_with_detail(
+        &self,
+        req: &Request,
+        path_type: &PathType,
+        kind: SkillEventKind,
+        action: SkillEventAction,
+        errno_value: Option<i32>,
+        bytes: Option<u64>,
+        detail: Option<String>,
+    ) {
         let (skill_name, relative_path) = match path_type {
             PathType::Passthrough {
                 skill_name,
@@ -169,7 +185,23 @@ impl SkillFs {
         if let Some(b) = bytes {
             event = event.with_bytes(b);
         }
+        if let Some(detail) = detail {
+            event = event.with_detail(detail);
+        }
         self.emit_event(event);
+    }
+
+    /// Stable, content-free audit context for an enabled OS adapter.
+    pub(super) fn os_adapter_open_detail(&self) -> Option<String> {
+        self.transform_pipeline
+            .os_adapter_metadata()
+            .map(|metadata| {
+                format!(
+                    "transform=os_adapter target_os={} rule_digest={}",
+                    metadata.target_os(),
+                    metadata.rule_digest()
+                )
+            })
     }
 
     /// Emit a normalized `Metadata` event for an xattr mutation (`setxattr`

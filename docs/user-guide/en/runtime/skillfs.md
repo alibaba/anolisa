@@ -533,6 +533,13 @@ notify source such as `--notify-socket` or `--activation-events-log`.
 `--activation-events-log <PATH>` writes activation protocol events as JSONL for
 daemon-driven activation flows.
 
+When the OS adapter is enabled, a successful read-only Open of a virtual flat
+or Hermes `SKILL.md` includes content-free adapter context in `detail`:
+`transform=os_adapter target_os=<target> rule_digest=<sha256>`. It records only
+the enabled stage, resolved target OS, and rule-artifact digest — never source
+content, transformed content, a diff, or rule literals. Successful per-syscall
+Read events remain suppressed to avoid high-volume audit flooding.
+
 ### SLS Ops and Runtime Metrics
 
 SkillFS writes best-effort SLS records to:
