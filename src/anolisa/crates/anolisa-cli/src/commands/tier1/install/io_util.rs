@@ -71,6 +71,133 @@ pub(crate) fn write_installed_component_manifest(
     Ok(path)
 }
 
+struct DatadirContract {
+    content: String,
+    source_path: PathBuf,
+    datadir_root: PathBuf,
+}
+
+enum DatadirContractLookup {
+    Found(DatadirContract),
+    Missing(Vec<PathBuf>),
+    Unreadable {
+        source_path: PathBuf,
+        source: std::io::Error,
+    },
+}
+
+/// Read-only result for comparing an RPM-owned contract with its state snapshot.
+pub(crate) struct ContractDriftInspection {
+    /// Whether the state snapshot is absent, unreadable, or byte-different.
+    pub(crate) drifted: bool,
+    /// Non-fatal lookup or path-resolution failures.
+    pub(crate) warnings: Vec<String>,
+}
+
+fn datadir_contract_roots(layout: &FsLayout) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(packaged) = crate::packaged::packaged_datadir_root(layout) {
+        roots.push(packaged);
+    }
+    if let Some(package_datadir) = layout.package_datadir()
+        && !roots.iter().any(|root| root == &package_datadir)
+    {
+        roots.push(package_datadir);
+    }
+    if !roots.iter().any(|root| root == &layout.datadir) {
+        roots.push(layout.datadir.clone());
+    }
+    roots
+}
+
+fn lookup_datadir_contract(layout: &FsLayout, component: &str) -> DatadirContractLookup {
+    let mut searched: Vec<PathBuf> = Vec::new();
+    for datadir_root in datadir_contract_roots(layout) {
+        let source_path = FsLayout::component_contract_path(&datadir_root, component);
+        match std::fs::read_to_string(&source_path) {
+            Ok(content) => {
+                return DatadirContractLookup::Found(DatadirContract {
+                    content,
+                    source_path,
+                    datadir_root,
+                });
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                searched.push(source_path);
+            }
+            Err(source) => {
+                return DatadirContractLookup::Unreadable {
+                    source_path,
+                    source,
+                };
+            }
+        }
+    }
+    DatadirContractLookup::Missing(searched)
+}
+
+/// Compare the package-owned component contract with its state snapshot.
+///
+/// A missing package contract is not drift because there is no authoritative
+/// content to copy. An unreadable snapshot is drift so a real reconciliation
+/// can attempt to replace it and surface any write failure.
+pub(crate) fn inspect_datadir_contract_drift(
+    layout: &FsLayout,
+    component: &str,
+    command: &str,
+) -> ContractDriftInspection {
+    let contract = match lookup_datadir_contract(layout, component) {
+        DatadirContractLookup::Found(contract) => contract,
+        DatadirContractLookup::Missing(_) => {
+            return ContractDriftInspection {
+                drifted: false,
+                warnings: Vec::new(),
+            };
+        }
+        DatadirContractLookup::Unreadable {
+            source_path,
+            source,
+        } => {
+            return ContractDriftInspection {
+                drifted: false,
+                warnings: vec![format!(
+                    "could not read datadir component contract at {}: {source}",
+                    source_path.display()
+                )],
+            };
+        }
+    };
+    let destination = match common::installed_component_manifest_path(layout, component, command) {
+        Ok(path) => path,
+        Err(err) => {
+            return ContractDriftInspection {
+                drifted: false,
+                warnings: vec![format!(
+                    "could not resolve snapshot path for component '{component}': {err}"
+                )],
+            };
+        }
+    };
+
+    match std::fs::read_to_string(&destination) {
+        Ok(snapshot) => ContractDriftInspection {
+            drifted: snapshot != contract.content,
+            warnings: Vec::new(),
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => ContractDriftInspection {
+            drifted: true,
+            warnings: Vec::new(),
+        },
+        Err(err) => ContractDriftInspection {
+            drifted: true,
+            warnings: vec![format!(
+                "could not read installed component manifest at {}: {err}",
+                destination.display()
+            )],
+        },
+    }
+}
+
 /// Best-effort snapshot of the datadir component contract for RPM paths.
 ///
 /// After an RPM adopt or delegated install the package-owned contract lives
@@ -94,60 +221,53 @@ pub(crate) fn snapshot_datadir_contract(
     component: &str,
     command: &str,
 ) -> Vec<String> {
+    snapshot_datadir_contract_with_missing_policy(layout, component, command, true)
+}
+
+/// Refresh an existing state snapshot when the RPM publishes a contract.
+///
+/// Unlike first-time install/adopt, an RPM without a contract is not a new
+/// warning during upgrade or repair because there is no snapshot to refresh.
+pub(crate) fn refresh_datadir_contract_snapshot(
+    layout: &FsLayout,
+    component: &str,
+    command: &str,
+) -> Vec<String> {
+    snapshot_datadir_contract_with_missing_policy(layout, component, command, false)
+}
+
+fn snapshot_datadir_contract_with_missing_policy(
+    layout: &FsLayout,
+    component: &str,
+    command: &str,
+    warn_if_missing: bool,
+) -> Vec<String> {
     let mut warnings: Vec<String> = Vec::new();
-
-    // Build the set of datadir roots to search, deduped, in priority
-    // order. packaged_datadir_root covers env override → exe-sibling →
-    // layout.datadir, while package_datadir covers the FHS RPM/DEB root
-    // (`/usr/share/anolisa`, rebased under prefix). Always include
-    // layout.datadir as the final fallback so the path appears in the
-    // "not found" warning.
-    let mut roots: Vec<PathBuf> = Vec::new();
-    if let Some(packaged) = crate::packaged::packaged_datadir_root(layout) {
-        roots.push(packaged);
-    }
-    if let Some(package_datadir) = layout.package_datadir()
-        && !roots.iter().any(|r| r == &package_datadir)
-    {
-        roots.push(package_datadir);
-    }
-    if !roots.iter().any(|r| r == &layout.datadir) {
-        roots.push(layout.datadir.clone());
-    }
-
-    let mut content: Option<String> = None;
-    let mut found_source: Option<PathBuf> = None;
-    let mut found_root: Option<PathBuf> = None;
-    let mut searched: Vec<PathBuf> = Vec::new();
-    for root in &roots {
-        let source = FsLayout::component_contract_path(root, component);
-        match std::fs::read_to_string(&source) {
-            Ok(c) => {
-                content = Some(c);
-                found_source = Some(source);
-                found_root = Some(root.clone());
-                break;
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                searched.push(source);
-            }
-            Err(err) => {
+    let contract = match lookup_datadir_contract(layout, component) {
+        DatadirContractLookup::Found(contract) => contract,
+        DatadirContractLookup::Missing(searched) => {
+            if warn_if_missing {
+                let paths: Vec<String> = searched
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect();
                 warnings.push(format!(
-                    "could not read datadir component contract at {}: {err}",
-                    source.display()
+                    "component '{component}' does not publish an ANOLISA component contract at {}",
+                    paths.join(" or ")
                 ));
-                return warnings;
             }
+            return warnings;
         }
-    }
-
-    let Some(content) = content else {
-        let paths: Vec<String> = searched.iter().map(|p| p.display().to_string()).collect();
-        warnings.push(format!(
-            "component '{component}' does not publish an ANOLISA component contract at {}",
-            paths.join(" or ")
-        ));
-        return warnings;
+        DatadirContractLookup::Unreadable {
+            source_path,
+            source,
+        } => {
+            warnings.push(format!(
+                "could not read datadir component contract at {}: {source}",
+                source_path.display()
+            ));
+            return warnings;
+        }
     };
 
     let dest = match common::installed_component_manifest_path(layout, component, command) {
@@ -160,7 +280,7 @@ pub(crate) fn snapshot_datadir_contract(
         }
     };
 
-    if let Err(err) = write_atomic_text(&dest, &content) {
+    if let Err(err) = write_atomic_text(&dest, &contract.content) {
         let msg = format!(
             "failed to snapshot component contract to {}: {err}",
             dest.display()
@@ -172,22 +292,19 @@ pub(crate) fn snapshot_datadir_contract(
 
     // Best-effort provenance sidecar so adapter operations can resolve
     // {datadir} without content-matching against scoped datadir roots.
-    if let (Some(source_path), Some(datadir_root)) = (found_source, found_root) {
-        use anolisa_core::adapter::contract::{
-            ContractProvenance, ContractSourceKind, write_snapshot_provenance,
-        };
-        let provenance = ContractProvenance {
-            schema_version: 1,
-            source_kind: ContractSourceKind::Datadir,
-            source_path,
-            datadir_root,
-        };
-        if let Err(err) = write_snapshot_provenance(&dest, &provenance) {
-            let msg =
-                format!("failed to write contract provenance for component '{component}': {err}");
-            eprintln!("warning: {msg}");
-            warnings.push(msg);
-        }
+    use anolisa_core::adapter::contract::{
+        ContractProvenance, ContractSourceKind, write_snapshot_provenance,
+    };
+    let provenance = ContractProvenance {
+        schema_version: 1,
+        source_kind: ContractSourceKind::Datadir,
+        source_path: contract.source_path,
+        datadir_root: contract.datadir_root,
+    };
+    if let Err(err) = write_snapshot_provenance(&dest, &provenance) {
+        let msg = format!("failed to write contract provenance for component '{component}': {err}");
+        eprintln!("warning: {msg}");
+        warnings.push(msg);
     }
 
     warnings

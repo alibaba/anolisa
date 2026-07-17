@@ -25,7 +25,7 @@ use crate::color::Palette;
 use crate::commands::common;
 use crate::commands::common::RepoPersistPolicy;
 use crate::commands::tier1::install::{
-    rpm_package_candidates_with_index, snapshot_datadir_contract,
+    refresh_datadir_contract_snapshot, rpm_package_candidates_with_index, snapshot_datadir_contract,
 };
 use crate::commands::tier1::rpm_install::{self, PendingRpmInstall};
 use crate::context::CliContext;
@@ -215,7 +215,7 @@ fn repair_with_query(
         &to_evr,
         source_repo.as_deref(),
         &command,
-        &warnings,
+        &mut warnings,
     )?;
 
     let payload = RepairPayload {
@@ -617,7 +617,7 @@ fn persist_repair(
     to_evr: &str,
     source_repo: Option<&str>,
     command: &str,
-    warnings: &[String],
+    warnings: &mut Vec<String>,
 ) -> Result<String, CliError> {
     let layout = common::resolve_layout(ctx);
     let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
@@ -712,6 +712,10 @@ fn persist_repair(
         command: command.to_string(),
         reason: format!("failed to save state: {err}"),
     })?;
+
+    warnings.extend(refresh_datadir_contract_snapshot(
+        &layout, component, command,
+    ));
 
     // Audit log is best-effort: the repair already persisted, so a log failure
     // downgrades to a warning instead of unwinding.
@@ -847,6 +851,7 @@ mod tests {
         InstallMode as StateInstallMode, InstalledObject, InstalledState, ObjectStatus,
     };
     use anolisa_core::transaction::{Transaction, TransactionOutcomeStatus};
+    use anolisa_platform::fs_layout::FsLayout;
     use anolisa_platform::pkg_query::PackageVersion;
 
     /// Configurable in-memory [`PackageQuery`] for the repair tests. Repair runs
@@ -1114,6 +1119,43 @@ mod tests {
         assert_eq!(meta.evr.as_deref(), Some("2.3.0-1.al8"));
         assert_eq!(meta.source_repo.as_deref(), Some("alinux-updates"));
         assert_ne!(obj.last_operation_id.as_deref(), Some("op-prior"));
+    }
+
+    #[test]
+    fn repair_refreshes_stale_component_manifest() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        let component = "manifest-sync-test";
+        let package = "manifest-sync-test-rpm";
+        let evr = "2.0.0-1.al8";
+        seed(
+            &c,
+            rpm_object(
+                component,
+                package,
+                evr,
+                Ownership::RpmManaged,
+                ObjectStatus::Installed,
+            ),
+        );
+        let layout = common::resolve_layout(&c);
+        let source = FsLayout::component_contract_path(&layout.datadir, component);
+        fs::create_dir_all(source.parent().expect("source parent")).expect("mkdir source");
+        fs::write(&source, "framework = \"new\"\n").expect("write source contract");
+        let snapshot = FsLayout::component_manifest_snapshot_path(&layout.state_dir, component);
+        fs::create_dir_all(snapshot.parent().expect("snapshot parent")).expect("mkdir snapshot");
+        fs::write(&snapshot, "framework = \"old\"\n").expect("write stale snapshot");
+        let rpm = FakeQuery::new(
+            package,
+            Some(pkg_info(package, "2.0.0", Some("1.al8"), "x86_64")),
+        );
+
+        repair_with_query(component, &c, &rpm).expect("repair manifest drift");
+
+        assert_eq!(
+            fs::read_to_string(snapshot).expect("read refreshed snapshot"),
+            "framework = \"new\"\n"
+        );
     }
 
     #[test]

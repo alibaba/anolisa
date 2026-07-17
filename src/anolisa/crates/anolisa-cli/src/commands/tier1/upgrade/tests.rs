@@ -1386,6 +1386,80 @@ fn empty_plan_reconciles_all_drifted_rpm_components() {
 }
 
 #[test]
+fn empty_plan_reconciles_stale_component_manifest() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let component = "manifest-sync-test";
+    let package = "manifest-sync-test-rpm";
+    let evr = "2.0.0-1.alnx4";
+    seed_state(
+        &layout,
+        vec![rpm_component(
+            component,
+            package,
+            evr,
+            Ownership::RpmManaged,
+        )],
+    );
+
+    let source = FsLayout::component_contract_path(&layout.datadir, component);
+    std::fs::create_dir_all(source.parent().expect("source parent")).expect("mkdir source");
+    std::fs::write(&source, "framework = \"new\"\n").expect("write source contract");
+    let snapshot = FsLayout::component_manifest_snapshot_path(&layout.state_dir, component);
+    std::fs::create_dir_all(snapshot.parent().expect("snapshot parent")).expect("mkdir snapshot");
+    std::fs::write(&snapshot, "framework = \"old\"\n").expect("write stale snapshot");
+
+    let host = FakeHost::default().with_installed(package, info(package, "2.0.0", Some("1.alnx4")));
+    let plan = build_plan(None, &cli_noop(), &[]);
+
+    let preview = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        false,
+        true,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("preview manifest drift");
+
+    assert_eq!(preview.reconciled.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(&snapshot).expect("read unchanged snapshot"),
+        "framework = \"old\"\n",
+        "dry-run must not refresh the snapshot"
+    );
+
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("reconcile manifest drift");
+
+    assert_eq!(result.status, STATUS_OK);
+    assert_eq!(result.reconciled.len(), 1);
+    assert_eq!(result.reconciled[0].name, component);
+    assert!(
+        host.txn_calls().is_empty(),
+        "manifest sync must not call dnf"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&snapshot).expect("read refreshed snapshot"),
+        "framework = \"new\"\n"
+    );
+}
+
+#[test]
 fn empty_plan_reconciles_legacy_rpm_component_and_backfills_metadata() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let ctx = system_ctx(tmp.path().to_path_buf());

@@ -52,6 +52,9 @@ use super::update::check::{
 use crate::color::Palette;
 use crate::commands::common;
 use crate::commands::common::RepoPersistPolicy;
+use crate::commands::tier1::install::{
+    inspect_datadir_contract_drift, refresh_datadir_contract_snapshot,
+};
 use crate::commands::tier1::rpm_install;
 use crate::context::{CliContext, InstallMode};
 use crate::progress::{self, Activity, ProgressReporter};
@@ -706,7 +709,7 @@ fn run_upgrade_with_deps(
         // Dry-run reads state/rpmdb without taking the install lock, applying a
         // transaction, or constructing an operation to persist.
         let state = common::load_installed_state(ctx, command)?;
-        return Ok(render_plan_preview(plan, &state, query));
+        return Ok(render_plan_preview(plan, layout, &state, query, command));
     }
 
     // Real execution needs root for the dnf transactions. Check up front so the
@@ -1041,11 +1044,13 @@ fn installed_origin_or_warn(
 /// Inspect existing RPM-backed component rows against rpmdb without mutating
 /// state. Callers decide whether to preview or apply the returned changes.
 fn inspect_rpm_reconciliations(
+    layout: &FsLayout,
     state: &InstalledState,
     query: &dyn PackageQuery,
     excluded: &HashSet<String>,
     legacy_reconciliations: &[PlannedLegacyReconciliation],
     warnings: &mut Vec<String>,
+    command: &str,
 ) -> ReconciliationInspection {
     let mut inspection = ReconciliationInspection::default();
 
@@ -1112,7 +1117,9 @@ fn inspect_rpm_reconciliations(
                 && metadata.evr.as_deref() == Some(to.as_str())
                 && metadata.arch.as_deref() == Some(refreshed.arch.as_str())
         });
-        let drifted = object.version != to || !metadata_current;
+        let manifest = inspect_datadir_contract_drift(layout, &object.name, command);
+        warnings.extend(manifest.warnings);
+        let drifted = object.version != to || !metadata_current || manifest.drifted;
         if !drifted {
             continue;
         }
@@ -1166,8 +1173,10 @@ fn txn_error_reason(err: PackageTransactionError) -> String {
 /// reconciliation detection.
 fn render_plan_preview(
     plan: &UpgradePlan,
+    layout: &FsLayout,
     state: &InstalledState,
     query: &dyn PackageQuery,
+    command: &str,
 ) -> UpgradeResult {
     let mut updated: Vec<UpdatedItem> = Vec::new();
     if let Some(cli) = &plan.cli {
@@ -1221,11 +1230,13 @@ fn render_plan_preview(
         .collect();
     let mut warnings = Vec::new();
     let inspection = inspect_rpm_reconciliations(
+        layout,
         state,
         query,
         &excluded,
         &plan.legacy_reconciliations,
         &mut warnings,
+        command,
     );
     let reconciled = inspection
         .pending
@@ -1488,8 +1499,15 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
         .chain(outcome.installed.iter().map(|item| item.name.clone()))
         .chain(outcome.recorded.iter().map(|item| item.name.clone()))
         .collect();
-    let inspection =
-        inspect_rpm_reconciliations(state, query, &excluded, legacy_reconciliations, warnings);
+    let inspection = inspect_rpm_reconciliations(
+        layout,
+        state,
+        query,
+        &excluded,
+        legacy_reconciliations,
+        warnings,
+        command,
+    );
     // Apply errors do not exclude a component from the sweep: a transient
     // post-transaction query may recover here and still reconcile state. If
     // the retry fails again, keep the original item error instead of counting
@@ -1587,6 +1605,22 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
         command: command.to_string(),
         reason: format!("failed to save state: {err}"),
     })?;
+
+    // Refresh package-owned component contracts only after state persisted.
+    // This heals stale snapshots left by external yum/dnf upgrades without
+    // exposing a new contract when the corresponding state write failed.
+    for component in outcome
+        .updated
+        .iter()
+        .map(|item| item.name.as_str())
+        .chain(outcome.installed.iter().map(|item| item.name.as_str()))
+        .chain(outcome.reconciled.iter().map(|item| item.name.as_str()))
+        .chain(outcome.recorded.iter().map(|item| item.name.as_str()))
+    {
+        warnings.extend(refresh_datadir_contract_snapshot(
+            layout, component, command,
+        ));
+    }
 
     // Audit log is best-effort: state already persisted, so a log failure
     // downgrades to a stderr warning rather than unwinding.
