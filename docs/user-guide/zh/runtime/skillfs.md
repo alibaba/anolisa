@@ -418,7 +418,8 @@ Agent 或 installer 通过 SkillFS 写入
 对于 in-place activation 和 notify mount，需要设置 `--ledger-backing-root`，给
 daemon 一个可见的 backing source path，并启用 authenticated resolver。Notify v2
 只携带 canonical identity，因此缺少 `--trusted-peer-exe` 的 in-place notify 配置会
-在启动阶段被拒绝：
+在启动阶段被拒绝。out-of-place notify mount 如果显式配置
+`--ledger-backing-root`，同样必须启用 resolver：
 
 ```bash
 skillfs mount /path/to/skills /path/to/skills \

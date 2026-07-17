@@ -441,8 +441,9 @@ SkillFS 不在文件系统核心中执行扫描、签名校验或风险判断。
   写入落到 source，完成信号可触发外部安全流程。
 - `--notify-socket <PATH>` 将 debounce 后的 skill mutation 通知发给外部 daemon。
   Notify v2 使用 canonical 路径和完整 flat/Hermes `skillId` 标识 Skill；
-  live/backing 路径通过独立 resolver 解析。in-place notify mount 要求配置
-  `--trusted-peer-exe`，确保 daemon 访问 source 前 authenticated resolver 已可用。
+  live/backing 路径通过独立 resolver 解析。in-place notify mount，以及任何配置了
+  `--ledger-backing-root` 的 notify mount，都要求配置 `--trusted-peer-exe`，
+  确保 daemon 访问 source 前 authenticated resolver 已可用。
 - `--activation-events-log <PATH>` 将 activation protocol events 写成 JSONL。
 - `--activation-reload-mode poll` 在 notify events 后重读 activation state，
   无需 remount 即可更新 resolver。

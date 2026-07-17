@@ -847,6 +847,8 @@ fn backing_root_under_tmp_fails_before_setup() {
             "/run/skillfs-privtmp-test.sock",
             "--ledger-backing-root",
             &backing,
+            "--trusted-peer-exe",
+            bin_path(),
         ])
         .output()
         .expect("invoke skillfs");
@@ -934,6 +936,8 @@ fn backing_root_symlink_to_tmp_fails_before_setup() {
             "/run/skillfs-privtmp-test.sock",
             "--ledger-backing-root",
             link.to_str().unwrap(),
+            "--trusted-peer-exe",
+            bin_path(),
         ])
         .output()
         .expect("invoke skillfs");
@@ -1037,10 +1041,14 @@ fn non_tmp_daemon_facing_root_passes_gate() {
             "/run/skillfs-privtmp-test.sock",
             "--ledger-backing-root",
             source.path().to_str().unwrap(),
+            "--trusted-peer-exe",
+            bin_path(),
         ],
     );
     assert!(
-        !combined.contains("PrivateTmp=true") && !combined.contains("resolves under /tmp"),
+        !combined.contains("PrivateTmp=true")
+            && !combined.contains("resolves under /tmp")
+            && !combined.contains("authenticated live-source resolver"),
         "PrivateTmp gate must not fire for a non-tmp backing root, got: {combined}"
     );
 }
@@ -2568,7 +2576,7 @@ fn in_place_notify_without_resolver_fails_startup() {
         "in-place notify must require the resolver control plane, got: {combined}"
     );
     assert!(
-        !combined.contains("--ledger-backing-root"),
+        !combined.contains("--ledger-backing-root setup failed"),
         "resolver gate must run before backing-root setup, got: {combined}"
     );
 }
@@ -2604,6 +2612,117 @@ fn in_place_notify_with_resolver_reaches_backing_root_gate() {
     assert!(
         !combined.contains("authenticated live-source resolver"),
         "configured resolver must satisfy the notify gate, got: {combined}"
+    );
+}
+
+#[test]
+fn out_of_place_notify_with_backing_root_without_resolver_fails_startup() {
+    let source = non_tmp_dir();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let backing = mount.path().join("backing");
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
+            "--notify-socket",
+            "/run/skillfs-out-of-place-notify.sock",
+            "--ledger-backing-root",
+            backing.to_str().unwrap(),
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("authenticated live-source resolver")
+            && combined.contains("--trusted-peer-exe")
+            && combined.contains("--ledger-backing-root"),
+        "backing-root notify must require the resolver control plane, got: {combined}"
+    );
+    assert!(
+        !backing.exists(),
+        "resolver gate must run before backing-root setup"
+    );
+}
+
+#[test]
+fn config_backing_root_with_notify_without_resolver_fails_startup() {
+    let source = non_tmp_dir();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let backing = mount.path().join("backing");
+    let config_dir = tempfile::tempdir().expect("config dir");
+    let config_path = config_dir.path().join("security.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "[activation]\nmode = \"file\"\n[ledger]\nbacking_root = \"{}\"\n",
+            backing.display()
+        ),
+    )
+    .unwrap();
+
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--config",
+            config_path.to_str().unwrap(),
+            "--notify-socket",
+            "/run/skillfs-config-backing-notify.sock",
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("authenticated live-source resolver")
+            && combined.contains("--ledger-backing-root"),
+        "merged config backing root must require the resolver, got: {combined}"
+    );
+    assert!(
+        !backing.exists(),
+        "resolver gate must run before config backing-root setup"
+    );
+}
+
+#[test]
+fn out_of_place_notify_with_backing_root_and_resolver_passes_gate() {
+    let source = non_tmp_dir();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let combined = run_briefly(
+        mount.path(),
+        &[
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
+            "--notify-socket",
+            "/run/skillfs-out-of-place-notify.sock",
+            "--ledger-backing-root",
+            source.path().to_str().unwrap(),
+            "--trusted-peer-exe",
+            bin_path(),
+        ],
+    );
+    assert!(
+        !combined.contains("authenticated live-source resolver"),
+        "configured resolver must satisfy backing-root notify gate, got: {combined}"
     );
 }
 

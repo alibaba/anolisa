@@ -458,7 +458,9 @@ Agent or installer writes through SkillFS
 For in-place activation and notify mounts, set `--ledger-backing-root` to a
 daemon-visible backing source path and enable the authenticated resolver.
 Notify v2 carries canonical identity only, so startup rejects an in-place
-notify configuration that omits `--trusted-peer-exe`:
+notify configuration that omits `--trusted-peer-exe`. The same resolver
+requirement applies to an out-of-place notify mount whenever it explicitly
+configures `--ledger-backing-root`:
 
 ```bash
 skillfs mount /path/to/skills /path/to/skills \

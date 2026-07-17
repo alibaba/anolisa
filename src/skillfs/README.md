@@ -488,8 +488,9 @@ Related security surfaces:
 - `--notify-socket <PATH>` sends debounced skill mutation notifications to an
   external daemon. Notify v2 identifies the Skill with its canonical path and
   complete flat or Hermes `skillId`; live/backing paths are resolved separately.
-  In-place notify mounts require `--trusted-peer-exe` so the authenticated
-  resolver is available before the daemon accesses the source.
+  In-place notify mounts, and any notify mount with `--ledger-backing-root`,
+  require `--trusted-peer-exe` so the authenticated resolver is available
+  before the daemon accesses the source.
 - `--activation-events-log <PATH>` writes activation protocol events as JSONL.
 - `--activation-reload-mode poll` re-reads activation state after notify events
   and updates the resolver without a remount.

@@ -124,10 +124,12 @@ The sec-core consumer switches directly to v2 and must:
 5. return `schemaVersion=2` with `accepted=true` only after accepting the
    event.
 
-An in-place notify v2 mount starts only when the authenticated S1 resolver
-control plane is enabled. The canonical path becomes the FUSE over-mount after
-startup, so a daemon without the resolver could otherwise mistake that view for
-the physical live source.
+An in-place notify v2 mount, or any notify mount with an explicit backing root,
+starts only when the authenticated S1 resolver control plane is enabled. The
+canonical path becomes the FUSE over-mount in-place, while an out-of-place
+backing root intentionally replaces the canonical host path as the
+daemon-facing source. Without the resolver, the daemon cannot identify the
+physical live source in either case.
 
 ## Deferred Work
 

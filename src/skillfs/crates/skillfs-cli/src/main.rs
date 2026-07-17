@@ -1281,17 +1281,21 @@ async fn cmd_mount(
     let source_roots = SourceRoots::resolve(&source)
         .map_err(|e| format!("failed to resolve source root '{}': {e}", source.display()))?;
 
-    // Compute mount identity before side-effecting setup. An in-place notify
-    // v2 deployment must expose the authenticated resolver because the
-    // canonical identity alone cannot reach the underlying live source after
-    // the FUSE over-mount.
+    // Compute mount identity before side-effecting setup. Notify v2 carries
+    // canonical identity only, so the daemon needs the authenticated resolver
+    // whenever the live root differs by contract: an in-place mount hides the
+    // physical source, while an explicit backing root replaces the canonical
+    // host path as the daemon-facing source.
     let mount_canon = mountpoint
         .canonicalize()
         .unwrap_or_else(|_| mountpoint.clone());
     let in_place = source_roots.physical_source_root() == mount_canon;
-    if in_place && notify_socket.is_some() && !control_plane_enabled {
+    let notify_requires_resolver =
+        notify_socket.is_some() && (in_place || ledger_backing_root.is_some());
+    if notify_requires_resolver && !control_plane_enabled {
         return Err(
-            "in-place --notify-socket requires the authenticated live-source resolver; \
+            "--notify-socket with an in-place mount or --ledger-backing-root requires the \
+             authenticated live-source resolver; \
              configure --trusted-peer-exe (and optionally --control-socket) so the daemon \
              can resolve canonicalSkillDir before accessing the source"
                 .into(),
