@@ -124,7 +124,15 @@ install -m 0644 manifests/repo.toml %{buildroot}%{_sysconfdir}/anolisa/repo.toml
 #%%doc %%{_docdir}/%%{name}/README.md
 
 %changelog
-* Thu Jul 16 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Sat Jul 18 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- `anolisa adapter` now manages Qwen Code extensions through the `qwen` CLI for Qwen Code 0.17 and newer.
+- `anolisa upgrade` and `anolisa repair` now explain component manifest reconciliation in human and JSON output.
+- `anolisa upgrade` now refreshes component manifests after RPM package upgrades.
+- `anolisa upgrade` now reconciles same-version RPM component manifest changes.
+- `anolisa repair` now refreshes stale component manifests from the installed RPM.
+- Failed component manifest refreshes now keep RPM components repairable and report the affected component.
+
+* Thu Jul 16 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.6-1
 - `anolisa status` no longer reports healthy RPM-managed components as failed.
 
 * Tue Jul 14 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.5-1

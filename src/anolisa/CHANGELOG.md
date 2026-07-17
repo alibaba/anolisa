@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-07-18
+
+### Added
+
+- `anolisa adapter` now manages Qwen Code extensions through the `qwen` CLI for Qwen Code 0.17 and newer.
+
+### Changed
+
+- `anolisa upgrade` and `anolisa repair` now explain component manifest reconciliation in human and JSON output.
+
+### Fixed
+
+- `anolisa upgrade` now refreshes component manifests after RPM package upgrades.
+- `anolisa upgrade` now reconciles same-version RPM component manifest changes.
+- `anolisa repair` now refreshes stale component manifests from the installed RPM.
+- Failed component manifest refreshes now keep RPM components repairable and report the affected component.
+
 ## [0.2.6] - 2026-07-16
 
 ### Fixed
@@ -517,6 +534,23 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.2.7] - 2026-07-18
+
+### 新增
+
+- `anolisa adapter` 现可通过 `qwen` CLI 管理 Qwen Code 0.17 及更高版本的扩展。
+
+### 变更
+
+- `anolisa upgrade` 和 `anolisa repair` 现会在人类可读和 JSON 输出中说明组件清单同步。
+
+### 修复
+
+- `anolisa upgrade` 现会在 RPM 软件包升级后刷新组件清单。
+- `anolisa upgrade` 现可同步版本号未变的 RPM 组件清单变更。
+- `anolisa repair` 现会从已安装的 RPM 刷新过期组件清单。
+- 组件清单刷新失败时，现会保持 RPM 组件可修复并报告受影响组件。
 
 ## [0.2.6] - 2026-07-16
 
