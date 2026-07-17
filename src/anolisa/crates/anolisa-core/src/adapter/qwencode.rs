@@ -428,6 +428,26 @@ impl FrameworkDriver for QwenCodeDriver {
                 layout.plugin
             )));
         }
+        if matches!(registration, RegistrationProbe::Absent) {
+            return Ok(incomplete(format!(
+                "Qwen registration is absent but activation policy remains; refusing to relink '{}' during cleanup",
+                layout.plugin
+            )));
+        }
+        match casefold_collision(&layout) {
+            Ok(Some(collision)) => {
+                return Ok(incomplete(format!(
+                    "Qwen extension '{}' has a case-insensitive name collision with '{collision}'; refusing name-only uninstall",
+                    layout.plugin
+                )));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return Ok(incomplete(format!(
+                    "could not verify Qwen extension name uniqueness; refusing name-only uninstall: {error}"
+                )));
+            }
+        }
         if find_binary_in_path(&qwen_program()).is_none() {
             return Ok(incomplete(
                 "qwen CLI not found; receipt kept so native cleanup can be retried".to_string(),
@@ -440,34 +460,6 @@ impl FrameworkDriver for QwenCodeDriver {
         }
 
         let mut messages = Vec::new();
-        if matches!(registration, RegistrationProbe::Absent) {
-            if !claim.resource_root.is_dir() {
-                return Ok(incomplete(format!(
-                    "Qwen registration is absent but activation policy remains, and source {} is unavailable for recovery",
-                    claim.resource_root.display()
-                )));
-            }
-            let source = claim.resource_root.display().to_string();
-            let output = ctx
-                .ops
-                .run_framework_cli(build_qwen_link_command(&layout.home, &source))?;
-            if !output.success()
-                || !matches!(
-                    probe_registration(&layout, claim, ctx)?,
-                    RegistrationProbe::Owned
-                )
-            {
-                return Ok(incomplete(format!(
-                    "could not restore Qwen registration needed to remove stale activation policy: {}",
-                    cli_failure_reason("extensions link", &output)
-                )));
-            }
-            messages.push(format!(
-                "restored Qwen extension '{}' temporarily for policy cleanup",
-                layout.plugin
-            ));
-        }
-
         let output = ctx.ops.run_framework_cli(build_qwen_command(
             &layout.home,
             ["extensions", "uninstall", layout.plugin.as_str()],
@@ -706,6 +698,46 @@ fn probe_registration(
     Ok(RegistrationProbe::Owned)
 }
 
+fn casefold_collision(layout: &QwenLayout) -> Result<Option<String>, AdapterError> {
+    let extensions_dir =
+        layout
+            .extension_dir
+            .parent()
+            .ok_or_else(|| AdapterError::BundleInvalid {
+                root: layout.extension_dir.clone(),
+                reason: "Qwen extension directory has no parent".to_string(),
+            })?;
+    let entries = std::fs::read_dir(extensions_dir).map_err(|source| AdapterError::Io {
+        path: extensions_dir.to_path_buf(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| AdapterError::Io {
+            path: extensions_dir.to_path_buf(),
+            source,
+        })?;
+        let file_type = entry.file_type().map_err(|source| AdapterError::Io {
+            path: entry.path(),
+            source,
+        })?;
+        if !file_type.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if is_casefold_collision(&layout.plugin, name) {
+            return Ok(Some(name.to_string()));
+        }
+    }
+    Ok(None)
+}
+
+fn is_casefold_collision(plugin: &str, candidate: &str) -> bool {
+    candidate != plugin && candidate.eq_ignore_ascii_case(plugin)
+}
+
 fn probe_activation(layout: &QwenLayout, ctx: &DriverCtx) -> Result<ActivationProbe, AdapterError> {
     let Some(bytes) = ctx.ops.read_file(&layout.enablement_file)? else {
         return Ok(ActivationProbe::Enabled {
@@ -902,15 +934,16 @@ fn qwen_program() -> String {
 
 fn qwen_home(user_home: Option<&Path>) -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
-    let configured = std::env::var_os("QWEN_HOME")
-        .filter(|value| !value.is_empty())
-        .or_else(|| user_home.and_then(qwen_home_from_user_env));
+    let configured = match std::env::var_os("QWEN_HOME") {
+        Some(value) => Some(value),
+        None => user_home.and_then(qwen_home_from_user_env),
+    };
     resolve_qwen_home(user_home, &cwd, configured.as_deref())
 }
 
 fn qwen_home_from_user_env(user_home: &Path) -> Option<OsString> {
     // Match Qwen's preResolveHomeEnvOverrides order. It ignores unreadable
-    // files and keeps the first non-empty QWEN_HOME value.
+    // files and keeps the first file's non-empty QWEN_HOME value.
     [user_home.join(".qwen").join(".env"), user_home.join(".env")]
         .into_iter()
         .find_map(|path| {
@@ -920,23 +953,47 @@ fn qwen_home_from_user_env(user_home: &Path) -> Option<OsString> {
 }
 
 fn parse_qwen_home_env(contents: &str) -> Option<String> {
-    contents.lines().find_map(|line| {
+    let mut configured = None;
+    for line in contents.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
-            return None;
+            continue;
         }
         let line = line
             .strip_prefix("export")
             .filter(|rest| rest.starts_with(char::is_whitespace))
             .map(str::trim_start)
             .unwrap_or(line);
-        let (key, raw_value) = line.split_once('=')?;
+        let Some((key, raw_value)) = dotenv_assignment(line) else {
+            continue;
+        };
         if key.trim() != "QWEN_HOME" {
-            return None;
+            continue;
         }
-        let value = parse_dotenv_value(raw_value)?;
-        (!value.is_empty()).then_some(value)
-    })
+        if let Some(value) = parse_dotenv_value(raw_value) {
+            configured = Some(value);
+        }
+    }
+    configured.filter(|value| !value.is_empty())
+}
+
+fn dotenv_assignment(line: &str) -> Option<(&str, &str)> {
+    let key_end = line
+        .find(|character: char| {
+            !(character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-'))
+        })
+        .unwrap_or(line.len());
+    if key_end == 0 {
+        return None;
+    }
+    let (key, rest) = line.split_at(key_end);
+    if let Some(value) = rest.strip_prefix(':') {
+        return value
+            .starts_with(char::is_whitespace)
+            .then(|| (key, value.trim_start()));
+    }
+    let value = rest.trim_start().strip_prefix('=')?;
+    Some((key, value.trim_start()))
 }
 
 fn parse_dotenv_value(raw: &str) -> Option<String> {
@@ -1176,6 +1233,11 @@ mod tests {
         fn set_bin_absent(&self) {
             // SAFETY: this module serializes its Qwen environment mutations.
             unsafe { std::env::set_var("QWEN_BIN", "qwen-missing-anolisa-test") }
+        }
+
+        fn set_home(&self, value: &OsStr) {
+            // SAFETY: this module serializes its Qwen environment mutations.
+            unsafe { std::env::set_var("QWEN_HOME", value) }
         }
     }
 
@@ -1628,6 +1690,79 @@ mod tests {
     }
 
     #[test]
+    fn disable_refuses_to_relink_when_only_policy_remains() {
+        let _guard = EnvGuard::acquire();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let user_home = tmp.path().join("home");
+        std::fs::create_dir_all(&user_home).expect("home");
+        let home = user_home.join(".qwen");
+        let resource = resource_root(tmp.path());
+        let ops = SimOps::new(home.clone(), user_home.clone());
+        ops.write_enablement(true).expect("enablement");
+        let layout = anolisa_platform::fs_layout::FsLayout::user(user_home.clone());
+        let ctx = ctx(&resource, &user_home, &ops, &layout);
+        let driver = QwenCodeDriver::new();
+        let claim = prepare_claim(&driver, &ctx).expect("claim");
+        std::fs::write(
+            resource.join(QWEN_MANIFEST),
+            br#"{"name":"tokenless-v2","version":"2.0.0"}"#,
+        )
+        .expect("replace manifest");
+
+        let report = driver.disable(&claim, &ctx).expect("disable");
+        assert!(!report.cleanup_complete);
+        assert!(
+            report
+                .messages
+                .iter()
+                .any(|message| message.contains("refusing to relink"))
+        );
+        assert!(ops.commands().is_empty());
+        assert!(!home.join("extensions").join("tokenless").exists());
+        assert!(!home.join("extensions").join("tokenless-v2").exists());
+    }
+
+    #[test]
+    fn disable_refuses_case_insensitive_name_collision() {
+        let guard = EnvGuard::acquire();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let user_home = tmp.path().join("home");
+        std::fs::create_dir_all(&user_home).expect("home");
+        guard.set_bin(&fake_qwen(tmp.path()));
+        let home = user_home.join(".qwen");
+        let resource = resource_root(tmp.path());
+        seed_owned_link(&home, &resource);
+        let foreign = home.join("extensions").join("TokenLess");
+        std::fs::create_dir_all(&foreign).expect("foreign extension");
+        if paths_equivalent(&foreign, &home.join("extensions").join("tokenless")) {
+            assert!(is_casefold_collision("tokenless", "TokenLess"));
+            return;
+        }
+        std::fs::write(
+            foreign.join(QWEN_MANIFEST),
+            br#"{"name":"TokenLess","version":"1.0.0"}"#,
+        )
+        .expect("foreign manifest");
+        let ops = SimOps::new(home.clone(), user_home.clone());
+        let layout = anolisa_platform::fs_layout::FsLayout::user(user_home.clone());
+        let ctx = ctx(&resource, &user_home, &ops, &layout);
+        let driver = QwenCodeDriver::new();
+        let claim = prepare_claim(&driver, &ctx).expect("claim");
+
+        let report = driver.disable(&claim, &ctx).expect("disable");
+        assert!(!report.cleanup_complete);
+        assert!(
+            report
+                .messages
+                .iter()
+                .any(|message| message.contains("case-insensitive name collision"))
+        );
+        assert!(ops.commands().is_empty());
+        assert!(home.join("extensions").join("tokenless").exists());
+        assert!(foreign.exists());
+    }
+
+    #[test]
     fn disable_keeps_receipt_when_cli_is_missing() {
         let guard = EnvGuard::acquire();
         guard.set_bin_absent();
@@ -1767,6 +1902,32 @@ mod tests {
             .expect("qwen env without home");
         let configured = qwen_home_from_user_env(&user_home).expect("fallback home");
         assert_eq!(configured, OsString::from("~/from-home-env"));
+    }
+
+    #[test]
+    fn qwen_home_preserves_explicit_empty_process_value() {
+        let guard = EnvGuard::acquire();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let user_home = tmp.path().join("home");
+        std::fs::create_dir_all(user_home.join(".qwen")).expect("qwen home");
+        std::fs::write(user_home.join(".qwen").join(".env"), "QWEN_HOME=/custom\n")
+            .expect("qwen env");
+        guard.set_home(OsStr::new(""));
+
+        assert_eq!(qwen_home(Some(&user_home)), Some(user_home.join(".qwen")));
+    }
+
+    #[test]
+    fn qwen_home_parser_matches_dotenv_assignment_precedence() {
+        assert_eq!(
+            parse_qwen_home_env("QWEN_HOME: /from-colon\n"),
+            Some("/from-colon".to_string())
+        );
+        assert_eq!(
+            parse_qwen_home_env("QWEN_HOME=/first\nQWEN_HOME=/last\n"),
+            Some("/last".to_string())
+        );
+        assert_eq!(parse_qwen_home_env("QWEN_HOME=/first\nQWEN_HOME=\n"), None);
     }
 
     #[test]

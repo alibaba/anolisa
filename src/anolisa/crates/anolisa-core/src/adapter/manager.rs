@@ -1922,40 +1922,60 @@ fn run_capture(cmd: &FrameworkCommand) -> Result<CliOutput, AdapterError> {
         }
     })?;
 
-    if let Some(input) = &cmd.stdin {
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| AdapterError::FrameworkCli {
-                program: cmd.program.clone(),
-                reason: "failed to open child stdin".to_string(),
-            })?;
-        stdin
-            .write_all(input)
-            .map_err(|source| AdapterError::FrameworkCli {
-                program: cmd.program.clone(),
-                reason: format!("failed to write child stdin: {source}"),
-            })?;
-    }
-
     let stdout_handle = child.stdout.take().map(|r| spawn_drain(r, OUTPUT_CAP));
     let stderr_handle = child.stderr.take().map(|r| spawn_drain(r, OUTPUT_CAP));
-
     let start = Instant::now();
+    let mut stdin_handle = if let Some(input) = &cmd.stdin {
+        let Some(mut stdin) = child.stdin.take() else {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = collect_drain(stdout_handle);
+            let _ = collect_drain(stderr_handle);
+            return Err(AdapterError::FrameworkCli {
+                program: cmd.program.clone(),
+                reason: "failed to open child stdin".to_string(),
+            });
+        };
+        let input = input.clone();
+        Some(thread::spawn(move || stdin.write_all(&input)))
+    } else {
+        None
+    };
+
     let mut timed_out = false;
     let status = loop {
+        if stdin_handle
+            .as_ref()
+            .is_some_and(|handle| handle.is_finished())
+            && let Err(reason) = collect_stdin_writer(stdin_handle.take())
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = collect_drain(stdout_handle);
+            let _ = collect_drain(stderr_handle);
+            return Err(AdapterError::FrameworkCli {
+                program: cmd.program.clone(),
+                reason: format!("failed to write child stdin: {reason}"),
+            });
+        }
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
             Ok(None) => {
                 if start.elapsed() >= cmd.timeout {
                     let _ = child.kill();
                     let _ = child.wait();
+                    let _ = collect_stdin_writer(stdin_handle.take());
                     timed_out = true;
                     break None;
                 }
                 thread::sleep(Duration::from_millis(20));
             }
             Err(source) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = collect_stdin_writer(stdin_handle.take());
+                let _ = collect_drain(stdout_handle);
+                let _ = collect_drain(stderr_handle);
                 return Err(AdapterError::FrameworkCli {
                     program: cmd.program.clone(),
                     reason: format!("failed to wait: {source}"),
@@ -1964,6 +1984,16 @@ fn run_capture(cmd: &FrameworkCommand) -> Result<CliOutput, AdapterError> {
         }
     };
 
+    if let Err(reason) = collect_stdin_writer(stdin_handle) {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = collect_drain(stdout_handle);
+        let _ = collect_drain(stderr_handle);
+        return Err(AdapterError::FrameworkCli {
+            program: cmd.program.clone(),
+            reason: format!("failed to write child stdin: {reason}"),
+        });
+    }
     let stdout = collect_drain(stdout_handle);
     let stderr = collect_drain(stderr_handle);
 
@@ -2138,6 +2168,17 @@ fn spawn_drain<R: Read + Send + 'static>(mut reader: R, cap: usize) -> JoinHandl
 /// absent pipe).
 fn collect_drain(handle: Option<JoinHandle<Vec<u8>>>) -> Vec<u8> {
     handle.and_then(|h| h.join().ok()).unwrap_or_default()
+}
+
+fn collect_stdin_writer(handle: Option<JoinHandle<std::io::Result<()>>>) -> Result<(), String> {
+    match handle {
+        None => Ok(()),
+        Some(handle) => match handle.join() {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(source)) => Err(source.to_string()),
+            Err(_) => Err("writer thread panicked".to_string()),
+        },
+    }
 }
 
 /// ISO 8601 UTC timestamp, second precision.
@@ -2733,6 +2774,43 @@ mod tests {
         };
         let out = run_capture(&cmd).expect("run");
         assert!(out.success(), "{out:?}");
+    }
+
+    #[test]
+    fn run_capture_cleans_up_after_stdin_failure() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pid_file = tmp.path().join("child.pid");
+        let cmd = FrameworkCommand {
+            program: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "printf '%s' \"$$\" > \"$PID_FILE\"; exec 0<&-; exec sleep 30".to_string(),
+            ],
+            stdin: Some(vec![b'x'; 1024 * 1024]),
+            env_set: vec![(
+                "PID_FILE".to_string(),
+                pid_file.to_string_lossy().into_owned(),
+            )],
+            env_remove: Vec::new(),
+            path_prepend: Vec::new(),
+            timeout: Duration::from_secs(5),
+        };
+
+        let error = run_capture(&cmd).expect_err("closed stdin must fail");
+        assert!(
+            matches!(&error, AdapterError::FrameworkCli { reason, .. }
+                if reason.contains("failed to write child stdin")),
+            "{error:?}"
+        );
+        let pid = std::fs::read_to_string(&pid_file).expect("child pid");
+        let alive = Command::new("/bin/kill")
+            .args(["-0", pid.trim()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("probe child")
+            .success();
+        assert!(!alive, "child must be reaped after stdin failure");
     }
 
     #[test]
