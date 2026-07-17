@@ -489,6 +489,8 @@ struct ReconciledItem {
     package: String,
     from: String,
     to: String,
+    /// Drift that caused this no-transaction reconciliation.
+    reason: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -553,6 +555,7 @@ struct PendingReconciliation {
     refreshed: PackageInfo,
     source_repo: Option<String>,
     allow_metadata_backfill: bool,
+    reason: &'static str,
 }
 
 #[derive(Default)]
@@ -1118,11 +1121,15 @@ fn inspect_rpm_reconciliations(
                 && metadata.arch.as_deref() == Some(refreshed.arch.as_str())
         });
         let manifest = inspect_datadir_contract_drift(layout, &object.name, command);
+        let manifest_drifted = manifest.drifted;
         warnings.extend(manifest.warnings);
-        let drifted = object.version != to || !metadata_current || manifest.drifted;
-        if !drifted {
-            continue;
-        }
+        let rpm_state_drifted = object.version != to || !metadata_current;
+        let reason = match (rpm_state_drifted, manifest_drifted) {
+            (true, true) => "RPM state and component manifest drift",
+            (true, false) => "RPM state drift",
+            (false, true) => "component manifest drift",
+            (false, false) => continue,
+        };
         let source_repo = installed_origin_or_warn(query, &package, warnings);
         inspection.pending.push(PendingReconciliation {
             name: object.name.clone(),
@@ -1131,6 +1138,7 @@ fn inspect_rpm_reconciliations(
             refreshed,
             source_repo,
             allow_metadata_backfill,
+            reason,
         });
     }
 
@@ -1143,6 +1151,7 @@ fn reconciliation_result(pending: &PendingReconciliation) -> ReconciledItem {
         package: pending.package.clone(),
         from: pending.from.clone(),
         to: pending.refreshed.version.to_string(),
+        reason: pending.reason,
     }
 }
 
@@ -1888,7 +1897,7 @@ fn render_result(ctx: &CliContext, result: &UpgradeResult) {
             item.name,
             item.from,
             item.to,
-            color.muted(format!("({})", item.package)),
+            color.muted(format!("({}; {})", item.package, item.reason)),
         );
     }
     for item in &result.recorded {

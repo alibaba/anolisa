@@ -1427,6 +1427,9 @@ fn empty_plan_reconciles_stale_component_manifest() {
     .expect("preview manifest drift");
 
     assert_eq!(preview.reconciled.len(), 1);
+    assert_eq!(preview.reconciled[0].reason, "component manifest drift");
+    let json = serde_json::to_value(&preview).expect("serialize preview");
+    assert_eq!(json["reconciled"][0]["reason"], "component manifest drift");
     assert_eq!(
         std::fs::read_to_string(&snapshot).expect("read unchanged snapshot"),
         "framework = \"old\"\n",
@@ -2181,6 +2184,7 @@ fn upgrade_dry_run_reports_reconcile_without_writes() {
     assert_eq!(result.reconciled[0].to, "2.7.0-1.alnx4");
     let json = serde_json::to_value(&result).expect("serialize result");
     assert_eq!(json["reconciled"][0]["package"], "copilot-shell");
+    assert_eq!(json["reconciled"][0]["reason"], "RPM state drift");
     assert!(host.txn_calls().is_empty());
     assert_eq!(std::fs::read(&state_path).expect("state bytes"), before);
     assert!(
