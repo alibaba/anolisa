@@ -1144,6 +1144,84 @@ mod tests {
         assert!(buf.iter().all(|&c| c == 0));
     }
 
+    // ─── build_llm_data tests ───────────────────────────────────────────────
+
+    fn make_llm_call(agent_name: Option<&str>, pid: i32) -> LLMCall {
+        use crate::genai::semantic::{LLMRequest, LLMResponse};
+        LLMCall {
+            call_id: "call-1".to_string(),
+            start_timestamp_ns: 1_000_000_000,
+            end_timestamp_ns: 2_000_000_000,
+            duration_ns: 1_000_000_000,
+            provider: "openai".to_string(),
+            model: "gpt-4".to_string(),
+            request: LLMRequest {
+                messages: vec![],
+                temperature: None,
+                max_tokens: None,
+                frequency_penalty: None,
+                presence_penalty: None,
+                top_p: None,
+                top_k: None,
+                seed: None,
+                stop_sequences: None,
+                stream: false,
+                tools: None,
+                raw_body: None,
+            },
+            response: LLMResponse {
+                messages: vec![],
+                streamed: false,
+                raw_body: None,
+            },
+            token_usage: None,
+            error: None,
+            pid,
+            process_name: "test".to_string(),
+            agent_name: agent_name.map(str::to_string),
+            metadata: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_build_llm_data_lowercases_agent_name() {
+        let holder = build_llm_data(&make_llm_call(Some("Claude"), 1234));
+        assert!(!holder.c_data.agent_name.is_null());
+        let name = unsafe { CStr::from_ptr(holder.c_data.agent_name) };
+        assert_eq!(name.to_str().unwrap(), "claude");
+    }
+
+    #[test]
+    fn test_build_llm_data_agent_name_none_is_null() {
+        let holder = build_llm_data(&make_llm_call(None, 1234));
+        assert!(holder.c_data.agent_name.is_null());
+    }
+
+    #[test]
+    fn test_build_llm_data_cmdline_live_process() {
+        // The current test process has a readable /proc/<pid>/cmdline, so the
+        // buffer must hold a non-empty NUL-terminated string.
+        let holder = build_llm_data(&make_llm_call(None, std::process::id() as i32));
+        let end = holder
+            .c_data
+            .cmdline
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(128);
+        assert!(end > 0, "cmdline should be non-empty for a live process");
+        assert!(
+            end < 128,
+            "cmdline must be NUL-terminated within the buffer"
+        );
+    }
+
+    #[test]
+    fn test_build_llm_data_cmdline_dead_pid_empty() {
+        // A non-existent pid makes read_cmdline fail, yielding an empty buffer.
+        let holder = build_llm_data(&make_llm_call(None, i32::MAX));
+        assert_eq!(holder.c_data.cmdline[0], 0);
+    }
+
     #[test]
     fn test_load_json_cmdline_allow() {
         let mut cfg = new_cfg();
