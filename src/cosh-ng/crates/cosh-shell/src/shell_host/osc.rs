@@ -606,6 +606,10 @@ impl OscParser {
         self.push_self_session_input_event("card", action, Some(value));
     }
 
+    pub(super) fn push_secret_card_event(&mut self, action: &str, value: &str) {
+        self.push_self_session_input_event("card_secret", action, Some(value));
+    }
+
     pub(super) fn push_prompt_ghost_event(&mut self, action: &str) {
         self.push_self_session_input_event("prompt_ghost", action, None);
     }

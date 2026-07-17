@@ -44,6 +44,9 @@ pub(crate) enum RuntimeAction {
 
 pub(crate) fn stable_event_key(prefix: &str, idx: usize, event: &ShellEvent) -> String {
     match event.started_at_ms {
+        Some(started_at_ms) if event.component.as_deref() == Some("card_secret") => {
+            format!("{prefix}:{started_at_ms}:card_secret:{idx}")
+        }
         Some(started_at_ms) => format!(
             "{prefix}:{}:{}:{}",
             started_at_ms,
@@ -443,5 +446,17 @@ mod tests {
 
         event.started_at_ms = Some(123);
         assert_eq!(stable_event_key("slash", 7, &event), "slash:123::/help");
+    }
+
+    #[test]
+    fn stable_event_key_does_not_retain_secret_card_input() {
+        let mut event = ShellEvent::user_input_intercepted("s", "auth-1:secret-value");
+        event.started_at_ms = Some(123);
+        event.component = Some("card_secret".to_string());
+
+        let key = stable_event_key("auth", 7, &event);
+
+        assert_eq!(key, "auth:123:card_secret:7");
+        assert!(!key.contains("secret-value"));
     }
 }

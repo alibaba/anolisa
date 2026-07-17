@@ -163,6 +163,8 @@ impl CoshCore {
         W: Write,
         R: AsyncBufReadExt + Unpin,
     {
+        let content = crate::redaction::redact_text(content);
+
         // Generate a unique run_id for this agent run.
         let run_id = uuid::Uuid::new_v4().to_string();
         self.hook_system.set_run_id(run_id);
@@ -171,7 +173,7 @@ impl CoshCore {
         let cwd_str = self.cwd().to_string_lossy().to_string();
         let prompt_result = self
             .hook_system
-            .fire_user_prompt_submit(&self.session_id, &cwd_str, content)
+            .fire_user_prompt_submit(&self.session_id, &cwd_str, &content)
             .await;
 
         if let HookDecision::Block(reason) = &prompt_result.decision {
@@ -256,7 +258,7 @@ impl CoshCore {
             self.emit_hook_notifications(writer, &prompt_result.notifications, None);
         }
 
-        self.messages.push(Message::user(content));
+        self.messages.push(Message::user(&content));
 
         // Inject additional context from hooks
         if let Some(ref ctx) = prompt_result.additional_context {
@@ -285,15 +287,18 @@ impl CoshCore {
         let max_turns = self.config.agent.max_turns;
 
         for _turn in 0..max_turns {
+            let mut provider_messages = self.messages.clone();
+            crate::redaction::redact_messages(&mut provider_messages);
+
             // ─── Hook: BeforeModel ───
             let before_model_result = self
                 .hook_system
-                .fire_before_model(&self.session_id, &cwd_str, &self.model, &self.messages)
+                .fire_before_model(&self.session_id, &cwd_str, &self.model, &provider_messages)
                 .await;
             self.emit_hook_notifications(writer, &before_model_result.notifications, None);
 
             let mut msgs_with_system = vec![Message::system(&system_prompt)];
-            msgs_with_system.extend(self.messages.clone());
+            msgs_with_system.extend(provider_messages);
 
             // ─── SLS: API request timing ───
             self.metrics.api_requests += 1;

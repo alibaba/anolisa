@@ -50,6 +50,7 @@ pub(crate) fn run_host_demo() -> i32 {
     let output = match run_scripted_bash(&config, &inputs) {
         Ok(output) => output,
         Err(err) => {
+            let err = crate::evidence::redact_sensitive_text(&err.to_string()).0;
             eprintln!("host demo failed: {err}");
             return 1;
         }
@@ -62,6 +63,7 @@ pub(crate) fn run_raw(adapter_name: &str, shell_kind: RawShellKind) -> i32 {
     let args = std::env::args().collect::<Vec<_>>();
 
     let Some(kind) = AdapterKind::parse(adapter_name) else {
+        let adapter_name = crate::evidence::redact_sensitive_text(adapter_name).0;
         eprintln!("unknown adapter: {adapter_name}");
         return 2;
     };
@@ -152,6 +154,7 @@ pub(crate) fn run_raw(adapter_name: &str, shell_kind: RawShellKind) -> i32 {
             return 2;
         }
         RawShellKind::Unsupported(shell) => {
+            let shell = crate::evidence::redact_sensitive_text(&shell).0;
             eprintln!("unsupported raw shell: {shell}; supported shells: bash, zsh");
             return 2;
         }
@@ -163,6 +166,7 @@ pub(crate) fn run_raw(adapter_name: &str, shell_kind: RawShellKind) -> i32 {
     match raw_result {
         Ok(output) => output.exit_status.unwrap_or(0),
         Err(err) => {
+            let err = crate::evidence::redact_sensitive_text(&err.to_string()).0;
             eprintln!("raw shell failed: {err}");
             1
         }
@@ -202,6 +206,7 @@ where
     W: std::io::Write,
 {
     let Some(kind) = AdapterKind::parse(adapter_name) else {
+        let adapter_name = crate::evidence::redact_sensitive_text(adapter_name).0;
         eprintln!("unknown adapter: {adapter_name}");
         return 2;
     };
@@ -213,6 +218,7 @@ where
     let shell_output = match run_line_interactive_bash(&config, input, output) {
         Ok(output) => output,
         Err(err) => {
+            let err = crate::evidence::redact_sensitive_text(&err.to_string()).0;
             eprintln!("interactive demo failed: {err}");
             return 1;
         }
@@ -223,6 +229,7 @@ where
 
 pub(crate) fn run_adapter_demo(adapter_name: &str) -> i32 {
     let Some(kind) = AdapterKind::parse(adapter_name) else {
+        let adapter_name = crate::evidence::redact_sensitive_text(adapter_name).0;
         eprintln!("unknown adapter: {adapter_name}");
         return 2;
     };
@@ -253,7 +260,8 @@ impl Drop for TempSessionDir {
 fn render_loop_from_events_with_adapter(events: &[ShellEvent], adapter: &impl AgentAdapter) -> i32 {
     let ledger = build_command_blocks(events);
     if !ledger.errors.is_empty() {
-        eprintln!("ledger errors: {}", ledger.errors.join(", "));
+        let errors = crate::evidence::redact_sensitive_text(&ledger.errors.join(", ")).0;
+        eprintln!("ledger errors: {errors}");
         return 1;
     }
 
@@ -275,7 +283,8 @@ fn render_loop_from_events_with_adapter(events: &[ShellEvent], adapter: &impl Ag
         let agent_events = match adapter.run(&request) {
             Ok(events) => events,
             Err(err) => {
-                eprintln!("adapter failed: {}", err.message);
+                let message = crate::evidence::redact_sensitive_text(&err.message).0;
+                eprintln!("adapter failed: {message}");
                 return 1;
             }
         };
@@ -285,6 +294,7 @@ fn render_loop_from_events_with_adapter(events: &[ShellEvent], adapter: &impl Ag
     };
 
     for line in render_transcript(block, &findings, &interventions, &governed_events) {
+        let line = crate::evidence::redact_sensitive_text(&line).0;
         println!("{line}");
     }
 

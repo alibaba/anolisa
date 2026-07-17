@@ -16,3 +16,4 @@ pub(crate) use context_window::{
 };
 pub(crate) use model::{evidence_capture_status_for_block, EvidenceCaptureStatus};
 pub(crate) use output_policy::output_excerpt_status_for_block;
+pub(crate) use redaction::redact_sensitive_text;

@@ -101,6 +101,36 @@ _cosh_history_command_from_entry() {
   printf '%s' "$entry" | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]*//'
 }
 
+_cosh_command_has_secret() {
+  local lower
+  lower="$(printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+
+  case "$lower" in
+    *"-----begin "*"private key-----"*|*"bearer "*|*"://"*":"*"@"*|*ghp_*|*github_pat_*|*glpat-*|*npm_*|*hf_*|*xox?-*|*aiza*)
+      return 0
+      ;;
+    *ltai????????????*)
+      return 0
+      ;;
+    *akia????????????????*|*asia????????????????*)
+      return 0
+      ;;
+    sk-*|sk_live_*|sk_test_*|*" sk-"*|*"=sk-"*|*":sk-"*|*"\"sk-"*|*"'sk-"*|*" sk_live_"*|*" sk_test_"*|*"=sk_live_"*|*"=sk_test_"*)
+      return 0
+      ;;
+  esac
+
+  local key
+  for key in password passwd passphrase token access_token access-token refresh_token refresh-token id_token id-token secret client_secret client-secret api_key api-key apikey access_key_id access-key-id access_key_secret access-key-secret security_token security-token authorization cookie set-cookie; do
+    case "$lower" in
+      *"$key="*|*"$key:"*|*"--$key "*|*"--$key="*)
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
 _cosh_emit_marker() {
   local event="$1"
   local command="$2"
@@ -332,8 +362,6 @@ _cosh_preexec_marker() {
         display_command="$(_cosh_unwrap_handoff_command "$command")"
         _COSH_HANDOFF_ACTIVE=1
         _COSH_HANDOFF_HISTORY_NO="$history_no"
-        _COSH_HANDOFF_HISTORY_COMMAND="$display_command"
-        _cosh_replace_handoff_history
       elif _cosh_is_pending_handoff_command "$command"; then
         _COSH_HANDOFF_ACTIVE=1
       else
@@ -356,6 +384,17 @@ _cosh_preexec_marker() {
       fi
       if [[ "$command" == trap*DEBUG* ]]; then
         _COSH_DEBUG_TRAP_MAY_CHANGE=1
+      fi
+      if _cosh_command_has_secret "$display_command"; then
+        if [[ -z "${_COSH_HANDOFF_HISTORY_NO:-}" ]]; then
+          builtin history -d "$history_no" 2>/dev/null || true
+        fi
+        display_command="<redacted sensitive command>"
+        _COSH_LAST_HISTORY_COMMAND="$display_command"
+      fi
+      if [[ -n "${_COSH_HANDOFF_HISTORY_NO:-}" ]]; then
+        _COSH_HANDOFF_HISTORY_COMMAND="$display_command"
+        _cosh_replace_handoff_history
       fi
       _cosh_emit_marker "preexec" "$display_command" 0 "$path_trusted"
     fi
@@ -660,10 +699,46 @@ _cosh_clear_handoff_request() {
   fi
 }
 
+_cosh_command_has_secret() {
+  local lower="${(L)1}"
+
+  case "$lower" in
+    *"-----begin "*"private key-----"*|*"bearer "*|*"://"*":"*"@"*|*ghp_*|*github_pat_*|*glpat-*|*npm_*|*hf_*|*xox?-*|*aiza*)
+      return 0
+      ;;
+    *ltai????????????*)
+      return 0
+      ;;
+    *akia????????????????*|*asia????????????????*)
+      return 0
+      ;;
+    sk-*|sk_live_*|sk_test_*|*" sk-"*|*"=sk-"*|*":sk-"*|*"\"sk-"*|*"'sk-"*|*" sk_live_"*|*" sk_test_"*|*"=sk_live_"*|*"=sk_test_"*)
+      return 0
+      ;;
+  esac
+
+  local key
+  for key in password passwd passphrase token access_token access-token refresh_token refresh-token id_token id-token secret client_secret client-secret api_key api-key apikey access_key_id access-key-id access_key_secret access-key-secret security_token security-token authorization cookie set-cookie; do
+    case "$lower" in
+      *"$key="*|*"$key:"*|*"--$key "*|*"--$key="*)
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
 _cosh_zshaddhistory_marker() {
   local command="${1%$'\n'}"
   if _cosh_is_handoff_wrapper "$command"; then
-    _COSH_HANDOFF_HISTORY_COMMAND="$(_cosh_unwrap_handoff_command "$command")"
+    local history_command="$(_cosh_unwrap_handoff_command "$command")"
+    if _cosh_command_has_secret "$history_command"; then
+      history_command="<redacted sensitive command>"
+    fi
+    _COSH_HANDOFF_HISTORY_COMMAND="$history_command"
+    return 1
+  fi
+  if _cosh_command_has_secret "$command"; then
     return 1
   fi
   return 0
@@ -716,6 +791,9 @@ _cosh_preexec_marker() {
   if _cosh_is_handoff_wrapper "$command"; then
     display_command="$(_cosh_unwrap_handoff_command "$command")"
     _COSH_HANDOFF_ACTIVE=1
+    if _cosh_command_has_secret "$display_command"; then
+      display_command="<redacted sensitive command>"
+    fi
     _COSH_HANDOFF_HISTORY_COMMAND="$display_command"
   elif _cosh_is_pending_handoff_command "$command"; then
     _COSH_HANDOFF_ACTIVE=1
@@ -735,6 +813,9 @@ _cosh_preexec_marker() {
       _COSH_PREEXEC_INTERCEPTED=1
       return 1
     fi
+  fi
+  if _cosh_command_has_secret "$display_command"; then
+    display_command="<redacted sensitive command>"
   fi
   _cosh_emit_marker "preexec" "$display_command" 0 "$path_trusted"
 }

@@ -19,14 +19,32 @@ pub(super) fn hook_input_from_block(block: &CommandBlock) -> HookInput {
         .and_then(|path| read_preview(path, 50))
         .unwrap_or_default();
     HookInput {
-        command: block.command.clone(),
-        cwd: block.cwd.clone(),
+        command: redact(&block.command),
+        cwd: redact(&block.cwd),
         exit_code: block.exit_code,
         duration_ms: block.duration_ms,
-        output_ref: block.output.terminal_output_ref.clone(),
+        output_ref: block.output.terminal_output_ref.as_deref().map(redact),
         output_bytes: block.output.terminal_output_bytes,
-        output_preview,
+        output_preview: redact(&output_preview),
     }
+}
+
+pub(super) fn redact_hook_finding(finding: &mut HookFinding) {
+    finding.hook_id = redact(&finding.hook_id);
+    finding.title = redact(&finding.title);
+    finding.description = redact(&finding.description);
+    finding.suggestion = redact(&finding.suggestion);
+    finding.skill = finding.skill.as_deref().map(redact);
+    finding.cli_hint = finding.cli_hint.as_deref().map(redact);
+    finding.context_refs = finding
+        .context_refs
+        .iter()
+        .map(|value| redact(value))
+        .collect();
+}
+
+fn redact(value: &str) -> String {
+    crate::evidence::redact_sensitive_text(value).0
 }
 
 fn read_preview(path: &str, max_lines: usize) -> Option<String> {
@@ -48,6 +66,7 @@ pub(super) fn run_external_hook(
     input: &HookInput,
 ) -> Option<HookFinding> {
     let input_json = serde_json::to_string(input).ok()?;
+    let safe_path = redact(&config.path.to_string_lossy());
 
     let mut child = Command::new(&config.path)
         .stdin(Stdio::piped())
@@ -57,7 +76,7 @@ pub(super) fn run_external_hook(
         .map_err(|e| {
             tracing::error!(
                 target: "cosh_hook",
-                path = %config.path.display(),
+                path = %safe_path,
                 "external hook spawn failed: {e}"
             );
         })
@@ -75,7 +94,7 @@ pub(super) fn run_external_hook(
         Ok(Some(_)) => {
             tracing::warn!(
                 target: "cosh_hook",
-                path = %config.path.display(),
+                path = %safe_path,
                 "external hook exited with error"
             );
             return None;
@@ -85,7 +104,7 @@ pub(super) fn run_external_hook(
             let _ = child.wait();
             tracing::warn!(
                 target: "cosh_hook",
-                path = %config.path.display(),
+                path = %safe_path,
                 timeout_ms = config.timeout_ms,
                 "external hook timed out"
             );
@@ -94,7 +113,7 @@ pub(super) fn run_external_hook(
         Err(e) => {
             tracing::warn!(
                 target: "cosh_hook",
-                path = %config.path.display(),
+                path = %safe_path,
                 "external hook wait failed: {e}"
             );
             return None;
@@ -127,7 +146,7 @@ pub(super) fn run_external_hook(
         .map_err(|e| {
             tracing::warn!(
                 target: "cosh_hook",
-                path = %config.path.display(),
+                path = %safe_path,
                 "external hook invalid JSON output: {e}"
             );
         })

@@ -42,6 +42,7 @@ pub(crate) fn pending_question_capture(state: &InlineState) -> Option<RawInputCa
                 option_count: question.options.len(),
                 allow_free_text: question.allow_free_text,
                 multiple: question.selection_mode == QuestionSelectionMode::Multiple,
+                secret: false,
             });
         }
     }

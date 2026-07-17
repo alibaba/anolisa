@@ -23,6 +23,7 @@ enum CardInputKind {
         option_count: usize,
         allow_free_text: bool,
         multiple: bool,
+        secret: bool,
     },
     Approval {
         id: String,
@@ -52,11 +53,13 @@ impl CardInputState {
                 option_count,
                 allow_free_text,
                 multiple,
+                secret,
             } => CardInputKind::Question {
                 id: id.clone(),
                 option_count: *option_count,
                 allow_free_text: *allow_free_text,
                 multiple: *multiple,
+                secret: *secret,
             },
             RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
                 CardInputKind::Approval { id: id.clone() }
@@ -539,6 +542,7 @@ impl CardInputState {
                 option_count,
                 allow_free_text,
                 multiple,
+                secret,
             } => {
                 let answer = self.free_text.trim();
                 if is_removed_question_answer_slash(answer) {
@@ -547,32 +551,36 @@ impl CardInputState {
                 if *multiple {
                     if !answer.is_empty() && *allow_free_text {
                         if self.selected_options.is_empty() {
-                            return Some(RawInputEvent::CardAnswer(answer.to_string()));
+                            return Some(card_answer_event(answer, *secret));
                         }
-                        return Some(RawInputEvent::CardAnswer(format!(
-                            "{}\n{}",
-                            selected_options_answer(&self.selected_options),
-                            answer
-                        )));
+                        return Some(card_answer_event(
+                            &format!(
+                                "{}\n{}",
+                                selected_options_answer(&self.selected_options),
+                                answer
+                            ),
+                            *secret,
+                        ));
                     }
                     if self.selected_options.is_empty() {
                         return None;
                     }
-                    return Some(RawInputEvent::CardAnswer(selected_options_answer(
-                        &self.selected_options,
-                    )));
+                    return Some(card_answer_event(
+                        &selected_options_answer(&self.selected_options),
+                        *secret,
+                    ));
                 }
                 if !answer.is_empty() && *allow_free_text {
-                    return Some(RawInputEvent::CardAnswer(answer.to_string()));
+                    return Some(card_answer_event(answer, *secret));
                 }
                 if self.selected < *option_count {
-                    return Some(RawInputEvent::CardAnswer((self.selected + 1).to_string()));
+                    return Some(card_answer_event(&(self.selected + 1).to_string(), *secret));
                 }
                 if !answer.is_empty() {
-                    return Some(RawInputEvent::CardAnswer(answer.to_string()));
+                    return Some(card_answer_event(answer, *secret));
                 }
                 if *allow_free_text && *option_count == 0 {
-                    return Some(RawInputEvent::CardAnswer(String::new()));
+                    return Some(card_answer_event("", *secret));
                 }
                 None
             }
@@ -624,12 +632,20 @@ impl CardInputState {
             RawInputCapture::Question {
                 id,
                 allow_free_text,
+                secret,
                 ..
             } if *allow_free_text => {
                 if is_removed_question_answer_slash_fragment(&self.free_text) {
                     return None;
                 }
-                Some(RawInputEvent::CardInput(id.clone(), self.free_text.clone()))
+                if *secret {
+                    Some(RawInputEvent::CardSecretInput(
+                        id.clone(),
+                        self.free_text.clone(),
+                    ))
+                } else {
+                    Some(RawInputEvent::CardInput(id.clone(), self.free_text.clone()))
+                }
             }
             _ => None,
         }
@@ -648,6 +664,14 @@ fn cancel_event(capture: &RawInputCapture) -> RawInputEvent {
         }
         RawInputCapture::Question { id, .. } => RawInputEvent::QuestionCancel(id.clone()),
         RawInputCapture::Evidence { id } => RawInputEvent::EvidenceCancel(id.clone()),
+    }
+}
+
+fn card_answer_event(answer: &str, secret: bool) -> RawInputEvent {
+    if secret {
+        RawInputEvent::CardSecretAnswer(answer.to_string())
+    } else {
+        RawInputEvent::CardAnswer(answer.to_string())
     }
 }
 
@@ -689,15 +713,14 @@ fn approval_event_for_action(id: &str, action: ApprovalPanelAction) -> RawInputE
 fn question_choice_count(capture: &RawInputCapture) -> usize {
     match capture {
         RawInputCapture::Question {
-            id: _,
             option_count,
             allow_free_text,
-            multiple: _,
+            ..
         } => shared_question_choice_count(*option_count, *allow_free_text),
         RawInputCapture::Approval { .. }
         | RawInputCapture::Consultation { .. }
-        | RawInputCapture::Evidence { .. } => 0,
-        RawInputCapture::Mode { .. }
+        | RawInputCapture::Evidence { .. }
+        | RawInputCapture::Mode { .. }
         | RawInputCapture::Config { .. }
         | RawInputCapture::ConfigLanguage { .. } => 0,
     }

@@ -1,90 +1,15 @@
+//! Central secret redaction for provider, hook, and session persistence boundaries.
+
 use std::sync::OnceLock;
 
 use regex::Regex;
+use serde::Serialize;
+use serde_json::Value;
 
-use crate::tools::{classify_command_interaction, OutputStability};
-use crate::types::{CommandBlock, CommandStatus};
+use crate::provider::{Message, MessageContent, MessageContentBlock};
 
-const PROVIDER_COMMAND_MAX_BYTES: usize = 4 * 1024;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderCommandFacts {
-    pub id: String,
-    pub command: String,
-    pub cwd: String,
-    pub end_cwd: String,
-    pub status: &'static str,
-    pub exit_code: i32,
-    pub duration_ms: u64,
-    pub output_bytes: u64,
-    pub output_id: String,
-    pub output_stability: &'static str,
-}
-
-pub fn redact_provider_command_text(command: &str) -> String {
-    truncate_provider_command(redact_sensitive_text(command).0)
-}
-
-fn truncate_provider_command(mut command: String) -> String {
-    const MARKER: &str = " ... <truncated>";
-    if command.len() <= PROVIDER_COMMAND_MAX_BYTES {
-        return command;
-    }
-
-    let mut end = PROVIDER_COMMAND_MAX_BYTES - MARKER.len();
-    while !command.is_char_boundary(end) {
-        end -= 1;
-    }
-    command.truncate(end);
-    command.push_str(MARKER);
-    command
-}
-
-pub fn terminal_output_id(shell_session_id: &str, command_id: &str) -> String {
-    format!("terminal-output://{shell_session_id}/{command_id}")
-}
-
-pub fn provider_safe_command_facts(block: &CommandBlock) -> ProviderCommandFacts {
-    let status = match block.status {
-        CommandStatus::Completed => "completed",
-        CommandStatus::Failed => "failed",
-    };
-    let output_id = if block.output.terminal_output_ref.is_some() {
-        terminal_output_id(&block.session_id, &block.id)
-    } else {
-        "<missing>".to_string()
-    };
-    let output_stability = match classify_command_interaction(&block.command).output_stability {
-        OutputStability::StableSnapshot => "stable_snapshot",
-        OutputStability::UnstableInteractive => "unstable_interactive",
-    };
-    ProviderCommandFacts {
-        id: block.id.clone(),
-        command: redact_provider_command_text(&block.command),
-        cwd: redact_sensitive_text(&redact_home_path(&block.cwd)).0,
-        end_cwd: redact_sensitive_text(&redact_home_path(&block.end_cwd)).0,
-        status,
-        exit_code: block.exit_code,
-        duration_ms: block.duration_ms,
-        output_bytes: block.output.terminal_output_bytes,
-        output_id,
-        output_stability,
-    }
-}
-
-fn redact_home_path(value: &str) -> String {
-    let Ok(home) = std::env::var("HOME") else {
-        return value.to_string();
-    };
-    if home.is_empty() {
-        value.to_string()
-    } else {
-        value.replace(&home, "~")
-    }
-}
-
-pub(crate) fn redact_sensitive_text(text: &str) -> (String, bool) {
-    let (mut redacted, mut changed) = redact_private_key_blocks(text);
+pub(crate) fn redact_text(text: &str) -> String {
+    let (mut redacted, _) = redact_private_key_blocks(text);
     for (pattern, replacement) in [
         (cookie_header_pattern(), "$prefix<redacted>"),
         (authorization_pattern(), "$prefix$scheme <redacted>"),
@@ -98,11 +23,105 @@ pub(crate) fn redact_sensitive_text(text: &str) -> (String, bool) {
         (aws_access_key_pattern(), "$prefix<redacted>"),
         (alibaba_access_key_pattern(), "<redacted>"),
     ] {
-        let next = pattern.replace_all(&redacted, replacement).into_owned();
-        changed |= next != redacted;
-        redacted = next;
+        redacted = pattern.replace_all(&redacted, replacement).into_owned();
     }
-    (redacted, changed)
+    redacted
+}
+
+pub(crate) fn redact_value(value: &mut Value) {
+    match value {
+        Value::Object(values) => {
+            for (key, value) in values {
+                if is_sensitive_key(key) {
+                    *value = Value::String("<redacted>".to_string());
+                } else {
+                    redact_value(value);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                redact_value(value);
+            }
+        }
+        Value::String(text) => *text = redact_text(text),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+pub(crate) fn to_redacted_json<T: Serialize>(value: &T) -> String {
+    let Ok(mut value) = serde_json::to_value(value) else {
+        return String::new();
+    };
+    redact_value(&mut value);
+    serde_json::to_string(&value).unwrap_or_default()
+}
+
+pub(crate) fn redact_messages(messages: &mut [Message]) {
+    for message in messages {
+        redact_message(message);
+    }
+}
+
+fn redact_message(message: &mut Message) {
+    match &mut message.content {
+        MessageContent::Text(text) => *text = redact_text(text),
+        MessageContent::Blocks(blocks) => {
+            for block in blocks {
+                match block {
+                    MessageContentBlock::Text { text } => *text = redact_text(text),
+                    MessageContentBlock::ToolResult { content, .. } => {
+                        *content = redact_text(content);
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(tool_calls) = &mut message.tool_calls {
+        for tool_call in tool_calls {
+            tool_call.function.arguments = redact_json_or_text(&tool_call.function.arguments);
+        }
+    }
+}
+
+pub(crate) fn redact_json_or_text(text: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(text) else {
+        return redact_text(text);
+    };
+    redact_value(&mut value);
+    serde_json::to_string(&value).unwrap_or_else(|_| redact_text(text))
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    matches!(
+        normalized.as_str(),
+        "password"
+            | "passwd"
+            | "passphrase"
+            | "token"
+            | "accesstoken"
+            | "refreshtoken"
+            | "idtoken"
+            | "secret"
+            | "clientsecret"
+            | "apikey"
+            | "accesskeyid"
+            | "accesskeysecret"
+            | "securitytoken"
+            | "awssecretaccesskey"
+            | "openaiapikey"
+            | "dashscopeapikey"
+            | "githubtoken"
+            | "authorization"
+            | "cookie"
+            | "setcookie"
+    )
 }
 
 fn redact_private_key_blocks(text: &str) -> (String, bool) {
@@ -278,151 +297,85 @@ fn alibaba_access_key_pattern() -> &'static Regex {
     })
 }
 
-pub fn provider_safe_command_fact_line(block: &CommandBlock) -> String {
-    let facts = provider_safe_command_facts(block);
-    format!(
-        "command_id={id}; command={command}; cwd={cwd}; end_cwd={end_cwd}; status={status}; exit_code={exit_code}; duration_ms={duration_ms}; output_bytes={output_bytes}; output_id={output_id}; output_stability={output_stability}",
-        id = facts.id,
-        command = facts.command,
-        cwd = facts.cwd,
-        end_cwd = facts.end_cwd,
-        status = facts.status,
-        exit_code = facts.exit_code,
-        duration_ms = facts.duration_ms,
-        output_bytes = facts.output_bytes,
-        output_id = facts.output_id,
-        output_stability = facts.output_stability,
-    )
-}
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use serde_json::json;
+
+    use super::{redact_text, redact_value};
 
     #[test]
-    fn provider_command_redacts_private_key_blocks_before_token_redaction() {
-        let command = "printf '%s' '-----BEGIN PRIVATE KEY-----\nsuper-secret-key-material\n-----END PRIVATE KEY-----' --token token-value";
-
-        let redacted = redact_provider_command_text(command);
-
-        assert!(redacted.contains("<redacted private key block>"));
-        assert!(redacted.contains("--token <redacted>"));
-        assert!(!redacted.contains("super-secret-key-material"));
-        assert!(!redacted.contains("token-value"));
-    }
-
-    #[test]
-    fn provider_command_is_utf8_safely_bounded() {
-        let command = format!("tool {} secret={}", "你".repeat(2_000), "x".repeat(8_000));
-
-        let redacted = redact_provider_command_text(&command);
-
-        assert!(redacted.len() <= PROVIDER_COMMAND_MAX_BYTES);
-        assert!(redacted.ends_with(" ... <truncated>"));
-        assert!(!redacted.contains(&"x".repeat(100)));
-    }
-
-    #[test]
-    fn redacts_assignments_flags_headers_and_urls() {
+    fn redacts_common_secret_shapes() {
         let input = concat!(
+            "Bearer bearer-value ",
             "ALIBABA_CLOUD_ACCESS_KEY_ID=LTAIexampleaccesskey ",
             "OPENAI_API_KEY=sk-example-secret ",
-            "curl --password 'hunter2' --access-token=token-value ",
-            "'https://example.test/?client_secret=query-value&next=ok'\n",
-            "https://user:url-password@example.test/path\n",
-            r#"{"api_key":"json-value","password":"json-password"}"#,
-            "\nAuthorization: Basic dXNlcjpwYXNz\n",
-            "Cookie: session=private; other=value\n",
+            "--password hunter2 ",
+            "AKIA1234567890ABCDEF ",
+            "LTAI5tExampleAccessKey ",
+            "ghp_abcdefghijklmnopqrstuvwxyz123456 ",
+            "https://user:url-password@example.test/path"
         );
 
-        let (redacted, changed) = redact_sensitive_text(input);
+        let redacted = redact_text(input);
 
-        assert!(changed);
         for secret in [
-            "sk-example-secret",
+            "bearer-value",
             "LTAIexampleaccesskey",
+            "sk-example-secret",
             "hunter2",
-            "token-value",
-            "query-value",
-            "url-password",
-            "json-value",
-            "json-password",
-            "dXNlcjpwYXNz",
-            "session=private",
-            "other=value",
-        ] {
-            assert!(!redacted.contains(secret), "{redacted}");
-        }
-        assert!(redacted.contains("next=ok"), "{redacted}");
-    }
-
-    #[test]
-    fn redacts_multiple_opaque_token_shapes() {
-        let slack_token = ["xoxb", "1234567890", "abcdefghijklmnop"].join("-");
-        let input = format!(
-            "{}{slack_token} {}",
-            concat!(
-                "Bearer first.secret.value and bearer second-secret ",
-                "ghp_abcdefghijklmnopqrstuvwxyz123456 ",
-                "github_pat_abcdefghijklmnopqrstuvwxyz123456 ",
-                "sk-abcdefghijklmnopqrstuvwxyz ",
-                "AKIA1234567890ABCDEF ",
-                "ASIA1234567890ABCDEF ",
-                "LTAI5tExampleAccessKey ",
-                "glpat-abcdefghijklmnopqrstuvwxyz ",
-                "npm_abcdefghijklmnopqrstuvwxyz123456 ",
-                "hf_abcdefghijklmnopqrstuvwxyz123456 ",
-            ),
-            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature",
-        );
-
-        let (redacted, changed) = redact_sensitive_text(&input);
-
-        assert!(changed);
-        for secret in [
-            "first.secret.value",
-            "second-secret",
-            "ghp_",
-            "github_pat_",
-            "sk-abcdefghijklmnopqrstuvwxyz",
             "AKIA1234567890ABCDEF",
-            "ASIA1234567890ABCDEF",
             "LTAI5tExampleAccessKey",
-            "glpat-",
-            "npm_",
-            "hf_",
-            "xoxb-",
-            "eyJhbGciOiJIUzI1NiJ9",
+            "ghp_",
+            "url-password",
         ] {
             assert!(!redacted.contains(secret), "{redacted}");
         }
-        assert_eq!(
-            redacted
-                .to_ascii_lowercase()
-                .matches("bearer <redacted>")
-                .count(),
-            2
-        );
     }
 
     #[test]
-    fn redacts_complete_private_key_blocks() {
+    fn redacts_sensitive_json_keys_and_nested_strings() {
+        let mut value = json!({
+            "api_key": "short-value",
+            "nested": {
+                "command": "curl --token command-secret",
+                "safe": "visible"
+            }
+        });
+
+        redact_value(&mut value);
+
+        assert_eq!(value["api_key"], "<redacted>");
+        assert_eq!(value["nested"]["safe"], "visible");
+        assert!(!value.to_string().contains("short-value"));
+        assert!(!value.to_string().contains("command-secret"));
+    }
+
+    #[test]
+    fn removes_private_key_body() {
         let input = concat!(
             "before\n",
             "-----BEGIN PRIVATE KEY-----\n",
-            "private-key-body-must-not-survive\n",
+            "private-body\n",
             "-----END PRIVATE KEY-----\n",
-            "after\n",
+            "after"
         );
 
-        let (redacted, changed) = redact_sensitive_text(input);
-
-        assert!(changed);
-        assert_eq!(redacted, "before\n<redacted private key block>\nafter\n");
+        assert_eq!(
+            redact_text(input),
+            "before\n<redacted private key block>\nafter"
+        );
     }
 
     #[test]
-    fn leaves_non_secret_text_unchanged() {
-        let input = "cargo test --package cosh-shell\n";
-        assert_eq!(redact_sensitive_text(input), (input.to_string(), false));
+    fn preserves_content_after_private_key_end_marker() {
+        let input = concat!(
+            "-----BEGIN PRIVATE KEY-----\n",
+            "private-body\n",
+            "-----END PRIVATE KEY-----' --token token-value"
+        );
+
+        let redacted = redact_text(input);
+
+        assert_eq!(redacted, "<redacted private key block>' --token <redacted>");
     }
 }

@@ -195,7 +195,6 @@ fn evaluate_with_disabled_skips_matching_hook() {
     assert!(engine.evaluate_with_disabled(&block, &disabled).is_empty());
     assert_eq!(engine.evaluate(&block).len(), 1);
 }
-
 #[test]
 fn builtin_provenance_uses_registered_hook_id_not_payload_hook_id() {
     let mut engine = HookEngine::new();
@@ -249,4 +248,29 @@ fn engine_attaches_builtin_facts_outside_external_payload() {
             swap_ratio: Some(0.25),
         }))
     ));
+}
+
+#[test]
+fn external_hook_boundaries_redact_input_and_findings() {
+    let secret = "hook-boundary-secret";
+    let mut block = make_block(&format!("curl --token {secret}"));
+    block.cwd = format!("/tmp/token={secret}");
+    let input = runtime::hook_input_from_block(&block);
+    assert!(!input.command.contains(secret), "{}", input.command);
+    assert!(!input.cwd.contains(secret), "{}", input.cwd);
+
+    let mut finding = HookFinding {
+        hook_id: format!("token={secret}"),
+        severity: FindingSeverity::Warning,
+        title: format!("Bearer {secret}"),
+        description: format!("password={secret}"),
+        suggestion: format!("--api-key {secret}"),
+        skill: Some(format!("token={secret}")),
+        cli_hint: Some(format!("--token {secret}")),
+        context_refs: vec![format!("client_secret={secret}")],
+    };
+    runtime::redact_hook_finding(&mut finding);
+
+    let serialized = serde_json::to_string(&finding).unwrap();
+    assert!(!serialized.contains(secret), "{serialized}");
 }

@@ -421,6 +421,7 @@ dependencies = [
  "nix",
  "qrcode",
  "ratatui",
+ "regex",
  "serde",
  "serde_json",
  "toml",

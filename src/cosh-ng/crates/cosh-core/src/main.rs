@@ -17,6 +17,7 @@ mod metrics;
 mod migrate;
 mod protocol;
 mod provider;
+mod redaction;
 mod registry;
 mod session;
 mod skill;

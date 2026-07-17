@@ -441,12 +441,18 @@ fn drain_raw_input_events<W: Write>(
             RawInputEvent::CardInput(id, text) => {
                 parser.push_card_event("input", &format!("{id}:{text}"))
             }
+            RawInputEvent::CardSecretInput(id, text) => {
+                parser.push_secret_card_event("input", &format!("{id}:{text}"))
+            }
             RawInputEvent::CardApprove(id) => parser.push_card_event("approve", &id),
             RawInputEvent::CardAlwaysTrust(id) => parser.push_card_event("always_trust", &id),
             RawInputEvent::CardDeny(id) => parser.push_card_event("deny", &id),
             RawInputEvent::CardDetails(id) => parser.push_card_event("details", &id),
             RawInputEvent::CardCancel(id) => parser.push_card_event("cancel", &id),
             RawInputEvent::CardAnswer(answer) => parser.push_card_event("answer", &answer),
+            RawInputEvent::CardSecretAnswer(answer) => {
+                parser.push_secret_card_event("answer", &answer)
+            }
             RawInputEvent::QuestionCancel(id) => parser.push_card_event("question_cancel", &id),
             RawInputEvent::EvidenceSend(id) => parser.push_card_event("evidence_send", &id),
             RawInputEvent::EvidenceIgnore(id) => parser.push_card_event("evidence_ignore", &id),

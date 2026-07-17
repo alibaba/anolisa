@@ -286,6 +286,8 @@ pub(crate) fn passthrough_non_interactive(args: &[String]) -> Option<i32> {
             .status()
             .map(|s| s.code().unwrap_or(1))
             .unwrap_or_else(|err| {
+                let command = crate::evidence::redact_sensitive_text(command).0;
+                let err = crate::evidence::redact_sensitive_text(&err.to_string()).0;
                 eprintln!("cosh-shell: exec {command} failed: {err}");
                 126
             });

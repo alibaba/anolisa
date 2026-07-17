@@ -175,6 +175,9 @@ impl HookEngine {
                 }
             }
         }
+        for finding in &mut findings {
+            runtime::redact_hook_finding(&mut finding.finding);
+        }
         findings.sort_by_key(|f| match f.severity {
             FindingSeverity::Critical => 0,
             FindingSeverity::Warning => 1,

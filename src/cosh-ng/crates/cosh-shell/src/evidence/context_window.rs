@@ -533,6 +533,8 @@ mod tests {
         let mut block = make_block("x", 0, 1000, None);
         block.command = "curl https://example.test/api?token=query-secret --password cli-secret -H Authorization: Bearer bearer-secret ghp_abcdefghijklmnopqrstuvwxyz123456"
             .to_string();
+        block.cwd = "/tmp/token=cwd-secret".to_string();
+        block.end_cwd = "/tmp/token=end-cwd-secret".to_string();
 
         let line = provider_safe_command_fact_line(&block);
 
@@ -545,6 +547,8 @@ mod tests {
         assert!(!line.contains("bearer-secret"), "{line}");
         assert!(!line.contains("ghp_"), "{line}");
         assert!(!line.contains("abcdefghijklmnopqrstuvwxyz123456"), "{line}");
+        assert!(!line.contains("cwd-secret"), "{line}");
+        assert!(!line.contains("end-cwd-secret"), "{line}");
     }
 
     #[test]

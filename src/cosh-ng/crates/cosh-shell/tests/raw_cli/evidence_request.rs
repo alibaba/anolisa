@@ -43,7 +43,7 @@ fn raw_cli_cosh_request_history_auto_sends_history_index() {
 }
 
 #[test]
-fn raw_cli_cosh_request_history_redaction_requires_confirmation() {
+fn raw_cli_cosh_request_history_omits_secret_without_confirmation() {
     let output = run_raw_cli_with_delayed_input(
         "fake",
         vec![
@@ -57,13 +57,9 @@ fn raw_cli_cosh_request_history_redaction_requires_confirmation() {
         ],
     );
 
-    assert!(output.contains("Agent Requested Evidence"), "{output}");
+    assert!(!output.contains("Agent Requested Evidence"), "{output}");
     assert!(
-        output.contains("Agent wants to inspect the recent shell command index."),
-        "{output}"
-    );
-    assert!(
-        output.contains("Redacted history index received by fake adapter."),
+        output.contains("Evidence history index received by fake adapter."),
         "{output}"
     );
     assert!(output.contains("token=super-secret"), "{output}");

@@ -12,3 +12,4 @@ pub use context_window::{
     terminal_output_id, ContextEntry, ContextWindowConfig, ProviderCommandFacts,
     RelatedHistoryConfig, ShellEvidenceAccess,
 };
+pub(crate) use redaction::redact_sensitive_text;

@@ -106,8 +106,10 @@ impl SysomProvider {
         tools: &[ToolDeclaration],
         config: &GenerateConfig,
     ) -> Value {
+        let mut safe_messages = messages.to_vec();
+        crate::redaction::redact_messages(&mut safe_messages);
         let mut inner = serde_json::json!({
-            "messages": messages,
+            "messages": safe_messages,
             "model": config.model,
             "stream": true,
             "use_dashscope": true,

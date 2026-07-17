@@ -210,6 +210,108 @@ fn raw_relay_zsh_preserves_session_history() {
 }
 
 #[test]
+fn raw_relay_bash_excludes_secrets_from_history_and_journal() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-secret-history-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+    let history_snapshot = work_dir.join("history-snapshot");
+    let secret = "history-secret-value";
+    let access_key = "LTAI5tExampleAccessKey";
+    let url_password = "history-url-password";
+    let mut config = ShellHostConfig::new("bash-secret-history-test", &work_dir);
+    config.native_mode = false;
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::line(format!("TOKEN={secret} true")),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line(format!(": {access_key}")),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line(format!(": https://user:{url_password}@example.test")),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line(format!("history > {}", shell_arg(&history_snapshot))),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line("exit"),
+        ],
+        Vec::new(),
+    )
+    .expect("raw bash secret history");
+
+    let history = std::fs::read_to_string(&history_snapshot).expect("history snapshot");
+    let journal = std::fs::read_to_string(&output.journal_path).expect("journal");
+    assert!(!history.contains(secret), "{history}");
+    assert!(!history.contains(access_key), "{history}");
+    assert!(!history.contains(url_password), "{history}");
+    assert!(!journal.contains(secret), "{journal}");
+    assert!(!journal.contains(access_key), "{journal}");
+    assert!(!journal.contains(url_password), "{journal}");
+    assert!(ledger_from_output(&output)
+        .blocks
+        .iter()
+        .all(|block| !block.command.contains(secret)
+            && !block.command.contains(access_key)
+            && !block.command.contains(url_password)));
+}
+
+#[test]
+fn raw_relay_zsh_excludes_secrets_from_history_and_journal() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-secret-history-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+    let history_snapshot = work_dir.join("history-snapshot");
+    let secret = "history-secret-value";
+    let access_key = "LTAI5tExampleAccessKey";
+    let url_password = "history-url-password";
+    let mut config = ShellHostConfig::new("zsh-secret-history-test", &work_dir);
+    config.native_mode = false;
+    let output = run_raw_relay_zsh_with_actions(
+        &config,
+        vec![
+            RawRelayAction::line(format!("TOKEN={secret} true")),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line(format!(": {access_key}")),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line(format!(": https://user:{url_password}@example.test")),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line(format!("fc -l -100 > {}", shell_arg(&history_snapshot))),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line("exit"),
+        ],
+        Vec::new(),
+    )
+    .expect("raw zsh secret history");
+
+    let history = std::fs::read_to_string(&history_snapshot).expect("history snapshot");
+    let journal = std::fs::read_to_string(&output.journal_path).expect("journal");
+    assert!(!history.contains(secret), "{history}");
+    assert!(!history.contains(access_key), "{history}");
+    assert!(!history.contains(url_password), "{history}");
+    assert!(!journal.contains(secret), "{journal}");
+    assert!(!journal.contains(access_key), "{journal}");
+    assert!(!journal.contains(url_password), "{journal}");
+    assert!(ledger_from_output(&output)
+        .blocks
+        .iter()
+        .all(|block| !block.command.contains(secret)
+            && !block.command.contains(access_key)
+            && !block.command.contains(url_password)));
+}
+
+#[test]
 fn raw_relay_hold_mode_drops_input_without_writing_to_bash() {
     let work_dir = std::env::temp_dir().join(format!(
         "cosh-shell-hold-test-{}-{}",

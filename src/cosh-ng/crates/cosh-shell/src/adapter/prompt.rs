@@ -1,6 +1,6 @@
 use crate::evidence::{
     build_context_window, format_context_prompt_with_policy, provider_safe_command_facts,
-    ContextWindowConfig, ShellEvidenceAccess,
+    redact_sensitive_text, ContextWindowConfig, ShellEvidenceAccess,
 };
 use crate::types::{AgentRequest, CommandStatus, CoshApprovalMode};
 
@@ -23,7 +23,8 @@ pub fn prompt_from_request_with_evidence_policy(
     let trigger = trigger_evidence_prompt(request, access, allow_output_requests);
     let runtime = runtime_frame_prompt(request, access, allow_output_requests);
     let hook = hook_finding_prompt(request);
-    bound_provider_context(trigger, runtime, hook, request)
+    let prompt = bound_provider_context(trigger, runtime, hook, request);
+    redact_sensitive_text(&prompt).0
 }
 
 fn bound_provider_context(

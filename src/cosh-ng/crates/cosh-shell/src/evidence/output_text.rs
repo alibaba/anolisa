@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use crate::evidence::model::OutputExcerptDirection;
+use crate::evidence::redact_sensitive_text;
 
 pub(super) const PROVIDER_PREVIEW_MAX_CHARS: usize = 6_000;
 const PROVIDER_PREVIEW_HEAD_CHARS: usize = 4_000;
@@ -62,68 +63,8 @@ pub(super) fn redact_sensitive_output(text: &str) -> (String, bool) {
 
 pub(super) fn redact_sensitive_output_with_policy(text: &str) -> (String, bool, bool) {
     let (redacted, home_changed) = redact_home_path(text);
-    let (redacted, private_key_changed) = redact_private_key_blocks(&redacted);
-    let mut changed = home_changed || private_key_changed;
-    let mut confirmation_required = private_key_changed;
-
-    let mut lines = Vec::new();
-    for line in redacted.lines() {
-        let (line, line_changed) = redact_sensitive_line(line);
-        changed |= line_changed;
-        confirmation_required |= line_changed;
-        lines.push(line);
-    }
-    let mut output = lines.join("\n");
-    if text.ends_with('\n') {
-        output.push('\n');
-    }
-    (output, changed, confirmation_required)
-}
-
-fn redact_private_key_blocks(text: &str) -> (String, bool) {
-    const BEGIN: &str = "-----BEGIN ";
-    const END: &str = "-----END ";
-    const SUFFIX: &str = "PRIVATE KEY-----";
-
-    let mut output = String::with_capacity(text.len());
-    let mut cursor = 0;
-    let mut changed = false;
-    while let Some(relative_begin) = text[cursor..].find(BEGIN) {
-        let begin = cursor + relative_begin;
-        let marker_tail = &text[begin + BEGIN.len()..];
-        let Some(relative_begin_end) = marker_tail.find(SUFFIX) else {
-            break;
-        };
-        let begin_end = begin + BEGIN.len() + relative_begin_end + SUFFIX.len();
-        if text[begin..begin_end].contains('\n') {
-            output.push_str(&text[cursor..begin + BEGIN.len()]);
-            cursor = begin + BEGIN.len();
-            continue;
-        }
-
-        output.push_str(&text[cursor..begin]);
-        output.push_str("<redacted private key block>");
-        changed = true;
-        let after_begin = &text[begin_end..];
-        let Some(relative_end) = after_begin.find(END) else {
-            cursor = text.len();
-            break;
-        };
-        let end = begin_end + relative_end;
-        let end_tail = &text[end + END.len()..];
-        let Some(relative_end_marker) = end_tail.find(SUFFIX) else {
-            cursor = text.len();
-            break;
-        };
-        let end_marker_end = end + END.len() + relative_end_marker + SUFFIX.len();
-        if text[end..end_marker_end].contains('\n') {
-            cursor = text.len();
-            break;
-        }
-        cursor = end_marker_end;
-    }
-    output.push_str(&text[cursor..]);
-    (output, changed)
+    let (redacted, secret_changed) = redact_sensitive_text(&redacted);
+    (redacted, home_changed || secret_changed, secret_changed)
 }
 
 pub(super) fn clean_terminal_control_sequences(text: &str) -> String {
@@ -159,65 +100,6 @@ fn redact_home_path(text: &str) -> (String, bool) {
         }
     }
     (text.to_string(), false)
-}
-
-fn redact_sensitive_line(line: &str) -> (String, bool) {
-    if line.contains("PRIVATE KEY-----") {
-        return ("<redacted private key marker>".to_string(), true);
-    }
-
-    let (line, bearer_changed) = redact_bearer_token(line);
-    let (line, aws_changed) = redact_aws_access_key(&line);
-    (line, bearer_changed || aws_changed)
-}
-
-fn redact_bearer_token(line: &str) -> (String, bool) {
-    let lower = line.to_ascii_lowercase();
-    let Some(start) = lower.find("bearer ") else {
-        return (line.to_string(), false);
-    };
-    let token_start = start + "bearer ".len();
-    let token_end = line[token_start..]
-        .find(char::is_whitespace)
-        .map(|idx| token_start + idx)
-        .unwrap_or(line.len());
-    let mut redacted = String::new();
-    redacted.push_str(&line[..token_start]);
-    redacted.push_str("<redacted>");
-    redacted.push_str(&line[token_end..]);
-    (redacted, true)
-}
-
-fn redact_aws_access_key(line: &str) -> (String, bool) {
-    let mut output = String::new();
-    let mut token = String::new();
-    let mut changed = false;
-
-    for ch in line.chars() {
-        if ch.is_ascii_alphanumeric() {
-            token.push(ch);
-            continue;
-        }
-        push_redacted_token(&mut output, &token, &mut changed);
-        token.clear();
-        output.push(ch);
-    }
-    push_redacted_token(&mut output, &token, &mut changed);
-    (output, changed)
-}
-
-fn push_redacted_token(output: &mut String, token: &str, changed: &mut bool) {
-    if token.starts_with("AKIA")
-        && token.len() >= 20
-        && token
-            .chars()
-            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
-    {
-        output.push_str("AKIA<redacted>");
-        *changed = true;
-    } else {
-        output.push_str(token);
-    }
 }
 
 fn truncate_preview(value: &str, max_chars: usize, output_id: &str) -> (String, bool) {

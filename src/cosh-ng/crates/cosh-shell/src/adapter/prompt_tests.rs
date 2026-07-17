@@ -113,6 +113,7 @@ fn prompt_context_blocks_do_not_include_history_output_preview() {
 #[test]
 fn bound_auto_analysis_uses_evidence_as_single_command_fact_source() {
     let command = "cargo test --token do-not-duplicate";
+    let redacted_command = "cargo test --token <redacted>";
     let request = AgentRequest {
         id: "auto-failure".to_string(),
         session_id: "session-1".to_string(),
@@ -135,7 +136,8 @@ fn bound_auto_analysis_uses_evidence_as_single_command_fact_source() {
         prompt.contains("single source of command facts"),
         "{prompt}"
     );
-    assert_eq!(prompt.matches(command).count(), 1, "{prompt}");
+    assert_eq!(prompt.matches(redacted_command).count(), 1, "{prompt}");
+    assert!(!prompt.contains("do-not-duplicate"), "{prompt}");
 }
 
 #[test]
@@ -312,6 +314,49 @@ fn bound_insight_in_recommend_mode_names_missing_evidence_without_requesting_too
         "{prompt}"
     );
     assert!(!prompt.contains("request at most one safe"), "{prompt}");
+}
+
+#[test]
+fn provider_prompt_redacts_all_user_and_runtime_text_boundaries() {
+    let github_token = "ghp_abcdefghijklmnopqrstuvwxyz123456";
+    let request = AgentRequest {
+        id: "agent-request-secret".to_string(),
+        session_id: "session-1".to_string(),
+        command_block: command_block("input-secret", "curl --token command-secret", 0, None),
+        context_blocks: Vec::new(),
+        context_hints: vec!["diagnostic api_key=hint-secret".to_string()],
+        user_input: Some(format!(
+            "inspect password=user-secret and token {github_token}"
+        )),
+        findings: Vec::new(),
+        mode: AgentMode::RecommendOnly,
+        user_confirmed: true,
+        hook_finding: Some(HookFinding {
+            hook_id: "secret-hook".to_string(),
+            severity: FindingSeverity::Warning,
+            title: "Bearer hook-secret".to_string(),
+            description: "client_secret=description-secret".to_string(),
+            suggestion: "redact".to_string(),
+            skill: None,
+            cli_hint: None,
+            context_refs: Vec::new(),
+        }),
+        recommended_skill: None,
+    };
+
+    let prompt = prompt_from_request(&request);
+
+    for secret in [
+        "user-secret",
+        github_token,
+        "hint-secret",
+        "hook-secret",
+        "description-secret",
+    ] {
+        assert!(!prompt.contains(secret), "{prompt}");
+    }
+    assert!(prompt.contains("password=<redacted>"), "{prompt}");
+    assert!(prompt.contains("api_key=<redacted>"), "{prompt}");
 }
 
 #[test]

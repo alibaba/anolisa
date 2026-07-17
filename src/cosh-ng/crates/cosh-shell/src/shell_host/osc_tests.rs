@@ -521,6 +521,28 @@ fn output_ref_file_uses_private_permissions() {
 }
 
 #[test]
+fn output_ref_file_redacts_secrets_before_persistence() {
+    let dir = std::env::temp_dir().join(format!(
+        "cosh-shell-osc-secret-output-ref-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let secret = "output-secret-value";
+
+    let path = write_output_ref(
+        &dir,
+        "cmd-1",
+        format!("result api_key={secret}\n").as_bytes(),
+    )
+    .expect("write output ref");
+    let output = std::fs::read_to_string(&path).expect("read output ref");
+
+    assert!(!output.contains(secret), "{output}");
+    assert!(output.contains("api_key=<redacted>"), "{output}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn output_ref_file_is_capped_but_preserves_head_and_tail() {
     let dir = std::env::temp_dir().join(format!(
         "cosh-shell-osc-output-ref-cap-{}",

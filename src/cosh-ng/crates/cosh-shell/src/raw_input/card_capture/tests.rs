@@ -7,6 +7,7 @@ fn question_capture_custom_option_waits_for_text_before_submit() {
         option_count: 2,
         allow_free_text: true,
         multiple: false,
+        secret: false,
     };
     let mut state = CardInputState::default();
     state.apply_capture(&capture);
@@ -34,6 +35,7 @@ fn question_capture_strips_bracketed_paste_wrappers() {
         option_count: 0,
         allow_free_text: true,
         multiple: false,
+        secret: false,
     };
     let mut state = CardInputState::default();
     state.apply_capture(&capture);
@@ -54,12 +56,40 @@ fn question_capture_strips_bracketed_paste_wrappers() {
 }
 
 #[test]
+fn secret_question_capture_marks_input_as_sensitive() {
+    let capture = RawInputCapture::Question {
+        id: "auth-1".to_string(),
+        option_count: 0,
+        allow_free_text: true,
+        multiple: false,
+        secret: true,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    assert_eq!(
+        state.consume(&capture, b"hunter2\n"),
+        vec![
+            RawInputEvent::CardSecretInput("auth-1".to_string(), "h".to_string()),
+            RawInputEvent::CardSecretInput("auth-1".to_string(), "hu".to_string()),
+            RawInputEvent::CardSecretInput("auth-1".to_string(), "hun".to_string()),
+            RawInputEvent::CardSecretInput("auth-1".to_string(), "hunt".to_string()),
+            RawInputEvent::CardSecretInput("auth-1".to_string(), "hunte".to_string()),
+            RawInputEvent::CardSecretInput("auth-1".to_string(), "hunter".to_string()),
+            RawInputEvent::CardSecretInput("auth-1".to_string(), "hunter2".to_string()),
+            RawInputEvent::CardSecretAnswer("hunter2".to_string()),
+        ]
+    );
+}
+
+#[test]
 fn question_capture_strips_split_bracketed_paste_wrappers() {
     let capture = RawInputCapture::Question {
         id: "q-1".to_string(),
         option_count: 0,
         allow_free_text: true,
         multiple: false,
+        secret: false,
     };
     let mut state = CardInputState::default();
     state.apply_capture(&capture);
@@ -87,6 +117,7 @@ fn question_capture_ignores_tilde_control_sequences() {
         option_count: 0,
         allow_free_text: true,
         multiple: false,
+        secret: false,
     };
     let mut state = CardInputState::default();
     state.apply_capture(&capture);
@@ -108,6 +139,7 @@ fn question_capture_ignores_removed_answer_slash() {
         option_count: 2,
         allow_free_text: true,
         multiple: false,
+        secret: false,
     };
     let mut state = CardInputState::default();
     state.apply_capture(&capture);
@@ -146,6 +178,7 @@ fn question_capture_still_submits_selected_option() {
         option_count: 2,
         allow_free_text: true,
         multiple: false,
+        secret: false,
     };
     let mut state = CardInputState::default();
     state.apply_capture(&capture);
@@ -166,6 +199,7 @@ fn question_capture_multiple_toggles_options_and_submits_indices() {
         option_count: 3,
         allow_free_text: true,
         multiple: true,
+        secret: false,
     };
     let mut state = CardInputState::default();
     state.apply_capture(&capture);
@@ -188,6 +222,7 @@ fn question_capture_multiple_preserves_checked_options_with_custom_answer() {
         option_count: 3,
         allow_free_text: true,
         multiple: true,
+        secret: false,
     };
     let mut state = CardInputState::default();
     state.apply_capture(&capture);
@@ -375,6 +410,7 @@ fn question_capture_ctrl_c_and_escape_cancel_question() {
         option_count: 2,
         allow_free_text: true,
         multiple: false,
+        secret: false,
     };
     let mut state = CardInputState::default();
     state.apply_capture(&capture);

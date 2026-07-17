@@ -1,6 +1,6 @@
 use std::io;
 
-use crate::journal::write_shell_events;
+use crate::journal::{redacted_shell_events, write_shell_events};
 use crate::types::{ShellEvent, ShellEventKind};
 
 use super::model::{ShellHostConfig, ShellHostOutput};
@@ -73,10 +73,11 @@ pub(super) fn build_shell_host_output(
     exit_status: Option<i32>,
 ) -> io::Result<ShellHostOutput> {
     let journal_path = config.work_dir.join("events.jsonl");
-    write_shell_events(&journal_path, &parser.events)?;
+    let events = redacted_shell_events(&parser.events);
+    write_shell_events(&journal_path, &events)?;
 
     Ok(ShellHostOutput {
-        events: parser.events,
+        events,
         terminal_output: parser.clean,
         work_dir: config.work_dir.clone(),
         journal_path,

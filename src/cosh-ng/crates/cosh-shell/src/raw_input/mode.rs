@@ -61,6 +61,7 @@ pub enum RawInputCapture {
         option_count: usize,
         allow_free_text: bool,
         multiple: bool,
+        secret: bool,
     },
     Approval {
         id: String,
