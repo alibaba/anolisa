@@ -107,16 +107,17 @@ mapping table — the catalog lives only in the asset.
 
 ### Built-in catalog composition
 
-The bundled catalog carries **311 rules** covering package-manager verbs,
+The bundled catalog carries **312 rules** covering package-manager verbs,
 `-dev`/`-devel` package names, service unit names, and filesystem paths. Each
-rule's eligibility is normalized to an explicit `auto_apply`: the 257
-high-confidence rules are `auto_apply: always` and the 51 medium plus 3 low
-rules are `auto_apply: never`. Medium and low rules are therefore documented in
-the catalog but never applied — SkillFS performs no verification, Repology
-lookup, network call, subprocess, or LLM review to promote them. After
-normalization the catalog produces **223** non-identity active substitutions for
-target Alinux and **192** for target Ubuntu, with no duplicate or ambiguous
-active mapping for either target.
+rule's eligibility is normalized to an explicit `auto_apply`: 257 rules are
+`auto_apply: always` and 55 are `auto_apply: never` (51 medium-confidence, 3
+low-confidence, and the deliberately protected high-confidence bare `cron`
+token). The corresponding full install command remains eligible. Protected
+rules are documented in the catalog but never substituted — SkillFS performs
+no verification, Repology lookup, network call, subprocess, or LLM review to
+promote them. After normalization the catalog produces **223** non-identity
+active substitutions for target Alinux and **192** for target Ubuntu, with no
+duplicate or ambiguous active mapping for either target.
 
 ### Explicit rule contract (built-in and external)
 

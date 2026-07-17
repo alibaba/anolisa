@@ -285,11 +285,11 @@ mod tests {
 
     #[test]
     fn builtin_catalog_has_expected_rule_and_eligibility_counts() {
-        // Structural contract of the bundled asset: exactly 311 rules, every
-        // rule carries an explicit auto_apply, split 257 always / 54 never.
+        // Structural contract of the bundled asset: exactly 312 rules, every
+        // rule carries an explicit auto_apply, split 257 always / 55 never.
         let value: serde_yaml::Value = serde_yaml::from_slice(BUILTIN_RULES).unwrap();
         let seq = value.as_sequence().expect("top-level YAML sequence");
-        assert_eq!(seq.len(), 311, "exactly 311 rules");
+        assert_eq!(seq.len(), 312, "exactly 312 rules");
         let (mut always, mut never) = (0usize, 0usize);
         for rule in seq {
             let aa = rule
@@ -302,16 +302,16 @@ mod tests {
                 other => panic!("unexpected auto_apply value: {other}"),
             }
         }
-        assert_eq!(always, 257, "high-confidence rules are auto_apply: always");
-        assert_eq!(never, 54, "medium+low rules are auto_apply: never");
+        assert_eq!(always, 257, "eligible rules are auto_apply: always");
+        assert_eq!(never, 55, "protected rules are auto_apply: never");
     }
 
     #[test]
     fn builtin_catalog_loads_for_explicit_alinux() {
         let stage = OsAdapterStage::load_default(TargetSelector::Alinux).unwrap();
         assert_eq!(stage.target(), OsTarget::Alinux);
-        // 311 rules parsed before direction/eligibility filtering.
-        assert_eq!(stage.total_rules(), 311);
+        // 312 rules parsed before direction/eligibility filtering.
+        assert_eq!(stage.total_rules(), 312);
         // Non-identity active substitutions when converting toward Alinux.
         assert_eq!(stage.active_rules(), 223);
     }
@@ -320,8 +320,36 @@ mod tests {
     fn builtin_catalog_loads_for_explicit_ubuntu() {
         let stage = OsAdapterStage::load_default(TargetSelector::Ubuntu).unwrap();
         assert_eq!(stage.target(), OsTarget::Ubuntu);
-        assert_eq!(stage.total_rules(), 311);
+        assert_eq!(stage.total_rules(), 312);
         assert_eq!(stage.active_rules(), 192);
+    }
+
+    #[test]
+    fn builtin_cron_rules_require_explicit_install_context() {
+        let alinux = OsAdapterStage::load_default(TargetSelector::Alinux).unwrap();
+        assert_eq!(alinux.apply("crontab -e"), "crontab -e");
+        assert_eq!(alinux.apply("micron"), "micron");
+        assert_eq!(
+            alinux.apply("apt-get install -y cron"),
+            "dnf install -y cronie"
+        );
+        assert_eq!(alinux.apply("cron.service"), "crond.service");
+        assert_eq!(
+            alinux.apply("systemctl restart cron"),
+            "systemctl restart crond"
+        );
+
+        let ubuntu = OsAdapterStage::load_default(TargetSelector::Ubuntu).unwrap();
+        assert_eq!(ubuntu.apply("cronietab"), "cronietab");
+        assert_eq!(
+            ubuntu.apply("dnf install -y cronie"),
+            "apt-get install -y cron"
+        );
+        assert_eq!(ubuntu.apply("crond.service"), "cron.service");
+        assert_eq!(
+            ubuntu.apply("systemctl restart crond"),
+            "systemctl restart cron"
+        );
     }
 
     #[test]

@@ -274,8 +274,9 @@ diagnostics report the actual enabled stage list, including an empty list.
 Transforms never modify source files, snapshots, activation metadata, or the
 rule artifact. Hidden skills stay `ENOENT` and never enter the pipeline; a
 snapshot read is transformed from the snapshot and never falls back to the live
-source. Only `SKILL.md` is adapted — other Markdown, shell, Python, and config
-files pass through unchanged.
+source. The same pipeline applies to flat and Hermes nested `SKILL.md`. Only
+`SKILL.md` is adapted — other Markdown, shell, Python, and config files pass
+through unchanged.
 
 ### Disabling the Directive Stage
 
@@ -312,9 +313,11 @@ skillfs mount /path/to/skills /mnt/skillfs \
   --config /etc/skillfs/skillfs-security.toml
 ```
 
-SkillFS **ships a built-in 311-rule Ubuntu/Alinux catalog** embedded in the
+SkillFS **ships a built-in 312-rule Ubuntu/Alinux catalog** embedded in the
 binary from the repository asset, so the adapter works in source builds, RPMs,
-and containers without a separate file. It remains opt-in.
+and containers without a separate file. Of those rules, 257 are
+`auto_apply: always` and 55 are `auto_apply: never`; compilation produces 223
+active substitutions toward Alinux and 192 toward Ubuntu. It remains opt-in.
 
 - `target_os = "auto"` detects the host distribution from the exact
   `/etc/os-release` `ID` once at mount startup — `ubuntu`/`debian` map to Ubuntu
@@ -337,11 +340,12 @@ and containers without a separate file. It remains opt-in.
   artifact is loaded once at mount startup, so remount after editing it. There
   is currently no catalog overlay, hot reload, or export command.
 
-In the built-in catalog, high-confidence rules are `auto_apply: always` while
-medium- and low-confidence rules are included but `auto_apply: never`, so they
-are documented yet never applied. The rule artifact — built-in or external — is
-a top-level YAML sequence. Each entry declares the literal strings for each OS
-side, a `direction`, and an explicit `auto_apply` eligibility flag:
+In the built-in catalog, most high-confidence rules are `auto_apply: always`;
+medium- and low-confidence rules and deliberately unsafe bare-token matches are
+`auto_apply: never`, so they protect matched spans but are never substituted.
+The rule artifact — built-in or external — is a top-level YAML sequence. Each
+entry declares the literal strings for each OS side, a `direction`, and an
+explicit `auto_apply` eligibility flag:
 
 ```yaml
 - ubuntu: "apt-get install -y "

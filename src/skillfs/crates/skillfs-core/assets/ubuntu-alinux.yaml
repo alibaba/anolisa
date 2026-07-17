@@ -988,6 +988,13 @@
 - ubuntu: "cron"
   alinux: "cronie"
   direction: bidirectional
+  auto_apply: never
+  confidence: high
+  notes: bare token is protection-only; use the explicit install command rule
+
+- ubuntu: "apt-get install -y cron"
+  alinux: "dnf install -y cronie"
+  direction: bidirectional
   auto_apply: always
   confidence: high
 

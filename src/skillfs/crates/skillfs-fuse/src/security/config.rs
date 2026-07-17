@@ -188,6 +188,7 @@ pub struct ControlSocketSection {
 pub enum ConfigError {
     Io(std::io::Error),
     Parse(toml::de::Error),
+    OsAdapter(OsAdapterError),
     InvalidValue {
         field: &'static str,
         value: String,
@@ -200,6 +201,7 @@ impl fmt::Display for ConfigError {
         match self {
             ConfigError::Io(e) => write!(f, "config I/O error: {e}"),
             ConfigError::Parse(e) => write!(f, "config parse error: {e}"),
+            ConfigError::OsAdapter(e) => fmt::Display::fmt(e, f),
             ConfigError::InvalidValue {
                 field,
                 value,
@@ -212,7 +214,23 @@ impl fmt::Display for ConfigError {
     }
 }
 
-impl std::error::Error for ConfigError {}
+impl std::error::Error for ConfigError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ConfigError::Io(e) => Some(e),
+            ConfigError::Parse(e) => Some(e),
+            ConfigError::OsAdapter(e) => Some(e),
+            ConfigError::InvalidValue { .. } => None,
+        }
+    }
+}
+
+/// Pure, validated adapter settings. Parsing this type performs no file I/O or
+/// host OS detection; those operations remain gated on stage construction.
+struct ParsedOsAdapterConfig<'a> {
+    selector: TargetSelector,
+    rules_path: Option<&'a str>,
+}
 
 impl SecurityConfig {
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
@@ -414,34 +432,8 @@ impl SecurityConfig {
                 }
             }
         }
-        if let Some(adapter) = self.transforms.as_ref().and_then(|t| t.os_adapter.as_ref()) {
-            if adapter.enabled {
-                // An absent rules_path selects the built-in catalog. A present
-                // but blank/whitespace value is a configuration mistake, not a
-                // request for the default, so reject it explicitly.
-                if let Some(rules_path) = adapter.rules_path.as_deref() {
-                    if rules_path.trim().is_empty() {
-                        return Err(ConfigError::InvalidValue {
-                            field: "transforms.os_adapter.rules_path",
-                            value: String::new(),
-                            allowed: "non-empty path, or omit to use the built-in catalog",
-                        });
-                    }
-                }
-            }
-            if let Some(value) = adapter.target_os.as_deref() {
-                match value {
-                    "auto" | "ubuntu" | "alinux" => {}
-                    other => {
-                        return Err(ConfigError::InvalidValue {
-                            field: "transforms.os_adapter.target_os",
-                            value: other.to_string(),
-                            allowed: "auto, ubuntu, alinux",
-                        });
-                    }
-                }
-            }
-        }
+        self.parse_os_adapter_config()
+            .map_err(ConfigError::OsAdapter)?;
         if let Some(ref cs) = self.control_socket {
             let has_path = cs
                 .path
@@ -676,6 +668,42 @@ impl SecurityConfig {
             .unwrap_or(true)
     }
 
+    /// Parse and validate the enabled OS adapter without loading rules or
+    /// detecting the host OS.
+    fn parse_os_adapter_config(&self) -> Result<Option<ParsedOsAdapterConfig<'_>>, OsAdapterError> {
+        let Some(adapter) = self
+            .transforms
+            .as_ref()
+            .and_then(|t| t.os_adapter.as_ref())
+            .filter(|adapter| adapter.enabled)
+        else {
+            return Ok(None);
+        };
+
+        let selector = match adapter.target_os.as_deref() {
+            None => TargetSelector::Auto,
+            Some(raw) => {
+                TargetSelector::parse(raw).ok_or_else(|| OsAdapterError::InvalidTargetSelector {
+                    value: raw.to_string(),
+                })?
+            }
+        };
+        let rules_path = match adapter.rules_path.as_deref() {
+            None => None,
+            Some(raw) => {
+                let path = raw.trim();
+                if path.is_empty() {
+                    return Err(OsAdapterError::BlankRulesPath);
+                }
+                Some(path)
+            }
+        };
+        Ok(Some(ParsedOsAdapterConfig {
+            selector,
+            rules_path,
+        }))
+    }
+
     /// Build the opt-in OS adapter stage from `[transforms.os_adapter]`.
     ///
     /// Returns `Ok(None)` when the section is absent or `enabled = false`, so
@@ -703,38 +731,12 @@ impl SecurityConfig {
     /// deserialization) cannot silently fall back to the built-in catalog or to
     /// `auto` detection when it meant something specific.
     pub fn build_os_adapter_stage(&self) -> Result<Option<OsAdapterStage>, OsAdapterError> {
-        let Some(adapter) = self
-            .transforms
-            .as_ref()
-            .and_then(|t| t.os_adapter.as_ref())
-            .filter(|a| a.enabled)
-        else {
+        let Some(adapter) = self.parse_os_adapter_config()? else {
             return Ok(None);
         };
-        // An *absent* target_os defaults to auto. A *present* but unsupported
-        // value is a misconfiguration: reject it fail-closed rather than
-        // silently coercing to auto (which would then probe /etc/os-release).
-        let selector = match adapter.target_os.as_deref() {
-            None => TargetSelector::Auto,
-            Some(raw) => {
-                TargetSelector::parse(raw).ok_or_else(|| OsAdapterError::InvalidTargetSelector {
-                    value: raw.to_string(),
-                })?
-            }
-        };
-        // An *absent* rules_path selects the built-in catalog. A *present*
-        // rules_path selects an external artifact — but a blank/whitespace one
-        // is a misconfiguration, so reject it rather than defaulting to
-        // built-in.
-        let stage = match adapter.rules_path.as_deref() {
-            None => OsAdapterStage::load_default(selector)?,
-            Some(raw) => {
-                let path = raw.trim();
-                if path.is_empty() {
-                    return Err(OsAdapterError::BlankRulesPath);
-                }
-                OsAdapterStage::load(Path::new(path), selector)?
-            }
+        let stage = match adapter.rules_path {
+            None => OsAdapterStage::load_default(adapter.selector)?,
+            Some(path) => OsAdapterStage::load(Path::new(path), adapter.selector)?,
         };
         Ok(Some(stage))
     }
@@ -1891,6 +1893,19 @@ rules_path = "/nonexistent/rules.yaml"
     }
 
     #[test]
+    fn os_adapter_disabled_ignores_invalid_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("disabled.toml");
+        std::fs::write(
+            &path,
+            "[transforms.os_adapter]\nenabled = false\ntarget_os = \"fedora\"\nrules_path = \"   \"\n",
+        )
+        .unwrap();
+        let cfg = SecurityConfig::load(&path).expect("disabled adapter must not be validated");
+        assert!(cfg.build_os_adapter_stage().unwrap().is_none());
+    }
+
+    #[test]
     fn os_adapter_enabled_without_rules_path_builds_builtin() {
         // Absent rules_path is valid: it selects the built-in catalog. Use an
         // explicit target so the test does not depend on the host's os-release.
@@ -1906,12 +1921,12 @@ target_os = "alinux"
             .unwrap()
             .expect("built-in stage");
         assert_eq!(stage.target().as_str(), "alinux");
-        // The bundled catalog has 311 rules.
-        assert_eq!(stage.total_rules(), 311);
+        // The bundled catalog has 312 rules.
+        assert_eq!(stage.total_rules(), 312);
     }
 
     #[test]
-    fn os_adapter_blank_rules_path_rejected() {
+    fn os_adapter_blank_rules_path_has_shared_root_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bad.toml");
         std::fs::write(
@@ -1919,71 +1934,64 @@ target_os = "alinux"
             "[transforms.os_adapter]\nenabled = true\nrules_path = \"   \"\n",
         )
         .unwrap();
-        let result = SecurityConfig::load(&path);
-        assert!(
-            matches!(
-                result,
-                Err(ConfigError::InvalidValue {
-                    field: "transforms.os_adapter.rules_path",
-                    ..
-                })
-            ),
-            "blank rules_path must be rejected, not treated as built-in: {result:?}"
-        );
-    }
-
-    #[test]
-    fn os_adapter_builder_rejects_blank_rules_path_without_validate() {
-        // Deserialize directly (no SecurityConfig::load, so validate() never
-        // runs), mimicking an embedder that bypasses config validation. The
-        // builder must still fail closed on a blank rules_path instead of
-        // silently loading the built-in catalog.
+        let load_err = SecurityConfig::load(&path).unwrap_err();
         let cfg: SecurityConfig = toml::from_str(
             "[transforms.os_adapter]\nenabled = true\ntarget_os = \"alinux\"\nrules_path = \"   \"\n",
         )
         .unwrap();
-        let err = cfg.build_os_adapter_stage().unwrap_err();
+        let build_err = cfg.build_os_adapter_stage().unwrap_err();
         assert!(
-            format!("{err}").contains("blank"),
-            "builder must reject a blank rules_path fail-closed: {err}"
+            matches!(
+                &load_err,
+                ConfigError::OsAdapter(OsAdapterError::BlankRulesPath)
+            ),
+            "load must preserve the shared adapter root error: {load_err}"
         );
+        assert!(matches!(&build_err, OsAdapterError::BlankRulesPath));
+        assert_eq!(load_err.to_string(), build_err.to_string());
     }
 
     #[test]
-    fn os_adapter_builder_rejects_invalid_target_os_without_validate() {
-        // Deserialize directly (bypassing SecurityConfig::load/validate), then
-        // build. An unsupported target_os must fail closed instead of being
-        // coerced to auto and resolved from /etc/os-release.
-        let cfg: SecurityConfig =
-            toml::from_str("[transforms.os_adapter]\nenabled = true\ntarget_os = \"fedora\"\n")
-                .unwrap();
-        let err = cfg.build_os_adapter_stage().unwrap_err();
-        assert!(
-            format!("{err}").contains("invalid target_os"),
-            "builder must reject an unsupported target_os fail-closed: {err}"
-        );
-    }
-
-    #[test]
-    fn os_adapter_invalid_target_os_rejected() {
+    fn os_adapter_invalid_target_os_has_shared_root_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bad.toml");
         std::fs::write(
             &path,
-            "[transforms.os_adapter]\nenabled = true\nrules_path = \"/r.yaml\"\ntarget_os = \"fedora\"\n",
+            "[transforms.os_adapter]\nenabled = true\ntarget_os = \"fedora\"\n",
         )
         .unwrap();
-        let result = SecurityConfig::load(&path);
+        let load_err = SecurityConfig::load(&path).unwrap_err();
+        let cfg: SecurityConfig =
+            toml::from_str("[transforms.os_adapter]\nenabled = true\ntarget_os = \"fedora\"\n")
+                .unwrap();
+        let build_err = cfg.build_os_adapter_stage().unwrap_err();
         assert!(
             matches!(
-                result,
-                Err(ConfigError::InvalidValue {
-                    field: "transforms.os_adapter.target_os",
-                    ..
-                })
+                &load_err,
+                ConfigError::OsAdapter(OsAdapterError::InvalidTargetSelector { value })
+                    if value == "fedora"
             ),
-            "invalid target_os must fail: {result:?}"
+            "load must preserve the shared adapter root error: {load_err}"
         );
+        assert!(matches!(
+            &build_err,
+            OsAdapterError::InvalidTargetSelector { value } if value == "fedora"
+        ));
+        assert_eq!(load_err.to_string(), build_err.to_string());
+    }
+
+    #[test]
+    fn os_adapter_load_validation_does_not_read_rules_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("valid.toml");
+        std::fs::write(
+            &path,
+            "[transforms.os_adapter]\nenabled = true\nrules_path = \"/definitely/missing/os-rules.yaml\"\ntarget_os = \"alinux\"\n",
+        )
+        .unwrap();
+        let cfg = SecurityConfig::load(&path).expect("validation must not load rule files");
+        let err = cfg.build_os_adapter_stage().unwrap_err();
+        assert!(matches!(err, OsAdapterError::ReadRules { .. }));
     }
 
     #[test]
@@ -2017,7 +2025,7 @@ rules_path = "/definitely/missing/os-rules.yaml"
         let stage = cfg.build_os_adapter_stage().unwrap().expect("stage built");
         assert_eq!(stage.target().as_str(), "alinux");
         // A non-empty rules_path overrides the built-in catalog: this artifact
-        // has exactly one rule, not the 311 bundled rules.
+        // has exactly one rule, not the 312 bundled rules.
         assert_eq!(
             stage.total_rules(),
             1,

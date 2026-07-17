@@ -398,8 +398,8 @@ fn builtin_stage(target: OsTarget) -> OsAdapterStage {
 fn builtin_catalog_transforms_skill_md_without_rules_path() {
     skip_if_no_fuse!();
     let stage = builtin_stage(OsTarget::Alinux);
-    // The bundled catalog carries all 311 rules.
-    assert_eq!(stage.total_rules(), 311);
+    // The bundled catalog carries all 312 rules.
+    assert_eq!(stage.total_rules(), 312);
     let body = "# Setup\n\nRun `sudo apt-get install -y nginx`.\n";
     let fx = MountFixture::normal_with_os_adapter(|src| seed_skill(src, "web", body), stage);
     let got = std::fs::read_to_string(fx.skill_path("web").join("SKILL.md")).expect("read");

@@ -270,6 +270,11 @@ The pipeline only affects the bytes an agent reads. Source files, trusted
 snapshots, activation metadata, and the rule artifact are never modified.
 Hidden skills stay hidden and never enter the pipeline; a fallback read is
 transformed from the trusted snapshot and never falls back to the live source.
+The same pipeline and activation ordering applies to flat `<skill>/SKILL.md`
+and Hermes `<category>/<skill>/SKILL.md` layouts. A snapshot read resolves,
+reads, and transforms only the selected snapshot; if snapshot target parsing or
+resolution fails, or its `SKILL.md` cannot be read, the operation returns an
+error (`ENOENT` at the virtual read boundary) and never retries the live source.
 `getattr` size, partial reads, and full reads always agree on the transformed
 bytes. Only `SKILL.md` is adapted — other Markdown, shell, Python, and config
 files pass through untouched.
@@ -309,11 +314,13 @@ skillfs mount /path/to/skills /mnt/skillfs \
   --config /etc/skillfs/skillfs-security.toml
 ```
 
-SkillFS ships a **built-in 311-rule Ubuntu/Alinux catalog** embedded in the
+SkillFS ships a **built-in 312-rule Ubuntu/Alinux catalog** embedded in the
 binary from the repository asset, so the adapter works in source builds, RPMs,
-and containers without a separate file. It stays opt-in. In this catalog,
-high-confidence rules are `auto_apply: always`, while medium- and low-confidence
-rules are included but `auto_apply: never` (documented yet never applied).
+and containers without a separate file. It stays opt-in. The catalog contains
+257 `auto_apply: always` rules and 55 `auto_apply: never` protection rules,
+producing 223 active substitutions toward Alinux and 192 toward Ubuntu. Most
+high-confidence rules are applied; medium- and low-confidence rules and unsafe
+bare-token matches remain protection-only.
 
 - `target_os = "auto"` reads the exact `/etc/os-release` `ID` once at mount
   startup — `ubuntu`/`debian` map to Ubuntu, `alinux`/`anolis` map to Alinux.

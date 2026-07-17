@@ -252,8 +252,9 @@ FUSE 读取 `SKILL.md` 时，SkillFS 会执行 `compiler::compile`，支持：
 | 关闭 | 关闭 | 选中的原始字节 |
 
 转换绝不修改源文件、snapshot、激活元数据或规则文件。Hidden 技能保持 `ENOENT`
-且不进入流水线；snapshot 读取只转换 snapshot，绝不回退到 live source。只有
-`SKILL.md` 会被适配——其他 Markdown、shell、Python 与配置文件原样透传。
+且不进入流水线；snapshot 读取只转换 snapshot，绝不回退到 live source。flat 与
+Hermes nested `SKILL.md` 使用同一条流水线。只有 `SKILL.md` 会被适配——其他
+Markdown、shell、Python 与配置文件原样透传。
 
 ### 关闭 directive stage
 
@@ -288,9 +289,10 @@ skillfs mount /path/to/skills /mnt/skillfs \
   --config /etc/skillfs/skillfs-security.toml
 ```
 
-SkillFS **内置一份 311 条规则的 Ubuntu/Alinux 规则目录**，通过 `include_bytes!`
-从仓库资产嵌入二进制，因此源码构建、RPM 与容器中无需额外文件即可工作。适配器仍是
-opt-in。
+SkillFS **内置一份 312 条规则的 Ubuntu/Alinux 规则目录**，通过 `include_bytes!`
+从仓库资产嵌入二进制，因此源码构建、RPM 与容器中无需额外文件即可工作。其中 257 条
+为 `auto_apply: always`，55 条为 `auto_apply: never`；编译后面向 Alinux 有 223 条
+active substitution，面向 Ubuntu 有 192 条。适配器仍是 opt-in。
 
 - `target_os = "auto"` 在挂载启动时读取一次 `/etc/os-release` 的精确 `ID`
   检测宿主：`ubuntu`/`debian` 映射为 Ubuntu，`alinux`/`anolis` 映射为 Alinux。
@@ -308,9 +310,10 @@ opt-in。
   规则文件只在挂载启动时加载一次，修改后需要重新挂载。当前没有 catalog overlay、
   hot reload 或 export 命令。
 
-内置目录中，高置信度规则为 `auto_apply: always`，中/低置信度规则虽然收录但为
-`auto_apply: never`，因此被记录却永不应用。规则文件（内置或外部）是一个顶层 YAML
-序列，每条规则声明两侧 OS 的字面量、`direction` 以及显式的 `auto_apply` 资格标记：
+内置目录中，大多数高置信度规则为 `auto_apply: always`；中/低置信度规则和刻意保护的
+不安全裸 token 为 `auto_apply: never`，因此会保护匹配 span，但不会执行替换。规则文件
+（内置或外部）是一个顶层 YAML 序列，每条规则声明两侧 OS 的字面量、`direction`
+以及显式的 `auto_apply` 资格标记：
 
 ```yaml
 - ubuntu: "apt-get install -y "
