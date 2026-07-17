@@ -435,7 +435,7 @@ output_id=${output_tail%%\\n*}
 printf '%s\n' "{\"type\":\"control_request\",\"request_id\":\"home-path-read\",\"request\":{\"subtype\":\"shell_evidence\",\"tool_use_id\":\"toolu-home-path-read\",\"action\":\"read_output\",\"output_id\":\"$output_id\",\"direction\":\"tail\",\"lines\":5}}"
 IFS= read -r response2 || exit 2
 case "$response2" in
-  *'"behavior":"shell_evidence"'*'ShellEvidenceExcerpt'*'excerpt_status: available'*'redaction_status: excerpt_included'*'~/Applications/Codex.app/Contents/MacOS/Codex'*)
+  *'"behavior":"shell_evidence"'*'ShellEvidenceExcerpt'*'excerpt_status: available'*'redaction_status: excerpt_redacted'*'~/Applications/Codex.app/Contents/MacOS/Codex'*)
     case "$response2" in
       *redacted_confirmation_required*) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-home-path-redaction","is_error":true,"result":"home path redaction blocked shell evidence"}'; exit 1 ;;
     esac
