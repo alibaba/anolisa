@@ -441,7 +441,8 @@ SkillFS 不在文件系统核心中执行扫描、签名校验或风险判断。
   写入落到 source，完成信号可触发外部安全流程。
 - `--notify-socket <PATH>` 将 debounce 后的 skill mutation 通知发给外部 daemon。
   Notify v2 使用 canonical 路径和完整 flat/Hermes `skillId` 标识 Skill；
-  live/backing 路径通过独立 resolver 解析。
+  live/backing 路径通过独立 resolver 解析。in-place notify mount 要求配置
+  `--trusted-peer-exe`，确保 daemon 访问 source 前 authenticated resolver 已可用。
 - `--activation-events-log <PATH>` 将 activation protocol events 写成 JSONL。
 - `--activation-reload-mode poll` 在 notify events 后重读 activation state，
   无需 remount 即可更新 resolver。
@@ -459,7 +460,9 @@ SkillFS 不在文件系统核心中执行扫描、签名校验或风险判断。
   进程名可伪造，不应用作生产可信依据。
 - `--control-socket <PATH>` 配合 `--trusted-peer-exe <PATH>` 启动可信 Unix
   socket control plane。可信 peer 可通过 `meta.writeActivation`、
-  `meta.setActivationXattr` 等方法写 activation JSON 或 xattr。
+  `meta.setActivationXattr` 等方法写 activation JSON 或 xattr。packaged Skill
+  Ledger worker 通过 `sys.executable` 启动，因此其 executable 是
+  `/usr/bin/python3.11`，不是 `skill-ledger` launcher。
 - control plane 是 opt-in 且需认证的。endpoint 按优先级解析：CLI
   `--control-socket` > 配置 `[control_socket].path` > 默认的每用户 endpoint
   `/run/user/<uid>/skillfs/control.sock`。仅配置 trusted peer 而未给显式

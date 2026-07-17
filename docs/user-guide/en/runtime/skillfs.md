@@ -456,7 +456,9 @@ Agent or installer writes through SkillFS
 `--activation-events-log`, because SkillFS needs a trigger source for polling.
 
 For in-place activation and notify mounts, set `--ledger-backing-root` to a
-daemon-visible backing source path:
+daemon-visible backing source path and enable the authenticated resolver.
+Notify v2 carries canonical identity only, so startup rejects an in-place
+notify configuration that omits `--trusted-peer-exe`:
 
 ```bash
 skillfs mount /path/to/skills /path/to/skills \
@@ -464,6 +466,7 @@ skillfs mount /path/to/skills /path/to/skills \
   --security \
   --activation-mode file \
   --notify-socket /run/skill-ledger.sock \
+  --trusted-peer-exe /usr/bin/python3.11 \
   --ledger-backing-root /run/user/$UID/skillfs-ledger/source
 ```
 
@@ -481,12 +484,27 @@ skillfs mount /path/to/skills /mnt/skillfs \
   --security \
   --activation-mode file \
   --control-socket /run/skillfs/control.sock \
-  --trusted-peer-exe /usr/bin/skill-ledger
+  --trusted-peer-exe /usr/bin/python3.11
 ```
 
 The socket requires `--security --activation-mode file`, is mutually exclusive
 with `--decision-command`, and requires a pinned trusted peer executable. Peer
 validation uses Linux peer credentials and executable identity checks.
+
+The packaged AgentSecCore daemon starts the Skill Ledger worker with
+`sys.executable`, which resolves to `/usr/bin/python3.11`; the worker is not a
+`/usr/bin/skill-ledger` executable. For a custom virtual environment, run the
+following with the exact interpreter that starts the daemon and configure the
+real path it prints:
+
+```bash
+/path/to/ledger/python -c 'import os, sys; print(os.path.realpath(sys.executable))'
+```
+
+This M1 executable gate trusts that Python interpreter, not a particular
+module. Keep SkillFS and the Ledger worker in the same UID/security domain and
+account for the fact that another process under that UID using the same
+interpreter also satisfies the executable identity check.
 
 #### Endpoint and priority
 
@@ -532,10 +550,11 @@ three distinct outcomes:
 - **`managed=false`** — the request is well-formed and `canonicalSkillDir` is a
   valid absolute path outside the managed root (`reason: not_managed`). This is
   a normal success; the caller may manage that directory directly.
-- **structured error** — a non-absolute path, an illegal `..` segment, a
-  symlink/path escape, a management/reserved directory, a missing Skill
-  directory, an invalid layout / missing `SKILL.md`, an unreadable live source,
-  or peer-authentication failure. These are never disguised as `managed=false`.
+- **structured error** — a non-absolute or non-normalized path (including
+  repeated or trailing `/`), an illegal `..` segment, a symlink/path escape, a
+  management/reserved directory, a missing Skill directory, an invalid layout /
+  missing `SKILL.md`, an unreadable live source, or peer-authentication failure.
+  These are never disguised as `managed=false`.
 
 The skill id is derived from the canonical relative path, so both flat
 (`my-skill`) and Hermes nested (`apple/apple-notes`) layouts resolve to full
@@ -554,11 +573,12 @@ both components (`category/weather`). SkillFS sorts and deduplicates paths; an
 empty array requests a whole-Skill rescan, including when the path limit is
 exceeded.
 
-The canonical directory is derived from the user-visible source root. The
-physical live/backing root remains private to activation and the S1 resolver,
-so backing paths never appear in notifications. The daemon must accept v2
-directly and return `schemaVersion=2` with `accepted=true`; there is no v1
-fallback or negotiation.
+The canonical directory is derived from the absolute, lexically normalized
+source identity without following a source-root symlink. The physical
+live/backing root remains private to activation and the S1 resolver, so backing
+paths never appear in notifications. The daemon must accept v2 directly and
+return `schemaVersion=2` with `accepted=true`; there is no v1 fallback or
+negotiation.
 
 ### Trusted Mount-path Writer
 

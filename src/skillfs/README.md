@@ -488,6 +488,8 @@ Related security surfaces:
 - `--notify-socket <PATH>` sends debounced skill mutation notifications to an
   external daemon. Notify v2 identifies the Skill with its canonical path and
   complete flat or Hermes `skillId`; live/backing paths are resolved separately.
+  In-place notify mounts require `--trusted-peer-exe` so the authenticated
+  resolver is available before the daemon accesses the source.
 - `--activation-events-log <PATH>` writes activation protocol events as JSONL.
 - `--activation-reload-mode poll` re-reads activation state after notify events
   and updates the resolver without a remount.
@@ -508,7 +510,9 @@ Related security surfaces:
 - `--control-socket <PATH>` with `--trusted-peer-exe <PATH>` starts a trusted
   Unix socket control plane. Trusted peers can write activation JSON or xattr
   through methods such as `meta.writeActivation` and
-  `meta.setActivationXattr`.
+  `meta.setActivationXattr`. The packaged Skill Ledger worker's executable is
+  `/usr/bin/python3.11` because it starts through `sys.executable`, not a
+  `skill-ledger` launcher.
 - The control plane is opt-in and authenticated. The endpoint is resolved by
   priority: CLI `--control-socket` > `[control_socket].path` in the config >
   the default per-user endpoint `/run/user/<uid>/skillfs/control.sock`. A

@@ -103,8 +103,9 @@ pub struct TrustedPeerConfig {
 ///
 /// This context keeps the two skill roots explicit:
 ///
-/// * `canonical_root` — the user-visible Skill root the external ledger
-///   addresses. Incoming `canonicalSkillDir` paths are checked for
+/// * `canonical_root` — the absolute, lexically normalized user-visible
+///   Skill identity the external ledger addresses. It does not follow a
+///   source-root symlink. Incoming `canonicalSkillDir` paths are checked for
 ///   lexical containment against this root, and the relative skill id is
 ///   derived from it.
 /// * `source_root` — the live / backing root whose physical content stays
@@ -4050,6 +4051,31 @@ mod tests {
             let resp: ControlResponse = serde_json::from_str(&resp_str).unwrap();
             assert!(!resp.ok);
             assert_eq!(resp.error.unwrap().code, "invalid_canonical_path");
+
+            handle.shutdown();
+        }
+
+        #[test]
+        fn server_resolve_live_source_non_normalized_path_error() {
+            let dir = tempfile::tempdir().unwrap();
+            let source = tempfile::tempdir().unwrap();
+            let (socket_path, handle) = start_server_with_context(dir.path(), source.path());
+
+            for canonical_skill_dir in [
+                format!("{}//my-skill", source.path().display()),
+                format!("//{}/my-skill", source.path().display()),
+                format!("{}/my-skill/", source.path().display()),
+            ] {
+                let req = serde_json::json!({
+                    "schemaVersion": "1",
+                    "method": "skill.resolveLiveSource",
+                    "canonicalSkillDir": canonical_skill_dir,
+                });
+                let resp_str = connect_and_send(&socket_path, &req.to_string());
+                let resp: ControlResponse = serde_json::from_str(&resp_str).unwrap();
+                assert!(!resp.ok);
+                assert_eq!(resp.error.unwrap().code, "invalid_canonical_path");
+            }
 
             handle.shutdown();
         }

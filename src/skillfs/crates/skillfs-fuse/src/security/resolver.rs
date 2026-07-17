@@ -180,6 +180,18 @@ fn validate_canonical_syntax(raw: &str) -> Result<(), ResolveError> {
             format!("canonicalSkillDir '{raw}' is not an absolute path"),
         ));
     }
+    if raw.contains("//") {
+        return Err(ResolveError::new(
+            "invalid_canonical_path",
+            format!("canonicalSkillDir '{raw}' contains a repeated path separator"),
+        ));
+    }
+    if raw.len() > 1 && raw.ends_with('/') {
+        return Err(ResolveError::new(
+            "invalid_canonical_path",
+            format!("canonicalSkillDir '{raw}' contains a trailing path separator"),
+        ));
+    }
     for seg in raw.split('/') {
         if seg == "." || seg == ".." {
             return Err(ResolveError::new(
@@ -688,6 +700,20 @@ mod tests {
         let err =
             resolve_live_source(root.path(), root.path(), SkillLayout::Flat, &bad).unwrap_err();
         assert_eq!(err.code, "invalid_canonical_path");
+    }
+
+    #[test]
+    fn non_normalized_wire_path_is_error() {
+        let root = tempfile::tempdir().unwrap();
+        for raw in [
+            format!("{}//my-skill", root.path().display()),
+            format!("//{}/my-skill", root.path().display()),
+            format!("{}/my-skill/", root.path().display()),
+        ] {
+            let err =
+                resolve_live_source(root.path(), root.path(), SkillLayout::Flat, &raw).unwrap_err();
+            assert_eq!(err.code, "invalid_canonical_path", "{raw}");
+        }
     }
 
     #[test]

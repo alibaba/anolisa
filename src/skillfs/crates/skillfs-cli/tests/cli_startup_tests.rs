@@ -85,11 +85,15 @@ fn empty_source() -> tempfile::TempDir {
 /// or a `permission_denied` (the test binary may fail peer verification),
 /// both of which carry the `schemaVersion` envelope.
 fn probe_control_socket(path: &Path) -> Option<String> {
+    request_control_socket(path, r#"{"schemaVersion":"1","method":"ping"}"#)
+}
+
+fn request_control_socket(path: &Path, request: &str) -> Option<String> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
     let mut stream = UnixStream::connect(path).ok()?;
     stream.set_read_timeout(Some(Duration::from_secs(3))).ok()?;
-    writeln!(stream, r#"{{"schemaVersion":"1","method":"ping"}}"#).ok()?;
+    writeln!(stream, "{request}").ok()?;
     stream.flush().ok()?;
     let mut reader = BufReader::new(&stream);
     let mut response = String::new();
@@ -2215,6 +2219,84 @@ fn control_socket_created_and_accepts_ping() {
 }
 
 #[test]
+fn control_socket_preserves_symlink_source_identity() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE unavailable; cannot test symlink source identity");
+        return;
+    }
+
+    let physical_source = non_tmp_dir();
+    let skill_dir = physical_source.path().join("my-skill");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: my-skill\ndescription: fixture\n---\n",
+    )
+    .unwrap();
+    let identity_parent = non_tmp_dir();
+    let identity_root = identity_parent.path().join("skills-link");
+    std::os::unix::fs::symlink(physical_source.path(), &identity_root).unwrap();
+
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let sock_dir = non_tmp_dir();
+    let sock_path = sock_dir.path().join("skillfs.sock");
+    let mut child = Command::new(bin_path())
+        .args([
+            "mount",
+            identity_root.to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
+            "--control-socket",
+            sock_path.to_str().unwrap(),
+            "--trusted-peer-exe",
+            &test_exe(),
+        ])
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn skillfs");
+
+    std::thread::sleep(Duration::from_secs(2));
+    let child_alive = matches!(child.try_wait(), Ok(None));
+    let request_identity = identity_root.join("my-skill");
+    let request = serde_json::json!({
+        "schemaVersion": "1",
+        "method": "skill.resolveLiveSource",
+        "canonicalSkillDir": request_identity,
+    });
+    let response = request_control_socket(&sock_path, &request.to_string());
+
+    stop_mount_child(&mut child, mount.path());
+    let output = child.wait_with_output();
+
+    assert!(
+        child_alive,
+        "child exited before serving symlink identity: {:?}",
+        output.map(|o| String::from_utf8_lossy(&o.stderr).into_owned())
+    );
+    let response: serde_json::Value =
+        serde_json::from_str(&response.expect("control socket must respond")).unwrap();
+    assert_eq!(response["ok"], true);
+    assert_eq!(
+        response["result"]["canonicalSkillDir"],
+        request_identity.to_string_lossy().as_ref()
+    );
+    assert_eq!(response["result"]["skillId"], "my-skill");
+    assert_eq!(
+        response["result"]["liveSkillDir"],
+        physical_source
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("my-skill")
+            .to_string_lossy()
+            .as_ref()
+    );
+}
+
+#[test]
 fn control_socket_default_endpoint_used_when_no_path() {
     // A trusted peer with no explicit --control-socket binds the default
     // per-user endpoint /run/user/<uid>/skillfs/control.sock.
@@ -2455,6 +2537,73 @@ fn control_socket_in_place_without_backing_root_fails_startup() {
     assert!(
         !sock_path.exists(),
         "no control socket must be bound on a rejected startup"
+    );
+}
+
+#[test]
+fn in_place_notify_without_resolver_fails_startup() {
+    let source = non_tmp_dir();
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            source.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
+            "--notify-socket",
+            "/run/skillfs-in-place-notify.sock",
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("authenticated live-source resolver")
+            && combined.contains("--trusted-peer-exe"),
+        "in-place notify must require the resolver control plane, got: {combined}"
+    );
+    assert!(
+        !combined.contains("--ledger-backing-root"),
+        "resolver gate must run before backing-root setup, got: {combined}"
+    );
+}
+
+#[test]
+fn in_place_notify_with_resolver_reaches_backing_root_gate() {
+    let source = non_tmp_dir();
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            source.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
+            "--notify-socket",
+            "/run/skillfs-in-place-notify.sock",
+            "--trusted-peer-exe",
+            bin_path(),
+        ])
+        .output()
+        .expect("invoke skillfs");
+    assert!(!out.status.success(), "expected non-zero exit");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("--ledger-backing-root"),
+        "resolver-enabled in-place notify must reach backing-root gate, got: {combined}"
+    );
+    assert!(
+        !combined.contains("authenticated live-source resolver"),
+        "configured resolver must satisfy the notify gate, got: {combined}"
     );
 }
 

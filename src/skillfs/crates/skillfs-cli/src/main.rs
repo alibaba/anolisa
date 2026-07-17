@@ -1,6 +1,6 @@
 //! SkillFS CLI — AI agent skill management via virtual filesystem.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 fn cleanup_pid_file(pid_file: &Option<PathBuf>) {
@@ -40,23 +40,73 @@ mod managed;
 mod sls_ops;
 
 #[derive(Clone, Debug)]
+struct SourceRoots {
+    canonical_identity_root: PathBuf,
+    physical_source_root: PathBuf,
+}
+
+impl SourceRoots {
+    fn resolve(source: &Path) -> std::io::Result<Self> {
+        Ok(Self {
+            canonical_identity_root: lexical_absolute(source)?,
+            physical_source_root: source.canonicalize()?,
+        })
+    }
+
+    fn canonical_identity_root(&self) -> &Path {
+        &self.canonical_identity_root
+    }
+
+    fn physical_source_root(&self) -> &Path {
+        &self.physical_source_root
+    }
+}
+
+fn lexical_absolute(path: &Path) -> std::io::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(Path::new("/")),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(name) => normalized.push(name),
+        }
+    }
+    Ok(normalized)
+}
+
+#[derive(Clone, Debug)]
 struct MountRuntimeRoots {
     notify_canonical_root: PathBuf,
+    physical_source_root: PathBuf,
     daemon_root: PathBuf,
 }
 
 impl MountRuntimeRoots {
-    fn from_mount(canonical_source: &Path, ledger_backing_root: Option<&Path>) -> Self {
+    fn from_source(source: &SourceRoots, ledger_backing_root: Option<&Path>) -> Self {
         Self {
-            notify_canonical_root: canonical_source.to_path_buf(),
+            notify_canonical_root: source.canonical_identity_root().to_path_buf(),
+            physical_source_root: source.physical_source_root().to_path_buf(),
             daemon_root: ledger_backing_root
-                .unwrap_or(canonical_source)
+                .unwrap_or(source.physical_source_root())
                 .to_path_buf(),
         }
     }
 
     fn notify_canonical_root(&self) -> &Path {
         &self.notify_canonical_root
+    }
+
+    fn physical_source_root(&self) -> &Path {
+        &self.physical_source_root
     }
 
     fn daemon_root(&self) -> &Path {
@@ -1224,14 +1274,29 @@ async fn cmd_mount(
         .validate(&source, &mountpoint)
         .map_err(|e| format!("{}", e))?;
 
-    // Resolve the source canonical path once, up front. Several startup
-    // gates need it: the W1 audit-path-vs-source check below, the
-    // in-place detection further down, and the W1 drift watcher
-    // (which must observe canonical source events). Falls back to the
-    // user-supplied path on canonicalize failure so the existing CLI UX
-    // is preserved for callers who hand us a relative path that already
-    // resolves to a real directory.
-    let source_canon = source.canonicalize().unwrap_or_else(|_| source.clone());
+    // Keep external identity separate from physical I/O. The canonical
+    // identity is absolute and lexically normalized without following a
+    // source symlink; the physical root resolves that symlink for mount,
+    // backing-root, safety, and live-source operations.
+    let source_roots = SourceRoots::resolve(&source)
+        .map_err(|e| format!("failed to resolve source root '{}': {e}", source.display()))?;
+
+    // Compute mount identity before side-effecting setup. An in-place notify
+    // v2 deployment must expose the authenticated resolver because the
+    // canonical identity alone cannot reach the underlying live source after
+    // the FUSE over-mount.
+    let mount_canon = mountpoint
+        .canonicalize()
+        .unwrap_or_else(|_| mountpoint.clone());
+    let in_place = source_roots.physical_source_root() == mount_canon;
+    if in_place && notify_socket.is_some() && !control_plane_enabled {
+        return Err(
+            "in-place --notify-socket requires the authenticated live-source resolver; \
+             configure --trusted-peer-exe (and optionally --control-socket) so the daemon \
+             can resolve canonicalSkillDir before accessing the source"
+                .into(),
+        );
+    }
 
     // Build the runtime audit configuration. When `--audit-log` is omitted
     // the default `NoopEventSink` is preserved (Ok(None) below). When it is
@@ -1251,14 +1316,17 @@ async fn cmd_mount(
     // creates the audit log file on disk. Disabled audit configs always
     // pass.
     audit_runtime
-        .validate_audit_path_outside_source(&source_canon)
+        .validate_audit_path_outside_source(source_roots.physical_source_root())
         .map_err(|e| format!("{}", e))?;
     // N3 source-tree guard: reject --activation-events-log inside source,
     // same rationale as audit. Ordered before the file is opened so a
     // rejected path never creates the log file on disk.
     if let Some(ref p) = activation_events_log {
-        skillfs_fuse::security::validate_protocol_events_path_outside_source(p, &source_canon)
-            .map_err(|e| format!("{}", e))?;
+        skillfs_fuse::security::validate_protocol_events_path_outside_source(
+            p,
+            source_roots.physical_source_root(),
+        )
+        .map_err(|e| format!("{}", e))?;
     }
 
     // #1262 PrivateTmp gate. When a daemon-facing operation is enabled,
@@ -1304,14 +1372,14 @@ async fn cmd_mount(
                 )
                 .into());
             }
-        } else if daemon_facing_path_under_private_tmp(&source_canon) {
+        } else if daemon_facing_path_under_private_tmp(source_roots.physical_source_root()) {
             return Err(format!(
                 "the daemon-facing source root {} resolves under /tmp or /var/tmp, which the \
                  agent-sec-core.service daemon cannot see because it runs with PrivateTmp=true. \
                  Daemon-driven activation would be rejected and the affected skills hidden. \
                  Set --ledger-backing-root to a daemon-visible path such as \
                  /run/user/$UID/skillfs-ledger/... or /run/skillfs-ledger/... instead.",
-                source_canon.display()
+                source_roots.physical_source_root().display()
             )
             .into());
         }
@@ -1399,13 +1467,6 @@ async fn cmd_mount(
         return Err(format!("Mount point is not a directory: {}", mountpoint.display()).into());
     }
 
-    // Compute mount_canon and in_place early so the A6/B1 backing root
-    // setup can validate path shape before the FUSE over-mount.
-    let mount_canon = mountpoint
-        .canonicalize()
-        .unwrap_or_else(|_| mountpoint.clone());
-    let in_place = source_canon == mount_canon;
-
     // A6/B1: Ledger backing root setup.
     //
     // When the operator provides --ledger-backing-root, SkillFS creates a
@@ -1414,8 +1475,13 @@ async fn cmd_mount(
     // the backing root path; socket notify v2 keeps canonical source identity.
     // Fail-closed: unsafe backing root rejects startup.
     let backing_root: Option<LedgerBackingRoot> = if let Some(ref br_path) = ledger_backing_root {
-        let br = LedgerBackingRoot::setup(&source_canon, br_path, &mount_canon, in_place)
-            .map_err(|e| format!("--ledger-backing-root setup failed: {e}"))?;
+        let br = LedgerBackingRoot::setup(
+            source_roots.physical_source_root(),
+            br_path,
+            &mount_canon,
+            in_place,
+        )
+        .map_err(|e| format!("--ledger-backing-root setup failed: {e}"))?;
         info!(
             backing_root = %br.path().display(),
             in_place,
@@ -1455,8 +1521,8 @@ async fn cmd_mount(
     // Select the path contracts once for all later production wiring. Socket
     // notify v2 keeps canonical source identity, while daemon live-source
     // operations and N3 protocol events use the backing root when configured.
-    let runtime_roots = MountRuntimeRoots::from_mount(
-        &source_canon,
+    let runtime_roots = MountRuntimeRoots::from_source(
+        &source_roots,
         backing_root.as_ref().map(LedgerBackingRoot::path),
     );
     let daemon_root = runtime_roots.daemon_root().to_path_buf();
@@ -1465,7 +1531,7 @@ async fn cmd_mount(
     info!("loading skills from source directory");
     let mut store = SkillStore::new();
     let config = ParseConfig::default();
-    let errors = store.load_from_directory(&source, &config);
+    let errors = store.load_from_directory(runtime_roots.physical_source_root(), &config);
 
     if !errors.is_empty() {
         warn!(count = errors.len(), "some skills failed to load");
@@ -1477,7 +1543,7 @@ async fn cmd_mount(
     info!(count = store.len(), "skills loaded");
 
     // Auto-assign any skills that are not yet in any view to the default view.
-    if let Some(mut views) = ViewsConfig::load(&source) {
+    if let Some(mut views) = ViewsConfig::load(runtime_roots.physical_source_root()) {
         let assigned = views.all_assigned_skills();
         let new_skills: Vec<String> = store
             .list()
@@ -1490,7 +1556,9 @@ async fn cmd_mount(
                 count = new_skills.len(),
                 "auto-assigning new skills to default view"
             );
-            if let Err(e) = views.assign_to_default(&source, &new_skills) {
+            if let Err(e) =
+                views.assign_to_default(runtime_roots.physical_source_root(), &new_skills)
+            {
                 warn!(error = %e, "failed to save updated views config");
             }
         }
@@ -1528,7 +1596,7 @@ async fn cmd_mount(
         // `<skill_dir>/.skill-meta/activation.json` for every loaded
         // skill at startup and populates the resolver. Invalid or
         // missing activation files map to hidden (fail-safe).
-        let resolver = ActiveSkillResolver::new(source.clone());
+        let resolver = ActiveSkillResolver::new(runtime_roots.physical_source_root().to_path_buf());
         let skill_names: Vec<String> = if skill_layout == Some(skillfs_fuse::SkillLayout::Hermes) {
             skillfs_fuse::security::enumerate_hermes_skill_ids(&daemon_root)
         } else {
@@ -1573,7 +1641,7 @@ async fn cmd_mount(
             .expect("decision_command presence checked above")
             .clone();
         let adapter: Arc<dyn LedgerAdapter> = Arc::new(CliLedgerAdapter::new(cmd.clone()));
-        let resolver = ActiveSkillResolver::new(source.clone());
+        let resolver = ActiveSkillResolver::new(runtime_roots.physical_source_root().to_path_buf());
         let skill_names: Vec<String> = shared_store
             .read()
             .list()
@@ -1587,7 +1655,7 @@ async fn cmd_mount(
             "security: resolving active skill mapping via scan -> resolve"
         );
         for name in &skill_names {
-            let skill_dir = source.join(name);
+            let skill_dir = runtime_roots.physical_source_root().join(name);
             if let Err(e) = adapter.scan(&skill_dir) {
                 warn!(
                     skill = %name,
@@ -2046,11 +2114,12 @@ async fn cmd_mount(
     // operator already asked for. We log a warning and continue with the
     // sink-only audit pipeline that S2.1 delivered.
     let drift_handle = if let Some(ref sink) = audit_sink {
-        let observer = Arc::new(SourceDriftObserver::new(source_canon.clone(), sink.clone()));
-        match spawn_drift_watcher(source_canon.clone(), observer, DRIFT_DEBOUNCE_MS).await {
+        let drift_source = runtime_roots.daemon_root().to_path_buf();
+        let observer = Arc::new(SourceDriftObserver::new(drift_source.clone(), sink.clone()));
+        match spawn_drift_watcher(drift_source.clone(), observer, DRIFT_DEBOUNCE_MS).await {
             Ok(handle) => {
                 info!(
-                    source = %source_canon.display(),
+                    source = %drift_source.display(),
                     debounce_ms = DRIFT_DEBOUNCE_MS,
                     "source drift observation enabled"
                 );
@@ -2216,7 +2285,7 @@ async fn cmd_mount(
             // Canonical root: the user-visible Skill root the ledger
             // addresses. Live root (source_root): the physical backing
             // tree that stays accessible under the FUSE over-mount.
-            canonical_root: source_canon.clone(),
+            canonical_root: runtime_roots.notify_canonical_root().to_path_buf(),
             source_root: daemon_root.clone(),
             // Layout drives the resolver's Flat / Hermes Skill boundary.
             layout: skill_layout.unwrap_or_default(),
@@ -2254,7 +2323,7 @@ async fn cmd_mount(
         // Load ViewsConfig once; derive all metrics from a single canonical set.
         let store_guard = shared_store.read();
         let total_skills = store_guard.len() as u64;
-        let views_config = ViewsConfig::load(&source);
+        let views_config = ViewsConfig::load(runtime_roots.physical_source_root());
 
         // Build the canonical "real existing default-view skills" set.
         // Deduplicates and filters out stale/typo names not in the store.
@@ -2370,7 +2439,7 @@ async fn cmd_mount(
     let mount_task = tokio::task::spawn_blocking(move || {
         mount_configured(
             &mountpoint,
-            &source,
+            runtime_roots.physical_source_root(),
             shared_store,
             options,
             in_place,
@@ -3021,31 +3090,65 @@ mod tests {
 
     #[test]
     fn mount_runtime_roots_preserve_notify_identity_and_select_live_root() {
-        let canonical_root = Path::new("/srv/skills");
+        let source_roots = SourceRoots {
+            canonical_identity_root: PathBuf::from("/srv/skills"),
+            physical_source_root: PathBuf::from("/srv/skills"),
+        };
         let backing_root = Path::new("/run/skillfs-ledger/skills");
 
-        let direct = MountRuntimeRoots::from_mount(canonical_root, None);
-        assert_eq!(direct.notify_canonical_root(), canonical_root);
-        assert_eq!(direct.daemon_root(), canonical_root);
+        let direct = MountRuntimeRoots::from_source(&source_roots, None);
+        assert_eq!(
+            direct.notify_canonical_root(),
+            source_roots.canonical_identity_root()
+        );
+        assert_eq!(direct.daemon_root(), source_roots.physical_source_root());
 
-        let backed = MountRuntimeRoots::from_mount(canonical_root, Some(backing_root));
-        assert_eq!(backed.notify_canonical_root(), canonical_root);
+        let backed = MountRuntimeRoots::from_source(&source_roots, Some(backing_root));
+        assert_eq!(
+            backed.notify_canonical_root(),
+            source_roots.canonical_identity_root()
+        );
         assert_eq!(backed.daemon_root(), backing_root);
         assert_ne!(backed.notify_canonical_root(), backed.daemon_root());
     }
 
     #[test]
+    fn source_roots_preserve_symlink_identity_and_resolve_physical_source() {
+        let physical_root = tempfile::tempdir().unwrap();
+        let identity_parent = tempfile::tempdir().unwrap();
+        let identity_root = identity_parent.path().join("skills-link");
+        std::os::unix::fs::symlink(physical_root.path(), &identity_root).unwrap();
+
+        let source_roots = SourceRoots::resolve(&identity_root).unwrap();
+        assert_eq!(source_roots.canonical_identity_root(), identity_root);
+        assert_eq!(
+            source_roots.physical_source_root(),
+            physical_root.path().canonicalize().unwrap()
+        );
+
+        let runtime_roots = MountRuntimeRoots::from_source(&source_roots, None);
+        assert_eq!(runtime_roots.notify_canonical_root(), identity_root);
+        assert_eq!(
+            runtime_roots.daemon_root(),
+            physical_root.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
     fn notify_controller_wiring_splits_canonical_and_event_roots() {
-        let canonical_root = tempfile::tempdir().unwrap();
+        let physical_source_root = tempfile::tempdir().unwrap();
+        let identity_parent = tempfile::tempdir().unwrap();
+        let canonical_identity_root = identity_parent.path().join("skills-link");
+        std::os::unix::fs::symlink(physical_source_root.path(), &canonical_identity_root).unwrap();
         let daemon_root = tempfile::tempdir().unwrap();
         let skill_id = "category/alpha";
         let activation_path = seed_skill(daemon_root.path(), skill_id);
-        seed_skill(canonical_root.path(), skill_id);
+        seed_skill(physical_source_root.path(), skill_id);
 
         let client = Arc::new(ActivationWritingNotifyClient::new(activation_path));
         let writer = Arc::new(InMemoryProtocolEventWriter::new());
         let resolver = Arc::new(ActiveSkillResolver::new(
-            canonical_root.path().to_path_buf(),
+            physical_source_root.path().to_path_buf(),
         ));
         let reload_controller = Arc::new(ActivationReloadController::new(
             daemon_root.path().to_path_buf(),
@@ -3053,10 +3156,17 @@ mod tests {
             Duration::from_millis(1),
             Duration::from_millis(250),
         ));
-        let runtime_roots =
-            MountRuntimeRoots::from_mount(canonical_root.path(), Some(daemon_root.path()));
+        let source_roots = SourceRoots::resolve(&canonical_identity_root).unwrap();
+        let runtime_roots = MountRuntimeRoots::from_source(&source_roots, Some(daemon_root.path()));
 
-        assert_eq!(runtime_roots.notify_canonical_root(), canonical_root.path());
+        assert_eq!(
+            runtime_roots.notify_canonical_root(),
+            canonical_identity_root
+        );
+        assert_eq!(
+            runtime_roots.physical_source_root(),
+            physical_source_root.path().canonicalize().unwrap()
+        );
         assert_eq!(runtime_roots.daemon_root(), daemon_root.path());
 
         let ctrl = build_notify_controller(
@@ -3082,7 +3192,13 @@ mod tests {
             assert!(
                 event
                     .canonical_skill_dir
-                    .starts_with(canonical_root.path().to_string_lossy().as_ref())
+                    .starts_with(canonical_identity_root.to_string_lossy().as_ref())
+            );
+            assert!(
+                !event
+                    .canonical_skill_dir
+                    .starts_with(physical_source_root.path().to_string_lossy().as_ref()),
+                "notify canonicalSkillDir must preserve symlink identity"
             );
             assert!(
                 !event
@@ -3116,7 +3232,7 @@ mod tests {
             assert!(
                 !event
                     .skill_dir
-                    .starts_with(canonical_root.path().to_string_lossy().as_ref()),
+                    .starts_with(canonical_identity_root.to_string_lossy().as_ref()),
                 "protocol event skillDir must not use canonical root"
             );
         }

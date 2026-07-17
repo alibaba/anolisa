@@ -80,8 +80,9 @@ the current activation mapping stays in place.
 
 Notify and activation use two explicit roots:
 
-- **Canonical root** (`source_canon` in the CLI) is the user-visible root that
-  callers and the ledger address. Notify derives
+- **Canonical root** (`canonical_identity_root` in the CLI) is the absolute,
+  lexically normalized user-visible identity that callers and the ledger
+  address. It does not follow a source-root symlink. Notify derives
   `canonicalSkillDir = canonical_root.join(skillId)`.
 - **Live root** (`daemon_root` in the CLI) is the physical source that remains
   reachable after an in-place FUSE over-mount. It is the configured backing
@@ -122,6 +123,11 @@ The sec-core consumer switches directly to v2 and must:
    scan/resolve pass; and
 5. return `schemaVersion=2` with `accepted=true` only after accepting the
    event.
+
+An in-place notify v2 mount starts only when the authenticated S1 resolver
+control plane is enabled. The canonical path becomes the FUSE over-mount after
+startup, so a daemon without the resolver could otherwise mistake that view for
+the physical live source.
 
 ## Deferred Work
 

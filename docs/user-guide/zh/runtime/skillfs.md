@@ -416,7 +416,9 @@ Agent 或 installer 通过 SkillFS 写入
 `--activation-events-log`，因为 SkillFS 需要触发源来启动 polling。
 
 对于 in-place activation 和 notify mount，需要设置 `--ledger-backing-root`，给
-daemon 一个可见的 backing source path：
+daemon 一个可见的 backing source path，并启用 authenticated resolver。Notify v2
+只携带 canonical identity，因此缺少 `--trusted-peer-exe` 的 in-place notify 配置会
+在启动阶段被拒绝：
 
 ```bash
 skillfs mount /path/to/skills /path/to/skills \
@@ -424,6 +426,7 @@ skillfs mount /path/to/skills /path/to/skills \
   --security \
   --activation-mode file \
   --notify-socket /run/skill-ledger.sock \
+  --trusted-peer-exe /usr/bin/python3.11 \
   --ledger-backing-root /run/user/$UID/skillfs-ledger/source
 ```
 
@@ -440,12 +443,25 @@ skillfs mount /path/to/skills /mnt/skillfs \
   --security \
   --activation-mode file \
   --control-socket /run/skillfs/control.sock \
-  --trusted-peer-exe /usr/bin/skill-ledger
+  --trusted-peer-exe /usr/bin/python3.11
 ```
 
 该 socket 要求 `--security --activation-mode file`，与 `--decision-command` 互斥，
 并且必须指定可信 peer executable。Peer 校验使用 Linux peer credential 和
 executable identity。
+
+packaged AgentSecCore daemon 使用 `sys.executable` 启动 Skill Ledger worker，该路径
+解析为 `/usr/bin/python3.11`；worker 并不是 `/usr/bin/skill-ledger` executable。
+使用自定义 virtual environment 时，请用启动 daemon 的同一个 interpreter 执行以下
+命令，并配置它输出的真实路径：
+
+```bash
+/path/to/ledger/python -c 'import os, sys; print(os.path.realpath(sys.executable))'
+```
+
+这个 M1 executable gate 信任的是 Python interpreter，而不是某个特定 module。请让
+SkillFS 与 Ledger worker 运行在相同 UID/security domain，并注意同一 UID 下使用相同
+interpreter 的其他进程也会通过 executable identity 校验。
 
 #### Endpoint 与优先级
 
@@ -485,9 +501,9 @@ peer 为配置错误；两者都没有则 control plane 保持关闭。默认 en
   不触发 scan、manifest、policy decide 或 activation write。
 - **`managed=false`**——请求格式合法且 `canonicalSkillDir` 是位于受管 root 之外的
   合法绝对路径（`reason: not_managed`）。这是正常成功响应，调用方可直接管理该目录。
-- **structured error**——非绝对路径、非法 `..` 段、symlink/path 逃逸、管理/保留目录、
-  Skill 目录不存在、布局无效/缺少 `SKILL.md`、live source 不可安全访问，或 peer
-  认证失败。这些绝不会伪装成 `managed=false`。
+- **structured error**——非绝对或非规范路径（包括重复或末尾 `/`）、非法 `..` 段、
+  symlink/path 逃逸、管理/保留目录、Skill 目录不存在、布局无效/缺少 `SKILL.md`、
+  live source 不可安全访问，或 peer 认证失败。这些绝不会伪装成 `managed=false`。
 
 skillId 由 canonical 相对路径推导，因此 flat（`my-skill`）和 Hermes nested
 （`apple/apple-notes`）布局都会解析为完整 id。S1 只实现单 source runtime；该 endpoint
@@ -503,9 +519,10 @@ skillId 由 canonical 相对路径推导，因此 flat（`my-skill`）和 Hermes
 （`weather`），Hermes id 保留两个分量（`category/weather`）。SkillFS 会排序、去重
 paths；空数组表示需要重新扫描整个 Skill，也用于超过路径数量上限的情况。
 
-canonical 目录由用户可见的 source root 推导。物理 live/backing root 只供 activation
-和 S1 resolver 使用，因此通知不会暴露 backing 路径。daemon 必须直接接受 v2，并返回
-`schemaVersion=2` 与 `accepted=true`；不提供 v1 fallback 或协商。
+canonical 目录由不跟随 source-root symlink 的绝对、词法规范化 source identity
+推导。物理 live/backing root 只供 activation 和 S1 resolver 使用，因此通知不会暴露
+backing 路径。daemon 必须直接接受 v2，并返回 `schemaVersion=2` 与
+`accepted=true`；不提供 v1 fallback 或协商。
 
 ### Trusted Mount-path Writer
 

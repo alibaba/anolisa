@@ -126,6 +126,7 @@ The following are structured errors, never disguised as `managed=false`:
 | --- | --- |
 | protocol / request format error | `invalid_request` |
 | non-absolute path | `invalid_canonical_path` |
+| repeated or trailing path separator | `invalid_canonical_path` |
 | illegal `..` (or `.`) segment | `invalid_canonical_path` |
 | symlink / path escape | `invalid_canonical_path` |
 | management / reserved directory | `invalid_canonical_path` |
@@ -142,19 +143,21 @@ system is not redesigned.
 The resolver context stores the two roots explicitly rather than relying
 on a single ambiguous `source_root`:
 
-- **canonical root** — the user-visible Skill root the ledger addresses
-  (`source_canon` in the CLI). Incoming `canonicalSkillDir` paths are
-  checked for lexical containment against it, and the relative skill id is
-  derived from it.
+- **canonical root** — the absolute, lexically normalized user-visible
+  Skill identity the ledger addresses (`canonical_identity_root` in the
+  CLI). It does not follow a source-root symlink. Incoming
+  `canonicalSkillDir` paths are checked for lexical containment against it,
+  and the relative skill id is derived from it.
 - **live root** — the backing/daemon-facing root whose physical content
   stays accessible after the FUSE over-mount (`daemon_root` in the CLI:
-  the ledger backing root when configured, otherwise the source). The
-  live Skill directory is opened under this root, and its `(dev, ino)` is
-  reported.
+  the ledger backing root when configured, otherwise the realpath-resolved
+  physical source). The live Skill directory is opened under this root,
+  and its `(dev, ino)` is reported.
 
-In the common single-source in-place mount the two resolve to the same
-tree (or a bind-mount alias of it), but they are kept separate so a query
-never crosses the canonical / FUSE / live boundary implicitly.
+The roots can use different path strings even without a backing root when
+the configured source is a symlink. They still identify the same tree, but
+are kept separate so a query never crosses the canonical / FUSE / live
+boundary implicitly.
 
 The control plane is a **daemon-facing operation**: in an in-place mount
 the source path is a FUSE over-mount, so resolving against it would return
@@ -172,10 +175,11 @@ Resolution is O(path depth) and never scans the whole Skill root:
 
 1. **Raw-string lexical syntax** — validate the raw request string before
    constructing a `Path` or doing containment: reject a NUL byte, a
-   non-absolute path, and any `.`/`..` segment. This runs on the raw bytes
-   because `Path::components()` would silently normalize an embedded `.`
-   (e.g. `/root/./skill`) and a NUL would only surface later — an illegal
-   request must never fall through to `managed=false`.
+   non-absolute path, repeated separators, a trailing separator, and any
+   `.`/`..` segment. This runs on the raw bytes because
+   `Path::components()` would silently normalize aliases such as
+   `/root//skill`, `/root/skill/`, and `/root/./skill`; an illegal request
+   must never fall through to `managed=false`.
 2. **Lexical containment** — the user path is *not* canonicalized;
    containment against the canonical root is purely component-wise. A
    valid path outside the root becomes `managed=false`.
