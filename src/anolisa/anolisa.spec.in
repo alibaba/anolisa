@@ -124,7 +124,10 @@ install -m 0644 manifests/repo.toml %{buildroot}%{_sysconfdir}/anolisa/repo.toml
 #%%doc %%{_docdir}/%%{name}/README.md
 
 %changelog
-* Tue Jul 14 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Thu Jul 16 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- `anolisa status` no longer reports healthy RPM-managed components as failed.
+
+* Tue Jul 14 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.5-1
 - `anolisa repair` now recovers interrupted fresh RPM installs after the package has been installed.
 - `anolisa update --check` now reports RPM components whose saved state requires reconciliation.
 - Install, adopt, and upgrade commands now require interrupted RPM installs to be repaired before continuing.

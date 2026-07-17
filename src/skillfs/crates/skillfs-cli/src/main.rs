@@ -344,6 +344,18 @@ async fn main() {
     let cli = Cli::parse();
 
     let pid = std::process::id();
+
+    // Arm the SLS ops guard before any logging output so a broken stdout /
+    // stderr pipe that closes before the first write still yields exactly one
+    // ops record via Drop. Stop / Supervise are internal and left unlogged.
+    let sls_guard = match &cli.command {
+        Commands::Mount { .. } => Some(SlsOpsGuard::new("mount")),
+        Commands::Classify { .. } => Some(SlsOpsGuard::new("classify")),
+        Commands::Validate { .. } => Some(SlsOpsGuard::new("validate")),
+        Commands::List { .. } => Some(SlsOpsGuard::new("list")),
+        Commands::Stop { .. } | Commands::Supervise { .. } => None,
+    };
+
     let max_level = if cli.verbose {
         tracing::Level::DEBUG
     } else {
@@ -400,13 +412,17 @@ async fn main() {
 
     info!(pid, "starting skillfs CLI");
 
-    if let Err(e) = run(cli, raw_args).await {
+    if let Err(e) = run(cli, raw_args, sls_guard).await {
         error!(error = %e, "command failed");
         std::process::exit(1);
     }
 }
 
-async fn run(cli: Cli, raw_args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+async fn run(
+    cli: Cli,
+    raw_args: Vec<String>,
+    guard: Option<SlsOpsGuard>,
+) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Mount {
             source,
@@ -441,15 +457,13 @@ async fn run(cli: Cli, raw_args: Vec<String>) -> Result<(), Box<dyn std::error::
                 // as a foreground worker using the preserved raw arguments.
                 // Log this public mount invocation too — the detached worker's
                 // own mount record is separate.
-                let start = std::time::Instant::now();
                 let result = managed::run_client(&raw_args, &source, &mountpoint);
-                sls_ops::log_command("mount", start, err_reason(&result));
+                finish_sls(guard, err_reason(&result));
                 return result;
             }
             // Log the mount startup attempt as a best-effort ops record. The
             // mount may be long-running, so this captures startup success or
             // failure; the mount-session summary writer remains untouched.
-            let start = std::time::Instant::now();
             let result = cmd_mount(
                 source,
                 mountpoint,
@@ -477,7 +491,7 @@ async fn run(cli: Cli, raw_args: Vec<String>) -> Result<(), Box<dyn std::error::
                 skill_layout,
             )
             .await;
-            sls_ops::log_command("mount", start, err_reason(&result));
+            finish_sls(guard, err_reason(&result));
             result
         }
         Commands::Classify {
@@ -485,13 +499,11 @@ async fn run(cli: Cli, raw_args: Vec<String>) -> Result<(), Box<dyn std::error::
             primary_count,
             dry_run,
         } => {
-            let start = std::time::Instant::now();
             let result = cmd_classify(source, primary_count, dry_run).await;
-            sls_ops::log_command("classify", start, err_reason(&result));
+            finish_sls(guard, err_reason(&result));
             result
         }
         Commands::Validate { source, format } => {
-            let start = std::time::Instant::now();
             let (result, validation_failed) = cmd_validate(source, format).await;
             // A validation failure exits non-zero but is not a command error;
             // record it with a concise err_reason before exiting.
@@ -500,7 +512,9 @@ async fn run(cli: Cli, raw_args: Vec<String>) -> Result<(), Box<dyn std::error::
                 None if validation_failed => Some("validation failed".to_string()),
                 None => None,
             };
-            sls_ops::log_command("validate", start, reason);
+            // Write now, not on drop: process::exit below skips destructors, so
+            // the validation-failure record must land before the exit.
+            finish_sls(guard, reason);
             if result.is_ok() && validation_failed {
                 std::process::exit(1);
             }
@@ -510,9 +524,8 @@ async fn run(cli: Cli, raw_args: Vec<String>) -> Result<(), Box<dyn std::error::
             source,
             enabled_only,
         } => {
-            let start = std::time::Instant::now();
             let result = cmd_list(source, enabled_only).await;
-            sls_ops::log_command("list", start, err_reason(&result));
+            finish_sls(guard, err_reason(&result));
             result
         }
         Commands::Stop { mountpoint } => managed::run_stop(&mountpoint),
@@ -523,6 +536,58 @@ async fn run(cli: Cli, raw_args: Vec<String>) -> Result<(), Box<dyn std::error::
 /// Extract a concise error string from a command result for the SLS ops log.
 fn err_reason<T>(result: &Result<T, Box<dyn std::error::Error>>) -> Option<String> {
     result.as_ref().err().map(|e| e.to_string())
+}
+
+/// Guarantees each CLI command emits exactly one SLS ops record on every exit
+/// path. It is armed in `main` before logging is initialized, so the `Drop`
+/// fallback is live if tracing's internal error report panics after an early
+/// EPIPE. The same fallback handles later `println!`/`eprintln!` broken-pipe
+/// panics. `finish` writes the record immediately and disarms the guard; if the
+/// command unwinds first, `Drop` writes a single `err_reason="panic"` record
+/// instead.
+///
+/// `finish` writes eagerly rather than deferring to `Drop` because
+/// `process::exit` (used by `validate` on validation failure) skips
+/// destructors — the record must already be on disk before any explicit exit.
+/// Covers panic unwinding only, not `abort`/SIGKILL, which never run drops.
+struct SlsOpsGuard {
+    ops_name: &'static str,
+    start: std::time::Instant,
+    // `true` until `finish` runs; gates the panic fallback in `Drop`.
+    armed: bool,
+}
+
+impl SlsOpsGuard {
+    fn new(ops_name: &'static str) -> Self {
+        Self {
+            ops_name,
+            start: std::time::Instant::now(),
+            armed: true,
+        }
+    }
+
+    /// Write the ops record now and disarm the panic fallback.
+    fn finish(mut self, reason: Option<String>) {
+        self.armed = false;
+        sls_ops::log_command(self.ops_name, self.start, reason);
+    }
+}
+
+impl Drop for SlsOpsGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            // Reached only when the command unwound before `finish`.
+            sls_ops::log_command(self.ops_name, self.start, Some("panic".to_string()));
+        }
+    }
+}
+
+/// Finish the command's SLS guard, if any, writing exactly one ops record. A
+/// no-op for the internal Stop/Supervise commands, which carry no guard.
+fn finish_sls(guard: Option<SlsOpsGuard>, reason: Option<String>) {
+    if let Some(guard) = guard {
+        guard.finish(reason);
+    }
 }
 
 // ---------------------------------------------------------------------------

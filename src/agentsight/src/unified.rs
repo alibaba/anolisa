@@ -284,13 +284,23 @@ impl AgentSight {
             pid_agent_name_cache.put(agent.pid, agent.agent_info.name.clone());
         }
         for result in &conn_results {
-            // Prefer cmdline agent name over domain fallback if the process matches a rule.
-            let agent_name = scanner
-                .try_match_process(result.pid)
-                .map(|a| a.agent_info.name)
-                .unwrap_or_else(|| format!("domain:{}", result.domain));
-            Self::attach_process_internal(&mut probes, result.pid, &agent_name);
-            pid_agent_name_cache.put(result.pid, agent_name);
+            // Agent name comes from a config rule, else the process comm — never
+            // the endpoint domain, never a per-event thread name.
+            let agent_name = Self::conn_scan_agent_name(&scanner, result.pid);
+            if let Some(ref name) = agent_name {
+                pid_agent_name_cache.put(result.pid, name.clone());
+            }
+            log::debug!(
+                "Connection scan: pid={} connected to {}, agent_name={:?}",
+                result.pid,
+                result.domain,
+                agent_name
+            );
+            Self::attach_process_internal(
+                &mut probes,
+                result.pid,
+                agent_name.as_deref().unwrap_or("unknown"),
+            );
         }
         if !conn_results.is_empty() {
             log::info!(
@@ -580,6 +590,19 @@ impl AgentSight {
     /// Attach SSL probes to a specific agent process
     pub fn attach_process(&mut self, pid: u32, agent_name: &str) {
         Self::attach_process_internal(&mut self.probes, pid, agent_name);
+    }
+
+    /// Resolve the agent name to cache for a connection-scan hit.
+    ///
+    /// Prefers a cmdline config-rule match; otherwise falls back to the process
+    /// comm (`/proc/<pid>/comm`). Returns `None` only when neither is available
+    /// (comm unreadable) — such a pid is left uncached for runtime resolution.
+    /// Never returns the endpoint domain.
+    fn conn_scan_agent_name(scanner: &AgentScanner, pid: u32) -> Option<String> {
+        scanner
+            .try_match_process(pid)
+            .map(|a| a.agent_info.name)
+            .or_else(|| crate::discovery::scanner::read_comm(pid))
     }
 
     /// Internal helper to attach SSL probes to a process
@@ -1959,6 +1982,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir
+    }
+
+    // ── Tests for conn_scan_agent_name (agent identity, never a domain) ──
+
+    #[test]
+    fn test_conn_scan_agent_name_uses_matched_rule() {
+        // When a cmdline rule matches, the configured agent name is returned.
+        let rules = vec![crate::config::CmdlineRule {
+            patterns: vec!["*".to_string()],
+            agent_name: Some("MatchedAgent".to_string()),
+            allow: true,
+        }];
+        let scanner = AgentScanner::from_rules(&rules, &[]);
+        let name = AgentSight::conn_scan_agent_name(&scanner, std::process::id());
+        assert_eq!(name, Some("MatchedAgent".to_string()));
+    }
+
+    #[test]
+    fn test_conn_scan_agent_name_falls_back_to_process_comm() {
+        // No matching rule → the process comm, never a "domain:<host>" string.
+        let scanner = AgentScanner::from_rules(&[], &[]);
+        let name = AgentSight::conn_scan_agent_name(&scanner, std::process::id());
+        assert!(name.is_some());
+        assert!(!name.unwrap().starts_with("domain:"));
+    }
+
+    #[test]
+    fn test_conn_scan_agent_name_none_for_dead_pid() {
+        // Unmatched and unreadable comm → None (left uncached).
+        let scanner = AgentScanner::from_rules(&[], &[]);
+        assert!(AgentSight::conn_scan_agent_name(&scanner, u32::MAX).is_none());
     }
 
     // ── Tests for complete_deferred_genai + complete_pending guard ──

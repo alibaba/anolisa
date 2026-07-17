@@ -202,6 +202,36 @@ agentsight serve --db /path/to/genai_events.db
 
 ### 环境要求
 
+#### 系统软件包
+
+构建前需安装以下系统软件包：
+
+**Anolis OS / CentOS / RHEL:**
+```bash
+sudo yum install -y openssl-devel elfutils-libelf-devel perl-IPC-Cmd libbpf-devel clang llvm bpftool
+```
+
+**Ubuntu / Debian:**
+```bash
+sudo apt install -y pkg-config libssl-dev libelf-dev libbpf-dev clang llvm linux-tools-common
+```
+
+| 软件包 | 用途 |
+|--------|------|
+| `openssl-devel` | OpenSSL 本地编译（通过 `openssl = { features = ["vendored"] }` 使用） |
+| `elfutils-libelf-devel` | libbpf-sys crate（提供 `gelf.h`、`libelf.h`） |
+| `perl-IPC-Cmd` | OpenSSL 源码构建（Perl IPC::Cmd 模块） |
+| `libbpf-devel` | eBPF 程序编译和加载 |
+| `clang` / `llvm` | eBPF C 程序编译为 BPF 字节码 |
+| `bpftool` | eBPF skeleton 生成 |
+
+可使用包含的依赖检查脚本验证：
+```bash
+./scripts/check-deps.sh
+```
+
+#### 版本要求
+
 | 组件 | 版本 |
 |------|------|
 | Linux 内核 | >= 5.8（需要 BTF 支持） |
@@ -213,6 +243,11 @@ agentsight serve --db /path/to/genai_events.db
 
 ```bash
 cd src/agentsight
+
+# 验证依赖（推荐）
+./scripts/check-deps.sh
+
+# 构建
 cargo build --release
 ```
 

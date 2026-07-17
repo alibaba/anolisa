@@ -1,4 +1,4 @@
-%define anolis_release 2
+%define anolis_release 3
 %global debug_package %{nil}
 
 Name:           tokenless
@@ -448,6 +448,9 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Thu Jul 16 2026 Lin Yan <linyan.lin@alibaba-inc.com> - 0.7.0-3
+- fix(tokenless): declare all shipped adapters (claude-code, codex, cosh, qoder) in RPM component contract template; exclude generated component.toml from source tarball to prevent stale contracts (GH-1470)
+
 * Mon Jul 13 2026 Lin Yan <linyan.lin@alibaba-inc.com> - 0.7.0-1
 - feat(tokenless): add MCP `tokenless_retrieve` stdio server (`tokenless mcp serve`); closes the stash MCP gap vs Headroom CCR's `headroom_retrieve`
 - feat(tokenless): complete reversible-compression (stash) coverage across string, depth, and SchemaCompressor description truncation paths; add `--no-stash`/`--stash-db` to `compress-schema`; SqliteStore lazy TTL purge

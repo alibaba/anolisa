@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-07-16
+
+### Fixed
+
+- `anolisa status` no longer reports healthy RPM-managed components as failed.
+
 ## [0.2.5] - 2026-07-14
 
 ### Added
@@ -511,6 +517,12 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.2.6] - 2026-07-16
+
+### 修复
+
+- `anolisa status` 不再误报正常 RPM 组件失败。
 
 ## [0.2.5] - 2026-07-14
 

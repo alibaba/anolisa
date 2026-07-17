@@ -11,6 +11,15 @@
             "statusMessage": "Scanning command for security issues..."
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/observability_hook.py",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
@@ -33,6 +42,11 @@
             "command": "python3 ${PLUGIN_ROOT}/hooks/skill_ledger_hook.py",
             "timeout": 10,
             "statusMessage": "Checking skill integrity..."
+          },
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/observability_hook.py",
+            "timeout": 10
           }
         ]
       }
@@ -45,6 +59,22 @@
             "command": "python3 ${PLUGIN_ROOT}/hooks/pii_checker_hook.py",
             "timeout": 10,
             "statusMessage": "Checking for PII in tool output..."
+          },
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/observability_hook.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/observability_hook.py",
+            "timeout": 10
           }
         ]
       }

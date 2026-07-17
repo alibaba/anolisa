@@ -98,6 +98,7 @@ do_install() {
     info "   - prompt_scanner_hook.py (UserPromptSubmit)"
     info "   - pii_checker_hook.py    (UserPromptSubmit + PostToolUse)"
     info "   - skill_ledger_hook.py   (UserPromptSubmit)"
+    info "   - observability_hook.py  (UserPromptSubmit + PreToolUse + PostToolUse + Stop)"
     echo ""
     info "启动命令（可选环境变量）："
     info "  CODE_SCANNER_MODE=deny PROMPT_SCANNER_MODE=deny SKILL_LEDGER_MODE=deny PII_CHECKER_MODE=deny codex"

@@ -1,0 +1,91 @@
+{
+  "name": "agent-sec-core-qwen-code-extension",
+  "version": "0.8.0",
+  "description": "ANOLISA security integration for Qwen Code",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "agent-sec-observability",
+            "command": "python3 \"${extensionPath}${/}hooks${/}observability_hook.py\"",
+            "description": "Record the Qwen Code user prompt event",
+            "timeout": 10000,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "agent-sec-observability",
+            "command": "python3 \"${extensionPath}${/}hooks${/}observability_hook.py\"",
+            "description": "Record the Qwen Code pre-tool event",
+            "timeout": 10000,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "agent-sec-observability",
+            "command": "python3 \"${extensionPath}${/}hooks${/}observability_hook.py\"",
+            "description": "Record the Qwen Code successful tool event",
+            "timeout": 10000,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "agent-sec-observability",
+            "command": "python3 \"${extensionPath}${/}hooks${/}observability_hook.py\"",
+            "description": "Record the Qwen Code failed tool event",
+            "timeout": 10000,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "agent-sec-observability",
+            "command": "python3 \"${extensionPath}${/}hooks${/}observability_hook.py\"",
+            "description": "Record the Qwen Code completed agent run",
+            "timeout": 10000,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "agent-sec-observability",
+            "command": "python3 \"${extensionPath}${/}hooks${/}observability_hook.py\"",
+            "description": "Record the Qwen Code failed agent run",
+            "timeout": 10000,
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,6 +1,6 @@
 {
   "name": "@anolisa/cli",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "ANOLISA CLI — Agentic OS component lifecycle manager",
   "type": "module",
   "license": "Apache-2.0",
@@ -35,7 +35,7 @@
     "linux"
   ],
   "optionalDependencies": {
-    "@anolisa/cli-linux-x64": "0.2.5",
-    "@anolisa/cli-linux-arm64": "0.2.5"
+    "@anolisa/cli-linux-x64": "0.2.6",
+    "@anolisa/cli-linux-arm64": "0.2.6"
   }
 }

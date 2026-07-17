@@ -44,7 +44,7 @@ class TestTraceContext:
         data = {
             "trace_id": "t1",
             "session_id": "s1",
-            "run_id": "r1",
+            "turn_id": "r1",
             "tool_use_id": "c1",
             "call_id": "c2",
         }
@@ -85,6 +85,15 @@ class TestTraceContext:
         data = {"trace_id": "t1", "session_id": "s1"}
         ctx = trace_context.trace_context(data)
         assert ctx == {"agent_name": "codex", "trace_id": "t1", "session_id": "s1"}
+
+    def test_turn_id_is_preferred_over_legacy_run_id(self):
+        data = {"turn_id": "turn-1", "run_id": "legacy-run"}
+        ctx = trace_context.trace_context(data)
+        assert ctx == {"agent_name": "codex", "run_id": "turn-1"}
+
+    def test_legacy_run_id_remains_supported(self):
+        ctx = trace_context.trace_context({"run_id": "legacy-run"})
+        assert ctx == {"agent_name": "codex", "run_id": "legacy-run"}
 
 
 class TestWithTraceContext:

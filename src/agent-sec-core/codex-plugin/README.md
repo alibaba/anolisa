@@ -1,6 +1,7 @@
 # agent-sec-core Codex 插件
 
-为 Codex CLI 提供实时安全防护，包括代码扫描、Prompt 注入检测、PII 敏感信息检查和 Skill 完整性验证。
+为 Codex CLI 提供实时安全防护，包括代码扫描、Prompt 注入检测、PII 敏感信息检查和 Skill 完整性验证，
+并提供 Turn/Tool 生命周期可观测记录。
 
 ## 快速安装
 
@@ -125,7 +126,8 @@ codex-plugin/
         ├── prompt_scanner_hook.py          ← UserPromptSubmit: Prompt 注入检测
         ├── pii_checker_hook.py             ← UserPromptSubmit + PostToolUse: PII 检测
         ├── skill_ledger_hook.py            ← UserPromptSubmit: Skill 完整性验证
-        └── trace_context.py               ← 链路追踪工具库
+        ├── observability_hook.py           ← Turn/Tool 生命周期可观测记录
+        └── trace_context.py                ← 链路追踪工具库
 ```
 
 ## Hook 说明
@@ -136,6 +138,25 @@ codex-plugin/
 | `prompt_scanner_hook.py` | UserPromptSubmit | (all) | 检测用户输入中的 prompt 注入攻击 |
 | `pii_checker_hook.py` | UserPromptSubmit + PostToolUse | (all) | 检测用户输入和工具输出中的 PII，deny 模式下阻断对应 payload（不支持脱敏放行） |
 | `skill_ledger_hook.py` | UserPromptSubmit | (all) | 解析 prompt 中的 $skill-name，验证 skill 文件完整性和签名 |
+| `observability_hook.py` | UserPromptSubmit + PreToolUse + PostToolUse + Stop | (all) | 记录 Turn/Tool 生命周期；不改变 Codex 决策 |
+
+## 可观测能力
+
+Codex Hook 与 `agent-sec-cli observability` 的映射如下：
+
+| Codex Hook | Observability Hook | 关联字段 |
+|------------|--------------------|----------|
+| `UserPromptSubmit` | `before_agent_run` | `session_id`、`turn_id` |
+| `PreToolUse` | `before_tool_call` | `session_id`、`turn_id`、`tool_use_id` |
+| `PostToolUse` | `after_tool_call` | `session_id`、`turn_id`、`tool_use_id` |
+| `Stop` | `after_agent_run` | `session_id`、`turn_id` |
+
+其中 `session_id → sessionId`、`turn_id → runId`、`tool_use_id → toolCallId`。
+缺少必需关联字段时会跳过该条记录，不生成伪 ID。Prompt、工具参数、工具结果和最终回复
+会先通过本地 PII Checker 脱敏；脱敏失败时丢弃对应字段。所有错误均 fail-open。
+
+Codex 当前没有 `BeforeModel` / `AfterModel` Hook，因此本插件不会生成
+`before_llm_call` / `after_llm_call` 或伪造 Token、TTFB、模型请求耗时等指标。
 
 ## 调试
 
@@ -172,12 +193,21 @@ echo '{"hook_event_name":"UserPromptSubmit","prompt":"我的手机号是13800138
 # 测试 PII 检测（PostToolUse）
 echo '{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"cat contacts.txt"},"tool_response":"张三 13912345678","session_id":"test","turn_id":"t1","cwd":"/tmp","model":"o3","permission_mode":"default","tool_use_id":"call_1"}' | \
   PII_CHECKER_MODE=deny python3 hooks-plugin/hooks/pii_checker_hook.py
+
+# 测试可观测 PreToolUse（输出 {}，记录写入 observability JSONL/SQLite）
+echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"pwd"},"session_id":"test","turn_id":"t1","tool_use_id":"call_1","model":"o3"}' | \
+  python3 hooks-plugin/hooks/observability_hook.py
 ```
 
-预期输出：`{"decision": "block", "reason": "..."}`
+阻断模式扫描命中时输出：`{"decision": "block", "reason": "..."}`；可观测 Hook
+始终输出 `{}`，不会改变 Codex 行为。可通过以下命令查看最近一次会话：
+
+```bash
+agent-sec-cli observability report --last
+```
 
 ## 注意事项
 
 1. **hook 脚本内容变更后**，下次 Codex 启动会重新弹出 Trust Review
-2. **`agent-sec-cli` 不在 PATH 时**，hook 会 fail-open（静默放行），不会阻断正常使用
+2. **`agent-sec-cli` 不在 PATH 时**，hook 会 fail-open，不会阻断正常使用；可观测 Hook 仅向 stderr 写入不含 payload 的诊断
 3. **Codex 必须在真实 TTY 中运行**，不能在子进程或管道中启动

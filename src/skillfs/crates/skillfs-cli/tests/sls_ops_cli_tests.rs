@@ -4,8 +4,9 @@
 //! ops log. Tests point the writer at a temp file via `SKILLFS_SLS_OPS_PATH`
 //! (validated to live under `/tmp/`) and assert the appended record.
 
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn bin_path() -> &'static str {
     env!("CARGO_BIN_EXE_skillfs")
@@ -60,6 +61,56 @@ fn run_skillfs(args: &[&str], ops_log: &Path) -> std::process::Output {
         .env("SKILLFS_SLS_OPS_PATH", ops_log)
         .output()
         .expect("invoke skillfs")
+}
+
+/// Spawn `skillfs` and close the read end of the child's stdout pipe before it
+/// prints, so the first `println!` fails with EPIPE and the process panics —
+/// the broken-pipe scenario from issue #1506 (`skillfs list | head -5`).
+/// Dropping `ChildStdout` closes the fd; stderr is discarded so tracing and the
+/// panic message never block.
+fn run_with_broken_stdout(args: &[&str], ops_log: &Path) -> std::process::ExitStatus {
+    let mut child = Command::new(bin_path())
+        .args(args)
+        .env("SKILLFS_SLS_OPS_PATH", ops_log)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn skillfs");
+    drop(child.stdout.take());
+    child.wait().expect("wait for skillfs")
+}
+
+/// Reproduce `skillfs <cmd> 2>&1 | <reader that closes immediately>` (the
+/// issue's own repro). Creates a pipe and closes its read end *before*
+/// spawning, so the child inherits a reader-less pipe on both stdout and
+/// stderr. The first tracing write in `main` hits EPIPE; tracing's default
+/// internal error report then writes to the closed stderr and panics before
+/// the command body runs. This has no dependence on scheduling or output size
+/// and covers both the earliest possible close and the guard armed before
+/// logging. Close-on-exec prevents subprocesses spawned by parallel tests
+/// from accidentally inheriting either endpoint during setup.
+fn run_with_merged_output_closed(args: &[&str], ops_log: &Path) -> std::process::ExitStatus {
+    let mut fds = [0_i32; 2];
+    // SAFETY: `pipe2` writes two fresh, close-on-exec fds into `fds` on success.
+    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    assert_eq!(rc, 0, "pipe2() failed: {}", std::io::Error::last_os_error());
+    // SAFETY: a successful `pipe2` returned two fresh fds owned by this test.
+    let read_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+    let write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+    let write_dup = write_fd.try_clone().expect("clone pipe write fd");
+
+    // Close the read end now: the child inherits a reader-less pipe, so its
+    // first write is guaranteed to hit EPIPE regardless of timing.
+    drop(read_fd);
+
+    let mut child = Command::new(bin_path())
+        .args(args)
+        .env("SKILLFS_SLS_OPS_PATH", ops_log)
+        .stdout(Stdio::from(write_fd))
+        .stderr(Stdio::from(write_dup))
+        .spawn()
+        .expect("spawn skillfs");
+    child.wait().expect("wait for skillfs")
 }
 
 #[test]
@@ -164,4 +215,245 @@ fn missing_ops_log_is_not_created_and_command_succeeds() {
         !ops_log.exists(),
         "CLI must not create the missing ops log file"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Broken-pipe regression tests (issue #1506)
+//
+// When a downstream reader closes early (`skillfs list | head -5` or the
+// issue's own `skillfs list 2>&1 | head -5`), the CLI's `println!`/`eprintln!`
+// panics on EPIPE and unwinds. The SLS ops record must still be written exactly
+// once via the drop guard, with `err_reason="panic"`.
+//
+// Two channels are covered: stdout-only (panic in the command body, after the
+// guard) and merged stdout+stderr closed before any output (panic at the first
+// logging write in `main`, exercising the guard armed before logging).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn list_writes_one_record_when_stdout_reader_closes_early() {
+    let dir = tempfile::tempdir_in("/tmp").expect("tempdir");
+    let ops_log = make_ops_log(dir.path());
+
+    let source = tempfile::tempdir_in("/tmp").expect("source tempdir");
+    create_skill_dir(source.path(), "good-skill", VALID_SKILL);
+
+    let status = run_with_broken_stdout(&["list", source.path().to_str().unwrap()], &ops_log);
+    assert!(
+        !status.success(),
+        "list must not exit 0 once its stdout pipe breaks"
+    );
+
+    let records = read_records(&ops_log);
+    assert_eq!(
+        records.len(),
+        1,
+        "exactly one list ops record must survive the broken pipe"
+    );
+    assert_eq!(records[0]["ops_name"], "list");
+    assert_eq!(records[0]["err_reason"], "panic");
+}
+
+#[test]
+fn classify_dry_run_writes_one_record_when_stdout_reader_closes_early() {
+    let dir = tempfile::tempdir_in("/tmp").expect("tempdir");
+    let ops_log = make_ops_log(dir.path());
+
+    let source = tempfile::tempdir_in("/tmp").expect("source tempdir");
+    create_skill_dir(source.path(), "good-skill", VALID_SKILL);
+
+    let status = run_with_broken_stdout(
+        &["classify", source.path().to_str().unwrap(), "--dry-run"],
+        &ops_log,
+    );
+    assert!(
+        !status.success(),
+        "classify must not exit 0 once its stdout pipe breaks"
+    );
+
+    let records = read_records(&ops_log);
+    assert_eq!(
+        records.len(),
+        1,
+        "exactly one classify ops record must survive the broken pipe"
+    );
+    assert_eq!(records[0]["ops_name"], "classify");
+    assert_eq!(records[0]["err_reason"], "panic");
+    // --dry-run must not persist a config even when it panics mid-print.
+    assert!(
+        !source.path().join("skillfs-views.toml").exists(),
+        "classify --dry-run must not write skillfs-views.toml"
+    );
+}
+
+#[test]
+fn validate_writes_one_record_when_stdout_reader_closes_early() {
+    let dir = tempfile::tempdir_in("/tmp").expect("tempdir");
+    let ops_log = make_ops_log(dir.path());
+
+    let source = tempfile::tempdir_in("/tmp").expect("source tempdir");
+    create_skill_dir(source.path(), "good-skill", VALID_SKILL);
+
+    let status = run_with_broken_stdout(&["validate", source.path().to_str().unwrap()], &ops_log);
+    assert!(
+        !status.success(),
+        "validate must not exit 0 once its stdout pipe breaks"
+    );
+
+    let records = read_records(&ops_log);
+    assert_eq!(
+        records.len(),
+        1,
+        "exactly one validate ops record must survive the broken pipe"
+    );
+    assert_eq!(records[0]["ops_name"], "validate");
+    assert_eq!(records[0]["err_reason"], "panic");
+}
+
+#[test]
+fn mount_writes_one_record_through_guard_on_fast_failure() {
+    // `mount` routes through the same `SlsOpsGuard` as the other subcommands. A
+    // fast configuration error returns before any FUSE mount, so the guard's
+    // `finish` path emits exactly one "mount" record without a live mount. The
+    // broken-pipe Drop path for `mount` is covered separately by
+    // `mount_writes_one_record_when_merged_output_closes_early`.
+    let dir = tempfile::tempdir_in("/tmp").expect("tempdir");
+    let ops_log = make_ops_log(dir.path());
+
+    let source = tempfile::tempdir_in("/tmp").expect("source tempdir");
+    create_skill_dir(source.path(), "good-skill", VALID_SKILL);
+    let mountpoint = tempfile::tempdir_in("/tmp").expect("mountpoint tempdir");
+
+    // An invalid --activation-mode fails inside cmd_mount before mounting.
+    let out = run_skillfs(
+        &[
+            "mount",
+            source.path().to_str().unwrap(),
+            mountpoint.path().to_str().unwrap(),
+            "--activation-mode",
+            "bogus",
+        ],
+        &ops_log,
+    );
+    assert!(
+        !out.status.success(),
+        "an invalid --activation-mode must exit non-zero"
+    );
+
+    let records = read_records(&ops_log);
+    assert_eq!(
+        records.len(),
+        1,
+        "exactly one mount ops record on a fast startup failure"
+    );
+    assert_eq!(records[0]["ops_name"], "mount");
+    assert_ne!(
+        records[0]["err_reason"], "none",
+        "a startup failure must set a non-none err_reason"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Merged stdout+stderr (`2>&1`) closed before any output.
+//
+// The consumer closes before the first tracing write in `main`; that write
+// gets EPIPE, then tracing's internal error report panics on the closed stderr.
+// Because the guard is armed before logging, exactly one record must still be
+// written with `err_reason="panic"`. This is the strict form of the
+// contract: logging must not depend on when the downstream closes.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn list_writes_one_record_when_merged_output_closes_early() {
+    let dir = tempfile::tempdir_in("/tmp").expect("tempdir");
+    let ops_log = make_ops_log(dir.path());
+
+    let source = tempfile::tempdir_in("/tmp").expect("source tempdir");
+    create_skill_dir(source.path(), "good-skill", VALID_SKILL);
+
+    let status =
+        run_with_merged_output_closed(&["list", source.path().to_str().unwrap()], &ops_log);
+    assert!(!status.success(), "list must not exit 0 on a broken pipe");
+
+    let records = read_records(&ops_log);
+    assert_eq!(records.len(), 1, "exactly one list ops record");
+    assert_eq!(records[0]["ops_name"], "list");
+    assert_eq!(records[0]["err_reason"], "panic");
+}
+
+#[test]
+fn classify_dry_run_writes_one_record_when_merged_output_closes_early() {
+    let dir = tempfile::tempdir_in("/tmp").expect("tempdir");
+    let ops_log = make_ops_log(dir.path());
+
+    let source = tempfile::tempdir_in("/tmp").expect("source tempdir");
+    create_skill_dir(source.path(), "good-skill", VALID_SKILL);
+
+    let status = run_with_merged_output_closed(
+        &["classify", source.path().to_str().unwrap(), "--dry-run"],
+        &ops_log,
+    );
+    assert!(
+        !status.success(),
+        "classify must not exit 0 on a broken pipe"
+    );
+
+    let records = read_records(&ops_log);
+    assert_eq!(records.len(), 1, "exactly one classify ops record");
+    assert_eq!(records[0]["ops_name"], "classify");
+    assert_eq!(records[0]["err_reason"], "panic");
+    assert!(
+        !source.path().join("skillfs-views.toml").exists(),
+        "classify --dry-run must not write skillfs-views.toml"
+    );
+}
+
+#[test]
+fn validate_writes_one_record_when_merged_output_closes_early() {
+    let dir = tempfile::tempdir_in("/tmp").expect("tempdir");
+    let ops_log = make_ops_log(dir.path());
+
+    let source = tempfile::tempdir_in("/tmp").expect("source tempdir");
+    create_skill_dir(source.path(), "good-skill", VALID_SKILL);
+
+    let status =
+        run_with_merged_output_closed(&["validate", source.path().to_str().unwrap()], &ops_log);
+    assert!(
+        !status.success(),
+        "validate must not exit 0 on a broken pipe"
+    );
+
+    let records = read_records(&ops_log);
+    assert_eq!(records.len(), 1, "exactly one validate ops record");
+    assert_eq!(records[0]["ops_name"], "validate");
+    assert_eq!(records[0]["err_reason"], "panic");
+}
+
+#[test]
+fn mount_writes_one_record_when_merged_output_closes_early() {
+    // The first tracing write gets EPIPE, then tracing's internal error report
+    // panics on the closed stderr. This happens before the command body and any
+    // FUSE mount attempt; the guard records the panic and the test leaves no
+    // mount.
+    let dir = tempfile::tempdir_in("/tmp").expect("tempdir");
+    let ops_log = make_ops_log(dir.path());
+
+    let source = tempfile::tempdir_in("/tmp").expect("source tempdir");
+    create_skill_dir(source.path(), "good-skill", VALID_SKILL);
+    let mountpoint = tempfile::tempdir_in("/tmp").expect("mountpoint tempdir");
+
+    let status = run_with_merged_output_closed(
+        &[
+            "mount",
+            source.path().to_str().unwrap(),
+            mountpoint.path().to_str().unwrap(),
+        ],
+        &ops_log,
+    );
+    assert!(!status.success(), "mount must not exit 0 on a broken pipe");
+
+    let records = read_records(&ops_log);
+    assert_eq!(records.len(), 1, "exactly one mount ops record");
+    assert_eq!(records[0]["ops_name"], "mount");
+    assert_eq!(records[0]["err_reason"], "panic");
 }

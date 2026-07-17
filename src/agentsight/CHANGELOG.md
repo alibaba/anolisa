@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.1
+
+### Fixes
+- Replace `lock().unwrap()` with poison-safe `unwrap_or_else` for mutex recovery.
+- Correct SSL library attribution from aws-lc/BoringSSL to OpenSSL 3.x.
+- Add Claude process name to BoringSSL classification.
+- Preserve user config on schema migration instead of overwriting.
+- Don't auto-overwrite invalid JSON configs; record process pid not thread tid in ns pid helper.
+- Downgrade high-frequency event logs from debug to trace to reduce noise.
+
+### Tests
+- Expand unit tests for handlers, interruption store, and token store.
+- Add poison-recovery tests for mutex `unwrap_or_else` changes.
+
 ## 0.8.0
 
 ### Features

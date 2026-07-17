@@ -224,7 +224,7 @@ build_agent_sec_core() {
     local tmp_dir
     tmp_dir=$(mktemp -d)
     local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
-    mkdir -p "$pkg_dir"/{skills,linux-sandbox,agent-sec-cli,cosh-extension,openclaw-plugin,hermes-plugin,scripts,tools}
+    mkdir -p "$pkg_dir"/{skills,linux-sandbox,agent-sec-cli,cosh-extension,openclaw-plugin,hermes-plugin,qwen-code-extension,qoder-plugin,scripts,tools}
 
     # skills: use cp -rp dir/. to include hidden files/directories
     cp -rp "${SEC_DIR}/skills/." "$pkg_dir/skills/"
@@ -250,10 +250,20 @@ build_agent_sec_core() {
         --exclude='__pycache__' \
         hermes-plugin/src hermes-plugin/scripts | tar -xf - -C "$pkg_dir/"
 
+    # qwen-code-extension (exclude Python cache artifacts)
+    tar -cf - -C "${SEC_DIR}" \
+        --exclude='__pycache__' \
+        qwen-code-extension/ | tar -xf - -C "$pkg_dir/"
+
     # codex-plugin (hooks + install script + .agents registry, exclude __pycache__)
     tar -cf - -C "${SEC_DIR}" \
         --exclude='__pycache__' \
         codex-plugin/hooks-plugin codex-plugin/install.sh codex-plugin/.agents | tar -xf - -C "$pkg_dir/"
+
+    # qoder-plugin (hooks + install script, exclude __pycache__)
+    tar -cf - -C "${SEC_DIR}" \
+        --exclude='__pycache__' \
+        qoder-plugin/ | tar -xf - -C "$pkg_dir/"
 
 
     # Include agent-sec-cli source for maturin wheel build
@@ -486,14 +496,18 @@ build_tokenless() {
     # Copy full source tree (including vendored rtk), excluding build artifacts and VCS
     # Note: third_party/rtk must be included — it's built separately via --manifest-path
     # Adapter config files (manifest.json, package.json, openclaw.plugin.json, plugin.yaml)
-    # are excluded because they are generated from .in templates by
-    # stamp-adapter-templates during rpmbuild %build (make build-openclaw-plugin).
+    # and the component contract (component.toml) are excluded because they are
+    # generated from .in templates by stamp-adapter-templates during rpmbuild
+    # %build (make build-openclaw-plugin). Excluding them ensures the RPM build
+    # always regenerates from the authoritative .in template, preventing stale
+    # contracts from shipping (see GH-1470).
     tar -cf - -C "$TOKEN_DIR" \
         --exclude='target' \
         --exclude='.git' \
         --exclude='node_modules' \
         --exclude='__pycache__' \
         --exclude='*.pyc' \
+        --exclude='.anolisa/component.toml' \
         --exclude='adapters/tokenless/manifest.json' \
         --exclude='adapters/tokenless/openclaw/package.json' \
         --exclude='adapters/tokenless/openclaw/openclaw.plugin.json' \
