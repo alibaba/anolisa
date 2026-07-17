@@ -108,9 +108,12 @@ impl World {
         )
     }
 
-    fn load_state(&self) -> anolisa_core::state::InstalledState {
-        anolisa_core::state::InstalledState::load(&self.layout.state_dir.join("installed.toml"))
-            .expect("load state")
+    fn load_state(&self) -> anolisa_core::state_store::StateStore {
+        anolisa_core::state_store::StateStore::load(
+            &self.layout.state_dir.join("installed.toml"),
+            anolisa_platform::privilege::effective_uid(),
+        )
+        .expect("load state")
     }
 }
 
@@ -165,6 +168,8 @@ kind = "component"
 name = "{COMPONENT}"
 version = "0.6.0"
 status = "installed"
+install_backend = "raw"
+ownership = "raw_managed"
 installed_at = "2026-07-04T00:00:00Z"
 "#,
             prefix = prefix.display(),

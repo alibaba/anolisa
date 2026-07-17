@@ -3,9 +3,9 @@
 //! [`PackageTransaction`] is the write-side counterpart to
 //! [`PackageQuery`](crate::pkg_query::PackageQuery): where the query contract
 //! only reads rpmdb / repo metadata, this one runs the package-manager
-//! transactions ANOLISA delegates to dnf/rpm — `install`, `update`, and
-//! `remove`, used by `anolisa install` / `update` / `uninstall` for
-//! `rpm-observed` and `rpm-managed` components.
+//! transactions ANOLISA delegates to dnf/rpm — `install`, `update`,
+//! `reinstall`, and `remove`, used by `anolisa install` / `update` /
+//! `reinstall` / `uninstall` for delegated (rpm-backed) components.
 //!
 //! The trait is object-safe so the CLI can hold a `&dyn PackageTransaction`
 //! and inject a fake in tests instead of shelling out to a live `dnf`.
@@ -57,8 +57,14 @@ pub enum PackageTransactionError {
 ///
 /// All methods take `&self` and return concrete types, so the trait is
 /// object-safe and any backend can be held as `Box<dyn PackageTransaction>`.
+///
+/// Every verb takes a `packages` slice and must run **one** native
+/// transaction over the whole set: the package manager's solver sees all
+/// packages together, and the transaction commits or fails as a unit. A
+/// single-package call is the one-element slice; callers must not pass an
+/// empty slice.
 pub trait PackageTransaction {
-    /// Install `package` from the configured repos.
+    /// Install `packages` from the configured repos in one transaction.
     ///
     /// Delegates the whole file transaction (dependency solving, download,
     /// scriptlets, rpmdb write) to the package manager. ANOLISA records the
@@ -68,29 +74,50 @@ pub trait PackageTransaction {
     /// (the backend performs a no-op), not an error.
     ///
     /// # Errors
-    /// See [`PackageTransactionError`]. The caller owns the privilege
-    /// precondition and records ANOLISA state from rpmdb afterwards.
-    fn install(&self, package: &str) -> Result<(), PackageTransactionError>;
+    /// See [`PackageTransactionError`]. A failure reports the transaction as
+    /// a whole — the backend does not attribute it to one package. The caller
+    /// owns the privilege precondition and records ANOLISA state from rpmdb
+    /// afterwards.
+    fn install(&self, packages: &[&str]) -> Result<(), PackageTransactionError>;
 
-    /// Update `package` to the latest candidate the configured repos offer.
+    /// Update `packages` to the latest candidates the configured repos offer,
+    /// in one transaction.
     ///
     /// Delegates the whole file transaction (download, scriptlets, rpmdb
     /// write) to the package manager — ANOLISA never touches RPM-owned files
     /// directly. The update does **not** switch backends: it upgrades the
-    /// package in place. A package that is already at the latest version is a
+    /// packages in place. A package that is already at the latest version is a
     /// success (the backend performs a no-op), not an error.
     ///
     /// # Errors
     /// See [`PackageTransactionError`] for the failure conditions. The caller
     /// is responsible for the privilege precondition and for refreshing
     /// ANOLISA state from rpmdb after a successful update.
-    fn update(&self, package: &str) -> Result<(), PackageTransactionError>;
+    fn update(&self, packages: &[&str]) -> Result<(), PackageTransactionError>;
 
-    /// Remove `package`, delegating the file transaction (scriptlets, rpmdb
-    /// write) to the package manager — ANOLISA never deletes RPM-owned files
-    /// directly. A package that is already absent is reported by the backend as
-    /// a hard failure (no match), so the caller should confirm presence first
-    /// when it wants to treat "already gone" as success.
+    /// Reinstall `packages` at their currently installed versions, in one
+    /// transaction.
+    ///
+    /// Delegates the whole file transaction to the package manager's
+    /// reinstall verb (`dnf reinstall`). Unlike [`install`], which is a no-op
+    /// success for an already-installed package, reinstall re-runs the file
+    /// transaction so damaged or missing files are restored from the package
+    /// payload. Versions do not change; a package that is absent is a
+    /// backend hard failure, so the caller should confirm presence first.
+    ///
+    /// # Errors
+    /// See [`PackageTransactionError`]. The caller owns the privilege
+    /// precondition and refreshes ANOLISA state from rpmdb afterwards.
+    ///
+    /// [`install`]: PackageTransaction::install
+    fn reinstall(&self, packages: &[&str]) -> Result<(), PackageTransactionError>;
+
+    /// Remove `packages` in one transaction, delegating the file transaction
+    /// (scriptlets, rpmdb write) to the package manager — ANOLISA never
+    /// deletes RPM-owned files directly. A package that is already absent is
+    /// reported by the backend as a hard failure (no match), so the caller
+    /// should confirm presence first when it wants to treat "already gone" as
+    /// success.
     ///
     /// This method is only the spawn/exit mechanism; **whether** a removal is
     /// authorized is the caller's decision. For an `rpm-observed` package
@@ -102,5 +129,5 @@ pub trait PackageTransaction {
     /// See [`PackageTransactionError`] for the failure conditions. The caller
     /// owns the privilege precondition and drops ANOLISA state after a
     /// successful removal.
-    fn remove(&self, package: &str) -> Result<(), PackageTransactionError>;
+    fn remove(&self, packages: &[&str]) -> Result<(), PackageTransactionError>;
 }

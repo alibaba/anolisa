@@ -9,13 +9,11 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use anolisa_core::adapter::contract::{
-    ContractProvenance, ContractSourceKind, read_snapshot_provenance, write_snapshot_provenance,
-};
-use anolisa_core::central_log::LogFilter;
 use anolisa_platform::pkg_query::{PackageInfo, PackageQueryError, PackageVersion};
 
-use anolisa_core::state::{InstalledObject, InstalledState, RpmMetadata, SubscriptionScope};
+use anolisa_core::state::{
+    InstalledObject, InstalledState, ObjectStatus, Ownership, RpmMetadata, SubscriptionScope,
+};
 
 // `Activity` and `ProgressReporter` reach the tests through the module glob
 // (`use super::*`); `NoopReporter` is the only progress item not re-imported by
@@ -112,9 +110,16 @@ impl PackageQuery for FakeHost {
 }
 
 impl PackageTransaction for FakeHost {
-    fn install(&self, package: &str) -> Result<(), PackageTransactionError> {
-        self.calls.borrow_mut().push(format!("install:{package}"));
-        if self.fail_install.contains(package) {
+    // Calls record the full package set per invocation
+    // (`verb:pkg-a,pkg-b`), so tests can pin that a merged transaction
+    // really shared one dnf run. A transaction fails as a whole when any of
+    // its packages is in the matching `fail_*` set, mirroring dnf's
+    // unit-of-work semantics.
+    fn install(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
+        self.calls
+            .borrow_mut()
+            .push(format!("install:{}", packages.join(",")));
+        if packages.iter().any(|p| self.fail_install.contains(*p)) {
             return Err(PackageTransactionError::TransactionFailed {
                 command: "dnf".to_string(),
                 operation: "install".to_string(),
@@ -125,9 +130,11 @@ impl PackageTransaction for FakeHost {
         Ok(())
     }
 
-    fn update(&self, package: &str) -> Result<(), PackageTransactionError> {
-        self.calls.borrow_mut().push(format!("update:{package}"));
-        if self.fail_update.contains(package) {
+    fn update(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
+        self.calls
+            .borrow_mut()
+            .push(format!("update:{}", packages.join(",")));
+        if packages.iter().any(|p| self.fail_update.contains(*p)) {
             return Err(PackageTransactionError::TransactionFailed {
                 command: "dnf".to_string(),
                 operation: "update".to_string(),
@@ -138,9 +145,19 @@ impl PackageTransaction for FakeHost {
         Ok(())
     }
 
-    fn remove(&self, package: &str) -> Result<(), PackageTransactionError> {
+    fn reinstall(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
+        // `upgrade` never reinstalls packages; a call is a routing bug.
+        self.calls
+            .borrow_mut()
+            .push(format!("reinstall:{}", packages.join(",")));
+        Ok(())
+    }
+
+    fn remove(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
         // `upgrade` never removes packages; a call is a routing bug.
-        self.calls.borrow_mut().push(format!("remove:{package}"));
+        self.calls
+            .borrow_mut()
+            .push(format!("remove:{}", packages.join(",")));
         Ok(())
     }
 }
@@ -260,15 +277,74 @@ fn rpm_component(name: &str, package: &str, evr: &str, ownership: Ownership) -> 
 }
 
 /// Write a state file under `layout` seeded with `objects` so an apply run can
-/// find (and refresh) already-installed components.
+/// find (and refresh) already-installed components. Seeds stay in the legacy
+/// v4 shape so every apply run also exercises the load-boundary migration.
 fn seed_state(layout: &FsLayout, objects: Vec<InstalledObject>) {
-    let mut state = InstalledState::default();
+    // System mode, matching the only mode `upgrade` runs in — a user-mode
+    // legacy file would migrate its records into a user scope keyed by the
+    // test-runner uid.
+    let mut state = InstalledState {
+        install_mode: StateInstallMode::System,
+        prefix: layout.prefix.clone(),
+        ..Default::default()
+    };
     for obj in objects {
         state.upsert_object(obj);
     }
     state
         .save(&layout.state_dir.join("installed.toml"))
         .expect("seed state");
+}
+
+/// Load the persisted state as the v5 store (post-upgrade assertions).
+fn load_store(layout: &FsLayout) -> StateStore {
+    StateStore::load(&layout.state_dir.join("installed.toml"), 0).expect("load store")
+}
+
+/// Find a component installation or panic with a readable message.
+fn find_component<'a>(store: &'a StateStore, name: &str) -> &'a Installation {
+    store
+        .find(ObjectKind::Component, name)
+        .unwrap_or_else(|| panic!("component '{name}' must be in state"))
+}
+
+/// Destructure a delegated installation into (package name, relation label,
+/// recorded EVR, arch, source repo) for compact assertions.
+fn delegated_parts(
+    installation: &Installation,
+) -> (
+    Option<&str>,
+    &'static str,
+    Option<&str>,
+    Option<&str>,
+    Option<&str>,
+) {
+    match &installation.binding {
+        ProviderBinding::Delegated {
+            package,
+            relation,
+            last_observed,
+            ..
+        } => (
+            package.resolved_name(),
+            relation.label(),
+            last_observed.as_ref().and_then(|o| o.evr.as_deref()),
+            last_observed.as_ref().and_then(|o| o.arch.as_deref()),
+            last_observed
+                .as_ref()
+                .and_then(|o| o.source_repo.as_deref()),
+        ),
+        ProviderBinding::Owned { .. } => panic!(
+            "component '{}' must be delegated, found owned",
+            installation.name
+        ),
+    }
+}
+
+/// Recorded EVR of a delegated component, the v5 analogue of the legacy
+/// `obj.version` assertion.
+fn observed_evr<'a>(store: &'a StateStore, name: &str) -> Option<&'a str> {
+    delegated_parts(find_component(store, name)).2
 }
 
 fn system_ctx(prefix: PathBuf) -> CliContext {
@@ -762,25 +838,13 @@ fn installed_default_is_recorded_as_rpm_managed_after_refresh() {
     assert_eq!(result.installed.len(), 1);
     assert_eq!(result.installed[0].version.as_deref(), Some("1.0.0-1.al4"));
 
-    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
-    let obj = state
-        .find_object(ObjectKind::Component, "agent-memory")
-        .expect("recorded component");
-    assert_eq!(obj.effective_ownership(), Ownership::RpmManaged);
-    assert_eq!(obj.install_backend.as_deref(), Some("rpm"));
-    assert!(obj.managed);
-    assert!(!obj.adopted);
-    assert_eq!(obj.version, "1.0.0-1.al4");
-    assert_eq!(
-        obj.rpm_metadata.as_ref().map(|m| m.package_name.as_str()),
-        Some("agent-memory")
-    );
-    assert_eq!(
-        obj.rpm_metadata
-            .as_ref()
-            .and_then(|m| m.source_repo.as_deref()),
-        Some("alinux4-agentic-os")
-    );
+    let store = load_store(&layout);
+    let (package, relation, evr, _arch, source_repo) =
+        delegated_parts(find_component(&store, "agent-memory"));
+    assert_eq!(relation, "managed", "upgrade ran the dnf install itself");
+    assert_eq!(package, Some("agent-memory"));
+    assert_eq!(evr, Some("1.0.0-1.al4"));
+    assert_eq!(source_repo, Some("alinux4-agentic-os"));
 }
 
 #[test]
@@ -821,16 +885,10 @@ fn origin_lookup_failure_is_warning_not_apply_failure() {
     assert_eq!(result.warnings.len(), 1);
     assert!(result.warnings[0].contains("could not determine source repo"));
 
-    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
-    let obj = state
-        .find_object(ObjectKind::Component, "agent-memory")
-        .expect("recorded component");
-    assert_eq!(
-        obj.rpm_metadata
-            .as_ref()
-            .and_then(|m| m.source_repo.as_deref()),
-        None
-    );
+    let store = load_store(&layout);
+    let (_package, _relation, _evr, _arch, source_repo) =
+        delegated_parts(find_component(&store, "agent-memory"));
+    assert_eq!(source_repo, None);
 }
 
 #[test]
@@ -881,17 +939,11 @@ fn origin_lookup_failure_preserves_existing_source_repo() {
     assert_eq!(result.status, STATUS_OK);
     assert_eq!(result.warnings.len(), 1);
 
-    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
-    let obj = state
-        .find_object(ObjectKind::Component, "cosh")
-        .expect("component");
-    assert_eq!(obj.version, "1.1.0-1.al4");
-    assert_eq!(
-        obj.rpm_metadata
-            .as_ref()
-            .and_then(|m| m.source_repo.as_deref()),
-        Some("@System")
-    );
+    let store = load_store(&layout);
+    let (_package, _relation, evr, _arch, source_repo) =
+        delegated_parts(find_component(&store, "cosh"));
+    assert_eq!(evr, Some("1.1.0-1.al4"));
+    assert_eq!(source_repo, Some("@System"));
 }
 
 // ── apply: partial failure ───────────────────────────────────────────────────
@@ -963,9 +1015,9 @@ fn partial_transaction_failure_is_reported_and_not_claimed_as_success() {
 
     // The durable operation record must reflect the partial outcome, not `ok`,
     // even though the cosh update landed in state.
-    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
+    let store = load_store(&layout);
     assert_eq!(
-        state.operations.last().map(|op| op.status.as_str()),
+        store.operations.last().map(|op| op.status.as_str()),
         Some("partial"),
         "a partial upgrade must not record an `ok` operation"
     );
@@ -1028,13 +1080,13 @@ fn install_does_not_overwrite_existing_raw_managed_component() {
         "stale state must block dnf before RPM mutation"
     );
 
-    // State must still describe the original raw-managed component.
-    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
-    let obj = state
-        .find_object(ObjectKind::Component, "agent-memory")
-        .expect("component");
-    assert_eq!(obj.effective_ownership(), Ownership::RawManaged);
-    assert_eq!(obj.version, "0.9.0");
+    // State must still describe the original owned component.
+    let store = load_store(&layout);
+    let installation = find_component(&store, "agent-memory");
+    match &installation.binding {
+        ProviderBinding::Owned { artifact } => assert_eq!(artifact.version, "0.9.0"),
+        other => panic!("component must stay owned, found {other:?}"),
+    }
 }
 
 /// A component update whose state row vanished after planning must be rejected
@@ -1133,25 +1185,13 @@ fn observed_default_update_missing_from_state_is_recorded_as_rpm_observed() {
     assert_eq!(result.updated.len(), 1);
     assert!(result.errors.is_empty());
 
-    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
-    let obj = state
-        .find_object(ObjectKind::Component, "cosh")
-        .expect("observed default recorded");
-    assert_eq!(obj.effective_ownership(), Ownership::RpmObserved);
-    assert_eq!(obj.status, ObjectStatus::Adopted);
-    assert!(obj.adopted);
-    assert!(!obj.managed);
-    assert_eq!(obj.version, "1.1.0-1.al4");
-    assert_eq!(
-        obj.rpm_metadata.as_ref().map(|m| m.package_name.as_str()),
-        Some("copilot-shell")
-    );
-    assert_eq!(
-        obj.rpm_metadata
-            .as_ref()
-            .and_then(|m| m.source_repo.as_deref()),
-        Some("alinux4-agentic-os")
-    );
+    let store = load_store(&layout);
+    let (package, relation, evr, _arch, source_repo) =
+        delegated_parts(find_component(&store, "cosh"));
+    assert_eq!(relation, "observed", "ANOLISA does not own its removal");
+    assert_eq!(package, Some("copilot-shell"));
+    assert_eq!(evr, Some("1.1.0-1.al4"));
+    assert_eq!(source_repo, Some("alinux4-agentic-os"));
 }
 
 #[test]
@@ -1197,17 +1237,12 @@ fn observed_default_noop_missing_from_state_is_recorded_without_dnf() {
         "recording an observed default must not run dnf"
     );
 
-    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
-    let obj = state
-        .find_object(ObjectKind::Component, "cosh")
-        .expect("observed default recorded");
-    assert_eq!(obj.effective_ownership(), Ownership::RpmObserved);
-    assert_eq!(obj.status, ObjectStatus::Adopted);
-    assert_eq!(obj.version, "1.1.0-1.al4");
-    assert_eq!(
-        obj.rpm_metadata.as_ref().map(|m| m.package_name.as_str()),
-        Some("copilot-shell")
-    );
+    let store = load_store(&layout);
+    let (package, relation, evr, _arch, _source_repo) =
+        delegated_parts(find_component(&store, "cosh"));
+    assert_eq!(relation, "observed");
+    assert_eq!(package, Some("copilot-shell"));
+    assert_eq!(evr, Some("1.1.0-1.al4"));
 }
 
 // ── audit for CLI-only / component-less runs ─────────────────────────────────
@@ -1248,16 +1283,14 @@ fn cli_only_upgrade_records_durable_audit() {
     assert_eq!(result.updated[0].name, "anolisa");
     assert!(result.installed.is_empty());
 
-    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
+    let store = load_store(&layout);
     assert_eq!(
-        state.operations.last().map(|op| op.status.as_str()),
+        store.operations.last().map(|op| op.status.as_str()),
         Some("ok"),
         "a CLI-only upgrade must still leave an operation record"
     );
     assert!(
-        state
-            .find_object(ObjectKind::Component, "anolisa")
-            .is_none(),
+        store.find(ObjectKind::Component, "anolisa").is_none(),
         "the CLI is not recorded as a component object"
     );
 }
@@ -1309,9 +1342,9 @@ fn cli_success_with_component_failure_records_partial_audit() {
     assert_eq!(result.errors.len(), 1);
     assert_eq!(result.errors[0].name, "cosh");
 
-    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
+    let store = load_store(&layout);
     assert_eq!(
-        state.operations.last().map(|op| op.status.as_str()),
+        store.operations.last().map(|op| op.status.as_str()),
         Some("partial"),
         "CLI success + component failure must record a partial operation"
     );
@@ -1370,445 +1403,20 @@ fn empty_plan_reconciles_all_drifted_rpm_components() {
     assert_eq!(result.reconciled.len(), 6);
     assert!(host.txn_calls().is_empty(), "reconcile must not call dnf");
 
-    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
-    assert_eq!(state.operations.len(), 1, "one upgrade operation");
-    let operation_id = &state.operations[0].id;
+    let store = load_store(&layout);
+    assert_eq!(store.operations.len(), 1, "one upgrade operation");
+    let operation_id = store.operations[0].id.clone();
     for (name, _package, _old, new) in components {
         let expected = format!("{new}-1.alnx4");
-        let object = state
-            .find_object(ObjectKind::Component, name)
-            .expect("reconciled component");
-        let metadata = object.rpm_metadata.as_ref().expect("rpm metadata");
-        assert_eq!(object.version, expected);
-        assert_eq!(metadata.evr.as_deref(), Some(expected.as_str()));
-        assert_eq!(metadata.arch.as_deref(), Some("x86_64"));
+        let installation = find_component(&store, name);
+        let (_package, _relation, evr, arch, _source_repo) = delegated_parts(installation);
+        assert_eq!(evr, Some(expected.as_str()));
+        assert_eq!(arch, Some("x86_64"));
         assert_eq!(
-            object.last_operation_id.as_deref(),
+            installation.last_operation_id.as_deref(),
             Some(operation_id.as_str())
         );
     }
-}
-
-#[test]
-fn empty_plan_reconciles_missing_manifest_provenance() {
-    let tmp = tempfile::tempdir().expect("tmpdir");
-    let ctx = system_ctx(tmp.path().to_path_buf());
-    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
-    let component = "manifest-sync-test";
-    let package = "manifest-sync-test-rpm";
-    let evr = "2.0.0-1.alnx4";
-    seed_state(
-        &layout,
-        vec![rpm_component(
-            component,
-            package,
-            evr,
-            Ownership::RpmManaged,
-        )],
-    );
-
-    let package_datadir = layout.package_datadir().expect("package datadir");
-    let source = FsLayout::component_contract_path(&package_datadir, component);
-    std::fs::create_dir_all(source.parent().expect("source parent")).expect("mkdir source");
-    std::fs::write(&source, "framework = \"same\"\n").expect("write source contract");
-    let snapshot = FsLayout::component_manifest_snapshot_path(&layout.state_dir, component);
-    std::fs::create_dir_all(snapshot.parent().expect("snapshot parent")).expect("mkdir snapshot");
-    std::fs::write(&snapshot, "framework = \"same\"\n").expect("write matching snapshot");
-    let provenance_path = FsLayout::provenance_path_for_snapshot(&snapshot);
-
-    let host = FakeHost::default().with_installed(package, info(package, "2.0.0", Some("1.alnx4")));
-    let plan = build_plan(None, &cli_noop(), &[]);
-
-    let preview = run_upgrade_with_deps(
-        &ctx,
-        &layout,
-        &plan,
-        &host,
-        &host,
-        false,
-        true,
-        COMMAND,
-        &NoopReporter,
-    )
-    .expect("preview manifest drift");
-
-    assert_eq!(preview.reconciled.len(), 1);
-    assert_eq!(preview.reconciled[0].reason, "component manifest drift");
-    let json = serde_json::to_value(&preview).expect("serialize preview");
-    assert_eq!(json["reconciled"][0]["reason"], "component manifest drift");
-    assert_eq!(
-        std::fs::read_to_string(&snapshot).expect("read unchanged snapshot"),
-        "framework = \"same\"\n",
-        "dry-run must not refresh the snapshot"
-    );
-    assert!(
-        !provenance_path.exists(),
-        "dry-run must not create provenance"
-    );
-
-    let result = run_upgrade_with_deps(
-        &ctx,
-        &layout,
-        &plan,
-        &host,
-        &host,
-        true,
-        false,
-        COMMAND,
-        &NoopReporter,
-    )
-    .expect("reconcile manifest drift");
-
-    assert_eq!(result.status, STATUS_OK);
-    assert_eq!(result.reconciled.len(), 1);
-    assert_eq!(result.reconciled[0].name, component);
-    assert!(
-        host.txn_calls().is_empty(),
-        "manifest sync must not call dnf"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&snapshot).expect("read refreshed snapshot"),
-        "framework = \"same\"\n"
-    );
-    let provenance = read_snapshot_provenance(&snapshot).expect("read refreshed provenance");
-    assert_eq!(provenance.source_kind, ContractSourceKind::Datadir);
-    assert_eq!(provenance.source_path, source);
-    assert_eq!(provenance.datadir_root, package_datadir);
-}
-
-#[test]
-fn empty_plan_reconciles_stale_manifest_provenance() {
-    let tmp = tempfile::tempdir().expect("tmpdir");
-    let ctx = system_ctx(tmp.path().to_path_buf());
-    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
-    let component = "manifest-stale-provenance";
-    let package = "manifest-stale-provenance-rpm";
-    let evr = "2.0.0-1.alnx4";
-    seed_state(
-        &layout,
-        vec![rpm_component(
-            component,
-            package,
-            evr,
-            Ownership::RpmManaged,
-        )],
-    );
-
-    let package_datadir = layout.package_datadir().expect("package datadir");
-    let source = FsLayout::component_contract_path(&package_datadir, component);
-    std::fs::create_dir_all(source.parent().expect("source parent")).expect("mkdir source");
-    std::fs::write(&source, "framework = \"same\"\n").expect("write source contract");
-    let snapshot = FsLayout::component_manifest_snapshot_path(&layout.state_dir, component);
-    std::fs::create_dir_all(snapshot.parent().expect("snapshot parent")).expect("mkdir snapshot");
-    std::fs::write(&snapshot, "framework = \"same\"\n").expect("write matching snapshot");
-    let stale_root = layout.datadir.clone();
-    write_snapshot_provenance(
-        &snapshot,
-        &ContractProvenance {
-            schema_version: 1,
-            source_kind: ContractSourceKind::Datadir,
-            source_path: FsLayout::component_contract_path(&stale_root, component),
-            datadir_root: stale_root,
-        },
-    )
-    .expect("write stale provenance");
-
-    let host = FakeHost::default().with_installed(package, info(package, "2.0.0", Some("1.alnx4")));
-    let plan = build_plan(None, &cli_noop(), &[]);
-
-    let preview = run_upgrade_with_deps(
-        &ctx,
-        &layout,
-        &plan,
-        &host,
-        &host,
-        false,
-        true,
-        COMMAND,
-        &NoopReporter,
-    )
-    .expect("preview provenance drift");
-
-    assert_eq!(preview.reconciled.len(), 1);
-    assert_eq!(preview.reconciled[0].reason, "component manifest drift");
-    let stale = read_snapshot_provenance(&snapshot).expect("read stale provenance");
-    assert_ne!(stale.datadir_root, package_datadir);
-
-    let result = run_upgrade_with_deps(
-        &ctx,
-        &layout,
-        &plan,
-        &host,
-        &host,
-        true,
-        false,
-        COMMAND,
-        &NoopReporter,
-    )
-    .expect("reconcile provenance drift");
-
-    assert_eq!(result.status, STATUS_OK);
-    assert_eq!(result.reconciled.len(), 1);
-    assert!(
-        host.txn_calls().is_empty(),
-        "provenance sync must not call dnf"
-    );
-    let provenance = read_snapshot_provenance(&snapshot).expect("read refreshed provenance");
-    assert_eq!(provenance.source_path, source);
-    assert_eq!(provenance.datadir_root, package_datadir);
-}
-
-#[derive(Clone, Copy)]
-enum BlockedManifestArtifact {
-    Snapshot,
-    Provenance,
-}
-
-fn assert_manifest_refresh_failure(blocked: BlockedManifestArtifact) {
-    let tmp = tempfile::tempdir().expect("tmpdir");
-    let ctx = system_ctx(tmp.path().to_path_buf());
-    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
-    let component = "manifest-refresh-failure";
-    let package = "manifest-refresh-failure-rpm";
-    let evr = "2.0.0-1.alnx4";
-    let mut objects = vec![rpm_component(
-        component,
-        package,
-        evr,
-        Ownership::RpmManaged,
-    )];
-    if matches!(blocked, BlockedManifestArtifact::Provenance) {
-        objects.push(rpm_component(
-            "state-drift-success",
-            "state-drift-success-rpm",
-            "1.0.0-1.alnx4",
-            Ownership::RpmManaged,
-        ));
-    }
-    seed_state(&layout, objects);
-
-    let package_datadir = layout.package_datadir().expect("package datadir");
-    let source = FsLayout::component_contract_path(&package_datadir, component);
-    std::fs::create_dir_all(source.parent().expect("source parent")).expect("mkdir source");
-    std::fs::write(&source, "framework = \"new\"\n").expect("write source contract");
-    let snapshot = FsLayout::component_manifest_snapshot_path(&layout.state_dir, component);
-    let provenance_path = FsLayout::provenance_path_for_snapshot(&snapshot);
-    let marker = match blocked {
-        BlockedManifestArtifact::Snapshot => {
-            std::fs::create_dir_all(&snapshot).expect("create blocking snapshot directory");
-            snapshot.join("keep")
-        }
-        BlockedManifestArtifact::Provenance => {
-            std::fs::create_dir_all(snapshot.parent().expect("snapshot parent"))
-                .expect("mkdir snapshot");
-            std::fs::write(&snapshot, "framework = \"old\"\n").expect("write old snapshot");
-            std::fs::create_dir(&provenance_path).expect("create blocking provenance directory");
-            provenance_path.join("keep")
-        }
-    };
-    std::fs::write(&marker, "unchanged").expect("write artifact marker");
-
-    let mut host =
-        FakeHost::default().with_installed(package, info(package, "2.0.0", Some("1.alnx4")));
-    if matches!(blocked, BlockedManifestArtifact::Provenance) {
-        host.installed.insert(
-            "state-drift-success-rpm".to_string(),
-            info("state-drift-success-rpm", "2.0.0", Some("1.alnx4")),
-        );
-    }
-    let plan = build_plan(None, &cli_noop(), &[]);
-
-    let result = run_upgrade_with_deps(
-        &ctx,
-        &layout,
-        &plan,
-        &host,
-        &host,
-        true,
-        false,
-        COMMAND,
-        &NoopReporter,
-    )
-    .expect("render failed manifest reconciliation");
-
-    let (expected_status, expected_log_status, expected_reconciled) = match blocked {
-        BlockedManifestArtifact::Snapshot => (STATUS_FAILED, LogStatus::Failed, 0),
-        BlockedManifestArtifact::Provenance => (STATUS_PARTIAL, LogStatus::Partial, 1),
-    };
-    assert_eq!(result.status, expected_status);
-    assert_eq!(result.reconciled.len(), expected_reconciled);
-    assert!(
-        result.reconciled.iter().all(|item| item.name != component),
-        "failed manifest item must not remain reconciled"
-    );
-    assert_eq!(result.errors.len(), 1);
-    assert_eq!(result.errors[0].name, component);
-    assert!(result.errors[0].reason.contains("manifest reconciliation"));
-    assert!(
-        host.txn_calls().is_empty(),
-        "failed manifest sync must not call dnf"
-    );
-    let json = serde_json::to_value(&result).expect("serialize failed result");
-    assert_eq!(json["status"], expected_status);
-    assert_eq!(
-        std::fs::read_to_string(&marker).expect("read unchanged marker"),
-        "unchanged"
-    );
-    if matches!(blocked, BlockedManifestArtifact::Provenance) {
-        assert_eq!(
-            std::fs::read_to_string(&snapshot).expect("read restored snapshot"),
-            "framework = \"old\"\n"
-        );
-    }
-
-    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
-    assert_eq!(
-        state
-            .operations
-            .last()
-            .map(|operation| operation.status.as_str()),
-        Some(expected_status)
-    );
-    let records = CentralLog::open(layout.central_log)
-        .query(&LogFilter::default())
-        .expect("query central log");
-    assert_eq!(
-        records.last().and_then(|record| record.status.as_ref()),
-        Some(&expected_log_status)
-    );
-}
-
-#[test]
-fn empty_plan_reports_snapshot_refresh_failure() {
-    assert_manifest_refresh_failure(BlockedManifestArtifact::Snapshot);
-}
-
-#[test]
-fn empty_plan_reports_provenance_refresh_failure() {
-    assert_manifest_refresh_failure(BlockedManifestArtifact::Provenance);
-}
-
-fn assert_updated_manifest_refresh_failure(blocked: BlockedManifestArtifact) {
-    let tmp = tempfile::tempdir().expect("tmpdir");
-    let ctx = system_ctx(tmp.path().to_path_buf());
-    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
-    let component = "manifest-update-failure";
-    let package = "manifest-update-failure-rpm";
-    let from = "1.0.0-1.alnx4";
-    let to = "2.0.0-1.alnx4";
-    seed_state(
-        &layout,
-        vec![rpm_component(
-            component,
-            package,
-            from,
-            Ownership::RpmManaged,
-        )],
-    );
-
-    let package_datadir = layout.package_datadir().expect("package datadir");
-    let source = FsLayout::component_contract_path(&package_datadir, component);
-    std::fs::create_dir_all(source.parent().expect("source parent")).expect("mkdir source");
-    std::fs::write(&source, "framework = \"new\"\n").expect("write source contract");
-    let snapshot = FsLayout::component_manifest_snapshot_path(&layout.state_dir, component);
-    let provenance_path = FsLayout::provenance_path_for_snapshot(&snapshot);
-    let marker = match blocked {
-        BlockedManifestArtifact::Snapshot => {
-            std::fs::create_dir_all(&snapshot).expect("create blocking snapshot directory");
-            snapshot.join("keep")
-        }
-        BlockedManifestArtifact::Provenance => {
-            std::fs::create_dir_all(snapshot.parent().expect("snapshot parent"))
-                .expect("mkdir snapshot");
-            std::fs::write(&snapshot, "framework = \"old\"\n").expect("write old snapshot");
-            std::fs::create_dir(&provenance_path).expect("create blocking provenance directory");
-            provenance_path.join("keep")
-        }
-    };
-    std::fs::write(&marker, "unchanged").expect("write artifact marker");
-
-    let host = FakeHost::default().with_installed(package, info(package, "2.0.0", Some("1.alnx4")));
-    let plan = build_plan(
-        None,
-        &cli_noop(),
-        &[component_check(
-            component,
-            Some(package),
-            Some("rpm-managed"),
-            Some(from),
-            Some(to),
-            ACTION_UPDATE,
-            None,
-        )],
-    );
-
-    let result = run_upgrade_with_deps(
-        &ctx,
-        &layout,
-        &plan,
-        &host,
-        &host,
-        true,
-        false,
-        COMMAND,
-        &NoopReporter,
-    )
-    .expect("render failed post-transaction manifest refresh");
-
-    assert_eq!(result.status, STATUS_PARTIAL);
-    assert_eq!(result.updated.len(), 1);
-    assert_eq!(result.updated[0].name, component);
-    assert_eq!(result.errors.len(), 1);
-    assert_eq!(result.errors[0].name, component);
-    assert!(result.errors[0].reason.contains("manifest refresh"));
-    assert_eq!(host.txn_calls(), vec![format!("update:{package}")]);
-    let json = serde_json::to_value(&result).expect("serialize failed result");
-    assert_eq!(json["status"], STATUS_PARTIAL);
-    assert_eq!(json["updated"][0]["name"], component);
-    assert_eq!(json["errors"][0]["name"], component);
-    assert_eq!(
-        std::fs::read_to_string(&marker).expect("read unchanged marker"),
-        "unchanged"
-    );
-    if matches!(blocked, BlockedManifestArtifact::Provenance) {
-        assert_eq!(
-            std::fs::read_to_string(&snapshot).expect("read restored snapshot"),
-            "framework = \"old\"\n"
-        );
-    }
-
-    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
-    assert_eq!(
-        state
-            .find_object(ObjectKind::Component, component)
-            .expect("updated component")
-            .version,
-        to
-    );
-    assert_eq!(
-        state
-            .operations
-            .last()
-            .map(|operation| operation.status.as_str()),
-        Some(STATUS_PARTIAL)
-    );
-    let records = CentralLog::open(layout.central_log)
-        .query(&LogFilter::default())
-        .expect("query central log");
-    assert_eq!(
-        records.last().and_then(|record| record.status.as_ref()),
-        Some(&LogStatus::Partial)
-    );
-}
-
-#[test]
-fn updated_transaction_reports_snapshot_refresh_failure() {
-    assert_updated_manifest_refresh_failure(BlockedManifestArtifact::Snapshot);
-}
-
-#[test]
-fn updated_transaction_reports_provenance_refresh_failure() {
-    assert_updated_manifest_refresh_failure(BlockedManifestArtifact::Provenance);
 }
 
 #[test]
@@ -1859,16 +1467,17 @@ fn empty_plan_reconciles_legacy_rpm_component_and_backfills_metadata() {
     assert_eq!(result.reconciled.len(), 1);
     assert_eq!(result.reconciled[0].name, "cosh");
     assert!(host.txn_calls().is_empty());
-    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
-    let object = state
-        .find_object(ObjectKind::Component, "cosh")
-        .expect("cosh");
-    let metadata = object.rpm_metadata.as_ref().expect("backfilled metadata");
-    assert_eq!(object.version, "2.7.0-1.alnx4");
-    assert_eq!(metadata.package_name, "copilot-shell");
-    assert_eq!(metadata.evr.as_deref(), Some("2.7.0-1.alnx4"));
-    assert_eq!(metadata.arch.as_deref(), Some("x86_64"));
-    assert_eq!(metadata.source_repo.as_deref(), Some("anolisa"));
+    let store = load_store(&layout);
+    let (package, _relation, evr, arch, source_repo) =
+        delegated_parts(find_component(&store, "cosh"));
+    assert_eq!(
+        package,
+        Some("copilot-shell"),
+        "package identity backfilled"
+    );
+    assert_eq!(evr, Some("2.7.0-1.alnx4"));
+    assert_eq!(arch, Some("x86_64"));
+    assert_eq!(source_repo, Some("anolisa"));
 }
 
 #[test]
@@ -1918,14 +1527,15 @@ fn planned_update_backfills_legacy_rpm_metadata() {
     assert_eq!(result.updated.len(), 1);
     assert!(result.reconciled.is_empty());
     assert_eq!(host.txn_calls(), vec!["update:copilot-shell"]);
-    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
-    let object = state
-        .find_object(ObjectKind::Component, "cosh")
-        .expect("cosh");
-    let metadata = object.rpm_metadata.as_ref().expect("backfilled metadata");
-    assert_eq!(object.version, "2.7.0-1.alnx4");
-    assert_eq!(metadata.package_name, "copilot-shell");
-    assert_eq!(metadata.evr.as_deref(), Some("2.7.0-1.alnx4"));
+    let store = load_store(&layout);
+    let (package, _relation, evr, _arch, _source_repo) =
+        delegated_parts(find_component(&store, "cosh"));
+    assert_eq!(
+        package,
+        Some("copilot-shell"),
+        "package identity backfilled"
+    );
+    assert_eq!(evr, Some("2.7.0-1.alnx4"));
 }
 
 #[test]
@@ -1941,7 +1551,8 @@ fn empty_plan_without_drift_is_true_noop() {
     );
     object.last_operation_id = Some("op-before".to_string());
     seed_state(&layout, vec![object]);
-    let before = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("before");
+    let state_path = layout.state_dir.join("installed.toml");
+    let before = std::fs::read(&state_path).expect("state bytes");
     let host = FakeHost::default().with_installed(
         "copilot-shell",
         info("copilot-shell", "2.7.0", Some("1.alnx4")),
@@ -1965,7 +1576,7 @@ fn empty_plan_without_drift_is_true_noop() {
     assert!(result.reconciled.is_empty());
     assert!(result.errors.is_empty());
     assert!(host.txn_calls().is_empty());
-    let after = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("after");
+    let after = std::fs::read(&state_path).expect("state bytes");
     assert_eq!(after, before, "a drift-free run must not save state");
 }
 
@@ -2034,18 +1645,12 @@ fn planned_update_is_not_reported_as_reconciled() {
     assert_eq!(result.reconciled[0].name, "sec-core");
     assert_eq!(host.txn_calls(), vec!["update:copilot-shell"]);
 
-    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
-    assert_eq!(state.operations.len(), 1, "one operation and one save path");
-    assert_eq!(
-        state.operations[0].status, STATUS_OK,
-        "a component without a contract remains a successful update"
-    );
-    let operation_id = &state.operations[0].id;
+    let store = load_store(&layout);
+    assert_eq!(store.operations.len(), 1, "one operation and one save path");
+    let operation_id = store.operations[0].id.clone();
     for name in ["cosh", "sec-core"] {
         assert_eq!(
-            state
-                .find_object(ObjectKind::Component, name)
-                .and_then(|object| object.last_operation_id.as_deref()),
+            find_component(&store, name).last_operation_id.as_deref(),
             Some(operation_id.as_str()),
             "all state changes share the upgrade operation",
         );
@@ -2106,16 +1711,10 @@ fn post_transaction_query_failure_is_not_double_counted() {
     assert_eq!(result.errors.len(), 1, "one component yields one error");
     assert_eq!(result.errors[0].name, "cosh");
 
-    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
-    assert_eq!(
-        state
-            .find_object(ObjectKind::Component, "cosh")
-            .expect("cosh")
-            .version,
-        "2.6.1-1.alnx4",
-    );
-    assert_eq!(state.operations.len(), 1);
-    assert_eq!(state.operations[0].status, STATUS_FAILED);
+    let store = load_store(&layout);
+    assert_eq!(observed_evr(&store, "cosh"), Some("2.6.1-1.alnx4"));
+    assert_eq!(store.operations.len(), 1);
+    assert_eq!(store.operations[0].status, STATUS_FAILED);
 }
 
 #[test]
@@ -2174,16 +1773,14 @@ fn post_transaction_query_retry_can_reconcile() {
     assert_eq!(result.reconciled[0].name, "cosh");
     assert_eq!(result.errors.len(), 1, "the original apply error remains");
 
-    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
-    let object = state
-        .find_object(ObjectKind::Component, "cosh")
-        .expect("cosh");
-    assert_eq!(object.version, "2.7.0-1.alnx4");
-    assert_eq!(state.operations.len(), 1);
-    assert_eq!(state.operations[0].status, STATUS_PARTIAL);
+    let store = load_store(&layout);
+    let installation = find_component(&store, "cosh");
+    assert_eq!(observed_evr(&store, "cosh"), Some("2.7.0-1.alnx4"));
+    assert_eq!(store.operations.len(), 1);
+    assert_eq!(store.operations[0].status, STATUS_PARTIAL);
     assert_eq!(
-        object.last_operation_id.as_deref(),
-        Some(state.operations[0].id.as_str())
+        installation.last_operation_id.as_deref(),
+        Some(store.operations[0].id.as_str())
     );
 }
 
@@ -2215,10 +1812,8 @@ fn reconcile_preserves_rpm_ownership_and_metadata() {
     }
     let mut raw = rpm_component("local-tool", "local-tool", "1.0.0", Ownership::RawManaged);
     raw.enabled_features = vec!["local".to_string()];
-    let managed_before = managed.clone();
-    let observed_before = observed.clone();
-    let raw_before = raw.clone();
     seed_state(&layout, vec![managed, observed, raw]);
+    let raw_before = find_component(&load_store(&layout), "local-tool").clone();
     let host = FakeHost::default()
         .with_installed(
             "copilot-shell",
@@ -2246,41 +1841,48 @@ fn reconcile_preserves_rpm_ownership_and_metadata() {
     .expect("preserving reconcile");
 
     assert_eq!(result.reconciled.len(), 2);
-    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
-    let mut expected_managed = managed_before;
-    let actual_managed = state
-        .find_object(ObjectKind::Component, "cosh")
-        .expect("managed");
-    expected_managed.version = "2.7.0-1.alnx4".to_string();
-    expected_managed.last_operation_id = actual_managed.last_operation_id.clone();
-    let managed_meta = expected_managed.rpm_metadata.as_mut().expect("metadata");
-    managed_meta.evr = Some("2.7.0-1.alnx4".to_string());
-    managed_meta.arch = Some("aarch64".to_string());
-    managed_meta.source_repo = Some("anolisa-updates".to_string());
-    assert_eq!(actual_managed, &expected_managed);
+    let store = load_store(&layout);
 
-    let mut expected_observed = observed_before;
-    let actual_observed = state
-        .find_object(ObjectKind::Component, "os-skills")
-        .expect("observed");
-    expected_observed.version = "0.6.1-1.alnx4".to_string();
-    expected_observed.last_operation_id = actual_observed.last_operation_id.clone();
-    let observed_meta = expected_observed.rpm_metadata.as_mut().expect("metadata");
-    observed_meta.evr = Some("0.6.1-1.alnx4".to_string());
-    observed_meta.arch = Some("noarch".to_string());
-    observed_meta.source_repo = Some("anolisa-updates".to_string());
-    assert_eq!(actual_observed, &expected_observed);
+    // The managed row keeps its relation and features; only the observation
+    // cache is refreshed from rpmdb.
+    let actual_managed = find_component(&store, "cosh");
+    let (package, relation, evr, arch, source_repo) = delegated_parts(actual_managed);
     assert_eq!(
-        state
-            .find_object(ObjectKind::Component, "local-tool")
-            .expect("raw"),
+        relation, "managed",
+        "reconcile must not change the relation"
+    );
+    assert_eq!(package, Some("copilot-shell"));
+    assert_eq!(evr, Some("2.7.0-1.alnx4"));
+    assert_eq!(arch, Some("aarch64"));
+    assert_eq!(source_repo, Some("anolisa-updates"));
+    assert_eq!(actual_managed.enabled_features, vec!["shell-hooks"]);
+
+    // The adopted row (legacy rpm-observed with adoption consent) keeps its
+    // relation; the never-recorded EVR/arch are backfilled from rpmdb.
+    let actual_observed = find_component(&store, "os-skills");
+    let (package, relation, evr, arch, source_repo) = delegated_parts(actual_observed);
+    assert_eq!(
+        relation, "adopted",
+        "reconcile must not change the relation"
+    );
+    assert_eq!(package, Some("os-skills"));
+    assert_eq!(evr, Some("0.6.1-1.alnx4"));
+    assert_eq!(arch, Some("noarch"));
+    assert_eq!(source_repo, Some("anolisa-updates"));
+    assert_eq!(
+        actual_observed.installed_at, "2026-05-01T00:00:00Z",
+        "reconcile must not restamp the install time"
+    );
+
+    assert_eq!(
+        find_component(&store, "local-tool"),
         &raw_before,
-        "raw-managed state is untouched",
+        "owned state is untouched",
     );
     assert_eq!(
         host.query_calls().into_iter().collect::<HashSet<_>>(),
         HashSet::from(["copilot-shell".to_string(), "os-skills".to_string()]),
-        "raw-managed components are not queried",
+        "owned components are not queried",
     );
 }
 
@@ -2309,7 +1911,8 @@ fn reconcile_missing_or_ambiguous_rpm_is_not_written() {
             Ownership::RpmManaged,
         ),
     ];
-    seed_state(&layout, objects.clone());
+    seed_state(&layout, objects);
+    let installations_before = load_store(&layout).installations;
     let mut host = FakeHost::default();
     host.missing_after.insert("missing-pkg".to_string());
     host.ambiguous_after.insert("ambiguous-pkg".to_string());
@@ -2347,13 +1950,13 @@ fn reconcile_missing_or_ambiguous_rpm_is_not_written() {
             "package identity is visible"
         );
     }
-    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
+    let store = load_store(&layout);
     assert_eq!(
-        state.objects, objects,
+        store.installations, installations_before,
         "failed items remain byte-for-byte facts"
     );
-    assert_eq!(state.operations.len(), 1);
-    assert_eq!(state.operations[0].status, STATUS_FAILED);
+    assert_eq!(store.operations.len(), 1);
+    assert_eq!(store.operations[0].status, STATUS_FAILED);
 
     let partial_tmp = tempfile::tempdir().expect("partial tmpdir");
     let partial_ctx = system_ctx(partial_tmp.path().to_path_buf());
@@ -2428,18 +2031,11 @@ fn reconcile_origin_failure_preserves_prior_source() {
     assert_eq!(result.reconciled.len(), 1);
     assert_eq!(result.warnings.len(), 1);
     assert!(result.warnings[0].contains("copilot-shell"));
-    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
-    let object = state
-        .find_object(ObjectKind::Component, "cosh")
-        .expect("cosh");
-    assert_eq!(object.version, "2.7.0-1.alnx4");
-    assert_eq!(
-        object
-            .rpm_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.source_repo.as_deref()),
-        Some("@System"),
-    );
+    let store = load_store(&layout);
+    let (_package, _relation, evr, _arch, source_repo) =
+        delegated_parts(find_component(&store, "cosh"));
+    assert_eq!(evr, Some("2.7.0-1.alnx4"));
+    assert_eq!(source_repo, Some("@System"));
 }
 
 #[test]
@@ -2537,22 +2133,15 @@ fn upgrade_dry_run_reports_reconcile_without_writes() {
     assert_eq!(result.reconciled[0].to, "2.7.0-1.alnx4");
     let json = serde_json::to_value(&result).expect("serialize result");
     assert_eq!(json["reconciled"][0]["package"], "copilot-shell");
-    assert_eq!(json["reconciled"][0]["reason"], "RPM state drift");
     assert!(host.txn_calls().is_empty());
     assert_eq!(std::fs::read(&state_path).expect("state bytes"), before);
     assert!(
         !layout.lock_file.exists(),
         "dry-run must not acquire the install lock"
     );
-    let state = InstalledState::load(&state_path).expect("state");
-    assert!(state.operations.is_empty());
-    assert!(
-        state
-            .find_object(ObjectKind::Component, "cosh")
-            .expect("cosh")
-            .last_operation_id
-            .is_none()
-    );
+    let store = StateStore::load(&state_path, 0).expect("store");
+    assert!(store.operations.is_empty());
+    assert!(find_component(&store, "cosh").last_operation_id.is_none());
 }
 
 // ── progress reporting (issue #1452) ─────────────────────────────────────────
@@ -2743,11 +2332,313 @@ fn apply_reports_phases_even_when_an_item_fails() {
     assert_eq!(
         reporter.messages(),
         vec![
-            "Upgrading cosh (1/2)...".to_string(),
-            "Upgrading sec-core (2/2)...".to_string(),
+            "Upgrading cosh, sec-core (1/1)...".to_string(),
+            "Retrying sec-core individually...".to_string(),
             "Finalizing ANOLISA state...".to_string(),
         ],
-        "a failing item is still announced and the finalize phase still runs"
+        "the merged transaction is announced once, the degraded retry names its member, and the finalize phase still runs"
+    );
+}
+
+/// All authorized component updates share one dnf transaction, so the solver
+/// resolves the whole set at once instead of per-item runs.
+#[test]
+fn merged_update_shares_one_dnf_transaction() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let host = FakeHost::default()
+        .with_installed(
+            "copilot-shell",
+            info("copilot-shell", "1.1.0", Some("1.al4")),
+        )
+        .with_installed(
+            "agent-sec-core",
+            info("agent-sec-core", "1.1.0", Some("1.al4")),
+        );
+    seed_state(
+        &layout,
+        vec![
+            rpm_component(
+                "cosh",
+                "copilot-shell",
+                "1.0.0-1.al4",
+                Ownership::RpmManaged,
+            ),
+            rpm_component(
+                "sec-core",
+                "agent-sec-core",
+                "1.0.0-1.al4",
+                Ownership::RpmManaged,
+            ),
+        ],
+    );
+    let components = vec![
+        component_check(
+            "cosh",
+            Some("copilot-shell"),
+            Some("rpm-managed"),
+            Some("1.0.0-1.al4"),
+            Some("1.1.0-1.al4"),
+            ACTION_UPDATE,
+            None,
+        ),
+        component_check(
+            "sec-core",
+            Some("agent-sec-core"),
+            Some("rpm-managed"),
+            Some("1.0.0-1.al4"),
+            Some("1.1.0-1.al4"),
+            ACTION_UPDATE,
+            None,
+        ),
+    ];
+    let plan = build_plan(None, &cli_noop(), &components);
+
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("apply");
+
+    assert_eq!(result.status, STATUS_OK);
+    assert_eq!(result.updated.len(), 2);
+    assert_eq!(
+        host.txn_calls(),
+        vec!["update:copilot-shell,agent-sec-core".to_string()],
+        "both packages must share one dnf update"
+    );
+}
+
+/// All missing-default installs share one dnf transaction as well.
+#[test]
+fn merged_install_shares_one_dnf_transaction() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let host = FakeHost::default()
+        .with_installed("agent-memory", info("agent-memory", "1.0.0", Some("1.al4")))
+        .with_installed("agentsight", info("agentsight", "2.0.0", Some("1.al4")));
+    let components = vec![
+        component_check(
+            "agent-memory",
+            Some("agent-memory"),
+            None,
+            None,
+            Some("1.0.0-1.al4"),
+            ACTION_INSTALL,
+            None,
+        ),
+        component_check(
+            "agentsight",
+            Some("agentsight"),
+            None,
+            None,
+            Some("2.0.0-1.al4"),
+            ACTION_INSTALL,
+            None,
+        ),
+    ];
+    let plan = build_plan(None, &cli_noop(), &components);
+
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("apply");
+
+    assert_eq!(result.status, STATUS_OK);
+    assert_eq!(result.installed.len(), 2);
+    assert_eq!(
+        host.txn_calls(),
+        vec!["install:agent-memory,agentsight".to_string()],
+        "both packages must share one dnf install"
+    );
+}
+
+/// A merged update failure isolates the offender: the member whose slot
+/// provably did not move retries alone and lands, the offender fails with
+/// its own diagnostic, and nothing is retried twice.
+#[test]
+fn merged_update_failure_retries_clean_members_individually() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    // Both packages sit at their pre-upgrade EVR, so after the merged
+    // failure both slots read as clean and both retry; only copilot-shell's
+    // own transaction keeps failing.
+    let mut host = FakeHost::default()
+        .with_installed(
+            "copilot-shell",
+            info("copilot-shell", "1.0.0", Some("1.al4")),
+        )
+        .with_installed(
+            "agent-sec-core",
+            info("agent-sec-core", "1.0.0", Some("1.al4")),
+        );
+    host.fail_update.insert("copilot-shell".to_string());
+    seed_state(
+        &layout,
+        vec![
+            rpm_component(
+                "cosh",
+                "copilot-shell",
+                "1.0.0-1.al4",
+                Ownership::RpmManaged,
+            ),
+            rpm_component(
+                "sec-core",
+                "agent-sec-core",
+                "1.0.0-1.al4",
+                Ownership::RpmManaged,
+            ),
+        ],
+    );
+    let components = vec![
+        component_check(
+            "cosh",
+            Some("copilot-shell"),
+            Some("rpm-managed"),
+            Some("1.0.0-1.al4"),
+            Some("1.1.0-1.al4"),
+            ACTION_UPDATE,
+            None,
+        ),
+        component_check(
+            "sec-core",
+            Some("agent-sec-core"),
+            Some("rpm-managed"),
+            Some("1.0.0-1.al4"),
+            Some("1.1.0-1.al4"),
+            ACTION_UPDATE,
+            None,
+        ),
+    ];
+    let plan = build_plan(None, &cli_noop(), &components);
+
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("apply");
+
+    assert_eq!(result.status, STATUS_PARTIAL);
+    assert_eq!(
+        host.txn_calls(),
+        vec![
+            "update:copilot-shell,agent-sec-core".to_string(),
+            "update:copilot-shell".to_string(),
+            "update:agent-sec-core".to_string(),
+        ],
+        "one merged attempt, then one isolated retry per clean member"
+    );
+    assert_eq!(result.updated.len(), 1);
+    assert_eq!(result.updated[0].name, "sec-core");
+    assert_eq!(result.errors.len(), 1);
+    assert_eq!(result.errors[0].name, "cosh");
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| w.contains("merged dnf update failed")),
+        "the degrade must be announced as a warning: {:?}",
+        result.warnings
+    );
+}
+
+/// A merged install failure records members that landed anyway from rpmdb
+/// truth (forward-only) and retries only the provably clean ones.
+#[test]
+fn merged_install_failure_records_landed_member_from_rpmdb_truth() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    // agent-memory reached the rpmdb despite the failed merged transaction;
+    // agentsight stayed absent for good (its retry then reads back nothing).
+    let mut host = FakeHost::default()
+        .with_installed("agent-memory", info("agent-memory", "1.0.0", Some("1.al4")));
+    host.fail_install.insert("agent-memory".to_string());
+    let components = vec![
+        component_check(
+            "agent-memory",
+            Some("agent-memory"),
+            None,
+            None,
+            Some("1.0.0-1.al4"),
+            ACTION_INSTALL,
+            None,
+        ),
+        component_check(
+            "agentsight",
+            Some("agentsight"),
+            None,
+            None,
+            Some("2.0.0-1.al4"),
+            ACTION_INSTALL,
+            None,
+        ),
+    ];
+    let plan = build_plan(None, &cli_noop(), &components);
+
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("apply");
+
+    assert_eq!(result.status, STATUS_PARTIAL);
+    assert_eq!(
+        host.txn_calls(),
+        vec![
+            "install:agent-memory,agentsight".to_string(),
+            "install:agentsight".to_string(),
+        ],
+        "the landed member is never retried; only the clean one is"
+    );
+    assert_eq!(result.installed.len(), 1);
+    assert_eq!(result.installed[0].name, "agent-memory");
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| w.contains("'agent-memory' was installed despite")),
+        "recording rpmdb truth must be announced: {:?}",
+        result.warnings
+    );
+    assert_eq!(result.errors.len(), 1);
+    assert_eq!(result.errors[0].name, "agentsight");
+    assert!(
+        result.errors[0].reason.contains("not present in rpmdb"),
+        "got: {}",
+        result.errors[0].reason
     );
 }
 

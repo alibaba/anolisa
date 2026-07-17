@@ -19,12 +19,14 @@ use anolisa_env::EnvFacts;
 use anolisa_platform::fs_layout::FsLayout;
 use chrono::{SecondsFormat, Utc};
 
+use crate::domain::{
+    Installation, InstallationScope, LifecycleStatus, ManagementRelation, NativePm,
+    PackageIdentity, ProviderBinding,
+};
 use crate::lock::{InstallLock, LockError};
 use crate::sandbox_manifest::{ManifestError, SandboxManifest, ScenarioConfig};
-use crate::state::{
-    InstallMode as StateInstallMode, InstalledObject, InstalledState, ObjectKind, ObjectStatus,
-    Ownership, ServiceRef,
-};
+use crate::state::{InstallMode as StateInstallMode, ObjectKind};
+use crate::state_store::StateStore;
 
 // ===========================================================================
 // Public types
@@ -705,49 +707,38 @@ fn run_manifest_install(
     // Lock is already held (acquired before Phase 2).
     let state_path = layout.state_dir.join("installed.toml");
     let state_result = (|| -> Result<String, String> {
-        let mut state =
-            InstalledState::load(&state_path).map_err(|e| format!("failed to load state: {e}"))?;
+        let mut store = StateStore::load(&state_path, anolisa_platform::privilege::effective_uid())
+            .map_err(|e| format!("failed to load state: {e}"))?;
 
         // Mark state as system-scoped so other tools interpret paths correctly.
-        state.install_mode = StateInstallMode::System;
-        state.prefix = layout.prefix.clone();
+        store.install_mode = StateInstallMode::System;
+        store.prefix = layout.prefix.clone();
 
-        let obj = InstalledObject {
+        let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+        // The scenario's packages are dnf-managed: record a delegated,
+        // managed installation. The record marks existence; dnf owns the
+        // package facts.
+        let installation = Installation {
             kind: ObjectKind::Osbase,
             name: format!("sandbox-{}", scenario.name),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            status: ObjectStatus::Installed,
-            manifest_digest: None,
-            distribution_source: Some("sandbox.toml".to_string()),
-            raw_package: None,
-            install_backend: Some("dnf".to_string()),
-            ownership: Some(Ownership::RpmManaged),
-            rpm_metadata: None,
-            installed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            scope: InstallationScope::System,
+            binding: ProviderBinding::Delegated {
+                pm: NativePm::Rpm,
+                package: PackageIdentity::Unresolved {
+                    component_hint: format!("sandbox-{}", scenario.name),
+                },
+                relation: ManagementRelation::Managed { since: now.clone() },
+                last_observed: None,
+            },
+            status: LifecycleStatus::Installed,
+            installed_at: now,
             last_operation_id: None,
-            managed: true,
-            adopted: false,
             subscription_scope: Default::default(),
             enabled_features: vec![],
-            component_refs: vec![],
-            files: vec![],
-            external_modified_files: vec![],
-            services: scenario
-                .services
-                .iter()
-                .map(|s| ServiceRef {
-                    name: format!("{s}.service"),
-                    manager: "systemd".to_string(),
-                    restartable: true,
-                    enabled: true,
-                    scope: Default::default(),
-                })
-                .collect(),
             health: vec![],
-            provisioned_packages: vec![],
         };
-        state.upsert_object(obj);
-        state
+        store.upsert(installation);
+        store
             .save(&state_path)
             .map_err(|e| format!("failed to save state: {e}"))?;
         Ok(format!(

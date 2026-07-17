@@ -1,23 +1,24 @@
-//! Subprocess wire-contract coverage for the generic lifecycle plan view of
-//! `uninstall --dry-run --json` (#1471).
+//! Subprocess wire-contract coverage for `uninstall --dry-run --json`.
 //!
-//! The in-crate payload unit tests serialize [`PlanDryRunPayload`] directly, so
-//! they cannot catch a regression that reverts the handler to `render_json(&plan)`
-//! (which would drop `data.dry_run`). These tests drive the real
-//! `handle → render_json` routing through the compiled binary and assert the
-//! full envelope, closing that gap.
+//! Plain uninstall runs the planner pipeline: for an absent component the
+//! dry-run reports the same refusal as a real run would (an error envelope,
+//! exit 2), so previews never disagree with reality. `--purge` keeps the
+//! legacy plan view (#1471): a unified `data.dry_run`, plan fields flat
+//! under `data`. These tests drive the compiled binary and assert the full
+//! envelope, which in-crate unit tests cannot cover.
 
 use std::process::Output;
 
 mod common;
 
-/// Run the CLI and parse its stdout as a JSON envelope, asserting a clean exit.
-fn run_json(arguments: &[&str]) -> serde_json::Value {
+/// Run the CLI and parse its stdout as a JSON envelope, asserting `expected`
+/// as the exit code.
+fn run_json(arguments: &[&str], expected: i32) -> serde_json::Value {
     let output: Output = common::run(arguments);
     assert_eq!(
-        Some(0),
+        Some(expected),
         output.status.code(),
-        "dry-run uninstall of an absent component must exit 0; stderr: {}",
+        "unexpected exit code; stderr: {}",
         String::from_utf8_lossy(&output.stderr),
     );
     serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
@@ -65,37 +66,31 @@ fn absent_uninstall_args<'a>(prefix: &'a str, extra: &[&'a str]) -> Vec<&'a str>
     args
 }
 
+/// A dry-run of an absent component must report the same refusal a real run
+/// would — an error envelope with the actionable "not installed" reason —
+/// never a hollow successful preview.
 #[test]
-fn uninstall_dry_run_json_absent_component_carries_dry_run_and_empty_phases() {
+fn uninstall_dry_run_json_absent_component_reports_not_installed() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let prefix = tmp.path().to_str().expect("utf-8 prefix");
-    let value = run_json(&absent_uninstall_args(prefix, &[]));
+    let value = run_json(&absent_uninstall_args(prefix, &[]), 2);
 
     assert_eq!(
         value.get("ok"),
-        Some(&serde_json::Value::Bool(true)),
-        "absent-component dry-run is a successful preview: {value}",
+        Some(&serde_json::Value::Bool(false)),
+        "an absent component refuses on dry-run exactly like a real run: {value}",
     );
+    let error = value.get("error").expect("envelope must carry error");
     assert_eq!(
-        value.get("command").and_then(|v| v.as_str()),
-        Some("uninstall"),
+        error.get("code").and_then(|v| v.as_str()),
+        Some("INVALID_ARGUMENT"),
     );
-    let data = value.get("data").expect("envelope must carry data");
-    assert_eq!(
-        data.get("operation").and_then(|v| v.as_str()),
-        Some("uninstall"),
-    );
-    assert_plan_dry_run_contract(data);
-
-    let warnings = data
-        .get("warnings")
-        .and_then(|v| v.as_array())
-        .expect("plan carries its own warnings list");
     assert!(
-        warnings
-            .iter()
-            .any(|w| w.as_str().is_some_and(|s| s.contains("not installed"))),
-        "the not-installed warning must remain: {data}",
+        error
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .is_some_and(|reason| reason.contains("not installed")),
+        "the reason must say not installed: {value}",
     );
 }
 
@@ -103,13 +98,13 @@ fn uninstall_dry_run_json_absent_component_carries_dry_run_and_empty_phases() {
 fn uninstall_purge_dry_run_json_uses_same_contract() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let prefix = tmp.path().to_str().expect("utf-8 prefix");
-    let value = run_json(&absent_uninstall_args(prefix, &["--purge"]));
+    let value = run_json(&absent_uninstall_args(prefix, &["--purge"]), 0);
 
     let data = value.get("data").expect("envelope must carry data");
     assert_eq!(
         data.get("operation").and_then(|v| v.as_str()),
         Some("purge"),
-        "purge shares the generic plan view: {data}",
+        "purge keeps the generic plan view: {data}",
     );
     assert_plan_dry_run_contract(data);
 }

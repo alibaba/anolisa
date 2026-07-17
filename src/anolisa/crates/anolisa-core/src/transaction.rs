@@ -241,6 +241,12 @@ pub struct Transaction {
     /// schema churn (`install`, `uninstall`, `disable`, `enable`,
     /// `purge`, …).
     pub operation: String,
+    /// Object this operation is about (component name), when the caller
+    /// declared one. Lets recovery and planning attribute a pending journal
+    /// to its subject; journals written before this field exists load as
+    /// `None` and are treated as unattributed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
     /// RFC3339 UTC timestamp captured during `begin`.
     pub started_at: String,
     /// RFC3339 UTC timestamp captured during `finish`. `None` while the
@@ -310,6 +316,18 @@ impl Transaction {
         state_path: PathBuf,
         journal_dir: &Path,
     ) -> Result<Self, TransactionError> {
+        Self::begin_with_subject(operation, None, state_path, journal_dir)
+    }
+
+    /// [`begin`](Self::begin) with a declared subject (component name), so
+    /// a pending journal can later be attributed to the object it was
+    /// mutating instead of blocking every operation.
+    pub fn begin_with_subject(
+        operation: &str,
+        subject: Option<&str>,
+        state_path: PathBuf,
+        journal_dir: &Path,
+    ) -> Result<Self, TransactionError> {
         let now = Utc::now();
         let operation_id = build_operation_id(operation, &now);
         let started_at = now.to_rfc3339_opts(SecondsFormat::Secs, true);
@@ -332,6 +350,7 @@ impl Transaction {
             schema_version: JOURNAL_SCHEMA_VERSION,
             operation_id,
             operation: operation.to_string(),
+            subject: subject.map(str::to_string),
             started_at,
             finished_at: None,
             state_path,
@@ -342,6 +361,17 @@ impl Transaction {
         };
         tx.persist()?;
         Ok(tx)
+    }
+
+    /// Whether this journal records unfinished business: it is still in
+    /// flight (crash window) or ended `Partial` (side effects committed
+    /// that the record does not reflect). `Ok`, `Failed`, and `RolledBack`
+    /// are settled outcomes — nothing is left to recover.
+    pub fn is_pending(&self) -> bool {
+        matches!(
+            self.status,
+            TransactionOutcomeStatus::InFlight | TransactionOutcomeStatus::Partial
+        )
     }
 
     /// Append a step to the journal and persist.
@@ -598,6 +628,15 @@ impl Transaction {
         write_atomic(&self.journal_path, content.as_bytes())
             .map_err(|err| TransactionError::Io(self.journal_path.clone(), err))
     }
+}
+
+/// Mint a fresh operation id outside a journal, in the same format
+/// [`Transaction::begin`] uses. Batch orchestrations use this for the parent
+/// id that groups their members' per-component operations: the parent never
+/// owns a journal (each member journals for itself), but its id must sort
+/// and grep exactly like every other id in `installed.toml::operations`.
+pub fn mint_operation_id(operation: &str) -> String {
+    build_operation_id(operation, &Utc::now())
 }
 
 /// `op-YYYYMMDDHHMMSS-<6-hex>` — matches the operation-id format used by

@@ -7,11 +7,12 @@
 
 use std::collections::BTreeSet;
 
+use anolisa_core::domain::{Installation, LifecycleStatus, ProviderBinding};
 use anolisa_core::{
     Catalog, CheckEnv, CheckOutcome, CheckSpec, CheckStatus, ComponentManifest, DependencyKind,
-    DependencyResolution, DependencyResolver, DependencyStatus, HealthEntry, InstalledObject,
-    ObjectKind, ObjectStatus, ResolverEnv, ServiceManager, ServiceRef, ServiceScope, ServiceState,
-    run_check, service_for_install_mode, user_service_for_install_mode,
+    DependencyResolution, DependencyResolver, DependencyStatus, HealthEntry, ObjectKind,
+    ResolverEnv, ServiceManager, ServiceRef, ServiceScope, ServiceState, run_check,
+    service_for_install_mode, user_service_for_install_mode,
 };
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::rpm_query::RpmPackageQuery;
@@ -239,10 +240,8 @@ fn diagnose_from_view(
 
     for mut record in records {
         let root = root_for_record(view, &record);
-        let object = root.and_then(|root| {
-            root.state
-                .find_object(ObjectKind::Component, record.name.as_str())
-        });
+        let object =
+            root.and_then(|root| root.state.find(ObjectKind::Component, record.name.as_str()));
         normalize_rpm_record(&mut record, object);
         let catalog = root.and_then(|root| catalogs.catalog_for(root));
         let layout = root
@@ -288,7 +287,7 @@ fn lookup_component_name_from_view(input: &str, view: &StateView, ctx: &CliConte
     {
         return input.to_string();
     }
-    common::lookup_component_name(input, &view.writable.state, ctx, COMMAND)
+    common::lookup_component_name_in_store(input, &view.writable.state, ctx, COMMAND)
 }
 
 fn root_for_record<'a>(
@@ -303,7 +302,7 @@ fn root_for_record<'a>(
 
 fn diagnose_component(
     record: ComponentRecord,
-    object: Option<&InstalledObject>,
+    object: Option<&Installation>,
     manifest: Option<&ComponentManifest>,
     manifest_warning: Option<String>,
     probe_ctx: &DoctorProbeContext<'_>,
@@ -318,7 +317,7 @@ fn diagnose_component(
         state_path: record.state_path.clone(),
         state_status: Some(
             object
-                .map(|object| common::object_status_str(object.status).to_string())
+                .map(|object| common::installation_status_str(object).to_string())
                 .unwrap_or_else(|| record.status.clone()),
         ),
         version: record.version.clone(),
@@ -362,32 +361,33 @@ fn qualify_fix_plan_for_record(record: &ComponentRecord, fix_plan: &mut [FixSugg
     }
 }
 
-fn normalize_rpm_record(record: &mut ComponentRecord, object: Option<&InstalledObject>) {
+fn normalize_rpm_record(record: &mut ComponentRecord, object: Option<&Installation>) {
     let Some(object) = object else {
         return;
     };
-    if !object.effective_ownership().is_rpm() {
+    if !object.binding.is_delegated() {
         return;
     }
     // `status`' legacy manifest probes expand `{bindir}` through the raw
-    // `/usr/local` layout. RPM packages own their files under distro paths, so
-    // doctor must not treat those raw-layout probe results as RPM health.
+    // `/usr/local` layout. Delegated packages own their files under distro
+    // paths, so doctor must not treat those raw-layout probe results as
+    // package health.
     record
         .health
         .retain(|entry| !entry.name.starts_with(&format!("{}:", record.name)));
-    record.status = crate::commands::common::object_status_str(object.status).to_string();
+    record.status = crate::commands::common::installation_status_str(object).to_string();
 }
 
 fn add_state_finding(
     record: &ComponentRecord,
-    object: Option<&InstalledObject>,
+    object: Option<&Installation>,
     out: &mut DoctorComponent,
 ) {
     let status = object
-        .map(|object| common::object_status_str(object.status))
+        .map(common::installation_status_str)
         .unwrap_or(record.status.as_str());
     match status {
-        "installed" | "adopted" | "disabled" => {}
+        "installed" | "adopted" | "observed" | "disabled" => {}
         "not_installed" => {
             out.findings.push(finding(
                 FindingSeverity::Error,
@@ -455,14 +455,14 @@ fn add_health_entries(record: &ComponentRecord, out: &mut DoctorComponent) {
 
 fn add_manifest_warning(
     warning: Option<String>,
-    object: Option<&InstalledObject>,
+    object: Option<&Installation>,
     out: &mut DoctorComponent,
 ) {
     let Some(warning) = warning else {
         return;
     };
     let rpm_backed = object
-        .map(|object| object.effective_ownership().is_rpm())
+        .map(|object| object.binding.is_delegated())
         .unwrap_or(false);
     if rpm_backed && warning.starts_with("component contract unavailable") {
         return;
@@ -492,7 +492,7 @@ fn add_manifest_warning(
 
 fn add_structured_health(
     manifest: Option<&ComponentManifest>,
-    object: Option<&InstalledObject>,
+    object: Option<&Installation>,
     probe_ctx: &DoctorProbeContext<'_>,
     out: &mut DoctorComponent,
 ) {
@@ -502,7 +502,7 @@ fn add_structured_health(
     let Some(manifest) = manifest else {
         return;
     };
-    if object.effective_ownership().is_rpm() {
+    if object.binding.is_delegated() {
         out.health_checks.push(DoctorHealthCheck {
             name: "component.health_check".to_string(),
             status: "skipped".to_string(),
@@ -518,7 +518,7 @@ fn add_structured_health(
     let Some(spec) = manifest.health_spec() else {
         return;
     };
-    let skip_active_service_probe = object.status == ObjectStatus::Disabled;
+    let skip_active_service_probe = object.status == LifecycleStatus::Disabled;
     let outcome = run_doctor_check(&spec, Some(manifest), probe_ctx, skip_active_service_probe);
     let component = out.name.clone();
     add_check_outcome(&component, &outcome, out);
@@ -753,14 +753,17 @@ fn systemd_active_scope(service: &str, manifest: Option<&ComponentManifest>) -> 
 
 fn add_service_refs(
     manifest: Option<&ComponentManifest>,
-    object: Option<&InstalledObject>,
+    object: Option<&Installation>,
     probe_ctx: &DoctorProbeContext<'_>,
     out: &mut DoctorComponent,
 ) {
     let Some(object) = object else {
         return;
     };
-    if object.services.is_empty() {
+    let ProviderBinding::Owned { artifact } = &object.binding else {
+        return;
+    };
+    if artifact.services.is_empty() {
         return;
     }
     let explicit_systemd = manifest
@@ -771,9 +774,9 @@ fn add_service_refs(
             units
         })
         .unwrap_or_default();
-    let skip_active_service_probe = object.status == ObjectStatus::Disabled;
+    let skip_active_service_probe = object.status == LifecycleStatus::Disabled;
 
-    for service in &object.services {
+    for service in &artifact.services {
         if explicit_systemd.contains(&service.name) {
             continue;
         }
@@ -1029,7 +1032,7 @@ fn add_check_outcome(component: &str, outcome: &CheckOutcome, out: &mut DoctorCo
 
 fn add_runtime_dependencies(
     manifest: Option<&ComponentManifest>,
-    object: Option<&InstalledObject>,
+    object: Option<&Installation>,
     resolver_env: &ResolverEnv,
     dry_run: bool,
     out: &mut DoctorComponent,
@@ -1043,7 +1046,7 @@ fn add_runtime_dependencies(
     if manifest.runtime_deps.is_empty() {
         return;
     }
-    if object.effective_ownership().is_rpm() {
+    if object.binding.is_delegated() {
         for dep in &manifest.runtime_deps {
             out.dependencies.push(DoctorDependency {
                 name: dep.name.clone(),
@@ -1158,17 +1161,17 @@ fn add_dependency_resolution(resolution: &DependencyResolution, out: &mut Doctor
 }
 
 fn add_rpm_drift(
-    object: Option<&InstalledObject>,
+    object: Option<&Installation>,
     rpm_query: &RpmPackageQuery,
     out: &mut DoctorComponent,
 ) {
     let Some(object) = object else {
         return;
     };
-    if !object.effective_ownership().is_rpm() {
+    if !object.binding.is_delegated() {
         return;
     }
-    let Some(meta) = object.rpm_metadata.as_ref() else {
+    let Some((package, recorded_evr)) = status::drift_probe_identity(object) else {
         out.health_checks.push(DoctorHealthCheck {
             name: "rpmdb".to_string(),
             status: "unverified".to_string(),
@@ -1193,10 +1196,10 @@ fn add_rpm_drift(
         ));
         return;
     };
-    match status::probe_rpm_drift(meta, rpm_query) {
+    match status::probe_rpm_drift(package, recorded_evr, rpm_query) {
         Some(RpmDrift::Drifted { reason }) => {
             out.health_checks.push(DoctorHealthCheck {
-                name: format!("rpmdb:{}", meta.package_name),
+                name: format!("rpmdb:{package}"),
                 status: "failed".to_string(),
                 source: "rpm".to_string(),
                 detail: Some(reason.clone()),
@@ -1219,7 +1222,6 @@ fn add_rpm_drift(
             ));
         }
         Some(RpmDrift::Missing) => {
-            let package = meta.package_name.clone();
             out.health_checks.push(DoctorHealthCheck {
                 name: format!("rpmdb:{package}"),
                 status: "failed".to_string(),
@@ -1249,7 +1251,7 @@ fn add_rpm_drift(
             ));
         }
         None => out.health_checks.push(DoctorHealthCheck {
-            name: format!("rpmdb:{}", meta.package_name),
+            name: format!("rpmdb:{package}"),
             status: "ok".to_string(),
             source: "rpm".to_string(),
             detail: None,
@@ -1555,9 +1557,12 @@ fn dedupe_fix_plan(fix_plan: &mut Vec<FixSuggestion>) {
 mod tests {
     use super::*;
     use crate::commands::state_view::StateScope;
+    use anolisa_core::domain::{
+        InstallationScope, ManagementRelation, NativePm, OwnedArtifact, PackageIdentity,
+    };
+    use anolisa_core::state_store::StateStore;
     use anolisa_core::{
-        DependencyStatus, FakeServiceManager, HealthEntry, InstalledState,
-        NotSupportedServiceManager, ObjectStatus, Ownership, ServiceOp,
+        DependencyStatus, FakeServiceManager, HealthEntry, NotSupportedServiceManager, ServiceOp,
     };
     use std::path::PathBuf;
 
@@ -1583,31 +1588,64 @@ mod tests {
         }
     }
 
-    fn object(name: &str, status: ObjectStatus, ownership: Ownership) -> InstalledObject {
-        InstalledObject {
+    fn installation(name: &str, status: LifecycleStatus, binding: ProviderBinding) -> Installation {
+        Installation {
             kind: ObjectKind::Component,
             name: name.to_string(),
-            version: "1.0.0".to_string(),
+            scope: InstallationScope::System,
+            binding,
             status,
-            manifest_digest: None,
-            distribution_source: None,
-            raw_package: None,
-            install_backend: Some("rpm".to_string()),
-            ownership: Some(ownership),
-            rpm_metadata: None,
             installed_at: "2026-06-01T00:00:00Z".to_string(),
             last_operation_id: None,
-            managed: true,
-            adopted: false,
             subscription_scope: anolisa_core::SubscriptionScope::None,
             enabled_features: Vec::new(),
-            component_refs: Vec::new(),
-            files: Vec::new(),
-            external_modified_files: Vec::new(),
-            services: Vec::new(),
             health: Vec::new(),
-            provisioned_packages: Vec::new(),
         }
+    }
+
+    fn owned_object(name: &str, status: LifecycleStatus) -> Installation {
+        installation(
+            name,
+            status,
+            ProviderBinding::Owned {
+                artifact: OwnedArtifact {
+                    version: "1.0.0".to_string(),
+                    distribution_source: None,
+                    raw_package: None,
+                    manifest_digest: None,
+                    files: Vec::new(),
+                    services: Vec::new(),
+                    external_modified_files: Vec::new(),
+                    provisioned_packages: Vec::new(),
+                },
+            },
+        )
+    }
+
+    /// Delegated fixture with an unresolved package: rpm-backed for the
+    /// gating checks without depending on the host rpmdb in probes.
+    fn delegated_object(name: &str, status: LifecycleStatus) -> Installation {
+        installation(
+            name,
+            status,
+            ProviderBinding::Delegated {
+                pm: NativePm::Rpm,
+                package: PackageIdentity::Unresolved {
+                    component_hint: name.to_string(),
+                },
+                relation: ManagementRelation::Managed {
+                    since: "2026-06-01T00:00:00Z".to_string(),
+                },
+                last_observed: None,
+            },
+        )
+    }
+
+    fn push_owned_service(installation: &mut Installation, service: ServiceRef) {
+        let ProviderBinding::Owned { artifact } = &mut installation.binding else {
+            panic!("fixture must be owned to carry services");
+        };
+        artifact.services.push(service);
     }
 
     fn service_ref(name: &str, scope: ServiceScope) -> ServiceRef {
@@ -1656,13 +1694,13 @@ mod tests {
         }
     }
 
-    fn state_with_component(object: InstalledObject) -> InstalledState {
-        let mut state = InstalledState::default();
-        state.upsert_object(object);
-        state
+    fn state_with_component(installation: Installation) -> StateStore {
+        let mut store = StateStore::empty();
+        store.installations.push(installation);
+        store
     }
 
-    fn scoped_doctor_view(user_state: InstalledState, system_state: InstalledState) -> StateView {
+    fn scoped_doctor_view(user_state: StateStore, system_state: StateStore) -> StateView {
         let user_root = ScopedStateRoot {
             scope: StateScope::User,
             layout: FsLayout::user_with_overrides(
@@ -1691,7 +1729,7 @@ mod tests {
         }
     }
 
-    fn system_only_doctor_view(system_state: InstalledState) -> StateView {
+    fn system_only_doctor_view(system_state: StateStore) -> StateView {
         let system_root = ScopedStateRoot {
             scope: StateScope::System,
             layout: FsLayout::system(Some(PathBuf::from("/tmp/anolisa-system"))),
@@ -1730,12 +1768,8 @@ mod tests {
     #[test]
     fn user_doctor_view_includes_system_component_as_read_only() {
         let view = scoped_doctor_view(
-            InstalledState::default(),
-            state_with_component(object(
-                "agentsight",
-                ObjectStatus::Installed,
-                Ownership::RpmManaged,
-            )),
+            StateStore::empty(),
+            state_with_component(delegated_object("agentsight", LifecycleStatus::Installed)),
         );
 
         let payload = diagnose_test_view(&view, Some("agentsight"));
@@ -1755,16 +1789,8 @@ mod tests {
     #[test]
     fn named_doctor_view_reports_shadowed_system_record() {
         let view = scoped_doctor_view(
-            state_with_component(object(
-                "agentsight",
-                ObjectStatus::Installed,
-                Ownership::RpmManaged,
-            )),
-            state_with_component(object(
-                "agentsight",
-                ObjectStatus::Installed,
-                Ownership::RpmManaged,
-            )),
+            state_with_component(delegated_object("agentsight", LifecycleStatus::Installed)),
+            state_with_component(delegated_object("agentsight", LifecycleStatus::Installed)),
         );
 
         let payload = diagnose_test_view(&view, Some("agentsight"));
@@ -1781,10 +1807,9 @@ mod tests {
 
     #[test]
     fn system_doctor_view_uses_only_visible_system_root() {
-        let view = system_only_doctor_view(state_with_component(object(
+        let view = system_only_doctor_view(state_with_component(delegated_object(
             "system-tool",
-            ObjectStatus::Installed,
-            Ownership::RpmManaged,
+            LifecycleStatus::Installed,
         )));
 
         let payload = diagnose_test_view(&view, None);
@@ -1797,11 +1822,12 @@ mod tests {
 
     #[test]
     fn system_record_service_ref_uses_system_scope_manager_in_user_view() {
-        let mut object = object("agentsight", ObjectStatus::Installed, Ownership::RawManaged);
-        object
-            .services
-            .push(service_ref("agentsight.service", ServiceScope::System));
-        let view = scoped_doctor_view(InstalledState::default(), state_with_component(object));
+        let mut object = owned_object("agentsight", LifecycleStatus::Installed);
+        push_owned_service(
+            &mut object,
+            service_ref("agentsight.service", ServiceScope::System),
+        );
+        let view = scoped_doctor_view(StateStore::empty(), state_with_component(object));
         let resolver_env = ResolverEnv::default();
         let rpm_query = RpmPackageQuery::system();
         let invocation_system_service =
@@ -1839,16 +1865,12 @@ mod tests {
 
     #[test]
     fn system_record_user_service_ref_uses_invocation_user_manager() {
-        let mut object = object(
-            "agent-memory",
-            ObjectStatus::Installed,
-            Ownership::RawManaged,
+        let mut object = owned_object("agent-memory", LifecycleStatus::Installed);
+        push_owned_service(
+            &mut object,
+            service_ref("anolisa-memory@user.service", ServiceScope::User),
         );
-        object.services.push(service_ref(
-            "anolisa-memory@user.service",
-            ServiceScope::User,
-        ));
-        let view = scoped_doctor_view(InstalledState::default(), state_with_component(object));
+        let view = scoped_doctor_view(StateStore::empty(), state_with_component(object));
         let resolver_env = ResolverEnv::default();
         let rpm_query = RpmPackageQuery::system();
         let invocation_system_service =
@@ -1973,7 +1995,7 @@ mod tests {
             checked_at: "2026-06-01T00:00:00Z".to_string(),
             reason: None,
         });
-        let obj = object("agentsight", ObjectStatus::Installed, Ownership::RpmManaged);
+        let obj = delegated_object("agentsight", LifecycleStatus::Installed);
 
         normalize_rpm_record(&mut rec, Some(&obj));
 
@@ -1984,7 +2006,7 @@ mod tests {
 
     #[test]
     fn rpm_missing_contract_does_not_degrade_component() {
-        let obj = object("tokenless", ObjectStatus::Installed, Ownership::RpmManaged);
+        let obj = delegated_object("tokenless", LifecycleStatus::Installed);
         let mut component = empty_component("tokenless");
 
         add_manifest_warning(
@@ -2010,11 +2032,7 @@ mod tests {
             checked_at: "2026-06-01T00:00:00Z".to_string(),
             reason: None,
         });
-        let obj = object(
-            "agent-memory",
-            ObjectStatus::Installed,
-            Ownership::RawManaged,
-        );
+        let obj = owned_object("agent-memory", LifecycleStatus::Installed);
         let mut component = empty_component(&rec.name);
 
         add_state_finding(&rec, Some(&obj), &mut component);
@@ -2197,9 +2215,11 @@ mod tests {
             &user_service,
             false,
         );
-        let mut obj = object("agentsight", ObjectStatus::Installed, Ownership::RawManaged);
-        obj.services
-            .push(service_ref("agentsight.service", ServiceScope::System));
+        let mut obj = owned_object("agentsight", LifecycleStatus::Installed);
+        push_owned_service(
+            &mut obj,
+            service_ref("agentsight.service", ServiceScope::System),
+        );
         let mut component = empty_component("agentsight");
 
         add_service_refs(None, Some(&obj), &ctx, &mut component);
@@ -2227,9 +2247,11 @@ mod tests {
             &user_service,
             false,
         );
-        let mut obj = object("agentsight", ObjectStatus::Disabled, Ownership::RawManaged);
-        obj.services
-            .push(service_ref("agentsight.service", ServiceScope::System));
+        let mut obj = owned_object("agentsight", LifecycleStatus::Disabled);
+        push_owned_service(
+            &mut obj,
+            service_ref("agentsight.service", ServiceScope::System),
+        );
         let mut component = empty_component("agentsight");
 
         add_service_refs(None, Some(&obj), &ctx, &mut component);
@@ -2279,15 +2301,11 @@ mod tests {
             &user_service,
             false,
         );
-        let mut obj = object(
-            "agent-memory",
-            ObjectStatus::Installed,
-            Ownership::RawManaged,
+        let mut obj = owned_object("agent-memory", LifecycleStatus::Installed);
+        push_owned_service(
+            &mut obj,
+            service_ref("anolisa-memory@root.service", ServiceScope::User),
         );
-        obj.services.push(service_ref(
-            "anolisa-memory@root.service",
-            ServiceScope::User,
-        ));
         let mut component = empty_component("agent-memory");
 
         add_service_refs(Some(&manifest), Some(&obj), &ctx, &mut component);

@@ -15,6 +15,8 @@ pub mod dependency;
 pub mod distribution;
 pub mod domain;
 pub mod download;
+pub mod executor;
+pub mod facts;
 pub mod feature_flags;
 pub mod health;
 pub mod hooks;
@@ -26,10 +28,13 @@ pub mod lock;
 pub mod manifest;
 pub mod metadata;
 pub mod osbase_install;
+pub mod owned_executor;
 pub mod path_safety;
 pub mod planner;
 pub mod process;
+pub mod providers;
 pub mod provisioner;
+pub mod record_sink;
 pub mod register;
 pub mod registry;
 pub mod resolver;
@@ -38,6 +43,7 @@ pub mod self_update;
 pub mod service;
 pub mod state;
 pub mod state_migration;
+pub mod state_store;
 pub mod system_helper;
 pub mod telemetry;
 pub mod transaction;
@@ -78,9 +84,8 @@ pub use instance::{InstanceInfo, InstanceProber, InstanceSnapshot};
 pub use integrity::{IntegrityStatus, check_owned_file};
 pub use lifecycle::{
     ComponentLifecyclePlan, FileAction, FileActionKind, FileOwner as LifecycleFileOwner,
-    HookAction, LifecycleError, LifecycleMode, LifecycleOperation, LifecycleOutcome,
-    LifecyclePhase, LifecyclePlan, LifecycleTargetKind, ResolvedLifecycleHooks, RiskLevel,
-    ServiceAction, ServiceActionKind, execute_plan,
+    HookAction, LifecycleError, LifecycleMode, LifecycleOperation, LifecyclePhase, LifecyclePlan,
+    LifecycleTargetKind, ResolvedLifecycleHooks, RiskLevel, ServiceAction, ServiceActionKind,
 };
 pub use lock::{InstallLock, LockError};
 pub use manifest::{

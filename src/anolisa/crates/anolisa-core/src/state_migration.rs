@@ -102,7 +102,7 @@ pub enum QuarantineReason {
 }
 
 /// A legacy record preserved verbatim because migration refused to guess.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QuarantinedObject {
     /// Original legacy record, unmodified — zero information loss.
     pub record: InstalledObject,
@@ -330,7 +330,16 @@ fn migrate_status(status: ObjectStatus) -> LifecycleStatus {
 
 /// Build an `Owned` installation from a legacy record.
 fn owned(legacy: &InstalledObject, scope: InstallationScope) -> MigrationOutcome {
-    MigrationOutcome::Active(Installation {
+    MigrationOutcome::Active(owned_installation(legacy, scope))
+}
+
+/// Map a legacy record's fields onto an `Owned` installation, verbatim.
+///
+/// Public because repair's quarantine-restore exit performs the same
+/// mapping: a quarantined legacy record whose owned files verify intact is
+/// rebuilt into an active owned record through exactly this translation.
+pub fn owned_installation(legacy: &InstalledObject, scope: InstallationScope) -> Installation {
+    Installation {
         kind: legacy.kind,
         name: legacy.name.clone(),
         scope,
@@ -352,7 +361,7 @@ fn owned(legacy: &InstalledObject, scope: InstallationScope) -> MigrationOutcome
         subscription_scope: legacy.subscription_scope,
         enabled_features: legacy.enabled_features.clone(),
         health: legacy.health.clone(),
-    })
+    }
 }
 
 /// Build a `Delegated` installation from a legacy record. The observation

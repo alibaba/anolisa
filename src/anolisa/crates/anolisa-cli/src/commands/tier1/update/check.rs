@@ -44,8 +44,10 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use anolisa_core::domain::{Installation, ManagementRelation, ProviderBinding};
 use anolisa_core::self_update;
-use anolisa_core::state::{InstalledObject, InstalledState, ObjectKind, Ownership};
+use anolisa_core::state::ObjectKind;
+use anolisa_core::state_store::StateStore;
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError, PackageVersion, rpm_evr_cmp};
 use anolisa_platform::rpm_query::RpmPackageQuery;
@@ -214,7 +216,7 @@ impl TargetProfile {
 /// Read-only inputs for [`run_update_check`]; injected so tests drive the whole
 /// report without a live rpmdb/dnf.
 struct CheckInputs<'a> {
-    installed: &'a InstalledState,
+    installed: &'a StateStore,
     query: &'a dyn PackageQuery,
     /// Path of the running executable, used to find its owning RPM.
     cli_exe_path: &'a str,
@@ -325,7 +327,7 @@ pub(crate) fn compute_update_check_report(
         },
     )?;
     let query = RpmPackageQuery::system_with_repo(repo);
-    let installed = common::load_installed_state(ctx, CHECK_COMMAND)?;
+    let installed = common::load_state_store(ctx, CHECK_COMMAND)?;
 
     let exe = self_update::resolve_current_exe().map_err(|err| CliError::Runtime {
         command: CHECK_COMMAND.to_string(),
@@ -389,15 +391,15 @@ fn run_update_check(inputs: CheckInputs<'_>) -> UpdateCheckReport {
     let cli = build_cli_check(inputs.query, inputs.cli_exe_path, inputs.arch, &mut summary);
 
     let mut components = Vec::new();
-    for obj in &inputs.installed.objects {
-        if obj.kind != ObjectKind::Component {
+    for installation in &inputs.installed.installations {
+        if installation.kind != ObjectKind::Component {
             continue;
         }
         components.push(check_component(
             inputs.query,
             inputs.component_index,
             inputs.rpm_backend,
-            obj,
+            installation,
             inputs.arch,
             &mut summary,
         ));
@@ -410,11 +412,7 @@ fn run_update_check(inputs: CheckInputs<'_>) -> UpdateCheckReport {
     // adopted) is evaluated for upgrades instead of falsely reported as missing.
     if let Some(profile) = &inputs.target {
         for name in &profile.default_components {
-            if inputs
-                .installed
-                .find_object(ObjectKind::Component, name)
-                .is_some()
-            {
+            if inputs.installed.find(ObjectKind::Component, name).is_some() {
                 continue;
             }
             components.push(check_default_component(
@@ -540,38 +538,49 @@ fn check_component(
     query: &dyn PackageQuery,
     component_index: Option<&ComponentIndex>,
     rpm_backend: Option<&BackendConfig>,
-    obj: &InstalledObject,
+    installation: &Installation,
     arch: &str,
     summary: &mut CheckSummary,
 ) -> ComponentCheck {
-    let component = obj.name.clone();
-    let ownership = obj.effective_ownership();
+    let component = installation.name.clone();
 
-    // Raw-managed components are explicitly out of the RPM upgrade path. Nothing
-    // is queried, touched, or migrated — only reported.
-    if ownership == Ownership::RawManaged {
-        summary.unsupported += 1;
-        return ComponentCheck {
-            component,
-            package: obj.raw_package.clone(),
-            ownership: Some(ownership.label().to_string()),
-            installed: Some(obj.version.clone()),
-            available: None,
-            action: ACTION_UNSUPPORTED_RPM.to_string(),
-            error: None,
-            absent_from_state: false,
-            backfill_rpm_metadata: false,
-        };
-    }
+    // Owned components are explicitly out of the RPM upgrade path. Nothing is
+    // queried, touched, or migrated — only reported.
+    let (identity, relation, last_observed) = match &installation.binding {
+        ProviderBinding::Owned { artifact } => {
+            summary.unsupported += 1;
+            return ComponentCheck {
+                component,
+                package: artifact.raw_package.clone(),
+                ownership: Some("owned".to_string()),
+                installed: Some(artifact.version.clone()),
+                available: None,
+                action: ACTION_UNSUPPORTED_RPM.to_string(),
+                error: None,
+                absent_from_state: false,
+                backfill_rpm_metadata: false,
+            };
+        }
+        ProviderBinding::Delegated {
+            package,
+            relation,
+            last_observed,
+            ..
+        } => (package, relation, last_observed),
+    };
 
-    let ownership_label = ownership.label().to_string();
-    let (package, backfill_rpm_metadata) = match obj
-        .rpm_metadata
+    let ownership_label = relation.label().to_string();
+    // Recorded version for error rows, where rpmdb could not be consulted:
+    // the observation cache is the best (stale) display value available.
+    let recorded_version = last_observed
         .as_ref()
-        .map(|m| m.package_name.clone())
+        .map(|obs| obs.evr.clone().unwrap_or_else(|| obs.version.clone()));
+    let (package, backfill_rpm_metadata) = match identity
+        .resolved_name()
+        .map(str::trim)
         .filter(|p| !p.is_empty())
     {
-        Some(package) => (package, false),
+        Some(package) => (package.to_string(), false),
         None => {
             match resolve_legacy_component_package(query, component_index, rpm_backend, &component)
             {
@@ -582,7 +591,7 @@ fn check_component(
                         component,
                         None,
                         ownership_label,
-                        Some(obj.version.clone()),
+                        recorded_version,
                         reason,
                     );
                 }
@@ -600,7 +609,7 @@ fn check_component(
                 component,
                 Some(package),
                 ownership_label,
-                Some(obj.version.clone()),
+                recorded_version.clone(),
                 "package recorded in ANOLISA state is not present in rpmdb; run `anolisa forget` or reinstall".to_string(),
             );
         }
@@ -610,7 +619,7 @@ fn check_component(
                 component,
                 Some(package),
                 ownership_label,
-                Some(obj.version.clone()),
+                recorded_version.clone(),
                 "rpmdb reports multiple installed versions for this package".to_string(),
             );
         }
@@ -620,7 +629,7 @@ fn check_component(
                 component,
                 Some(package),
                 ownership_label,
-                Some(obj.version.clone()),
+                recorded_version.clone(),
                 "rpm/dnf not found; cannot query the installed version".to_string(),
             );
         }
@@ -630,7 +639,7 @@ fn check_component(
                 component,
                 Some(package),
                 ownership_label,
-                Some(obj.version.clone()),
+                recorded_version.clone(),
                 format!("rpm query failed: {err}"),
             );
         }
@@ -960,7 +969,7 @@ fn check_present_default(
     arch: &str,
     summary: &mut CheckSummary,
 ) -> ComponentCheck {
-    let ownership_label = Ownership::RpmObserved.label().to_string();
+    let ownership_label = ManagementRelation::Observed.label().to_string();
     let installed = match query.query_installed(package) {
         Ok(Some(info)) => info.version,
         // The probe just resolved `package` as an installed provider, so an

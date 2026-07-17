@@ -100,6 +100,8 @@ pub enum ComponentCommands {
     Restart(tier1::restart::RestartArgs),
     /// Update a component (`update <component>`), the CLI binary (`self`), or everything (`all`)
     Update(tier1::update::UpdateArgs),
+    /// Reinstall a component at its currently installed version
+    Reinstall(tier1::reinstall::ReinstallArgs),
     /// Upgrade the RPM/system image to the target toolchain profile (system-only)
     Upgrade(tier1::upgrade::UpgradeArgs),
     /// Reconcile a component's ANOLISA state with rpmdb after manual RPM changes
@@ -210,6 +212,7 @@ pub fn dispatch(cli: Cli, ctx: &CliContext) -> Result<(), CliError> {
             ComponentCommands::Logs(args) => tier1::logs::handle(args, ctx),
             ComponentCommands::Restart(args) => tier1::restart::handle(args, ctx),
             ComponentCommands::Update(args) => tier1::update::handle(args, ctx),
+            ComponentCommands::Reinstall(args) => tier1::reinstall::handle(args, ctx),
             ComponentCommands::Upgrade(args) => tier1::upgrade::handle(args, ctx),
             ComponentCommands::Repair(args) => tier1::repair::handle(args, ctx),
             ComponentCommands::Forget(args) => tier1::forget::handle(args, ctx),
@@ -402,6 +405,9 @@ fn command_policy(command: &Commands) -> CommandPolicy {
                 CommandPolicy::new("update", CommandScope::ReadOnly)
             }
             ComponentCommands::Update(_) => mode_scoped("update", true),
+            // Reinstall mutates like update: real execution needs the mode's
+            // privilege, `--dry-run` previews the plan without root.
+            ComponentCommands::Reinstall(_) => mode_scoped("reinstall", true),
             // `upgrade` is a system-only RPM image mutation: real execution
             // needs root. `--dry-run` waives only the root requirement, not the
             // system-mode one, so an explicit system-mode dry-run can preview

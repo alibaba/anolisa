@@ -109,8 +109,9 @@ fn build_payload(
     let environment = collect_environment(ctx);
     // Resolve component alias before filtering state and logs.
     let resolved = component.map(|name| {
-        let state = common::load_installed_state(ctx, COMMAND).unwrap_or_default();
-        common::lookup_component_name(name, &state, ctx, COMMAND)
+        let state = common::load_state_store(ctx, COMMAND)
+            .unwrap_or_else(|_| anolisa_core::state_store::StateStore::empty());
+        common::lookup_component_name_in_store(name, &state, ctx, COMMAND)
     });
     let components = collect_components(resolved.as_deref(), ctx)?;
     let recent_logs = collect_recent_logs(resolved.as_deref(), limit, ctx)?;
@@ -151,19 +152,31 @@ fn collect_environment(ctx: &CliContext) -> EnvironmentSummary {
     }
 }
 
+/// Human-facing version string: an owned artifact's recorded version, a
+/// delegated record's cached observation (EVR preferred), else "unknown".
+fn installed_version(installation: &anolisa_core::domain::Installation) -> String {
+    match &installation.binding {
+        anolisa_core::domain::ProviderBinding::Owned { artifact } => artifact.version.clone(),
+        anolisa_core::domain::ProviderBinding::Delegated { last_observed, .. } => last_observed
+            .as_ref()
+            .map(|o| o.evr.clone().unwrap_or_else(|| o.version.clone()))
+            .unwrap_or_else(|| "unknown".to_string()),
+    }
+}
+
 fn collect_components(
     component: Option<&str>,
     ctx: &CliContext,
 ) -> Result<Vec<ComponentSummary>, CliError> {
-    let state = common::load_installed_state(ctx, COMMAND)?;
+    let state = common::load_state_store(ctx, COMMAND)?;
     let all: Vec<ComponentSummary> = state
-        .objects
+        .installations
         .iter()
         .filter(|o| o.kind == ObjectKind::Component)
         .map(|o| ComponentSummary {
             name: o.name.clone(),
-            status: common::object_status_str(o.status).to_string(),
-            installed_version: Some(o.version.clone()),
+            status: common::installation_status_str(o).to_string(),
+            installed_version: Some(installed_version(o)),
         })
         .collect();
 

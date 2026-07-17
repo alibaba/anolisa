@@ -1,24 +1,23 @@
 use std::path::PathBuf;
 
-use anolisa_core::state::{InstalledState, ObjectStatus, Ownership};
+use anolisa_core::domain::LifecycleStatus;
+use anolisa_core::state_store::StateStore;
 use anolisa_platform::fs_layout::FsLayout;
 
 use crate::commands::state_view::{ScopedStateRoot, StateScope, StateView};
 use crate::commands::tier1::list::{ListArgs, build_rows_from_view};
 
-use super::support::{component_object, sample_index, state_with_component_object};
+use super::support::{
+    delegated_component, managed, owned_component, sample_index, state_with_component_object,
+};
 
 #[test]
 fn user_view_installed_filter_keeps_system_provided_component() {
     let index = sample_index();
     let args = ListArgs { installed: true };
     let view = user_plus_system_view(
-        InstalledState::default(),
-        state_with_component_object(component_object(
-            "agentsight",
-            ObjectStatus::Installed,
-            Ownership::RawManaged,
-        )),
+        StateStore::empty(),
+        state_with_component_object(owned_component("agentsight", LifecycleStatus::Installed)),
     );
 
     let rows = build_rows_from_view(&index, &args, &view, None);
@@ -40,15 +39,11 @@ fn user_record_shadows_system_record_in_list_rows() {
     let index = sample_index();
     let args = ListArgs { installed: true };
     let view = user_plus_system_view(
-        state_with_component_object(component_object(
+        state_with_component_object(owned_component("agentsight", LifecycleStatus::Installed)),
+        state_with_component_object(delegated_component(
             "agentsight",
-            ObjectStatus::Installed,
-            Ownership::RawManaged,
-        )),
-        state_with_component_object(component_object(
-            "agentsight",
-            ObjectStatus::Installed,
-            Ownership::RpmManaged,
+            LifecycleStatus::Installed,
+            managed(),
         )),
     );
 
@@ -60,7 +55,7 @@ fn user_record_shadows_system_record_in_list_rows() {
     assert!(rows[0].mutable_by_current_invocation);
 }
 
-fn user_plus_system_view(user_state: InstalledState, system_state: InstalledState) -> StateView {
+fn user_plus_system_view(user_state: StateStore, system_state: StateStore) -> StateView {
     let user_root = ScopedStateRoot {
         scope: StateScope::User,
         layout: FsLayout::user_with_overrides(

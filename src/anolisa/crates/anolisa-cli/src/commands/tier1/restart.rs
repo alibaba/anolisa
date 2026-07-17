@@ -34,8 +34,10 @@
 
 use clap::Parser;
 
+use anolisa_core::domain::{Installation, ProviderBinding};
+use anolisa_core::state_store::StateStore;
 use anolisa_core::{
-    InstalledObject, InstalledState, ObjectKind, ServiceManager, ServiceScope, ServiceState,
+    ObjectKind, ServiceManager, ServiceScope, ServiceState,
     service_for_install_mode as service_factory,
     user_service_for_install_mode as user_service_factory,
 };
@@ -64,18 +66,19 @@ pub fn handle(args: RestartArgs, ctx: &CliContext) -> Result<(), CliError> {
     let install_mode = ctx.install_mode.as_str();
 
     let state_path = layout.state_dir.join("installed.toml");
-    let state = InstalledState::load(&state_path).map_err(|err| CliError::Runtime {
-        command: command.clone(),
-        reason: format!(
-            "failed to load installed state at {}: {err}",
-            state_path.display()
-        ),
-    })?;
+    let state = StateStore::load(&state_path, anolisa_platform::privilege::effective_uid())
+        .map_err(|err| CliError::Runtime {
+            command: command.clone(),
+            reason: format!(
+                "failed to load installed state at {}: {err}",
+                state_path.display()
+            ),
+        })?;
 
-    let resolved = common::lookup_component_name(&args.component, &state, ctx, &command);
+    let resolved = common::lookup_component_name_in_store(&args.component, &state, ctx, &command);
 
     let comp = state
-        .find_object(ObjectKind::Component, &resolved)
+        .find(ObjectKind::Component, &resolved)
         .ok_or_else(|| CliError::InvalidArgument {
             command: command.clone(),
             reason: format!(
@@ -256,25 +259,31 @@ const USER_UNIT_DIRS: &[&str] = &[
 /// `rpm -ql` (the package owns the unit files and state records no services).
 /// Returned notes (e.g. for un-expandable templates) are surfaced to the user.
 fn collect_restart_units(
-    comp: &InstalledObject,
+    comp: &Installation,
     component: &str,
 ) -> Result<(Vec<RestartUnit>, Vec<String>), CliError> {
-    if comp.effective_ownership().is_rpm() {
-        discover_rpm_units(comp, component, &RpmPackageQuery::system())
-    } else {
-        // Raw: the recorded ServiceRefs (restartable is hardcoded true today;
-        // the filter keeps the door open for an explicit opt-out later).
-        let units = comp
-            .services
-            .iter()
-            .filter(|svc| svc.restartable)
-            .map(|svc| RestartUnit {
-                component: component.to_string(),
-                unit: svc.name.clone(),
-                scope: svc.scope,
-            })
-            .collect();
-        Ok((units, Vec::new()))
+    match &comp.binding {
+        ProviderBinding::Delegated { package, .. } => discover_rpm_units(
+            package.resolved_name(),
+            component,
+            &RpmPackageQuery::system(),
+        ),
+        // Owned: the recorded ServiceRefs (restartable is hardcoded true
+        // today; the filter keeps the door open for an explicit opt-out
+        // later).
+        ProviderBinding::Owned { artifact } => {
+            let units = artifact
+                .services
+                .iter()
+                .filter(|svc| svc.restartable)
+                .map(|svc| RestartUnit {
+                    component: component.to_string(),
+                    unit: svc.name.clone(),
+                    scope: svc.scope,
+                })
+                .collect();
+            Ok((units, Vec::new()))
+        }
     }
 }
 
@@ -293,16 +302,12 @@ fn collect_restart_units(
 /// `Runtime` when the component records no RPM package name (refresh with
 /// `repair`), or when `rpm -ql` fails (e.g. the recorded package vanished).
 fn discover_rpm_units<R: CommandRunner>(
-    comp: &InstalledObject,
+    package: Option<&str>,
     component: &str,
     query: &RpmPackageQuery<R>,
 ) -> Result<(Vec<RestartUnit>, Vec<String>), CliError> {
     let command = format!("restart {component}");
-    let package = comp
-        .rpm_metadata
-        .as_ref()
-        .map(|m| m.package_name.as_str())
-        .ok_or_else(|| CliError::Runtime {
+    let package = package.ok_or_else(|| CliError::Runtime {
             command: command.clone(),
             reason: format!(
                 "component '{component}' is RPM-backed but its state records no package name; run `anolisa repair {component}` to refresh rpm metadata"
@@ -530,7 +535,6 @@ mod tests {
     use super::*;
 
     use crate::context::InstallMode;
-    use anolisa_core::{ObjectStatus, Ownership, RpmMetadata};
     use anolisa_platform::command::CommandOutput;
     use std::path::PathBuf;
     use tempfile::tempdir;
@@ -574,39 +578,6 @@ mod tests {
             code: Some(0),
             spawn_err: None,
         })
-    }
-
-    /// An rpm-observed component object; `package = None` omits rpm metadata.
-    fn rpm_component(name: &str, package: Option<&str>) -> InstalledObject {
-        InstalledObject {
-            kind: ObjectKind::Component,
-            name: name.to_string(),
-            version: "1.0.0-1".to_string(),
-            status: ObjectStatus::Adopted,
-            manifest_digest: None,
-            distribution_source: None,
-            raw_package: None,
-            install_backend: Some("rpm".to_string()),
-            ownership: Some(Ownership::RpmObserved),
-            rpm_metadata: package.map(|p| RpmMetadata {
-                package_name: p.to_string(),
-                evr: Some("1.0.0-1".to_string()),
-                arch: Some("x86_64".to_string()),
-                source_repo: Some("@System".to_string()),
-            }),
-            installed_at: "2026-06-01T10:00:00Z".to_string(),
-            last_operation_id: None,
-            managed: false,
-            adopted: true,
-            subscription_scope: Default::default(),
-            enabled_features: Vec::new(),
-            component_refs: Vec::new(),
-            files: Vec::new(),
-            external_modified_files: Vec::new(),
-            services: Vec::new(),
-            health: Vec::new(),
-            provisioned_packages: Vec::new(),
-        }
     }
 
     #[test]
@@ -741,9 +712,9 @@ mod tests {
             "/usr/share/doc/agent-memory/README",
         ]
         .join("\n");
-        let comp = rpm_component("agent-memory", Some("agent-memory"));
         let (units, notes) =
-            discover_rpm_units(&comp, "agent-memory", &fake_query(&listing)).expect("discovery ok");
+            discover_rpm_units(Some("agent-memory"), "agent-memory", &fake_query(&listing))
+                .expect("discovery ok");
 
         assert_eq!(units.len(), 1, "one plain unit expected: {units:?}");
         assert_eq!(units[0].unit, "agentsight.service");
@@ -761,8 +732,7 @@ mod tests {
     #[test]
     fn discover_rpm_units_without_package_name_errors() {
         // RPM-backed but state lost the package name → actionable repair hint.
-        let comp = rpm_component("agent-memory", None);
-        let err = discover_rpm_units(&comp, "agent-memory", &fake_query(""))
+        let err = discover_rpm_units(None, "agent-memory", &fake_query(""))
             .expect_err("missing package name must error");
         assert!(err.reason().contains("repair"), "{}", err.reason());
     }
@@ -771,13 +741,12 @@ mod tests {
     fn discover_rpm_units_tooling_missing_maps_to_actionable_error() {
         // `rpm` absent (spawn NotFound) → the uniform rpm/dnf-not-found message,
         // not a generic "command not found".
-        let comp = rpm_component("agent-memory", Some("agent-memory"));
         let query = RpmPackageQuery::with_runner(FakeRpm {
             stdout: String::new(),
             code: None,
             spawn_err: Some(std::io::ErrorKind::NotFound),
         });
-        let err = discover_rpm_units(&comp, "agent-memory", &query)
+        let err = discover_rpm_units(Some("agent-memory"), "agent-memory", &query)
             .expect_err("missing rpm tooling must error");
         assert!(
             err.reason().contains("rpm/dnf not found"),

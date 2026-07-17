@@ -1,15 +1,13 @@
-use anolisa_core::state::InstalledState;
-
 use crate::commands::tier1::list::render::human_header;
 use crate::commands::tier1::list::{ListArgs, ListPayload, Row, build_rows};
 
-use super::support::{FakeRpmQuery, pkg_info, sample_index};
+use super::support::{FakeRpmQuery, empty_state, pkg_info, sample_index};
 
 #[test]
 fn row_json_retains_status_and_adds_local_fields() {
     let index = sample_index();
     let args = ListArgs { installed: false };
-    let state = InstalledState::default();
+    let state = empty_state();
     let query = FakeRpmQuery {
         installed: vec![(
             "agentsight".to_string(),

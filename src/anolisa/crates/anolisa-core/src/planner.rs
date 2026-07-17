@@ -249,6 +249,19 @@ pub enum NativeAction {
     Remove,
 }
 
+impl NativeAction {
+    /// Stable verb label (`install`, `update`, `reinstall`, `remove`) used
+    /// in journals and diagnostics.
+    pub fn verb(self) -> &'static str {
+        match self {
+            Self::Install => "install",
+            Self::Update => "update",
+            Self::Reinstall => "reinstall",
+            Self::Remove => "remove",
+        }
+    }
+}
+
 /// What a `WriteRecord` step persists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordWrite {
@@ -262,6 +275,19 @@ pub enum RecordWrite {
     DelegatedObserved,
     /// Absorb a fresh observation into an existing delegated record.
     RefreshObservation,
+}
+
+impl RecordWrite {
+    /// Stable label used in journals and diagnostics.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Owned => "write-owned",
+            Self::DelegatedManaged => "write-delegated-managed",
+            Self::DelegatedAdopted => "write-delegated-adopted",
+            Self::DelegatedObserved => "write-delegated-observed",
+            Self::RefreshObservation => "refresh-observation",
+        }
+    }
 }
 
 /// Planner output: either an ordered step sequence or an explicit no-op.
@@ -698,10 +724,13 @@ fn plan_uninstall(req: &UninstallRequest, facts: &Facts) -> Result<Plan, PlanErr
                     ManagementRelation::Managed { .. } => true, // X2/X3
                     _ => req.remove_system_package,             // X4
                 };
-                let present = probed_presence(&facts.native)?;
                 if !removes {
-                    return Ok(Plan::execute(vec![Step::DropRecord])); // X4 default
+                    // X4 default: a record-only drop consults no native
+                    // authority, so it must not demand a probe (the native
+                    // tooling may be the very thing that is missing).
+                    return Ok(Plan::execute(vec![Step::DropRecord]));
                 }
+                let present = probed_presence(&facts.native)?;
                 if !present {
                     // X3: already gone externally — record-only, flagged.
                     return Ok(Plan::Execute {

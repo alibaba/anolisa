@@ -458,6 +458,11 @@ pub struct OperationRecord {
     /// RFC3339 UTC finish timestamp; absent while an operation is in flight.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<String>,
+    /// Batch operation this record belongs to — its members shared one
+    /// native transaction (`install --all`, `update all`). Absent for
+    /// standalone operations and for state written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_operation_id: Option<String>,
 }
 
 /// On-disk record of installed objects, backups, and operation history.
@@ -529,11 +534,30 @@ pub enum StateError {
     /// TOML serialization error while saving state.
     #[error("failed to serialize installed state: {0}")]
     Serialize(#[from] toml::ser::Error),
+    /// The on-disk file was written by a newer schema this reader cannot
+    /// represent.
+    #[error(
+        "installed state at {path} uses schema version {found} (this reader \
+         understands up to {supported}); refusing to read it as if it were empty"
+    )]
+    NewerSchema {
+        /// State path that carries the newer schema.
+        path: PathBuf,
+        /// Schema version found on disk.
+        found: u32,
+        /// Highest schema version this reader supports.
+        supported: u32,
+    },
 }
 
 impl InstalledState {
     /// Load state from `path`. Returns a fresh default if the file does
     /// not exist (first-run case).
+    ///
+    /// Refuses files with a newer `schema_version`: serde would otherwise
+    /// skip the unknown fields those schemas keep their records in and hand
+    /// back an empty state, which downstream code would treat as "nothing
+    /// installed".
     pub fn load(path: &Path) -> Result<Self, StateError> {
         if !path.exists() {
             return Ok(Self::default());
@@ -542,10 +566,18 @@ impl InstalledState {
             path: path.to_path_buf(),
             source,
         })?;
-        toml::from_str(&content).map_err(|source| StateError::Parse {
+        let state: Self = toml::from_str(&content).map_err(|source| StateError::Parse {
             path: path.to_path_buf(),
             source,
-        })
+        })?;
+        if state.schema_version > STATE_SCHEMA_VERSION {
+            return Err(StateError::NewerSchema {
+                path: path.to_path_buf(),
+                found: state.schema_version,
+                supported: STATE_SCHEMA_VERSION,
+            });
+        }
+        Ok(state)
     }
 
     /// Atomically write state to `path` (unique `tmp` sibling + `rename`).
@@ -705,7 +737,7 @@ impl InstalledState {
     }
 }
 
-fn now_iso8601() -> String {
+pub(crate) fn now_iso8601() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
@@ -750,7 +782,7 @@ fn open_excl_nofollow(tmp: &Path) -> io::Result<File> {
 
 /// `tmp` + `rename` write so a crash mid-write cannot leave a truncated
 /// file. Mirrors `transaction::write_atomic`.
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -853,6 +885,7 @@ mod tests {
             status: "ok".to_string(),
             started_at: now_iso8601(),
             finished_at: Some(now_iso8601()),
+            parent_operation_id: None,
         }
     }
 
@@ -871,6 +904,38 @@ mod tests {
         assert!(loaded.objects.is_empty());
         assert!(loaded.backups.is_empty());
         assert!(loaded.operations.is_empty());
+    }
+
+    /// The batch parent link is a soft schema extension: files written
+    /// before the field existed must load with `None`, and standalone
+    /// operations must not serialize the key at all — an old anolisa
+    /// reading a new file only ever sees keys it knows.
+    #[test]
+    fn operation_parent_link_roundtrips_and_stays_optional() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("installed.toml");
+
+        let mut state = InstalledState::default();
+        state.operations.push(sample_operation("op-batch-1"));
+        state.operations.push(OperationRecord {
+            parent_operation_id: Some("op-batch-1".to_string()),
+            ..sample_operation("op-member-1")
+        });
+        state.save(&path).expect("save");
+
+        let raw = fs::read_to_string(&path).expect("read raw toml");
+        assert_eq!(
+            raw.matches("parent_operation_id").count(),
+            1,
+            "only the member serializes the key:\n{raw}"
+        );
+
+        let loaded = InstalledState::load(&path).expect("load");
+        assert_eq!(loaded.operations[0].parent_operation_id, None);
+        assert_eq!(
+            loaded.operations[1].parent_operation_id.as_deref(),
+            Some("op-batch-1")
+        );
     }
 
     #[test]
@@ -927,6 +992,38 @@ mod tests {
         "#;
         let state: InstalledState = toml::from_str(toml_text).expect("legacy state parses");
         assert_eq!(state.objects[0].kind, ObjectKind::Capability);
+    }
+
+    /// A v5 store file keeps its records under fields this schema does not
+    /// know; serde would drop them and report an empty state. The loader
+    /// must refuse instead of going blind.
+    #[test]
+    fn load_rejects_newer_schema_instead_of_reading_it_as_empty() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let path = dir.path().join("installed.toml");
+        fs::write(
+            &path,
+            r#"
+            schema_version = 5
+            updated_at = "2026-07-16T10:00:00Z"
+            install_mode = "user"
+            prefix = "~/.local"
+            anolisa_version = "0.3.0"
+            "#,
+        )
+        .expect("write state");
+
+        let err = InstalledState::load(&path).unwrap_err();
+
+        match err {
+            StateError::NewerSchema {
+                found, supported, ..
+            } => {
+                assert_eq!(found, 5);
+                assert_eq!(supported, STATE_SCHEMA_VERSION);
+            }
+            other => panic!("expected NewerSchema, got {other:?}"),
+        }
     }
 
     #[test]

@@ -21,10 +21,8 @@ fn adopt_snapshots_datadir_contract() {
         origins: vec![("copilot-shell".to_string(), "@System".to_string())],
         ..Default::default()
     };
-    let outcome =
-        handle_one_with_query("copilot-shell".to_string(), args("copilot-shell"), &ctx, &q)
-            .expect("adopt ok");
-    assert_eq!(outcome, InstallOutcome::Adopted);
+    crate::commands::tier1::adopt::adopt_with_query("copilot-shell", None, &ctx, &q)
+        .expect("adopt ok");
 
     let snapshot = common::installed_component_manifest_path(&layout, "copilot-shell", COMMAND)
         .expect("snapshot path");
@@ -51,10 +49,8 @@ fn adopt_without_datadir_contract_succeeds_with_warning() {
         origins: vec![("copilot-shell".to_string(), "@System".to_string())],
         ..Default::default()
     };
-    let outcome =
-        handle_one_with_query("copilot-shell".to_string(), args("copilot-shell"), &ctx, &q)
-            .expect("adopt must succeed even without a contract");
-    assert_eq!(outcome, InstallOutcome::Adopted);
+    crate::commands::tier1::adopt::adopt_with_query("copilot-shell", None, &ctx, &q)
+        .expect("adopt must succeed even without a contract");
 
     let snapshot = common::installed_component_manifest_path(&layout, "copilot-shell", COMMAND)
         .expect("snapshot path");
@@ -77,15 +73,10 @@ fn delegated_install_snapshots_datadir_contract() {
         pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
     )
     .with_origin("anolisa");
-    let exec = RpmExec {
-        query: &fake,
-        txn: &fake,
-        is_root: true,
-    };
     let mut a = args("copilot-shell");
     a.backend = Some("rpm".to_string());
 
-    let outcome = handle_one_with_exec("copilot-shell".to_string(), a, &ctx, &exec)
+    let outcome = install_component_with_deps("copilot-shell", &a, &ctx, &fake, &fake, true)
         .expect("delegated install ok");
     assert_eq!(outcome, InstallOutcome::Installed);
 
@@ -111,15 +102,10 @@ fn delegated_install_without_datadir_contract_succeeds() {
         pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
     )
     .with_origin("anolisa");
-    let exec = RpmExec {
-        query: &fake,
-        txn: &fake,
-        is_root: true,
-    };
     let mut a = args("copilot-shell");
     a.backend = Some("rpm".to_string());
 
-    let outcome = handle_one_with_exec("copilot-shell".to_string(), a, &ctx, &exec)
+    let outcome = install_component_with_deps("copilot-shell", &a, &ctx, &fake, &fake, true)
         .expect("delegated install must succeed without a contract");
     assert_eq!(outcome, InstallOutcome::Installed);
 
@@ -155,11 +141,8 @@ fn adopt_snapshots_packaged_datadir_contract() {
         origins: vec![("copilot-shell".to_string(), "@System".to_string())],
         ..Default::default()
     };
-    let outcome =
-        handle_one_with_query("copilot-shell".to_string(), args("copilot-shell"), &ctx, &q)
-            .expect("adopt ok");
-
-    assert_eq!(outcome, InstallOutcome::Adopted);
+    crate::commands::tier1::adopt::adopt_with_query("copilot-shell", None, &ctx, &q)
+        .expect("adopt ok");
 
     let snapshot = common::installed_component_manifest_path(&layout, "copilot-shell", COMMAND)
         .expect("snapshot path");
@@ -201,11 +184,8 @@ fn adopt_snapshots_fhs_package_datadir_contract() {
         origins: vec![("copilot-shell".to_string(), "@System".to_string())],
         ..Default::default()
     };
-    let outcome =
-        handle_one_with_query("copilot-shell".to_string(), args("copilot-shell"), &ctx, &q)
-            .expect("adopt ok");
-
-    assert_eq!(outcome, InstallOutcome::Adopted);
+    crate::commands::tier1::adopt::adopt_with_query("copilot-shell", None, &ctx, &q)
+        .expect("adopt ok");
 
     let snapshot = common::installed_component_manifest_path(&layout, "copilot-shell", COMMAND)
         .expect("snapshot path");

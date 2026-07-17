@@ -1,0 +1,620 @@
+//! v5 installed-state store: persistence for the authority-centric domain
+//! model, with the one-time legacy migration wired in at the load boundary.
+//!
+//! The v5 file stores [`Installation`] records directly plus quarantined
+//! legacy records verbatim. A schema ≤ 4 file is parsed through the legacy
+//! [`InstalledState`] wire type and pushed through
+//! [`migrate_state`](crate::state_migration::migrate_state) exactly once —
+//! the domain types never learn to read the old field soup.
+//!
+//! Migration is lazy on disk by design: loading never writes. The first
+//! *mutating* command that saves persists the store as v5 and leaves the
+//! untouched legacy file behind as a `.v4.bak` sibling, so a downgrade or a
+//! migration bug never loses the original bytes. Read-only commands on a
+//! legacy file keep reading (and re-migrating) the v4 bytes forever.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::adapter::claim::AdapterClaim;
+use crate::domain::{Installation, InstallationScope};
+use crate::planner::RecordFacts;
+use crate::state::{
+    BackupRecord, InstallMode, InstalledState, ObjectKind, OperationRecord, StateError,
+    now_iso8601, write_atomic,
+};
+use crate::state_migration::{MigrationRule, QuarantinedObject, migrate_state};
+
+/// Schema version this store reads natively and always writes.
+pub const STORE_SCHEMA_VERSION: u32 = 5;
+
+/// v5 on-disk wire shape. Kept private: the store is the API, the file
+/// layout is an implementation detail.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StateFileV5 {
+    schema_version: u32,
+    updated_at: String,
+    install_mode: InstallMode,
+    prefix: PathBuf,
+    anolisa_version: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    installations: Vec<Installation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    quarantined: Vec<QuarantinedObject>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    backups: Vec<BackupRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    operations: Vec<OperationRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    adapter_claims: Vec<AdapterClaim>,
+}
+
+/// Minimal probe to route a file to the right parser without committing to
+/// either full shape. `schema_version` has been present since v1.
+#[derive(Deserialize)]
+struct VersionProbe {
+    #[serde(default)]
+    schema_version: u32,
+}
+
+/// In-memory installed state under the authority model.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StateStore {
+    /// Install scope used to interpret paths in this state file.
+    pub install_mode: InstallMode,
+    /// Prefix recorded for diagnostics and future migrations.
+    pub prefix: PathBuf,
+    /// Active installations (one per kind/name/scope).
+    pub installations: Vec<Installation>,
+    /// Legacy records preserved verbatim, inert until `repair`/`forget`.
+    pub quarantined: Vec<QuarantinedObject>,
+    /// Backup metadata created by lifecycle transactions.
+    pub backups: Vec<BackupRecord>,
+    /// Lightweight operation history mirrored by central logs.
+    pub operations: Vec<OperationRecord>,
+    /// Adapter receipts written by `anolisa adapter enable`.
+    pub adapter_claims: Vec<AdapterClaim>,
+    /// Audit trail of the load-boundary migration, when one ran.
+    pub migration_audit: Vec<(String, MigrationRule)>,
+    /// Names of legacy capability objects the migration dropped.
+    pub dropped_capabilities: Vec<String>,
+    /// This load parsed a schema ≤ 4 file through the migration.
+    migrated_from_legacy: bool,
+}
+
+impl StateStore {
+    /// A fresh, empty store (first-run case).
+    pub fn empty() -> Self {
+        Self {
+            install_mode: InstallMode::default(),
+            prefix: PathBuf::new(),
+            installations: Vec::new(),
+            quarantined: Vec::new(),
+            backups: Vec::new(),
+            operations: Vec::new(),
+            adapter_claims: Vec::new(),
+            migration_audit: Vec::new(),
+            dropped_capabilities: Vec::new(),
+            migrated_from_legacy: false,
+        }
+    }
+
+    /// Load state from `path`, migrating a legacy (schema ≤ 4) file in
+    /// memory. A missing file is a fresh store, not an error.
+    ///
+    /// `uid` disambiguates the scope of a user-mode legacy file — the old
+    /// format recorded only the mode, not whose user scope it was.
+    pub fn load(path: &Path, uid: u32) -> Result<Self, StateError> {
+        if !path.exists() {
+            return Ok(Self::empty());
+        }
+        let content = fs::read_to_string(path).map_err(|source| StateError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let probe: VersionProbe = toml::from_str(&content).map_err(|source| StateError::Parse {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+        if probe.schema_version >= STORE_SCHEMA_VERSION {
+            let file: StateFileV5 =
+                toml::from_str(&content).map_err(|source| StateError::Parse {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+            return Ok(Self {
+                install_mode: file.install_mode,
+                prefix: file.prefix,
+                installations: file.installations,
+                quarantined: file.quarantined,
+                backups: file.backups,
+                operations: file.operations,
+                adapter_claims: file.adapter_claims,
+                migration_audit: Vec::new(),
+                dropped_capabilities: Vec::new(),
+                migrated_from_legacy: false,
+            });
+        }
+
+        let legacy: InstalledState =
+            toml::from_str(&content).map_err(|source| StateError::Parse {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        let scope = match legacy.install_mode {
+            InstallMode::System => InstallationScope::System,
+            InstallMode::User => InstallationScope::User { uid },
+        };
+        let migration = migrate_state(&legacy.objects, scope);
+        Ok(Self {
+            install_mode: legacy.install_mode,
+            prefix: legacy.prefix,
+            installations: migration.active,
+            quarantined: migration.quarantined,
+            backups: legacy.backups,
+            operations: legacy.operations,
+            adapter_claims: legacy.adapter_claims,
+            migration_audit: migration.audit,
+            dropped_capabilities: migration.dropped_capabilities,
+            migrated_from_legacy: true,
+        })
+    }
+
+    /// Whether this load ran the legacy migration (useful for surfacing the
+    /// audit trail on the first write).
+    pub fn migrated_from_legacy(&self) -> bool {
+        self.migrated_from_legacy
+    }
+
+    /// Atomically persist the store as schema v5.
+    ///
+    /// If the on-disk file is still legacy (schema ≤ 4), its original bytes
+    /// are first preserved as a `.v4.bak` sibling — exactly once: an
+    /// existing backup is never overwritten, so the true pre-migration
+    /// content survives repeated saves.
+    pub fn save(&self, path: &Path) -> Result<(), StateError> {
+        self.backup_legacy_file(path)?;
+
+        let file = StateFileV5 {
+            schema_version: STORE_SCHEMA_VERSION,
+            updated_at: now_iso8601(),
+            install_mode: self.install_mode,
+            prefix: self.prefix.clone(),
+            anolisa_version: env!("CARGO_PKG_VERSION").to_string(),
+            installations: self.installations.clone(),
+            quarantined: self.quarantined.clone(),
+            backups: self.backups.clone(),
+            operations: self.operations.clone(),
+            adapter_claims: self.adapter_claims.clone(),
+        };
+        let content = toml::to_string_pretty(&file)?;
+        write_atomic(path, content.as_bytes()).map_err(|source| StateError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Ok(())
+    }
+
+    /// Copy a still-legacy state file aside before the first v5 write. The
+    /// on-disk schema version is probed at save time (not trusted from the
+    /// load) so a v5 file is never mislabelled as a v4 backup.
+    fn backup_legacy_file(&self, path: &Path) -> Result<(), StateError> {
+        let Ok(content) = fs::read_to_string(path) else {
+            return Ok(()); // no existing file — nothing to preserve
+        };
+        let Ok(probe) = toml::from_str::<VersionProbe>(&content) else {
+            return Ok(()); // unparsable content is not a legacy state file
+        };
+        if probe.schema_version >= STORE_SCHEMA_VERSION {
+            return Ok(());
+        }
+        let backup = legacy_backup_path(path);
+        if backup.exists() {
+            return Ok(()); // first backup wins — it holds the original bytes
+        }
+        fs::copy(path, &backup)
+            .map(|_| ())
+            .map_err(|source| StateError::Io {
+                path: backup,
+                source,
+            })
+    }
+
+    /// Active installation for `(kind, name)`, if any.
+    pub fn find(&self, kind: ObjectKind, name: &str) -> Option<&Installation> {
+        self.installations
+            .iter()
+            .find(|i| i.kind == kind && i.name == name)
+    }
+
+    /// Mutable access to an active installation.
+    pub fn find_mut(&mut self, kind: ObjectKind, name: &str) -> Option<&mut Installation> {
+        self.installations
+            .iter_mut()
+            .find(|i| i.kind == kind && i.name == name)
+    }
+
+    /// What the store knows about `(kind, name)` — the planner's record
+    /// facts, straight from the aggregate.
+    pub fn record_facts(&self, kind: ObjectKind, name: &str) -> RecordFacts {
+        if let Some(installation) = self.find(kind, name) {
+            return RecordFacts::Active(installation.clone());
+        }
+        if let Some(q) = self
+            .quarantined
+            .iter()
+            .find(|q| q.record.kind == kind && q.record.name == name)
+        {
+            return RecordFacts::Quarantined(q.reason.clone());
+        }
+        RecordFacts::Absent
+    }
+
+    /// Insert or replace an installation, deduped by `(kind, name)`. Also
+    /// consumes any quarantined record of the same identity — writing an
+    /// active record *is* the repair exit for a quarantined one.
+    pub fn upsert(&mut self, installation: Installation) {
+        self.quarantined.retain(|q| {
+            !(q.record.kind == installation.kind && q.record.name == installation.name)
+        });
+        if let Some(slot) = self.find_mut(installation.kind, &installation.name) {
+            *slot = installation;
+        } else {
+            self.installations.push(installation);
+        }
+    }
+
+    /// Remove the record for `(kind, name)` — active or quarantined.
+    /// Returns whether anything was removed.
+    pub fn remove(&mut self, kind: ObjectKind, name: &str) -> bool {
+        let before = self.installations.len() + self.quarantined.len();
+        self.installations
+            .retain(|i| !(i.kind == kind && i.name == name));
+        self.quarantined
+            .retain(|q| !(q.record.kind == kind && q.record.name == name));
+        before != self.installations.len() + self.quarantined.len()
+    }
+
+    /// Find an adapter receipt by `(component, framework)`.
+    pub fn find_adapter_claim(&self, component: &str, framework: &str) -> Option<&AdapterClaim> {
+        self.adapter_claims
+            .iter()
+            .find(|c| c.component == component && c.framework == framework)
+    }
+
+    /// Insert or replace an adapter receipt, deduped by
+    /// `(component, framework)`.
+    pub fn upsert_adapter_claim(&mut self, claim: AdapterClaim) {
+        if let Some(slot) = self
+            .adapter_claims
+            .iter_mut()
+            .find(|c| c.component == claim.component && c.framework == claim.framework)
+        {
+            *slot = claim;
+        } else {
+            self.adapter_claims.push(claim);
+        }
+    }
+
+    /// Remove an adapter receipt by `(component, framework)`, returning the
+    /// removed value.
+    pub fn remove_adapter_claim(
+        &mut self,
+        component: &str,
+        framework: &str,
+    ) -> Option<AdapterClaim> {
+        let idx = self
+            .adapter_claims
+            .iter()
+            .position(|c| c.component == component && c.framework == framework)?;
+        Some(self.adapter_claims.remove(idx))
+    }
+
+    /// All adapter receipts for a component, across frameworks.
+    pub fn adapter_claims_for_component(&self, component: &str) -> Vec<&AdapterClaim> {
+        self.adapter_claims
+            .iter()
+            .filter(|c| c.component == component)
+            .collect()
+    }
+}
+
+/// Sibling path preserving the legacy file's original bytes.
+pub fn legacy_backup_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "installed.toml".to_string());
+    path.with_file_name(format!("{file_name}.v4.bak"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{
+        LifecycleStatus, ManagementRelation, NativePm, OwnedArtifact, PackageIdentity,
+        ProviderBinding,
+    };
+    use crate::state_migration::QuarantineReason;
+
+    /// A legacy v4 file with one object per migration bucket: a clean raw
+    /// component, a dropped capability, an evidence-free quarantine, and an
+    /// unknown-backend quarantine.
+    const LEGACY_V4: &str = r#"
+schema_version = 4
+updated_at = "2026-07-01T00:00:00Z"
+install_mode = "system"
+prefix = "/"
+anolisa_version = "0.2.4"
+
+[[objects]]
+kind = "component"
+name = "cosh"
+version = "2.7.0"
+status = "installed"
+install_backend = "raw"
+ownership = "raw_managed"
+distribution_source = "https://repo.example/raw/cosh-2.7.0.tar.gz"
+installed_at = "2026-07-01T00:00:00Z"
+
+[[objects.files]]
+path = "/usr/local/bin/cosh"
+owner = "anolisa"
+sha256 = "aa"
+kind = "file"
+
+[[objects]]
+kind = "capability"
+name = "legacy-cap"
+version = "1.0.0"
+status = "installed"
+installed_at = "2026-07-01T00:00:00Z"
+
+[[objects]]
+kind = "component"
+name = "mystery"
+version = "0.1.0"
+status = "installed"
+installed_at = "2026-07-01T00:00:00Z"
+
+[[objects]]
+kind = "component"
+name = "flatpak-thing"
+version = "0.2.0"
+status = "installed"
+install_backend = "flatpak"
+installed_at = "2026-07-01T00:00:00Z"
+
+[[operations]]
+id = "op-1"
+command = "install"
+status = "ok"
+started_at = "2026-07-01T00:00:00Z"
+"#;
+
+    fn write_file(dir: &Path, name: &str, content: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, content).expect("write fixture");
+        path
+    }
+
+    fn owned_installation(name: &str, version: &str) -> Installation {
+        Installation {
+            kind: ObjectKind::Component,
+            name: name.to_string(),
+            scope: InstallationScope::System,
+            binding: ProviderBinding::Owned {
+                artifact: OwnedArtifact {
+                    version: version.to_string(),
+                    distribution_source: None,
+                    raw_package: None,
+                    manifest_digest: None,
+                    files: Vec::new(),
+                    services: Vec::new(),
+                    external_modified_files: Vec::new(),
+                    provisioned_packages: Vec::new(),
+                },
+            },
+            status: LifecycleStatus::Installed,
+            installed_at: "2026-07-16T00:00:00Z".to_string(),
+            last_operation_id: None,
+            subscription_scope: Default::default(),
+            enabled_features: Vec::new(),
+            health: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn missing_file_loads_an_empty_store() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let store = StateStore::load(&tmp.path().join("installed.toml"), 1000).expect("load empty");
+        assert!(store.installations.is_empty());
+        assert!(store.quarantined.is_empty());
+        assert!(!store.migrated_from_legacy());
+    }
+
+    #[test]
+    fn legacy_file_migrates_at_the_load_boundary() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = write_file(tmp.path(), "installed.toml", LEGACY_V4);
+
+        let store = StateStore::load(&path, 1000).expect("load legacy");
+
+        assert!(store.migrated_from_legacy());
+        // cosh cleanly maps to an active Owned installation.
+        assert_eq!(store.installations.len(), 1);
+        let cosh = store.find(ObjectKind::Component, "cosh").expect("cosh");
+        assert!(matches!(
+            &cosh.binding,
+            ProviderBinding::Owned { artifact } if artifact.version == "2.7.0"
+        ));
+        assert_eq!(cosh.scope, InstallationScope::System);
+        // The capability object is dropped, the other two are quarantined.
+        assert_eq!(store.dropped_capabilities, vec!["legacy-cap".to_string()]);
+        assert_eq!(store.quarantined.len(), 2);
+        assert!(matches!(
+            store.record_facts(ObjectKind::Component, "mystery"),
+            RecordFacts::Quarantined(QuarantineReason::NoEvidence)
+        ));
+        assert!(matches!(
+            store.record_facts(ObjectKind::Component, "flatpak-thing"),
+            RecordFacts::Quarantined(QuarantineReason::UnknownBackend { backend }) if backend == "flatpak"
+        ));
+        // Non-object payloads carry over untouched.
+        assert_eq!(store.operations.len(), 1);
+        assert_eq!(store.migration_audit.len(), 4);
+    }
+
+    #[test]
+    fn user_mode_legacy_scope_carries_the_uid() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let user_v4 = LEGACY_V4.replace("install_mode = \"system\"", "install_mode = \"user\"");
+        let path = write_file(tmp.path(), "installed.toml", &user_v4);
+
+        let store = StateStore::load(&path, 1000).expect("load legacy");
+
+        let cosh = store.find(ObjectKind::Component, "cosh").expect("cosh");
+        assert_eq!(cosh.scope, InstallationScope::User { uid: 1000 });
+    }
+
+    #[test]
+    fn first_save_backs_up_the_legacy_file_and_writes_v5() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = write_file(tmp.path(), "installed.toml", LEGACY_V4);
+
+        let store = StateStore::load(&path, 1000).expect("load legacy");
+        store.save(&path).expect("save v5");
+
+        // The original bytes survive as the backup sibling.
+        let backup = legacy_backup_path(&path);
+        assert_eq!(fs::read_to_string(&backup).expect("read backup"), LEGACY_V4);
+        // The main file is now v5 and loads without migration.
+        let reloaded = StateStore::load(&path, 1000).expect("reload");
+        assert!(!reloaded.migrated_from_legacy());
+        assert_eq!(reloaded.installations, store.installations);
+        assert_eq!(reloaded.quarantined, store.quarantined);
+        assert_eq!(reloaded.operations, store.operations);
+    }
+
+    #[test]
+    fn later_saves_never_overwrite_the_first_backup() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = write_file(tmp.path(), "installed.toml", LEGACY_V4);
+        let backup = legacy_backup_path(&path);
+
+        let mut store = StateStore::load(&path, 1000).expect("load legacy");
+        store.save(&path).expect("first save");
+
+        // Plant a marker: if a later save re-created the backup from the
+        // (now v5) main file, the marker would vanish.
+        let original = fs::read_to_string(&backup).expect("read backup");
+        store.upsert(owned_installation("tokenless", "0.7.0"));
+        store.save(&path).expect("second save");
+
+        assert_eq!(
+            fs::read_to_string(&backup).expect("re-read backup"),
+            original
+        );
+    }
+
+    #[test]
+    fn read_only_load_never_touches_the_legacy_file() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = write_file(tmp.path(), "installed.toml", LEGACY_V4);
+
+        let _store = StateStore::load(&path, 1000).expect("load legacy");
+
+        // Loading is pure: same bytes, no v5 file, no backup.
+        assert_eq!(fs::read_to_string(&path).expect("re-read"), LEGACY_V4);
+        assert!(!legacy_backup_path(&path).exists());
+    }
+
+    #[test]
+    fn v5_roundtrip_preserves_all_buckets() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("installed.toml");
+
+        let mut store = StateStore::empty();
+        store.install_mode = InstallMode::System;
+        store.upsert(owned_installation("cosh", "2.7.0"));
+        store.upsert(Installation {
+            binding: ProviderBinding::Delegated {
+                pm: NativePm::Rpm,
+                package: PackageIdentity::Resolved {
+                    name: "agentsight".to_string(),
+                },
+                relation: ManagementRelation::Adopted {
+                    since: "2026-07-16T00:00:00Z".to_string(),
+                },
+                last_observed: None,
+            },
+            ..owned_installation("agentsight", "0.8.0")
+        });
+        store.save(&path).expect("save");
+
+        let reloaded = StateStore::load(&path, 1000).expect("reload");
+        assert_eq!(reloaded.installations, store.installations);
+        assert!(matches!(
+            reloaded
+                .find(ObjectKind::Component, "agentsight")
+                .expect("agentsight")
+                .binding,
+            ProviderBinding::Delegated {
+                relation: ManagementRelation::Adopted { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn upsert_consumes_a_quarantined_record_of_the_same_identity() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = write_file(tmp.path(), "installed.toml", LEGACY_V4);
+        let mut store = StateStore::load(&path, 1000).expect("load legacy");
+        assert!(matches!(
+            store.record_facts(ObjectKind::Component, "mystery"),
+            RecordFacts::Quarantined(_)
+        ));
+
+        // Repair resolved the mystery record into a real installation.
+        store.upsert(owned_installation("mystery", "0.1.0"));
+
+        assert!(matches!(
+            store.record_facts(ObjectKind::Component, "mystery"),
+            RecordFacts::Active(_)
+        ));
+        assert_eq!(store.quarantined.len(), 1, "only flatpak-thing remains");
+    }
+
+    #[test]
+    fn remove_drops_active_and_quarantined_records() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = write_file(tmp.path(), "installed.toml", LEGACY_V4);
+        let mut store = StateStore::load(&path, 1000).expect("load legacy");
+
+        assert!(store.remove(ObjectKind::Component, "cosh"));
+        assert!(store.remove(ObjectKind::Component, "mystery"));
+        assert!(!store.remove(ObjectKind::Component, "cosh"), "already gone");
+
+        assert!(matches!(
+            store.record_facts(ObjectKind::Component, "cosh"),
+            RecordFacts::Absent
+        ));
+        assert!(matches!(
+            store.record_facts(ObjectKind::Component, "mystery"),
+            RecordFacts::Absent
+        ));
+    }
+
+    #[test]
+    fn corrupt_file_is_a_parse_error_not_a_fresh_store() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = write_file(tmp.path(), "installed.toml", "schema_version = [broken");
+
+        let err = StateStore::load(&path, 1000).unwrap_err();
+        assert!(matches!(err, StateError::Parse { .. }));
+    }
+}

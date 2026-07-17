@@ -3,13 +3,29 @@
 use super::super::tests::*;
 
 use anolisa_core::ComponentManifest;
+use anolisa_core::domain::{Installation, LifecycleStatus, OwnedArtifact, ProviderBinding};
 use anolisa_core::state::{
     InstallMode as StateInstallMode, InstalledObject, ObjectKind, ObjectStatus,
 };
+use anolisa_core::state_store::StateStore;
 use anolisa_platform::fs_layout::FsLayout;
 
 use crate::commands::common;
 use tempfile::tempdir;
+
+/// v5 store as the pipeline persisted it for a system-prefix layout.
+fn load_v5_store(layout: &FsLayout) -> StateStore {
+    StateStore::load(&layout.state_dir.join("installed.toml"), 0).expect("state must load")
+}
+
+/// The owned artifact behind a component's binding; fails the test on a
+/// delegated binding, which also asserts the raw family was recorded.
+fn owned_artifact(installation: &Installation) -> &OwnedArtifact {
+    match &installation.binding {
+        ProviderBinding::Owned { artifact } => artifact,
+        other => panic!("expected an owned binding, got {other:?}"),
+    }
+}
 
 #[test]
 fn install_dry_run_resolves_without_writing_files() {
@@ -51,7 +67,7 @@ fn install_dry_run_resolves_without_writing_files() {
 }
 
 #[test]
-fn install_dry_run_reads_version_meta_without_downloading_artifact() {
+fn install_dry_run_does_not_download_the_artifact() {
     let tmp = tempdir().expect("tmpdir");
     let prefix = tmp.path().join("sys");
     let repo_url = write_published_layout_repo_with_meta(
@@ -63,36 +79,10 @@ fn install_dry_run_reads_version_meta_without_downloading_artifact() {
     let mut ctx = ctx_with_prefix(false, Some(prefix.clone()));
     ctx.dry_run = true;
     let layout = FsLayout::system(Some(prefix));
-    let env = anolisa_env::EnvService::detect();
 
-    let resolution = resolve_raw(
-        &ctx,
-        &layout,
-        &env,
-        ResolveInputs {
-            component: "remote-only".to_string(),
-            package: "remote-only".to_string(),
-            backend: "raw".to_string(),
-            base_url: repo_url,
-            version: None,
-            warnings: Vec::new(),
-        },
-    )
-    .expect("resolve");
-    let preview =
-        build_install_preview(&ctx, &layout, &Default::default(), resolution).expect("preview");
-
-    assert_eq!(preview.files.len(), 1);
-    assert_eq!(preview.files[0].dest, layout.bin_dir.join("remote-only"));
-    assert!(
-        preview
-            .resolution
-            .warnings
-            .iter()
-            .all(|warning| !warning.contains("file and service details are unavailable")),
-        "version-level meta.toml should provide file details: {:?}",
-        preview.resolution.warnings
-    );
+    let mut a = args("remote-only");
+    a.repo = Some(repo_url);
+    handle_with_fake_rpm(a, &ctx).expect("dry-run must succeed");
 
     let cached_names: Vec<String> = std::fs::read_dir(layout.cache_dir.join("downloads"))
         .expect("downloads cache exists")
@@ -248,10 +238,14 @@ sha256 = "{sha}"
 
     let layout = FsLayout::system(Some(prefix));
     assert!(layout.bin_dir.join("agentsight").exists());
+    let store = load_v5_store(&layout);
+    let installation = store
+        .find(ObjectKind::Component, "agentsight")
+        .expect("installed object");
     assert_eq!(
-        available_raw_versions(&layout, &repo_url, "agentsight", &env, "system"),
-        vec!["0.2.0"],
-        "binary-only versions must not appear in update candidates"
+        owned_artifact(installation).version,
+        "0.2.0",
+        "the higher binary-only 9.0.0 entry must be ignored by resolution"
     );
 }
 
@@ -280,40 +274,38 @@ fn install_raw_end_to_end_from_local_repo() {
     assert_eq!(saved_manifest.component.name, "agentsight");
     assert_eq!(saved_manifest.component.version, "0.2.0");
 
-    let state = anolisa_core::InstalledState::load(&layout.state_dir.join("installed.toml"))
-        .expect("state must load");
-    let obj = state
-        .find_object(ObjectKind::Component, "agentsight")
+    let store = load_v5_store(&layout);
+    let installation = store
+        .find(ObjectKind::Component, "agentsight")
         .expect("component object must be recorded");
-    assert_eq!(obj.version, "0.2.0");
-    assert_eq!(obj.status, ObjectStatus::Installed);
-    assert_eq!(obj.files.len(), 2);
+    assert_eq!(installation.status, LifecycleStatus::Installed);
+    // `owned_artifact` panics on a delegated binding, so this also asserts
+    // the raw family was recorded as the authority.
+    let artifact = owned_artifact(installation);
+    assert_eq!(artifact.version, "0.2.0");
+    assert_eq!(artifact.files.len(), 2);
     assert!(
-        obj.files.iter().any(|file| file.path == manifest_path),
+        artifact.files.iter().any(|file| file.path == manifest_path),
         "installed manifest must be tracked as an owned file"
     );
     assert!(
-        obj.distribution_source
+        artifact
+            .distribution_source
             .as_deref()
             .is_some_and(|u| u.starts_with(&repo_url)),
         "distribution_source must record the resolved artifact URL"
     );
     assert_eq!(
-        obj.raw_package.as_deref(),
+        artifact.raw_package.as_deref(),
         Some("agentsight"),
         "raw_package must record the resolved package so update can reuse it"
     );
-    assert_eq!(
-        obj.install_backend.as_deref(),
-        Some("raw"),
-        "install_backend must record the selected backend"
-    );
     assert!(
-        obj.services.iter().all(|s| !s.enabled),
+        artifact.services.iter().all(|s| !s.enabled),
         "install must not mark services enabled"
     );
-    assert_eq!(state.operations.len(), 1);
-    assert!(state.operations[0].id.starts_with("op-install-"));
+    assert_eq!(store.operations.len(), 1);
+    assert!(store.operations[0].id.starts_with("op-install-"));
 }
 
 #[test]
@@ -387,12 +379,9 @@ fn install_raw_end_to_end_applies_optional_capability() {
         layout.bin_dir.join("agentsight").exists(),
         "binary must be installed even when the optional setcap is skipped"
     );
-    let state = anolisa_core::InstalledState::load(&layout.state_dir.join("installed.toml"))
-        .expect("state must load");
+    let store = load_v5_store(&layout);
     assert!(
-        state
-            .find_object(ObjectKind::Component, "agentsight")
-            .is_some(),
+        store.find(ObjectKind::Component, "agentsight").is_some(),
         "component must be recorded despite optional capability outcome"
     );
 }
@@ -461,13 +450,13 @@ fn install_raw_end_to_end_records_declared_service() {
         layout.bin_dir.join("agentsight").exists(),
         "binary installed"
     );
-    let state = anolisa_core::InstalledState::load(&layout.state_dir.join("installed.toml"))
-        .expect("state must load");
-    let obj = state
-        .find_object(ObjectKind::Component, "agentsight")
+    let store = load_v5_store(&layout);
+    let installation = store
+        .find(ObjectKind::Component, "agentsight")
         .expect("component recorded");
-    assert_eq!(obj.services.len(), 1);
-    assert_eq!(obj.services[0].name, "agentsight.service");
+    let artifact = owned_artifact(installation);
+    assert_eq!(artifact.services.len(), 1);
+    assert_eq!(artifact.services[0].name, "agentsight.service");
 }
 
 #[test]
@@ -535,11 +524,9 @@ fn install_raw_strict_post_install_failure_rolls_back() {
     );
     let state_path = layout.state_dir.join("installed.toml");
     if state_path.exists() {
-        let state = anolisa_core::InstalledState::load(&state_path).expect("state load");
+        let store = load_v5_store(&layout);
         assert!(
-            state
-                .find_object(ObjectKind::Component, "agentsight")
-                .is_none(),
+            store.find(ObjectKind::Component, "agentsight").is_none(),
             "component must not be recorded after rollback"
         );
     }
@@ -598,12 +585,9 @@ fn install_raw_uses_embedded_manifest_without_local_catalog() {
         layout.bin_dir.join("remote-only").exists(),
         "component absent from local manifests must install from embedded artifact contract"
     );
-    let state = anolisa_core::InstalledState::load(&layout.state_dir.join("installed.toml"))
-        .expect("state must load");
+    let store = load_v5_store(&layout);
     assert!(
-        state
-            .find_object(ObjectKind::Component, "remote-only")
-            .is_some(),
+        store.find(ObjectKind::Component, "remote-only").is_some(),
         "remote-only component must be recorded"
     );
 }
@@ -690,14 +674,13 @@ fn install_derives_artifact_url_from_convention_when_index_omits_url() {
     let layout = FsLayout::system(Some(prefix));
     assert!(layout.bin_dir.join("agentsight").exists());
 
-    let state = anolisa_core::InstalledState::load(&layout.state_dir.join("installed.toml"))
-        .expect("state must load");
-    let obj = state
-        .find_object(ObjectKind::Component, "agentsight")
+    let store = load_v5_store(&layout);
+    let installation = store
+        .find(ObjectKind::Component, "agentsight")
         .expect("component object must be recorded");
     let env = anolisa_env::EnvService::detect();
     assert_eq!(
-        obj.distribution_source.as_deref(),
+        owned_artifact(installation).distribution_source.as_deref(),
         Some(
             format!(
                 "{repo_url}/agentsight/0.2.0/{os}/{arch}/agentsight-0.2.0-{os}-{arch}.tar.gz",
@@ -731,14 +714,13 @@ fn install_resolves_legacy_template_form_repo_url() {
     let layout = FsLayout::system(Some(prefix));
     assert!(layout.bin_dir.join("agentsight").exists());
 
-    let state = anolisa_core::InstalledState::load(&layout.state_dir.join("installed.toml"))
-        .expect("state must load");
-    let obj = state
-        .find_object(ObjectKind::Component, "agentsight")
+    let store = load_v5_store(&layout);
+    let installation = store
+        .find(ObjectKind::Component, "agentsight")
         .expect("component object must be recorded");
     let env = anolisa_env::EnvService::detect();
     assert_eq!(
-        obj.distribution_source.as_deref(),
+        owned_artifact(installation).distribution_source.as_deref(),
         Some(
             format!(
                 "file://{}/v1/agentsight/0.2.0/{os}/{arch}/agentsight-0.2.0-{os}-{arch}.tar.gz",
@@ -916,11 +898,10 @@ fn install_no_conflict_when_conflicting_component_not_installed() {
 
     // Verify cosh-ng is recorded in state.
     let layout = FsLayout::system(Some(prefix));
-    let state = anolisa_core::InstalledState::load(&layout.state_dir.join("installed.toml"))
-        .expect("state must load");
-    let obj = state
-        .find_object(ObjectKind::Component, "cosh-ng")
+    let store = load_v5_store(&layout);
+    let installation = store
+        .find(ObjectKind::Component, "cosh-ng")
         .expect("cosh-ng must be recorded");
-    assert_eq!(obj.version, "0.11.0");
-    assert_eq!(obj.status, ObjectStatus::Installed);
+    assert_eq!(installation.status, LifecycleStatus::Installed);
+    assert_eq!(owned_artifact(installation).version, "0.11.0");
 }

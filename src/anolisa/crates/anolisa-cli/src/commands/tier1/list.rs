@@ -11,7 +11,7 @@ mod state_view;
 mod tests;
 
 #[cfg(test)]
-use anolisa_core::state::InstalledState;
+use anolisa_core::state_store::StateStore;
 use anolisa_platform::pkg_query::PackageQuery;
 use anolisa_platform::rpm_query::RpmPackageQuery;
 use clap::Parser;
@@ -119,7 +119,7 @@ pub fn handle(args: ListArgs, ctx: &CliContext) -> Result<(), CliError> {
 fn build_rows(
     index: &ComponentIndex,
     args: &ListArgs,
-    state: &InstalledState,
+    state: &StateStore,
     rpm_query: Option<&dyn PackageQuery>,
 ) -> Vec<Row> {
     index

@@ -8,7 +8,11 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use anolisa_platform::pkg_query::{PackageInfo, PackageVersion};
 use anolisa_platform::pkg_transaction::{PackageTransaction, PackageTransactionError};
 
-use anolisa_core::state::{ObjectStatus, RpmMetadata, SubscriptionScope};
+use anolisa_core::domain::InstallationScope;
+use anolisa_core::state::{
+    InstalledObject, ObjectStatus, Ownership, RpmMetadata, SubscriptionScope,
+};
+use anolisa_core::state_migration::migrate_state;
 
 use super::super::UpdateArgs;
 use super::render::build_motd;
@@ -93,15 +97,19 @@ impl PackageQuery for FakeHost {
 }
 
 impl PackageTransaction for FakeHost {
-    fn install(&self, _package: &str) -> Result<(), PackageTransactionError> {
+    fn install(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
         self.txn_calls.set(self.txn_calls.get() + 1);
         Ok(())
     }
-    fn update(&self, _package: &str) -> Result<(), PackageTransactionError> {
+    fn update(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
         self.txn_calls.set(self.txn_calls.get() + 1);
         Ok(())
     }
-    fn remove(&self, _package: &str) -> Result<(), PackageTransactionError> {
+    fn reinstall(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
+        self.txn_calls.set(self.txn_calls.get() + 1);
+        Ok(())
+    }
+    fn remove(&self, _packages: &[&str]) -> Result<(), PackageTransactionError> {
         self.txn_calls.set(self.txn_calls.get() + 1);
         Ok(())
     }
@@ -201,17 +209,23 @@ fn raw_component(component: &str, version: &str) -> InstalledObject {
     }
 }
 
-fn state_with(objects: Vec<InstalledObject>) -> InstalledState {
-    let mut state = InstalledState::default();
-    for obj in objects {
-        state.upsert_object(obj);
-    }
-    state
+/// Build a v5 store from legacy fixtures via the load-boundary migration, so
+/// these tests double as migration coverage for the check's inputs.
+fn state_with(objects: Vec<InstalledObject>) -> StateStore {
+    let migration = migrate_state(&objects, InstallationScope::System);
+    assert!(
+        migration.quarantined.is_empty(),
+        "check fixtures must migrate cleanly; quarantined: {:?}",
+        migration.quarantined
+    );
+    let mut store = StateStore::empty();
+    store.installations = migration.active;
+    store
 }
 
 fn run(
     host: &FakeHost,
-    installed: &InstalledState,
+    installed: &StateStore,
     target: Option<TargetProfile>,
     target_name: Option<String>,
 ) -> UpdateCheckReport {
@@ -220,7 +234,7 @@ fn run(
 
 fn run_with_index(
     host: &FakeHost,
-    installed: &InstalledState,
+    installed: &StateStore,
     target: Option<TargetProfile>,
     target_name: Option<String>,
     component_index: Option<&crate::resolution::ComponentIndex>,
@@ -230,7 +244,7 @@ fn run_with_index(
 
 fn run_with_index_and_backend(
     host: &FakeHost,
-    installed: &InstalledState,
+    installed: &StateStore,
     target: Option<TargetProfile>,
     target_name: Option<String>,
     component_index: Option<&crate::resolution::ComponentIndex>,
@@ -358,7 +372,7 @@ fn update_check_rpm_component_update_candidate() {
     assert_eq!(item.action, ACTION_UPDATE);
     assert_eq!(item.installed.as_deref(), Some("1.0.0-1.al4"));
     assert_eq!(item.available.as_deref(), Some("1.1.0-1.al4"));
-    assert_eq!(item.ownership.as_deref(), Some("rpm-observed"));
+    assert_eq!(item.ownership.as_deref(), Some("adopted"));
     assert_eq!(report.summary.updates, 1);
     assert!(report.upgrade_available);
     assert!(report.action_required);
@@ -429,7 +443,7 @@ fn update_check_raw_component_is_unsupported() {
     let report = run(&host, &state, None, None);
     let item = &report.components[0];
     assert_eq!(item.action, ACTION_UNSUPPORTED_RPM);
-    assert_eq!(item.ownership.as_deref(), Some("raw-managed"));
+    assert_eq!(item.ownership.as_deref(), Some("owned"));
     assert_eq!(report.summary.unsupported, 1);
     assert_eq!(report.summary.updates, 0);
     assert_eq!(
@@ -519,7 +533,7 @@ fn update_check_default_present_via_provide_is_not_missing() {
         .find(|c| c.component == "cosh")
         .expect("cosh reported");
     assert_eq!(item.action, ACTION_NOOP);
-    assert_eq!(item.ownership.as_deref(), Some("rpm-observed"));
+    assert_eq!(item.ownership.as_deref(), Some("observed"));
     assert_eq!(
         report.summary.missing_defaults, 0,
         "a present-but-unadopted default is not missing"
@@ -590,7 +604,7 @@ fn update_check_default_present_via_index_package_without_provide() {
     );
     let item = &report.components[0];
     assert_eq!(item.action, ACTION_NOOP);
-    assert_eq!(item.ownership.as_deref(), Some("rpm-observed"));
+    assert_eq!(item.ownership.as_deref(), Some("observed"));
     assert_eq!(report.summary.missing_defaults, 0);
 }
 
@@ -619,7 +633,7 @@ fn update_check_default_present_via_package_map_without_provide() {
     let item = &report.components[0];
     assert_eq!(item.action, ACTION_NOOP);
     assert_eq!(item.package.as_deref(), Some("copilot-shell"));
-    assert_eq!(item.ownership.as_deref(), Some("rpm-observed"));
+    assert_eq!(item.ownership.as_deref(), Some("observed"));
     assert_eq!(report.summary.missing_defaults, 0);
 }
 

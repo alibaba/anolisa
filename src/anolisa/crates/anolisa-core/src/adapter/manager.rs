@@ -42,9 +42,11 @@ use super::driver::{
 };
 use super::registry::DriverRegistry;
 use crate::central_log::{CentralLog, LogKind, LogRecord, LogStatus, Severity};
+use crate::domain::{Installation, LifecycleStatus};
 use crate::lock::InstallLock;
 use crate::manifest::ComponentManifest;
-use crate::state::{InstalledState, ObjectKind, ObjectStatus};
+use crate::state::ObjectKind;
+use crate::state_store::StateStore;
 
 /// Per-CLI-call producer name recorded in the central log.
 const LOG_SOURCE: &str = "anolisa-cli";
@@ -331,6 +333,17 @@ impl AdapterManager {
 
     // -- scan ---------------------------------------------------------------
 
+    /// Load the primary root's installed state (v5, migrating legacy files
+    /// at the boundary). Scope resolution follows the invoking uid, the
+    /// same convention the CLI uses.
+    fn load_state(&self) -> Result<StateStore, crate::state::StateError> {
+        Self::load_state_at(&self.state_path)
+    }
+
+    fn load_state_at(path: &Path) -> Result<StateStore, crate::state::StateError> {
+        StateStore::load(path, anolisa_platform::privilege::effective_uid())
+    }
+
     /// Discover adapter declarations from visible installed component
     /// manifests, merge them with resource directories under the datadir
     /// roots, then annotate each row with driver availability, framework
@@ -340,7 +353,7 @@ impl AdapterManager {
     ///
     /// [`AdapterError::State`] if the state file cannot be read.
     pub fn scan(&self) -> Result<ScanReport, AdapterError> {
-        let state = InstalledState::load(&self.state_path)?;
+        let state = self.load_state()?;
         let mut entries: BTreeMap<(String, String), ScanEntry> = BTreeMap::new();
         for (component, framework, resource_root) in self.discover_all() {
             let (driver_available, framework_detected) = self.driver_scan_facts(&framework);
@@ -498,7 +511,7 @@ impl AdapterManager {
         options: EnableOptions,
     ) -> Result<EnableOutcome, AdapterError> {
         let _lock = InstallLock::acquire(&self.layout.lock_file)?;
-        let mut state = InstalledState::load(&self.state_path)?;
+        let mut state = self.load_state()?;
 
         let (manifest, scoped_datadir_roots, contract_datadir_root) =
             self.load_visible_component_manifest(component, &state)?;
@@ -773,7 +786,7 @@ impl AdapterManager {
         dry_run: bool,
     ) -> Result<DisableOutcome, AdapterError> {
         let _lock = InstallLock::acquire(&self.layout.lock_file)?;
-        let mut state = InstalledState::load(&self.state_path)?;
+        let mut state = self.load_state()?;
 
         let framework = match framework {
             Some(f) => f.to_string(),
@@ -956,7 +969,7 @@ impl AdapterManager {
     /// re-validation, or state errors. A missing driver or undetectable
     /// framework is reported in the per-entry conditions, not as an error.
     pub fn status(&self, component: Option<&str>) -> Result<StatusReport, AdapterError> {
-        let state = InstalledState::load(&self.state_path)?;
+        let state = self.load_state()?;
         let mut entries = Vec::new();
 
         for claim in &state.adapter_claims {
@@ -1087,7 +1100,7 @@ impl AdapterManager {
     fn source_probe_for_claim(
         &self,
         claim: &AdapterClaim,
-        current_state: &InstalledState,
+        current_state: &StateStore,
     ) -> SourceProbe {
         self.source_probe(&claim.component, &claim.framework, current_state)
     }
@@ -1096,7 +1109,7 @@ impl AdapterManager {
         &self,
         component: &str,
         framework: &str,
-        current_state: &InstalledState,
+        current_state: &StateStore,
     ) -> SourceProbe {
         let vr = match self.find_component_visible_root(component, current_state) {
             Ok(Some(vr)) => vr,
@@ -1210,7 +1223,7 @@ impl AdapterManager {
     fn load_visible_component_manifest(
         &self,
         component: &str,
-        current_state: &InstalledState,
+        current_state: &StateStore,
     ) -> Result<(ComponentManifest, Vec<PathBuf>, Option<PathBuf>), AdapterError> {
         let vr = self
             .find_component_visible_root(component, current_state)?
@@ -1246,25 +1259,25 @@ impl AdapterManager {
     }
 
     /// First visible root whose installed state contains `component` in
-    /// an adapter-visible status ([`Installed`](ObjectStatus::Installed) or
-    /// [`Adopted`](ObjectStatus::Adopted)). Returns the full
+    /// an adapter-visible status ([`LifecycleStatus::Installed`]).
+    /// Returns the full
     /// [`VisibleRoot`] so callers can scope contract resolution to the
     /// paired datadir roots.
     fn find_component_visible_root(
         &self,
         component: &str,
-        current_state: &InstalledState,
+        current_state: &StateStore,
     ) -> Result<Option<&VisibleRoot>, AdapterError> {
         for vr in &self.visible_roots {
             let visible = if vr.state_dir == self.layout.state_dir {
                 current_state
-                    .find_object(ObjectKind::Component, component)
-                    .is_some_and(|obj| is_adapter_visible_status(obj.status))
+                    .find(ObjectKind::Component, component)
+                    .is_some_and(is_adapter_visible)
             } else {
                 let state_path = vr.state_dir.join("installed.toml");
-                InstalledState::load(&state_path)?
-                    .find_object(ObjectKind::Component, component)
-                    .is_some_and(|obj| is_adapter_visible_status(obj.status))
+                Self::load_state_at(&state_path)?
+                    .find(ObjectKind::Component, component)
+                    .is_some_and(is_adapter_visible)
             };
             if visible {
                 return Ok(Some(vr));
@@ -1284,7 +1297,7 @@ impl AdapterManager {
     /// fallback.
     fn load_visible_adapter_declarations(
         &self,
-        current_state: &InstalledState,
+        current_state: &StateStore,
     ) -> (Vec<AdapterDecl>, Vec<String>) {
         let mut declarations = BTreeSet::new();
         // Map component name → the VisibleRoot where it was first seen.
@@ -1296,7 +1309,7 @@ impl AdapterManager {
             let state = if vr.state_dir == self.layout.state_dir {
                 current_state.clone()
             } else {
-                match InstalledState::load(&state_path) {
+                match Self::load_state_at(&state_path) {
                     Ok(state) => state,
                     Err(err) => {
                         warnings.push(format!(
@@ -1309,10 +1322,10 @@ impl AdapterManager {
             };
 
             for object in state
-                .objects
+                .installations
                 .iter()
                 .filter(|object| object.kind == ObjectKind::Component)
-                .filter(|object| is_adapter_visible_status(object.status))
+                .filter(|object| is_adapter_visible(object))
             {
                 component_vr.entry(object.name.clone()).or_insert(vr);
             }
@@ -1666,7 +1679,7 @@ struct ManagerOps {
 /// lock. Drivers never receive the state path or write installed state
 /// directly.
 struct ManagerEnableProgress<'a> {
-    state: &'a mut InstalledState,
+    state: &'a mut StateStore,
     state_path: &'a Path,
     layout: &'a FsLayout,
     allowed_external_roots: &'a [PathBuf],
@@ -2439,8 +2452,8 @@ fn validate_adapter_type_for_framework(
 
 /// Whether a component status makes it visible to adapter scan/enable.
 /// Both fully-installed and adopted components should be adapter-visible.
-fn is_adapter_visible_status(status: ObjectStatus) -> bool {
-    matches!(status, ObjectStatus::Installed | ObjectStatus::Adopted)
+fn is_adapter_visible(installation: &Installation) -> bool {
+    installation.status == LifecycleStatus::Installed
 }
 
 /// Return the datadir root that supplied a resolved component contract.
@@ -2861,6 +2874,13 @@ fn prioritize_datadir_root(roots: &[PathBuf], preferred: Option<&Path>) -> Vec<P
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::state::{InstalledState, ObjectStatus};
+
+    /// Read back the state file the manager wrote (v5 on disk).
+    fn load_written_state(path: &std::path::Path) -> StateStore {
+        StateStore::load(path, anolisa_platform::privilege::effective_uid()).expect("load state")
+    }
 
     /// The framework-agnostic Manager resolves the requirement by precedence
     /// only and never validates it — a present-but-empty value is passed
@@ -3832,7 +3852,7 @@ source = "adapters/openclaw"
         );
 
         // resolve_resource_root (used by enable) must return the custom path.
-        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let state = load_written_state(&state_dir.join("installed.toml"));
         let (manifest, scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
@@ -3892,7 +3912,7 @@ source = "adapters/openclaw"
 
         // resolve_resource_root: must return ContractResourceRootNotFound,
         // NOT silently fall back to convention.
-        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let state = load_written_state(&state_dir.join("installed.toml"));
         let (manifest, scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
@@ -3962,7 +3982,7 @@ source = "adapters/openclaw"
         );
 
         // resolve_resource_root must error, not fall back.
-        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let state = load_written_state(&state_dir.join("installed.toml"));
         let (manifest, scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
@@ -4103,7 +4123,7 @@ source = "{datadir}/skills/code-scanner/"
         manager.all_datadir_roots = vec![sys_data.clone()];
 
         // Resolve resource root — must come from system datadir.
-        let state = InstalledState::load(&manager.state_path).expect("load state");
+        let state = load_written_state(&manager.state_path);
         let (manifest, scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
@@ -4274,7 +4294,7 @@ source = "{datadir}/skills/code-scanner/"
         );
 
         // Verify resolve_resource_root returns the package datadir path.
-        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let state = load_written_state(&state_dir.join("installed.toml"));
         let (manifest, scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
@@ -4351,7 +4371,7 @@ source = "{datadir}/skills/code-scanner/"
         }];
         manager.all_datadir_roots = vec![package_datadir.clone()];
 
-        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let state = load_written_state(&state_dir.join("installed.toml"));
         let (manifest, scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
@@ -5011,7 +5031,7 @@ source = "{{datadir}}/skills/code-scanner/"
         }];
         manager.all_datadir_roots = vec![local_datadir.clone(), pkg_datadir.clone()];
 
-        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let state = load_written_state(&state_dir.join("installed.toml"));
         let (manifest, scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
@@ -5122,7 +5142,7 @@ source = "{{datadir}}/skills/code-scanner/"
         }];
         manager.all_datadir_roots = vec![local_datadir.clone(), pkg_datadir.clone()];
 
-        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let state = load_written_state(&state_dir.join("installed.toml"));
         let (manifest, scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
@@ -5234,7 +5254,7 @@ source = "{{datadir}}/skills/code-scanner/"
         }];
         manager.all_datadir_roots = vec![local_datadir.clone(), pkg_datadir.clone()];
 
-        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let state = load_written_state(&state_dir.join("installed.toml"));
         let (manifest, scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
@@ -5300,7 +5320,7 @@ source = "{{datadir}}/skills/code-scanner/"
         }];
         manager.all_datadir_roots = vec![pkg_datadir.clone()];
 
-        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let state = load_written_state(&state_dir.join("installed.toml"));
         let (_manifest, _scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
@@ -5379,7 +5399,7 @@ dest = "{datadir}/skills"
 
         // enable path: resolve_resource_root must also prefer the package
         // datadir.
-        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let state = load_written_state(&state_dir.join("installed.toml"));
         let (manifest, scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("os-skills", &state)
             .expect("load manifest");
@@ -5446,7 +5466,7 @@ dest = "{datadir}/skills"
         }];
         manager.all_datadir_roots = vec![local_datadir.clone(), package_datadir.clone()];
 
-        let state = InstalledState::load(&state_dir.join("installed.toml")).expect("load state");
+        let state = load_written_state(&state_dir.join("installed.toml"));
         let (manifest, scoped_roots, contract_datadir_root) = manager
             .load_visible_component_manifest("os-skills", &state)
             .expect("load manifest");

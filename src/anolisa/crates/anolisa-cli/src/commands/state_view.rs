@@ -1,7 +1,10 @@
 use std::path::{Path, PathBuf};
 
-use anolisa_core::{InstalledObject, InstalledState, ObjectKind};
+use anolisa_core::ObjectKind;
+use anolisa_core::domain::{Installation, ProviderBinding};
+use anolisa_core::state_store::StateStore;
 use anolisa_platform::fs_layout::FsLayout;
+use anolisa_platform::privilege;
 
 use crate::commands::common;
 use crate::context::{CliContext, InstallMode};
@@ -35,7 +38,7 @@ pub(crate) struct ScopedStateRoot {
     pub(crate) layout: FsLayout,
     pub(crate) state_path: PathBuf,
     pub(crate) writable: bool,
-    pub(crate) state: InstalledState,
+    pub(crate) state: StateStore,
 }
 
 #[derive(Debug, Clone)]
@@ -86,9 +89,9 @@ impl StateView {
         for root in &self.visible_roots {
             for object in root
                 .state
-                .objects
+                .installations
                 .iter()
-                .filter(|object| object.kind == ObjectKind::Component)
+                .filter(|installation| installation.kind == ObjectKind::Component)
             {
                 let shadowed_by = records
                     .iter()
@@ -115,12 +118,7 @@ impl StateView {
             record.active
                 && !record.mutable_by_current_invocation
                 && (record.object.name == component
-                    || record.object.raw_package.as_deref() == Some(component)
-                    || record
-                        .object
-                        .rpm_metadata
-                        .as_ref()
-                        .is_some_and(|metadata| metadata.package_name == component))
+                    || record_package_alias(record.object) == Some(component))
         }) {
             let scope = record.scope();
             return Err(CliError::PermissionDenied {
@@ -183,7 +181,7 @@ impl StateView {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ScopedInstalledObject<'a> {
     pub(crate) root: &'a ScopedStateRoot,
-    pub(crate) object: &'a InstalledObject,
+    pub(crate) object: &'a Installation,
     pub(crate) active: bool,
     pub(crate) shadowed_by: Option<StateScope>,
     pub(crate) mutable_by_current_invocation: bool,
@@ -192,6 +190,16 @@ pub(crate) struct ScopedInstalledObject<'a> {
 impl ScopedInstalledObject<'_> {
     pub(crate) const fn scope(&self) -> StateScope {
         self.root.scope
+    }
+}
+
+/// Package-name alias an installation is addressable by, in addition to its
+/// component name: the raw package for owned artifacts, the resolved native
+/// package for delegated ones.
+fn record_package_alias(installation: &Installation) -> Option<&str> {
+    match &installation.binding {
+        ProviderBinding::Owned { artifact } => artifact.raw_package.as_deref(),
+        ProviderBinding::Delegated { package, .. } => package.resolved_name(),
     }
 }
 
@@ -204,8 +212,8 @@ fn load_root_state(
     command: &str,
     state_path: &Path,
     writable: bool,
-) -> Result<InstalledState, RootLoad> {
-    InstalledState::load(state_path).map_err(|err| {
+) -> Result<StateStore, RootLoad> {
+    StateStore::load(state_path, privilege::effective_uid()).map_err(|err| {
         if writable {
             RootLoad::Fatal(CliError::InvalidArgument {
                 command: command.to_string(),

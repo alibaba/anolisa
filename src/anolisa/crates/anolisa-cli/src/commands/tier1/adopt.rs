@@ -1,26 +1,44 @@
-//! `anolisa adopt <component>` — record an already-installed system RPM as
-//! `rpm-observed` ANOLISA state.
+//! `anolisa adopt <component>` — take an already-installed system RPM under
+//! ANOLISA tracking as a delegated-adopted record.
 //!
-//! Adoption is the explicit counterpart to `install`'s implicit system-mode
-//! adoption: it fetches nothing and runs no `dnf`/`rpm` transaction — it reads
-//! rpmdb and writes the observation. It is a system-scope action: a unique
-//! installed RPM for the component is recorded with `Ownership::RpmObserved`,
-//! while ambiguous, absent, or already-tracked (non-observed) components are
-//! refused with guidance toward the right command.
+//! The handler is a thin shell over the planner pipeline (decision table
+//! A1–A7): resolve the component to its RPM package, assemble host facts,
+//! and execute the planner's step sequence. Adoption fetches nothing and
+//! runs no `dnf`/`rpm` transaction — a fresh adopt observes rpmdb and writes
+//! the record (A1); re-adopting an observed component upgrades the
+//! management consent in place without refreshing the cached observation
+//! (A6); an already-adopted component is a NoOp (A7). Ambiguous, absent, or
+//! differently-owned components are refused with guidance toward the right
+//! command.
 
 use clap::Parser;
+use serde::Serialize;
 
-use anolisa_core::state::{ObjectKind, Ownership};
-use anolisa_platform::pkg_query::PackageQuery;
+use anolisa_core::domain::{InstallationScope, ManagementRelation, NativePm, ProviderBinding};
+use anolisa_core::executor::execute_delegated_steps;
+use anolisa_core::facts::{FactsError, ObserveRequest, assemble_facts, pending_journal_for};
+use anolisa_core::lock::InstallLock;
+use anolisa_core::planner::{Intent, Plan, PlanError, Step, plan};
+use anolisa_core::providers::{DelegatedProvider, ProviderError};
+use anolisa_core::record_sink::{DelegatedIdentity, RecordContext, StoreRecordSink};
+use anolisa_core::state::{ObjectKind, OperationRecord};
+use anolisa_core::state_store::StateStore;
+use anolisa_core::transaction::Transaction;
+use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError};
+use anolisa_platform::pkg_transaction::{PackageTransaction, PackageTransactionError};
+use anolisa_platform::privilege;
 use anolisa_platform::rpm_query::RpmPackageQuery;
 
 use crate::commands::common;
 use crate::commands::common::RepoPersistPolicy;
-use crate::commands::tier1::install::{RpmSituation, execute_adopt, probe_rpm_situation};
+use crate::commands::tier1::install::{
+    installed_version_label, now_iso8601, rpm_package_candidates_with_index,
+    snapshot_datadir_contract,
+};
 use crate::commands::tier1::rpm_install;
-use crate::context::CliContext;
+use crate::context::{CliContext, InstallMode};
 use crate::resolution::{ResolutionUse, load_optional_component_index};
-use crate::response::CliError;
+use crate::response::{CliError, render_json};
 
 /// Command label for JSON envelopes and error routing.
 const COMMAND: &str = "adopt";
@@ -36,152 +54,607 @@ pub struct AdoptArgs {
     pub package: Option<String>,
 }
 
-/// Dispatch `adopt <component>`: probe rpmdb and record the unique installed RPM
-/// as `rpm-observed`.
-///
-/// # Errors
-///
-/// Returns [`CliError`] in user mode, when the component is already tracked
-/// under a non-observed ownership, when no / ambiguous / multi-version RPM is
-/// found, or when the state write fails.
+/// Dispatch `adopt <component>` against the live host.
 pub fn handle(args: AdoptArgs, ctx: &CliContext) -> Result<(), CliError> {
     let query = RpmPackageQuery::system();
     adopt_with_query(&args.component, args.package.as_deref(), ctx, &query)
 }
 
+/// Adopt runs no native transaction; the provider contract needs one anyway,
+/// so this stub refuses honestly if a plan ever routes a transaction here.
+struct NoNativeTransaction;
+
+impl NoNativeTransaction {
+    fn refused(operation: &str, packages: &[&str]) -> PackageTransactionError {
+        PackageTransactionError::TransactionFailed {
+            command: COMMAND.to_string(),
+            operation: operation.to_string(),
+            code: None,
+            stderr: format!(
+                "adopt never runs a native transaction (attempted {operation} {})",
+                packages.join(" ")
+            ),
+        }
+    }
+}
+
+impl PackageTransaction for NoNativeTransaction {
+    fn install(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
+        Err(Self::refused("install", packages))
+    }
+    fn update(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
+        Err(Self::refused("update", packages))
+    }
+    fn reinstall(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
+        Err(Self::refused("reinstall", packages))
+    }
+    fn remove(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
+        Err(Self::refused("remove", packages))
+    }
+}
+
+/// What the pre-lock plan decided this adopt writes, re-checked against the
+/// store as re-read under the install lock.
+enum AdoptShape {
+    /// A1: no record existed; the adopt writes a fresh delegated-adopted one.
+    Fresh,
+    /// A6: an observed record existed for this package; the adopt upgrades
+    /// its management relation in place.
+    UpgradeObserved {
+        /// RPM package the observed record must still point at.
+        package: String,
+    },
+}
+
 /// Core of [`handle`] with the package query injected so tests drive every
-/// branch without a live rpmdb. Adopt runs no dnf transaction, so only a
-/// [`PackageQuery`] is required.
-// pub(crate): driven by the cross-command MVP lifecycle test (#963).
+/// branch without a live rpmdb.
 pub(crate) fn adopt_with_query(
     target: &str,
     cli_override: Option<&str>,
     ctx: &CliContext,
     query: &dyn PackageQuery,
 ) -> Result<(), CliError> {
-    let command = format!("adopt {target}");
+    let command = format!("{COMMAND} {target}");
+    let layout = common::resolve_layout(ctx);
+    let state_path = layout.state_dir.join("installed.toml");
+    let journal_dir = rpm_install::journal_dir(&layout);
+    let uid = privilege::effective_uid();
+    let scope = match ctx.install_mode {
+        InstallMode::System => InstallationScope::System,
+        InstallMode::User => InstallationScope::User { uid },
+    };
+    let now = now_iso8601();
+    let env = anolisa_env::EnvService::detect();
 
-    common::require_system_mode(
-        ctx,
-        &command,
-        "adopt records a system RPM and requires system scope",
-        &format!("sudo anolisa adopt {target}"),
-    )?;
+    let store = StateStore::load(&state_path, uid).map_err(|err| CliError::Runtime {
+        command: command.clone(),
+        reason: format!("failed to load installed state: {err}"),
+    })?;
 
-    let installed = common::load_installed_state(ctx, COMMAND)?;
+    // Resolve package aliases (e.g., "copilot-shell" → "cosh") before
+    // addressing state, matching install/update/repair resolution.
+    let mut component = common::lookup_component_name_in_store(target, &store, ctx, COMMAND);
 
-    // Resolve package aliases (e.g., "copilot-shell" → "cosh") before the
-    // tracked-component gate, so the ownership pre-check addresses the
-    // canonical state key.
-    let resolved = common::lookup_component_name(target, &installed, ctx, COMMAND);
-    let target = resolved.as_str();
+    // Quarantined records and pending journals decide the outcome before any
+    // rpmdb resolution has to run — the refusal must not depend on the
+    // candidate chain resolving.
+    if quarantined(&store, &component) {
+        return Err(plan_error_to_cli(
+            PlanError::NeedsAttention,
+            &component,
+            &component,
+            &command,
+        ));
+    }
+    let pending =
+        pending_journal_for(&journal_dir, &component).map_err(|err| CliError::Runtime {
+            command: command.clone(),
+            reason: err.to_string(),
+        })?;
+    if pending.is_some() {
+        return Err(plan_error_to_cli(
+            PlanError::PendingOperation,
+            &component,
+            &component,
+            &command,
+        ));
+    }
 
-    // Tracked-component gate (pre-lock fast-fail for a clear, early message).
-    // Re-adopting a component that is already `rpm-observed` is a refresh and
-    // falls through to execute_adopt, which upserts. A component owned under any
-    // other provenance must not be silently downgraded to rpm-observed — that is
-    // an ownership migration, left for later — so refuse and point at the right
-    // tool. This is the friendly path; execute_adopt re-enforces the same policy
-    // atomically under the lock (covering a concurrent managed install).
-    if let Some(obj) = installed.find_object(ObjectKind::Component, target) {
-        match obj.effective_ownership() {
-            Ownership::RpmObserved => {}
-            Ownership::RpmManaged => {
+    // Resolve the RPM package to probe and the shape the write would take.
+    // Active-record arms never run the candidate chain: the planner rules on
+    // the recorded identity (A4–A7), and repointing a tracked component at a
+    // different package is an identity migration adopt refuses up front.
+    let active_binding = store
+        .find(ObjectKind::Component, &component)
+        .map(|installation| installation.binding.clone());
+    let prior_version = store
+        .find(ObjectKind::Component, &component)
+        .map(installed_version_label);
+    let (native_package, shape): (Option<String>, AdoptShape) = match &active_binding {
+        Some(ProviderBinding::Owned { .. }) => {
+            // A4 refuses before any probe; nothing to resolve.
+            (None, AdoptShape::Fresh)
+        }
+        Some(ProviderBinding::Delegated {
+            package: recorded,
+            relation,
+            ..
+        }) => {
+            let recorded_name = recorded.resolved_name().map(str::to_string);
+            if let (Some(requested), Some(prev)) = (cli_override, recorded_name.as_deref())
+                && !prev.is_empty()
+                && prev != requested
+                && !matches!(relation, ManagementRelation::Managed { .. })
+            {
                 return Err(CliError::InvalidArgument {
                     command,
                     reason: format!(
-                        "component '{target}' is already tracked as rpm-managed; run `anolisa repair {target}` to refresh its state from rpmdb"
+                        "component '{component}' is already adopted from RPM package '{prev}', not '{requested}'; adopt will not silently repoint it to a different package — run `anolisa forget {component}` first, then adopt the new package"
                     ),
                 });
             }
-            Ownership::RawManaged => {
-                return Err(CliError::InvalidArgument {
-                    command,
-                    reason: format!(
-                        "component '{target}' is already tracked as a raw install; run `anolisa uninstall {target}` first to re-adopt it as an rpm-observed system package"
-                    ),
-                });
+            let package = cli_override
+                .map(str::to_string)
+                .or(recorded_name)
+                .unwrap_or_else(|| component.clone());
+            let shape = if matches!(relation, ManagementRelation::Observed) {
+                AdoptShape::UpgradeObserved {
+                    package: package.clone(),
+                }
+            } else {
+                AdoptShape::Fresh
+            };
+            (Some(package), shape)
+        }
+        None => {
+            if !matches!(scope, InstallationScope::System) {
+                // The planner refuses user scope before consulting the probe
+                // (its first guard), so nothing touches the rpmdb here.
+                (None, AdoptShape::Fresh)
+            } else {
+                let (package, resolved_component) = resolve_fresh_adopt(
+                    cli_override,
+                    ctx,
+                    &layout,
+                    &env,
+                    &component,
+                    query,
+                    &command,
+                )?;
+                component = resolved_component;
+                (Some(package), AdoptShape::Fresh)
             }
         }
+    };
+
+    let txn = NoNativeTransaction;
+    let provider = DelegatedProvider::new(query, &txn);
+    let observe_request = ObserveRequest {
+        kind: ObjectKind::Component,
+        name: &component,
+        scope,
+        native_package: native_package.as_deref(),
+        observed_at: &now,
+        verify_owned_files: false,
+    };
+    let facts = assemble_facts(
+        &observe_request,
+        &store,
+        Some(&provider),
+        &layout,
+        &journal_dir,
+    )
+    .map_err(|err| match err {
+        FactsError::Probe(ProviderError::Query(PackageQueryError::CommandMissing {
+            command: bin,
+        })) => rpm_tooling_missing_error(&command, &bin, &component),
+        err => CliError::Runtime {
+            command: command.clone(),
+            reason: err.to_string(),
+        },
+    })?;
+
+    let package_label = native_package.clone().unwrap_or_else(|| component.clone());
+    let steps = match plan(&Intent::Adopt, &facts) {
+        Ok(Plan::Execute { steps, .. }) => steps,
+        Ok(Plan::NoOp { .. }) => {
+            // A7: adopt is idempotent over an already-adopted record.
+            render_result(
+                ctx,
+                &AdoptResultPayload {
+                    component,
+                    package: native_package,
+                    version: prior_version,
+                    action: "already-adopted",
+                    operation_id: None,
+                    dry_run: ctx.dry_run,
+                    plan: Vec::new(),
+                },
+            )?;
+            return Ok(());
+        }
+        Err(err) => return Err(plan_error_to_cli(err, &component, &package_label, &command)),
+    };
+    let plan_labels: Vec<String> = steps.iter().map(step_label).collect();
+
+    if ctx.dry_run {
+        return render_result(
+            ctx,
+            &AdoptResultPayload {
+                component,
+                package: native_package,
+                version: prior_version,
+                action: "planned",
+                operation_id: None,
+                dry_run: true,
+                plan: plan_labels,
+            },
+        );
     }
 
-    let layout = common::resolve_layout(ctx);
-    let mut claims = vec![target];
-    if let Some(package) = cli_override {
-        claims.push(package);
-    }
-    rpm_install::reject_pending_claim(&layout, &installed, &claims, &command)?;
-    // repo.toml locates the RPM backend and raw-hosted component index. Both
-    // are supplementary to the explicit --package input, installed Provides
-    // contract, and default name candidate, so unreadable config degrades to
-    // "no rpm backend config" rather than failing the adopt.
+    execute_adopt_plan(
+        &component,
+        &package_label,
+        &shape,
+        ctx,
+        &layout,
+        &state_path,
+        &journal_dir,
+        scope,
+        &now,
+        &steps,
+        &plan_labels,
+        &provider,
+        prior_version,
+        &command,
+    )
+}
+
+/// Candidate-chain resolution for a component with no record: CLI
+/// `--package` override, repo-side component index, repo.toml `package_map`,
+/// then rpmdb Provides metadata. repo.toml is supplementary here, so an
+/// unreadable config degrades to "no rpm backend config" rather than
+/// failing the adopt.
+fn resolve_fresh_adopt(
+    cli_override: Option<&str>,
+    ctx: &CliContext,
+    layout: &anolisa_platform::fs_layout::FsLayout,
+    env: &anolisa_env::EnvFacts,
+    component: &str,
+    query: &dyn PackageQuery,
+    command: &str,
+) -> Result<(String, String), CliError> {
     let repo_config =
-        common::load_repo_config(ctx, &layout, COMMAND, RepoPersistPolicy::BestEffort).ok();
+        common::load_repo_config(ctx, layout, COMMAND, RepoPersistPolicy::BestEffort).ok();
     let rpm_backend = repo_config.as_ref().and_then(|c| c.backends.get("rpm"));
-    let env = anolisa_env::EnvService::detect();
     let component_index = repo_config
         .as_ref()
-        .and_then(|cfg| load_optional_component_index(&layout, &env, cfg));
+        .and_then(|cfg| load_optional_component_index(layout, env, cfg));
 
-    match probe_rpm_situation(
-        target,
+    let candidates = rpm_package_candidates_with_index(
         cli_override,
         rpm_backend,
         component_index.as_ref(),
-        ResolutionUse::Adopt,
         query,
-        &command,
-    )? {
-        // Exactly one installed RPM: record it (or preview on --dry-run). reused
-        // verbatim from the install path, including the lock-held re-validation.
-        RpmSituation::Adoptable { target, info } => {
-            execute_adopt(
-                ctx,
-                &layout,
-                &command,
-                &target.component,
-                target.package,
-                info,
-                query,
-            )?;
-            Ok(())
+        component,
+        ResolutionUse::Adopt,
+    )
+    .map_err(|err| match err {
+        PackageQueryError::CommandMissing { command: bin } => {
+            rpm_tooling_missing_error(command, &bin, component)
         }
-        // Nothing installed under this name: adopt never installs, so point at
-        // install for the delegated `dnf install` path.
-        RpmSituation::Absent { target: resolved } => Err(CliError::InvalidArgument {
-            command,
+        err => pkg_query_err(err, command),
+    })?;
+    match candidates.as_slice() {
+        [] => Err(CliError::InvalidArgument {
+            command: command.to_string(),
             reason: format!(
-                "no installed RPM '{}' found for component '{}'; adopt only records an already-installed system RPM — run `sudo anolisa install {}` to install it",
-                resolved.package, resolved.component, resolved.component
+                "component '{component}' is not an ANOLISA RPM component; configure the repo-side component index or publish Provides: anolisa-component({component})"
             ),
         }),
-        RpmSituation::NotAnolisaComponent => Err(CliError::InvalidArgument {
-            command,
+        [single] => Ok((single.package.clone(), single.component.clone())),
+        many => Err(CliError::InvalidArgument {
+            command: command.to_string(),
             reason: format!(
-                "component '{target}' is not an ANOLISA RPM component; configure the repo-side component index or publish Provides: anolisa-component({target})"
-            ),
-        }),
-        // Several provider packages: the user must disambiguate.
-        RpmSituation::Ambiguous(targets) => Err(CliError::InvalidArgument {
-            command,
-            reason: format!(
-                "multiple RPM candidates match '{target}': {}; cannot adopt unambiguously — pin one with `--package <name>`",
-                targets
-                    .iter()
+                "multiple RPM candidates match '{component}': {}; cannot adopt unambiguously — pin one with `--package <name>`",
+                many.iter()
                     .map(|target| target.package.clone())
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
         }),
-        // One name, several installed versions: a drift the user must resolve.
-        RpmSituation::MultiVersion(resolved) => Err(CliError::InvalidArgument {
+    }
+}
+
+/// Execute an adopt plan (A1 or A6): at most one observation plus a record
+/// write, under the install lock.
+///
+/// The store is re-read under the lock and the plan's shape re-validated so
+/// a concurrent operation that recorded the component between planning and
+/// locking is refused instead of overwritten.
+#[expect(clippy::too_many_arguments)]
+fn execute_adopt_plan(
+    component: &str,
+    package: &str,
+    shape: &AdoptShape,
+    ctx: &CliContext,
+    layout: &anolisa_platform::fs_layout::FsLayout,
+    state_path: &std::path::Path,
+    journal_dir: &std::path::Path,
+    scope: InstallationScope,
+    now: &str,
+    steps: &[Step],
+    plan_labels: &[String],
+    provider: &DelegatedProvider,
+    prior_version: Option<String>,
+    command: &str,
+) -> Result<(), CliError> {
+    let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("failed to acquire install lock: {err}"),
+    })?;
+    let mut store = StateStore::load(state_path, privilege::effective_uid()).map_err(|err| {
+        CliError::Runtime {
+            command: command.to_string(),
+            reason: format!("failed to load installed state: {err}"),
+        }
+    })?;
+    adopt_authorized(&store, component, shape, command)?;
+
+    let mut journal = Transaction::begin_with_subject(
+        COMMAND,
+        Some(component),
+        state_path.to_path_buf(),
+        journal_dir,
+    )
+    .map_err(|err| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("failed to begin operation journal: {err}"),
+    })?;
+    let operation_id = journal.operation_id.clone();
+
+    let context = RecordContext {
+        kind: ObjectKind::Component,
+        name: component.to_string(),
+        scope,
+        now: now.to_string(),
+        operation_id: Some(operation_id.clone()),
+        delegated: Some(DelegatedIdentity {
+            pm: NativePm::Rpm,
+            package: package.to_string(),
+        }),
+        owned_artifact: None,
+    };
+    let outcome = {
+        let mut sink = StoreRecordSink::new(&mut store, state_path, context);
+        execute_delegated_steps(steps, provider, &mut sink, &mut journal, now)
+    }
+    .map_err(|err| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("adopt of '{component}' failed: {err}"),
+    })?;
+
+    // Operation history is best-effort bookkeeping on top of the committed
+    // record: the adopt already succeeded, so a history-write failure
+    // degrades to a warning instead of unwinding anything.
+    store.operations.push(OperationRecord {
+        id: operation_id.clone(),
+        command: command.to_string(),
+        status: "ok".to_string(),
+        started_at: now.to_string(),
+        finished_at: Some(now_iso8601()),
+        parent_operation_id: None,
+    });
+    if let Err(err) = store.save(state_path) {
+        eprintln!("warning: failed to record operation history: {err}");
+    }
+
+    // Best-effort: snapshot the datadir component contract so adapter
+    // commands can discover declared adapters. Missing or unwritable
+    // contracts produce warnings, never failures.
+    for warning in snapshot_datadir_contract(layout, component, command) {
+        eprintln!("warning: {warning}");
+    }
+
+    // A1 carries a fresh observation; A6 writes no observation and keeps the
+    // record's cached one.
+    let version = outcome
+        .observation
+        .as_ref()
+        .map(|o| o.version.clone())
+        .or(prior_version);
+    render_result(
+        ctx,
+        &AdoptResultPayload {
+            component: component.to_string(),
+            package: Some(package.to_string()),
+            version,
+            action: "adopted",
+            operation_id: Some(operation_id),
+            dry_run: false,
+            plan: plan_labels.to_vec(),
+        },
+    )
+}
+
+/// Re-validation under the install lock: the plan was made from a pre-lock
+/// read, and a concurrent operation may have won the lock first. Any drift
+/// from the planned shape is refused instead of overwriting what the winner
+/// recorded — an adopt must never clobber a raw install or downgrade a
+/// managed component to adopted.
+fn adopt_authorized(
+    store: &StateStore,
+    component: &str,
+    shape: &AdoptShape,
+    command: &str,
+) -> Result<(), CliError> {
+    let drift = |detail: String| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!(
+            "{detail} while this adopt was resolving; nothing was changed — re-run `anolisa adopt {component}`"
+        ),
+    };
+    match shape {
+        AdoptShape::Fresh => {
+            if store.find(ObjectKind::Component, component).is_some()
+                || quarantined(store, component)
+            {
+                return Err(drift(format!("a record for '{component}' appeared")));
+            }
+        }
+        AdoptShape::UpgradeObserved { package } => {
+            let Some(installation) = store.find(ObjectKind::Component, component) else {
+                return Err(drift(format!("the record for '{component}' disappeared")));
+            };
+            match &installation.binding {
+                ProviderBinding::Delegated {
+                    relation: ManagementRelation::Observed,
+                    package: recorded,
+                    ..
+                } if recorded.resolved_name().is_none_or(|name| name == package) => {}
+                _ => return Err(drift(format!("the record for '{component}' changed"))),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether the store holds a quarantined record for this component.
+fn quarantined(store: &StateStore, component: &str) -> bool {
+    store
+        .quarantined
+        .iter()
+        .any(|q| q.record.kind == ObjectKind::Component && q.record.name == component)
+}
+
+/// Map a planning refusal to an actionable CLI error. The planner names the
+/// way out; this mapping only renders it.
+fn plan_error_to_cli(err: PlanError, component: &str, package: &str, command: &str) -> CliError {
+    let command = command.to_string();
+    match err {
+        PlanError::AdoptRequiresSystemScope => CliError::InvalidArgument {
             command,
             reason: format!(
-                "RPM package '{}' has multiple installed versions; refusing to adopt a single version automatically — resolve the duplicate first",
-                resolved.package
+                "adopt records a system RPM and requires system scope; re-run as `sudo anolisa adopt {component}`"
             ),
-        }),
+        },
+        PlanError::NothingToAdopt => CliError::InvalidArgument {
+            command,
+            reason: format!(
+                "no installed RPM '{package}' found for component '{component}'; adopt only records an already-installed system RPM — run `sudo anolisa install {component}` to install it"
+            ),
+        },
+        PlanError::AmbiguousPackage => CliError::InvalidArgument {
+            command,
+            reason: format!(
+                "RPM package '{package}' has multiple installed versions; refusing to adopt a single version automatically — resolve the duplicate first"
+            ),
+        },
+        PlanError::ProvenanceConflict => CliError::InvalidArgument {
+            command,
+            reason: format!(
+                "component '{component}' is already tracked as a raw install; run `anolisa uninstall {component}` first to re-adopt it as a system package"
+            ),
+        },
+        PlanError::AlreadyManaged => CliError::InvalidArgument {
+            command,
+            reason: format!(
+                "component '{component}' is already tracked as rpm-managed; run `anolisa repair {component}` to refresh its state from rpmdb"
+            ),
+        },
+        PlanError::TrackedButAbsent => CliError::InvalidArgument {
+            command,
+            reason: format!(
+                "'{component}' is tracked but its package is no longer installed; run `anolisa forget {component}` to drop the record, then install again"
+            ),
+        },
+        PlanError::NeedsAttention => CliError::InvalidArgument {
+            command,
+            reason: format!(
+                "the record for '{component}' was quarantined by the state migration; run `anolisa repair {component}` to resolve it"
+            ),
+        },
+        PlanError::PendingOperation => CliError::Runtime {
+            command,
+            reason: format!(
+                "a previous operation on '{component}' is pending recovery; run `anolisa repair {component}` before retrying"
+            ),
+        },
+        other => CliError::InvalidArgument {
+            command,
+            reason: format!("cannot adopt '{component}': {other:?}"),
+        },
     }
+}
+
+/// Warn-and-exit error raised when the rpmdb probe cannot run because
+/// `rpm`/`dnf` is absent: adopt records what rpmdb reports, so without the
+/// tooling there is nothing it could observe.
+fn rpm_tooling_missing_error(command: &str, bin: &str, component: &str) -> CliError {
+    CliError::Runtime {
+        command: command.to_string(),
+        reason: format!(
+            "cannot adopt '{component}': {bin} not found on PATH — adopt reads rpmdb to record the installed package; install rpm/dnf and retry"
+        ),
+    }
+}
+
+fn pkg_query_err(err: PackageQueryError, command: &str) -> CliError {
+    CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("rpm query failed: {err}"),
+    }
+}
+
+/// Human-facing label for a plan step (preview rendering). Adopt plans only
+/// carry observe/record steps; anything else falls back to its debug form.
+fn step_label(step: &Step) -> String {
+    match step {
+        Step::Observe { packages } => format!("observe {}", packages.join(" ")),
+        Step::WriteRecord(write) => format!("record: {}", write.label()),
+        other => format!("{other:?}"),
+    }
+}
+
+/// JSON payload for a completed (or previewed, or idempotent) adopt.
+#[derive(Debug, Serialize)]
+struct AdoptResultPayload {
+    component: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    package: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    /// `adopted` | `planned` (dry-run) | `already-adopted`.
+    action: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation_id: Option<String>,
+    dry_run: bool,
+    plan: Vec<String>,
+}
+
+fn render_result(ctx: &CliContext, payload: &AdoptResultPayload) -> Result<(), CliError> {
+    if ctx.json {
+        return render_json(COMMAND, payload);
+    }
+    if ctx.quiet {
+        return Ok(());
+    }
+    if payload.dry_run {
+        println!("adopt {} (dry-run):", payload.component);
+        for label in &payload.plan {
+            println!("  - {label}");
+        }
+        return Ok(());
+    }
+    match (payload.action, &payload.version) {
+        ("already-adopted", Some(version)) => {
+            println!("{} {version} is already adopted", payload.component);
+        }
+        ("already-adopted", None) => println!("{} is already adopted", payload.component),
+        (_, Some(version)) => println!("adopted {} {version}", payload.component),
+        (_, None) => println!("adopted {}", payload.component),
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -191,13 +664,16 @@ mod tests {
 
     use std::path::PathBuf;
 
+    use anolisa_core::domain::PackageIdentity;
     use anolisa_core::state::{
-        InstallMode as StateInstallMode, InstalledObject, InstalledState, ObjectStatus, RpmMetadata,
+        InstallMode as StateInstallMode, InstalledObject, InstalledState, ObjectStatus, Ownership,
+        RpmMetadata,
     };
     use anolisa_platform::pkg_query::{PackageInfo, PackageQueryError, PackageVersion};
 
-    /// In-memory [`PackageQuery`] for the adopt tests. Adopt runs no transaction,
-    /// so a query alone drives every branch (probe + origin lookup).
+    /// In-memory [`PackageQuery`] for the adopt tests. Adopt runs no
+    /// transaction, so a query alone drives every branch (candidate chain +
+    /// probe + origin lookup).
     #[derive(Default)]
     struct FakeQuery {
         /// package name → installed info reported by `query_installed`.
@@ -312,14 +788,20 @@ mod tests {
         }
     }
 
-    /// A tracked component object with the given provenance.
-    fn component_object(name: &str, ownership: Ownership, status: ObjectStatus) -> InstalledObject {
+    /// A tracked component object with the given provenance, as legacy v4
+    /// state; loading it exercises the migration into the v5 store. `adopted`
+    /// splits `RpmObserved` into the Adopted vs Observed relations.
+    fn component_object(name: &str, ownership: Ownership, adopted: bool) -> InstalledObject {
         let is_rpm = ownership.is_rpm();
         InstalledObject {
             kind: ObjectKind::Component,
             name: name.to_string(),
             version: "1.0.0-1.al8".to_string(),
-            status,
+            status: if adopted {
+                ObjectStatus::Adopted
+            } else {
+                ObjectStatus::Installed
+            },
             manifest_digest: None,
             distribution_source: None,
             raw_package: None,
@@ -334,7 +816,7 @@ mod tests {
             installed_at: "2026-06-01T10:00:00Z".to_string(),
             last_operation_id: Some("op-prior".to_string()),
             managed: matches!(ownership, Ownership::RawManaged | Ownership::RpmManaged),
-            adopted: matches!(ownership, Ownership::RpmObserved),
+            adopted,
             subscription_scope: Default::default(),
             enabled_features: Vec::new(),
             component_refs: Vec::new(),
@@ -346,8 +828,8 @@ mod tests {
         }
     }
 
-    /// Write a seed state (creating the state dir) so the lock-held write path
-    /// has somewhere to land.
+    /// Write a seed state (creating the state dir) so the lock-held write
+    /// path has somewhere to land.
     fn seed(ctx: &CliContext, objs: Vec<InstalledObject>) {
         let layout = common::resolve_layout(ctx);
         std::fs::create_dir_all(&layout.state_dir).expect("mkdir state");
@@ -364,14 +846,38 @@ mod tests {
             .expect("seed state");
     }
 
-    fn load_state(ctx: &CliContext) -> InstalledState {
+    fn load_store(ctx: &CliContext) -> StateStore {
         let layout = common::resolve_layout(ctx);
-        InstalledState::load(&layout.state_dir.join("installed.toml")).expect("load state")
+        StateStore::load(&layout.state_dir.join("installed.toml"), 0).expect("load store")
     }
 
-    /// A unique installed RPM with no prior state is recorded as `rpm-observed`.
+    /// The delegated binding pieces of a recorded component, for assertions.
+    fn delegated_parts(
+        store: &StateStore,
+        name: &str,
+    ) -> (String, ManagementRelation, Option<String>) {
+        let installation = store
+            .find(ObjectKind::Component, name)
+            .expect("component recorded");
+        match &installation.binding {
+            ProviderBinding::Delegated {
+                package,
+                relation,
+                last_observed,
+                ..
+            } => (
+                package.resolved_name().unwrap_or_default().to_string(),
+                relation.clone(),
+                last_observed.as_ref().and_then(|o| o.evr.clone()),
+            ),
+            other => panic!("expected a delegated binding, got {other:?}"),
+        }
+    }
+
+    /// A unique installed RPM with no prior state is recorded as
+    /// delegated-adopted with a fresh observation (A1).
     #[test]
-    fn adopt_records_unique_rpm_as_observed() {
+    fn adopt_records_unique_rpm_as_adopted() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
         seed(&c, Vec::new());
@@ -386,17 +892,16 @@ mod tests {
         };
         adopt_with_query("copilot-shell", None, &c, &q).expect("adopt ok");
 
-        let after = load_state(&c);
-        let obj = after
-            .find_object(ObjectKind::Component, "copilot-shell")
-            .expect("object recorded");
-        assert_eq!(obj.effective_ownership(), Ownership::RpmObserved);
-        assert_eq!(obj.status, ObjectStatus::Adopted);
-        let meta = obj.rpm_metadata.as_ref().expect("rpm metadata");
-        assert_eq!(meta.package_name, "copilot-shell");
-        assert_eq!(meta.evr.as_deref(), Some("2.2.0-1.al8"));
+        let store = load_store(&c);
+        let (package, relation, evr) = delegated_parts(&store, "copilot-shell");
+        assert_eq!(package, "copilot-shell");
         assert!(
-            after
+            matches!(relation, ManagementRelation::Adopted { .. }),
+            "adopt records the adopted relation, got {relation:?}",
+        );
+        assert_eq!(evr.as_deref(), Some("2.2.0-1.al8"), "fresh observation");
+        assert!(
+            store
                 .operations
                 .iter()
                 .any(|o| o.command == "adopt copilot-shell"),
@@ -404,10 +909,11 @@ mod tests {
         );
     }
 
-    /// Re-adopting an already `rpm-observed` component refreshes its EVR and
-    /// keeps it rpm-observed (idempotent).
+    /// Re-adopting an observed component upgrades the management relation in
+    /// place (A6) without refreshing the cached observation — install/adopt
+    /// never refresh EVR implicitly; that is repair's job.
     #[test]
-    fn adopt_refreshes_existing_rpm_observed() {
+    fn adopt_upgrades_observed_record_to_adopted() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
         seed(
@@ -415,7 +921,7 @@ mod tests {
             vec![component_object(
                 "copilot-shell",
                 Ownership::RpmObserved,
-                ObjectStatus::Adopted,
+                false,
             )],
         );
         let q = FakeQuery {
@@ -423,27 +929,64 @@ mod tests {
                 "copilot-shell".to_string(),
                 pkg_info("copilot-shell", "2.0.0", Some("1.al8"), "x86_64"),
             )],
-            package_provides: vec![package_component_provide("copilot-shell", "copilot-shell")],
             ..Default::default()
         };
-        adopt_with_query("copilot-shell", None, &c, &q).expect("refresh ok");
+        adopt_with_query("copilot-shell", None, &c, &q).expect("upgrade ok");
 
-        let obj = load_state(&c)
-            .find_object(ObjectKind::Component, "copilot-shell")
-            .expect("object")
-            .clone();
-        assert_eq!(obj.effective_ownership(), Ownership::RpmObserved);
+        let store = load_store(&c);
+        let (package, relation, evr) = delegated_parts(&store, "copilot-shell");
+        assert_eq!(package, "copilot-shell");
+        assert!(
+            matches!(relation, ManagementRelation::Adopted { .. }),
+            "observed must upgrade to adopted, got {relation:?}",
+        );
         assert_eq!(
-            obj.rpm_metadata.and_then(|m| m.evr).as_deref(),
-            Some("2.0.0-1.al8"),
-            "EVR refreshed from rpmdb",
+            evr.as_deref(),
+            Some("1.0.0-1.al8"),
+            "the cached observation is preserved, not refreshed",
         );
     }
 
-    /// Re-adopting an rpm-observed component with `--package` pointing at a
-    /// *different* RPM is a package-identity migration, not a refresh: it must be
-    /// refused under the lock (not silently overwrite `rpm_metadata.package_name`),
-    /// and steer the user through forget→adopt.
+    /// Re-adopting an already-adopted component is a NoOp (A7): nothing is
+    /// rewritten, no operation is recorded.
+    #[test]
+    fn adopt_already_adopted_is_a_noop() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(
+            &c,
+            vec![component_object(
+                "copilot-shell",
+                Ownership::RpmObserved,
+                true,
+            )],
+        );
+        let q = FakeQuery {
+            installed: vec![(
+                "copilot-shell".to_string(),
+                pkg_info("copilot-shell", "9.9.9", Some("1.al8"), "x86_64"),
+            )],
+            ..Default::default()
+        };
+        adopt_with_query("copilot-shell", None, &c, &q).expect("noop ok");
+
+        let store = load_store(&c);
+        let (_, relation, evr) = delegated_parts(&store, "copilot-shell");
+        assert!(matches!(relation, ManagementRelation::Adopted { .. }));
+        assert_eq!(
+            evr.as_deref(),
+            Some("1.0.0-1.al8"),
+            "a NoOp must not refresh the observation",
+        );
+        assert!(
+            store.operations.is_empty(),
+            "a NoOp must not append an operation record",
+        );
+    }
+
+    /// Re-adopting a tracked component with `--package` pointing at a
+    /// *different* RPM is a package-identity migration, not a refresh: it is
+    /// refused up front and steers the user through forget→adopt.
     #[test]
     fn adopt_refuses_repointing_observed_to_different_package() {
         let tmp = tempfile::tempdir().expect("tmpdir");
@@ -453,11 +996,9 @@ mod tests {
             vec![component_object(
                 "copilot-shell",
                 Ownership::RpmObserved,
-                ObjectStatus::Adopted,
+                true,
             )],
         );
-        // Existing observed package is `copilot-shell`; the user pins a
-        // different installed package via --package.
         let q = FakeQuery {
             installed: vec![(
                 "anolisa-other".to_string(),
@@ -478,22 +1019,17 @@ mod tests {
             err.reason(),
         );
         // The state must be untouched — no repoint, no EVR bump.
-        let meta = load_state(&c)
-            .find_object(ObjectKind::Component, "copilot-shell")
-            .expect("object")
-            .rpm_metadata
-            .clone()
-            .expect("rpm metadata");
+        let store = load_store(&c);
+        let (package, _, evr) = delegated_parts(&store, "copilot-shell");
         assert_eq!(
-            meta.package_name, "copilot-shell",
+            package, "copilot-shell",
             "package identity must be preserved when the repoint is refused",
         );
-        assert_eq!(meta.evr.as_deref(), Some("1.0.0-1.al8"), "EVR unchanged");
+        assert_eq!(evr.as_deref(), Some("1.0.0-1.al8"), "EVR unchanged");
     }
 
     /// The repoint refusal must also fire on `--dry-run`: the preview cannot
-    /// promise `Would adopt...` for a switch the real run would reject. Mirrors
-    /// the real-run test above with a dry-run context.
+    /// promise a plan the real run would reject.
     #[test]
     fn adopt_dry_run_refuses_repointing_observed_to_different_package() {
         let tmp = tempfile::tempdir().expect("tmpdir");
@@ -503,7 +1039,7 @@ mod tests {
             vec![component_object(
                 "copilot-shell",
                 Ownership::RpmObserved,
-                ObjectStatus::Adopted,
+                true,
             )],
         );
         let q = FakeQuery {
@@ -525,18 +1061,13 @@ mod tests {
             "dry-run refusal must match the real run: {}",
             err.reason(),
         );
-        // Dry-run never writes, so the record is untouched regardless.
-        let meta = load_state(&c)
-            .find_object(ObjectKind::Component, "copilot-shell")
-            .expect("object")
-            .rpm_metadata
-            .clone()
-            .expect("rpm metadata");
-        assert_eq!(meta.package_name, "copilot-shell");
+        let store = load_store(&c);
+        let (package, _, _) = delegated_parts(&store, "copilot-shell");
+        assert_eq!(package, "copilot-shell");
     }
 
-    /// A raw-managed component is not silently downgraded; adopt points at
-    /// uninstall.
+    /// A raw-managed component is not silently converted; adopt points at
+    /// uninstall (A4).
     #[test]
     fn adopt_refuses_raw_managed() {
         let tmp = tempfile::tempdir().expect("tmpdir");
@@ -546,7 +1077,7 @@ mod tests {
             vec![component_object(
                 "copilot-shell",
                 Ownership::RawManaged,
-                ObjectStatus::Installed,
+                false,
             )],
         );
         let err = adopt_with_query("copilot-shell", None, &c, &FakeQuery::default())
@@ -559,7 +1090,7 @@ mod tests {
         );
     }
 
-    /// An rpm-managed component is refused; adopt points at repair.
+    /// An rpm-managed component is refused; adopt points at repair (A5).
     #[test]
     fn adopt_refuses_rpm_managed() {
         let tmp = tempfile::tempdir().expect("tmpdir");
@@ -569,7 +1100,7 @@ mod tests {
             vec![component_object(
                 "copilot-shell",
                 Ownership::RpmManaged,
-                ObjectStatus::Installed,
+                false,
             )],
         );
         let err = adopt_with_query("copilot-shell", None, &c, &FakeQuery::default())
@@ -582,7 +1113,31 @@ mod tests {
         );
     }
 
-    /// Adoption is system-scope; user mode is refused.
+    /// A tracked component whose package left rpmdb points at forget.
+    #[test]
+    fn adopt_of_tracked_but_absent_points_at_forget() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(
+            &c,
+            vec![component_object(
+                "copilot-shell",
+                Ownership::RpmObserved,
+                false,
+            )],
+        );
+        // Query reports nothing installed: the observed package is gone.
+        let err = adopt_with_query("copilot-shell", None, &c, &FakeQuery::default())
+            .expect_err("tracked-but-absent must be refused");
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert!(
+            err.reason().contains("forget"),
+            "absence of a tracked package points at forget: {}",
+            err.reason()
+        );
+    }
+
+    /// Adoption is system-scope; user mode is refused by the planner.
     #[test]
     fn adopt_refuses_in_user_mode() {
         let tmp = tempfile::tempdir().expect("tmpdir");
@@ -597,7 +1152,8 @@ mod tests {
         );
     }
 
-    /// No installed RPM under the name: adopt does not install, points at install.
+    /// No installed RPM under the name: adopt does not install, points at
+    /// install (A2).
     #[test]
     fn adopt_refuses_absent_package() {
         let tmp = tempfile::tempdir().expect("tmpdir");
@@ -638,7 +1194,8 @@ mod tests {
         );
     }
 
-    /// A same-name multi-version rpmdb is refused rather than adopted blindly.
+    /// A same-name multi-version rpmdb is refused rather than adopted
+    /// blindly (A3).
     #[test]
     fn adopt_refuses_multi_version() {
         let tmp = tempfile::tempdir().expect("tmpdir");
@@ -679,6 +1236,7 @@ mod tests {
         );
     }
 
+    /// A pending operation journal blocks adopt before any rpmdb resolution.
     #[test]
     fn adopt_refuses_pending_rpm_install_claim() {
         let tmp = tempfile::tempdir().expect("tmpdir");
@@ -708,18 +1266,112 @@ mod tests {
             ..Default::default()
         };
         adopt_with_query("copilot-shell", Some("custom-pkg"), &c, &q).expect("adopt ok");
-        let obj = load_state(&c)
-            .find_object(ObjectKind::Component, "copilot-shell")
-            .expect("object")
-            .clone();
-        assert_eq!(
-            obj.rpm_metadata.map(|m| m.package_name).as_deref(),
-            Some("custom-pkg"),
-            "the pinned package is recorded",
+        let store = load_store(&c);
+        let (package, _, _) = delegated_parts(&store, "copilot-shell");
+        assert_eq!(package, "custom-pkg", "the pinned package is recorded");
+    }
+
+    // ── in-lock re-validation (concurrent-writer refusals) ──
+
+    fn empty_store() -> StateStore {
+        StateStore::load(std::path::Path::new("/nonexistent/installed.toml"), 0)
+            .expect("empty store")
+    }
+
+    fn store_with(binding: ProviderBinding) -> StateStore {
+        let mut store = empty_store();
+        store.upsert(anolisa_core::domain::Installation {
+            kind: ObjectKind::Component,
+            name: "copilot-shell".to_string(),
+            scope: InstallationScope::System,
+            binding,
+            status: anolisa_core::domain::LifecycleStatus::Installed,
+            installed_at: "2026-06-01T10:00:00Z".to_string(),
+            last_operation_id: None,
+            subscription_scope: Default::default(),
+            enabled_features: Vec::new(),
+            health: Vec::new(),
+        });
+        store
+    }
+
+    fn owned_binding() -> ProviderBinding {
+        ProviderBinding::Owned {
+            artifact: anolisa_core::domain::OwnedArtifact {
+                version: "1.0.0".to_string(),
+                distribution_source: None,
+                raw_package: None,
+                manifest_digest: None,
+                files: Vec::new(),
+                services: Vec::new(),
+                external_modified_files: Vec::new(),
+                provisioned_packages: Vec::new(),
+            },
+        }
+    }
+
+    fn delegated_binding(relation: ManagementRelation) -> ProviderBinding {
+        ProviderBinding::Delegated {
+            pm: NativePm::Rpm,
+            package: PackageIdentity::Resolved {
+                name: "copilot-shell".to_string(),
+            },
+            relation,
+            last_observed: None,
+        }
+    }
+
+    /// A fresh adopt planned against an empty store must refuse when a
+    /// concurrent raw install recorded the component first.
+    #[test]
+    fn adopt_authorized_refuses_concurrent_raw_install() {
+        let store = store_with(owned_binding());
+        let err = adopt_authorized(&store, "copilot-shell", &AdoptShape::Fresh, "adopt x")
+            .expect_err("a record that appeared under the lock must refuse the adopt");
+        assert!(
+            err.reason().contains("appeared") && err.reason().contains("nothing was changed"),
+            "got: {}",
+            err.reason()
         );
     }
 
-    /// `AdoptArgs` parses the positional component and the optional `--package`.
+    /// An observed→adopted upgrade must refuse when a concurrent managed
+    /// install replaced the observed record — adopt must never silently
+    /// downgrade managed provenance.
+    #[test]
+    fn adopt_authorized_refuses_concurrent_managed_install() {
+        let store = store_with(delegated_binding(ManagementRelation::Managed {
+            since: "2026-06-01T10:00:00Z".to_string(),
+        }));
+        let shape = AdoptShape::UpgradeObserved {
+            package: "copilot-shell".to_string(),
+        };
+        let err = adopt_authorized(&store, "copilot-shell", &shape, "adopt x")
+            .expect_err("a record that changed under the lock must refuse the adopt");
+        assert!(err.reason().contains("changed"), "got: {}", err.reason());
+    }
+
+    /// The happy paths pass re-validation: an empty store for a fresh adopt,
+    /// a matching observed record for an upgrade.
+    #[test]
+    fn adopt_authorized_allows_planned_shapes() {
+        adopt_authorized(
+            &empty_store(),
+            "copilot-shell",
+            &AdoptShape::Fresh,
+            "adopt x",
+        )
+        .expect("fresh adopt over an empty store");
+        let store = store_with(delegated_binding(ManagementRelation::Observed));
+        let shape = AdoptShape::UpgradeObserved {
+            package: "copilot-shell".to_string(),
+        };
+        adopt_authorized(&store, "copilot-shell", &shape, "adopt x")
+            .expect("upgrade over the matching observed record");
+    }
+
+    /// `AdoptArgs` parses the positional component and the optional
+    /// `--package`.
     #[test]
     fn adopt_parses_positional_and_package_flag() {
         use clap::Parser;

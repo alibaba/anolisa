@@ -3,15 +3,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anolisa_core::state::{
-    InstalledObject, InstalledState, ObjectKind, ObjectStatus, OperationRecord, Ownership,
-    RpmMetadata,
-};
+use anolisa_core::state::OperationRecord;
 use anolisa_core::transaction::{
-    Transaction, TransactionError, TransactionOutcomeStatus, TransactionStep, TransactionStepStatus,
+    Transaction, TransactionError, TransactionOutcomeStatus, TransactionStepStatus,
 };
 use anolisa_platform::fs_layout::FsLayout;
-use anolisa_platform::pkg_query::PackageInfo;
 
 use crate::response::CliError;
 
@@ -55,20 +51,6 @@ impl PendingRpmInstall {
             .map_err(|err| journal_error(command, "finish RPM install journal", err))
     }
 
-    pub(crate) fn finish_partial(
-        &mut self,
-        failed_step: usize,
-        reason: &str,
-        command: &str,
-    ) -> Result<(), CliError> {
-        self.transaction
-            .mark_failed(failed_step, reason)
-            .map_err(|err| journal_error(command, "record incomplete RPM install", err))?;
-        self.transaction
-            .finish(TransactionOutcomeStatus::Partial)
-            .map_err(|err| journal_error(command, "finish incomplete RPM install", err))
-    }
-
     pub(crate) fn finish_failed(
         &mut self,
         failed_step: usize,
@@ -82,27 +64,24 @@ impl PendingRpmInstall {
             .finish(TransactionOutcomeStatus::Failed)
             .map_err(|err| journal_error(command, "finish failed RPM install", err))
     }
-
-    pub(crate) fn journal_update_failure_detail(&self, err: &CliError) -> String {
-        format!(
-            "recovery journal operation '{}' at '{}' could not be updated: {}; it may remain live (InFlight or Partial)",
-            self.transaction.operation_id,
-            self.transaction.journal_path.display(),
-            err.reason()
-        )
-    }
 }
 
 pub(crate) fn journal_dir(layout: &FsLayout) -> PathBuf {
     layout.state_dir.join("journal")
 }
 
+// Test-only since the delegated install moved to the planner pipeline's
+// subject journals: tests use this to fabricate the legacy two-step journal
+// shape that repair's R1 recovery still consumes from disk.
+#[cfg(test)]
 pub(crate) fn begin_fresh_install(
     layout: &FsLayout,
     component: &str,
     package: &str,
     command: &str,
 ) -> Result<PendingRpmInstall, CliError> {
+    use anolisa_core::transaction::TransactionStep;
+
     let state_path = layout.state_dir.join("installed.toml");
     let mut transaction = Transaction::begin("install", state_path, &journal_dir(layout))
         .map_err(|err| journal_error(command, "create pending RPM install", err))?;
@@ -130,9 +109,13 @@ pub(crate) fn begin_fresh_install(
 }
 
 /// Find one live RPM claim matching a component or package alias.
+///
+/// `operations` is the operation history the claims are checked against; the
+/// v4 `InstalledState` and the v5 `StateStore` carry the same record shape,
+/// so callers on either model pass their history slice.
 pub(crate) fn find_pending_claim(
     layout: &FsLayout,
-    state: &InstalledState,
+    operations: &[OperationRecord],
     claims: &[&str],
     command: &str,
 ) -> Result<Option<PendingRpmInstall>, CliError> {
@@ -179,7 +162,7 @@ pub(crate) fn find_pending_claim(
                 path.display()
             ),
         })?;
-        let Some(pending) = parse_pending(transaction, &path, layout, state, command)? else {
+        let Some(pending) = parse_pending(transaction, &path, layout, operations, command)? else {
             continue;
         };
         if claims.is_empty()
@@ -221,11 +204,11 @@ pub(crate) fn find_pending_claim(
 
 pub(crate) fn reject_pending_claim(
     layout: &FsLayout,
-    state: &InstalledState,
+    operations: &[OperationRecord],
     claims: &[&str],
     command: &str,
 ) -> Result<(), CliError> {
-    if let Some(pending) = find_pending_claim(layout, state, claims, command)? {
+    if let Some(pending) = find_pending_claim(layout, operations, claims, command)? {
         return Err(CliError::Runtime {
             command: command.to_string(),
             reason: format!(
@@ -237,27 +220,19 @@ pub(crate) fn reject_pending_claim(
     Ok(())
 }
 
-pub(crate) fn state_claim_owner<'a>(
-    state: &'a InstalledState,
-    component: &str,
-    package: &str,
-) -> Option<&'a InstalledObject> {
-    state.objects.iter().find(|object| {
-        object.kind == ObjectKind::Component
-            && (object.name == component
-                || object.name == package
-                || object
-                    .rpm_metadata
-                    .as_ref()
-                    .is_some_and(|metadata| metadata.package_name.trim() == package))
-    })
-}
-
-fn parse_pending(
+/// Interpret one journal as a legacy pending RPM install claim.
+///
+/// `operations` is the operation history the claim is checked against — the
+/// v4 `InstalledState` and the v5 `StateStore` both carry the same record
+/// shape, so callers on either model pass their history slice. Returns
+/// `Ok(None)` for journals that are not this shape (settled, already
+/// committed, or written by another pipeline); a *live* journal that matches
+/// this shape but is malformed fails closed.
+pub(crate) fn parse_pending(
     transaction: Transaction,
     path: &Path,
     layout: &FsLayout,
-    state: &InstalledState,
+    operations: &[OperationRecord],
     command: &str,
 ) -> Result<Option<PendingRpmInstall>, CliError> {
     let install_steps = transaction
@@ -278,8 +253,7 @@ fn parse_pending(
     if install_steps.is_empty() && state_steps.is_empty() {
         return Ok(None);
     }
-    if state
-        .operations
+    if operations
         .iter()
         .any(|operation| operation.id == transaction.operation_id && operation.status == "ok")
     {
@@ -346,60 +320,6 @@ fn valid_component_name(component: &str) -> bool {
         && !component.contains('\\')
 }
 
-pub(crate) fn fresh_rpm_object(
-    component: &str,
-    info: &PackageInfo,
-    source_repo: Option<&str>,
-    operation_id: &str,
-    installed_at: &str,
-) -> InstalledObject {
-    let evr = info.version.to_string();
-    InstalledObject {
-        kind: ObjectKind::Component,
-        name: component.to_string(),
-        version: evr.clone(),
-        status: ObjectStatus::Installed,
-        manifest_digest: None,
-        distribution_source: None,
-        raw_package: None,
-        install_backend: Some("rpm".to_string()),
-        ownership: Some(Ownership::RpmManaged),
-        rpm_metadata: Some(RpmMetadata {
-            package_name: info.name.clone(),
-            evr: Some(evr),
-            arch: Some(info.arch.clone()),
-            source_repo: source_repo.map(str::to_string),
-        }),
-        installed_at: installed_at.to_string(),
-        last_operation_id: Some(operation_id.to_string()),
-        managed: true,
-        adopted: false,
-        subscription_scope: Default::default(),
-        enabled_features: Vec::new(),
-        component_refs: Vec::new(),
-        files: Vec::new(),
-        external_modified_files: Vec::new(),
-        services: Vec::new(),
-        health: Vec::new(),
-        provisioned_packages: Vec::new(),
-    }
-}
-
-pub(crate) fn install_operation(
-    operation_id: &str,
-    command: &str,
-    started_at: &str,
-    finished_at: String,
-) -> OperationRecord {
-    OperationRecord {
-        id: operation_id.to_string(),
-        command: command.to_string(),
-        status: "ok".to_string(),
-        started_at: started_at.to_string(),
-        finished_at: Some(finished_at),
-    }
-}
-
 pub(crate) fn journal_error(command: &str, action: &str, err: TransactionError) -> CliError {
     CliError::Runtime {
         command: command.to_string(),
@@ -425,7 +345,7 @@ mod tests {
             .expect("begin journal");
 
         for claim in ["cosh", "copilot-shell"] {
-            let found = find_pending_claim(&layout, &InstalledState::default(), &[claim], "test")
+            let found = find_pending_claim(&layout, &[], &[claim], "test")
                 .expect("find claim")
                 .expect("pending claim");
             assert_eq!(
@@ -443,7 +363,7 @@ mod tests {
         let second = begin_fresh_install(&layout, "cosh", "copilot-shell", "install cosh")
             .expect("second journal");
 
-        let err = find_pending_claim(&layout, &InstalledState::default(), &["cosh"], "test")
+        let err = find_pending_claim(&layout, &[], &["cosh"], "test")
             .expect_err("ambiguous claim must fail");
         assert!(err.reason().contains("multiple pending RPM installs"));
         assert!(err.reason().contains(&first.transaction.operation_id));
@@ -462,17 +382,17 @@ mod tests {
             toml::to_string_pretty(&pending.transaction).expect("serialize journal"),
         )
         .expect("rewrite journal");
-        let mut state = InstalledState::default();
-        state.operations.push(OperationRecord {
+        let operations = vec![OperationRecord {
             id: pending.transaction.operation_id,
             command: "install cosh".to_string(),
             status: "ok".to_string(),
             started_at: "2026-07-14T00:00:00Z".to_string(),
             finished_at: Some("2026-07-14T00:00:01Z".to_string()),
-        });
+            parent_operation_id: None,
+        }];
 
         assert!(
-            find_pending_claim(&layout, &state, &["cosh"], "test")
+            find_pending_claim(&layout, &operations, &["cosh"], "test")
                 .expect("scan stale journal")
                 .is_none()
         );
@@ -490,7 +410,7 @@ mod tests {
         )
         .expect("rewrite journal");
 
-        let err = find_pending_claim(&layout, &InstalledState::default(), &["cosh"], "test")
+        let err = find_pending_claim(&layout, &[], &["cosh"], "test")
             .expect_err("live malformed journal must fail closed");
         assert!(err.reason().contains(&pending.transaction.operation_id));
         assert!(err.reason().contains("installed.toml"));

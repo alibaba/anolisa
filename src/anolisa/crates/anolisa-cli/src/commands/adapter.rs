@@ -42,6 +42,7 @@ use anolisa_core::adapter::manager::{
     AdapterManager, AdapterSourceStatus, DisableOutcome, EnableOptions, EnableOutcome, ScanEntry,
     ScanReport, StatusReport,
 };
+use anolisa_core::state_store::StateStore;
 
 use crate::commands::common;
 use crate::context::CliContext;
@@ -309,8 +310,8 @@ fn handle_enable(
     allow_unsafe_plugin_install: bool,
 ) -> Result<(), CliError> {
     const COMMAND: &str = "adapter enable";
-    let installed = common::load_installed_state(ctx, COMMAND).unwrap_or_default();
-    let component = common::lookup_component_name(component, &installed, ctx, COMMAND);
+    let installed = common::load_state_store(ctx, COMMAND).unwrap_or_else(|_| StateStore::empty());
+    let component = common::lookup_component_name_in_store(component, &installed, ctx, COMMAND);
     let manager = build_manager(ctx);
     let outcome = manager
         .enable_with_options(
@@ -377,8 +378,8 @@ fn handle_disable(
     framework: Option<&str>,
 ) -> Result<(), CliError> {
     const COMMAND: &str = "adapter disable";
-    let installed = common::load_installed_state(ctx, COMMAND).unwrap_or_default();
-    let component = common::lookup_component_name(component, &installed, ctx, COMMAND);
+    let installed = common::load_state_store(ctx, COMMAND).unwrap_or_else(|_| StateStore::empty());
+    let component = common::lookup_component_name_in_store(component, &installed, ctx, COMMAND);
     let manager = build_manager(ctx);
     let outcome: DisableOutcome = manager
         .disable(&component, framework, ctx.dry_run)
@@ -461,8 +462,9 @@ fn handle_status(ctx: &CliContext, component: Option<&str>) -> Result<(), CliErr
     const COMMAND: &str = "adapter status";
     let component = match component {
         Some(name) => {
-            let installed = common::load_installed_state(ctx, COMMAND).unwrap_or_default();
-            Some(common::lookup_component_name(
+            let installed =
+                common::load_state_store(ctx, COMMAND).unwrap_or_else(|_| StateStore::empty());
+            Some(common::lookup_component_name_in_store(
                 name, &installed, ctx, COMMAND,
             ))
         }

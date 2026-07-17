@@ -1,25 +1,18 @@
 //! `anolisa install` — install a component through a configured backend.
 //!
-//! `install` takes a component noun and resolves it through the configured
-//! backend. The resolution chain — repo.toml loading, backend selection
-//! (`--backend` > `default_backend`), base_url variable substitution, and
-//! package-name mapping (`--package` > `package_map` > scope > component
-//! name) — feeds the **raw** backend executor: fetch the distribution index
-//! from the raw repository root, resolve an artifact, then execute by
-//! downloading it with mandatory sha256 verification, loading the install
-//! contract, installing the declared files, and recording state plus a
-//! central-log audit entry.
+//! The handler is a thin shell over the planner pipeline: pick the provider
+//! family (`--backend` > recorded provenance > `default_backend`), resolve
+//! the component to a provider target, assemble host facts, and execute the
+//! planner's step sequence (decision table I1–I11).
 //!
-//! The `rpm` backend supports two actions. **Adopt** (issue #958): in system
-//! mode, when a component is already present as a system RPM, `install`
-//! records it as `rpm-observed` state without downloading or running
-//! `dnf install`. **Delegated install** (issue #959): in system mode, when the
-//! component is *not* yet present, `install` delegates the file transaction to
-//! `dnf install` and records it as `rpm-managed` state (ANOLISA owns the
-//! removal). The backend decision is two-layered — pick a backend name
-//! (`--backend` > existing state > system RPM presence > `default_backend`),
-//! then pick an action by `(backend, rpmdb hit, install mode)`. `npm` remains
-//! NOT_IMPLEMENTED.
+//! The **raw** family resolves an artifact from the distribution index and
+//! places it through the owned executor: sha256-verified download, install
+//! contract, files, capabilities, hooks, services, and an owned record. The
+//! **rpm** family delegates one `dnf install` transaction and records the
+//! component as delegated-managed (ANOLISA owns the removal). A component
+//! already present as an unmanaged system RPM is never adopted implicitly —
+//! install refuses and points at `anolisa adopt`. Other configured backends
+//! (`npm`, …) remain NOT_IMPLEMENTED.
 //!
 //! Deliberately out of scope for this milestone: execution-policy gating and
 //! health checks.
@@ -41,13 +34,17 @@ pub(crate) use batch::*;
 mod raw;
 pub(crate) use raw::*;
 
-mod render;
-pub(crate) use render::*;
 mod io_util;
+mod render;
 pub(crate) use io_util::*;
 
+mod owned_ops;
+pub(crate) use owned_ops::*;
+
+// `pub(crate)` so sibling commands exercising the raw pipeline (reinstall's
+// owned replay) can reuse the local-repo fixtures.
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 const COMMAND: &str = "install";
 const ANOLISA_RPM_REPO_ID: &str = "anolisa-configured";
@@ -92,7 +89,6 @@ mod types;
 pub(crate) use types::*;
 
 mod provision;
-pub(crate) use provision::*;
 
 pub fn handle(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
     if args.fail_fast && !args.all {

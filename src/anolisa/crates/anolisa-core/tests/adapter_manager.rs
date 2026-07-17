@@ -24,7 +24,7 @@ use anolisa_core::adapter::claim::{
 };
 use anolisa_core::adapter::driver::{AdapterSummary, ConditionStatus};
 use anolisa_core::adapter::manager::{AdapterManager, EnableOptions, EnableOutcome};
-use anolisa_core::state::InstalledState;
+use anolisa_core::state_store::StateStore;
 use anolisa_platform::fs_layout::FsLayout;
 
 /// Serializes the process-global env mutation across tests.
@@ -58,8 +58,8 @@ impl World {
         guard.apply(&self.fake_bin, &self.openclaw_home, fail);
     }
 
-    fn load_state(&self) -> InstalledState {
-        InstalledState::load(&self.layout.state_dir.join("installed.toml")).expect("load state")
+    fn load_state(&self) -> StateStore {
+        load_state_at(&self.layout.state_dir.join("installed.toml"))
     }
 
     /// Path the fake CLI appends each invocation's argv to (test-only).
@@ -413,6 +413,10 @@ exit 0
 
 /// Seed `installed.toml` with the component recorded as installed so
 /// `enable`'s precondition passes.
+fn load_state_at(path: &Path) -> StateStore {
+    StateStore::load(path, anolisa_platform::privilege::effective_uid()).expect("load state")
+}
+
 fn seed_state(layout: &FsLayout, prefix: &Path) {
     let state_path = layout.state_dir.join("installed.toml");
     std::fs::create_dir_all(state_path.parent().unwrap()).expect("state dir");
@@ -428,6 +432,8 @@ kind = "component"
 name = "{COMPONENT}"
 version = "0.1.0"
 status = "installed"
+install_backend = "raw"
+ownership = "raw_managed"
 installed_at = "2026-06-15T00:00:00Z"
 "#,
         prefix = prefix.display(),
@@ -565,16 +571,14 @@ fn user_layout_enable_accepts_system_installed_component() {
         .enable(COMPONENT, Some(FRAMEWORK), false)
         .expect("enable system component from user layout");
 
-    let user_state =
-        InstalledState::load(&user_layout.state_dir.join("installed.toml")).expect("user state");
+    let user_state = load_state_at(&user_layout.state_dir.join("installed.toml"));
     assert!(
         user_state
             .find_adapter_claim(COMPONENT, FRAMEWORK)
             .is_some(),
         "receipt is written to the invoking user's state"
     );
-    let system_state = InstalledState::load(&system_layout.state_dir.join("installed.toml"))
-        .expect("system state");
+    let system_state = load_state_at(&system_layout.state_dir.join("installed.toml"));
     assert!(
         system_state
             .find_adapter_claim(COMPONENT, FRAMEWORK)

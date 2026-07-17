@@ -8,8 +8,11 @@
 //!
 //! This handler reports state-on-disk plus live read-only probes. Every
 //! persisted field in [`ComponentRecord`] is projected straight from
-//! [`InstalledObject`]; synthesized data is limited to read-only rpmdb,
-//! integrity, adapter, and manifest health observations.
+//! [`Installation`]; synthesized data is limited to read-only rpmdb,
+//! integrity, adapter, and manifest health observations. Quarantined
+//! legacy records are surfaced as `needs-attention` rows with their exits
+//! (`repair`/`forget`) — `status` is the only command that shows them
+//! unprompted. Nothing here ever writes state.
 
 use chrono::{SecondsFormat, Utc};
 use clap::Parser;
@@ -23,13 +26,16 @@ use anolisa_core::adapter::claim::ClaimStatus;
 #[cfg(test)]
 use anolisa_core::adapter::manager::AdapterSourceStatus;
 use anolisa_core::adapter::manager::ScanEntry;
+use anolisa_core::domain::{Installation, ManagementRelation, ProviderBinding};
 use anolisa_core::path_safety::{PathBoundaryError, validate_owned_path};
-use anolisa_core::{
-    Catalog, HealthEntry, HealthSpec, InstalledObject, IntegrityStatus, RpmMetadata, ServiceState,
-    check_owned_file, service_for_install_mode as service_factory,
-};
+use anolisa_core::state::ObjectKind;
+use anolisa_core::state_migration::QuarantineReason;
 #[cfg(test)]
-use anolisa_core::{InstalledState, ObjectKind};
+use anolisa_core::state_store::StateStore;
+use anolisa_core::{
+    Catalog, HealthEntry, HealthSpec, IntegrityStatus, ServiceState, check_owned_file,
+    service_for_install_mode as service_factory,
+};
 
 /// Wall-clock ceiling for a single manifest command-kind probe. `status`
 /// is read-only; a hostile or buggy probe must not be able to hang the
@@ -148,9 +154,32 @@ pub(crate) struct ComponentRecord {
     pub(crate) provisioned_packages: Vec<String>,
 }
 
+/// JSON-shaped record for a quarantined legacy record: migration preserved
+/// it verbatim because provenance could not be established, so no intent
+/// except `repair`/`forget` will touch it. Surfaced by `status` as
+/// `needs-attention` — the record is invisible to every other command, and
+/// this is where the user finds out it exists.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct QuarantinedRecord {
+    pub(crate) name: String,
+    pub(crate) kind: String,
+    pub(crate) scope: String,
+    /// Always `needs-attention`.
+    pub(crate) status: &'static str,
+    pub(crate) version: String,
+    /// Why migration refused to classify the record.
+    pub(crate) reason: String,
+    /// Suggested exit: `repair` rebuilds from system reality, `forget`
+    /// drops the record.
+    pub(crate) hint: String,
+}
+
 #[derive(Serialize)]
 struct StatusPayload {
     components: Vec<ComponentRecord>,
+    /// Quarantined legacy records needing user action; absent when none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    quarantined: Vec<QuarantinedRecord>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
 }
@@ -262,11 +291,14 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
         }
     }
 
+    let quarantined = select_quarantined_from_view(&view, selected_component.as_deref());
+
     if ctx.json {
         return render_json(
             COMMAND,
             StatusPayload {
                 components: records,
+                quarantined,
                 warnings: view.warnings,
             },
         );
@@ -275,8 +307,60 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
     if !ctx.quiet {
         render_warnings(&view.warnings);
         render_human(&records, ctx.verbose, ctx.no_color);
+        render_quarantined(&quarantined, ctx.no_color);
     }
     Ok(())
+}
+
+/// Project the quarantined records of every visible root, optionally
+/// filtered to one name. Read-only, like everything else in `status`:
+/// the records stay on disk untouched until `repair` or `forget`.
+fn select_quarantined_from_view(
+    view: &StateView,
+    selected: Option<&str>,
+) -> Vec<QuarantinedRecord> {
+    view.visible_roots
+        .iter()
+        .flat_map(|root| {
+            root.state
+                .quarantined
+                .iter()
+                .filter(|q| selected.is_none_or(|name| q.record.name == name))
+                .map(|q| QuarantinedRecord {
+                    name: q.record.name.clone(),
+                    kind: kind_label(q.record.kind).to_string(),
+                    scope: root.scope.label().to_string(),
+                    status: "needs-attention",
+                    version: q.record.version.clone(),
+                    reason: quarantine_reason_text(&q.reason),
+                    hint: format!(
+                        "run `anolisa repair {0}` to rebuild the record from system reality, or `anolisa forget {0}` to drop it",
+                        q.record.name
+                    ),
+                })
+        })
+        .collect()
+}
+
+fn kind_label(kind: ObjectKind) -> &'static str {
+    match kind {
+        ObjectKind::Component => "component",
+        ObjectKind::Adapter => "adapter",
+        ObjectKind::Osbase => "osbase",
+        ObjectKind::Capability => "capability",
+    }
+}
+
+fn quarantine_reason_text(reason: &QuarantineReason) -> String {
+    match reason {
+        QuarantineReason::UnknownBackend { backend } => format!(
+            "its record names install backend '{backend}', which this version cannot interpret"
+        ),
+        QuarantineReason::NoEvidence => {
+            "its record carries no provenance evidence (no ownership, backend, source, or file list)"
+                .to_string()
+        }
+    }
 }
 
 pub(crate) fn migrate_view_states(view: &mut StateView) {
@@ -296,7 +380,7 @@ fn lookup_component_name_from_view(input: &str, view: &StateView, ctx: &CliConte
     {
         return input.to_string();
     }
-    common::lookup_component_name(input, &view.writable.state, ctx, COMMAND)
+    common::lookup_component_name_in_store(input, &view.writable.state, ctx, COMMAND)
 }
 
 const fn install_mode_for_scope(scope: StateScope) -> InstallMode {
@@ -306,21 +390,21 @@ const fn install_mode_for_scope(scope: StateScope) -> InstallMode {
     }
 }
 
-/// Pure selector: project [`InstalledState`] down to component records,
+/// Pure selector: project the [`StateStore`] down to component records,
 /// optionally filtered to a single name. Extracted so tests can exercise
 /// the filtering/synthetic-not-installed logic without mocking
 /// `CliContext` or touching the filesystem.
 #[cfg(test)]
 pub(crate) fn select_components(
-    state: &InstalledState,
+    state: &StateStore,
     layout: &FsLayout,
     catalog: Option<&Catalog>,
     install_mode: &str,
     name: Option<&str>,
     adapter_scan: Option<&[ScanEntry]>,
 ) -> Vec<ComponentRecord> {
-    let installed: Vec<&InstalledObject> = state
-        .objects
+    let installed: Vec<&Installation> = state
+        .installations
         .iter()
         .filter(|o| o.kind == ObjectKind::Component)
         .collect();
@@ -388,12 +472,7 @@ pub(crate) fn select_components_from_view(
             component.adapters = adapter_summaries_for(&component.name, adapter_scan);
             apply_record_scope(&mut component, &record);
             if let Some(query) = rpm_query {
-                apply_rpm_drift_to_record(
-                    &mut component,
-                    record.object.rpm_metadata.as_ref(),
-                    query,
-                    &checked_at,
-                );
+                apply_rpm_drift_to_record(&mut component, record.object, query, &checked_at);
             }
             component
         })
@@ -530,16 +609,19 @@ pub(crate) enum RpmDrift {
 /// is a genuine divergence from the single recorded version, so it classifies
 /// as drift. `query` is injected so tests drive this without a live rpmdb.
 // pub(crate): driven by the cross-command MVP lifecycle test (#963).
-pub(crate) fn probe_rpm_drift(meta: &RpmMetadata, query: &dyn PackageQuery) -> Option<RpmDrift> {
-    match query.query_installed(&meta.package_name) {
+pub(crate) fn probe_rpm_drift(
+    package: &str,
+    recorded_evr: Option<&str>,
+    query: &dyn PackageQuery,
+) -> Option<RpmDrift> {
+    match query.query_installed(package) {
         Ok(Some(info)) => {
             let live = info.version.to_string();
-            match meta.evr.as_deref() {
+            match recorded_evr {
                 // Recorded EVR diverges from rpmdb: a manual dnf update/downgrade.
                 Some(recorded) if recorded != live => Some(RpmDrift::Drifted {
                     reason: format!(
-                        "rpmdb reports {live} for package {} but ANOLISA state records {recorded}",
-                        meta.package_name
+                        "rpmdb reports {live} for package {package} but ANOLISA state records {recorded}"
                     ),
                 }),
                 // EVR matches, or none recorded to compare against: no drift.
@@ -553,10 +635,7 @@ pub(crate) fn probe_rpm_drift(meta: &RpmMetadata, query: &dyn PackageQuery) -> O
         // The recorded version can no longer be trusted as-is, so surface it as
         // drift carrying the backend's own detail rather than guessing the cause.
         Err(PackageQueryError::UnexpectedOutput { detail, .. }) => Some(RpmDrift::Drifted {
-            reason: format!(
-                "rpmdb returned unexpected output for package {}: {detail}",
-                meta.package_name
-            ),
+            reason: format!("rpmdb returned unexpected output for package {package}: {detail}"),
         }),
         // rpm/dnf absent, or a spawn/permission/query failure: cannot prove
         // drift on an unrunnable query, so keep the recorded status untouched.
@@ -564,29 +643,41 @@ pub(crate) fn probe_rpm_drift(meta: &RpmMetadata, query: &dyn PackageQuery) -> O
     }
 }
 
+/// The (package, recorded EVR) pair the drift probe compares against rpmdb,
+/// when the installation is delegated with a resolved package.
+pub(crate) fn drift_probe_identity(installation: &Installation) -> Option<(&str, Option<&str>)> {
+    match &installation.binding {
+        ProviderBinding::Delegated {
+            package,
+            last_observed,
+            ..
+        } => package
+            .resolved_name()
+            .map(|name| (name, last_observed.as_ref().and_then(|o| o.evr.as_deref()))),
+        ProviderBinding::Owned { .. } => None,
+    }
+}
+
 fn apply_rpm_drift_to_record(
     record: &mut ComponentRecord,
-    rpm_meta: Option<&RpmMetadata>,
+    installation: &Installation,
     query: &dyn PackageQuery,
     checked_at: &str,
 ) {
     // Only adjudicate drift on a clean live projection; never demote a
     // failed/degraded/disabled record (see fn doc). This also bounds the
     // rpm -q probes below to the records that can actually drift.
-    if !matches!(record.status.as_str(), "installed" | "adopted") {
+    if !matches!(record.status.as_str(), "installed" | "adopted" | "observed") {
         return;
     }
-    let Some(meta) = rpm_meta else {
+    let Some((package, recorded_evr)) = drift_probe_identity(installation) else {
         return;
     };
-    let (status, reason) = match probe_rpm_drift(meta, query) {
+    let (status, reason) = match probe_rpm_drift(package, recorded_evr, query) {
         Some(RpmDrift::Drifted { reason }) => ("drifted", reason),
         Some(RpmDrift::Missing) => (
             "missing",
-            format!(
-                "package {} recorded in ANOLISA state is no longer present in rpmdb",
-                meta.package_name
-            ),
+            format!("package {package} recorded in ANOLISA state is no longer present in rpmdb"),
         ),
         None => return,
     };
@@ -627,16 +718,16 @@ fn record_from_object(
     layout: &FsLayout,
     catalog: Option<&Catalog>,
     install_mode: &str,
-    obj: &InstalledObject,
+    installation: &Installation,
 ) -> ComponentRecord {
     // Start from the state's last-known health entries, then layer the
     // live integrity probe on top. The integrity probe is authoritative
     // for owned-file existence and sha256; it can escalate the wire
     // status from `installed` to `degraded` or `failed` without us
     // touching the on-disk state.
-    let base_status = common::object_status_str(obj.status).to_string();
-    let mut health = obj.health.clone();
-    let (integrity_entries, integrity_status) = integrity_probe(layout, obj, &base_status);
+    let base_status = common::installation_status_str(installation).to_string();
+    let mut health = installation.health.clone();
+    let (integrity_entries, integrity_status) = integrity_probe(layout, installation, &base_status);
     health.extend(integrity_entries);
 
     // Layer manifest-driven health checks on top. Each entry can escalate
@@ -645,51 +736,80 @@ fn record_from_object(
     // catalog is loaded — fresh checkouts without a packaged catalog still
     // get integrity-only behavior.
     //
-    // RpmManaged and RpmObserved objects both use the file layout selected by
-    // RPM macros rather than ANOLISA's raw-backend layout. Manifest health
-    // probes assume the raw layout, so applying them to either RPM ownership
-    // can spuriously escalate a valid package. RPM status remains adjudicated
-    // by the rpmdb drift probe after this projection.
+    // Adopted/observed delegated rows are exempt: ANOLISA owns none of their
+    // files and does not lay out the raw artifact tree, so the manifest
+    // health checks (which assume that layout) would spuriously escalate an
+    // adopted row to degraded/failed (§8, review P2).
     let manifest_status = match catalog {
-        Some(cat) if !obj.effective_ownership().is_rpm() => {
+        Some(cat) if !is_unmanaged_delegated(installation) => {
             let (manifest_entries, escalated) =
-                manifest_health_probe(layout, cat, install_mode, obj, &integrity_status);
+                manifest_health_probe(layout, cat, install_mode, installation, &integrity_status);
             health.extend(manifest_entries);
             escalated
         }
         _ => integrity_status,
     };
 
-    // Surface RPM provenance for adopted rpm-observed rows so human/JSON
-    // output shows the package/EVR/repo behind the `adopted` status.
-    let (rpm_package, rpm_evr, rpm_source_repo) = match &obj.rpm_metadata {
-        Some(meta) => (
-            Some(meta.package_name.clone()),
-            meta.evr.clone(),
-            meta.source_repo.clone(),
+    // Surface RPM provenance for delegated rows so human/JSON output shows
+    // the package/EVR/repo behind the record.
+    let (rpm_package, rpm_evr, rpm_source_repo) = match &installation.binding {
+        ProviderBinding::Delegated {
+            package,
+            last_observed,
+            ..
+        } => (
+            package.resolved_name().map(str::to_string),
+            last_observed.as_ref().and_then(|o| o.evr.clone()),
+            last_observed.as_ref().and_then(|o| o.source_repo.clone()),
         ),
-        None => (None, None, None),
+        ProviderBinding::Owned { .. } => (None, None, None),
     };
 
     ComponentRecord {
-        name: obj.name.clone(),
+        name: installation.name.clone(),
         status: manifest_status,
         scope: "none".to_string(),
         active: true,
         mutable_by_current_invocation: false,
         shadowed_by: None,
         state_path: None,
-        version: Some(obj.version.clone()),
-        installed_at: Some(obj.installed_at.clone()),
-        last_operation_id: obj.last_operation_id.clone(),
-        enabled_features: obj.enabled_features.clone(),
+        version: record_version(installation),
+        installed_at: Some(installation.installed_at.clone()),
+        last_operation_id: installation.last_operation_id.clone(),
+        enabled_features: installation.enabled_features.clone(),
         health,
         adapters: Vec::new(),
         rpm_package,
         rpm_evr,
         rpm_source_repo,
-        provisioned_packages: obj.provisioned_packages.clone(),
+        provisioned_packages: match &installation.binding {
+            ProviderBinding::Owned { artifact } => artifact.provisioned_packages.clone(),
+            ProviderBinding::Delegated { .. } => Vec::new(),
+        },
     }
+}
+
+/// Displayed version: authoritative for owned artifacts; the last observed
+/// EVR (full EVR preferred, matching the legacy wire) for delegated rows.
+fn record_version(installation: &Installation) -> Option<String> {
+    match &installation.binding {
+        ProviderBinding::Owned { artifact } => Some(artifact.version.clone()),
+        ProviderBinding::Delegated { last_observed, .. } => last_observed
+            .as_ref()
+            .map(|o| o.evr.clone().unwrap_or_else(|| o.version.clone())),
+    }
+}
+
+/// Delegated without management consent (adopted or merely observed):
+/// ANOLISA does not own the file layout these manifests describe.
+fn is_unmanaged_delegated(installation: &Installation) -> bool {
+    matches!(
+        &installation.binding,
+        ProviderBinding::Delegated {
+            relation: ManagementRelation::Adopted { .. } | ManagementRelation::Observed,
+            ..
+        }
+    )
 }
 
 /// Probe the integrity of every file owned by `component` and return
@@ -707,7 +827,7 @@ fn record_from_object(
 /// to `degraded` would be a regression in the meaning of `disabled`.
 fn integrity_probe(
     layout: &FsLayout,
-    component: &InstalledObject,
+    component: &Installation,
     base_status: &str,
 ) -> (Vec<HealthEntry>, String) {
     let mut entries: Vec<HealthEntry> = Vec::new();
@@ -715,7 +835,13 @@ fn integrity_probe(
     let mut had_unverified = false;
     let checked_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
 
-    for file in &component.files {
+    let files: &[anolisa_core::state::OwnedFile] = match &component.binding {
+        ProviderBinding::Owned { artifact } => &artifact.files,
+        // Delegated rows own no files; the native package manager verifies
+        // its own payload.
+        ProviderBinding::Delegated { .. } => &[],
+    };
+    for file in files {
         let result = check_owned_file(layout, file);
         if result == IntegrityStatus::Skipped {
             continue;
@@ -737,8 +863,8 @@ fn integrity_probe(
     // as-is so a disabled component does not get demoted by a stale
     // sha256 mismatch on disk.
     let escalated = match base_status {
-        "installed" | "adopted" if had_failure => "failed".to_string(),
-        "installed" | "adopted" if had_unverified => "degraded".to_string(),
+        "installed" | "adopted" | "observed" if had_failure => "failed".to_string(),
+        "installed" | "adopted" | "observed" if had_unverified => "degraded".to_string(),
         _ => base_status.to_string(),
     };
     (entries, escalated)
@@ -762,7 +888,7 @@ fn manifest_health_probe(
     layout: &FsLayout,
     catalog: &Catalog,
     install_mode: &str,
-    component: &InstalledObject,
+    component: &Installation,
     base_status: &str,
 ) -> (Vec<HealthEntry>, String) {
     let mut entries: Vec<HealthEntry> = Vec::new();
@@ -827,8 +953,8 @@ fn manifest_health_probe(
     }
 
     let escalated = match base_status {
-        "installed" | "adopted" if had_failure => "failed".to_string(),
-        "installed" | "adopted" if had_degrade => "degraded".to_string(),
+        "installed" | "adopted" | "observed" if had_failure => "failed".to_string(),
+        "installed" | "adopted" | "observed" if had_degrade => "degraded".to_string(),
         // Already escalated by the integrity probe — preserve "failed" /
         // "degraded" rather than letting a manifest "ok" downgrade it.
         _ => base_status.to_string(),
@@ -1303,6 +1429,30 @@ fn render_warnings(warnings: &[String]) {
     }
 }
 
+/// Render quarantined records after the component table. Each row names
+/// the record, why it was refused, and the two exits — without this
+/// section a quarantined record is invisible: every other command only
+/// mentions it when it happens to block them.
+fn render_quarantined(records: &[QuarantinedRecord], no_color: bool) {
+    if records.is_empty() {
+        return;
+    }
+    let color = Palette::new(no_color);
+    println!();
+    println!("{}", color.header("NEEDS ATTENTION"));
+    for record in records {
+        println!(
+            "{} {} ({}, {}) — quarantined: {}",
+            color.warn("!"),
+            record.name,
+            record.kind,
+            record.scope,
+            record.reason,
+        );
+        println!("    {} {}", color.label("hint:"), record.hint);
+    }
+}
+
 fn adapter_state_label(adapter: &AdapterSummaryRecord) -> &'static str {
     match (
         adapter.enabled,
@@ -1359,7 +1509,7 @@ mod tests {
             distribution_source: Some("builtin".to_string()),
             raw_package: None,
             install_backend: None,
-            ownership: None,
+            ownership: Some(Ownership::RawManaged),
             rpm_metadata: None,
             installed_at: "2026-06-01T10:00:00Z".to_string(),
             last_operation_id: Some("op-20260601-001".to_string()),
@@ -1376,6 +1526,22 @@ mod tests {
         }
     }
 
+    /// Migrate a v4 fixture state into a v5 store; fixtures must migrate
+    /// cleanly so tests exercise exactly the objects they seeded.
+    fn store_with(state: &InstalledState) -> StateStore {
+        let migration = anolisa_core::state_migration::migrate_state(
+            &state.objects,
+            anolisa_core::domain::InstallationScope::System,
+        );
+        assert!(
+            migration.quarantined.is_empty(),
+            "fixtures must migrate cleanly"
+        );
+        let mut store = StateStore::empty();
+        store.installations = migration.active;
+        store
+    }
+
     fn scoped_status_view(user_state: InstalledState, system_state: InstalledState) -> StateView {
         let user_root = ScopedStateRoot {
             scope: StateScope::User,
@@ -1389,14 +1555,14 @@ mod tests {
             ),
             state_path: PathBuf::from("/tmp/anolisa-user-state/installed.toml"),
             writable: true,
-            state: user_state,
+            state: store_with(&user_state),
         };
         let system_root = ScopedStateRoot {
             scope: StateScope::System,
             layout: FsLayout::system(Some(PathBuf::from("/tmp/anolisa-system"))),
             state_path: PathBuf::from("/tmp/anolisa-system-state/installed.toml"),
             writable: false,
-            state: system_state,
+            state: store_with(&system_state),
         };
         StateView {
             writable: user_root.clone(),
@@ -1434,6 +1600,75 @@ mod tests {
             records[0].state_path.as_deref(),
             Some("/tmp/anolisa-system-state/installed.toml")
         );
+    }
+
+    #[test]
+    fn quarantined_records_surface_as_needs_attention() {
+        use anolisa_core::state_migration::QuarantinedObject;
+
+        let mut view = scoped_status_view(InstalledState::default(), InstalledState::default());
+        view.visible_roots[0]
+            .state
+            .quarantined
+            .push(QuarantinedObject {
+                record: component_object("legacy-flatpak", "0.9.0", ObjectStatus::Installed),
+                reason: QuarantineReason::UnknownBackend {
+                    backend: "flatpak".to_string(),
+                },
+            });
+        view.visible_roots[1]
+            .state
+            .quarantined
+            .push(QuarantinedObject {
+                record: component_object("legacy-bare", "0.1.0", ObjectStatus::Installed),
+                reason: QuarantineReason::NoEvidence,
+            });
+
+        let all = select_quarantined_from_view(&view, None);
+        assert_eq!(all.len(), 2);
+
+        let flatpak = &all[0];
+        assert_eq!(flatpak.name, "legacy-flatpak");
+        assert_eq!(flatpak.kind, "component");
+        assert_eq!(flatpak.scope, "user");
+        assert_eq!(flatpak.status, "needs-attention");
+        assert_eq!(flatpak.version, "0.9.0");
+        assert!(flatpak.reason.contains("'flatpak'"), "{}", flatpak.reason);
+        assert!(
+            flatpak.hint.contains("anolisa repair legacy-flatpak")
+                && flatpak.hint.contains("anolisa forget legacy-flatpak"),
+            "{}",
+            flatpak.hint
+        );
+
+        let bare = &all[1];
+        assert_eq!(bare.scope, "system");
+        assert!(
+            bare.reason.contains("no provenance evidence"),
+            "{}",
+            bare.reason
+        );
+
+        // A named query surfaces only the matching quarantined record —
+        // this is how `status <name>` explains why other intents refuse it.
+        let named = select_quarantined_from_view(&view, Some("legacy-bare"));
+        assert_eq!(named.len(), 1);
+        assert_eq!(named[0].name, "legacy-bare");
+        assert!(select_quarantined_from_view(&view, Some("unrelated")).is_empty());
+    }
+
+    /// The `quarantined` key is new wire surface: it must be absent (not
+    /// `[]`) when nothing is quarantined, so existing consumers see an
+    /// unchanged envelope on healthy state.
+    #[test]
+    fn status_payload_omits_quarantined_when_empty() {
+        let payload = StatusPayload {
+            components: Vec::new(),
+            quarantined: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let json = serde_json::to_value(&payload).expect("serialize");
+        assert!(json.get("quarantined").is_none(), "{json}");
     }
 
     #[test]
@@ -1492,7 +1727,7 @@ mod tests {
             layout: user_layout,
             state_path: user_state_path.clone(),
             writable: true,
-            state: InstalledState::default(),
+            state: StateStore::empty(),
         };
         let mut system_state = InstalledState::default();
         system_state.upsert_object(component_object(
@@ -1505,7 +1740,7 @@ mod tests {
             layout: system_layout,
             state_path: system_state_path.clone(),
             writable: false,
-            state: system_state,
+            state: store_with(&system_state),
         };
         let view = StateView {
             writable: user_root.clone(),
@@ -1583,7 +1818,7 @@ mod tests {
             layout: FsLayout::system(Some(PathBuf::from("/tmp/anolisa-system"))),
             state_path: PathBuf::from("/tmp/anolisa-system-state/installed.toml"),
             writable: true,
-            state: system_state,
+            state: store_with(&system_state),
         };
         let view = StateView {
             writable: system_root.clone(),
@@ -1601,13 +1836,13 @@ mod tests {
 
     /// A missing `installed.toml` is the fresh-install case and must
     /// surface as an empty result, not an error. Verifies the helper
-    /// stack (`InstalledState::load` -> `select_components`) collapses
+    /// stack (`StateStore::load` -> `select_components`) collapses
     /// "no file" to "no components".
     #[test]
     fn missing_state_file_yields_empty_result() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("installed.toml");
-        let state = InstalledState::load(&path).expect("missing file is not an error");
+        let state = StateStore::load(&path, 0).expect("missing file is not an error");
         let records = select_components(&state, &dummy_layout(), None, "system", None, None);
         assert!(records.is_empty());
     }
@@ -1626,7 +1861,14 @@ mod tests {
             ObjectStatus::Partial,
         ));
 
-        let records = select_components(&state, &dummy_layout(), None, "system", None, None);
+        let records = select_components(
+            &store_with(&state),
+            &dummy_layout(),
+            None,
+            "system",
+            None,
+            None,
+        );
         assert_eq!(records.len(), 2);
         let names: Vec<&str> = records.iter().map(|r| r.name.as_str()).collect();
         assert!(names.contains(&"agentsight"));
@@ -1649,7 +1891,7 @@ mod tests {
         ));
 
         let records = select_components(
-            &state,
+            &store_with(&state),
             &dummy_layout(),
             None,
             "system",
@@ -1681,7 +1923,7 @@ mod tests {
         state.upsert_object(obj);
 
         let records = select_components(
-            &state,
+            &store_with(&state),
             &dummy_layout(),
             None,
             "system",
@@ -1725,7 +1967,14 @@ mod tests {
         }];
         state.upsert_object(comp);
 
-        let records = select_components(&state, &layout, None, "system", Some("agentsight"), None);
+        let records = select_components(
+            &store_with(&state),
+            &layout,
+            None,
+            "system",
+            Some("agentsight"),
+            None,
+        );
         let only = &records[0];
         assert_eq!(only.status, "installed");
         // Exactly one integrity entry, status "ok", with the path in the name.
@@ -1760,7 +2009,14 @@ mod tests {
         }];
         state.upsert_object(comp);
 
-        let records = select_components(&state, &layout, None, "system", Some("agentsight"), None);
+        let records = select_components(
+            &store_with(&state),
+            &layout,
+            None,
+            "system",
+            Some("agentsight"),
+            None,
+        );
         let only = &records[0];
         assert_eq!(only.status, "failed", "missing file -> failed");
         let integrity = only
@@ -1794,7 +2050,14 @@ mod tests {
         }];
         state.upsert_object(comp);
 
-        let records = select_components(&state, &layout, None, "system", Some("agentsight"), None);
+        let records = select_components(
+            &store_with(&state),
+            &layout,
+            None,
+            "system",
+            Some("agentsight"),
+            None,
+        );
         let only = &records[0];
         assert_eq!(only.status, "failed", "sha mismatch -> failed");
         let integrity = only
@@ -1827,7 +2090,14 @@ mod tests {
         }];
         state.upsert_object(comp);
 
-        let records = select_components(&state, &layout, None, "system", Some("agentsight"), None);
+        let records = select_components(
+            &store_with(&state),
+            &layout,
+            None,
+            "system",
+            Some("agentsight"),
+            None,
+        );
         let only = &records[0];
         assert_eq!(only.status, "degraded");
         let integrity = only
@@ -1858,7 +2128,14 @@ mod tests {
         }];
         state.upsert_object(comp);
 
-        let records = select_components(&state, &layout, None, "system", Some("agentsight"), None);
+        let records = select_components(
+            &store_with(&state),
+            &layout,
+            None,
+            "system",
+            Some("agentsight"),
+            None,
+        );
         let only = &records[0];
         assert_eq!(only.status, "disabled");
         // The integrity entry is still surfaced so users can see the drift,
@@ -1894,7 +2171,14 @@ mod tests {
         }];
         state.upsert_object(comp);
 
-        let records = select_components(&state, &layout, None, "system", Some("agentsight"), None);
+        let records = select_components(
+            &store_with(&state),
+            &layout,
+            None,
+            "system",
+            Some("agentsight"),
+            None,
+        );
         let only = &records[0];
         assert_eq!(only.status, "failed", "out-of-bounds path -> failed");
         let integrity = only
@@ -1964,7 +2248,7 @@ mod tests {
         ));
 
         let records = select_components(
-            &state,
+            &store_with(&state),
             &layout,
             Some(&catalog),
             "system",
@@ -2021,7 +2305,7 @@ mod tests {
         ));
 
         let records = select_components(
-            &state,
+            &store_with(&state),
             &layout,
             Some(&catalog),
             "system",
@@ -2072,7 +2356,7 @@ mod tests {
         ));
 
         let records = select_components(
-            &state,
+            &store_with(&state),
             &layout,
             Some(&catalog),
             "system",
@@ -2135,7 +2419,7 @@ mod tests {
         ));
 
         let records = select_components(
-            &state,
+            &store_with(&state),
             &layout,
             Some(&catalog),
             "system",
@@ -2183,7 +2467,7 @@ mod tests {
         ));
 
         let records = select_components(
-            &state,
+            &store_with(&state),
             &layout,
             Some(&catalog),
             "system",
@@ -2231,7 +2515,7 @@ mod tests {
         ));
 
         let records = select_components(
-            &state,
+            &store_with(&state),
             &layout,
             Some(&catalog),
             "system",
@@ -2294,7 +2578,7 @@ mod tests {
         ));
 
         let records = select_components(
-            &state,
+            &store_with(&state),
             &layout,
             Some(&catalog),
             "system",
@@ -2353,7 +2637,7 @@ mod tests {
         ));
 
         let records = select_components(
-            &state,
+            &store_with(&state),
             &layout,
             Some(&catalog),
             "system",
@@ -2405,7 +2689,7 @@ mod tests {
         ));
 
         let records = select_components(
-            &state,
+            &store_with(&state),
             &layout,
             Some(&catalog),
             "system",
@@ -2451,7 +2735,7 @@ mod tests {
         ));
 
         let records = select_components(
-            &state,
+            &store_with(&state),
             &layout,
             Some(&catalog),
             "system",
@@ -2502,7 +2786,7 @@ mod tests {
         ));
 
         let records = select_components(
-            &state,
+            &store_with(&state),
             &layout,
             Some(&catalog),
             "system",
@@ -2551,7 +2835,7 @@ mod tests {
 
         // user mode is the portable "no service backend" install_mode.
         let records = select_components(
-            &state,
+            &store_with(&state),
             &layout,
             Some(&catalog),
             "user",
@@ -2606,7 +2890,7 @@ mod tests {
         state.upsert_object(comp);
 
         let records = select_components(
-            &state,
+            &store_with(&state),
             &layout,
             Some(&catalog),
             "system",
@@ -2669,7 +2953,7 @@ mod tests {
             ObjectStatus::Installed,
         ));
         let records = select_components(
-            &state,
+            &store_with(&state),
             &dummy_layout(),
             None,
             "system",
@@ -2698,7 +2982,7 @@ mod tests {
             sample_scan_entry("agentsight", "openclaw", false),
         ];
         let records = select_components(
-            &state,
+            &store_with(&state),
             &dummy_layout(),
             None,
             "system",
@@ -2726,7 +3010,14 @@ mod tests {
         ));
 
         let scan = vec![sample_scan_entry("tokenless", "openclaw", true)];
-        let records = select_components(&state, &dummy_layout(), None, "system", None, Some(&scan));
+        let records = select_components(
+            &store_with(&state),
+            &dummy_layout(),
+            None,
+            "system",
+            None,
+            Some(&scan),
+        );
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].adapters.len(), 1);
         assert_eq!(records[0].adapters[0].component, "tokenless");
@@ -2737,7 +3028,7 @@ mod tests {
         let state = InstalledState::default();
         let scan = vec![sample_scan_entry("ghost", "openclaw", false)];
         let records = select_components(
-            &state,
+            &store_with(&state),
             &dummy_layout(),
             None,
             "system",
@@ -2945,7 +3236,7 @@ mod tests {
             ObjectStatus::Installed,
         ));
         let raw = select_components(
-            &raw_state,
+            &store_with(&raw_state),
             &layout,
             Some(&catalog),
             "system",
@@ -2963,7 +3254,7 @@ mod tests {
             "2.3.0-1.al8",
         ));
         let obs = select_components(
-            &obs_state,
+            &store_with(&obs_state),
             &layout,
             Some(&catalog),
             "system",
@@ -2974,88 +3265,6 @@ mod tests {
         assert_eq!(obs[0].rpm_package.as_deref(), Some("copilot-shell"));
         assert_eq!(obs[0].rpm_evr.as_deref(), Some("2.3.0-1.al8"));
         assert_eq!(obs[0].rpm_source_repo.as_deref(), Some("@System"));
-    }
-
-    #[test]
-    fn rpm_managed_row_skips_raw_layout_health_probe() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let layout = test_layout(dir.path());
-        let state_path = layout.state_dir.join("installed.toml");
-        let manifest = r#"
-            [component]
-            name = "cosh"
-            version = "2.3.0-1.al8"
-
-            [[health_checks]]
-            name = "launcher"
-            kind = "command"
-            command = "{bindir}/cosh --version"
-        "#;
-        let (catalog, _guard) = catalog_with_component("cosh", manifest);
-        let catalogs = ScopedCatalogs::from_entries(vec![(state_path.clone(), catalog)]);
-        let query = FakeQuery {
-            installed: vec![(
-                "copilot-shell".to_string(),
-                pkg_info("copilot-shell", "2.3.0", "1.al8"),
-            )],
-            origins: Vec::new(),
-        };
-        let project = |object: InstalledObject| {
-            let mut state = InstalledState::default();
-            state.upsert_object(object);
-            let root = ScopedStateRoot {
-                scope: StateScope::System,
-                layout: layout.clone(),
-                state_path: state_path.clone(),
-                writable: true,
-                state,
-            };
-            let view = StateView {
-                writable: root.clone(),
-                visible_roots: vec![root],
-                warnings: Vec::new(),
-            };
-            select_components_from_view(&view, &catalogs, Some("cosh"), None, Some(&query))
-        };
-
-        let mut rpm_managed = component_object("cosh", "2.3.0-1.al8", ObjectStatus::Installed);
-        rpm_managed.install_backend = Some("rpm".to_string());
-        rpm_managed.ownership = Some(Ownership::RpmManaged);
-        rpm_managed.rpm_metadata = Some(rpm_meta("copilot-shell", "2.3.0-1.al8"));
-        let rpm_records = project(rpm_managed);
-        let rpm = &rpm_records[0];
-
-        assert_eq!(rpm.status, "installed");
-        assert!(
-            !rpm.health
-                .iter()
-                .any(|entry| entry.name == "cosh:command:launcher"),
-            "RPM rows must not run raw-layout manifest commands",
-        );
-        assert!(
-            !rpm.health
-                .iter()
-                .any(|entry| entry.status == "command_error"),
-            "RPM rows must not report raw-layout command failures",
-        );
-        assert!(
-            !rpm.health.iter().any(|entry| entry.name == "rpm:drift"),
-            "matching rpmdb EVR must remain installed without drift",
-        );
-
-        let mut raw_managed = component_object("cosh", "2.3.0-1.al8", ObjectStatus::Installed);
-        raw_managed.install_backend = Some("raw".to_string());
-        raw_managed.ownership = Some(Ownership::RawManaged);
-        let raw_records = project(raw_managed);
-        let raw = &raw_records[0];
-
-        assert_eq!(raw.status, "failed");
-        let launcher = raw
-            .health
-            .iter()
-            .find(|entry| entry.name == "cosh:command:launcher")
-            .expect("raw-managed launcher health entry");
-        assert_eq!(launcher.status, "command_error");
     }
 
     /// Configurable [`PackageQuery`] for the observed-probe tests.
@@ -3158,7 +3367,7 @@ name = "copilot-shell"
         )
         .unwrap_or_else(|| "copilot-shell".to_string());
         let records = select_components(
-            &state,
+            &store_with(&state),
             &dummy_layout(),
             None,
             "system",
@@ -3239,19 +3448,9 @@ name = "copilot-shell"
         }
     }
 
-    fn rpm_meta(package: &str, evr: &str) -> RpmMetadata {
-        RpmMetadata {
-            package_name: package.to_string(),
-            evr: Some(evr.to_string()),
-            arch: Some("x86_64".to_string()),
-            source_repo: Some("@System".to_string()),
-        }
-    }
-
     /// rpmdb EVR matching the recorded one is not drift.
     #[test]
     fn probe_rpm_drift_none_when_evr_matches() {
-        let meta = rpm_meta("copilot-shell", "2.3.0-1.al8");
         let q = FakeQuery {
             installed: vec![(
                 "copilot-shell".to_string(),
@@ -3259,13 +3458,12 @@ name = "copilot-shell"
             )],
             origins: Vec::new(),
         };
-        assert!(probe_rpm_drift(&meta, &q).is_none());
+        assert!(probe_rpm_drift("copilot-shell", Some("2.3.0-1.al8"), &q).is_none());
     }
 
     /// A newer rpmdb EVR than recorded (manual `dnf update`) is drift.
     #[test]
     fn probe_rpm_drift_detects_evr_mismatch() {
-        let meta = rpm_meta("copilot-shell", "2.2.0-1.al8");
         let q = FakeQuery {
             installed: vec![(
                 "copilot-shell".to_string(),
@@ -3274,7 +3472,7 @@ name = "copilot-shell"
             origins: Vec::new(),
         };
         assert!(matches!(
-            probe_rpm_drift(&meta, &q),
+            probe_rpm_drift("copilot-shell", Some("2.2.0-1.al8"), &q),
             Some(RpmDrift::Drifted { .. })
         ));
     }
@@ -3282,10 +3480,9 @@ name = "copilot-shell"
     /// The package gone from rpmdb (manual `rpm -e`) is Missing.
     #[test]
     fn probe_rpm_drift_detects_missing() {
-        let meta = rpm_meta("copilot-shell", "2.2.0-1.al8");
         let q = FakeQuery::default();
         assert!(matches!(
-            probe_rpm_drift(&meta, &q),
+            probe_rpm_drift("copilot-shell", Some("2.2.0-1.al8"), &q),
             Some(RpmDrift::Missing)
         ));
     }
@@ -3293,13 +3490,12 @@ name = "copilot-shell"
     /// A same-name multi-version rpmdb is surfaced as drift, not a silent pass.
     #[test]
     fn probe_rpm_drift_multi_version_is_drifted() {
-        let meta = rpm_meta("copilot-shell", "2.2.0-1.al8");
         let q = ErrQuery(PackageQueryError::UnexpectedOutput {
             command: "rpm".to_string(),
             detail: "2 installed versions".to_string(),
         });
         assert!(matches!(
-            probe_rpm_drift(&meta, &q),
+            probe_rpm_drift("copilot-shell", Some("2.2.0-1.al8"), &q),
             Some(RpmDrift::Drifted { .. })
         ));
     }
@@ -3307,11 +3503,10 @@ name = "copilot-shell"
     /// Missing rpm/dnf tooling cannot prove drift; the recorded status stands.
     #[test]
     fn probe_rpm_drift_tooling_missing_keeps_status() {
-        let meta = rpm_meta("copilot-shell", "2.2.0-1.al8");
         let q = ErrQuery(PackageQueryError::CommandMissing {
             command: "rpm".to_string(),
         });
-        assert!(probe_rpm_drift(&meta, &q).is_none());
+        assert!(probe_rpm_drift("copilot-shell", Some("2.2.0-1.al8"), &q).is_none());
     }
 
     /// The scoped status selector overrides an adopted rpm-observed row to

@@ -3,11 +3,12 @@
 //!
 //! `forget` is the escape hatch for stale state: after a manual `rpm -e` (the
 //! `missing` case from `anolisa status`), or whenever the operator wants ANOLISA
-//! to stop tracking a component, `forget` removes the `installed.toml` object
-//! and records the operation. It performs **no** package operation — no
-//! `dnf remove`, no `rpm -e` — and leaves package/component files on disk. It
-//! only removes ANOLISA-owned state metadata for the forgotten component. An
-//! observed/managed RPM stays installed in rpmdb; a raw component's owned files
+//! to stop tracking a component, `forget` removes the state record and records
+//! the operation. It also resolves quarantined records — legacy state the
+//! migration refused to classify — when the operator decides they are not
+//! worth repairing. It performs **no** package operation — no `dnf remove`,
+//! no `rpm -e` — and leaves package/component files on disk. An
+//! observed/managed RPM stays installed in rpmdb; an owned component's files
 //! stay on disk (use `anolisa uninstall` to remove those).
 
 use chrono::{SecondsFormat, Utc};
@@ -15,8 +16,11 @@ use clap::Parser;
 use serde::Serialize;
 
 use anolisa_core::central_log::{CentralLog, LogKind, LogRecord, LogStatus, Severity};
+use anolisa_core::domain::ProviderBinding;
 use anolisa_core::lock::InstallLock;
 use anolisa_core::state::{ObjectKind, OperationRecord};
+use anolisa_core::state_store::StateStore;
+use anolisa_platform::privilege;
 
 use crate::color::Palette;
 use crate::commands::common;
@@ -39,8 +43,9 @@ pub struct ForgetArgs {
 #[derive(Serialize)]
 struct ForgetPayload {
     component: String,
-    /// Provenance label of the dropped record, for the audit trail.
-    ownership: &'static str,
+    /// Provenance of the dropped record, for the audit trail:
+    /// `owned` | `managed` | `adopted` | `observed` | `quarantined`.
+    provenance: &'static str,
     install_mode: String,
     /// Whether the state record was actually removed (false on dry-run).
     forgotten: bool,
@@ -60,26 +65,30 @@ struct ForgetPayload {
 pub fn handle(args: ForgetArgs, ctx: &CliContext) -> Result<(), CliError> {
     let input = args.component.as_str();
     let command = format!("forget {input}");
-    let installed = common::load_installed_state(ctx, COMMAND)?;
-    let resolved = common::lookup_component_name(input, &installed, ctx, COMMAND);
+    let layout = common::resolve_layout(ctx);
+    let state_path = layout.state_dir.join("installed.toml");
+    let store = StateStore::load(&state_path, privilege::effective_uid()).map_err(|err| {
+        CliError::Runtime {
+            command: command.clone(),
+            reason: format!("failed to load installed state: {err}"),
+        }
+    })?;
+    let resolved = common::lookup_component_name_in_store(input, &store, ctx, COMMAND);
     let target = resolved.as_str();
 
-    if installed
-        .find_object(ObjectKind::Component, target)
-        .is_none()
-    {
+    // Forget also resolves quarantined records: it is the documented exit for
+    // legacy state the migration refused to classify and repair cannot
+    // recover.
+    let provenance = record_provenance(&store, target);
+    if provenance.is_none() {
         common::reject_visible_non_writable_component(ctx, &command, target)?;
     }
-
-    let obj = installed
-        .find_object(ObjectKind::Component, target)
-        .ok_or_else(|| CliError::InvalidArgument {
-            command: command.clone(),
-            reason: format!(
-                "component '{target}' is not installed — nothing to forget (run `anolisa status` to see what is tracked)"
-            ),
-        })?;
-    let ownership_label = obj.effective_ownership().label();
+    let provenance = provenance.ok_or_else(|| CliError::InvalidArgument {
+        command: command.clone(),
+        reason: format!(
+            "component '{target}' is not installed — nothing to forget (run `anolisa status` to see what is tracked)"
+        ),
+    })?;
 
     // Adapter receipts must be released before the component is dropped:
     // silently orphaning a registered plugin is worse than refusing. This guard
@@ -87,25 +96,13 @@ pub fn handle(args: ForgetArgs, ctx: &CliContext) -> Result<(), CliError> {
     // authoritatively under the lock. Mirrors `uninstall`, pointing at
     // `adapter disable`.
     if !ctx.dry_run {
-        let claims = installed.adapter_claims_for_component(target);
-        if !claims.is_empty() {
-            let mut frameworks: Vec<&str> = claims.iter().map(|c| c.framework.as_str()).collect();
-            frameworks.sort_unstable();
-            frameworks.dedup();
-            return Err(CliError::InvalidArgument {
-                command,
-                reason: format!(
-                    "'{target}' has enabled adapters ({}); run `anolisa adapter disable {target}` for each framework before forgetting",
-                    frameworks.join(", ")
-                ),
-            });
-        }
+        ensure_no_adapter_claims(&store, target, &command)?;
     }
 
     if ctx.dry_run {
         let payload = ForgetPayload {
             component: target.to_string(),
-            ownership: ownership_label,
+            provenance,
             install_mode: ctx.install_mode.as_str().to_string(),
             forgotten: false,
             dry_run: true,
@@ -115,10 +112,10 @@ pub fn handle(args: ForgetArgs, ctx: &CliContext) -> Result<(), CliError> {
         return Ok(());
     }
 
-    let (operation_id, ownership_label) = persist_forget(ctx, target, &command)?;
+    let (operation_id, provenance) = persist_forget(ctx, target, &command)?;
     let payload = ForgetPayload {
         component: target.to_string(),
-        ownership: ownership_label,
+        provenance,
         install_mode: ctx.install_mode.as_str().to_string(),
         forgotten: true,
         dry_run: false,
@@ -128,53 +125,86 @@ pub fn handle(args: ForgetArgs, ctx: &CliContext) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Remove the component's state object and local manifest snapshot under the
+/// Provenance label for the record `forget` would drop — active or
+/// quarantined — or `None` when nothing is tracked under this name.
+fn record_provenance(store: &StateStore, component: &str) -> Option<&'static str> {
+    if let Some(installation) = store.find(ObjectKind::Component, component) {
+        return Some(match &installation.binding {
+            ProviderBinding::Owned { .. } => "owned",
+            ProviderBinding::Delegated { relation, .. } => relation.label(),
+        });
+    }
+    store
+        .quarantined
+        .iter()
+        .any(|q| q.record.kind == ObjectKind::Component && q.record.name == component)
+        .then_some("quarantined")
+}
+
+/// Refuse to drop a component that still has enabled adapter receipts.
+fn ensure_no_adapter_claims(
+    store: &StateStore,
+    target: &str,
+    command: &str,
+) -> Result<(), CliError> {
+    let mut frameworks: Vec<&str> = store
+        .adapter_claims
+        .iter()
+        .filter(|claim| claim.component == target)
+        .map(|claim| claim.framework.as_str())
+        .collect();
+    if frameworks.is_empty() {
+        return Ok(());
+    }
+    frameworks.sort_unstable();
+    frameworks.dedup();
+    Err(CliError::InvalidArgument {
+        command: command.to_string(),
+        reason: format!(
+            "'{target}' has enabled adapters ({}); run `anolisa adapter disable {target}` for each framework before forgetting",
+            frameworks.join(", ")
+        ),
+    })
+}
+
+/// Remove the component's state record and local manifest snapshot under the
 /// install lock, then append an audit record. No package/component files are
-/// removed. Returns the operation id.
+/// removed. Returns the operation id and the provenance the lock observed.
 fn persist_forget(
     ctx: &CliContext,
     component: &str,
     command: &str,
 ) -> Result<(String, &'static str), CliError> {
     let layout = common::resolve_layout(ctx);
+    let state_path = layout.state_dir.join("installed.toml");
     let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
         command: command.to_string(),
         reason: format!("failed to acquire install lock: {err}"),
     })?;
-    let mut state = common::load_installed_state(ctx, command)?;
+    let mut store = StateStore::load(&state_path, privilege::effective_uid()).map_err(|err| {
+        CliError::Runtime {
+            command: command.to_string(),
+            reason: format!("failed to load installed state: {err}"),
+        }
+    })?;
 
     // Authoritative adapter-claim guard, under the lock. The check in `handle`
     // is only a fast-fail / dry-run preview: a concurrent `adapter enable`
     // landing between that read and this removal would otherwise orphan its
-    // receipt once the component object is gone. Re-checking the freshly
+    // receipt once the component record is gone. Re-checking the freshly
     // reloaded state here closes that window.
-    let claims = state.adapter_claims_for_component(component);
-    if !claims.is_empty() {
-        let mut frameworks: Vec<&str> = claims.iter().map(|c| c.framework.as_str()).collect();
-        frameworks.sort_unstable();
-        frameworks.dedup();
-        return Err(CliError::InvalidArgument {
-            command: command.to_string(),
-            reason: format!(
-                "'{component}' has enabled adapters ({}); run `anolisa adapter disable {component}` for each framework before forgetting",
-                frameworks.join(", ")
-            ),
-        });
-    }
+    ensure_no_adapter_claims(&store, component, command)?;
 
-    // Re-validate object presence under the lock (a concurrent uninstall/forget
-    // may have dropped it), and take ownership of the removed object so the
-    // response reports the provenance the lock actually observed rather than the
-    // pre-lock read.
-    let removed = state
-        .remove_object(ObjectKind::Component, component)
-        .ok_or_else(|| CliError::Runtime {
-            command: command.to_string(),
-            reason: format!(
-                "component '{component}' disappeared from state during forget; nothing removed"
-            ),
-        })?;
-    let ownership_label = removed.effective_ownership().label();
+    // Re-validate record presence under the lock (a concurrent
+    // uninstall/forget may have dropped it), and report the provenance the
+    // lock actually observed rather than the pre-lock read.
+    let provenance = record_provenance(&store, component).ok_or_else(|| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!(
+            "component '{component}' disappeared from state during forget; nothing removed"
+        ),
+    })?;
+    store.remove(ObjectKind::Component, component);
     remove_component_manifest_snapshot(&layout, component, command)?;
 
     let now = now_iso8601();
@@ -184,16 +214,16 @@ fn persist_forget(
         lock_ts.format("%Y%m%d%H%M%S"),
         lock_ts.timestamp_subsec_nanos()
     );
-    state.operations.push(OperationRecord {
+    store.operations.push(OperationRecord {
         id: operation_id.clone(),
         command: command.to_string(),
         status: "ok".to_string(),
         started_at: now.clone(),
         finished_at: Some(now.clone()),
+        parent_operation_id: None,
     });
 
-    let state_path = layout.state_dir.join("installed.toml");
-    state.save(&state_path).map_err(|err| CliError::Runtime {
+    store.save(&state_path).map_err(|err| CliError::Runtime {
         command: command.to_string(),
         reason: format!("failed to save state: {err}"),
     })?;
@@ -224,7 +254,7 @@ fn persist_forget(
     if let Err(err) = log.append(&record) {
         eprintln!("warning: failed to write central log: {err}");
     }
-    Ok((operation_id, ownership_label))
+    Ok((operation_id, provenance))
 }
 
 fn remove_component_manifest_snapshot(
@@ -263,7 +293,7 @@ fn render_forget(ctx: &CliContext, payload: &ForgetPayload) {
             "{} {} {} {}",
             color.command("forget"),
             payload.component,
-            color.muted(format!("({})", payload.ownership)),
+            color.muted(format!("({})", payload.provenance)),
             color.muted("(dry-run — ANOLISA state not modified)"),
         );
         println!(
@@ -276,23 +306,26 @@ fn render_forget(ctx: &CliContext, payload: &ForgetPayload) {
         "{} {} {}",
         color.ok("✓ forgot"),
         payload.component,
-        color.muted(format!("({})", payload.ownership)),
+        color.muted(format!("({})", payload.provenance)),
     );
     println!(
         "    {} ANOLISA stopped tracking this component; no package operation was performed",
         color.label("note:"),
     );
     // Tailor the residue reminder to what forget deliberately left behind.
-    if payload.ownership == "raw-managed" {
-        println!(
+    match payload.provenance {
+        "owned" => println!(
             "    {} ANOLISA-owned files remain on disk; forget dropped their inventory, so 'anolisa uninstall' can no longer remove them — delete them manually (next time, run 'anolisa uninstall' instead of 'forget' when you want ANOLISA to remove files)",
             color.label("note:"),
-        );
-    } else {
-        println!(
+        ),
+        "quarantined" => println!(
+            "    {} whatever backed the quarantined record — files or a package — remains on the system untouched",
+            color.label("note:"),
+        ),
+        _ => println!(
             "    {} the RPM package remains installed; use dnf/rpm directly if you want to remove it",
             color.label("note:"),
-        );
+        ),
     }
 }
 
@@ -328,7 +361,8 @@ mod tests {
         }
     }
 
-    /// An adopted rpm-observed component object.
+    /// An adopted rpm-observed component object (legacy v4 shape; loading it
+    /// exercises the migration into the v5 store).
     fn rpm_observed_object(component: &str, package: &str, evr: &str) -> InstalledObject {
         InstalledObject {
             kind: ObjectKind::Component,
@@ -350,6 +384,36 @@ mod tests {
             last_operation_id: Some("op-prior".to_string()),
             managed: false,
             adopted: true,
+            subscription_scope: Default::default(),
+            enabled_features: Vec::new(),
+            component_refs: Vec::new(),
+            files: Vec::new(),
+            external_modified_files: Vec::new(),
+            services: Vec::new(),
+            health: Vec::new(),
+            provisioned_packages: Vec::new(),
+        }
+    }
+
+    /// A legacy object with no classifiable evidence: no backend, no
+    /// ownership, no rpm metadata, no source, no files. The migration
+    /// quarantines it (rule R4h).
+    fn unclassifiable_object(component: &str) -> InstalledObject {
+        InstalledObject {
+            kind: ObjectKind::Component,
+            name: component.to_string(),
+            version: "0.0.1".to_string(),
+            status: ObjectStatus::Installed,
+            manifest_digest: None,
+            distribution_source: None,
+            raw_package: None,
+            install_backend: None,
+            ownership: None,
+            rpm_metadata: None,
+            installed_at: "2026-06-01T10:00:00Z".to_string(),
+            last_operation_id: None,
+            managed: false,
+            adopted: false,
             subscription_scope: Default::default(),
             enabled_features: Vec::new(),
             component_refs: Vec::new(),
@@ -405,9 +469,9 @@ mod tests {
             .expect("seed state");
     }
 
-    fn load_state(ctx: &CliContext) -> InstalledState {
+    fn load_store(ctx: &CliContext) -> StateStore {
         let layout = common::resolve_layout(ctx);
-        InstalledState::load(&layout.state_dir.join("installed.toml")).expect("load state")
+        StateStore::load(&layout.state_dir.join("installed.toml"), 0).expect("load store")
     }
 
     fn seed_manifest_snapshot(ctx: &CliContext, component: &str) -> PathBuf {
@@ -423,7 +487,7 @@ mod tests {
         dir
     }
 
-    /// forget drops the state object and records the operation; no package
+    /// forget drops the state record and records the operation; no package
     /// operation is involved (there is no package query/transaction at all).
     #[test]
     fn forget_drops_object_and_records_operation() {
@@ -448,12 +512,10 @@ mod tests {
         )
         .expect("forget ok");
 
-        let after = load_state(&c);
+        let after = load_store(&c);
         assert!(
-            after
-                .find_object(ObjectKind::Component, "copilot-shell")
-                .is_none(),
-            "state object must be dropped",
+            after.find(ObjectKind::Component, "copilot-shell").is_none(),
+            "state record must be dropped",
         );
         assert!(
             after
@@ -465,6 +527,44 @@ mod tests {
         assert!(
             !snapshot_dir.exists(),
             "component manifest snapshot dir must be removed",
+        );
+    }
+
+    /// forget is the documented exit for quarantined records: it drops the
+    /// quarantine entry like any other record.
+    #[test]
+    fn forget_drops_quarantined_record() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(&c, vec![unclassifiable_object("mystery")], Vec::new());
+        // Sanity: the migration must have quarantined the seed.
+        assert!(
+            load_store(&c)
+                .quarantined
+                .iter()
+                .any(|q| q.record.name == "mystery"),
+            "seed must migrate into quarantine",
+        );
+
+        handle(
+            ForgetArgs {
+                component: "mystery".to_string(),
+            },
+            &c,
+        )
+        .expect("forget of a quarantined record ok");
+
+        let after = load_store(&c);
+        assert!(
+            after.quarantined.iter().all(|q| q.record.name != "mystery"),
+            "quarantined record must be dropped",
+        );
+        assert!(
+            after
+                .operations
+                .iter()
+                .any(|o| o.command == "forget mystery"),
+            "an operation record must be appended",
         );
     }
 
@@ -515,8 +615,8 @@ mod tests {
         );
         // The component must still be present — forget refused.
         assert!(
-            load_state(&c)
-                .find_object(ObjectKind::Component, "copilot-shell")
+            load_store(&c)
+                .find(ObjectKind::Component, "copilot-shell")
                 .is_some(),
         );
     }
@@ -524,7 +624,7 @@ mod tests {
     /// `persist_forget` enforces the adapter-claim guard under the lock, not only
     /// in `handle`. Calling it directly — bypassing the pre-lock fast-fail, as a
     /// concurrent `adapter enable` effectively would — on a state that already
-    /// holds a claim must refuse and leave the object intact. This is what closes
+    /// holds a claim must refuse and leave the record intact. This is what closes
     /// the enable-during-forget race; a regression that drops the locked check
     /// fails here while the `handle`-level test above would still pass.
     #[test]
@@ -549,10 +649,10 @@ mod tests {
             err.reason()
         );
         assert!(
-            load_state(&c)
-                .find_object(ObjectKind::Component, "copilot-shell")
+            load_store(&c)
+                .find(ObjectKind::Component, "copilot-shell")
                 .is_some(),
-            "object must remain when the locked claim check refuses",
+            "record must remain when the locked claim check refuses",
         );
     }
 
@@ -579,10 +679,10 @@ mod tests {
         )
         .expect("dry-run ok");
         assert!(
-            load_state(&c)
-                .find_object(ObjectKind::Component, "copilot-shell")
+            load_store(&c)
+                .find(ObjectKind::Component, "copilot-shell")
                 .is_some(),
-            "dry-run must not remove the state object",
+            "dry-run must not remove the state record",
         );
         assert!(
             snapshot_dir.exists(),
@@ -659,9 +759,9 @@ name = "copilot-shell"
         )
         .expect("forget via alias");
 
-        let after = load_state(&c);
+        let after = load_store(&c);
         assert!(
-            after.find_object(ObjectKind::Component, "cosh").is_none(),
+            after.find(ObjectKind::Component, "cosh").is_none(),
             "state record for 'cosh' must be dropped",
         );
     }
