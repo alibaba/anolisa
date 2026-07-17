@@ -37,7 +37,8 @@ use super::AdapterError;
 use super::claim::{AdapterClaim, ClaimStatus};
 use super::driver::{
     AdapterCondition, AdapterConditionKind, AdapterOps, AdapterStatusReport, AdapterSummary,
-    CliOutput, ConditionStatus, DisableReport, DriverCtx, DriverPlan, FrameworkCommand, HostEnv,
+    CliOutput, ConditionStatus, DisableReport, DriverCtx, DriverPlan, EnableProgress,
+    FrameworkCommand, HostEnv,
 };
 use super::registry::DriverRegistry;
 use crate::central_log::{CentralLog, LogKind, LogRecord, LogStatus, Severity};
@@ -59,6 +60,22 @@ pub enum EnableOutcome {
     Planned(DriverPlan),
     /// Enable ran; the persisted receipt.
     Enabled(Box<AdapterClaim>),
+}
+
+/// Typed knobs for [`AdapterManager::enable_with_options`].
+///
+/// A distinct struct (rather than extra positional parameters) keeps the
+/// default-safe [`AdapterManager::enable`] wrapper stable for its many
+/// callers while letting a new authorization be threaded to the driver as
+/// typed data — never an environment variable or free-form map.
+#[derive(Debug, Clone, Default)]
+pub struct EnableOptions {
+    /// The caller explicitly authorized an unsafe plugin install
+    /// (`--allow-unsafe-plugin-install`). Only honored for the OpenClaw
+    /// plugin adapter; rejected for any other framework or a `skill_bundle`
+    /// adapter. Even when set, the driver adds the framework's unsafe flag
+    /// only if the host's install help exposes it.
+    pub allow_unsafe_plugin_install: bool,
 }
 
 /// Outcome of [`AdapterManager::disable`].
@@ -461,6 +478,25 @@ impl AdapterManager {
         framework: Option<&str>,
         dry_run: bool,
     ) -> Result<EnableOutcome, AdapterError> {
+        self.enable_with_options(component, framework, dry_run, EnableOptions::default())
+    }
+
+    /// Enable with explicit typed [`EnableOptions`]. [`Self::enable`] is the
+    /// default-safe wrapper over this; callers that need to pass an explicit
+    /// safety-bypass authorization use this form.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::enable`], plus [`AdapterError::UnsafeInstallNotApplicable`]
+    /// when an unsafe-install authorization is passed for a framework or
+    /// adapter type that does not support it.
+    pub fn enable_with_options(
+        &self,
+        component: &str,
+        framework: Option<&str>,
+        dry_run: bool,
+        options: EnableOptions,
+    ) -> Result<EnableOutcome, AdapterError> {
         let _lock = InstallLock::acquire(&self.layout.lock_file)?;
         let mut state = InstalledState::load(&self.state_path)?;
 
@@ -485,9 +521,24 @@ impl AdapterManager {
         // so the wrong driver code path can never run.
         validate_adapter_type_for_framework(component, &framework, adapter_type.as_deref())?;
 
+        // An unsafe-install authorization is only meaningful for the OpenClaw
+        // plugin adapter. Reject it for any other framework, and for a
+        // skill_bundle adapter (which never installs a plugin), before doing
+        // any work — the authorization must never silently no-op.
+        if options.allow_unsafe_plugin_install
+            && (framework != "openclaw" || adapter_type.as_deref() == Some("skill_bundle"))
+        {
+            return Err(AdapterError::UnsafeInstallNotApplicable {
+                component: component.to_string(),
+                framework: framework.clone(),
+                adapter_type: adapter_type.clone(),
+            });
+        }
+
         let declared_plugin_id = declared_plugin_id(&manifest, &framework);
         let skill_specs = declared_skills(&manifest, &framework);
         let config = declared_config(&manifest, &framework);
+        let framework_version_req = declared_framework_version_req(&manifest, &framework);
         let bundle_entry = declared_bundle_entry(&manifest, &framework);
         if adapter_type.as_deref() == Some("skill_bundle") && !config.is_empty() {
             return Err(AdapterError::InvalidAdapterInput {
@@ -573,6 +624,8 @@ impl AdapterManager {
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: None,
+            framework_version_req: None,
+            allow_unsafe_plugin_install: false,
             dry_run,
             ops: &probe_ops,
         };
@@ -610,6 +663,8 @@ impl AdapterManager {
             declared_skills: skills,
             declared_config: config,
             declared_bundle_entry: bundle_entry,
+            framework_version_req,
+            allow_unsafe_plugin_install: options.allow_unsafe_plugin_install,
             dry_run,
             ops: &ops,
         };
@@ -632,21 +687,41 @@ impl AdapterManager {
             });
         }
 
-        let claim = driver.prepare_enable(&bundle, &ctx)?;
+        let (mut claim, prepared) = driver.prepare_enable(&bundle, &ctx)?;
+        let claim_allowed_roots = driver.allowed_external_roots(&ctx);
+        if let Some(prior) = state.find_adapter_claim(component, &framework).cloned() {
+            // A forged prior receipt must not gain authority merely because a
+            // driver preserves facts from it during re-enable.
+            prior.validate_with_owned_roots(
+                &self.layout,
+                &claim_allowed_roots,
+                &self.all_datadir_roots,
+            )?;
+            driver.preserve_reenable_facts(&prior, &mut claim)?;
+        }
         // Defense in depth: the driver must not emit a claim that points
         // outside its own declared roots. Reject before persisting.
         claim.validate_with_owned_roots(
             &self.layout,
-            &driver.allowed_external_roots(&ctx),
+            &claim_allowed_roots,
             &self.all_datadir_roots,
         )?;
 
         state.upsert_adapter_claim(claim.clone());
         state.save(&self.state_path)?;
-        if let Err(err) = driver.apply_enable(&claim, &ctx) {
-            let mut failed_claim = claim.clone();
-            failed_claim.status = ClaimStatus::CleanupFailed;
-            state.upsert_adapter_claim(failed_claim);
+        let apply_result = {
+            let mut progress = ManagerEnableProgress {
+                state: &mut state,
+                state_path: &self.state_path,
+                layout: &self.layout,
+                allowed_external_roots: &claim_allowed_roots,
+                extra_owned_roots: &self.all_datadir_roots,
+            };
+            driver.apply_enable(&mut claim, &prepared, &ctx, &mut progress)
+        };
+        if let Err(err) = apply_result {
+            claim.status = ClaimStatus::CleanupFailed;
+            state.upsert_adapter_claim(claim.clone());
             if let Err(save_err) = state.save(&self.state_path) {
                 self.log_operation(
                     &label,
@@ -788,6 +863,8 @@ impl AdapterManager {
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: None,
+            framework_version_req: None,
+            allow_unsafe_plugin_install: false,
             dry_run,
             ops: &probe_ops,
         };
@@ -815,6 +892,8 @@ impl AdapterManager {
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: None,
+            framework_version_req: None,
+            allow_unsafe_plugin_install: false,
             dry_run,
             ops: &ops,
         };
@@ -938,6 +1017,8 @@ impl AdapterManager {
                 declared_skills: Vec::new(),
                 declared_config: Vec::new(),
                 declared_bundle_entry: None,
+                framework_version_req: None,
+                allow_unsafe_plugin_install: false,
                 dry_run: false,
                 ops: &probe_ops,
             };
@@ -965,6 +1046,8 @@ impl AdapterManager {
                 declared_skills: Vec::new(),
                 declared_config: Vec::new(),
                 declared_bundle_entry: None,
+                framework_version_req: None,
+                allow_unsafe_plugin_install: false,
                 dry_run: false,
                 ops: &ops,
             };
@@ -1577,6 +1660,30 @@ struct ManagerOps {
     /// under. Populated from the driver's `allowed_external_roots` plus
     /// the resource root.
     allowed_roots: Vec<PathBuf>,
+}
+
+/// Persists incremental receipt facts while the Manager holds the enable
+/// lock. Drivers never receive the state path or write installed state
+/// directly.
+struct ManagerEnableProgress<'a> {
+    state: &'a mut InstalledState,
+    state_path: &'a Path,
+    layout: &'a FsLayout,
+    allowed_external_roots: &'a [PathBuf],
+    extra_owned_roots: &'a [PathBuf],
+}
+
+impl EnableProgress for ManagerEnableProgress<'_> {
+    fn persist_claim(&mut self, claim: &AdapterClaim) -> Result<(), AdapterError> {
+        claim.validate_with_owned_roots(
+            self.layout,
+            self.allowed_external_roots,
+            self.extra_owned_roots,
+        )?;
+        self.state.upsert_adapter_claim(claim.clone());
+        self.state.save(self.state_path)?;
+        Ok(())
+    }
 }
 
 impl ManagerOps {
@@ -2491,6 +2598,32 @@ fn declared_config(
     adapter.config.clone()
 }
 
+/// Resolve the adapter-level framework version requirement for a framework.
+///
+/// `[adapters.compat].framework_version` is the primary source; the legacy
+/// top-level `framework_version_req` is the compatibility entry used only
+/// when `compat.framework_version` is absent. This precedence lets newer
+/// manifests express the requirement in the structured `compat` table while
+/// older manifests keep working unchanged.
+fn declared_framework_version_req(manifest: &ComponentManifest, framework: &str) -> Option<String> {
+    let adapter = manifest
+        .adapters
+        .iter()
+        .find(|a| a.framework.as_deref().map(str::trim) == Some(framework))?;
+    // Precedence only — no validity check here. `[adapters.compat]
+    // .framework_version` is primary: when the field is *present* (even if
+    // empty), the legacy `framework_version_req` is not consulted, so a
+    // migrated manifest cannot accidentally fall back to a stale value. The
+    // raw value (including a present-but-empty one) is passed through to the
+    // driver, which alone decides validity — this keeps the framework-agnostic
+    // Manager from imposing OpenClaw's version rules on other frameworks
+    // (Hermes/Codex/Qoder/Cosh ignore the field entirely).
+    if let Some(raw) = adapter.compat.framework_version.as_deref() {
+        return Some(raw.to_string());
+    }
+    adapter.framework_version_req.as_deref().map(str::to_string)
+}
+
 /// Extract the bundle entry-point from the manifest, checking the
 /// framework-specific section first then falling back to the generic
 /// `[adapters.bundle].entry`.
@@ -2728,6 +2861,83 @@ fn prioritize_datadir_root(roots: &[PathBuf], preferred: Option<&Path>) -> Vec<P
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The framework-agnostic Manager resolves the requirement by precedence
+    /// only and never validates it — a present-but-empty value is passed
+    /// through verbatim (the owning driver decides validity), and it never
+    /// errors for any framework. This keeps the strict OpenClaw emptiness
+    /// rule from leaking onto Hermes/Codex/Qoder/Cosh (Issue non-goal).
+    #[test]
+    fn declared_framework_version_req_is_precedence_only() {
+        let compat_wins = ComponentManifest::from_toml_str(
+            r#"
+            [component]
+            name = "c"
+            version = "1.0.0"
+            [[adapters]]
+            framework = "openclaw"
+            framework_version_req = ">=legacy"
+            [adapters.compat]
+            framework_version = ">=2026.4.14"
+        "#,
+        )
+        .expect("parse");
+        assert_eq!(
+            declared_framework_version_req(&compat_wins, "openclaw").as_deref(),
+            Some(">=2026.4.14"),
+            "compat is primary; legacy is not consulted when compat is present"
+        );
+
+        // A present-but-empty compat value is returned as-is (not collapsed to
+        // None, not an error) — the driver validates it.
+        let empty_compat = ComponentManifest::from_toml_str(
+            r#"
+            [component]
+            name = "c"
+            version = "1.0.0"
+            [[adapters]]
+            framework = "hermes"
+            [adapters.compat]
+            framework_version = ""
+        "#,
+        )
+        .expect("parse");
+        assert_eq!(
+            declared_framework_version_req(&empty_compat, "hermes").as_deref(),
+            Some(""),
+            "a non-OpenClaw framework's empty requirement passes through unchanged, never erroring"
+        );
+
+        // Legacy field is the fallback only when compat is absent.
+        let legacy_only = ComponentManifest::from_toml_str(
+            r#"
+            [component]
+            name = "c"
+            version = "1.0.0"
+            [[adapters]]
+            framework = "openclaw"
+            framework_version_req = ">=1.2"
+        "#,
+        )
+        .expect("parse");
+        assert_eq!(
+            declared_framework_version_req(&legacy_only, "openclaw").as_deref(),
+            Some(">=1.2")
+        );
+
+        // No field at all → None.
+        let none = ComponentManifest::from_toml_str(
+            r#"
+            [component]
+            name = "c"
+            version = "1.0.0"
+            [[adapters]]
+            framework = "openclaw"
+        "#,
+        )
+        .expect("parse");
+        assert_eq!(declared_framework_version_req(&none, "openclaw"), None);
+    }
 
     #[test]
     fn prepend_path_puts_dirs_in_front() {
@@ -5513,6 +5723,7 @@ dest = "{datadir}/skills"
                 kind: ClaimResourceKind::FrameworkConfig {
                     framework: "openclaw".to_string(),
                     key: "plugins.entries.test-comp.enabled".to_string(),
+                    state: crate::adapter::claim::ConfigApplyState::Applied,
                 },
             }],
             Vec::new(),

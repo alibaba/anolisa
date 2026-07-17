@@ -77,6 +77,19 @@ pub struct DriverCtx<'a> {
     /// should use this to locate the framework-native manifest inside
     /// the resource root instead of hardcoding a filename.
     pub declared_bundle_entry: Option<String>,
+    /// Adapter-level framework version requirement resolved from the
+    /// component manifest. The Manager derives it with
+    /// `[adapters.compat].framework_version` taking precedence over the
+    /// legacy `framework_version_req` compat entry; `None` means the adapter
+    /// declares no minimum. A driver that can probe the framework version
+    /// gates enable on this before any mutation.
+    pub framework_version_req: Option<String>,
+    /// Whether the caller explicitly authorized an unsafe plugin install
+    /// (`--allow-unsafe-plugin-install`). Typed data, never a free-form map:
+    /// only the OpenClaw plugin path consults it, and only to add the
+    /// framework's own unsafe-install flag when the host also exposes it.
+    /// Defaults to `false` for every non-enable operation.
+    pub allow_unsafe_plugin_install: bool,
     /// True when the caller passed `--dry-run`; drivers must not mutate
     /// framework state in this mode (the Manager also guards this).
     pub dry_run: bool,
@@ -119,6 +132,59 @@ pub struct DriverPlan {
     /// run. Display-only — never parsed back into an argv.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub register_command: Option<String>,
+}
+
+/// Driver-private state produced by [`FrameworkDriver::prepare_enable`] and
+/// handed to [`FrameworkDriver::apply_enable`] within the same locked enable.
+///
+/// It carries the host capabilities a driver resolved by read-only probing
+/// *before* the first mutation, so apply can act on them without re-probing —
+/// keeping every probe to once per enable while still completing all probing
+/// up front. It is deliberately **not** part of the receipt: the persisted
+/// [`AdapterClaim`] stays pure typed resource data, and this transient value
+/// never outlives the enable call. Most drivers need no such state and return
+/// [`PreparedEnable::None`].
+#[derive(Debug, Clone, Default)]
+pub enum PreparedEnable {
+    /// The driver needs no prepared host state for apply.
+    #[default]
+    None,
+    /// OpenClaw install/verify capabilities resolved before the first
+    /// mutation. `apply_enable` uses these to decide the unsafe-retry hint and
+    /// the runtime-inspect form without a second probe.
+    OpenClaw {
+        /// The host's `plugins install --help` exposes the unsafe flag.
+        supports_unsafe_install: bool,
+        /// The host's `plugins inspect --help` exposes `--json`.
+        supports_inspect_json: bool,
+        /// The host's `plugins inspect --help` exposes `--runtime`.
+        supports_inspect_runtime: bool,
+        /// Original manifest indices of config entries selected by the
+        /// detected host version. Apply uses this transient intent to avoid
+        /// claiming an entry until its `config set` command succeeds.
+        selected_config_indices: Vec<usize>,
+    },
+}
+
+/// Manager-owned persistence channel for resources applied incrementally.
+///
+/// Drivers use it for write-ahead intent and confirmed-success transitions.
+/// The Manager validates and saves the updated receipt while the enable lock
+/// is still held, keeping cleanup state accurate across partial failure.
+pub trait EnableProgress {
+    /// Validate and persist the current enable receipt.
+    ///
+    /// # Errors
+    ///
+    /// Returns claim-validation or installed-state persistence failures.
+    fn persist_claim(&mut self, claim: &AdapterClaim) -> Result<(), AdapterError>;
+}
+
+#[cfg(test)]
+impl EnableProgress for () {
+    fn persist_claim(&mut self, _claim: &AdapterClaim) -> Result<(), AdapterError> {
+        Ok(())
+    }
 }
 
 /// Outcome of [`FrameworkDriver::disable`].
@@ -413,11 +479,16 @@ pub trait FrameworkDriver: Send + Sync {
     ) -> Result<DriverPlan, AdapterError>;
 
     /// Build the pure-data receipt for a future enable operation without
-    /// mutating framework state.
+    /// mutating framework state, together with any driver-private
+    /// [`PreparedEnable`] state (host capabilities resolved by read-only
+    /// probing) that [`Self::apply_enable`] should reuse instead of
+    /// re-probing.
     ///
     /// The Manager validates and persists this claim before
     /// [`Self::apply_enable`] runs, so a later framework-side failure stays
-    /// visible to status/disable.
+    /// visible to status/disable. The returned [`PreparedEnable`] is **not**
+    /// persisted — it flows in-memory to `apply_enable` within the same locked
+    /// enable, keeping the receipt pure typed resource data.
     ///
     /// # Errors
     ///
@@ -427,16 +498,43 @@ pub trait FrameworkDriver: Send + Sync {
         &self,
         bundle: &AdapterBundle,
         ctx: &DriverCtx,
-    ) -> Result<AdapterClaim, AdapterError>;
+    ) -> Result<(AdapterClaim, PreparedEnable), AdapterError>;
+
+    /// Carry still-relevant facts from a validated prior receipt into the
+    /// newly prepared receipt before it replaces prior state.
+    ///
+    /// Most drivers fully supersede their prior receipt and need no merge.
+    /// Drivers whose mutations are not reversed by re-enable can override
+    /// this hook so an early re-enable failure does not erase cleanup facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns a driver-specific receipt consistency error.
+    fn preserve_reenable_facts(
+        &self,
+        _prior: &AdapterClaim,
+        _next: &mut AdapterClaim,
+    ) -> Result<(), AdapterError> {
+        Ok(())
+    }
 
     /// Idempotently apply an already-persisted enable receipt to framework
-    /// state.
+    /// state, reusing the [`PreparedEnable`] state produced by
+    /// [`Self::prepare_enable`] so no read-only host probe runs twice in one
+    /// enable. When a driver applies resources incrementally, it journals
+    /// intent and confirmation transitions through `progress`.
     ///
     /// # Errors
     ///
     /// [`AdapterError::FrameworkCli`] or [`AdapterError::BundleInvalid`] on
     /// failure.
-    fn apply_enable(&self, claim: &AdapterClaim, ctx: &DriverCtx) -> Result<(), AdapterError>;
+    fn apply_enable(
+        &self,
+        claim: &mut AdapterClaim,
+        prepared: &PreparedEnable,
+        ctx: &DriverCtx,
+        progress: &mut dyn EnableProgress,
+    ) -> Result<(), AdapterError>;
 
     /// Read-only status check against a receipt. Must not mutate state.
     ///

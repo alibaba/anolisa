@@ -53,7 +53,7 @@ use super::claim::{
 use super::driver::{
     AdapterBundle, AdapterCondition, AdapterConditionKind, AdapterStatusReport, AdapterSummary,
     ClaimResourceRef, ConditionStatus, DetectResult, DisableReport, DriverCtx, DriverPlan,
-    FrameworkCommand, FrameworkDriver, HostEnv, find_binary_in_path,
+    FrameworkCommand, FrameworkDriver, HostEnv, PreparedEnable, find_binary_in_path,
 };
 use super::util::{bool_status, cli_failure_reason, digest_tree, display_command, now_iso8601};
 
@@ -221,7 +221,7 @@ impl FrameworkDriver for QoderDriver {
         &self,
         bundle: &AdapterBundle,
         ctx: &DriverCtx,
-    ) -> Result<AdapterClaim, AdapterError> {
+    ) -> Result<(AdapterClaim, PreparedEnable), AdapterError> {
         let plugin = plugin_name(bundle, ctx);
         validate_plugin_id(&plugin)?;
         let settings =
@@ -250,28 +250,37 @@ impl FrameworkDriver for QoderDriver {
             },
         ];
 
-        Ok(AdapterClaim {
-            claim_schema: CLAIM_SCHEMA_VERSION,
-            component: ctx.component.clone(),
-            framework: self.name().to_string(),
-            plugin_id: Some(plugin),
-            adapter_type: ctx.adapter_type.clone(),
-            enabled_at: now_iso8601(),
-            resource_root: bundle.resource_root.clone(),
-            bundle_digest: bundle.digest.clone(),
-            driver_schema: DRIVER_SCHEMA_VERSION,
-            status: ClaimStatus::Enabled,
-            resources,
-            driver_payload: DriverPayload::Qoder(QoderClaim {
-                plugin_resource: RES_PLUGIN.to_string(),
-                settings_resource: RES_SETTINGS.to_string(),
-                managed_hooks,
-                managed_hook_specs,
-            }),
-        })
+        Ok((
+            AdapterClaim {
+                claim_schema: CLAIM_SCHEMA_VERSION,
+                component: ctx.component.clone(),
+                framework: self.name().to_string(),
+                plugin_id: Some(plugin),
+                adapter_type: ctx.adapter_type.clone(),
+                enabled_at: now_iso8601(),
+                resource_root: bundle.resource_root.clone(),
+                bundle_digest: bundle.digest.clone(),
+                driver_schema: DRIVER_SCHEMA_VERSION,
+                status: ClaimStatus::Enabled,
+                resources,
+                driver_payload: DriverPayload::Qoder(QoderClaim {
+                    plugin_resource: RES_PLUGIN.to_string(),
+                    settings_resource: RES_SETTINGS.to_string(),
+                    managed_hooks,
+                    managed_hook_specs,
+                }),
+            },
+            PreparedEnable::None,
+        ))
     }
 
-    fn apply_enable(&self, claim: &AdapterClaim, ctx: &DriverCtx) -> Result<(), AdapterError> {
+    fn apply_enable(
+        &self,
+        claim: &mut AdapterClaim,
+        _prepared: &PreparedEnable,
+        ctx: &DriverCtx,
+        _progress: &mut dyn super::driver::EnableProgress,
+    ) -> Result<(), AdapterError> {
         // Resolve plugin + settings strictly from the receipt's payload
         // references (Manager-validated), failing closed on a malformed
         // receipt rather than falling back to ctx-derived defaults.
@@ -965,6 +974,8 @@ mod tests {
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: None,
+            framework_version_req: None,
+            allow_unsafe_plugin_install: false,
             dry_run: true,
             ops: &ops,
         };

@@ -301,6 +301,28 @@ impl ClaimResource {
     }
 }
 
+/// Confirmation state for a framework configuration mutation.
+///
+/// `Pending` is durable write-ahead intent: the command has not yet produced
+/// a confirmed success, so the host may or may not contain the requested
+/// value. Existing receipts omit this field and therefore deserialize as
+/// `Applied`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigApplyState {
+    /// The framework command completed successfully.
+    #[default]
+    Applied,
+    /// The mutation is about to run or its outcome is uncertain.
+    Pending,
+}
+
+impl ConfigApplyState {
+    fn is_applied(&self) -> bool {
+        *self == Self::Applied
+    }
+}
+
 /// The closed set of resource kinds a receipt may declare.
 ///
 /// Additional kinds (`Tree`, `JsonKeys`) are introduced when their first
@@ -354,14 +376,16 @@ pub enum ClaimResourceKind {
         /// Marketplace name ANOLISA registered.
         marketplace: String,
     },
-    /// A framework configuration key/value pair that ANOLISA applied.
-    /// The key path is framework-specific; the value is the TOML
-    /// representation of what was set.
+    /// A framework configuration key ANOLISA attempted to apply.
     FrameworkConfig {
         /// Framework that owns the config (e.g. `openclaw`).
         framework: String,
         /// Config key path.
         key: String,
+        /// Whether the framework confirmed the mutation. Applied is omitted
+        /// on the wire to preserve compatibility with existing receipts.
+        #[serde(default, skip_serializing_if = "ConfigApplyState::is_applied")]
+        state: ConfigApplyState,
     },
 }
 
@@ -1040,11 +1064,48 @@ mod tests {
             kind: ClaimResourceKind::FrameworkConfig {
                 framework: "openclaw".to_string(),
                 key: "plugins.entries.sec.enabled".to_string(),
+                state: ConfigApplyState::Applied,
             },
         };
         resource
             .validate(&layout, &allowed)
             .expect("config resource should pass");
+    }
+
+    #[test]
+    fn framework_config_state_is_backward_compatible_and_round_trips_pending() {
+        let applied = ClaimResource {
+            id: "config_applied".to_string(),
+            purpose: "openclaw_config".to_string(),
+            kind: ClaimResourceKind::FrameworkConfig {
+                framework: "openclaw".to_string(),
+                key: "applied.key".to_string(),
+                state: ConfigApplyState::Applied,
+            },
+        };
+        let applied_json = serde_json::to_string(&applied).expect("serialize applied");
+        assert!(
+            !applied_json.contains("\"state\""),
+            "default applied state must keep the existing wire shape"
+        );
+        let parsed: ClaimResource =
+            serde_json::from_str(&applied_json).expect("parse implicit applied");
+        assert_eq!(parsed, applied);
+
+        let pending = ClaimResource {
+            id: "config_pending".to_string(),
+            purpose: "openclaw_config".to_string(),
+            kind: ClaimResourceKind::FrameworkConfig {
+                framework: "openclaw".to_string(),
+                key: "pending.key".to_string(),
+                state: ConfigApplyState::Pending,
+            },
+        };
+        let pending_json = serde_json::to_string(&pending).expect("serialize pending");
+        assert!(pending_json.contains("\"state\":\"pending\""));
+        let parsed: ClaimResource =
+            serde_json::from_str(&pending_json).expect("parse explicit pending");
+        assert_eq!(parsed, pending);
     }
 
     #[test]
@@ -1089,6 +1150,7 @@ mod tests {
                     kind: ClaimResourceKind::FrameworkConfig {
                         framework: "openclaw".to_string(),
                         key: "plugins.entries.sec-core.enabled".to_string(),
+                        state: ConfigApplyState::Applied,
                     },
                 },
             ],

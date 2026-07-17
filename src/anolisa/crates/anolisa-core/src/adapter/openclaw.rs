@@ -13,7 +13,23 @@
 //! `OPENCLAW_HOME`, set `OPENCLAW_STATE_DIR` to the resolved home, and
 //! prepend the standard bin dirs to `PATH`. `OPENCLAW_BIN` overrides the
 //! executable (used by tests to point at a fake CLI).
+//!
+//! Before the first framework mutation — during `prepare_enable` (and, for
+//! `--dry-run`, `plan_enable`) — `enable` builds a read-only
+//! `OpenClawHostProfile` from all three probes (`openclaw --version`,
+//! `plugins install --help`, `plugins inspect --help`). From it the driver
+//! gates on the adapter's declared framework version, chooses
+//! version-conditioned config, decides the install argv (`--force`, and
+//! `--dangerously-force-unsafe-install` only when both authorized and
+//! advertised as effective by the host), and records the inspect capabilities.
+//! The install/verify capabilities flow to `apply_enable` as typed
+//! [`PreparedEnable`] state, so
+//! apply performs no probe of its own — each probe runs exactly once per
+//! enable, all before the first mutation. The host version or argv is never
+//! written into the receipt — the receipt stays pure typed data.
 
+use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -22,13 +38,15 @@ use sha2::{Digest, Sha256};
 use super::AdapterError;
 use super::claim::{
     AdapterClaim, CLAIM_SCHEMA_VERSION, ClaimResource, ClaimResourceKind, ClaimStatus,
-    DRIVER_SCHEMA_VERSION, DriverPayload, OpenClawClaim, validate_plugin_id,
+    ConfigApplyState, DRIVER_SCHEMA_VERSION, DriverPayload, OpenClawClaim, validate_plugin_id,
 };
 use super::driver::{
     AdapterBundle, AdapterCondition, AdapterConditionKind, AdapterStatusReport, AdapterSummary,
-    ClaimResourceRef, ConditionStatus, DetectResult, DisableReport, DriverCtx, DriverPlan,
-    FrameworkCommand, FrameworkDriver, HostEnv, find_binary_in_path,
+    ClaimResourceRef, CliOutput, ConditionStatus, DetectResult, DisableReport, DriverCtx,
+    DriverPlan, EnableProgress, FrameworkCommand, FrameworkDriver, HostEnv, PreparedEnable,
+    find_binary_in_path,
 };
+use crate::manifest::AdapterConfigSetSpec;
 
 /// Default timeout for an OpenClaw CLI invocation.
 const CLI_TIMEOUT: Duration = Duration::from_secs(60);
@@ -140,11 +158,20 @@ impl FrameworkDriver for OpenClawDriver {
         let home = require_home(ctx)?;
         let mut actions = Vec::new();
         let mut register_command = None;
-        if !ctx.is_skill_bundle() {
+        // Plugin adapters resolve a read-only host profile so the dry-run
+        // plan shows the exact install command (including whether the
+        // authorized unsafe flag is used) and only the config the host
+        // version actually selects — the same decisions a real enable makes.
+        let mut selected_config: Vec<(usize, &AdapterConfigSetSpec)> = Vec::new();
+        if ctx.is_skill_bundle() {
+            // The adapter-level version gate still applies to skill bundles.
+            self.gate_skill_bundle_version(ctx)?;
+        } else {
             let plugin_id = require_plugin_id(bundle)?;
             validate_plugin_id(&plugin_id)?;
-            let cmd = build_install_cmd(&bundle.resource_root, &home, ctx.user_home.as_deref());
-            register_command = Some(display_command(&cmd));
+            let preflight = self.plugin_preflight(&bundle.resource_root, ctx)?;
+            selected_config = preflight.selected_config;
+            register_command = Some(display_command(&preflight.install_cmd));
             actions.push(format!(
                 "register openclaw plugin '{plugin_id}' from {}",
                 bundle.resource_root.display()
@@ -164,14 +191,12 @@ impl FrameworkDriver for OpenClawDriver {
                 skill.name,
             ));
         }
-        if !ctx.is_skill_bundle() {
-            for (i, cfg) in ctx.declared_config.iter().enumerate() {
-                actions.push(format!(
-                    "set openclaw config [{i}] {} = {}",
-                    cfg.key,
-                    config_value_display(&cfg.value)
-                ));
-            }
+        for &(i, cfg) in &selected_config {
+            actions.push(format!(
+                "set openclaw config [{i}] {} = {}",
+                cfg.key,
+                config_value_display(&cfg.value)
+            ));
         }
 
         Ok(DriverPlan {
@@ -186,18 +211,50 @@ impl FrameworkDriver for OpenClawDriver {
         &self,
         bundle: &AdapterBundle,
         ctx: &DriverCtx,
-    ) -> Result<AdapterClaim, AdapterError> {
+    ) -> Result<(AdapterClaim, PreparedEnable), AdapterError> {
         let home = require_home(ctx)?;
-        let mut resources = vec![ClaimResource {
-            id: RES_STATE_DIR.to_string(),
-            purpose: "openclaw_state_dir".to_string(),
-            kind: ClaimResourceKind::ExternalPath { path: home.clone() },
-        }];
+
+        // Resolve the plugin id and, for plugin adapters, run all read-only
+        // probing and gating BEFORE building any resource — so a version
+        // mismatch, a missing `--force`/`--json`, or an unsupported authorized
+        // unsafe flag fails here, before the Manager persists the receipt. The
+        // config the host version selects is computed once and carried as
+        // transient intent; apply journals each entry as Pending before its
+        // write and confirms it only after success. The install/verify
+        // capabilities are carried forward to `apply_enable` as typed
+        // `PreparedEnable` so apply never re-probes.
         let plugin_id = if ctx.is_skill_bundle() {
             None
         } else {
             let plugin_id = require_plugin_id(bundle)?;
             validate_plugin_id(&plugin_id)?;
+            Some(plugin_id)
+        };
+        let prepared = if ctx.is_skill_bundle() {
+            // Skill bundles run no plugin install, but the adapter-level
+            // version gate still applies before the receipt is persisted.
+            self.gate_skill_bundle_version(ctx)?;
+            PreparedEnable::None
+        } else {
+            let preflight = self.plugin_preflight(&bundle.resource_root, ctx)?;
+            PreparedEnable::OpenClaw {
+                supports_unsafe_install: preflight.supports_unsafe_install,
+                supports_inspect_json: preflight.supports_inspect_json,
+                supports_inspect_runtime: preflight.supports_inspect_runtime,
+                selected_config_indices: preflight
+                    .selected_config
+                    .iter()
+                    .map(|(index, _)| *index)
+                    .collect(),
+            }
+        };
+
+        let mut resources = vec![ClaimResource {
+            id: RES_STATE_DIR.to_string(),
+            purpose: "openclaw_state_dir".to_string(),
+            kind: ClaimResourceKind::ExternalPath { path: home.clone() },
+        }];
+        if let Some(plugin_id) = &plugin_id {
             resources.push(ClaimResource {
                 id: RES_PLUGIN.to_string(),
                 purpose: "openclaw_plugin".to_string(),
@@ -206,8 +263,7 @@ impl FrameworkDriver for OpenClawDriver {
                     plugin_id: plugin_id.clone(),
                 },
             });
-            Some(plugin_id)
-        };
+        }
 
         let mut skill_resources = Vec::new();
         for skill in &ctx.declared_skills {
@@ -222,23 +278,7 @@ impl FrameworkDriver for OpenClawDriver {
             skill_resources.push(res_id);
         }
 
-        let mut config_resources = Vec::new();
-        if !ctx.is_skill_bundle() {
-            for (i, cfg) in ctx.declared_config.iter().enumerate() {
-                let res_id = format!("openclaw_config_{i}");
-                resources.push(ClaimResource {
-                    id: res_id.clone(),
-                    purpose: "openclaw_config".to_string(),
-                    kind: ClaimResourceKind::FrameworkConfig {
-                        framework: self.name().to_string(),
-                        key: cfg.key.clone(),
-                    },
-                });
-                config_resources.push(res_id);
-            }
-        }
-
-        Ok(AdapterClaim {
+        let claim = AdapterClaim {
             claim_schema: CLAIM_SCHEMA_VERSION,
             component: ctx.component.clone(),
             framework: self.name().to_string(),
@@ -258,31 +298,136 @@ impl FrameworkDriver for OpenClawDriver {
                     RES_PLUGIN.to_string()
                 },
                 skill_resources,
-                config_resources,
+                // Pending/applied config resources are journaled during apply;
+                // this list references confirmed entries only.
+                config_resources: Vec::new(),
             }),
-        })
+        };
+        Ok((claim, prepared))
     }
 
-    fn apply_enable(&self, claim: &AdapterClaim, ctx: &DriverCtx) -> Result<(), AdapterError> {
-        let home = require_home(ctx)?;
+    fn preserve_reenable_facts(
+        &self,
+        prior: &AdapterClaim,
+        next: &mut AdapterClaim,
+    ) -> Result<(), AdapterError> {
+        preserve_openclaw_config_facts(prior, next)
+    }
 
-        if !ctx.is_skill_bundle() {
+    fn apply_enable(
+        &self,
+        claim: &mut AdapterClaim,
+        prepared: &PreparedEnable,
+        ctx: &DriverCtx,
+        progress: &mut dyn EnableProgress,
+    ) -> Result<(), AdapterError> {
+        let home = require_home(ctx)?;
+        let user_home = ctx.user_home.as_deref();
+
+        // The install/verify capabilities (unsafe support, inspect `--runtime`)
+        // and all gating were resolved and validated by `prepare_enable`, which
+        // probed the host once and handed the results forward as `prepared`.
+        // `apply_enable` therefore does NOT probe at all: the install argv is
+        // rebuilt from the typed `ctx` (required `--force`, plus the unsafe
+        // flag iff the caller authorized it), config selection comes from
+        // prepared state, and runtime verification uses the prepared
+        // `--runtime` capability. Each probe (`--version`, install `--help`,
+        // inspect `--help`) thus runs exactly once per enable, all in prepare,
+        // and no two probe generations are ever mixed.
+        //
+        // Defense in depth: `PreparedEnable` and this trait are public, so a
+        // caller could hand a mismatched value. Validate the (adapter kind,
+        // prepared variant) pairing and re-check the capabilities BEFORE the
+        // first mutation, failing closed on any mismatch rather than silently
+        // degrading (which could skip the `--json` precondition, verify without
+        // `--runtime`, or add the unsafe flag on an unverified host).
+        let (host_supports_unsafe, verify_with_runtime, selected_config_indices) = if ctx
+            .is_skill_bundle()
+        {
+            if !matches!(prepared, PreparedEnable::None) {
+                return Err(prepared_state_mismatch(
+                    "skill_bundle adapters carry no prepared host capabilities",
+                ));
+            }
+            // Skill bundles run no plugin install and no runtime verification;
+            // these values are unused for them.
+            (false, false, Vec::new())
+        } else {
+            match prepared {
+                PreparedEnable::OpenClaw {
+                    supports_unsafe_install,
+                    supports_inspect_json,
+                    supports_inspect_runtime,
+                    selected_config_indices,
+                } => {
+                    if !supports_inspect_json {
+                        return Err(AdapterError::FrameworkCli {
+                            program: openclaw_bin(),
+                            reason: "`openclaw plugins inspect --help` does not expose --json; \
+                                     cannot verify plugin runtime status"
+                                .to_string(),
+                        });
+                    }
+                    if ctx.allow_unsafe_plugin_install && !supports_unsafe_install {
+                        return Err(AdapterError::FrameworkCli {
+                            program: openclaw_bin(),
+                            reason: "unsafe plugin install was explicitly authorized but this \
+                                     openclaw does not expose --dangerously-force-unsafe-install"
+                                .to_string(),
+                        });
+                    }
+                    validate_prepared_config_indices(selected_config_indices, ctx)?;
+                    (
+                        *supports_unsafe_install,
+                        *supports_inspect_runtime,
+                        selected_config_indices.clone(),
+                    )
+                }
+                PreparedEnable::None => {
+                    return Err(prepared_state_mismatch(
+                        "openclaw plugin enable requires prepared host capabilities",
+                    ));
+                }
+            }
+        };
+        validate_config_claim_state(claim)?;
+        validate_pending_config_selection(claim, &selected_config_indices, ctx)?;
+
+        let plugin = if ctx.is_skill_bundle() {
+            None
+        } else {
             let plugin_id = claim_plugin_id(claim).ok_or_else(|| AdapterError::BundleInvalid {
                 root: claim.resource_root.clone(),
                 reason: "openclaw receipt has no plugin id".to_string(),
             })?;
             validate_plugin_id(&plugin_id)?;
-
-            let cmd = build_install_cmd(&claim.resource_root, &home, ctx.user_home.as_deref());
+            let cmd = base_cmd(
+                install_argv(&claim.resource_root, ctx.allow_unsafe_plugin_install),
+                &home,
+                user_home,
+            );
             let program = cmd.program.clone();
             let output = ctx.ops.run_framework_cli(cmd)?;
             if !output.success() {
-                return Err(AdapterError::FrameworkCli {
-                    program,
-                    reason: cli_failure_reason("plugins install", &output),
-                });
+                let mut reason = full_failure_reason("plugins install", &output);
+                // Point the operator at the explicit, auditable retry only when
+                // it could actually help: the host exposes the unsafe flag, the
+                // user did not already authorize it, and the failure looks like
+                // a plugin-safety rejection. Never retry automatically.
+                if host_supports_unsafe
+                    && !ctx.allow_unsafe_plugin_install
+                    && install_output_looks_like_safety_rejection(&output)
+                {
+                    reason.push_str(
+                        "; this looks like an OpenClaw plugin-safety rejection — review the \
+                         reported findings and, only if you accept them, re-run enable with \
+                         --allow-unsafe-plugin-install",
+                    );
+                }
+                return Err(AdapterError::FrameworkCli { program, reason });
             }
-        }
+            Some(plugin_id)
+        };
 
         for skill in &ctx.declared_skills {
             let src = skill
@@ -293,19 +438,36 @@ impl FrameworkDriver for OpenClawDriver {
             ctx.ops.copy_tree(&src, &dst)?;
         }
 
-        if !ctx.is_skill_bundle() {
-            for cfg in &ctx.declared_config {
-                let cmd =
-                    build_config_set_cmd(&cfg.key, &cfg.value, &home, ctx.user_home.as_deref());
+        if let Some(plugin_id) = &plugin {
+            // Apply only the entries selected during prepare. A selected
+            // entry becomes a durable Pending resource before the command,
+            // then transitions to Applied after success. Matching resources
+            // from re-enable are reused rather than duplicated.
+            for i in selected_config_indices {
+                let cfg = &ctx.declared_config[i];
+                let resource_id = ensure_config_intent(claim, i, cfg)?;
+                // Write-ahead persistence closes the mutation-without-receipt
+                // window. On timeout/non-zero exit the entry remains Pending,
+                // accurately expressing that host state is uncertain.
+                progress.persist_claim(claim)?;
+                let cmd = build_config_set_cmd(&cfg.key, &cfg.value, &home, user_home);
                 let program = cmd.program.clone();
                 let output = ctx.ops.run_framework_cli(cmd)?;
                 if !output.success() {
                     return Err(AdapterError::FrameworkCli {
                         program,
-                        reason: cli_failure_reason("config set", &output),
+                        reason: full_failure_reason("config set", &output),
                     });
                 }
+                confirm_config_applied(claim, &resource_id, cfg)?;
+                progress.persist_claim(claim)?;
             }
+
+            // Post-install runtime verification: the plugin must report
+            // loaded. A non-loaded status surfaces the framework diagnostics
+            // and, via the Manager's receipt-first model, leaves a
+            // cleanup_failed receipt for later disable.
+            self.verify_runtime(plugin_id, &home, user_home, ctx, verify_with_runtime)?;
         }
 
         Ok(())
@@ -452,10 +614,27 @@ impl FrameworkDriver for OpenClawDriver {
 
         // 3. Config entries are NOT reversed on disable (framework-wide
         //    config should persist).
-        let config_count = claim_config_count(claim);
-        if config_count > 0 {
+        let (applied_config_count, pending_config_count) = claim_config_counts(claim);
+        if applied_config_count > 0 {
+            let noun = if applied_config_count == 1 {
+                "entry"
+            } else {
+                "entries"
+            };
             messages.push(format!(
-                "{config_count} openclaw config entries left in place (not reversed on disable)"
+                "{applied_config_count} confirmed openclaw config {noun} left in place \
+                 (not reversed on disable)"
+            ));
+        }
+        if pending_config_count > 0 {
+            let noun = if pending_config_count == 1 {
+                "entry"
+            } else {
+                "entries"
+            };
+            messages.push(format!(
+                "{pending_config_count} openclaw config {noun} with an uncertain apply outcome \
+                 left in place (not reversed on disable)"
             ));
         }
 
@@ -567,6 +746,1231 @@ impl OpenClawDriver {
 }
 
 // ---------------------------------------------------------------------------
+// Host profile (read-only probing) and enable gating
+// ---------------------------------------------------------------------------
+
+/// Read-only pre-install facts about the installed OpenClaw CLI, gathered by
+/// [`OpenClawDriver::host_profile`] from all three probes (`openclaw
+/// --version`, `plugins install --help`, `plugins inspect --help`) before the
+/// first mutation. Private typed data — never persisted into a receipt.
+#[derive(Debug, Clone)]
+struct OpenClawHostProfile {
+    /// Parsed `openclaw --version`, when the output was recognizable.
+    version: Option<OpenClawVersion>,
+    /// Trimmed raw `--version` output, for diagnostics.
+    version_display: String,
+    /// `openclaw plugins install --help` exposes `--force`.
+    supports_install_force: bool,
+    /// `openclaw plugins install --help` exposes
+    /// `--dangerously-force-unsafe-install`, including whether the advertised
+    /// option is still effective or has become a deprecated no-op.
+    unsafe_install_support: UnsafeInstallSupport,
+    /// `openclaw plugins inspect --help` exposes `--json`.
+    supports_inspect_json: bool,
+    /// `openclaw plugins inspect --help` exposes `--runtime`.
+    supports_inspect_runtime: bool,
+}
+
+/// Effective semantics of OpenClaw's unsafe-install compatibility option.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnsafeInstallSupport {
+    Unsupported,
+    Effective,
+    DeprecatedNoOp,
+}
+
+impl UnsafeInstallSupport {
+    fn is_effective(self) -> bool {
+        self == Self::Effective
+    }
+}
+
+/// A plugin adapter's resolved read-only preflight, derived before the first
+/// framework mutation and consumed by `prepare_enable`/`plan_enable`: the
+/// selected config, the single install command, and the install/verify
+/// capabilities to hand forward as [`PreparedEnable`].
+struct PluginPreflight<'a> {
+    /// The host's `plugins install --help` exposes the unsafe flag.
+    supports_unsafe_install: bool,
+    /// The host's `plugins inspect --help` exposes `--json`.
+    supports_inspect_json: bool,
+    /// The host's `plugins inspect --help` exposes `--runtime`.
+    supports_inspect_runtime: bool,
+    /// Selected config entries as `(original manifest index, spec)`. The
+    /// index anchors the receipt's `openclaw_config_<i>` resource id so
+    /// `apply_enable` can execute exactly the selected entries even when two
+    /// entries share a config key.
+    selected_config: Vec<(usize, &'a AdapterConfigSetSpec)>,
+    install_cmd: FrameworkCommand,
+}
+
+impl OpenClawDriver {
+    /// Run one read-only probe command, failing closed on timeout **or a
+    /// non-zero exit**, and return its combined stdout/stderr on success. A
+    /// failed probe must never be mistaken for a capability answer (e.g. an
+    /// error message mentioning `--force`), so the exit status is checked
+    /// before the output is interpreted; the diagnostics are carried in the
+    /// error.
+    ///
+    /// # Errors
+    ///
+    /// [`AdapterError::FrameworkCli`] when the probe cannot spawn, times out,
+    /// or exits non-zero.
+    fn run_read_probe(
+        &self,
+        ctx: &DriverCtx,
+        cmd: FrameworkCommand,
+        label: &str,
+    ) -> Result<String, AdapterError> {
+        let out = ctx.ops.run_framework_cli(cmd)?;
+        if out.timed_out || !out.success() {
+            return Err(AdapterError::FrameworkCli {
+                program: openclaw_bin(),
+                reason: full_failure_reason(label, &out),
+            });
+        }
+        Ok(combine_output(&out))
+    }
+
+    /// Probe `openclaw --version` read-only, failing closed on timeout or a
+    /// non-zero exit. The version may still be unparseable (`None`); callers
+    /// that require it enforce that separately.
+    ///
+    /// # Errors
+    ///
+    /// [`AdapterError::FrameworkCli`] when the probe cannot spawn, times out,
+    /// or exits non-zero.
+    fn probe_version(
+        &self,
+        ctx: &DriverCtx,
+    ) -> Result<(Option<OpenClawVersion>, String), AdapterError> {
+        let home = require_home(ctx)?;
+        let text = self.run_read_probe(
+            ctx,
+            build_version_cmd(&home, ctx.user_home.as_deref()),
+            "openclaw --version",
+        )?;
+        let version = parse_openclaw_version_output(&text);
+        // Keep the full trimmed output (bounded by the Manager's capture cap)
+        // so a diagnostic that precedes the version line does not hide the
+        // real, unparseable version text in the error.
+        Ok((version, text.trim().to_string()))
+    }
+
+    /// Probe the host CLI read-only for every pre-install fact: version,
+    /// `plugins install --help`, and `plugins inspect --help`. All probing
+    /// happens here — before the first mutation — and the inspect
+    /// capabilities are carried forward to `apply_enable` as
+    /// [`PreparedEnable`] so apply never re-probes. Fails closed when a probe
+    /// times out or exits non-zero.
+    ///
+    /// # Errors
+    ///
+    /// [`AdapterError::FrameworkCli`] when a probe command cannot be spawned,
+    /// times out, or exits non-zero.
+    fn host_profile(&self, ctx: &DriverCtx) -> Result<OpenClawHostProfile, AdapterError> {
+        let home = require_home(ctx)?;
+        let user_home = ctx.user_home.as_deref();
+
+        let (version, version_display) = self.probe_version(ctx)?;
+
+        let install_help = self.run_read_probe(
+            ctx,
+            build_install_help_cmd(&home, user_home),
+            "openclaw plugins install --help",
+        )?;
+        let supports_install_force = help_lists_flag(&install_help, "--force");
+        let unsafe_install_support = unsafe_install_support(&install_help);
+
+        let inspect_help = self.run_read_probe(
+            ctx,
+            build_inspect_help_cmd(&home, user_home),
+            "openclaw plugins inspect --help",
+        )?;
+        let supports_inspect_json = help_lists_flag(&inspect_help, "--json");
+        let supports_inspect_runtime = help_lists_flag(&inspect_help, "--runtime");
+
+        Ok(OpenClawHostProfile {
+            version,
+            version_display,
+            supports_install_force,
+            unsafe_install_support,
+            supports_inspect_json,
+            supports_inspect_runtime,
+        })
+    }
+
+    /// Enforce the adapter-level framework version requirement against a
+    /// probed version. A `None` requirement is a no-op. When set, the host
+    /// version must be known and satisfy the constraint. Applies to every
+    /// OpenClaw adapter (plugin and skill_bundle alike).
+    ///
+    /// # Errors
+    ///
+    /// [`AdapterError::FrameworkCli`] when the version cannot be determined;
+    /// [`AdapterError::InvalidAdapterInput`] when the requirement is malformed
+    /// (a manifest bug); [`AdapterError::FrameworkVersionMismatch`] when the
+    /// detected version does not satisfy the requirement.
+    fn enforce_version_gate(
+        &self,
+        ctx: &DriverCtx,
+        version: Option<&OpenClawVersion>,
+        version_display: &str,
+    ) -> Result<(), AdapterError> {
+        // A missing field (`None`) means "no requirement". OpenClaw owns the
+        // validity check for its own adapters (the framework-agnostic Manager
+        // does not gate other frameworks on this), so a present-but-empty
+        // requirement is a declaration error here, not a silent no-op.
+        let Some(raw) = ctx.framework_version_req.as_deref() else {
+            return Ok(());
+        };
+        let req = raw.trim();
+        if req.is_empty() {
+            return Err(AdapterError::InvalidAdapterInput {
+                component: ctx.component.clone(),
+                framework: ctx.framework.clone(),
+                reason: "adapter framework_version requirement is present but empty".to_string(),
+            });
+        }
+        let version = version.ok_or_else(|| AdapterError::FrameworkCli {
+            program: openclaw_bin(),
+            reason: format!(
+                "cannot determine openclaw version (from `openclaw --version`: {version_display:?}) to check adapter requirement '{req}'"
+            ),
+        })?;
+        match openclaw_version_req_satisfied(req, version) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(AdapterError::FrameworkVersionMismatch {
+                framework: self.name().to_string(),
+                detected: version.to_string(),
+                required: req.to_string(),
+            }),
+            Err(reason) => Err(AdapterError::InvalidAdapterInput {
+                component: ctx.component.clone(),
+                framework: ctx.framework.clone(),
+                reason: format!("invalid adapter framework_version requirement: {reason}"),
+            }),
+        }
+    }
+
+    /// Probe the version and enforce the adapter-level requirement for a
+    /// skill_bundle adapter. Only probes when a requirement is declared, so a
+    /// requirement-free skill bundle keeps its previous no-CLI behavior.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::enforce_version_gate`].
+    fn gate_skill_bundle_version(&self, ctx: &DriverCtx) -> Result<(), AdapterError> {
+        // Only probe when a requirement is declared, so a requirement-free
+        // skill bundle keeps its previous no-CLI behavior. `enforce_version_gate`
+        // still validates a present-but-empty requirement.
+        if ctx.framework_version_req.is_none() {
+            return Ok(());
+        }
+        let (version, display) = self.probe_version(ctx)?;
+        self.enforce_version_gate(ctx, version.as_ref(), &display)
+    }
+
+    /// Resolve the full plugin preflight before any mutation: profile (all
+    /// three probes), version precondition, `--json` inspect precondition,
+    /// version gate, install command, and selected config. Fails closed — the
+    /// version must be parseable, the host must expose machine-readable
+    /// (`--json`) inspect output for verification, and the `--force` /
+    /// unsafe-flag capabilities must hold (see [`build_install_cmd`]).
+    ///
+    /// # Errors
+    ///
+    /// [`AdapterError::FrameworkCli`] / [`AdapterError::FrameworkVersionMismatch`]
+    /// / [`AdapterError::InvalidAdapterInput`] for any failed probe,
+    /// precondition, gate, or malformed condition.
+    fn plugin_preflight<'a>(
+        &self,
+        resource_root: &Path,
+        ctx: &'a DriverCtx,
+    ) -> Result<PluginPreflight<'a>, AdapterError> {
+        let home = require_home(ctx)?;
+        let profile = self.host_profile(ctx)?;
+        // Fail closed before the first write: the version must be known even
+        // when the manifest declares no version condition, so an unreadable
+        // `--version` never silently proceeds to an install.
+        if profile.version.is_none() {
+            return Err(AdapterError::FrameworkCli {
+                program: openclaw_bin(),
+                reason: format!(
+                    "cannot determine openclaw version from `openclaw --version` (output: {:?})",
+                    profile.version_display
+                ),
+            });
+        }
+        // Runtime verification relies on machine-readable inspect output, so a
+        // host without `--json` is rejected before install, not after.
+        if !profile.supports_inspect_json {
+            return Err(AdapterError::FrameworkCli {
+                program: openclaw_bin(),
+                reason: "`openclaw plugins inspect --help` does not expose --json; \
+                         cannot verify plugin runtime status"
+                    .to_string(),
+            });
+        }
+        self.enforce_version_gate(ctx, profile.version.as_ref(), &profile.version_display)?;
+        let install_cmd = build_install_cmd(
+            resource_root,
+            &home,
+            ctx.user_home.as_deref(),
+            &profile,
+            ctx.allow_unsafe_plugin_install,
+        )?;
+        let selected_config = self.select_config(ctx, &profile)?;
+        Ok(PluginPreflight {
+            supports_unsafe_install: profile.unsafe_install_support.is_effective(),
+            supports_inspect_json: profile.supports_inspect_json,
+            supports_inspect_runtime: profile.supports_inspect_runtime,
+            selected_config,
+            install_cmd,
+        })
+    }
+
+    /// Select the declared config entries whose optional `framework_version`
+    /// condition the host version satisfies, paired with their original
+    /// manifest index. A missing condition (`None`) always selects; a
+    /// condition the host does not satisfy is skipped (left out of the
+    /// receipt). A present-but-empty or malformed condition is a manifest bug.
+    ///
+    /// # Errors
+    ///
+    /// [`AdapterError::InvalidAdapterInput`] when a condition is present but
+    /// empty or malformed; [`AdapterError::FrameworkCli`] when a valid
+    /// condition cannot be evaluated because the host version is unknown.
+    fn select_config<'a>(
+        &self,
+        ctx: &'a DriverCtx,
+        profile: &OpenClawHostProfile,
+    ) -> Result<Vec<(usize, &'a AdapterConfigSetSpec)>, AdapterError> {
+        let mut selected = Vec::new();
+        for (i, cfg) in ctx.declared_config.iter().enumerate() {
+            // A missing field means "always apply"; an explicit empty value is
+            // a declaration error, not an implicit unconditional apply.
+            let Some(raw) = cfg.framework_version.as_deref() else {
+                selected.push((i, cfg));
+                continue;
+            };
+            let req = raw.trim();
+            if req.is_empty() {
+                return Err(AdapterError::InvalidAdapterInput {
+                    component: ctx.component.clone(),
+                    framework: ctx.framework.clone(),
+                    reason: format!(
+                        "config '{}' declares an empty framework_version condition",
+                        cfg.key
+                    ),
+                });
+            }
+            let version = profile.version.as_ref().ok_or_else(|| AdapterError::FrameworkCli {
+                program: openclaw_bin(),
+                reason: format!(
+                    "cannot evaluate config version condition '{req}' for key '{}': openclaw version unknown",
+                    cfg.key
+                ),
+            })?;
+            match openclaw_version_req_satisfied(req, version) {
+                Ok(true) => selected.push((i, cfg)),
+                Ok(false) => {}
+                Err(reason) => {
+                    return Err(AdapterError::InvalidAdapterInput {
+                        component: ctx.component.clone(),
+                        framework: ctx.framework.clone(),
+                        reason: format!(
+                            "config '{}' has an invalid framework_version condition: {reason}",
+                            cfg.key
+                        ),
+                    });
+                }
+            }
+        }
+        Ok(selected)
+    }
+
+    /// Verify the plugin reports `loaded` after install/skill/config apply.
+    ///
+    /// Uses `plugins inspect <id> --runtime --json` when `with_runtime` (the
+    /// host's `--runtime` support, resolved during prepare and passed via
+    /// [`PreparedEnable`]), else `plugins inspect <id> --json`. No inspect-help
+    /// probe runs here — it already ran during prepare. The JSON is parsed in
+    /// Rust (legacy diagnostic lines before it are tolerated) and
+    /// `.plugin.status` must equal `"loaded"`.
+    ///
+    /// # Errors
+    ///
+    /// [`AdapterError::FrameworkCli`] carrying the OpenClaw diagnostics when
+    /// the command fails, the JSON is missing/invalid, or the status is not
+    /// `loaded`.
+    fn verify_runtime(
+        &self,
+        plugin_id: &str,
+        home: &Path,
+        user_home: Option<&Path>,
+        ctx: &DriverCtx,
+        with_runtime: bool,
+    ) -> Result<(), AdapterError> {
+        let cmd = build_inspect_cmd(plugin_id, home, user_home, with_runtime);
+        let output = ctx.ops.run_framework_cli(cmd)?;
+        if !output.success() {
+            return Err(AdapterError::FrameworkCli {
+                program: openclaw_bin(),
+                reason: format!(
+                    "runtime verification of plugin '{plugin_id}' failed: {}",
+                    inspect_diagnostics(&output)
+                ),
+            });
+        }
+        let value =
+            extract_trailing_json(&output.stdout).ok_or_else(|| AdapterError::FrameworkCli {
+                program: openclaw_bin(),
+                reason: format!(
+                    "could not parse `plugins inspect` JSON for plugin '{plugin_id}'; diagnostics: {}",
+                    inspect_diagnostics(&output)
+                ),
+            })?;
+        let status = value
+            .get("plugin")
+            .and_then(|p| p.get("status"))
+            .and_then(|s| s.as_str());
+        match status {
+            Some("loaded") => Ok(()),
+            other => Err(AdapterError::FrameworkCli {
+                program: openclaw_bin(),
+                reason: format!(
+                    "plugin '{plugin_id}' runtime status is {} (expected \"loaded\"); diagnostics: {}",
+                    other
+                        .map(|s| format!("\"{s}\""))
+                        .unwrap_or_else(|| "absent".to_string()),
+                    inspect_diagnostics(&output)
+                ),
+            }),
+        }
+    }
+}
+
+/// Merge a command's stdout and stderr into one searchable string. Help and
+/// version output land on either stream across CLI implementations.
+fn combine_output(output: &CliOutput) -> String {
+    let mut s = output.stdout.clone();
+    if !output.stderr.is_empty() {
+        if !s.is_empty() {
+            s.push('\n');
+        }
+        s.push_str(&output.stderr);
+    }
+    s
+}
+
+/// Compose a compact diagnostics string from an inspect command's output,
+/// preserving the framework's own messages for the operator.
+fn inspect_diagnostics(output: &CliOutput) -> String {
+    let mut parts = Vec::new();
+    let stdout = output.stdout.trim();
+    if !stdout.is_empty() {
+        parts.push(stdout.to_string());
+    }
+    let stderr = output.stderr.trim();
+    if !stderr.is_empty() {
+        parts.push(format!("stderr: {stderr}"));
+    }
+    if output.timed_out {
+        parts.push("timed out".to_string());
+    }
+    if parts.is_empty() {
+        "<no output>".to_string()
+    } else {
+        parts.join("; ")
+    }
+}
+
+/// Parse a JSON object from `stdout`, tolerating legacy diagnostic lines
+/// printed before it. Tries the whole trimmed output first, then each `{`
+/// boundary in turn — OpenClaw prints the JSON last, so the first prefix
+/// that parses cleanly is the intended value.
+fn extract_trailing_json(stdout: &str) -> Option<serde_json::Value> {
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return Some(value);
+    }
+    for (idx, _) in stdout.char_indices().filter(|&(_, c)| c == '{') {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout[idx..].trim()) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// Validate prepared config indices before the first mutation.
+fn validate_prepared_config_indices(
+    indices: &[usize],
+    ctx: &DriverCtx,
+) -> Result<(), AdapterError> {
+    let mut previous = None;
+    for &index in indices {
+        if index >= ctx.declared_config.len() {
+            return Err(prepared_state_mismatch(&format!(
+                "config index {index} is outside the declared config"
+            )));
+        }
+        if previous.is_some_and(|value| value >= index) {
+            return Err(prepared_state_mismatch(
+                "selected config indices must be unique and in manifest order",
+            ));
+        }
+        previous = Some(index);
+    }
+    Ok(())
+}
+
+/// Validate the OpenClaw payload's applied-resource references and the
+/// write-ahead state of every config resource.
+fn validate_config_claim_state(claim: &AdapterClaim) -> Result<(), AdapterError> {
+    let DriverPayload::OpenClaw(payload) = &claim.driver_payload else {
+        return Err(invalid_config_claim(
+            claim,
+            "receipt payload is not OpenClaw",
+        ));
+    };
+
+    let mut applied_ids = HashSet::new();
+    for resource_id in &payload.config_resources {
+        if !applied_ids.insert(resource_id.as_str()) {
+            return Err(invalid_config_claim(
+                claim,
+                &format!("applied config resource '{resource_id}' is referenced more than once"),
+            ));
+        }
+    }
+
+    let mut resource_ids = HashSet::new();
+    let mut config_keys = HashSet::new();
+    let mut has_pending = false;
+    for resource in &claim.resources {
+        if !resource_ids.insert(resource.id.as_str()) {
+            return Err(invalid_config_claim(
+                claim,
+                &format!("resource id '{}' is duplicated", resource.id),
+            ));
+        }
+        let ClaimResourceKind::FrameworkConfig { key, state, .. } = &resource.kind else {
+            continue;
+        };
+        if !config_keys.insert(key.as_str()) {
+            return Err(invalid_config_claim(
+                claim,
+                &format!("config key '{key}' has more than one receipt resource"),
+            ));
+        }
+        let referenced_as_applied = applied_ids.contains(resource.id.as_str());
+        match (*state, referenced_as_applied) {
+            (ConfigApplyState::Applied, true) | (ConfigApplyState::Pending, false) => {}
+            (ConfigApplyState::Applied, false) => {
+                return Err(invalid_config_claim(
+                    claim,
+                    &format!(
+                        "applied config resource '{}' is missing from the OpenClaw payload",
+                        resource.id
+                    ),
+                ));
+            }
+            (ConfigApplyState::Pending, true) => {
+                return Err(invalid_config_claim(
+                    claim,
+                    &format!(
+                        "pending config resource '{}' is listed as applied",
+                        resource.id
+                    ),
+                ));
+            }
+        }
+        has_pending |= *state == ConfigApplyState::Pending;
+    }
+
+    for resource_id in applied_ids {
+        match claim.resource(resource_id).map(|resource| &resource.kind) {
+            Some(ClaimResourceKind::FrameworkConfig {
+                state: ConfigApplyState::Applied,
+                ..
+            }) => {}
+            Some(_) => {
+                return Err(invalid_config_claim(
+                    claim,
+                    &format!(
+                        "applied config resource '{resource_id}' does not reference confirmed config"
+                    ),
+                ));
+            }
+            None => {
+                return Err(invalid_config_claim(
+                    claim,
+                    &format!("applied config resource '{resource_id}' does not exist"),
+                ));
+            }
+        }
+    }
+    if has_pending && claim.status != ClaimStatus::CleanupFailed {
+        return Err(invalid_config_claim(
+            claim,
+            "pending config resources require cleanup_failed receipt status",
+        ));
+    }
+    Ok(())
+}
+
+/// Ensure every uncertain prior config can be replayed by this enable.
+///
+/// A removed or version-incompatible key cannot be confirmed or superseded.
+/// Reject it before another framework mutation so enable never reports success
+/// while retaining an indefinitely pending receipt.
+fn validate_pending_config_selection(
+    claim: &AdapterClaim,
+    selected_indices: &[usize],
+    ctx: &DriverCtx,
+) -> Result<(), AdapterError> {
+    let selected_keys: HashSet<&str> = selected_indices
+        .iter()
+        .map(|&index| ctx.declared_config[index].key.as_str())
+        .collect();
+    let unmatched_keys: Vec<&str> = claim
+        .resources
+        .iter()
+        .filter_map(|resource| match &resource.kind {
+            ClaimResourceKind::FrameworkConfig {
+                key,
+                state: ConfigApplyState::Pending,
+                ..
+            } if !selected_keys.contains(key.as_str()) => Some(key.as_str()),
+            _ => None,
+        })
+        .collect();
+    if unmatched_keys.is_empty() {
+        return Ok(());
+    }
+
+    Err(AdapterError::InvalidAdapterInput {
+        component: claim.component.clone(),
+        framework: claim.framework.clone(),
+        reason: format!(
+            "pending OpenClaw config key(s) [{}] are not selected by the current manifest and \
+             host version; restore matching config entries and re-run enable to reconcile them, \
+             or disable the adapter to acknowledge they are left in place",
+            unmatched_keys.join(", ")
+        ),
+    })
+}
+
+/// Carry confirmed and uncertain config facts into a replacement receipt so a
+/// re-enable failure cannot erase host state that the new attempt did not
+/// supersede.
+fn preserve_openclaw_config_facts(
+    prior: &AdapterClaim,
+    next: &mut AdapterClaim,
+) -> Result<(), AdapterError> {
+    validate_config_claim_state(prior)?;
+    validate_config_claim_state(next)?;
+
+    let prior_resources: Vec<ClaimResource> = prior
+        .resources
+        .iter()
+        .filter(|resource| matches!(resource.kind, ClaimResourceKind::FrameworkConfig { .. }))
+        .cloned()
+        .collect();
+    for resource in prior_resources {
+        match next.resource(&resource.id) {
+            Some(existing) if existing == &resource => {}
+            Some(_) => {
+                return Err(invalid_config_claim(
+                    next,
+                    &format!(
+                        "prior config resource id '{}' collides with the replacement receipt",
+                        resource.id
+                    ),
+                ));
+            }
+            None => next.resources.push(resource),
+        }
+    }
+
+    let DriverPayload::OpenClaw(prior_payload) = &prior.driver_payload else {
+        return Err(invalid_config_claim(
+            prior,
+            "receipt payload is not OpenClaw",
+        ));
+    };
+    let DriverPayload::OpenClaw(next_payload) = &mut next.driver_payload else {
+        return Err(invalid_config_claim(
+            next,
+            "receipt payload is not OpenClaw",
+        ));
+    };
+    for resource_id in &prior_payload.config_resources {
+        if !next_payload.config_resources.contains(resource_id) {
+            next_payload.config_resources.push(resource_id.clone());
+        }
+    }
+    if next.resources.iter().any(|resource| {
+        matches!(
+            resource.kind,
+            ClaimResourceKind::FrameworkConfig {
+                state: ConfigApplyState::Pending,
+                ..
+            }
+        )
+    }) {
+        next.status = ClaimStatus::CleanupFailed;
+    }
+    validate_config_claim_state(next)
+}
+
+/// Ensure one selected config key has a durable typed intent resource.
+///
+/// Existing matching applied or pending resources are reused, which keeps
+/// repeated apply idempotent. When a manifest index collides with a preserved
+/// resource for another key, a deterministic numeric suffix avoids erasing the
+/// prior fact.
+fn ensure_config_intent(
+    claim: &mut AdapterClaim,
+    index: usize,
+    config: &AdapterConfigSetSpec,
+) -> Result<String, AdapterError> {
+    validate_config_claim_state(claim)?;
+
+    let existing_id = claim.resources.iter().find_map(|resource| {
+        matches!(
+            &resource.kind,
+            ClaimResourceKind::FrameworkConfig { framework, key, .. }
+                if framework == &claim.framework && key == &config.key
+        )
+        .then(|| resource.id.clone())
+    });
+
+    let resource_id = match existing_id {
+        Some(resource_id) => resource_id,
+        None => {
+            let base_id = format!("openclaw_config_{index}");
+            let resource_id = if claim.resource(&base_id).is_none() {
+                base_id
+            } else {
+                let mut suffix = 1usize;
+                loop {
+                    let candidate = format!("{base_id}_{suffix}");
+                    if claim.resource(&candidate).is_none() {
+                        break candidate;
+                    }
+                    suffix += 1;
+                }
+            };
+            let framework = claim.framework.clone();
+            claim.resources.push(ClaimResource {
+                id: resource_id.clone(),
+                purpose: "openclaw_config".to_string(),
+                kind: ClaimResourceKind::FrameworkConfig {
+                    framework,
+                    key: config.key.clone(),
+                    state: ConfigApplyState::Pending,
+                },
+            });
+            resource_id
+        }
+    };
+
+    let Some(resource) = claim
+        .resources
+        .iter_mut()
+        .find(|resource| resource.id == resource_id)
+    else {
+        return Err(invalid_config_claim(
+            claim,
+            &format!("config resource '{resource_id}' disappeared before apply"),
+        ));
+    };
+    match &mut resource.kind {
+        ClaimResourceKind::FrameworkConfig { state, .. } => {
+            *state = ConfigApplyState::Pending;
+        }
+        _ => {
+            return Err(invalid_config_claim(
+                claim,
+                &format!("config resource '{resource_id}' is not framework config"),
+            ));
+        }
+    }
+    let DriverPayload::OpenClaw(payload) = &mut claim.driver_payload else {
+        return Err(invalid_config_claim(
+            claim,
+            "receipt payload is not OpenClaw",
+        ));
+    };
+    payload
+        .config_resources
+        .retain(|existing| existing != &resource_id);
+    claim.status = ClaimStatus::CleanupFailed;
+    validate_config_claim_state(claim)?;
+    Ok(resource_id)
+}
+
+/// Promote a matching pending resource to a confirmed applied fact.
+fn confirm_config_applied(
+    claim: &mut AdapterClaim,
+    resource_id: &str,
+    config: &AdapterConfigSetSpec,
+) -> Result<(), AdapterError> {
+    let framework = claim.framework.clone();
+    let Some(resource_index) = claim
+        .resources
+        .iter()
+        .position(|resource| resource.id == resource_id)
+    else {
+        return Err(invalid_config_claim(
+            claim,
+            &format!("config resource '{resource_id}' disappeared during apply"),
+        ));
+    };
+    let resource = &mut claim.resources[resource_index];
+    match &mut resource.kind {
+        ClaimResourceKind::FrameworkConfig {
+            framework: resource_framework,
+            key,
+            state,
+        } if resource_framework == &framework && key == &config.key => {
+            *state = ConfigApplyState::Applied;
+        }
+        _ => {
+            return Err(invalid_config_claim(
+                claim,
+                &format!(
+                    "config resource '{resource_id}' does not match '{}'",
+                    config.key
+                ),
+            ));
+        }
+    }
+
+    let DriverPayload::OpenClaw(payload) = &mut claim.driver_payload else {
+        return Err(invalid_config_claim(
+            claim,
+            "receipt payload is not OpenClaw",
+        ));
+    };
+    if !payload
+        .config_resources
+        .iter()
+        .any(|existing| existing == resource_id)
+    {
+        payload.config_resources.push(resource_id.to_string());
+    }
+    claim.status = if claim.resources.iter().any(|resource| {
+        matches!(
+            resource.kind,
+            ClaimResourceKind::FrameworkConfig {
+                state: ConfigApplyState::Pending,
+                ..
+            }
+        )
+    }) {
+        ClaimStatus::CleanupFailed
+    } else {
+        ClaimStatus::Enabled
+    };
+    validate_config_claim_state(claim)?;
+    Ok(())
+}
+
+fn invalid_config_claim(claim: &AdapterClaim, reason: &str) -> AdapterError {
+    AdapterError::BundleInvalid {
+        root: claim.resource_root.clone(),
+        reason: format!("invalid OpenClaw config receipt: {reason}"),
+    }
+}
+
+/// Whether an install command's output looks like an OpenClaw plugin-safety
+/// rejection (as opposed to a generic failure). Used only to decide whether
+/// to surface the explicit-retry hint — never to auto-retry.
+fn install_output_looks_like_safety_rejection(output: &CliOutput) -> bool {
+    let haystack = format!("{}\n{}", output.stdout, output.stderr).to_lowercase();
+    ["unsafe", "safety", "dangerous"]
+        .iter()
+        .any(|marker| haystack.contains(marker))
+}
+
+// ---------------------------------------------------------------------------
+// OpenClaw version parsing and comparison
+// ---------------------------------------------------------------------------
+
+/// A parsed OpenClaw version.
+///
+/// OpenClaw ships calendar-style versions (`2026.4.14`) that may carry a
+/// purely-numeric *correction* suffix (`2026.5.3-1`, a rebuild of the same
+/// release), an alphabetic prerelease (`2026.4.14-beta.1`, `-rc.2`), and/or
+/// `+build` metadata (ignored for ordering).
+///
+/// The deliberate departure from plain semver: a numeric-only suffix is a
+/// correction that sorts **above** the base version, not a prerelease that
+/// sorts below. Comparing with a stock semver `Version` would wrongly rank
+/// `2026.5.3-1 < 2026.5.3`, so this type implements its own ordering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpenClawVersion {
+    core: [u64; 3],
+    suffix: VersionSuffix,
+}
+
+/// The suffix of an [`OpenClawVersion`], ranked prerelease < release <
+/// correction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum VersionSuffix {
+    /// Alphabetic prerelease identifiers (`beta.1`); sorts below the release.
+    Prerelease(Vec<PreId>),
+    /// No suffix.
+    Release,
+    /// Numeric-only correction identifiers (`1`, `2.1`); sorts above release.
+    Correction(Vec<u64>),
+}
+
+/// One prerelease identifier, numeric or textual, compared semver-style.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PreId {
+    /// Purely-numeric identifier, compared by value.
+    Num(u64),
+    /// Textual identifier, compared lexically.
+    Text(String),
+}
+
+impl OpenClawVersion {
+    /// Parse an OpenClaw version string. Returns `None` for any malformed
+    /// input — a non-numeric or >3-component core, an empty or invalid
+    /// `-suffix`, or empty/invalid `+build` metadata — so a bad constraint
+    /// like `>=2026.4.14-` is rejected rather than silently treated as
+    /// `>=2026.4.14`. Build metadata is validated for well-formedness, then
+    /// discarded (it does not affect identity or ordering).
+    fn parse(input: &str) -> Option<OpenClawVersion> {
+        let s = input.trim();
+        if s.is_empty() {
+            return None;
+        }
+        // Separate optional `+build`; validate then drop it. An empty or
+        // invalid build metadata segment is a malformed version.
+        let s = match s.split_once('+') {
+            Some((before, build)) => {
+                if !is_valid_dot_identifiers(build) {
+                    return None;
+                }
+                before
+            }
+            None => s,
+        };
+        // Separate optional `-suffix`. A trailing `-` with no suffix is
+        // malformed, not a plain release.
+        let (core_str, pre_str) = match s.split_once('-') {
+            Some((core, pre)) => (core, Some(pre)),
+            None => (s, None),
+        };
+
+        let mut core = [0u64; 3];
+        let mut count = 0usize;
+        for (i, part) in core_str.split('.').enumerate() {
+            if i >= 3 {
+                return None;
+            }
+            core[i] = part.parse().ok()?;
+            count = i + 1;
+        }
+        if count == 0 {
+            return None;
+        }
+
+        let suffix = match pre_str {
+            None => VersionSuffix::Release,
+            Some(pre) => {
+                // Every identifier must be non-empty and drawn from the
+                // semver alphabet (`[0-9A-Za-z-]`); an empty `-` or an illegal
+                // character is rejected rather than accepted as text.
+                if !is_valid_dot_identifiers(pre) {
+                    return None;
+                }
+                let ids: Vec<&str> = pre.split('.').collect();
+                let all_numeric = ids.iter().all(|id| id.bytes().all(|b| b.is_ascii_digit()));
+                if all_numeric {
+                    let nums = ids
+                        .iter()
+                        .map(|id| id.parse::<u64>().ok())
+                        .collect::<Option<Vec<_>>>()?;
+                    VersionSuffix::Correction(nums)
+                } else {
+                    let parsed = ids
+                        .iter()
+                        .map(|id| {
+                            if id.bytes().all(|b| b.is_ascii_digit()) {
+                                id.parse::<u64>().ok().map(PreId::Num)
+                            } else {
+                                Some(PreId::Text((*id).to_string()))
+                            }
+                        })
+                        .collect::<Option<Vec<_>>>()?;
+                    VersionSuffix::Prerelease(parsed)
+                }
+            }
+        };
+        Some(OpenClawVersion { core, suffix })
+    }
+}
+
+/// Whether `s` is one or more dot-separated identifiers, each non-empty and
+/// composed only of ASCII alphanumerics and `-` (the semver
+/// prerelease/build alphabet). Rejects empty input and empty identifiers
+/// (leading/trailing/double dots).
+fn is_valid_dot_identifiers(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    s.split('.')
+        .all(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+}
+
+impl std::fmt::Display for OpenClawVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}.{}", self.core[0], self.core[1], self.core[2])?;
+        match &self.suffix {
+            VersionSuffix::Release => Ok(()),
+            VersionSuffix::Correction(nums) => {
+                let joined = nums
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(".");
+                write!(f, "-{joined}")
+            }
+            VersionSuffix::Prerelease(ids) => {
+                let joined = ids
+                    .iter()
+                    .map(|id| match id {
+                        PreId::Num(n) => n.to_string(),
+                        PreId::Text(t) => t.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(".");
+                write!(f, "-{joined}")
+            }
+        }
+    }
+}
+
+impl Ord for OpenClawVersion {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.core
+            .cmp(&other.core)
+            .then_with(|| self.suffix.cmp(&other.suffix))
+    }
+}
+
+impl PartialOrd for OpenClawVersion {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl VersionSuffix {
+    /// Ordering rank: prerelease (0) < release (1) < correction (2).
+    fn rank(&self) -> u8 {
+        match self {
+            VersionSuffix::Prerelease(_) => 0,
+            VersionSuffix::Release => 1,
+            VersionSuffix::Correction(_) => 2,
+        }
+    }
+}
+
+impl Ord for VersionSuffix {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (VersionSuffix::Prerelease(a), VersionSuffix::Prerelease(b)) => cmp_pre_ids(a, b),
+            (VersionSuffix::Correction(a), VersionSuffix::Correction(b)) => a.cmp(b),
+            _ => self.rank().cmp(&other.rank()),
+        }
+    }
+}
+
+impl PartialOrd for VersionSuffix {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Compare prerelease identifier lists semver-style: numeric identifiers
+/// compare by value, numeric sorts below textual, textual compares lexically,
+/// and a shorter list sorts below a longer one when the shared prefix is
+/// equal.
+fn cmp_pre_ids(a: &[PreId], b: &[PreId]) -> Ordering {
+    for (x, y) in a.iter().zip(b.iter()) {
+        let ord = match (x, y) {
+            (PreId::Num(m), PreId::Num(n)) => m.cmp(n),
+            (PreId::Text(m), PreId::Text(n)) => m.cmp(n),
+            (PreId::Num(_), PreId::Text(_)) => Ordering::Less,
+            (PreId::Text(_), PreId::Num(_)) => Ordering::Greater,
+        };
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    a.len().cmp(&b.len())
+}
+
+/// Comparison operators supported in an OpenClaw version requirement.
+#[derive(Debug, Clone, Copy)]
+enum ReqOp {
+    /// `>=`
+    Gte,
+    /// `>`
+    Gt,
+    /// `<=`
+    Lte,
+    /// `<`
+    Lt,
+    /// `=` / `==`
+    Eq,
+}
+
+/// Split a single requirement clause into its operator and version text. A
+/// bare version (no operator) is treated as a minimum (`>=`), matching how
+/// these fields express a lowest supported framework version.
+fn split_req_clause(clause: &str) -> (ReqOp, &str) {
+    const OPS: [(&str, ReqOp); 6] = [
+        (">=", ReqOp::Gte),
+        ("<=", ReqOp::Lte),
+        ("==", ReqOp::Eq),
+        (">", ReqOp::Gt),
+        ("<", ReqOp::Lt),
+        ("=", ReqOp::Eq),
+    ];
+    for (prefix, op) in OPS {
+        if let Some(rest) = clause.strip_prefix(prefix) {
+            return (op, rest.trim());
+        }
+    }
+    (ReqOp::Gte, clause)
+}
+
+/// Evaluate a comma-separated requirement (`>=2026.4.14, <2027.0.0`) against
+/// a version. All clauses must hold.
+///
+/// # Errors
+///
+/// Returns `Err(reason)` when the requirement is empty, contains an empty
+/// clause (a leading/trailing/double comma), or a clause's version cannot be
+/// parsed — all manifest bugs, distinct from a non-match.
+fn openclaw_version_req_satisfied(req: &str, version: &OpenClawVersion) -> Result<bool, String> {
+    if req.trim().is_empty() {
+        return Err(format!("empty version requirement '{req}'"));
+    }
+    let mut clauses = Vec::new();
+    for clause in req.split(',') {
+        let clause = clause.trim();
+        // An empty clause (from `>=X,,<Y` or a trailing/leading comma) is a
+        // malformed requirement, not something to silently skip.
+        if clause.is_empty() {
+            return Err(format!("empty clause in version requirement '{req}'"));
+        }
+        let (op, ver_str) = split_req_clause(clause);
+        let required = OpenClawVersion::parse(ver_str)
+            .ok_or_else(|| format!("unparseable version '{ver_str}' in requirement '{req}'"))?;
+        clauses.push((op, required));
+    }
+
+    Ok(clauses.into_iter().all(|(op, required)| {
+        let ord = version.cmp(&required);
+        match op {
+            ReqOp::Gte => ord != Ordering::Less,
+            ReqOp::Gt => ord == Ordering::Greater,
+            ReqOp::Lte => ord != Ordering::Greater,
+            ReqOp::Lt => ord == Ordering::Less,
+            ReqOp::Eq => ord == Ordering::Equal,
+        }
+    }))
+}
+
+/// Extract an [`OpenClawVersion`] from `openclaw --version` output.
+///
+/// Only an unambiguous version line is accepted: either a bare calendar-shaped
+/// version or a version following an explicit `OpenClaw`, `OpenClaw version`,
+/// or `OpenClaw CLI version` label. Calendar-shaped tokens embedded in warning
+/// or diagnostic lines are ignored. Zero or multiple candidates return `None`
+/// so callers fail closed instead of guessing which number belongs to the CLI.
+fn parse_openclaw_version_output(output: &str) -> Option<OpenClawVersion> {
+    let candidates: Vec<OpenClawVersion> = output
+        .lines()
+        .filter_map(parse_openclaw_version_line)
+        .collect();
+    if candidates.len() == 1 {
+        candidates.into_iter().next()
+    } else {
+        None
+    }
+}
+
+fn parse_openclaw_version_line(line: &str) -> Option<OpenClawVersion> {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    let (version_token, trailing) = match tokens.as_slice() {
+        [version] => (*version, &[][..]),
+        [label, cli, keyword, version, trailing @ ..]
+            if is_openclaw_label(label)
+                && cli.eq_ignore_ascii_case("cli")
+                && keyword.eq_ignore_ascii_case("version") =>
+        {
+            (*version, trailing)
+        }
+        [label, keyword, version, trailing @ ..]
+            if is_openclaw_label(label) && keyword.eq_ignore_ascii_case("version") =>
+        {
+            (*version, trailing)
+        }
+        [label, version, trailing @ ..] if is_openclaw_label(label) => (*version, trailing),
+        _ => return None,
+    };
+    if !trailing_version_annotation_is_known(trailing) {
+        return None;
+    }
+    let version_token = version_token
+        .strip_prefix('v')
+        .or_else(|| version_token.strip_prefix('V'))
+        .unwrap_or(version_token);
+    is_calendar_shaped_token(version_token)
+        .then(|| OpenClawVersion::parse(version_token))
+        .flatten()
+}
+
+fn is_openclaw_label(token: &str) -> bool {
+    token.trim_end_matches(':').eq_ignore_ascii_case("openclaw")
+}
+
+fn trailing_version_annotation_is_known(tokens: &[&str]) -> bool {
+    tokens.is_empty()
+        || (tokens.first().is_some_and(|token| token.starts_with('('))
+            && tokens.last().is_some_and(|token| token.ends_with(')')))
+}
+
+/// Whether `token` has an OpenClaw calendar-shaped core: exactly three
+/// dot-separated numeric components with a 4-digit leading year, ignoring any
+/// `-`/`+` suffix. `2026.4.14` and `2026.5.3-1` pass; `22.14.0` and `2026.4`
+/// (a short version, valid only in a *requirement*) do not.
+fn is_calendar_shaped_token(token: &str) -> bool {
+    let core = token.split(['-', '+']).next().unwrap_or(token);
+    let parts: Vec<&str> = core.split('.').collect();
+    if parts.len() != 3 {
+        return false;
+    }
+    let year_ok = parts[0].len() == 4 && parts[0].bytes().all(|b| b.is_ascii_digit());
+    year_ok
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
+// ---------------------------------------------------------------------------
 // Pure helpers (no spawning) — unit-testable
 // ---------------------------------------------------------------------------
 
@@ -621,24 +2025,162 @@ fn base_cmd(args: Vec<String>, home: &Path, user_home: Option<&Path>) -> Framewo
     }
 }
 
-/// Build `openclaw plugins install <resource_root> --force
-/// --dangerously-force-unsafe-install`.
+/// Build the single `openclaw plugins install <resource_root> --force
+/// [--dangerously-force-unsafe-install]` command for the current host.
+///
+/// `--force` is a required capability of the driver contract; if the host's
+/// install help does not expose it, this fails before any mutation. The
+/// unsafe flag is appended only when the caller both authorized it
+/// (`allow_unsafe`) and the host's help describes it as effective. An
+/// authorized request fails when the option is absent or advertised as a
+/// deprecated no-op, and a normal install never carries it.
+///
+/// # Errors
+///
+/// [`AdapterError::FrameworkCli`] when `--force` is unsupported, or when an
+/// authorized unsafe install is requested but the host does not expose an
+/// effective unsafe flag.
 fn build_install_cmd(
     resource_root: &Path,
     home: &Path,
     user_home: Option<&Path>,
-) -> FrameworkCommand {
+    profile: &OpenClawHostProfile,
+    allow_unsafe: bool,
+) -> Result<FrameworkCommand, AdapterError> {
+    if !profile.supports_install_force {
+        return Err(AdapterError::FrameworkCli {
+            program: openclaw_bin(),
+            reason: "`openclaw plugins install --help` does not expose the required \
+                     --force flag; cannot install non-interactively"
+                .to_string(),
+        });
+    }
+    if allow_unsafe {
+        match profile.unsafe_install_support {
+            UnsafeInstallSupport::Effective => {}
+            UnsafeInstallSupport::Unsupported => {
+                return Err(AdapterError::FrameworkCli {
+                    program: openclaw_bin(),
+                    reason: "unsafe plugin install was explicitly authorized but this openclaw \
+                             does not expose --dangerously-force-unsafe-install"
+                        .to_string(),
+                });
+            }
+            UnsafeInstallSupport::DeprecatedNoOp => {
+                return Err(AdapterError::FrameworkCli {
+                    program: openclaw_bin(),
+                    reason: "unsafe plugin install was explicitly authorized, but this openclaw \
+                             advertises --dangerously-force-unsafe-install as a deprecated no-op; \
+                             configure the operator-owned security.installPolicy instead"
+                        .to_string(),
+                });
+            }
+        }
+    }
+    Ok(base_cmd(
+        install_argv(resource_root, allow_unsafe),
+        home,
+        user_home,
+    ))
+}
+
+/// Build the `plugins install <root> --force [--dangerously-force-unsafe-install]`
+/// argv. `--force` is always present (a required capability); the unsafe flag
+/// is appended iff `allow_unsafe`. Capability support is the caller's concern
+/// ([`build_install_cmd`] verifies it during preflight); `apply_enable` builds
+/// this directly from the authorized decision without re-probing.
+fn install_argv(resource_root: &Path, allow_unsafe: bool) -> Vec<String> {
+    let mut args = vec![
+        "plugins".to_string(),
+        "install".to_string(),
+        resource_root.to_string_lossy().into_owned(),
+        "--force".to_string(),
+    ];
+    if allow_unsafe {
+        args.push("--dangerously-force-unsafe-install".to_string());
+    }
+    args
+}
+
+/// Whether `help` lists `flag` as a standalone option token — not merely as a
+/// prefix of a longer flag. A flag token continues through any character that
+/// can appear inside an option name (ASCII alphanumeric, `-`, `_`, `.`), so a
+/// near-miss like `--force-color`, `--json-file`, `--json_file`, or
+/// `--runtime.mode` stays a single token and never matches `--force`/`--json`/
+/// `--runtime`, while genuine boundaries (`--json`, `--json=<path>`,
+/// `--json,`) do.
+fn help_lists_flag(help: &str, flag: &str) -> bool {
+    help.split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
+        .any(|token| token == flag)
+}
+
+/// Classify the unsafe option by its advertised help semantics. Current
+/// OpenClaw releases retain the token as a deprecated no-op, so token presence
+/// alone must not authorize an ineffective bypass or produce invalid retry
+/// advice.
+fn unsafe_install_support(help: &str) -> UnsafeInstallSupport {
+    const FLAG: &str = "--dangerously-force-unsafe-install";
+    let Some(option_line) = help.lines().find(|line| help_lists_flag(line, FLAG)) else {
+        return UnsafeInstallSupport::Unsupported;
+    };
+    let description = option_line.to_ascii_lowercase();
+    if description.contains("no-op") || description.contains("no op") {
+        UnsafeInstallSupport::DeprecatedNoOp
+    } else {
+        UnsafeInstallSupport::Effective
+    }
+}
+
+/// Build the read-only `openclaw --version` probe.
+fn build_version_cmd(home: &Path, user_home: Option<&Path>) -> FrameworkCommand {
+    base_cmd(vec!["--version".to_string()], home, user_home)
+}
+
+/// Build the read-only `openclaw plugins install --help` probe.
+fn build_install_help_cmd(home: &Path, user_home: Option<&Path>) -> FrameworkCommand {
     base_cmd(
         vec![
             "plugins".to_string(),
             "install".to_string(),
-            resource_root.to_string_lossy().into_owned(),
-            "--force".to_string(),
-            "--dangerously-force-unsafe-install".to_string(),
+            "--help".to_string(),
         ],
         home,
         user_home,
     )
+}
+
+/// Build the read-only `openclaw plugins inspect --help` probe.
+fn build_inspect_help_cmd(home: &Path, user_home: Option<&Path>) -> FrameworkCommand {
+    base_cmd(
+        vec![
+            "plugins".to_string(),
+            "inspect".to_string(),
+            "--help".to_string(),
+        ],
+        home,
+        user_home,
+    )
+}
+
+/// Build `openclaw plugins inspect <plugin_id> [--runtime] --json` for
+/// post-install runtime verification. `--runtime` is included only when the
+/// host's inspect help exposes it.
+fn build_inspect_cmd(
+    plugin_id: &str,
+    home: &Path,
+    user_home: Option<&Path>,
+    with_runtime: bool,
+) -> FrameworkCommand {
+    let mut args = vec![
+        "plugins".to_string(),
+        "inspect".to_string(),
+        plugin_id.to_string(),
+    ];
+    if with_runtime {
+        args.push("--runtime".to_string());
+    }
+    args.push("--json".to_string());
+    base_cmd(args, home, user_home)
 }
 
 /// Build `openclaw plugins uninstall <plugin_id> --force`.
@@ -935,6 +2477,16 @@ fn require_home(ctx: &DriverCtx) -> Result<PathBuf, AdapterError> {
     })
 }
 
+/// Fail-closed error for a `PreparedEnable` that does not match the adapter
+/// being applied. Signals a driver-contract misuse (a caller handed the wrong
+/// prepared state); raised before any mutation.
+fn prepared_state_mismatch(reason: &str) -> AdapterError {
+    AdapterError::FrameworkCli {
+        program: openclaw_bin(),
+        reason: format!("prepared enable state does not match the adapter: {reason}"),
+    }
+}
+
 /// Compose a failure reason string from a non-success [`CliOutput`].
 fn cli_failure_reason(verb: &str, output: &super::driver::CliOutput) -> String {
     if output.timed_out {
@@ -949,6 +2501,36 @@ fn cli_failure_reason(verb: &str, output: &super::driver::CliOutput) -> String {
     if !stderr.is_empty() {
         reason.push_str(": ");
         reason.push_str(stderr);
+    }
+    reason
+}
+
+/// Compose a failure reason keeping the exit/timeout status **and both**
+/// stdout and stderr.
+///
+/// Used on every enable-path command failure (probes, install, config set):
+/// OpenClaw may report plugin-safety findings on stdout, and a timeout must
+/// not drop stderr — the plain [`cli_failure_reason`] omits both. Both streams
+/// are already bounded by the Manager's capture cap.
+fn full_failure_reason(verb: &str, output: &super::driver::CliOutput) -> String {
+    let mut reason = if output.timed_out {
+        format!("'{verb}' timed out")
+    } else {
+        let code = output
+            .status
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "killed".to_string());
+        format!("'{verb}' exited with {code}")
+    };
+    let stderr = output.stderr.trim();
+    if !stderr.is_empty() {
+        reason.push_str("; stderr: ");
+        reason.push_str(stderr);
+    }
+    let stdout = output.stdout.trim();
+    if !stdout.is_empty() {
+        reason.push_str("; stdout: ");
+        reason.push_str(stdout);
     }
     reason
 }
@@ -1075,12 +2657,24 @@ fn claim_skill_resources(claim: &AdapterClaim) -> Vec<String> {
         .collect()
 }
 
-/// Count config resources in a claim's OpenClaw payload.
-fn claim_config_count(claim: &AdapterClaim) -> usize {
-    match &claim.driver_payload {
-        DriverPayload::OpenClaw(oc) => oc.config_resources.len(),
-        _ => 0,
-    }
+/// Count confirmed and uncertain OpenClaw config facts.
+fn claim_config_counts(claim: &AdapterClaim) -> (usize, usize) {
+    claim
+        .resources
+        .iter()
+        .fold((0, 0), |(applied, pending), resource| {
+            match &resource.kind {
+                ClaimResourceKind::FrameworkConfig {
+                    state: ConfigApplyState::Applied,
+                    ..
+                } => (applied + 1, pending),
+                ClaimResourceKind::FrameworkConfig {
+                    state: ConfigApplyState::Pending,
+                    ..
+                } => (applied, pending + 1),
+                _ => (applied, pending),
+            }
+        })
 }
 
 /// ISO 8601 UTC timestamp, second precision.
@@ -1270,14 +2864,35 @@ mod tests {
         assert!(list_contains_plugin(table, "enclaw-plugin"));
     }
 
+    /// Build a host profile with the given install capabilities; version
+    /// parsed from `"2026.4.14"` and inspect `--json`/`--runtime` supported by
+    /// default (the fields `build_install_cmd` does not read).
+    fn profile(force: bool, unsafe_install: bool) -> OpenClawHostProfile {
+        OpenClawHostProfile {
+            version: OpenClawVersion::parse("2026.4.14"),
+            version_display: "2026.4.14".to_string(),
+            supports_install_force: force,
+            unsafe_install_support: if unsafe_install {
+                UnsafeInstallSupport::Effective
+            } else {
+                UnsafeInstallSupport::Unsupported
+            },
+            supports_inspect_json: true,
+            supports_inspect_runtime: true,
+        }
+    }
+
     #[test]
-    fn install_cmd_mirrors_script_contract() {
+    fn install_cmd_default_uses_force_only_no_unsafe() {
         let _env = OpenClawBinEnvGuard::unset();
         let cmd = build_install_cmd(
             Path::new("/data/adapters/tokenless/openclaw"),
             Path::new("/home/u/.openclaw"),
             Some(Path::new("/home/u")),
-        );
+            &profile(true, true),
+            false,
+        )
+        .expect("force-capable host builds an install command");
         assert_eq!(cmd.program, "openclaw");
         assert_eq!(
             cmd.args,
@@ -1286,8 +2901,8 @@ mod tests {
                 "install",
                 "/data/adapters/tokenless/openclaw",
                 "--force",
-                "--dangerously-force-unsafe-install",
-            ]
+            ],
+            "a normal install must never carry the unsafe flag"
         );
         assert!(cmd.env_remove.contains(&"OPENCLAW_HOME".to_string()));
         assert_eq!(
@@ -1298,6 +2913,336 @@ mod tests {
             )]
         );
         assert_eq!(cmd.path_prepend[0], PathBuf::from("/home/u/.local/bin"));
+    }
+
+    #[test]
+    fn install_cmd_missing_force_capability_fails() {
+        let _env = OpenClawBinEnvGuard::unset();
+        let err = build_install_cmd(
+            Path::new("/data/adapters/tokenless/openclaw"),
+            Path::new("/home/u/.openclaw"),
+            Some(Path::new("/home/u")),
+            &profile(false, true),
+            false,
+        )
+        .expect_err("no --force must fail before mutation");
+        assert!(matches!(err, AdapterError::FrameworkCli { .. }));
+    }
+
+    #[test]
+    fn install_cmd_authorized_unsafe_supported_appends_flag() {
+        let _env = OpenClawBinEnvGuard::unset();
+        let cmd = build_install_cmd(
+            Path::new("/data/adapters/tokenless/openclaw"),
+            Path::new("/home/u/.openclaw"),
+            Some(Path::new("/home/u")),
+            &profile(true, true),
+            true,
+        )
+        .expect("authorized + supported unsafe install builds a command");
+        assert_eq!(
+            cmd.args,
+            vec![
+                "plugins",
+                "install",
+                "/data/adapters/tokenless/openclaw",
+                "--force",
+                "--dangerously-force-unsafe-install",
+            ],
+            "a single install argv carries the unsafe flag exactly once"
+        );
+    }
+
+    #[test]
+    fn install_cmd_authorized_unsafe_unsupported_fails() {
+        let _env = OpenClawBinEnvGuard::unset();
+        let err = build_install_cmd(
+            Path::new("/data/adapters/tokenless/openclaw"),
+            Path::new("/home/u/.openclaw"),
+            Some(Path::new("/home/u")),
+            &profile(true, false),
+            true,
+        )
+        .expect_err("authorized but unsupported unsafe must fail before mutation");
+        assert!(matches!(err, AdapterError::FrameworkCli { .. }));
+    }
+
+    #[test]
+    fn install_cmd_authorized_unsafe_deprecated_noop_fails() {
+        let _env = OpenClawBinEnvGuard::unset();
+        let mut host = profile(true, false);
+        host.unsafe_install_support = UnsafeInstallSupport::DeprecatedNoOp;
+        let err = build_install_cmd(
+            Path::new("/data/adapters/tokenless/openclaw"),
+            Path::new("/home/u/.openclaw"),
+            Some(Path::new("/home/u")),
+            &host,
+            true,
+        )
+        .expect_err("a deprecated no-op must not be treated as an unsafe bypass");
+        match err {
+            AdapterError::FrameworkCli { reason, .. } => {
+                assert!(reason.contains("deprecated no-op"), "{reason}");
+                assert!(reason.contains("security.installPolicy"), "{reason}");
+            }
+            other => panic!("expected FrameworkCli, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inspect_cmd_uses_runtime_when_supported() {
+        let _env = OpenClawBinEnvGuard::unset();
+        let with_runtime = build_inspect_cmd(
+            "agent-sec",
+            Path::new("/home/u/.openclaw"),
+            Some(Path::new("/home/u")),
+            true,
+        );
+        assert_eq!(
+            with_runtime.args,
+            vec!["plugins", "inspect", "agent-sec", "--runtime", "--json"]
+        );
+        let without_runtime = build_inspect_cmd(
+            "agent-sec",
+            Path::new("/home/u/.openclaw"),
+            Some(Path::new("/home/u")),
+            false,
+        );
+        assert_eq!(
+            without_runtime.args,
+            vec!["plugins", "inspect", "agent-sec", "--json"]
+        );
+    }
+
+    // -- version parsing / comparison ------------------------------------
+
+    #[test]
+    fn version_parses_core_and_variants() {
+        let base = OpenClawVersion::parse("2026.4.14").expect("core");
+        assert_eq!(base.core, [2026, 4, 14]);
+        assert_eq!(base.suffix, VersionSuffix::Release);
+
+        // Build metadata is ignored for identity.
+        let build = OpenClawVersion::parse("2026.4.14+build.5").expect("build meta");
+        assert_eq!(build, base);
+
+        // Alphabetic prerelease.
+        let beta = OpenClawVersion::parse("2026.4.14-beta.1").expect("beta");
+        assert!(matches!(beta.suffix, VersionSuffix::Prerelease(_)));
+
+        // Numeric correction.
+        let corr = OpenClawVersion::parse("2026.5.3-1").expect("correction");
+        assert_eq!(corr.suffix, VersionSuffix::Correction(vec![1]));
+
+        // Two-component core pads the patch to zero.
+        let short = OpenClawVersion::parse("2026.4").expect("short");
+        assert_eq!(short.core, [2026, 4, 0]);
+
+        // Non-numeric core is rejected.
+        assert!(OpenClawVersion::parse("not.a.version").is_none());
+        assert!(OpenClawVersion::parse("").is_none());
+    }
+
+    #[test]
+    fn version_rejects_malformed_suffixes() {
+        // An empty `-suffix` must not be treated as a plain release.
+        assert!(OpenClawVersion::parse("2026.4.14-").is_none());
+        // Empty build metadata must be rejected, not silently dropped.
+        assert!(OpenClawVersion::parse("2026.4.14+").is_none());
+        // Empty prerelease/build identifiers (double/leading/trailing dots).
+        assert!(OpenClawVersion::parse("2026.4.14-beta..1").is_none());
+        assert!(OpenClawVersion::parse("2026.4.14-.1").is_none());
+        assert!(OpenClawVersion::parse("2026.4.14+build.").is_none());
+        // Illegal characters in a prerelease identifier are rejected, not
+        // accepted as free text.
+        assert!(OpenClawVersion::parse("2026.4.14-beta_1").is_none());
+        assert!(OpenClawVersion::parse("2026.4.14-beta!1").is_none());
+        // Well-formed suffixes still parse (incl. hyphen inside identifiers
+        // and validated-then-dropped build metadata).
+        assert!(OpenClawVersion::parse("2026.4.14-rc-1").is_some());
+        assert_eq!(
+            OpenClawVersion::parse("2026.4.14-beta.1+build.5"),
+            OpenClawVersion::parse("2026.4.14-beta.1")
+        );
+    }
+
+    #[test]
+    fn version_ordering_ranks_correction_above_and_prerelease_below() {
+        let base = OpenClawVersion::parse("2026.5.3").unwrap();
+        let corr = OpenClawVersion::parse("2026.5.3-1").unwrap();
+        let beta = OpenClawVersion::parse("2026.5.3-beta.1").unwrap();
+        let rc = OpenClawVersion::parse("2026.5.3-rc.2").unwrap();
+
+        // The key departure from stock semver: numeric correction > base.
+        assert!(corr > base, "numeric correction must sort above the base");
+        assert!(
+            beta < base,
+            "alphabetic prerelease must sort below the base"
+        );
+        assert!(beta < rc, "beta precedes rc");
+        assert!(rc < base, "prerelease precedes the release");
+
+        // Core precedence still dominates the suffix.
+        let newer = OpenClawVersion::parse("2026.5.4").unwrap();
+        assert!(newer > corr);
+        assert!(newer > base);
+
+        // A larger correction number sorts above a smaller one.
+        let corr2 = OpenClawVersion::parse("2026.5.3-2").unwrap();
+        assert!(corr2 > corr);
+    }
+
+    #[test]
+    fn version_req_satisfaction_covers_operators_and_correction() {
+        let v = OpenClawVersion::parse("2026.4.24").unwrap();
+        assert_eq!(openclaw_version_req_satisfied(">=2026.4.14", &v), Ok(true));
+        assert_eq!(openclaw_version_req_satisfied(">=2026.4.24", &v), Ok(true));
+        assert_eq!(openclaw_version_req_satisfied(">=2026.5.0", &v), Ok(false));
+        assert_eq!(openclaw_version_req_satisfied(">2026.4.24", &v), Ok(false));
+        assert_eq!(openclaw_version_req_satisfied("<2026.5.0", &v), Ok(true));
+        assert_eq!(
+            openclaw_version_req_satisfied(">=2026.4.14, <2026.5.0", &v),
+            Ok(true)
+        );
+        // Bare version behaves as a minimum.
+        assert_eq!(openclaw_version_req_satisfied("2026.4.14", &v), Ok(true));
+
+        // A numeric-correction host satisfies a `>=` on the base release.
+        let corr = OpenClawVersion::parse("2026.5.3-1").unwrap();
+        assert_eq!(
+            openclaw_version_req_satisfied(">=2026.5.3", &corr),
+            Ok(true)
+        );
+
+        // Malformed requirement is an error, not a silent false.
+        assert!(openclaw_version_req_satisfied(">=not.a.version", &v).is_err());
+        assert!(
+            openclaw_version_req_satisfied(">=2027.0.0, >=not.a.version", &v).is_err(),
+            "every clause must be validated before a non-match is returned"
+        );
+        assert!(openclaw_version_req_satisfied("", &v).is_err());
+        // A malformed suffix in the constraint is an error, not a match.
+        assert!(openclaw_version_req_satisfied(">=2026.4.14-", &v).is_err());
+        // Empty clauses (double/leading/trailing comma) are errors.
+        assert!(openclaw_version_req_satisfied(">=2026.4.14,,<2027.0.0", &v).is_err());
+        assert!(openclaw_version_req_satisfied(">=2026.4.14,", &v).is_err());
+        assert!(openclaw_version_req_satisfied(",>=2026.4.14", &v).is_err());
+    }
+
+    #[test]
+    fn version_output_parsing_extracts_token() {
+        assert_eq!(
+            parse_openclaw_version_output("openclaw 2026.4.14"),
+            OpenClawVersion::parse("2026.4.14")
+        );
+        assert_eq!(
+            parse_openclaw_version_output("OpenClaw CLI version v2026.4.14 (abcdef)"),
+            OpenClawVersion::parse("2026.4.14")
+        );
+        assert_eq!(
+            parse_openclaw_version_output("2026.5.3-1\n"),
+            OpenClawVersion::parse("2026.5.3-1")
+        );
+        assert!(parse_openclaw_version_output("no version here").is_none());
+    }
+
+    #[test]
+    fn version_output_only_accepts_calendar_shape() {
+        // An unrelated dependency/runtime version must not be mistaken for
+        // OpenClaw's own version, and a non-calendar token is ignored.
+        assert!(
+            parse_openclaw_version_output(
+                "warning: node 22.14.0 is unsupported\nopenclaw nightly-build"
+            )
+            .is_none(),
+            "22.14.0 is not calendar-shaped and nightly-build is not a version"
+        );
+        // A leading warning number does not derail extraction of the real one.
+        assert_eq!(
+            parse_openclaw_version_output("note: 3 plugins loaded\nopenclaw 2026.4.14"),
+            OpenClawVersion::parse("2026.4.14")
+        );
+        assert_eq!(
+            parse_openclaw_version_output(
+                "warning: certificate expires on 2099.1.1\nopenclaw 2026.4.14"
+            ),
+            OpenClawVersion::parse("2026.4.14"),
+            "a calendar-shaped warning token must not outrank the explicit version line"
+        );
+        assert!(
+            parse_openclaw_version_output("warning: retry after 2099.1.1").is_none(),
+            "a diagnostic date is not an OpenClaw version"
+        );
+        assert!(
+            parse_openclaw_version_output("openclaw 2026.4.14\n2026.5.0").is_none(),
+            "multiple plausible version lines are ambiguous"
+        );
+        // A two-component version is not accepted as a host version.
+        assert!(parse_openclaw_version_output("openclaw 2026.4").is_none());
+    }
+
+    #[test]
+    fn help_lists_flag_requires_whole_token() {
+        assert!(help_lists_flag("  --force    overwrite", "--force"));
+        assert!(help_lists_flag("--json=<path>  machine readable", "--json"));
+        assert!(help_lists_flag("use --json, or --yaml", "--json"));
+        assert!(help_lists_flag(
+            "  --dangerously-force-unsafe-install  bypass",
+            "--dangerously-force-unsafe-install"
+        ));
+        // Similar-prefixed flags must not be mistaken for the target flag.
+        assert!(!help_lists_flag("--force-color   colorize", "--force"));
+        assert!(!help_lists_flag("--json-file <p>  write json", "--json"));
+        assert!(!help_lists_flag(
+            "--runtime-only   skip static",
+            "--runtime"
+        ));
+    }
+
+    #[test]
+    fn unsafe_install_help_distinguishes_effective_from_noop() {
+        assert_eq!(
+            unsafe_install_support(
+                "  --dangerously-force-unsafe-install  bypass plugin safety checks"
+            ),
+            UnsafeInstallSupport::Effective
+        );
+        assert_eq!(
+            unsafe_install_support(
+                "  --dangerously-force-unsafe-install  Deprecated no-op; security.installPolicy may still block"
+            ),
+            UnsafeInstallSupport::DeprecatedNoOp
+        );
+        assert_eq!(
+            unsafe_install_support("  --force  overwrite an existing plugin"),
+            UnsafeInstallSupport::Unsupported
+        );
+    }
+
+    #[test]
+    fn extract_trailing_json_tolerates_leading_diagnostics() {
+        let clean = r#"{"plugin":{"status":"loaded"}}"#;
+        assert_eq!(
+            extract_trailing_json(clean).and_then(|v| v
+                .get("plugin")?
+                .get("status")?
+                .as_str()
+                .map(str::to_string)),
+            Some("loaded".to_string())
+        );
+
+        let with_diag = "warning: legacy diagnostic line\nreading registry...\n{\"plugin\":{\"status\":\"loaded\"}}\n";
+        let value = extract_trailing_json(with_diag).expect("json after diagnostics");
+        assert_eq!(
+            value
+                .get("plugin")
+                .and_then(|p| p.get("status"))
+                .and_then(|s| s.as_str()),
+            Some("loaded")
+        );
+
+        assert!(extract_trailing_json("not json at all").is_none());
+        assert!(extract_trailing_json("").is_none());
     }
 
     #[test]
@@ -1429,7 +3374,7 @@ mod tests {
         );
     }
 
-    // -- claim_skill_resources / claim_config_count ---------------------
+    // -- claim_skill_resources / claim_config_counts --------------------
 
     #[test]
     fn claim_skill_resources_extracts_names() {
@@ -1443,8 +3388,27 @@ mod tests {
             resource_root: PathBuf::from("/tmp"),
             bundle_digest: None,
             driver_schema: DRIVER_SCHEMA_VERSION,
-            status: ClaimStatus::Enabled,
-            resources: Vec::new(),
+            status: ClaimStatus::CleanupFailed,
+            resources: vec![
+                ClaimResource {
+                    id: "openclaw_config_0".to_string(),
+                    purpose: "openclaw_config".to_string(),
+                    kind: ClaimResourceKind::FrameworkConfig {
+                        framework: "openclaw".to_string(),
+                        key: "applied.key".to_string(),
+                        state: ConfigApplyState::Applied,
+                    },
+                },
+                ClaimResource {
+                    id: "openclaw_config_1".to_string(),
+                    purpose: "openclaw_config".to_string(),
+                    kind: ClaimResourceKind::FrameworkConfig {
+                        framework: "openclaw".to_string(),
+                        key: "pending.key".to_string(),
+                        state: ConfigApplyState::Pending,
+                    },
+                },
+            ],
             driver_payload: DriverPayload::OpenClaw(OpenClawClaim {
                 state_dir_resource: "s".to_string(),
                 plugin_resource: "p".to_string(),
@@ -1457,7 +3421,7 @@ mod tests {
         };
         let skills = claim_skill_resources(&claim);
         assert_eq!(skills, vec!["sec-audit", "cred-scan"]);
-        assert_eq!(claim_config_count(&claim), 1);
+        assert_eq!(claim_config_counts(&claim), (1, 1));
     }
 
     #[test]
@@ -1507,6 +3471,8 @@ mod tests {
             }],
             declared_config: Vec::new(),
             declared_bundle_entry: None,
+            framework_version_req: None,
+            allow_unsafe_plugin_install: false,
             dry_run: true,
             ops: &ops,
         };
@@ -1522,7 +3488,7 @@ mod tests {
                 .all(|action| !action.contains("register openclaw plugin")),
         );
 
-        let claim = driver.prepare_enable(&bundle, &ctx).expect("claim");
+        let (claim, _prepared) = driver.prepare_enable(&bundle, &ctx).expect("claim");
         assert!(claim.plugin_id.is_none());
         assert_eq!(claim.adapter_type.as_deref(), Some("skill_bundle"));
         assert!(
@@ -1548,5 +3514,150 @@ mod tests {
             condition.kind == AdapterConditionKind::VerificationSupported
                 && condition.status == ConditionStatus::True
         }));
+    }
+
+    /// A mismatched (or under-capable) `PreparedEnable` must fail closed in
+    /// `apply_enable` **before** any framework CLI runs. The ops handle panics
+    /// on `run_framework_cli`, so any test reaching this line proves no
+    /// mutation was attempted.
+    #[test]
+    fn apply_enable_rejects_mismatched_prepared_state() {
+        use crate::adapter::driver::{AdapterOps, CliOutput};
+
+        struct PanicOps;
+        impl AdapterOps for PanicOps {
+            fn run_framework_cli(&self, _: FrameworkCommand) -> Result<CliOutput, AdapterError> {
+                panic!("apply must fail closed before running any framework CLI");
+            }
+            fn copy_tree(&self, _: &Path, _: &Path) -> Result<(), AdapterError> {
+                panic!("no tree copy before validation");
+            }
+            fn copy_file(&self, _: &Path, _: &Path) -> Result<(), AdapterError> {
+                unimplemented!()
+            }
+            fn remove_tree(&self, _: &Path) -> Result<bool, AdapterError> {
+                unimplemented!()
+            }
+            fn write_file(&self, _: &Path, _: &[u8]) -> Result<(), AdapterError> {
+                unimplemented!()
+            }
+            fn create_symlink(&self, _: &Path, _: &Path) -> Result<(), AdapterError> {
+                unimplemented!()
+            }
+            fn read_file(&self, _: &Path) -> Result<Option<Vec<u8>>, AdapterError> {
+                unimplemented!()
+            }
+        }
+
+        let layout = anolisa_platform::fs_layout::FsLayout::user(PathBuf::from("/tmp/test-home"));
+        let ops = PanicOps;
+        let mk_ctx = |adapter_type: Option<&str>, allow_unsafe: bool| DriverCtx {
+            component: "tokenless".to_string(),
+            framework: "openclaw".to_string(),
+            layout: &layout,
+            resource_root: PathBuf::from("/tmp/test-home/resource"),
+            user_home: Some(PathBuf::from("/tmp/test-home")),
+            declared_plugin_id: None,
+            adapter_type: adapter_type.map(str::to_string),
+            declared_skills: Vec::new(),
+            declared_config: Vec::new(),
+            declared_bundle_entry: None,
+            framework_version_req: None,
+            allow_unsafe_plugin_install: allow_unsafe,
+            dry_run: false,
+            ops: &ops,
+        };
+        let mut plugin_claim = AdapterClaim {
+            claim_schema: CLAIM_SCHEMA_VERSION,
+            component: "tokenless".to_string(),
+            framework: "openclaw".to_string(),
+            plugin_id: Some("tokenless".to_string()),
+            adapter_type: None,
+            enabled_at: "2026-01-01T00:00:00Z".to_string(),
+            resource_root: PathBuf::from("/tmp/test-home/resource"),
+            bundle_digest: None,
+            driver_schema: DRIVER_SCHEMA_VERSION,
+            status: ClaimStatus::Enabled,
+            resources: vec![ClaimResource {
+                id: RES_PLUGIN.to_string(),
+                purpose: "openclaw_plugin".to_string(),
+                kind: ClaimResourceKind::FrameworkPlugin {
+                    framework: "openclaw".to_string(),
+                    plugin_id: "tokenless".to_string(),
+                },
+            }],
+            driver_payload: DriverPayload::OpenClaw(OpenClawClaim {
+                state_dir_resource: RES_STATE_DIR.to_string(),
+                plugin_resource: RES_PLUGIN.to_string(),
+                skill_resources: Vec::new(),
+                config_resources: Vec::new(),
+            }),
+        };
+        let mut skill_claim = plugin_claim.clone();
+        skill_claim.adapter_type = Some("skill_bundle".to_string());
+        skill_claim.plugin_id = None;
+
+        let driver = OpenClawDriver::new();
+        let _env = OpenClawBinEnvGuard::unset();
+
+        // Plugin adapter but no prepared capabilities → reject.
+        assert!(matches!(
+            driver.apply_enable(
+                &mut plugin_claim,
+                &PreparedEnable::None,
+                &mk_ctx(None, false),
+                &mut (),
+            ),
+            Err(AdapterError::FrameworkCli { .. })
+        ));
+
+        // Skill bundle but plugin capabilities supplied → reject.
+        assert!(matches!(
+            driver.apply_enable(
+                &mut skill_claim,
+                &PreparedEnable::OpenClaw {
+                    supports_unsafe_install: true,
+                    supports_inspect_json: true,
+                    supports_inspect_runtime: true,
+                    selected_config_indices: Vec::new(),
+                },
+                &mk_ctx(Some("skill_bundle"), false),
+                &mut (),
+            ),
+            Err(AdapterError::FrameworkCli { .. })
+        ));
+
+        // Plugin adapter but the host cannot produce JSON inspect → reject.
+        assert!(matches!(
+            driver.apply_enable(
+                &mut plugin_claim,
+                &PreparedEnable::OpenClaw {
+                    supports_unsafe_install: true,
+                    supports_inspect_json: false,
+                    supports_inspect_runtime: false,
+                    selected_config_indices: Vec::new(),
+                },
+                &mk_ctx(None, false),
+                &mut (),
+            ),
+            Err(AdapterError::FrameworkCli { .. })
+        ));
+
+        // Unsafe authorized but the prepared state says the host lacks the
+        // flag → reject (never add the dangerous flag on an unverified host).
+        assert!(matches!(
+            driver.apply_enable(
+                &mut plugin_claim,
+                &PreparedEnable::OpenClaw {
+                    supports_unsafe_install: false,
+                    supports_inspect_json: true,
+                    supports_inspect_runtime: false,
+                    selected_config_indices: Vec::new(),
+                },
+                &mk_ctx(None, true),
+                &mut (),
+            ),
+            Err(AdapterError::FrameworkCli { .. })
+        ));
     }
 }

@@ -28,7 +28,7 @@ use super::claim::{
 use super::driver::{
     AdapterBundle, AdapterCondition, AdapterConditionKind, AdapterStatusReport, AdapterSummary,
     ClaimResourceRef, ConditionStatus, DetectResult, DisableReport, DriverCtx, DriverPlan,
-    FrameworkCommand, FrameworkDriver, HostEnv, find_binary_in_path,
+    FrameworkCommand, FrameworkDriver, HostEnv, PreparedEnable, find_binary_in_path,
 };
 
 /// Default timeout for a Hermes CLI invocation.
@@ -175,7 +175,7 @@ impl FrameworkDriver for HermesDriver {
         &self,
         bundle: &AdapterBundle,
         ctx: &DriverCtx,
-    ) -> Result<AdapterClaim, AdapterError> {
+    ) -> Result<(AdapterClaim, PreparedEnable), AdapterError> {
         let home = require_home(ctx)?;
         let mut resources = vec![ClaimResource {
             id: RES_HOME.to_string(),
@@ -210,31 +210,40 @@ impl FrameworkDriver for HermesDriver {
             skill_resource_ids.push(res_id);
         }
 
-        Ok(AdapterClaim {
-            claim_schema: CLAIM_SCHEMA_VERSION,
-            component: ctx.component.clone(),
-            framework: self.name().to_string(),
-            plugin_id,
-            adapter_type: ctx.adapter_type.clone(),
-            enabled_at: now_iso8601(),
-            resource_root: bundle.resource_root.clone(),
-            bundle_digest: bundle.digest.clone(),
-            driver_schema: DRIVER_SCHEMA_VERSION,
-            status: ClaimStatus::Enabled,
-            resources,
-            driver_payload: DriverPayload::Hermes(HermesClaim {
-                home_resource: RES_HOME.to_string(),
-                plugin_resource: if ctx.is_skill_bundle() {
-                    String::new()
-                } else {
-                    RES_PLUGIN.to_string()
-                },
-                skill_resources: skill_resource_ids,
-            }),
-        })
+        Ok((
+            AdapterClaim {
+                claim_schema: CLAIM_SCHEMA_VERSION,
+                component: ctx.component.clone(),
+                framework: self.name().to_string(),
+                plugin_id,
+                adapter_type: ctx.adapter_type.clone(),
+                enabled_at: now_iso8601(),
+                resource_root: bundle.resource_root.clone(),
+                bundle_digest: bundle.digest.clone(),
+                driver_schema: DRIVER_SCHEMA_VERSION,
+                status: ClaimStatus::Enabled,
+                resources,
+                driver_payload: DriverPayload::Hermes(HermesClaim {
+                    home_resource: RES_HOME.to_string(),
+                    plugin_resource: if ctx.is_skill_bundle() {
+                        String::new()
+                    } else {
+                        RES_PLUGIN.to_string()
+                    },
+                    skill_resources: skill_resource_ids,
+                }),
+            },
+            PreparedEnable::None,
+        ))
     }
 
-    fn apply_enable(&self, claim: &AdapterClaim, ctx: &DriverCtx) -> Result<(), AdapterError> {
+    fn apply_enable(
+        &self,
+        claim: &mut AdapterClaim,
+        _prepared: &PreparedEnable,
+        ctx: &DriverCtx,
+        _progress: &mut dyn super::driver::EnableProgress,
+    ) -> Result<(), AdapterError> {
         let home = require_home(ctx)?;
 
         if !ctx.is_skill_bundle() {
@@ -992,6 +1001,8 @@ mod tests {
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
             declared_bundle_entry: None,
+            framework_version_req: None,
+            allow_unsafe_plugin_install: false,
             dry_run: true,
             ops: &ops,
         };
@@ -1043,6 +1054,8 @@ mod tests {
             }],
             declared_config: Vec::new(),
             declared_bundle_entry: None,
+            framework_version_req: None,
+            allow_unsafe_plugin_install: false,
             dry_run: true,
             ops: &ops,
         };
@@ -1063,7 +1076,7 @@ mod tests {
             "undeclared skill must not appear in plan"
         );
 
-        let claim = driver
+        let (claim, _prepared) = driver
             .prepare_enable(&bundle, &ctx)
             .expect("prepare_enable");
         let skill_resources: Vec<&str> = claim
@@ -1108,6 +1121,8 @@ mod tests {
             }],
             declared_config: Vec::new(),
             declared_bundle_entry: None,
+            framework_version_req: None,
+            allow_unsafe_plugin_install: false,
             dry_run: true,
             ops: &ops,
         };
@@ -1122,7 +1137,7 @@ mod tests {
                 .all(|action| !action.contains("enable hermes plugin")),
         );
 
-        let claim = driver.prepare_enable(&bundle, &ctx).expect("claim");
+        let (claim, _prepared) = driver.prepare_enable(&bundle, &ctx).expect("claim");
         assert!(claim.plugin_id.is_none());
         assert_eq!(claim.adapter_type.as_deref(), Some("skill_bundle"));
         let plugin_paths = claim

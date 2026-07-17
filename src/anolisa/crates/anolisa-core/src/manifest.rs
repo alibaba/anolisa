@@ -686,6 +686,15 @@ pub struct AdapterConfigSetSpec {
     pub key: String,
     /// Value to set.
     pub value: toml::Value,
+    /// Optional semver-style constraint on the target framework version,
+    /// e.g. `">=2026.4.24"`. When present, the driver applies this config
+    /// entry only if the detected framework version satisfies the
+    /// constraint; otherwise the entry is skipped and left out of the
+    /// receipt. Absent means "always apply", preserving backward
+    /// compatibility with older manifests. Skipped on serialize when absent
+    /// so those manifests round-trip byte-stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framework_version: Option<String>,
 }
 
 /// One skill entry in an `[[adapters]]` or framework-specific section.
@@ -2796,6 +2805,72 @@ mod tests {
         assert_eq!(
             m.adapters[0].framework_version_req,
             m2.adapters[0].framework_version_req
+        );
+    }
+
+    #[test]
+    fn adapter_config_framework_version_parses_and_round_trips() {
+        // The issue's suggested component shape: a per-config framework
+        // version condition alongside the adapter-level compat requirement.
+        let toml_text = r#"
+            [component]
+            name = "sec-core"
+            version = "0.1.0"
+
+            [[adapters]]
+            framework = "openclaw"
+            plugin_id = "agent-sec"
+
+            [adapters.compat]
+            framework_version = ">=2026.4.14"
+
+            [[adapters.openclaw.config]]
+            key = "plugins.entries.agent-sec.hooks.allowConversationAccess"
+            value = true
+            framework_version = ">=2026.4.24"
+
+            [[adapters.openclaw.config]]
+            key = "plugins.entries.agent-sec.enabled"
+            value = true
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let a = &m.adapters[0];
+        assert_eq!(a.compat.framework_version.as_deref(), Some(">=2026.4.14"));
+        let oc = a.openclaw.as_ref().expect("openclaw section");
+        assert_eq!(oc.config.len(), 2);
+        assert_eq!(
+            oc.config[0].framework_version.as_deref(),
+            Some(">=2026.4.24")
+        );
+        // A config entry with no condition means "always apply".
+        assert!(oc.config[1].framework_version.is_none());
+
+        // The condition must survive a serialize→parse round-trip, and an
+        // absent condition must not be emitted (old manifests stay stable).
+        let serialized = toml::to_string_pretty(&m).expect("serialize");
+        let m2 = ComponentManifest::from_toml_str(&serialized).expect("re-parse");
+        assert_eq!(m.adapters, m2.adapters);
+    }
+
+    #[test]
+    fn adapter_config_without_framework_version_skips_serializing_field() {
+        let toml_text = r#"
+            [component]
+            name = "skiptest"
+            version = "1.0.0"
+
+            [[adapters]]
+            framework = "openclaw"
+
+            [[adapters.config]]
+            key = "some.key"
+            value = "hello"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let serialized = toml::to_string_pretty(&m).expect("serialize");
+        assert!(
+            !serialized.contains("framework_version"),
+            "absent per-config framework_version must be skipped: {serialized}"
         );
     }
 
