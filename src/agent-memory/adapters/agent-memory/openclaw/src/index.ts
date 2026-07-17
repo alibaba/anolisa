@@ -94,6 +94,12 @@ export default definePluginEntry({
           const rawText = await client.callTool("memory_search", {
             query: userMessage,
             top_k: 5,
+          // Use BM25 mode for auto-recall: memories are synchronously indexed
+          // immediately after observe (PR #1520), so BM25 finds them without delay.
+          // User prompts typically contain keyword matches with stored memories
+          // (e.g., "I decided" matching "decision" memories), making BM25 sufficient.
+          // Hybrid mode adds complexity without benefit when no embedding provider
+          // is configured.
             mode: "bm25",
           });
 

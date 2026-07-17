@@ -65,3 +65,5 @@ env -u OPENCLAW_HOME OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" "$OPENCLAW_BIN" co
 
 echo "[${COMPONENT}] ${AGENT} plugin installed via openclaw CLI."
 echo "[${COMPONENT}] Run '${OPENCLAW_BIN} gateway restart' to activate."
+echo "[${COMPONENT}] NOTE: allowConversationAccess and plugin hooks only take effect after gateway restart."
+echo "[${COMPONENT}]       Without restart, auto-capture and auto-recall hooks remain silently blocked."
