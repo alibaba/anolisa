@@ -6,6 +6,9 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use anolisa_core::adapter::contract::{
+    ContractProvenance, ContractSourceKind, read_snapshot_provenance,
+};
 use anolisa_core::central_log::CentralLog;
 use anolisa_core::{ServiceManager, ServiceRunOutcome, deactivate_services};
 use anolisa_platform::fs_layout::FsLayout;
@@ -86,23 +89,78 @@ enum DatadirContractLookup {
     },
 }
 
+#[derive(Clone, Copy)]
+enum ContractSourcePolicy {
+    InstallOrAdopt,
+    RpmReconciliation,
+}
+
 /// Read-only result for comparing an RPM-owned contract with its state snapshot.
 pub(crate) struct ContractDriftInspection {
-    /// Whether the state snapshot is absent, unreadable, or byte-different.
+    /// Whether the snapshot and provenance differ from the package contract.
     pub(crate) drifted: bool,
     /// Non-fatal lookup or path-resolution failures.
     pub(crate) warnings: Vec<String>,
 }
 
-fn datadir_contract_roots(layout: &FsLayout) -> Vec<PathBuf> {
-    let mut roots: Vec<PathBuf> = Vec::new();
-    if let Some(packaged) = crate::packaged::packaged_datadir_root(layout) {
-        roots.push(packaged);
+/// Result of refreshing a package-owned contract snapshot and its provenance.
+pub(crate) struct ContractRefreshOutcome {
+    /// Whether publication succeeded, was unnecessary, or failed.
+    state: ContractRefreshState,
+    /// Diagnostics for lookup or publication failures.
+    pub(crate) warnings: Vec<String>,
+}
+
+#[derive(Clone, Copy)]
+enum ContractRefreshState {
+    Refreshed,
+    NotApplicable,
+    Failed,
+}
+
+impl ContractRefreshOutcome {
+    /// Describe why a required refresh did not complete.
+    pub(crate) fn failure_detail(&self) -> Option<String> {
+        match self.state {
+            ContractRefreshState::Refreshed => None,
+            ContractRefreshState::NotApplicable => {
+                Some("the package-owned component contract was unavailable during refresh".into())
+            }
+            ContractRefreshState::Failed => Some(self.warning_detail()),
+        }
     }
-    if let Some(package_datadir) = layout.package_datadir()
-        && !roots.iter().any(|root| root == &package_datadir)
-    {
+
+    /// Describe a genuine lookup or publication failure.
+    pub(crate) fn error_detail(&self) -> Option<String> {
+        matches!(self.state, ContractRefreshState::Failed).then(|| self.warning_detail())
+    }
+
+    fn warning_detail(&self) -> String {
+        if self.warnings.is_empty() {
+            "the package-owned component contract could not be refreshed".to_string()
+        } else {
+            self.warnings.join("; ")
+        }
+    }
+}
+
+fn datadir_contract_roots(layout: &FsLayout, policy: ContractSourcePolicy) -> Vec<PathBuf> {
+    if matches!(policy, ContractSourcePolicy::RpmReconciliation) {
+        return vec![
+            layout
+                .package_datadir()
+                .unwrap_or_else(|| layout.datadir.clone()),
+        ];
+    }
+
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(package_datadir) = layout.package_datadir() {
         roots.push(package_datadir);
+    }
+    if let Some(packaged) = crate::packaged::packaged_datadir_root(layout)
+        && !roots.iter().any(|root| root == &packaged)
+    {
+        roots.push(packaged);
     }
     if !roots.iter().any(|root| root == &layout.datadir) {
         roots.push(layout.datadir.clone());
@@ -110,9 +168,13 @@ fn datadir_contract_roots(layout: &FsLayout) -> Vec<PathBuf> {
     roots
 }
 
-fn lookup_datadir_contract(layout: &FsLayout, component: &str) -> DatadirContractLookup {
+fn lookup_datadir_contract(
+    layout: &FsLayout,
+    component: &str,
+    policy: ContractSourcePolicy,
+) -> DatadirContractLookup {
     let mut searched: Vec<PathBuf> = Vec::new();
-    for datadir_root in datadir_contract_roots(layout) {
+    for datadir_root in datadir_contract_roots(layout, policy) {
         let source_path = FsLayout::component_contract_path(&datadir_root, component);
         match std::fs::read_to_string(&source_path) {
             Ok(content) => {
@@ -146,27 +208,28 @@ pub(crate) fn inspect_datadir_contract_drift(
     component: &str,
     command: &str,
 ) -> ContractDriftInspection {
-    let contract = match lookup_datadir_contract(layout, component) {
-        DatadirContractLookup::Found(contract) => contract,
-        DatadirContractLookup::Missing(_) => {
-            return ContractDriftInspection {
-                drifted: false,
-                warnings: Vec::new(),
-            };
-        }
-        DatadirContractLookup::Unreadable {
-            source_path,
-            source,
-        } => {
-            return ContractDriftInspection {
-                drifted: false,
-                warnings: vec![format!(
-                    "could not read datadir component contract at {}: {source}",
-                    source_path.display()
-                )],
-            };
-        }
-    };
+    let contract =
+        match lookup_datadir_contract(layout, component, ContractSourcePolicy::RpmReconciliation) {
+            DatadirContractLookup::Found(contract) => contract,
+            DatadirContractLookup::Missing(_) => {
+                return ContractDriftInspection {
+                    drifted: false,
+                    warnings: Vec::new(),
+                };
+            }
+            DatadirContractLookup::Unreadable {
+                source_path,
+                source,
+            } => {
+                return ContractDriftInspection {
+                    drifted: false,
+                    warnings: vec![format!(
+                        "could not read datadir component contract at {}: {source}",
+                        source_path.display()
+                    )],
+                };
+            }
+        };
     let destination = match common::installed_component_manifest_path(layout, component, command) {
         Ok(path) => path,
         Err(err) => {
@@ -179,9 +242,16 @@ pub(crate) fn inspect_datadir_contract_drift(
         }
     };
 
+    let expected_provenance = ContractProvenance {
+        schema_version: 1,
+        source_kind: ContractSourceKind::Datadir,
+        source_path: contract.source_path,
+        datadir_root: contract.datadir_root,
+    };
     match std::fs::read_to_string(&destination) {
         Ok(snapshot) => ContractDriftInspection {
-            drifted: snapshot != contract.content,
+            drifted: snapshot != contract.content
+                || !snapshot_provenance_matches(&destination, &expected_provenance),
             warnings: Vec::new(),
         },
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => ContractDriftInspection {
@@ -198,16 +268,23 @@ pub(crate) fn inspect_datadir_contract_drift(
     }
 }
 
+fn snapshot_provenance_matches(snapshot_path: &Path, expected: &ContractProvenance) -> bool {
+    read_snapshot_provenance(snapshot_path).is_some_and(|actual| {
+        actual.schema_version == expected.schema_version
+            && actual.source_kind == expected.source_kind
+            && actual.source_path == expected.source_path
+            && actual.datadir_root == expected.datadir_root
+    })
+}
+
 /// Best-effort snapshot of the datadir component contract for RPM paths.
 ///
 /// After an RPM adopt or delegated install the package-owned contract lives
 /// at `{datadir}/components/<component>/component.toml`. Real RPMs install
 /// to `%{_datadir}` (`/usr/share/anolisa/`), which may differ from the CLI
-/// install prefix (`/usr/local/share/anolisa/`). To handle both, this
-/// function probes the packaged datadir root first (exe-sibling /
-/// `ANOLISA_DATA_DIR` / `layout.datadir`), then falls back to
-/// `layout.datadir` if the packaged root differs. The first existing
-/// contract wins.
+/// install prefix (`/usr/local/share/anolisa/`). Install and adopt probe the
+/// FHS package datadir first, then packaged and layout datadirs for explicitly
+/// relocated or locally supplied contracts.
 ///
 /// The contract is copied verbatim (no TOML parsing) to the state snapshot
 /// at `{state_dir}/component-manifests/<component>/component.toml` so that
@@ -221,19 +298,33 @@ pub(crate) fn snapshot_datadir_contract(
     component: &str,
     command: &str,
 ) -> Vec<String> {
-    snapshot_datadir_contract_with_missing_policy(layout, component, command, true)
+    snapshot_datadir_contract_with_missing_policy(
+        layout,
+        component,
+        command,
+        true,
+        ContractSourcePolicy::InstallOrAdopt,
+    )
+    .warnings
 }
 
 /// Refresh an existing state snapshot when the RPM publishes a contract.
 ///
-/// Unlike first-time install/adopt, an RPM without a contract is not a new
-/// warning during upgrade or repair because there is no snapshot to refresh.
+/// Reconciliation only trusts the FHS package datadir. Unlike first-time
+/// install/adopt, an RPM without a contract is not a new warning during upgrade
+/// or repair because there is no authoritative snapshot to refresh.
 pub(crate) fn refresh_datadir_contract_snapshot(
     layout: &FsLayout,
     component: &str,
     command: &str,
-) -> Vec<String> {
-    snapshot_datadir_contract_with_missing_policy(layout, component, command, false)
+) -> ContractRefreshOutcome {
+    snapshot_datadir_contract_with_missing_policy(
+        layout,
+        component,
+        command,
+        false,
+        ContractSourcePolicy::RpmReconciliation,
+    )
 }
 
 fn snapshot_datadir_contract_with_missing_policy(
@@ -241,9 +332,10 @@ fn snapshot_datadir_contract_with_missing_policy(
     component: &str,
     command: &str,
     warn_if_missing: bool,
-) -> Vec<String> {
+    policy: ContractSourcePolicy,
+) -> ContractRefreshOutcome {
     let mut warnings: Vec<String> = Vec::new();
-    let contract = match lookup_datadir_contract(layout, component) {
+    let contract = match lookup_datadir_contract(layout, component, policy) {
         DatadirContractLookup::Found(contract) => contract,
         DatadirContractLookup::Missing(searched) => {
             if warn_if_missing {
@@ -256,7 +348,10 @@ fn snapshot_datadir_contract_with_missing_policy(
                     paths.join(" or ")
                 ));
             }
-            return warnings;
+            return ContractRefreshOutcome {
+                state: ContractRefreshState::NotApplicable,
+                warnings,
+            };
         }
         DatadirContractLookup::Unreadable {
             source_path,
@@ -266,7 +361,10 @@ fn snapshot_datadir_contract_with_missing_policy(
                 "could not read datadir component contract at {}: {source}",
                 source_path.display()
             ));
-            return warnings;
+            return ContractRefreshOutcome {
+                state: ContractRefreshState::Failed,
+                warnings,
+            };
         }
     };
 
@@ -276,41 +374,95 @@ fn snapshot_datadir_contract_with_missing_policy(
             warnings.push(format!(
                 "could not resolve snapshot path for component '{component}': {err}"
             ));
-            return warnings;
+            return ContractRefreshOutcome {
+                state: ContractRefreshState::Failed,
+                warnings,
+            };
         }
     };
 
-    if let Err(err) = write_atomic_text(&dest, &contract.content) {
-        let msg = format!(
-            "failed to snapshot component contract to {}: {err}",
-            dest.display()
-        );
-        eprintln!("warning: {msg}");
-        warnings.push(msg);
-        return warnings;
-    }
-
-    // Best-effort provenance sidecar so adapter operations can resolve
-    // {datadir} without content-matching against scoped datadir roots.
-    use anolisa_core::adapter::contract::{
-        ContractProvenance, ContractSourceKind, write_snapshot_provenance,
-    };
     let provenance = ContractProvenance {
         schema_version: 1,
         source_kind: ContractSourceKind::Datadir,
         source_path: contract.source_path,
         datadir_root: contract.datadir_root,
     };
-    if let Err(err) = write_snapshot_provenance(&dest, &provenance) {
-        let msg = format!("failed to write contract provenance for component '{component}': {err}");
+    if let Err(msg) = publish_contract_pair(&dest, &contract.content, &provenance) {
         eprintln!("warning: {msg}");
         warnings.push(msg);
+        return ContractRefreshOutcome {
+            state: ContractRefreshState::Failed,
+            warnings,
+        };
     }
 
-    warnings
+    ContractRefreshOutcome {
+        state: ContractRefreshState::Refreshed,
+        warnings,
+    }
+}
+
+fn publish_contract_pair(
+    snapshot_path: &Path,
+    snapshot_content: &str,
+    provenance: &ContractProvenance,
+) -> Result<(), String> {
+    let previous_snapshot = match std::fs::read(snapshot_path) {
+        Ok(content) => Some(content),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            return Err(format!(
+                "failed to preserve existing component contract at {}: {err}",
+                snapshot_path.display()
+            ));
+        }
+    };
+    let provenance_content = toml::to_string_pretty(provenance).map_err(|err| {
+        format!(
+            "failed to serialize contract provenance for {}: {err}",
+            snapshot_path.display()
+        )
+    })?;
+
+    write_atomic_text(snapshot_path, snapshot_content).map_err(|err| {
+        format!(
+            "failed to snapshot component contract to {}: {err}",
+            snapshot_path.display()
+        )
+    })?;
+
+    let provenance_path = FsLayout::provenance_path_for_snapshot(snapshot_path);
+    if let Err(err) = write_atomic_text(&provenance_path, &provenance_content) {
+        let rollback = restore_snapshot(snapshot_path, previous_snapshot.as_deref());
+        let rollback_detail = match rollback {
+            Ok(()) => "the previous snapshot was restored".to_string(),
+            Err(rollback_err) => format!("snapshot rollback also failed: {rollback_err}"),
+        };
+        return Err(format!(
+            "failed to publish contract provenance at {}: {err}; {rollback_detail}",
+            provenance_path.display()
+        ));
+    }
+
+    Ok(())
+}
+
+fn restore_snapshot(path: &Path, previous: Option<&[u8]>) -> std::io::Result<()> {
+    match previous {
+        Some(content) => write_atomic(path, content),
+        None => match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err),
+        },
+    }
 }
 
 pub(crate) fn write_atomic_text(path: &Path, content: &str) -> std::io::Result<()> {
+    write_atomic(path, content.as_bytes())
+}
+
+fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -330,7 +482,7 @@ pub(crate) fn write_atomic_text(path: &Path, content: &str) -> std::io::Result<(
         options.mode(0o644);
     }
     let mut file = options.open(&tmp)?;
-    file.write_all(content.as_bytes())?;
+    file.write_all(content)?;
     drop(file);
     if let Err(err) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);

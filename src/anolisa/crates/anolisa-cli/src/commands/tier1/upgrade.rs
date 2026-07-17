@@ -1577,34 +1577,41 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
     // Count the whole command's outcome, not just component state: the CLI
     // update (not an ANOLISA object) and the transaction-phase errors are folded
     // in so the durable record shows the true `ok` / `partial` / `failed`.
-    let total_success = cli_updated.is_some() as usize
+    let initial_total_success = cli_updated.is_some() as usize
         + outcome.updated.len()
         + outcome.installed.len()
         + outcome.reconciled.len()
         + outcome.recorded.len();
-    let total_errors = prior_errors.len() + outcome.errors.len();
+    let initial_total_errors = prior_errors.len() + outcome.errors.len();
 
-    if total_success == 0 && total_errors == 0 {
+    if initial_total_success == 0 && initial_total_errors == 0 {
         // No transaction actually happened (e.g. only skips/noops reached here);
         // nothing to audit and nothing to persist.
         return Ok(outcome);
     }
 
-    let status = apply_status(total_success, total_errors);
-    let (log_status, severity) = match status {
-        STATUS_OK => (LogStatus::Ok, Severity::Info),
-        STATUS_PARTIAL => (LogStatus::Partial, Severity::Warn),
-        _ => (LogStatus::Failed, Severity::Error),
-    };
+    let required_manifest_refreshes = outcome
+        .reconciled
+        .iter()
+        .filter(|item| reconciliation_requires_manifest_refresh(item))
+        .count();
+    let transaction_manifest_refreshes =
+        outcome.updated.len() + outcome.installed.len() + outcome.recorded.len();
+    let provisional_status = apply_status(
+        initial_total_success - required_manifest_refreshes,
+        initial_total_errors + required_manifest_refreshes + transaction_manifest_refreshes,
+    );
 
     // Always append the operation record and save when real work or an item
     // error occurred, even if no component object changed (for example a
-    // CLI-only upgrade or failed rpmdb query). The record keeps the attempt
-    // auditable via `anolisa logs`.
+    // CLI-only upgrade or failed rpmdb query). Required manifest refreshes are
+    // pessimistically counted as errors until their artifact writes succeed or
+    // prove unnecessary, so a failed final status save cannot leave a durable
+    // false `ok`.
     state.operations.push(OperationRecord {
         id: audit.operation_id.clone(),
         command: command.to_string(),
-        status: status.to_string(),
+        status: provisional_status.to_string(),
         started_at: audit.started_at.clone(),
         finished_at: Some(now_iso8601()),
     });
@@ -1618,18 +1625,89 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
     // Refresh package-owned component contracts only after state persisted.
     // This heals stale snapshots left by external yum/dnf upgrades without
     // exposing a new contract when the corresponding state write failed.
-    for component in outcome
+    for (component, package) in outcome
         .updated
         .iter()
-        .map(|item| item.name.as_str())
-        .chain(outcome.installed.iter().map(|item| item.name.as_str()))
-        .chain(outcome.reconciled.iter().map(|item| item.name.as_str()))
-        .chain(outcome.recorded.iter().map(|item| item.name.as_str()))
+        .map(|item| (item.name.as_str(), item.package.as_str()))
+        .chain(
+            outcome
+                .installed
+                .iter()
+                .map(|item| (item.name.as_str(), item.package.as_str())),
+        )
+        .chain(
+            outcome
+                .recorded
+                .iter()
+                .map(|item| (item.name.as_str(), item.package.as_str())),
+        )
     {
-        warnings.extend(refresh_datadir_contract_snapshot(
-            layout, component, command,
-        ));
+        let refresh = refresh_datadir_contract_snapshot(layout, component, command);
+        let failure_detail = refresh.error_detail();
+        warnings.extend(refresh.warnings);
+        if let Some(detail) = failure_detail {
+            outcome.errors.push(ErrorResult {
+                name: component.to_string(),
+                reason: format!(
+                    "component manifest refresh after transaction for package '{package}' did not complete: {detail}"
+                ),
+            });
+        }
     }
+
+    let mut reconciled = Vec::with_capacity(outcome.reconciled.len());
+    for item in std::mem::take(&mut outcome.reconciled) {
+        if !reconciliation_requires_manifest_refresh(&item) {
+            reconciled.push(item);
+            continue;
+        }
+        let refresh = refresh_datadir_contract_snapshot(layout, &item.name, command);
+        let failure_detail = refresh.failure_detail();
+        warnings.extend(refresh.warnings);
+        if let Some(detail) = failure_detail {
+            outcome.errors.push(ErrorResult {
+                name: item.name,
+                reason: format!(
+                    "component manifest reconciliation for package '{}' did not complete: {detail}",
+                    item.package
+                ),
+            });
+            continue;
+        }
+        reconciled.push(item);
+    }
+    outcome.reconciled = reconciled;
+
+    let total_success = cli_updated.is_some() as usize
+        + outcome.updated.len()
+        + outcome.installed.len()
+        + outcome.reconciled.len()
+        + outcome.recorded.len();
+    let total_errors = prior_errors.len() + outcome.errors.len();
+    let final_status = apply_status(total_success, total_errors);
+    let mut persisted_status = final_status;
+    let mut final_status_save_failure = None;
+    if final_status != provisional_status {
+        if let Some(operation) = state.operations.last_mut() {
+            operation.status = final_status.to_string();
+        }
+        if let Err(err) = state.save(&state_path) {
+            if let Some(operation) = state.operations.last_mut() {
+                operation.status = provisional_status.to_string();
+            }
+            persisted_status = provisional_status;
+            let detail =
+                format!("could not finalize the upgrade operation as '{final_status}': {err}");
+            warnings.push(detail.clone());
+            final_status_save_failure = Some(detail);
+        }
+    }
+
+    let (log_status, severity) = match persisted_status {
+        STATUS_OK => (LogStatus::Ok, Severity::Info),
+        STATUS_PARTIAL => (LogStatus::Partial, Severity::Warn),
+        _ => (LogStatus::Failed, Severity::Error),
+    };
 
     // Audit log is best-effort: state already persisted, so a log failure
     // downgrades to a stderr warning rather than unwinding.
@@ -1673,7 +1751,23 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
         });
     }
 
+    if let Some(detail) = final_status_save_failure {
+        return Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "upgrade changes were saved with conservative status '{provisional_status}', but {detail}"
+            ),
+        });
+    }
+
     Ok(outcome)
+}
+
+fn reconciliation_requires_manifest_refresh(item: &ReconciledItem) -> bool {
+    matches!(
+        item.reason,
+        "component manifest drift" | "RPM state and component manifest drift"
+    )
 }
 
 /// The current ANOLISA-state slot for a to-be-installed default, classified

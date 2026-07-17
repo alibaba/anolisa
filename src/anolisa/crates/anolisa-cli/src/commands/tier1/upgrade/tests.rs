@@ -9,6 +9,10 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+use anolisa_core::adapter::contract::{
+    ContractProvenance, ContractSourceKind, read_snapshot_provenance, write_snapshot_provenance,
+};
+use anolisa_core::central_log::LogFilter;
 use anolisa_platform::pkg_query::{PackageInfo, PackageQueryError, PackageVersion};
 
 use anolisa_core::state::{InstalledObject, InstalledState, RpmMetadata, SubscriptionScope};
@@ -1386,7 +1390,7 @@ fn empty_plan_reconciles_all_drifted_rpm_components() {
 }
 
 #[test]
-fn empty_plan_reconciles_stale_component_manifest() {
+fn empty_plan_reconciles_missing_manifest_provenance() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let ctx = system_ctx(tmp.path().to_path_buf());
     let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
@@ -1403,12 +1407,14 @@ fn empty_plan_reconciles_stale_component_manifest() {
         )],
     );
 
-    let source = FsLayout::component_contract_path(&layout.datadir, component);
+    let package_datadir = layout.package_datadir().expect("package datadir");
+    let source = FsLayout::component_contract_path(&package_datadir, component);
     std::fs::create_dir_all(source.parent().expect("source parent")).expect("mkdir source");
-    std::fs::write(&source, "framework = \"new\"\n").expect("write source contract");
+    std::fs::write(&source, "framework = \"same\"\n").expect("write source contract");
     let snapshot = FsLayout::component_manifest_snapshot_path(&layout.state_dir, component);
     std::fs::create_dir_all(snapshot.parent().expect("snapshot parent")).expect("mkdir snapshot");
-    std::fs::write(&snapshot, "framework = \"old\"\n").expect("write stale snapshot");
+    std::fs::write(&snapshot, "framework = \"same\"\n").expect("write matching snapshot");
+    let provenance_path = FsLayout::provenance_path_for_snapshot(&snapshot);
 
     let host = FakeHost::default().with_installed(package, info(package, "2.0.0", Some("1.alnx4")));
     let plan = build_plan(None, &cli_noop(), &[]);
@@ -1432,8 +1438,12 @@ fn empty_plan_reconciles_stale_component_manifest() {
     assert_eq!(json["reconciled"][0]["reason"], "component manifest drift");
     assert_eq!(
         std::fs::read_to_string(&snapshot).expect("read unchanged snapshot"),
-        "framework = \"old\"\n",
+        "framework = \"same\"\n",
         "dry-run must not refresh the snapshot"
+    );
+    assert!(
+        !provenance_path.exists(),
+        "dry-run must not create provenance"
     );
 
     let result = run_upgrade_with_deps(
@@ -1458,8 +1468,347 @@ fn empty_plan_reconciles_stale_component_manifest() {
     );
     assert_eq!(
         std::fs::read_to_string(&snapshot).expect("read refreshed snapshot"),
-        "framework = \"new\"\n"
+        "framework = \"same\"\n"
     );
+    let provenance = read_snapshot_provenance(&snapshot).expect("read refreshed provenance");
+    assert_eq!(provenance.source_kind, ContractSourceKind::Datadir);
+    assert_eq!(provenance.source_path, source);
+    assert_eq!(provenance.datadir_root, package_datadir);
+}
+
+#[test]
+fn empty_plan_reconciles_stale_manifest_provenance() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let component = "manifest-stale-provenance";
+    let package = "manifest-stale-provenance-rpm";
+    let evr = "2.0.0-1.alnx4";
+    seed_state(
+        &layout,
+        vec![rpm_component(
+            component,
+            package,
+            evr,
+            Ownership::RpmManaged,
+        )],
+    );
+
+    let package_datadir = layout.package_datadir().expect("package datadir");
+    let source = FsLayout::component_contract_path(&package_datadir, component);
+    std::fs::create_dir_all(source.parent().expect("source parent")).expect("mkdir source");
+    std::fs::write(&source, "framework = \"same\"\n").expect("write source contract");
+    let snapshot = FsLayout::component_manifest_snapshot_path(&layout.state_dir, component);
+    std::fs::create_dir_all(snapshot.parent().expect("snapshot parent")).expect("mkdir snapshot");
+    std::fs::write(&snapshot, "framework = \"same\"\n").expect("write matching snapshot");
+    let stale_root = layout.datadir.clone();
+    write_snapshot_provenance(
+        &snapshot,
+        &ContractProvenance {
+            schema_version: 1,
+            source_kind: ContractSourceKind::Datadir,
+            source_path: FsLayout::component_contract_path(&stale_root, component),
+            datadir_root: stale_root,
+        },
+    )
+    .expect("write stale provenance");
+
+    let host = FakeHost::default().with_installed(package, info(package, "2.0.0", Some("1.alnx4")));
+    let plan = build_plan(None, &cli_noop(), &[]);
+
+    let preview = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        false,
+        true,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("preview provenance drift");
+
+    assert_eq!(preview.reconciled.len(), 1);
+    assert_eq!(preview.reconciled[0].reason, "component manifest drift");
+    let stale = read_snapshot_provenance(&snapshot).expect("read stale provenance");
+    assert_ne!(stale.datadir_root, package_datadir);
+
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("reconcile provenance drift");
+
+    assert_eq!(result.status, STATUS_OK);
+    assert_eq!(result.reconciled.len(), 1);
+    assert!(
+        host.txn_calls().is_empty(),
+        "provenance sync must not call dnf"
+    );
+    let provenance = read_snapshot_provenance(&snapshot).expect("read refreshed provenance");
+    assert_eq!(provenance.source_path, source);
+    assert_eq!(provenance.datadir_root, package_datadir);
+}
+
+#[derive(Clone, Copy)]
+enum BlockedManifestArtifact {
+    Snapshot,
+    Provenance,
+}
+
+fn assert_manifest_refresh_failure(blocked: BlockedManifestArtifact) {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let component = "manifest-refresh-failure";
+    let package = "manifest-refresh-failure-rpm";
+    let evr = "2.0.0-1.alnx4";
+    let mut objects = vec![rpm_component(
+        component,
+        package,
+        evr,
+        Ownership::RpmManaged,
+    )];
+    if matches!(blocked, BlockedManifestArtifact::Provenance) {
+        objects.push(rpm_component(
+            "state-drift-success",
+            "state-drift-success-rpm",
+            "1.0.0-1.alnx4",
+            Ownership::RpmManaged,
+        ));
+    }
+    seed_state(&layout, objects);
+
+    let package_datadir = layout.package_datadir().expect("package datadir");
+    let source = FsLayout::component_contract_path(&package_datadir, component);
+    std::fs::create_dir_all(source.parent().expect("source parent")).expect("mkdir source");
+    std::fs::write(&source, "framework = \"new\"\n").expect("write source contract");
+    let snapshot = FsLayout::component_manifest_snapshot_path(&layout.state_dir, component);
+    let provenance_path = FsLayout::provenance_path_for_snapshot(&snapshot);
+    let marker = match blocked {
+        BlockedManifestArtifact::Snapshot => {
+            std::fs::create_dir_all(&snapshot).expect("create blocking snapshot directory");
+            snapshot.join("keep")
+        }
+        BlockedManifestArtifact::Provenance => {
+            std::fs::create_dir_all(snapshot.parent().expect("snapshot parent"))
+                .expect("mkdir snapshot");
+            std::fs::write(&snapshot, "framework = \"old\"\n").expect("write old snapshot");
+            std::fs::create_dir(&provenance_path).expect("create blocking provenance directory");
+            provenance_path.join("keep")
+        }
+    };
+    std::fs::write(&marker, "unchanged").expect("write artifact marker");
+
+    let mut host =
+        FakeHost::default().with_installed(package, info(package, "2.0.0", Some("1.alnx4")));
+    if matches!(blocked, BlockedManifestArtifact::Provenance) {
+        host.installed.insert(
+            "state-drift-success-rpm".to_string(),
+            info("state-drift-success-rpm", "2.0.0", Some("1.alnx4")),
+        );
+    }
+    let plan = build_plan(None, &cli_noop(), &[]);
+
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("render failed manifest reconciliation");
+
+    let (expected_status, expected_log_status, expected_reconciled) = match blocked {
+        BlockedManifestArtifact::Snapshot => (STATUS_FAILED, LogStatus::Failed, 0),
+        BlockedManifestArtifact::Provenance => (STATUS_PARTIAL, LogStatus::Partial, 1),
+    };
+    assert_eq!(result.status, expected_status);
+    assert_eq!(result.reconciled.len(), expected_reconciled);
+    assert!(
+        result.reconciled.iter().all(|item| item.name != component),
+        "failed manifest item must not remain reconciled"
+    );
+    assert_eq!(result.errors.len(), 1);
+    assert_eq!(result.errors[0].name, component);
+    assert!(result.errors[0].reason.contains("manifest reconciliation"));
+    assert!(
+        host.txn_calls().is_empty(),
+        "failed manifest sync must not call dnf"
+    );
+    let json = serde_json::to_value(&result).expect("serialize failed result");
+    assert_eq!(json["status"], expected_status);
+    assert_eq!(
+        std::fs::read_to_string(&marker).expect("read unchanged marker"),
+        "unchanged"
+    );
+    if matches!(blocked, BlockedManifestArtifact::Provenance) {
+        assert_eq!(
+            std::fs::read_to_string(&snapshot).expect("read restored snapshot"),
+            "framework = \"old\"\n"
+        );
+    }
+
+    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
+    assert_eq!(
+        state
+            .operations
+            .last()
+            .map(|operation| operation.status.as_str()),
+        Some(expected_status)
+    );
+    let records = CentralLog::open(layout.central_log)
+        .query(&LogFilter::default())
+        .expect("query central log");
+    assert_eq!(
+        records.last().and_then(|record| record.status.as_ref()),
+        Some(&expected_log_status)
+    );
+}
+
+#[test]
+fn empty_plan_reports_snapshot_refresh_failure() {
+    assert_manifest_refresh_failure(BlockedManifestArtifact::Snapshot);
+}
+
+#[test]
+fn empty_plan_reports_provenance_refresh_failure() {
+    assert_manifest_refresh_failure(BlockedManifestArtifact::Provenance);
+}
+
+fn assert_updated_manifest_refresh_failure(blocked: BlockedManifestArtifact) {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let component = "manifest-update-failure";
+    let package = "manifest-update-failure-rpm";
+    let from = "1.0.0-1.alnx4";
+    let to = "2.0.0-1.alnx4";
+    seed_state(
+        &layout,
+        vec![rpm_component(
+            component,
+            package,
+            from,
+            Ownership::RpmManaged,
+        )],
+    );
+
+    let package_datadir = layout.package_datadir().expect("package datadir");
+    let source = FsLayout::component_contract_path(&package_datadir, component);
+    std::fs::create_dir_all(source.parent().expect("source parent")).expect("mkdir source");
+    std::fs::write(&source, "framework = \"new\"\n").expect("write source contract");
+    let snapshot = FsLayout::component_manifest_snapshot_path(&layout.state_dir, component);
+    let provenance_path = FsLayout::provenance_path_for_snapshot(&snapshot);
+    let marker = match blocked {
+        BlockedManifestArtifact::Snapshot => {
+            std::fs::create_dir_all(&snapshot).expect("create blocking snapshot directory");
+            snapshot.join("keep")
+        }
+        BlockedManifestArtifact::Provenance => {
+            std::fs::create_dir_all(snapshot.parent().expect("snapshot parent"))
+                .expect("mkdir snapshot");
+            std::fs::write(&snapshot, "framework = \"old\"\n").expect("write old snapshot");
+            std::fs::create_dir(&provenance_path).expect("create blocking provenance directory");
+            provenance_path.join("keep")
+        }
+    };
+    std::fs::write(&marker, "unchanged").expect("write artifact marker");
+
+    let host = FakeHost::default().with_installed(package, info(package, "2.0.0", Some("1.alnx4")));
+    let plan = build_plan(
+        None,
+        &cli_noop(),
+        &[component_check(
+            component,
+            Some(package),
+            Some("rpm-managed"),
+            Some(from),
+            Some(to),
+            ACTION_UPDATE,
+            None,
+        )],
+    );
+
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("render failed post-transaction manifest refresh");
+
+    assert_eq!(result.status, STATUS_PARTIAL);
+    assert_eq!(result.updated.len(), 1);
+    assert_eq!(result.updated[0].name, component);
+    assert_eq!(result.errors.len(), 1);
+    assert_eq!(result.errors[0].name, component);
+    assert!(result.errors[0].reason.contains("manifest refresh"));
+    assert_eq!(host.txn_calls(), vec![format!("update:{package}")]);
+    let json = serde_json::to_value(&result).expect("serialize failed result");
+    assert_eq!(json["status"], STATUS_PARTIAL);
+    assert_eq!(json["updated"][0]["name"], component);
+    assert_eq!(json["errors"][0]["name"], component);
+    assert_eq!(
+        std::fs::read_to_string(&marker).expect("read unchanged marker"),
+        "unchanged"
+    );
+    if matches!(blocked, BlockedManifestArtifact::Provenance) {
+        assert_eq!(
+            std::fs::read_to_string(&snapshot).expect("read restored snapshot"),
+            "framework = \"old\"\n"
+        );
+    }
+
+    let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
+    assert_eq!(
+        state
+            .find_object(ObjectKind::Component, component)
+            .expect("updated component")
+            .version,
+        to
+    );
+    assert_eq!(
+        state
+            .operations
+            .last()
+            .map(|operation| operation.status.as_str()),
+        Some(STATUS_PARTIAL)
+    );
+    let records = CentralLog::open(layout.central_log)
+        .query(&LogFilter::default())
+        .expect("query central log");
+    assert_eq!(
+        records.last().and_then(|record| record.status.as_ref()),
+        Some(&LogStatus::Partial)
+    );
+}
+
+#[test]
+fn updated_transaction_reports_snapshot_refresh_failure() {
+    assert_updated_manifest_refresh_failure(BlockedManifestArtifact::Snapshot);
+}
+
+#[test]
+fn updated_transaction_reports_provenance_refresh_failure() {
+    assert_updated_manifest_refresh_failure(BlockedManifestArtifact::Provenance);
 }
 
 #[test]
@@ -1687,6 +2036,10 @@ fn planned_update_is_not_reported_as_reconciled() {
 
     let state = InstalledState::load(&layout.state_dir.join("installed.toml")).expect("state");
     assert_eq!(state.operations.len(), 1, "one operation and one save path");
+    assert_eq!(
+        state.operations[0].status, STATUS_OK,
+        "a component without a contract remains a successful update"
+    );
     let operation_id = &state.operations[0].id;
     for name in ["cosh", "sec-core"] {
         assert_eq!(

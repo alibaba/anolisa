@@ -25,7 +25,8 @@ use crate::color::Palette;
 use crate::commands::common;
 use crate::commands::common::RepoPersistPolicy;
 use crate::commands::tier1::install::{
-    refresh_datadir_contract_snapshot, rpm_package_candidates_with_index, snapshot_datadir_contract,
+    inspect_datadir_contract_drift, refresh_datadir_contract_snapshot,
+    rpm_package_candidates_with_index, snapshot_datadir_contract,
 };
 use crate::commands::tier1::rpm_install::{self, PendingRpmInstall};
 use crate::context::CliContext;
@@ -45,7 +46,7 @@ pub struct RepairArgs {
 
 /// Wire shape for a `repair <component>` result (`--json`) and its dry-run
 /// preview.
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct RepairPayload {
     component: String,
     package: String,
@@ -63,6 +64,9 @@ struct RepairPayload {
     refreshed: bool,
     /// Whether the rpmdb EVR differed from what ANOLISA had recorded.
     changed: bool,
+    /// Manifest-only reconciliation planned or completed alongside state repair.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    manifest_reconciliation: Option<&'static str>,
     dry_run: bool,
     /// `None` on dry-run (nothing recorded).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,7 +83,9 @@ struct RepairPayload {
 /// write fails.
 pub fn handle(args: RepairArgs, ctx: &CliContext) -> Result<(), CliError> {
     let query = RpmPackageQuery::system();
-    repair_with_query(&args.component, ctx, &query)
+    let payload = repair_with_query(&args.component, ctx, &query)?;
+    render_repair(ctx, &payload);
+    Ok(())
 }
 
 /// Core of [`handle`] with the package query injected so tests drive the
@@ -89,7 +95,7 @@ fn repair_with_query(
     target: &str,
     ctx: &CliContext,
     query: &dyn PackageQuery,
-) -> Result<(), CliError> {
+) -> Result<RepairPayload, CliError> {
     let command = format!("repair {target}");
     common::require_system_mode(
         ctx,
@@ -186,6 +192,10 @@ fn repair_with_query(
             None
         }
     };
+    let manifest = inspect_datadir_contract_drift(&layout, &component, &command);
+    let manifest_drifted = manifest.drifted;
+    let manifest_reconciliation = manifest_drifted.then_some("component manifest drift");
+    warnings.extend(manifest.warnings);
 
     if ctx.dry_run {
         let payload = RepairPayload {
@@ -198,15 +208,15 @@ fn repair_with_query(
             to_version: to_evr,
             refreshed: false,
             changed,
+            manifest_reconciliation,
             dry_run: true,
             operation_id: None,
             warnings,
         };
-        render_repair(ctx, &payload);
-        return Ok(());
+        return Ok(payload);
     }
 
-    let operation_id = persist_repair(
+    let persisted = persist_repair(
         ctx,
         &component,
         &package,
@@ -215,6 +225,7 @@ fn repair_with_query(
         &to_evr,
         source_repo.as_deref(),
         &command,
+        manifest_drifted,
         &mut warnings,
     )?;
 
@@ -228,12 +239,14 @@ fn repair_with_query(
         to_version: to_evr,
         refreshed: true,
         changed,
+        manifest_reconciliation: persisted
+            .manifest_reconciled
+            .then_some("component manifest drift"),
         dry_run: false,
-        operation_id: Some(operation_id),
+        operation_id: Some(persisted.operation_id),
         warnings,
     };
-    render_repair(ctx, &payload);
-    Ok(())
+    Ok(payload)
 }
 
 fn repair_pending_rpm(
@@ -243,7 +256,7 @@ fn repair_pending_rpm(
     pending: PendingRpmInstall,
     query: &dyn PackageQuery,
     command: &str,
-) -> Result<(), CliError> {
+) -> Result<RepairPayload, CliError> {
     // Preview must reject the same ownership conflicts as execution; otherwise
     // dry-run could promise a recovery that the locked path will refuse.
     reject_pending_state_owner(preview_state, &pending, command)?;
@@ -268,12 +281,12 @@ fn repair_pending_rpm(
             to_version: info.version.to_string(),
             refreshed: false,
             changed: true,
+            manifest_reconciliation: None,
             dry_run: true,
             operation_id: None,
             warnings,
         };
-        render_repair(ctx, &payload);
-        return Ok(());
+        return Ok(payload);
     }
 
     let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
@@ -406,12 +419,12 @@ fn repair_pending_rpm(
         to_version: info.version.to_string(),
         refreshed: true,
         changed: true,
+        manifest_reconciliation: None,
         dry_run: false,
         operation_id: Some(operation_id),
         warnings,
     };
-    render_repair(ctx, &payload);
-    Ok(())
+    Ok(payload)
 }
 
 fn pending_claim_changed_error(pending: &PendingRpmInstall, command: &str) -> CliError {
@@ -604,9 +617,15 @@ fn resolve_repair_package(
         })
 }
 
+#[derive(Debug)]
+struct PersistRepairOutcome {
+    operation_id: String,
+    manifest_reconciled: bool,
+}
+
 /// Persist the reconciled RPM metadata under the install lock, then append an
 /// audit record. Ownership and `install_backend` are left untouched — repair
-/// never switches backend. Returns the operation id.
+/// never switches backend.
 #[allow(clippy::too_many_arguments)]
 fn persist_repair(
     ctx: &CliContext,
@@ -617,8 +636,42 @@ fn persist_repair(
     to_evr: &str,
     source_repo: Option<&str>,
     command: &str,
+    manifest_drifted: bool,
     warnings: &mut Vec<String>,
-) -> Result<String, CliError> {
+) -> Result<PersistRepairOutcome, CliError> {
+    let mut save_state = |state: &InstalledState, path: &std::path::Path| state.save(path);
+    persist_repair_with_state_saver(
+        ctx,
+        component,
+        package,
+        ownership,
+        info,
+        to_evr,
+        source_repo,
+        command,
+        manifest_drifted,
+        warnings,
+        &mut save_state,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persist_repair_with_state_saver(
+    ctx: &CliContext,
+    component: &str,
+    package: &str,
+    ownership: Ownership,
+    info: &PackageInfo,
+    to_evr: &str,
+    source_repo: Option<&str>,
+    command: &str,
+    manifest_drifted: bool,
+    warnings: &mut Vec<String>,
+    save_state: &mut dyn FnMut(
+        &InstalledState,
+        &std::path::Path,
+    ) -> Result<(), anolisa_core::state::StateError>,
+) -> Result<PersistRepairOutcome, CliError> {
     let layout = common::resolve_layout(ctx);
     let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
         command: command.to_string(),
@@ -702,40 +755,77 @@ fn persist_repair(
     state.operations.push(OperationRecord {
         id: operation_id.clone(),
         command: command.to_string(),
-        status: "ok".to_string(),
+        status: if manifest_drifted {
+            "partial".to_string()
+        } else {
+            "ok".to_string()
+        },
         started_at: now.clone(),
         finished_at: Some(now.clone()),
     });
 
     let state_path = layout.state_dir.join("installed.toml");
-    state.save(&state_path).map_err(|err| CliError::Runtime {
+    save_state(&state, &state_path).map_err(|err| CliError::Runtime {
         command: command.to_string(),
         reason: format!("failed to save state: {err}"),
     })?;
 
-    warnings.extend(refresh_datadir_contract_snapshot(
-        &layout, component, command,
-    ));
+    let mut completion_failure = if manifest_drifted {
+        let refresh = refresh_datadir_contract_snapshot(&layout, component, command);
+        let failure = refresh
+            .failure_detail()
+            .map(|detail| format!("component manifest reconciliation did not complete: {detail}"));
+        warnings.extend(refresh.warnings);
+        failure
+    } else {
+        None
+    };
+
+    if manifest_drifted && completion_failure.is_none() {
+        if let Some(operation) = state.operations.last_mut() {
+            operation.status = "ok".to_string();
+        }
+        if let Err(err) = save_state(&state, &state_path) {
+            completion_failure = Some(format!(
+                "component manifest reconciliation completed, but the repair operation could not be finalized as ok: {err}"
+            ));
+        }
+    }
 
     // Audit log is best-effort: the repair already persisted, so a log failure
     // downgrades to a warning instead of unwinding.
     let log = CentralLog::open(layout.central_log.clone());
+    let (severity, status, message) = if completion_failure.is_some() {
+        (
+            Severity::Warn,
+            LogStatus::Partial,
+            format!(
+                "refreshed ANOLISA state for component {component} to {to_evr}, but component manifest reconciliation did not complete"
+            ),
+        )
+    } else {
+        (
+            Severity::Info,
+            LogStatus::Ok,
+            format!(
+                "refreshed ANOLISA state for component {component} to {to_evr} from rpmdb package {package} ({ownership_label})",
+                ownership_label = ownership.label(),
+            ),
+        )
+    };
     let record = LogRecord {
         kind: LogKind::Operation,
         operation_id: Some(operation_id.clone()),
         command: command.to_string(),
         source: "anolisa-cli".to_string(),
         component: Some(component.to_string()),
-        severity: Severity::Info,
-        message: format!(
-            "refreshed ANOLISA state for component {component} to {to_evr} from rpmdb package {package} ({ownership_label})",
-            ownership_label = ownership.label(),
-        ),
+        severity,
+        message,
         actor: "cli".to_string(),
         install_mode: Some(ctx.install_mode.as_str().to_string()),
         started_at: now.clone(),
         finished_at: Some(now),
-        status: Some(LogStatus::Ok),
+        status: Some(status),
         objects: vec![component.to_string()],
         backup_ids: Vec::new(),
         warnings: warnings.to_vec(),
@@ -745,7 +835,19 @@ fn persist_repair(
         eprintln!("warning: failed to write central log: {err}");
     }
 
-    Ok(operation_id)
+    if let Some(reason) = completion_failure {
+        return Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "state repair was saved with partial status, but {reason}; run `anolisa repair {component}` again after restoring write access"
+            ),
+        });
+    }
+
+    Ok(PersistRepairOutcome {
+        operation_id,
+        manifest_reconciled: manifest_drifted,
+    })
 }
 
 /// Human/JSON renderer for a repair result.
@@ -799,6 +901,14 @@ fn render_repair(ctx: &CliContext, payload: &RepairPayload) {
             payload.to_version,
         );
     }
+    if let Some(reason) = payload.manifest_reconciliation {
+        let label = if payload.dry_run {
+            "would reconcile:"
+        } else {
+            "reconciled:"
+        };
+        println!("{} {reason}", color.label(label));
+    }
     // Remind the operator that an observed row is a pre-existing system RPM.
     if payload.ownership == "rpm-observed" {
         println!(
@@ -847,8 +957,10 @@ mod tests {
 
     use std::{cell::Cell, fs, path::PathBuf};
 
+    use anolisa_core::adapter::contract::ContractProvenance;
+    use anolisa_core::central_log::LogFilter;
     use anolisa_core::state::{
-        InstallMode as StateInstallMode, InstalledObject, InstalledState, ObjectStatus,
+        InstallMode as StateInstallMode, InstalledObject, InstalledState, ObjectStatus, StateError,
     };
     use anolisa_core::transaction::{Transaction, TransactionOutcomeStatus};
     use anolisa_platform::fs_layout::FsLayout;
@@ -1139,7 +1251,8 @@ mod tests {
             ),
         );
         let layout = common::resolve_layout(&c);
-        let source = FsLayout::component_contract_path(&layout.datadir, component);
+        let package_datadir = layout.package_datadir().expect("package datadir");
+        let source = FsLayout::component_contract_path(&package_datadir, component);
         fs::create_dir_all(source.parent().expect("source parent")).expect("mkdir source");
         fs::write(&source, "framework = \"new\"\n").expect("write source contract");
         let snapshot = FsLayout::component_manifest_snapshot_path(&layout.state_dir, component);
@@ -1155,6 +1268,343 @@ mod tests {
         assert_eq!(
             fs::read_to_string(snapshot).expect("read refreshed snapshot"),
             "framework = \"new\"\n"
+        );
+    }
+
+    #[test]
+    fn repair_reports_partial_when_manifest_refresh_fails() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        let component = "manifest-write-failure";
+        let package = "manifest-write-failure-rpm";
+        let evr = "2.0.0-1.al8";
+        seed(
+            &c,
+            rpm_object(
+                component,
+                package,
+                evr,
+                Ownership::RpmManaged,
+                ObjectStatus::Installed,
+            ),
+        );
+        let layout = common::resolve_layout(&c);
+        let package_datadir = layout.package_datadir().expect("package datadir");
+        let source = FsLayout::component_contract_path(&package_datadir, component);
+        fs::create_dir_all(source.parent().expect("source parent")).expect("mkdir source");
+        fs::write(&source, "framework = \"new\"\n").expect("write source contract");
+        let snapshot = FsLayout::component_manifest_snapshot_path(&layout.state_dir, component);
+        fs::create_dir_all(&snapshot).expect("create blocking snapshot directory");
+        let marker = snapshot.join("keep");
+        fs::write(&marker, "unchanged").expect("write snapshot marker");
+        let provenance_path = FsLayout::provenance_path_for_snapshot(&snapshot);
+        let rpm = FakeQuery::new(
+            package,
+            Some(pkg_info(package, "2.0.0", Some("1.al8"), "x86_64")),
+        );
+
+        let err = repair_with_query(component, &c, &rpm).expect_err("manifest refresh must fail");
+
+        assert_eq!(err.code(), "EXECUTION_FAILED");
+        let CliError::Runtime { reason, .. } = err else {
+            panic!("expected runtime error");
+        };
+        assert!(reason.contains("state repair was saved"));
+        assert!(reason.contains("manifest reconciliation did not complete"));
+        assert_eq!(
+            fs::read_to_string(marker).expect("read unchanged marker"),
+            "unchanged"
+        );
+        assert!(
+            !provenance_path.exists(),
+            "failed refresh must not create provenance"
+        );
+        let state = load_state(&c);
+        assert_eq!(
+            state
+                .operations
+                .last()
+                .map(|operation| operation.status.as_str()),
+            Some("partial")
+        );
+    }
+
+    #[test]
+    fn repair_restores_snapshot_when_provenance_refresh_fails() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        let component = "provenance-write-failure";
+        let package = "provenance-write-failure-rpm";
+        let evr = "2.0.0-1.al8";
+        seed(
+            &c,
+            rpm_object(
+                component,
+                package,
+                evr,
+                Ownership::RpmManaged,
+                ObjectStatus::Installed,
+            ),
+        );
+        let layout = common::resolve_layout(&c);
+        let package_datadir = layout.package_datadir().expect("package datadir");
+        let source = FsLayout::component_contract_path(&package_datadir, component);
+        fs::create_dir_all(source.parent().expect("source parent")).expect("mkdir source");
+        fs::write(&source, "framework = \"new\"\n").expect("write source contract");
+        let snapshot = FsLayout::component_manifest_snapshot_path(&layout.state_dir, component);
+        fs::create_dir_all(snapshot.parent().expect("snapshot parent")).expect("mkdir snapshot");
+        fs::write(&snapshot, "framework = \"old\"\n").expect("write old snapshot");
+        let provenance_path = FsLayout::provenance_path_for_snapshot(&snapshot);
+        fs::create_dir(&provenance_path).expect("create blocking provenance directory");
+        let marker = provenance_path.join("keep");
+        fs::write(&marker, "unchanged").expect("write provenance marker");
+        let rpm = FakeQuery::new(
+            package,
+            Some(pkg_info(package, "2.0.0", Some("1.al8"), "x86_64")),
+        );
+
+        let err = repair_with_query(component, &c, &rpm).expect_err("provenance refresh must fail");
+
+        assert_eq!(err.code(), "EXECUTION_FAILED");
+        assert_eq!(
+            fs::read_to_string(&snapshot).expect("read restored snapshot"),
+            "framework = \"old\"\n"
+        );
+        assert_eq!(
+            fs::read_to_string(marker).expect("read unchanged provenance marker"),
+            "unchanged"
+        );
+        let state = load_state(&c);
+        assert_eq!(
+            state
+                .operations
+                .last()
+                .map(|operation| operation.status.as_str()),
+            Some("partial")
+        );
+    }
+
+    #[test]
+    fn repair_keeps_durable_partial_when_final_status_save_fails() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        let component = "repair-final-save-failure";
+        let package = "repair-final-save-failure-rpm";
+        let evr = "2.0.0-1.al8";
+        seed(
+            &c,
+            rpm_object(
+                component,
+                package,
+                evr,
+                Ownership::RpmManaged,
+                ObjectStatus::Installed,
+            ),
+        );
+        let layout = common::resolve_layout(&c);
+        let package_datadir = layout.package_datadir().expect("package datadir");
+        let source = FsLayout::component_contract_path(&package_datadir, component);
+        fs::create_dir_all(source.parent().expect("source parent")).expect("mkdir source");
+        fs::write(&source, "framework = \"new\"\n").expect("write source contract");
+        let snapshot = FsLayout::component_manifest_snapshot_path(&layout.state_dir, component);
+        fs::create_dir_all(snapshot.parent().expect("snapshot parent")).expect("mkdir snapshot");
+        fs::write(&snapshot, "framework = \"old\"\n").expect("write old snapshot");
+        let save_calls = Cell::new(0);
+        let mut save_state = |state: &InstalledState, path: &std::path::Path| {
+            let call = save_calls.get() + 1;
+            save_calls.set(call);
+            if call == 2 {
+                return Err(StateError::Io {
+                    path: path.to_path_buf(),
+                    source: std::io::Error::other("injected second-save failure"),
+                });
+            }
+            state.save(path)
+        };
+        let mut warnings = Vec::new();
+        let command = format!("repair {component}");
+        let info = pkg_info(package, "2.0.0", Some("1.al8"), "x86_64");
+
+        let err = persist_repair_with_state_saver(
+            &c,
+            component,
+            package,
+            Ownership::RpmManaged,
+            &info,
+            evr,
+            None,
+            &command,
+            true,
+            &mut warnings,
+            &mut save_state,
+        )
+        .expect_err("final status save must fail");
+
+        assert_eq!(save_calls.get(), 2);
+        assert_eq!(err.code(), "EXECUTION_FAILED");
+        assert!(err.reason().contains("could not be finalized as ok"));
+        let state = load_state(&c);
+        assert_eq!(
+            state
+                .operations
+                .last()
+                .map(|operation| operation.status.as_str()),
+            Some("partial")
+        );
+        let records = CentralLog::open(layout.central_log)
+            .query(&LogFilter::default())
+            .expect("query central log");
+        assert_eq!(
+            records.last().and_then(|record| record.status.as_ref()),
+            Some(&LogStatus::Partial)
+        );
+    }
+
+    #[test]
+    fn repair_dry_run_previews_manifest_reconciliation_without_writes() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, true);
+        let component = "manifest-preview-test";
+        let package = "manifest-preview-test-rpm";
+        let evr = "2.0.0-1.al8";
+        seed(
+            &c,
+            rpm_object(
+                component,
+                package,
+                evr,
+                Ownership::RpmManaged,
+                ObjectStatus::Installed,
+            ),
+        );
+        let layout = common::resolve_layout(&c);
+        let package_datadir = layout.package_datadir().expect("package datadir");
+        let source = FsLayout::component_contract_path(&package_datadir, component);
+        fs::create_dir_all(source.parent().expect("source parent")).expect("mkdir source");
+        fs::write(&source, "framework = \"new\"\n").expect("write source contract");
+        let snapshot = FsLayout::component_manifest_snapshot_path(&layout.state_dir, component);
+        fs::create_dir_all(snapshot.parent().expect("snapshot parent")).expect("mkdir snapshot");
+        fs::write(&snapshot, "framework = \"old\"\n").expect("write stale snapshot");
+        let provenance_path = FsLayout::provenance_path_for_snapshot(&snapshot);
+        fs::write(&provenance_path, "unchanged = true\n").expect("write provenance");
+        let rpm = FakeQuery::new(
+            package,
+            Some(pkg_info(package, "2.0.0", Some("1.al8"), "x86_64")),
+        );
+
+        let payload =
+            repair_with_query(component, &c, &rpm).expect("preview manifest reconciliation");
+
+        assert!(!payload.changed, "equal EVR must remain unchanged");
+        assert!(!payload.refreshed, "dry-run must not report a state write");
+        assert_eq!(
+            payload.manifest_reconciliation,
+            Some("component manifest drift")
+        );
+        let json = serde_json::to_value(&payload).expect("serialize repair preview");
+        assert_eq!(json["manifest_reconciliation"], "component manifest drift");
+        assert_eq!(
+            fs::read_to_string(&snapshot).expect("read unchanged snapshot"),
+            "framework = \"old\"\n"
+        );
+        assert_eq!(
+            fs::read_to_string(provenance_path).expect("read unchanged provenance"),
+            "unchanged = true\n"
+        );
+    }
+
+    #[test]
+    fn repair_prefers_rpm_manifest_over_local_stale_copy() {
+        let _env_guard = crate::packaged::DataDirEnvGuard::clear();
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        let component = "manifest-source-test";
+        let package = "manifest-source-test-rpm";
+        let evr = "2.0.0-1.al8";
+        seed(
+            &c,
+            rpm_object(
+                component,
+                package,
+                evr,
+                Ownership::RpmManaged,
+                ObjectStatus::Installed,
+            ),
+        );
+        let layout = common::resolve_layout(&c);
+        let local_source = FsLayout::component_contract_path(&layout.datadir, component);
+        fs::create_dir_all(local_source.parent().expect("local source parent"))
+            .expect("mkdir local source");
+        fs::write(&local_source, "framework = \"local-old\"\n").expect("write local contract");
+        let package_datadir = layout.package_datadir().expect("package datadir");
+        let rpm_source = FsLayout::component_contract_path(&package_datadir, component);
+        fs::create_dir_all(rpm_source.parent().expect("rpm source parent"))
+            .expect("mkdir rpm source");
+        fs::write(&rpm_source, "framework = \"rpm-new\"\n").expect("write rpm contract");
+        let snapshot = FsLayout::component_manifest_snapshot_path(&layout.state_dir, component);
+        fs::create_dir_all(snapshot.parent().expect("snapshot parent")).expect("mkdir snapshot");
+        fs::write(&snapshot, "framework = \"old\"\n").expect("write stale snapshot");
+        let rpm = FakeQuery::new(
+            package,
+            Some(pkg_info(package, "2.0.0", Some("1.al8"), "x86_64")),
+        );
+
+        repair_with_query(component, &c, &rpm).expect("repair manifest source");
+
+        assert_eq!(
+            fs::read_to_string(&snapshot).expect("read refreshed snapshot"),
+            "framework = \"rpm-new\"\n"
+        );
+        let provenance_path = FsLayout::provenance_path_for_snapshot(&snapshot);
+        let provenance: ContractProvenance =
+            toml::from_str(&fs::read_to_string(provenance_path).expect("read snapshot provenance"))
+                .expect("parse snapshot provenance");
+        assert_eq!(provenance.datadir_root, package_datadir);
+        assert_eq!(provenance.source_path, rpm_source);
+    }
+
+    #[test]
+    fn repair_ignores_local_manifest_when_rpm_contract_is_missing() {
+        let _env_guard = crate::packaged::DataDirEnvGuard::clear();
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        let component = "manifest-missing-test";
+        let package = "manifest-missing-test-rpm";
+        let evr = "2.0.0-1.al8";
+        seed(
+            &c,
+            rpm_object(
+                component,
+                package,
+                evr,
+                Ownership::RpmManaged,
+                ObjectStatus::Installed,
+            ),
+        );
+        let layout = common::resolve_layout(&c);
+        let local_source = FsLayout::component_contract_path(&layout.datadir, component);
+        fs::create_dir_all(local_source.parent().expect("local source parent"))
+            .expect("mkdir local source");
+        fs::write(&local_source, "framework = \"local-stale\"\n").expect("write local contract");
+        let snapshot = FsLayout::component_manifest_snapshot_path(&layout.state_dir, component);
+        fs::create_dir_all(snapshot.parent().expect("snapshot parent")).expect("mkdir snapshot");
+        fs::write(&snapshot, "framework = \"installed\"\n").expect("write snapshot");
+        let provenance_path = FsLayout::provenance_path_for_snapshot(&snapshot);
+        fs::write(&provenance_path, "unchanged = true\n").expect("write provenance");
+        let rpm = FakeQuery::new(
+            package,
+            Some(pkg_info(package, "2.0.0", Some("1.al8"), "x86_64")),
+        );
+
+        repair_with_query(component, &c, &rpm).expect("repair without rpm contract");
+
+        assert_eq!(
+            fs::read_to_string(&snapshot).expect("read unchanged snapshot"),
+            "framework = \"installed\"\n"
+        );
+        assert_eq!(
+            fs::read_to_string(provenance_path).expect("read unchanged provenance"),
+            "unchanged = true\n"
         );
     }
 
