@@ -94,15 +94,25 @@ fn safe_cstring(s: &str) -> CString {
     CString::new(s.replace('\0', "")).unwrap()
 }
 
-/// Copy a Rust string into a fixed-size `[c_char; 16]` buffer (NUL-terminated).
-fn copy_process_name(name: &str) -> [c_char; 16] {
-    let mut buf = [0 as c_char; 16];
-    let bytes = name.as_bytes();
-    let len = bytes.len().min(15);
-    for i in 0..len {
-        buf[i] = bytes[i] as c_char;
+/// Copy a Rust string into a fixed-size `[c_char; N]` buffer (NUL-terminated).
+///
+/// At most `N - 1` bytes are copied; truncation happens at a UTF-8 char
+/// boundary so the C side never sees invalid UTF-8.
+fn copy_to_fixed_buf<const N: usize>(s: &str) -> [c_char; N] {
+    let mut buf = [0 as c_char; N];
+    let mut end = s.len().min(N - 1);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    for (i, &b) in s.as_bytes()[..end].iter().enumerate() {
+        buf[i] = b as c_char;
     }
     buf
+}
+
+/// Copy a Rust string into a fixed-size `[c_char; 16]` buffer (NUL-terminated).
+fn copy_process_name(name: &str) -> [c_char; 16] {
+    copy_to_fixed_buf(name)
 }
 
 /// Drain the eventfd counter so that epoll won't re-trigger.
@@ -147,6 +157,9 @@ pub struct AgentsightLLMData {
     pub session_id: *const c_char,
     pub pid: i32,
     pub process_name: [c_char; 16],
+    /// Space-joined process command line (argv), truncated to 127 bytes.
+    /// Empty string when the process has already exited.
+    pub cmdline: [c_char; 128],
     pub agent_name: *const c_char,
     pub container_id: *const c_char,
     pub timestamp_ns: u64,
@@ -288,7 +301,17 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
         .get("conversation_id")
         .map(|s| safe_cstring(s));
     let session_id = call.metadata.get("session_id").map(|s| safe_cstring(s));
-    let agent_name = call.agent_name.as_ref().map(|s| safe_cstring(s));
+    // Normalize agent_name to lowercase at the FFI boundary so C consumers
+    // observe a consistent value regardless of config-file casing.
+    let agent_name = call
+        .agent_name
+        .as_ref()
+        .map(|s| safe_cstring(&s.to_lowercase()));
+    // Space-joined argv from /proc/<pid>/cmdline; empty when the process has
+    // already exited (read_cmdline returns an empty vec on error).
+    let cmdline = copy_to_fixed_buf::<128>(
+        &crate::discovery::scanner::read_cmdline(&format!("/proc/{}/cmdline", call.pid)).join(" "),
+    );
     let container_id =
         crate::container::extract_container_id_cached(call.pid as u32).map(|s| safe_cstring(&s));
 
@@ -367,6 +390,7 @@ fn build_llm_data(call: &LLMCall) -> LlmDataHolder {
         session_id: session_id.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
         pid: call.pid,
         process_name: copy_process_name(&call.process_name),
+        cmdline,
         agent_name: agent_name.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
         container_id: container_id.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
         timestamp_ns: call.start_timestamp_ns,
@@ -1093,6 +1117,31 @@ mod tests {
         for i in 0..15 {
             assert_eq!(buf[i] as u8, name.as_bytes()[i]);
         }
+    }
+
+    #[test]
+    fn test_copy_to_fixed_buf_truncates_at_char_boundary() {
+        fn as_bytes<const N: usize>(buf: &[c_char; N]) -> Vec<u8> {
+            buf.iter()
+                .take_while(|&&c| c != 0)
+                .map(|&c| c as u8)
+                .collect()
+        }
+
+        // ASCII longer than N-1: truncated with NUL termination.
+        let buf = copy_to_fixed_buf::<8>("abcdefghij");
+        assert_eq!(as_bytes(&buf), b"abcdefg");
+        assert_eq!(buf[7], 0);
+
+        // Multi-byte UTF-8: a char straddling the limit is dropped whole,
+        // never split into invalid bytes. "a中b" = 1 + 3 + 1 bytes; N-1 = 3
+        // would cut through 中, so only "a" is copied.
+        let buf = copy_to_fixed_buf::<4>("a中b");
+        assert_eq!(as_bytes(&buf), b"a");
+
+        // Empty input yields an all-zero buffer.
+        let buf = copy_to_fixed_buf::<128>("");
+        assert!(buf.iter().all(|&c| c == 0));
     }
 
     #[test]

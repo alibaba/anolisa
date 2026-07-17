@@ -35,7 +35,8 @@ typedef struct {
     /* 进程 */
     int32_t     pid;
     char        process_name[16];
-    const char* agent_name;           /* may be NULL */
+    char        cmdline[128];         /* 空格连接的 argv，截断到 127 字节；进程已退出时为空串 */
+    const char* agent_name;           /* may be NULL；统一为小写 */
 
     /* 时间与延迟 */
     uint64_t    timestamp_ns;
