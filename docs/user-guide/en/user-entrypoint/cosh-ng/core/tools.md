@@ -15,7 +15,7 @@ cosh-core includes a set of built-in tools for LLM to invoke during conversation
 | `todo` | Other | Manage task lists |
 | `ask_user_question` | Other | Ask user a question and wait for response |
 | `cosh_shell_evidence` | ShellEvidence | Get terminal output as evidence (requires `--enable-shell-evidence-tool`) |
-| `mcp__<server>__<tool>` | Mcp | Tool discovered from a trusted stdio MCP server |
+| `mcp__<server>__<tool>` | Mcp | Tool discovered from a configured MCP server |
 
 ## Tool Classification
 
@@ -97,5 +97,5 @@ Custom tools can be injected via the extension system. See [extensions.md](exten
 
 MCP tools are dynamically discovered only when `cosh-core --headless` starts.
 Each configured server receives `initialize`, then `tools/list`; a model call to
-the registered name is forwarded as `tools/call`. See [Configuration](../configuration.md#mcp-stdio-servers)
-for the trusted-server configuration and supported transport boundary.
+the registered name is forwarded as `tools/call`. See [Configuration](../configuration.md#mcp-servers)
+for trusted-server configuration, Streamable HTTP, and OAuth setup.

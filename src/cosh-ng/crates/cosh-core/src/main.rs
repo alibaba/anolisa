@@ -151,7 +151,12 @@ async fn run() {
     logging::init_logging(&log_level);
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "cosh-core starting");
 
-    if args.is_registry() {
+    if let Some(cli::Command::Mcp(mcp)) = args.command {
+        if let Err(error) = tool::mcp::run_command(mcp, &config).await {
+            eprintln!("MCP command failed: {error}");
+            std::process::exit(1);
+        }
+    } else if args.is_registry() {
         registry::run(&args, config).await;
     } else if args.is_compact() {
         std::process::exit(compaction::run_compact_cli(&args, config).await);

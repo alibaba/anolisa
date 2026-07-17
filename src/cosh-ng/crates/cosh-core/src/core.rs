@@ -1570,6 +1570,88 @@ mod tests {
         }
     }
 
+    struct CountingMcpTool {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for CountingMcpTool {
+        fn name(&self) -> &str {
+            "mcp__remote__search"
+        }
+
+        fn description(&self) -> &str {
+            "counting MCP tool"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+
+        fn kind(&self) -> ToolKind {
+            ToolKind::Mcp
+        }
+
+        async fn invoke(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> Result<ToolResult, String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolResult::success("called"))
+        }
+    }
+
+    fn mcp_tool_provider() -> MockProvider {
+        MockProvider::new(vec![
+            vec![
+                GenerateEvent::ToolCallStart {
+                    index: 0,
+                    id: "call-1".to_string(),
+                    name: "mcp__remote__search".to_string(),
+                },
+                GenerateEvent::ToolCallDelta {
+                    index: 0,
+                    arguments_delta: "{}".to_string(),
+                },
+                GenerateEvent::ToolCallEnd { index: 0 },
+                GenerateEvent::MessageEnd,
+            ],
+            vec![
+                GenerateEvent::TextDelta("Done.".to_string()),
+                GenerateEvent::MessageEnd,
+            ],
+        ])
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_do_not_execute_before_approval() {
+        for mode in ["auto", "balanced", "suggest", "strict"] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let mut config = CoreConfig::default();
+            config.agent.approval_mode = mode.to_string();
+            let mut tools = ToolRegistry::new();
+            tools.register(Box::new(CountingMcpTool {
+                calls: Arc::clone(&calls),
+            }));
+            let mut core = CoshCore::new(config, Box::new(mcp_tool_provider()), tools);
+            let deny = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"deny"}}}"#;
+            let mut reader = BufReader::new(deny.as_bytes()).lines();
+            let mut output = Vec::new();
+
+            core.handle_user_message("search", &mut reader, &mut output)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                0,
+                "MCP tool ran in {mode} mode"
+            );
+            assert!(String::from_utf8(output).unwrap().contains("can_use_tool"));
+        }
+    }
+
     #[tokio::test]
     async fn text_only_response() {
         let provider = MockProvider::text_only("Hello from AI!");

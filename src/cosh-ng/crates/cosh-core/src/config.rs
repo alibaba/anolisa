@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -71,6 +71,9 @@ pub struct AgentConfig {
     pub session_token_limit: u64,
     #[serde(default = "default_max_tool_calls")]
     pub max_tool_calls_per_turn: u32,
+    /// Tools that bypass approval for this agent configuration.
+    #[serde(default)]
+    pub allowed_tools: HashSet<String>,
 }
 
 impl Default for AgentConfig {
@@ -80,6 +83,7 @@ impl Default for AgentConfig {
             max_turns: default_max_turns(),
             session_token_limit: default_session_token_limit(),
             max_tool_calls_per_turn: default_max_tool_calls(),
+            allowed_tools: HashSet::new(),
         }
     }
 }
@@ -166,6 +170,9 @@ pub struct McpServerConfig {
     /// Optional static bearer token for an HTTP server.
     #[serde(default)]
     pub bearer_token: Option<String>,
+    /// OAuth settings for a Streamable HTTP server. Tokens are stored separately.
+    #[serde(default)]
+    pub oauth: McpOAuthConfig,
     /// Startup and request timeout in milliseconds.
     #[serde(default = "default_mcp_timeout_ms")]
     pub timeout_ms: u64,
@@ -175,6 +182,26 @@ pub struct McpServerConfig {
     /// `None` exposes every server tool; an empty list exposes none.
     #[serde(default)]
     pub allowed_tools: Option<Vec<String>>,
+}
+
+/// Non-secret OAuth settings for a Streamable HTTP MCP server.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct McpOAuthConfig {
+    /// Pre-registered public client identifier. When absent, dynamic registration is used.
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// Requested OAuth scopes when the server does not advertise them.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// OAuth resource indicator. Defaults to the MCP endpoint.
+    #[serde(default)]
+    pub resource: Option<String>,
+    /// Authorization-server metadata URL, bypassing protected-resource discovery.
+    #[serde(default)]
+    pub auth_server_metadata_url: Option<String>,
+    /// Local callback port. An ephemeral port is used when omitted.
+    #[serde(default)]
+    pub callback_port: Option<u16>,
 }
 
 fn default_mcp_timeout_ms() -> u64 {
@@ -377,6 +404,7 @@ struct PartialAgentConfig {
     max_turns: Option<u32>,
     session_token_limit: Option<u64>,
     max_tool_calls_per_turn: Option<u32>,
+    allowed_tools: Option<HashSet<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -566,6 +594,9 @@ fn apply_agent_layer(config: &mut AgentConfig, layer: &PartialAgentConfig) {
     }
     if let Some(value) = layer.max_tool_calls_per_turn {
         config.max_tool_calls_per_turn = value;
+    }
+    if let Some(ref value) = layer.allowed_tools {
+        config.allowed_tools = value.clone();
     }
 }
 

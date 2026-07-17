@@ -569,6 +569,14 @@ fn apply_cli_overrides(args: &CliArgs, config: &mut CoreConfig) {
     if let Some(ref mode) = args.approval_mode {
         config.agent.approval_mode = mode.clone();
     }
+    if let Some(ref tools) = args.allowed_tools {
+        config.agent.allowed_tools = tools
+            .split(',')
+            .map(str::trim)
+            .filter(|tool| !tool.is_empty())
+            .map(ToString::to_string)
+            .collect();
+    }
 }
 
 fn load_runtime_config(args: &CliArgs, workspace: &std::path::Path) -> CoreConfig {
