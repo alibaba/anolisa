@@ -50,8 +50,9 @@ use crate::color::Palette;
 use crate::commands::common;
 use crate::commands::common::RepoPersistPolicy;
 use crate::commands::tier1::install::{
-    QuarantineRestoreOps, RawReplayOps, ResolveInputs, resolve_raw,
-    resolve_raw_inputs_for_component, rpm_package_candidates_with_index, snapshot_datadir_contract,
+    QuarantineRestoreOps, RawReplayOps, ResolveInputs, inspect_datadir_contract_drift,
+    refresh_datadir_contract_snapshot, resolve_raw, resolve_raw_inputs_for_component,
+    rpm_package_candidates_with_index, snapshot_datadir_contract,
 };
 use crate::commands::tier1::rpm_install::{self, PendingRpmInstall};
 use crate::commands::tier1::update::rpm_repo_source_for_update;
@@ -90,6 +91,11 @@ struct RepairResultPayload {
     plan: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     operation_id: Option<String>,
+    /// Manifest-only reconciliation planned or completed alongside the state
+    /// repair (`component manifest drift` when the package-owned contract no
+    /// longer matches the state snapshot).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    manifest_reconciliation: Option<&'static str>,
 }
 
 /// Dispatch `repair <component>` against the live host.
@@ -227,6 +233,26 @@ fn repair_attempt(
         }),
     };
 
+    // A same-version external RPM upgrade can replace the package-owned
+    // component contract without touching ANOLISA state. Compare it with the
+    // state snapshot for active delegated records so repair heals a stale
+    // snapshot even when the record itself needs nothing.
+    let manifest_drifted = matches!(
+        store
+            .find(ObjectKind::Component, target)
+            .map(|r| &r.binding),
+        Some(ProviderBinding::Delegated { .. })
+    ) && {
+        let inspection = inspect_datadir_contract_drift(&layout, target, &command);
+        if !ctx.quiet {
+            for warning in &inspection.warnings {
+                eprintln!("warning: {warning}");
+            }
+        }
+        inspection.drifted
+    };
+    let manifest_reconciliation = manifest_drifted.then_some("component manifest drift");
+
     let provider = DelegatedProvider::new(query, txn);
     let observe_request = ObserveRequest {
         kind: ObjectKind::Component,
@@ -268,6 +294,9 @@ fn repair_attempt(
     let steps = match plan(&Intent::Repair, &facts) {
         Ok(Plan::Execute { steps, .. }) => steps,
         Ok(Plan::NoOp { .. }) => {
+            // Only owned records reach NoOp (a delegated record present in
+            // rpmdb always replans R3), so a drifted contract snapshot can
+            // never be stranded here.
             return render_result(
                 ctx,
                 &RepairResultPayload {
@@ -279,6 +308,7 @@ fn repair_attempt(
                     dry_run: ctx.dry_run,
                     plan: Vec::new(),
                     operation_id: None,
+                    manifest_reconciliation,
                 },
             );
         }
@@ -299,6 +329,7 @@ fn repair_attempt(
                 dry_run: true,
                 plan: plan_labels,
                 operation_id: None,
+                manifest_reconciliation,
             },
         );
     }
@@ -423,6 +454,7 @@ fn repair_attempt(
         &package,
         from_version,
         &provider,
+        manifest_drifted,
         &command,
     )
 }
@@ -443,6 +475,7 @@ fn repair_delegated(
     package: &str,
     from_version: Option<String>,
     provider: &DelegatedProvider<'_>,
+    manifest_drifted: bool,
     command: &str,
 ) -> Result<(), CliError> {
     let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
@@ -508,11 +541,13 @@ fn repair_delegated(
 
     // Operation history is best-effort bookkeeping on top of the committed
     // record: the repair already succeeded, so a history-write failure
-    // degrades to a warning instead of unwinding anything.
+    // degrades to a warning instead of unwinding anything. With a drifted
+    // contract snapshot the status stays `partial` until the refresh below
+    // completes, so a durable status can never overstate what happened.
     store.operations.push(OperationRecord {
         id: operation_id.clone(),
         command: command.to_string(),
-        status: "ok".to_string(),
+        status: if manifest_drifted { "partial" } else { "ok" }.to_string(),
         started_at: now.to_string(),
         finished_at: Some(now_iso8601()),
         parent_operation_id: None,
@@ -521,10 +556,53 @@ fn repair_delegated(
         eprintln!("warning: failed to record operation history: {err}");
     }
 
+    let mut completion_failure = None;
+    if manifest_drifted {
+        let refresh = refresh_datadir_contract_snapshot(layout, target, command);
+        if !ctx.quiet {
+            for warning in &refresh.warnings {
+                eprintln!("warning: {warning}");
+            }
+        }
+        completion_failure = refresh
+            .failure_detail()
+            .map(|detail| format!("component manifest reconciliation did not complete: {detail}"));
+        if completion_failure.is_none() {
+            if let Some(operation) = store.operations.last_mut() {
+                operation.status = "ok".to_string();
+            }
+            if let Err(err) = store.save(state_path) {
+                completion_failure = Some(format!(
+                    "component manifest reconciliation completed, but the repair operation could not be finalized as ok: {err}"
+                ));
+            }
+        }
+    }
+
     let to_version = outcome
         .observation
         .as_ref()
         .map(|o| o.evr.clone().unwrap_or_else(|| o.version.clone()));
+
+    if let Some(reason) = completion_failure {
+        append_repair_log(
+            layout,
+            ctx,
+            target,
+            command,
+            &operation_id,
+            now,
+            LogStatus::Partial,
+            format!(
+                "repaired component {target} ({package}): {}, but the component manifest reconciliation did not complete",
+                plan_action(steps)
+            ),
+        );
+        return Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!("the record for '{target}' was repaired, but {reason}"),
+        });
+    }
 
     append_repair_log(
         layout,
@@ -533,6 +611,7 @@ fn repair_delegated(
         command,
         &operation_id,
         now,
+        LogStatus::Ok,
         format!(
             "repaired component {target} ({package}): {}",
             plan_action(steps)
@@ -550,6 +629,7 @@ fn repair_delegated(
             dry_run: false,
             plan: plan_labels.to_vec(),
             operation_id: Some(operation_id),
+            manifest_reconciliation: manifest_drifted.then_some("component manifest drift"),
         },
     )
 }
@@ -639,6 +719,7 @@ fn repair_restore_quarantined(
         command,
         &operation_id,
         now,
+        LogStatus::Ok,
         format!("restored quarantined record for component {target} as owned ({version})"),
     );
 
@@ -653,6 +734,7 @@ fn repair_restore_quarantined(
             dry_run: false,
             plan: plan_labels.to_vec(),
             operation_id: Some(operation_id),
+            manifest_reconciliation: None,
         },
     )
 }
@@ -785,6 +867,7 @@ fn repair_owned_replay(
         command,
         &operation_id,
         now,
+        LogStatus::Ok,
         format!("replayed owned files for component {target} at {version}"),
     );
 
@@ -799,6 +882,7 @@ fn repair_owned_replay(
             dry_run: false,
             plan: plan_labels.to_vec(),
             operation_id: Some(operation_id),
+            manifest_reconciliation: None,
         },
     )
 }
@@ -946,6 +1030,7 @@ fn recover_journal(
                 command,
                 &operation_id,
                 now,
+                LogStatus::Ok,
                 format!(
                     "recovered interrupted {} of component {target} (package {package}) as rpm-managed",
                     journal.operation
@@ -967,6 +1052,7 @@ fn recover_journal(
                     dry_run: false,
                     plan: Vec::new(),
                     operation_id: Some(operation_id),
+                    manifest_reconciliation: None,
                 },
             )?;
             Ok(Recovery::Recovered)
@@ -1066,6 +1152,7 @@ fn recover_legacy_rpm_install(
                 command,
                 &operation_id,
                 &started_at,
+                LogStatus::Ok,
                 format!(
                     "recovered pending RPM package {} ({}) as rpm-managed for component {}",
                     pending.package,
@@ -1092,6 +1179,7 @@ fn recover_legacy_rpm_install(
                     dry_run: false,
                     plan: Vec::new(),
                     operation_id: Some(operation_id),
+                    manifest_reconciliation: None,
                 },
             )?;
             Ok(Recovery::Recovered)
@@ -1461,6 +1549,7 @@ fn journal_finish_error(
 }
 
 /// Best-effort central-log record for a committed repair.
+#[expect(clippy::too_many_arguments)]
 fn append_repair_log(
     layout: &FsLayout,
     ctx: &CliContext,
@@ -1468,6 +1557,7 @@ fn append_repair_log(
     command: &str,
     operation_id: &str,
     started_at: &str,
+    status: LogStatus,
     message: String,
 ) {
     let log = CentralLog::open(layout.central_log.clone());
@@ -1477,13 +1567,17 @@ fn append_repair_log(
         command: command.to_string(),
         source: "anolisa-cli".to_string(),
         component: Some(component.to_string()),
-        severity: Severity::Info,
+        severity: if matches!(status, LogStatus::Ok) {
+            Severity::Info
+        } else {
+            Severity::Warn
+        },
         message,
         actor: "cli".to_string(),
         install_mode: Some(ctx.install_mode.as_str().to_string()),
         started_at: started_at.to_string(),
         finished_at: Some(now_iso8601()),
-        status: Some(LogStatus::Ok),
+        status: Some(status),
         objects: vec![component.to_string()],
         backup_ids: Vec::new(),
         warnings: Vec::new(),
@@ -1514,14 +1608,28 @@ fn render_result(ctx: &CliContext, payload: &RepairResultPayload) -> Result<(), 
         for label in &payload.plan {
             println!("  - {label}");
         }
+        if let Some(reason) = payload.manifest_reconciliation {
+            println!(
+                "{} would refresh the component manifest snapshot ({reason})",
+                color.label("also:"),
+            );
+        }
         return Ok(());
     }
     if payload.action == "nothing-to-repair" {
-        println!(
-            "{} {} has nothing to repair",
-            color.ok("✓"),
-            payload.component
-        );
+        if payload.manifest_reconciliation.is_some() {
+            println!(
+                "{} {} record is healthy; refreshed the component manifest snapshot",
+                color.ok("✓"),
+                payload.component
+            );
+        } else {
+            println!(
+                "{} {} has nothing to repair",
+                color.ok("✓"),
+                payload.component
+            );
+        }
         return Ok(());
     }
     match (&payload.from_version, &payload.to_version) {
@@ -1989,6 +2097,256 @@ mod tests {
         assert_eq!(store.operations.len(), 1);
         assert!(store.operations[0].command.starts_with("repair"));
         assert_eq!(fake.install_calls.get(), 0, "R3 never transacts");
+    }
+
+    #[test]
+    fn healthy_record_with_stale_manifest_snapshot_reconciles_it() {
+        let _env_guard = crate::packaged::DataDirEnvGuard::clear();
+        use anolisa_core::adapter::contract::read_snapshot_provenance;
+
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        let component = "manifest-sync-test";
+        let package = "manifest-sync-test-rpm";
+        seed(
+            &ctx,
+            vec![rpm_object(
+                component,
+                package,
+                "2.0.0-1.al8",
+                Ownership::RpmManaged,
+                false,
+            )],
+        );
+        let layout = common::resolve_layout(&ctx);
+        let package_datadir = layout.package_datadir().expect("package datadir");
+        let source = FsLayout::component_contract_path(&package_datadir, component);
+        fs::create_dir_all(source.parent().expect("source parent")).expect("mkdir source");
+        fs::write(&source, "framework = \"new\"\n").expect("write source contract");
+        let snapshot = FsLayout::component_manifest_snapshot_path(&layout.state_dir, component);
+        fs::create_dir_all(snapshot.parent().expect("snapshot parent")).expect("mkdir snapshot");
+        fs::write(&snapshot, "framework = \"old\"\n").expect("write stale snapshot");
+        // rpmdb matches the record: the R3 refresh is a state no-change, but
+        // the drifted snapshot still has to be reconciled.
+        let fake = FakeRpm::new(
+            package,
+            Some(pkg_info(package, "2.0.0", Some("1.al8"), "x86_64")),
+        );
+
+        repair_with_deps(component, &ctx, &fake, &fake, false).expect("repair manifest drift");
+
+        assert_eq!(
+            fs::read_to_string(&snapshot).expect("read refreshed snapshot"),
+            "framework = \"new\"\n"
+        );
+        let provenance = read_snapshot_provenance(&snapshot).expect("refreshed provenance");
+        assert_eq!(provenance.source_path, source);
+        let store = load_store(&ctx);
+        assert_eq!(store.operations.len(), 1);
+        assert_eq!(store.operations[0].status, "ok");
+        assert_eq!(fake.install_calls.get(), 0, "manifest sync never transacts");
+    }
+
+    #[test]
+    fn manifest_refresh_failure_keeps_the_operation_partial() {
+        let _env_guard = crate::packaged::DataDirEnvGuard::clear();
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        let component = "manifest-write-failure";
+        let package = "manifest-write-failure-rpm";
+        seed(
+            &ctx,
+            vec![rpm_object(
+                component,
+                package,
+                "2.0.0-1.al8",
+                Ownership::RpmManaged,
+                false,
+            )],
+        );
+        let layout = common::resolve_layout(&ctx);
+        let package_datadir = layout.package_datadir().expect("package datadir");
+        let source = FsLayout::component_contract_path(&package_datadir, component);
+        fs::create_dir_all(source.parent().expect("source parent")).expect("mkdir source");
+        fs::write(&source, "framework = \"new\"\n").expect("write source contract");
+        // A directory where the snapshot file belongs blocks the refresh.
+        let snapshot = FsLayout::component_manifest_snapshot_path(&layout.state_dir, component);
+        fs::create_dir_all(&snapshot).expect("create blocking snapshot directory");
+        let marker = snapshot.join("keep");
+        fs::write(&marker, "unchanged").expect("write snapshot marker");
+        let fake = FakeRpm::new(
+            package,
+            Some(pkg_info(package, "2.0.0", Some("1.al8"), "x86_64")),
+        );
+
+        let err = repair_with_deps(component, &ctx, &fake, &fake, false)
+            .expect_err("manifest refresh must fail");
+
+        let CliError::Runtime { reason, .. } = err else {
+            panic!("expected runtime error");
+        };
+        assert!(
+            reason.contains("manifest reconciliation did not complete"),
+            "{reason}"
+        );
+        assert_eq!(
+            fs::read_to_string(&marker).expect("read unchanged marker"),
+            "unchanged"
+        );
+        let store = load_store(&ctx);
+        assert_eq!(store.operations.len(), 1);
+        assert_eq!(
+            store.operations[0].status, "partial",
+            "a failed refresh must leave the conservative durable status"
+        );
+    }
+
+    #[test]
+    fn dry_run_previews_manifest_reconciliation_without_writes() {
+        let _env_guard = crate::packaged::DataDirEnvGuard::clear();
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, true);
+        let component = "manifest-dry-run";
+        let package = "manifest-dry-run-rpm";
+        seed(
+            &ctx,
+            vec![rpm_object(
+                component,
+                package,
+                "2.0.0-1.al8",
+                Ownership::RpmManaged,
+                false,
+            )],
+        );
+        let layout = common::resolve_layout(&ctx);
+        let package_datadir = layout.package_datadir().expect("package datadir");
+        let source = FsLayout::component_contract_path(&package_datadir, component);
+        fs::create_dir_all(source.parent().expect("source parent")).expect("mkdir source");
+        fs::write(&source, "framework = \"new\"\n").expect("write source contract");
+        let snapshot = FsLayout::component_manifest_snapshot_path(&layout.state_dir, component);
+        fs::create_dir_all(snapshot.parent().expect("snapshot parent")).expect("mkdir snapshot");
+        fs::write(&snapshot, "framework = \"old\"\n").expect("write stale snapshot");
+        let fake = FakeRpm::new(
+            package,
+            Some(pkg_info(package, "2.0.0", Some("1.al8"), "x86_64")),
+        );
+
+        repair_with_deps(component, &ctx, &fake, &fake, false).expect("dry-run previews");
+
+        assert_eq!(
+            fs::read_to_string(&snapshot).expect("read unchanged snapshot"),
+            "framework = \"old\"\n",
+            "dry-run must not refresh the snapshot"
+        );
+        let store = load_store(&ctx);
+        assert!(store.operations.is_empty(), "dry-run records no operation");
+    }
+
+    #[test]
+    fn manifest_drift_is_judged_against_the_package_datadir_only() {
+        let _env_guard = crate::packaged::DataDirEnvGuard::clear();
+        use anolisa_core::adapter::contract::{
+            ContractProvenance, ContractSourceKind, write_snapshot_provenance,
+        };
+
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        let component = "manifest-root-priority";
+        let package = "manifest-root-priority-rpm";
+        seed(
+            &ctx,
+            vec![rpm_object(
+                component,
+                package,
+                "2.0.0-1.al8",
+                Ownership::RpmManaged,
+                false,
+            )],
+        );
+        let layout = common::resolve_layout(&ctx);
+        let package_datadir = layout.package_datadir().expect("package datadir");
+        let source = FsLayout::component_contract_path(&package_datadir, component);
+        fs::create_dir_all(source.parent().expect("source parent")).expect("mkdir source");
+        fs::write(&source, "framework = \"same\"\n").expect("write package contract");
+        // A stale local copy in the plain datadir must not count as drift.
+        let local = FsLayout::component_contract_path(&layout.datadir, component);
+        fs::create_dir_all(local.parent().expect("local parent")).expect("mkdir local");
+        fs::write(&local, "framework = \"stale-local\"\n").expect("write local copy");
+        let snapshot = FsLayout::component_manifest_snapshot_path(&layout.state_dir, component);
+        fs::create_dir_all(snapshot.parent().expect("snapshot parent")).expect("mkdir snapshot");
+        fs::write(&snapshot, "framework = \"same\"\n").expect("write matching snapshot");
+        write_snapshot_provenance(
+            &snapshot,
+            &ContractProvenance {
+                schema_version: 1,
+                source_kind: ContractSourceKind::Datadir,
+                source_path: source.clone(),
+                datadir_root: package_datadir.clone(),
+            },
+        )
+        .expect("write matching provenance");
+        let fake = FakeRpm::new(
+            package,
+            Some(pkg_info(package, "2.0.0", Some("1.al8"), "x86_64")),
+        );
+
+        repair_with_deps(component, &ctx, &fake, &fake, false).expect("repair ok");
+
+        // A misjudged drift against the local copy would overwrite the
+        // snapshot with the stale local content; the package-datadir verdict
+        // leaves it untouched.
+        assert_eq!(
+            fs::read_to_string(&snapshot).expect("read unchanged snapshot"),
+            "framework = \"same\"\n"
+        );
+        let store = load_store(&ctx);
+        assert_eq!(store.operations.len(), 1, "idempotent R3 refresh");
+        assert_eq!(
+            store.operations[0].status, "ok",
+            "no manifest drift means no partial phase"
+        );
+    }
+
+    #[test]
+    fn local_manifest_is_ignored_when_the_package_contract_is_missing() {
+        let _env_guard = crate::packaged::DataDirEnvGuard::clear();
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        let component = "manifest-missing-package-contract";
+        let package = "manifest-missing-package-contract-rpm";
+        seed(
+            &ctx,
+            vec![rpm_object(
+                component,
+                package,
+                "2.0.0-1.al8",
+                Ownership::RpmManaged,
+                false,
+            )],
+        );
+        let layout = common::resolve_layout(&ctx);
+        // Only a local datadir copy exists; the package publishes no contract.
+        let local = FsLayout::component_contract_path(&layout.datadir, component);
+        fs::create_dir_all(local.parent().expect("local parent")).expect("mkdir local");
+        fs::write(&local, "framework = \"local-only\"\n").expect("write local copy");
+        let fake = FakeRpm::new(
+            package,
+            Some(pkg_info(package, "2.0.0", Some("1.al8"), "x86_64")),
+        );
+
+        repair_with_deps(component, &ctx, &fake, &fake, false).expect("repair ok");
+
+        // An absent package contract is not drift: the local datadir copy
+        // must be ignored, so no snapshot gets seeded and no partial phase
+        // is entered.
+        let snapshot = FsLayout::component_manifest_snapshot_path(&layout.state_dir, component);
+        assert!(
+            !snapshot.exists(),
+            "an absent package contract must not seed a snapshot"
+        );
+        let store = load_store(&ctx);
+        assert_eq!(store.operations.len(), 1, "idempotent R3 refresh");
+        assert_eq!(store.operations[0].status, "ok");
     }
 
     #[test]

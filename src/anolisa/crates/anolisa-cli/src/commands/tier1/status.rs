@@ -26,7 +26,7 @@ use anolisa_core::adapter::claim::ClaimStatus;
 #[cfg(test)]
 use anolisa_core::adapter::manager::AdapterSourceStatus;
 use anolisa_core::adapter::manager::ScanEntry;
-use anolisa_core::domain::{Installation, ManagementRelation, ProviderBinding};
+use anolisa_core::domain::{Installation, ProviderBinding};
 use anolisa_core::path_safety::{PathBoundaryError, validate_owned_path};
 use anolisa_core::state::ObjectKind;
 use anolisa_core::state_migration::QuarantineReason;
@@ -736,12 +736,13 @@ fn record_from_object(
     // catalog is loaded — fresh checkouts without a packaged catalog still
     // get integrity-only behavior.
     //
-    // Adopted/observed delegated rows are exempt: ANOLISA owns none of their
-    // files and does not lay out the raw artifact tree, so the manifest
-    // health checks (which assume that layout) would spuriously escalate an
-    // adopted row to degraded/failed (§8, review P2).
+    // Delegated rows are exempt regardless of relation: their file layout is
+    // selected by RPM macros rather than ANOLISA's raw-backend layout, so the
+    // manifest health checks (which assume that layout) would spuriously
+    // escalate a valid package. Delegated health remains adjudicated by the
+    // rpmdb drift probe after this projection.
     let manifest_status = match catalog {
-        Some(cat) if !is_unmanaged_delegated(installation) => {
+        Some(cat) if !installation.binding.is_delegated() => {
             let (manifest_entries, escalated) =
                 manifest_health_probe(layout, cat, install_mode, installation, &integrity_status);
             health.extend(manifest_entries);
@@ -798,18 +799,6 @@ fn record_version(installation: &Installation) -> Option<String> {
             .as_ref()
             .map(|o| o.evr.clone().unwrap_or_else(|| o.version.clone())),
     }
-}
-
-/// Delegated without management consent (adopted or merely observed):
-/// ANOLISA does not own the file layout these manifests describe.
-fn is_unmanaged_delegated(installation: &Installation) -> bool {
-    matches!(
-        &installation.binding,
-        ProviderBinding::Delegated {
-            relation: ManagementRelation::Adopted { .. } | ManagementRelation::Observed,
-            ..
-        }
-    )
 }
 
 /// Probe the integrity of every file owned by `component` and return
@@ -3209,7 +3198,7 @@ mod tests {
     /// health check would fail a raw install — ANOLISA owns none of its files
     /// and never laid out the raw tree, so those checks do not apply (§8).
     #[test]
-    fn rpm_observed_row_skips_manifest_health_escalation() {
+    fn delegated_rows_skip_manifest_health_escalation() {
         let dir = tempfile::tempdir().expect("tempdir");
         let layout = test_layout(dir.path());
         let probe_path = layout.bin_dir.join("ghost-binary");
@@ -3265,6 +3254,32 @@ mod tests {
         assert_eq!(obs[0].rpm_package.as_deref(), Some("copilot-shell"));
         assert_eq!(obs[0].rpm_evr.as_deref(), Some("2.3.0-1.al8"));
         assert_eq!(obs[0].rpm_source_repo.as_deref(), Some("@System"));
+
+        // rpm-managed rows lay out files via RPM macros too: the same failing
+        // raw-layout check must not escalate a managed row either.
+        let mut managed_state = InstalledState::default();
+        let mut managed = rpm_observed_object("copilot-shell", "copilot-shell", "2.3.0-1.al8");
+        managed.status = ObjectStatus::Installed;
+        managed.ownership = Some(Ownership::RpmManaged);
+        managed.managed = true;
+        managed.adopted = false;
+        managed_state.upsert_object(managed);
+        let rows = select_components(
+            &store_with(&managed_state),
+            &layout,
+            Some(&catalog),
+            "system",
+            Some("copilot-shell"),
+            None,
+        );
+        assert_eq!(rows[0].status, "installed", "rpm-managed must not escalate");
+        assert!(
+            !rows[0]
+                .health
+                .iter()
+                .any(|entry| entry.name.contains("binary")),
+            "rpm-managed rows must not run raw-layout manifest checks",
+        );
     }
 
     /// Configurable [`PackageQuery`] for the observed-probe tests.
