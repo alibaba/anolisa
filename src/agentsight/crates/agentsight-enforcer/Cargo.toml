@@ -7,6 +7,7 @@ publish = false
 [features]
 default = ["mock-backend"]
 mock-backend = []
+actplane = ["dep:actplane-ifc-compiler", "dep:ebpf-ifc-engine"]
 
 [dependencies]
 agentsight-enforcement-protocol = { path = "../enforcement-protocol" }
@@ -15,3 +16,5 @@ libc = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+actplane-ifc-compiler = { workspace = true, optional = true }
+ebpf-ifc-engine = { workspace = true, optional = true }

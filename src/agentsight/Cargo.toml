@@ -13,6 +13,8 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "1.0.63"
 uuid = { version = "1", features = ["v4", "serde"] }
+actplane-ifc-compiler = { git = "https://github.com/eunomia-bpf/ActPlane.git", rev = "a62e5d9d96f91101cda019519053e950d532380a" }
+ebpf-ifc-engine = { git = "https://github.com/eunomia-bpf/ActPlane.git", rev = "a62e5d9d96f91101cda019519053e950d532380a" }
 
 [package]
 name = "agentsight"
