@@ -356,9 +356,18 @@ fn read_process_start_time(pid: i32) -> Result<u64, BackendError> {
 }
 
 fn convert_violation(raw: Violation, active: &ActiveBinding) -> ViolationEvent {
-    let rule_index = raw.rule_id as usize;
     let monotonic_now_ns = monotonic_now_ns();
     let observed_at_ns = now_ns();
+    convert_violation_at(raw, active, observed_at_ns, monotonic_now_ns)
+}
+
+fn convert_violation_at(
+    raw: Violation,
+    active: &ActiveBinding,
+    observed_at_ns: u64,
+    monotonic_now_ns: Option<u64>,
+) -> ViolationEvent {
+    let rule_index = raw.rule_id as usize;
     let occurred_at_ns = monotonic_now_ns
         .map(|monotonic_now_ns| {
             monotonic_to_epoch_ns(raw.timestamp_ns, monotonic_now_ns, observed_at_ns)
@@ -517,10 +526,6 @@ mod tests {
         }
     }
 
-    fn test_monotonic_now_ns() -> u64 {
-        monotonic_now_ns().expect("CLOCK_MONOTONIC should be available on Linux")
-    }
-
     #[test]
     fn domain_id_is_stable_and_nonzero() {
         let id = Uuid::parse_str("00000000-0000-4000-8000-000000000123")
@@ -557,32 +562,77 @@ mod tests {
     }
 
     #[test]
-    fn raw_violation_conversion_preserves_block_and_rule_metadata() {
+    fn violation_adapter_maps_fields_and_converts_fixed_observation() {
         let active = active_binding();
-        let raw = raw_violation(100);
+        let raw = raw_violation(270_000_000_000);
 
-        let event: ViolationEvent = convert_violation(raw, &active);
+        let event: ViolationEvent = convert_violation_at(
+            raw,
+            &active,
+            1_784_000_000_000_000_000,
+            Some(271_000_000_000),
+        );
+        assert_eq!(event.binding_id, active.binding.request.binding_id);
+        assert_eq!(event.agent_id, "agent-1");
+        assert_eq!(event.session_id.as_deref(), Some("session-1"));
+        assert_eq!(event.policy_id, "policy-1");
+        assert_eq!(event.policy_revision, "revision-1");
+        assert_eq!(event.pid, 43);
+        assert_eq!(event.ppid, Some(42));
         assert_eq!(event.effect, Effect::Block);
         assert!(event.blocked);
+        assert!(!event.killed);
         assert_eq!(event.operation, "connect");
+        assert_eq!(event.target, "198.51.100.10");
         assert_eq!(event.rule_id.as_deref(), Some("block-exfiltration"));
         assert_eq!(
             event.reason.as_deref(),
             Some("credential reached an external sink")
         );
+        assert_eq!(event.occurred_at_ns, 1_783_999_999_000_000_000);
+        assert_eq!(event.observed_at_ns, 1_784_000_000_000_000_000);
         assert_eq!(event.actplane_revision, ACTPLANE_REVISION);
     }
 
     #[test]
-    fn raw_violation_conversion_publishes_epoch_timestamp() {
+    fn violation_adapter_falls_back_when_monotonic_read_fails() {
         let active = active_binding();
-        let raw_timestamp_ns = test_monotonic_now_ns().saturating_sub(1_000_000_000);
+        let observed_at_ns = 1_784_000_000_000_000_000;
 
-        let event = convert_violation(raw_violation(raw_timestamp_ns), &active);
+        let event = convert_violation_at(
+            raw_violation(270_000_000_000),
+            &active,
+            observed_at_ns,
+            None,
+        );
 
-        assert!(event.occurred_at_ns >= 946_684_800_000_000_000);
-        assert!(event.occurred_at_ns <= event.observed_at_ns);
-        assert!(event.observed_at_ns - event.occurred_at_ns <= 2_000_000_000);
-        assert_ne!(event.occurred_at_ns, raw_timestamp_ns);
+        assert_eq!(event.occurred_at_ns, observed_at_ns);
+        assert_eq!(event.observed_at_ns, observed_at_ns);
+    }
+
+    #[test]
+    fn violation_adapter_falls_back_for_future_monotonic_event() {
+        let observed_at_ns = 1_784_000_000_000_000_000;
+        let event = convert_violation_at(
+            raw_violation(272_000_000_000),
+            &active_binding(),
+            observed_at_ns,
+            Some(271_000_000_000),
+        );
+
+        assert_eq!(event.occurred_at_ns, observed_at_ns);
+    }
+
+    #[test]
+    fn violation_adapter_falls_back_when_epoch_subtraction_underflows() {
+        let observed_at_ns = 5;
+        let event = convert_violation_at(
+            raw_violation(10),
+            &active_binding(),
+            observed_at_ns,
+            Some(20),
+        );
+
+        assert_eq!(event.occurred_at_ns, observed_at_ns);
     }
 }
