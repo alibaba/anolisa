@@ -1,0 +1,17 @@
+[package]
+name = "agentsight-enforcer"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+default = ["mock-backend"]
+mock-backend = []
+
+[dependencies]
+agentsight-enforcement-protocol = { path = "../enforcement-protocol" }
+anyhow = { workspace = true }
+libc = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }

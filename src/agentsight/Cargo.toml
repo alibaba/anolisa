@@ -1,5 +1,9 @@
 [workspace]
-members = [".", "crates/enforcement-protocol"]
+members = [
+    ".",
+    "crates/enforcement-protocol",
+    "crates/agentsight-enforcer",
+]
 resolver = "2"
 
 [workspace.dependencies]
