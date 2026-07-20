@@ -409,16 +409,24 @@ mod tests {
                 .arg("30")
                 .spawn()
                 .expect("fixture process should start");
-            let stat = fs::read_to_string(format!("/proc/{}/stat", child.id()))
-                .expect("fixture proc stat should exist");
-            let open = stat
-                .find('(')
-                .expect("fixture proc stat should contain open");
-            let close = stat
-                .rfind(')')
-                .expect("fixture proc stat should contain close");
             let expected_process_name: String = process_name.chars().take(15).collect();
-            assert_eq!(&stat[open + 1..close], expected_process_name);
+            let mut actual_process_name = String::new();
+            for _ in 0..10 {
+                let stat = fs::read_to_string(format!("/proc/{}/stat", child.id()))
+                    .expect("fixture proc stat should exist");
+                let open = stat
+                    .find('(')
+                    .expect("fixture proc stat should contain open");
+                let close = stat
+                    .rfind(')')
+                    .expect("fixture proc stat should contain close");
+                actual_process_name = stat[open + 1..close].into();
+                if actual_process_name == expected_process_name {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert_eq!(actual_process_name, expected_process_name);
 
             assert!(
                 build_file_binding(FileBindingRequest {
