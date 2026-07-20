@@ -47,7 +47,7 @@ Add:
 
 ```toml
 [workspace]
-members = [".", "crates/enforcement-protocol", "crates/agentsight-enforcer"]
+members = [".", "crates/enforcement-protocol"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -57,8 +57,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
-actplane-ifc-compiler = { git = "https://github.com/eunomia-bpf/ActPlane.git", rev = "a62e5d9d96f91101cda019519053e950d532380a" }
-ebpf-ifc-engine = { git = "https://github.com/eunomia-bpf/ActPlane.git", rev = "a62e5d9d96f91101cda019519053e950d532380a" }
 ```
 
 Create the member manifest with those four serialization/error dependencies using `workspace = true`.
@@ -157,6 +155,10 @@ git commit -m "feat(sight): add enforcement protocol"
 - Produces: `EnforcementBackend`, `BackendError`, `MockBackend`, `EventHub`, and `EnforcerService`.
 
 - [ ] **Step 1: Add daemon features and pinned dependencies**
+
+Add `crates/agentsight-enforcer` to the root workspace members, then add the two
+official ActPlane Git dependencies to `[workspace.dependencies]`, both pinned to
+`a62e5d9d96f91101cda019519053e950d532380a`.
 
 ```toml
 [features]
