@@ -16,6 +16,9 @@ vi.mock('../pages/AtifViewerPage', () => ({
 vi.mock('../pages/SecurityObservabilityPage', () => ({
   SecurityObservabilityPage: () => <div data-testid="page-security">SecurityObservabilityPage</div>,
 }));
+vi.mock('../pages/RiskEnforcementPage', () => ({
+  RiskEnforcementPage: () => <div data-testid="page-enforcement">RiskEnforcementPage</div>,
+}));
 vi.mock('../components/AgentHealthSidebar', () => ({
   AgentHealthSidebar: () => <div data-testid="sidebar">Sidebar</div>,
 }));
@@ -48,5 +51,11 @@ describe('App', () => {
     window.location.hash = '#/security';
     render(<App />);
     expect(screen.getByTestId('page-security')).toBeInTheDocument();
+  });
+
+  it('renders RiskEnforcementPage on enforcement path', async () => {
+    window.location.hash = '#/enforcement';
+    render(<App />);
+    expect(await screen.findByTestId('page-enforcement')).toBeInTheDocument();
   });
 });

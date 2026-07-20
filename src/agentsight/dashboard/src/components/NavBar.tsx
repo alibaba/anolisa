@@ -6,6 +6,7 @@ const navItems = [
   { path: '/savings', label: 'Token 节省', icon: '⚡' },
   { path: '/skills', label: 'Skill 指标', icon: '🧩' },
   { path: '/security', label: '安全可观测', icon: '🛡️' },
+  { path: '/enforcement', label: '风险拦截', icon: '⛔' },
   { path: '/atif', label: 'ATIF 查看器', icon: '🔍' },
 ];
 
