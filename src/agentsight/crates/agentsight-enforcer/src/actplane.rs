@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -356,6 +357,13 @@ fn read_process_start_time(pid: i32) -> Result<u64, BackendError> {
 
 fn convert_violation(raw: Violation, active: &ActiveBinding) -> ViolationEvent {
     let rule_index = raw.rule_id as usize;
+    let monotonic_now_ns = monotonic_now_ns();
+    let observed_at_ns = now_ns();
+    let occurred_at_ns = monotonic_now_ns
+        .map(|monotonic_now_ns| {
+            monotonic_to_epoch_ns(raw.timestamp_ns, monotonic_now_ns, observed_at_ns)
+        })
+        .unwrap_or(observed_at_ns);
     ViolationEvent {
         event_id: Uuid::new_v4(),
         binding_id: active.binding.request.binding_id,
@@ -377,8 +385,8 @@ fn convert_violation(raw: Violation, active: &ActiveBinding) -> ViolationEvent {
             .cloned()
             .or_else(|| Some(raw.rule_id.to_string())),
         reason: active.reasons.get(rule_index).cloned(),
-        occurred_at_ns: raw.timestamp_ns,
-        observed_at_ns: now_ns(),
+        occurred_at_ns,
+        observed_at_ns,
         actplane_revision: ACTPLANE_REVISION.into(),
     }
 }
@@ -400,6 +408,35 @@ fn effect(value: u32) -> Effect {
         2 => Effect::Kill,
         _ => Effect::Notify,
     }
+}
+
+fn monotonic_to_epoch_ns(
+    event_monotonic_ns: u64,
+    monotonic_now_ns: u64,
+    realtime_now_ns: u64,
+) -> u64 {
+    let Some(elapsed_ns) = monotonic_now_ns.checked_sub(event_monotonic_ns) else {
+        return realtime_now_ns;
+    };
+    realtime_now_ns
+        .checked_sub(elapsed_ns)
+        .unwrap_or(realtime_now_ns)
+}
+
+fn monotonic_now_ns() -> Option<u64> {
+    let mut timestamp = MaybeUninit::<libc::timespec>::uninit();
+    // SAFETY: `clock_gettime` initializes the provided timespec on success.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, timestamp.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: The successful call above initialized `timestamp`.
+    let timestamp = unsafe { timestamp.assume_init() };
+    let seconds = u64::try_from(timestamp.tv_sec).ok()?;
+    let nanoseconds = u64::try_from(timestamp.tv_nsec).ok()?;
+    if nanoseconds >= 1_000_000_000 {
+        return None;
+    }
+    seconds.checked_mul(1_000_000_000)?.checked_add(nanoseconds)
 }
 
 fn now_ns() -> u64 {
@@ -437,6 +474,53 @@ mod tests {
 
     use super::*;
 
+    fn active_binding() -> ActiveBinding {
+        ActiveBinding {
+            binding: Binding {
+                request: ApplyPolicy {
+                    binding_id: Uuid::new_v4(),
+                    agent_id: "agent-1".into(),
+                    session_id: Some("session-1".into()),
+                    root_pid: 42,
+                    process_start_time: 98765,
+                    policy_id: "policy-1".into(),
+                    policy_revision: "revision-1".into(),
+                    policy_dsl: "fixture".into(),
+                },
+                state: BindingState::Enforced,
+                message: None,
+                domain_id: Some(7),
+            },
+            reasons: vec!["credential reached an external sink".into()],
+            rule_names: vec!["block-exfiltration".into()],
+        }
+    }
+
+    fn raw_violation(timestamp_ns: u64) -> Violation {
+        Violation {
+            effect: 1,
+            blocked: true,
+            killed: false,
+            comm: "curl".into(),
+            pid: 43,
+            ppid: 42,
+            target: "198.51.100.10".into(),
+            rule_id: 0,
+            op: 3,
+            domain_id: 7,
+            session_root: 42,
+            label: 1,
+            matched_label: 1,
+            matched_labels: 1,
+            provenance: None,
+            timestamp_ns,
+        }
+    }
+
+    fn test_monotonic_now_ns() -> u64 {
+        monotonic_now_ns().expect("CLOCK_MONOTONIC should be available on Linux")
+    }
+
     #[test]
     fn domain_id_is_stable_and_nonzero() {
         let id = Uuid::parse_str("00000000-0000-4000-8000-000000000123")
@@ -459,45 +543,23 @@ mod tests {
     }
 
     #[test]
+    fn monotonic_event_time_is_converted_to_unix_epoch() {
+        let occurred_at_ns =
+            monotonic_to_epoch_ns(270_000_000_000, 271_000_000_000, 1_784_000_000_000_000_000);
+
+        assert_eq!(occurred_at_ns, 1_783_999_999_000_000_000);
+    }
+
+    #[test]
+    fn invalid_clock_relationships_fall_back_to_observation_time() {
+        assert_eq!(monotonic_to_epoch_ns(30, 20, 5), 5);
+        assert_eq!(monotonic_to_epoch_ns(10, 20, 5), 5);
+    }
+
+    #[test]
     fn raw_violation_conversion_preserves_block_and_rule_metadata() {
-        let binding_id = Uuid::new_v4();
-        let active = ActiveBinding {
-            binding: Binding {
-                request: ApplyPolicy {
-                    binding_id,
-                    agent_id: "agent-1".into(),
-                    session_id: Some("session-1".into()),
-                    root_pid: 42,
-                    process_start_time: 98765,
-                    policy_id: "policy-1".into(),
-                    policy_revision: "revision-1".into(),
-                    policy_dsl: "fixture".into(),
-                },
-                state: BindingState::Enforced,
-                message: None,
-                domain_id: Some(7),
-            },
-            reasons: vec!["credential reached an external sink".into()],
-            rule_names: vec!["block-exfiltration".into()],
-        };
-        let raw = Violation {
-            effect: 1,
-            blocked: true,
-            killed: false,
-            comm: "curl".into(),
-            pid: 43,
-            ppid: 42,
-            target: "198.51.100.10".into(),
-            rule_id: 0,
-            op: 3,
-            domain_id: 7,
-            session_root: 42,
-            label: 1,
-            matched_label: 1,
-            matched_labels: 1,
-            provenance: None,
-            timestamp_ns: 100,
-        };
+        let active = active_binding();
+        let raw = raw_violation(100);
 
         let event: ViolationEvent = convert_violation(raw, &active);
         assert_eq!(event.effect, Effect::Block);
@@ -509,5 +571,18 @@ mod tests {
             Some("credential reached an external sink")
         );
         assert_eq!(event.actplane_revision, ACTPLANE_REVISION);
+    }
+
+    #[test]
+    fn raw_violation_conversion_publishes_epoch_timestamp() {
+        let active = active_binding();
+        let raw_timestamp_ns = test_monotonic_now_ns().saturating_sub(1_000_000_000);
+
+        let event = convert_violation(raw_violation(raw_timestamp_ns), &active);
+
+        assert!(event.occurred_at_ns >= 946_684_800_000_000_000);
+        assert!(event.occurred_at_ns <= event.observed_at_ns);
+        assert!(event.observed_at_ns - event.occurred_at_ns <= 2_000_000_000);
+        assert_ne!(event.occurred_at_ns, raw_timestamp_ns);
     }
 }

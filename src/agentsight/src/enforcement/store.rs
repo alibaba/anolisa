@@ -9,6 +9,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 use uuid::Uuid;
 
+const MIN_REASONABLE_UNIX_EPOCH_NS: u64 = 946_684_800_000_000_000;
+
 /// Persistence failures for enforcement state.
 #[derive(Debug, Error)]
 pub enum EnforcementStoreError {
@@ -40,10 +42,10 @@ impl EnforcementStore {
     ///
     /// # Errors
     ///
-    /// Returns a SQLite error when the file or schema cannot be initialized.
+    /// Returns a SQLite or JSON error when initialization or legacy migration fails.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, EnforcementStoreError> {
         let path = path.as_ref();
-        let connection = if path == Path::new(":memory:") {
+        let mut connection = if path == Path::new(":memory:") {
             Connection::open_in_memory()?
         } else {
             crate::storage::sqlite::create_connection(path)
@@ -67,6 +69,7 @@ impl EnforcementStore {
              CREATE INDEX IF NOT EXISTS idx_enforcement_violations_time
                 ON enforcement_violations(occurred_at_ns DESC);",
         )?;
+        migrate_legacy_violation_timestamps(&mut connection)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
@@ -204,6 +207,54 @@ impl EnforcementStore {
     }
 }
 
+fn migrate_legacy_violation_timestamps(
+    connection: &mut Connection,
+) -> Result<(), EnforcementStoreError> {
+    let transaction = connection.transaction()?;
+    let candidates = {
+        let mut statement = transaction.prepare(
+            "SELECT event_id, event_json FROM enforcement_violations
+             WHERE occurred_at_ns < ?1",
+        )?;
+        let rows = statement
+            .query_map(params![sqlite_i64(MIN_REASONABLE_UNIX_EPOCH_NS)], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+        let mut candidates = Vec::new();
+        for row in rows {
+            candidates.push(row?);
+        }
+        candidates
+    };
+
+    for (event_id, event_json) in candidates {
+        let mut event: ViolationEvent = serde_json::from_str(&event_json)?;
+        if event.occurred_at_ns >= MIN_REASONABLE_UNIX_EPOCH_NS
+            || !is_reasonable_unix_epoch_ns(event.observed_at_ns)
+        {
+            continue;
+        }
+        event.occurred_at_ns = event.observed_at_ns;
+        transaction.execute(
+            "UPDATE enforcement_violations
+             SET occurred_at_ns = ?1, event_json = ?2
+             WHERE event_id = ?3 AND occurred_at_ns < ?4",
+            params![
+                event.observed_at_ns as i64,
+                serde_json::to_string(&event)?,
+                event_id,
+                sqlite_i64(MIN_REASONABLE_UNIX_EPOCH_NS),
+            ],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+fn is_reasonable_unix_epoch_ns(value: u64) -> bool {
+    (MIN_REASONABLE_UNIX_EPOCH_NS..=i64::MAX as u64).contains(&value)
+}
+
 fn state_name(state: BindingState) -> &'static str {
     match state {
         BindingState::Pending => "pending",
@@ -225,4 +276,140 @@ fn now_ns() -> u64 {
 
 fn sqlite_i64(value: u64) -> i64 {
     value.min(i64::MAX as u64) as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use agentsight_enforcement_protocol::Effect;
+
+    use super::*;
+
+    const LEGACY_OCCURRED_AT_NS: u64 = 270_000_000_000_000;
+    const LEGACY_OBSERVED_AT_NS: u64 = 1_784_000_000_000_000_000;
+    const VALID_OCCURRED_AT_NS: u64 = 1_783_000_000_000_000_000;
+
+    struct TestDatabase {
+        path: PathBuf,
+    }
+
+    impl TestDatabase {
+        fn new() -> Self {
+            Self {
+                path: std::env::temp_dir().join(format!(
+                    "agentsight-enforcement-store-{}.db",
+                    Uuid::new_v4()
+                )),
+            }
+        }
+    }
+
+    impl Drop for TestDatabase {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.path);
+            let _ = fs::remove_file(format!("{}-wal", self.path.display()));
+            let _ = fs::remove_file(format!("{}-shm", self.path.display()));
+        }
+    }
+
+    fn violation(occurred_at_ns: u64, observed_at_ns: u64) -> ViolationEvent {
+        ViolationEvent {
+            event_id: Uuid::new_v4(),
+            binding_id: Uuid::new_v4(),
+            agent_id: "test-agent".into(),
+            session_id: Some("test-session".into()),
+            policy_id: "test-policy".into(),
+            policy_revision: "revision-1".into(),
+            pid: 42,
+            ppid: Some(1),
+            process_start_time: 99,
+            operation: "open".into(),
+            target: "/tmp/secret".into(),
+            effect: Effect::Block,
+            blocked: true,
+            killed: false,
+            rule_id: Some("block-secret".into()),
+            reason: Some("test fixture".into()),
+            occurred_at_ns,
+            observed_at_ns,
+            actplane_revision: "test-revision".into(),
+        }
+    }
+
+    fn raw_violation(path: &Path, event_id: Uuid) -> (i64, String) {
+        Connection::open(path)
+            .expect("test database should open")
+            .query_row(
+                "SELECT occurred_at_ns, event_json
+                 FROM enforcement_violations WHERE event_id = ?1",
+                params![event_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("test violation should exist")
+    }
+
+    #[test]
+    fn open_migrates_legacy_violation_idempotently_and_repairs_ordering() {
+        let database = TestDatabase::new();
+        let legacy = violation(LEGACY_OCCURRED_AT_NS, LEGACY_OBSERVED_AT_NS);
+        let valid = violation(VALID_OCCURRED_AT_NS, VALID_OCCURRED_AT_NS + 10);
+        let store = EnforcementStore::open(&database.path).expect("test store should open");
+        store
+            .insert_violation(&legacy)
+            .expect("legacy violation should insert");
+        store
+            .insert_violation(&valid)
+            .expect("valid violation should insert");
+        drop(store);
+
+        let valid_before = raw_violation(&database.path, valid.event_id);
+        let reopened = EnforcementStore::open(&database.path).expect("test store should reopen");
+        let events = reopened
+            .violations(10)
+            .expect("migrated violations should load");
+        assert_eq!(events[0].event_id, legacy.event_id);
+        assert_eq!(events[0].occurred_at_ns, LEGACY_OBSERVED_AT_NS);
+        assert_eq!(events[1], valid);
+        drop(reopened);
+
+        let legacy_after_first_open = raw_violation(&database.path, legacy.event_id);
+        assert_eq!(legacy_after_first_open.0, LEGACY_OBSERVED_AT_NS as i64);
+        let migrated_json: ViolationEvent = serde_json::from_str(&legacy_after_first_open.1)
+            .expect("migrated event JSON should deserialize");
+        assert_eq!(migrated_json.occurred_at_ns, LEGACY_OBSERVED_AT_NS);
+        assert_eq!(raw_violation(&database.path, valid.event_id), valid_before);
+
+        drop(EnforcementStore::open(&database.path).expect("test store should reopen twice"));
+        assert_eq!(
+            raw_violation(&database.path, legacy.event_id),
+            legacy_after_first_open
+        );
+        assert_eq!(raw_violation(&database.path, valid.event_id), valid_before);
+    }
+
+    #[test]
+    fn open_propagates_malformed_legacy_event_json() {
+        let database = TestDatabase::new();
+        let legacy = violation(LEGACY_OCCURRED_AT_NS, LEGACY_OBSERVED_AT_NS);
+        let store = EnforcementStore::open(&database.path).expect("test store should open");
+        store
+            .insert_violation(&legacy)
+            .expect("legacy violation should insert");
+        drop(store);
+        Connection::open(&database.path)
+            .expect("test database should open")
+            .execute(
+                "UPDATE enforcement_violations SET event_json = '{' WHERE event_id = ?1",
+                params![legacy.event_id.to_string()],
+            )
+            .expect("legacy JSON should be corrupted");
+
+        match EnforcementStore::open(&database.path) {
+            Err(EnforcementStoreError::Json(_)) => {}
+            Err(error) => panic!("expected JSON error, got {error}"),
+            Ok(_) => panic!("malformed legacy JSON should fail store open"),
+        }
+    }
 }

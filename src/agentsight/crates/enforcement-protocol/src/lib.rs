@@ -164,9 +164,9 @@ pub struct ViolationEvent {
     pub rule_id: Option<String>,
     /// Sanitized upstream reason when available.
     pub reason: Option<String>,
-    /// Kernel or backend event time in nanoseconds.
+    /// Event occurrence time as Unix epoch nanoseconds.
     pub occurred_at_ns: u64,
-    /// Enforcer observation time in nanoseconds.
+    /// Time the enforcer received and normalized the event, as Unix epoch nanoseconds.
     pub observed_at_ns: u64,
     /// Exact upstream ActPlane revision that produced the event.
     pub actplane_revision: String,
