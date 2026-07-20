@@ -104,6 +104,13 @@ beforeEach(() => {
 });
 
 describe('RiskEnforcementPage', () => {
+  it('does not declare a main landmark because App owns it', async () => {
+    render(<RiskEnforcementPage />);
+
+    await screen.findByText('运行中');
+    expect(screen.queryByRole('main')).not.toBeInTheDocument();
+  });
+
   it('loads health bindings and violations independently', async () => {
     render(<RiskEnforcementPage />);
 

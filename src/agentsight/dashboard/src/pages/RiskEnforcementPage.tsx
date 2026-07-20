@@ -159,7 +159,7 @@ export const RiskEnforcementPage: React.FC = () => {
   const readinessLabel = health?.ready ? '运行中' : healthUnavailable ? '不可用' : '检测中';
 
   return (
-    <main className="mx-auto w-full max-w-screen-xl space-y-6 p-6">
+    <div className="mx-auto w-full max-w-screen-xl space-y-6 p-6">
       <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <div className="flex items-center gap-3">
@@ -342,6 +342,6 @@ export const RiskEnforcementPage: React.FC = () => {
           </table>
         </div>
       </section>
-    </main>
+    </div>
   );
 };
