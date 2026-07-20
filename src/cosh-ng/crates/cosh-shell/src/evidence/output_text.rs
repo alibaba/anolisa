@@ -56,7 +56,8 @@ pub(super) fn provider_output_preview(
     }
 }
 
-pub(super) fn redact_sensitive_output(text: &str) -> (String, bool) {
+/// Applies the shared output policy before content crosses a durable or provider boundary.
+pub(crate) fn redact_sensitive_output(text: &str) -> (String, bool) {
     let (redacted, changed, _) = redact_sensitive_output_with_policy(text);
     (redacted, changed)
 }

@@ -85,6 +85,9 @@ fn main() {
         print_usage_help();
         std::process::exit(0);
     }
+    if args.get(1).map(String::as_str) == Some("diagnostics") {
+        std::process::exit(diagnostics::bundle::run_cli(&args[2..]));
+    }
 
     runtime::terminal::install_terminal_recovery();
 

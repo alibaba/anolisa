@@ -420,6 +420,7 @@ pub(crate) fn print_usage_help() {
          \n\
          Modes:\n\
           raw [adapter] [--run]   Interactive mode with AI (adapters: fake, claude, co, qwen, cosh-core)\n\
+          diagnostics export      Export a redacted diagnostic bundle\n\
            demo                    Demo with synthetic events\n\
          \n\
          Options:\n\

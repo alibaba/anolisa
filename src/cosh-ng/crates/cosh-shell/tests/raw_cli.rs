@@ -22,6 +22,8 @@ mod cancellation;
 mod config;
 #[path = "raw_cli/cosh_core/mod.rs"]
 mod cosh_core;
+#[path = "raw_cli/diagnostics.rs"]
+mod diagnostics;
 #[path = "raw_cli/evidence_request.rs"]
 mod evidence_request;
 #[path = "raw_cli/failed_command.rs"]
