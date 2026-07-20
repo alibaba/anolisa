@@ -23,6 +23,35 @@ struct CountingShellTool {
     calls: Arc<AtomicUsize>,
 }
 
+struct ExternalTool;
+
+#[async_trait]
+impl Tool for ExternalTool {
+    fn name(&self) -> &str {
+        "example.ops/mcp/server/tool"
+    }
+
+    fn description(&self) -> &str {
+        "external tool"
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type":"object"})
+    }
+
+    fn kind(&self) -> ToolKind {
+        ToolKind::External
+    }
+
+    async fn invoke(
+        &self,
+        _params: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> Result<ToolResult, String> {
+        Ok(ToolResult::success("unused"))
+    }
+}
+
 #[test]
 fn allowlisted_tools_bypass_strict_approval() {
     let mut config = CoreConfig::default();
@@ -73,6 +102,52 @@ fn exact_mcp_allowlist_entry_bypasses_approval() {
         core.classify_tool("mcp__remote__search", &serde_json::json!({})),
         Outcome::Allow
     );
+}
+
+#[test]
+fn external_tools_require_approval_outside_trust_mode() {
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "trust".to_string();
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(ExternalTool));
+    let mut core = CoshCore::new(config, Box::new(MockProvider::text_only("unused")), tools);
+    for mode in ["auto", "balanced", "suggest"] {
+        core.config.agent.approval_mode = mode.to_string();
+        assert_eq!(
+            core.classify_tool("example.ops/mcp/server/tool", &serde_json::json!({})),
+            Outcome::RequireApproval
+        );
+    }
+    core.config.agent.approval_mode = "trust".to_string();
+    assert_eq!(
+        core.classify_tool("example.ops/mcp/server/tool", &serde_json::json!({})),
+        Outcome::Allow
+    );
+}
+
+#[test]
+fn safe_reload_rebinds_the_complete_snapshot_before_the_next_run() {
+    let mut core = make_core(MockProvider::text_only("unused"));
+    let previous = core.extension_generation.current().generation.id;
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(ExternalTool));
+    let candidate = RuntimeSnapshot::bootstrap(
+        RuntimeGeneration::healthy(previous + 1, "candidate"),
+        Arc::new(tools),
+    );
+
+    core.extension_generation.stage(candidate);
+    assert_eq!(
+        core.extension_generation.reload(),
+        crate::extension::generation::ReloadOutcome::Activated
+    );
+    assert!(core.tools.get("example.ops/mcp/server/tool").is_none());
+
+    core.bind_current_extension_snapshot();
+
+    assert_eq!(core.bound_extension_generation, previous + 1);
+    assert!(core.tools.get("example.ops/mcp/server/tool").is_some());
+    assert_eq!(core.extension_generation.take_retired().len(), 1);
 }
 
 #[async_trait]

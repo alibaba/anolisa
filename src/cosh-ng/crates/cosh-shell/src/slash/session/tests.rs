@@ -231,6 +231,7 @@ fn active_core_adapter() -> AdapterInstance {
         session: Arc::new(Mutex::new(SessionRuntimeState::with_active(
             SESSION_ID, "/tmp",
         ))),
+        ..CoshCoreAdapter::default()
     })
 }
 

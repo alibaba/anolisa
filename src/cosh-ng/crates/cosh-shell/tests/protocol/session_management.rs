@@ -1,7 +1,6 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cosh_shell::adapter::{
@@ -263,11 +262,7 @@ esac
     let mut permissions = fs::metadata(&script).expect("metadata").permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(&script, permissions).expect("chmod");
-    let adapter = CoshCoreAdapter {
-        program: script.display().to_string(),
-        allow_model_call: false,
-        session: Arc::default(),
-    };
+    let adapter = CoshCoreAdapter::new(script.display().to_string(), false);
 
     let clear_adapter = adapter.clone();
     let clear_id = session_id.to_string();

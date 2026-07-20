@@ -10,6 +10,24 @@ impl ContextBuilder {
         approval_mode: &str,
         output_language: Option<&str>,
     ) -> String {
+        Self::build_system_prompt_with_extensions(
+            cwd,
+            tool_names,
+            skill_summaries,
+            approval_mode,
+            output_language,
+            None,
+        )
+    }
+
+    pub fn build_system_prompt_with_extensions(
+        cwd: &Path,
+        tool_names: &[String],
+        skill_summaries: &[(String, String)],
+        approval_mode: &str,
+        output_language: Option<&str>,
+        extension_context: Option<&str>,
+    ) -> String {
         let mut parts = Vec::new();
 
         parts.push(format!(
@@ -21,6 +39,10 @@ impl ContextBuilder {
 
         if let Some(ctx) = Self::load_project_context(cwd) {
             parts.push(format!("# Project Context\n{ctx}"));
+        }
+
+        if let Some(context) = extension_context.filter(|context| !context.trim().is_empty()) {
+            parts.push(format!("# Extension Contexts\n{context}"));
         }
 
         parts.push(format!("# Approval Mode\nCurrent mode: `{approval_mode}`"));
@@ -124,5 +146,26 @@ mod tests {
         let prompt = ContextBuilder::build_system_prompt(&cwd, &[], &[], "auto", None);
 
         assert!(!prompt.contains("Available Skills"));
+    }
+
+    #[test]
+    fn extension_context_follows_project_context_before_policy_sections() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project_dir = temporary.path().join(".copilot-shell");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join("CONTEXT.md"), "PROJECT-CONTEXT").unwrap();
+        let prompt = ContextBuilder::build_system_prompt_with_extensions(
+            temporary.path(),
+            &[],
+            &[],
+            "balanced",
+            None,
+            Some("EXTENSION-CONTEXT"),
+        );
+        let project = prompt.find("PROJECT-CONTEXT").unwrap();
+        let extension = prompt.find("EXTENSION-CONTEXT").unwrap();
+        let approval = prompt.find("# Approval Mode").unwrap();
+        assert!(project < extension);
+        assert!(extension < approval);
     }
 }

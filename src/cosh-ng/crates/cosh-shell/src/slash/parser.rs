@@ -27,7 +27,7 @@ pub(super) enum SlashCommand<'a> {
     Removed(RemovedCommand<'a>),
     Hint(&'a str),
     Unknown(&'a str),
-    Extensions(Option<&'a str>, Option<&'a str>),
+    Extensions(&'a str),
     Skills(Option<&'a str>, Option<&'a str>),
     Session(&'a str),
     Recommendations(Option<&'a str>, Option<&'a str>, Option<&'a str>),
@@ -80,9 +80,11 @@ impl<'a> SlashCommand<'a> {
             "/debug" => Some(Self::Debug(parts.next())),
             "/health" => Some(Self::Health),
             "/extensions" => {
-                let sub = parts.next();
-                let arg = parts.next();
-                Some(Self::Extensions(sub, arg))
+                let args = input
+                    .strip_prefix("/extensions")
+                    .expect("matched slash command prefix")
+                    .trim();
+                Some(Self::Extensions(args))
             }
             "/skills" => {
                 let sub = parts.next();

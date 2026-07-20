@@ -1,5 +1,3 @@
-use std::sync::{Arc, Mutex};
-
 use cosh_shell::adapter::{
     CoshCoreAdapter, SessionHealth, SessionRecoveryState, SessionRuntimeState,
 };
@@ -27,11 +25,8 @@ fn active_and_selected_provider_sessions_are_both_protected() {
     session.recovery.state = SessionRecoveryState::Selected;
     session.recovery.selected_session_id = Some(selected.clone());
     session.recovery.selected_workspace_scope = Some("/tmp".to_string());
-    let adapter = CoshCoreAdapter {
-        program: "unused".to_string(),
-        allow_model_call: false,
-        session: Arc::new(Mutex::new(session)),
-    };
+    let adapter = CoshCoreAdapter::new("unused", false);
+    *adapter.session.lock().unwrap() = session;
 
     assert_eq!(adapter.protected_session_ids(), vec![active, selected]);
 }

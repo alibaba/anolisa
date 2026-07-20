@@ -919,11 +919,7 @@ exit 1
         .permissions();
     permissions.set_mode(0o700);
     std::fs::set_permissions(&program, permissions).expect("chmod mock cosh-core");
-    let adapter = CoshCoreAdapter {
-        program: program.to_string_lossy().to_string(),
-        allow_model_call: true,
-        session: std::sync::Arc::default(),
-    };
+    let adapter = CoshCoreAdapter::new(program.to_string_lossy().to_string(), true);
     let handle = adapter.start_cancellable(request.clone(), CoshApprovalMode::Auto);
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {

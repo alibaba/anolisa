@@ -23,11 +23,6 @@ while [ "$#" -gt 0 ]; do
   fi
   shift
 done
-if [ "$mode" = "strict" ]; then
-  printf '{"type":"assistant","session_id":"sess-cosh-core-mode-argv","message":{"content":[{"type":"text","text":"ARGV_APPROVAL_MODE=%s"}]}}\n' "$mode"
-  printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core-mode-argv","is_error":false,"result":"done"}'
-  exit 0
-fi
 read -r init
 printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-mode-argv","model":"cosh-core-test"}'
@@ -267,6 +262,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
             ),
             (b"d".to_vec(), Duration::from_millis(1_500)),
             (b"\x1b".to_vec(), Duration::from_millis(700)),
+            (b"\n".to_vec(), Duration::from_millis(100)),
             (b"exit 0\n".to_vec(), Duration::from_millis(1_500)),
         ],
     );

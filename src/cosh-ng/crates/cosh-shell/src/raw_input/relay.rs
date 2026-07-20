@@ -7,8 +7,8 @@ use crate::input::{InputClassifier, InputDecision, InterceptReason};
 
 use super::event_parser::{
     candidate_inline_hint, candidate_line_status, native_candidate_should_return_to_shell,
-    starts_intercept_candidate, starts_native_intercept_candidate, CandidateLineBuffer,
-    CandidateLineStatus, NativeLineState,
+    redact_extension_setting_value, starts_intercept_candidate, starts_native_intercept_candidate,
+    CandidateLineBuffer, CandidateLineStatus, NativeLineState,
 };
 use super::{write_all_pty, PromptGhostRoute, RawInputEvent, RawInputMode, CTRL_C};
 
@@ -311,9 +311,9 @@ fn relay_candidate_line(
             let mut bytes = relay.line_buffer.take();
             let remainder = bytes.split_off(line_len);
             if force_agent_intercept {
-                let _ = relay
-                    .input_events
-                    .send(RawInputEvent::CandidateCommit(line.as_bytes().to_vec()));
+                let _ = relay.input_events.send(RawInputEvent::CandidateCommit(
+                    redact_extension_setting_value(line.as_bytes()),
+                ));
                 if let Ok(mut mode) = relay.input_mode.lock() {
                     *mode = RawInputMode::Delay;
                 }
@@ -331,9 +331,9 @@ fn relay_candidate_line(
             }
             match relay.input_classifier.classify(&line) {
                 InputDecision::Intercept { input, reason } => {
-                    let _ = relay
-                        .input_events
-                        .send(RawInputEvent::CandidateCommit(line.as_bytes().to_vec()));
+                    let _ = relay.input_events.send(RawInputEvent::CandidateCommit(
+                        redact_extension_setting_value(line.as_bytes()),
+                    ));
                     if let Ok(mut mode) = relay.input_mode.lock() {
                         *mode = RawInputMode::Delay;
                     }
@@ -400,8 +400,9 @@ fn redraw_candidate_line(
     input_events: &Sender<RawInputEvent>,
     line_buffer: &mut CandidateLineBuffer,
 ) {
-    let visible = line_buffer.visible_line_bytes().to_vec();
-    send_shell_input_state(visible.is_empty(), input_events);
+    let original = line_buffer.visible_line_bytes();
+    send_shell_input_state(original.is_empty(), input_events);
+    let visible = redact_extension_setting_value(original);
     let hint = std::str::from_utf8(&visible)
         .ok()
         .and_then(candidate_inline_hint);

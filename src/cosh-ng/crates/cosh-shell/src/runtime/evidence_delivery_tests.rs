@@ -1,7 +1,6 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::runtime::prelude::{
@@ -559,11 +558,7 @@ exit 1
         .permissions();
     permissions.set_mode(0o700);
     std::fs::set_permissions(&program, permissions).expect("chmod mock cosh-core");
-    let adapter = CoshCoreAdapter {
-        program: program.to_string_lossy().to_string(),
-        allow_model_call: true,
-        session: Arc::default(),
-    };
+    let adapter = CoshCoreAdapter::new(program.to_string_lossy().to_string(), true);
     let handle = adapter.start_cancellable(request.clone(), CoshApprovalMode::Auto);
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut saw_request = false;
@@ -590,8 +585,8 @@ exit 1
 
 fn closed_cosh_core_control_handle(request: &AgentRequest) -> AgentRunHandle {
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let adapter = CoshCoreAdapter {
-        program: manifest_dir
+    let adapter = CoshCoreAdapter::new(
+        manifest_dir
             .join("tests")
             .join("fixtures")
             .join("provider")
@@ -599,9 +594,8 @@ fn closed_cosh_core_control_handle(request: &AgentRequest) -> AgentRunHandle {
             .join("mock_qwen_control_capabilities.sh")
             .to_string_lossy()
             .to_string(),
-        allow_model_call: true,
-        session: Arc::default(),
-    };
+        true,
+    );
     let handle = adapter.start_cancellable(request.clone(), CoshApprovalMode::Auto);
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {

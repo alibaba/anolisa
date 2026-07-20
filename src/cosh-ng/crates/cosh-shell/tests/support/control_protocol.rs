@@ -116,9 +116,5 @@ pub(crate) fn make_qwen_adapter(mock_script: &str) -> QwenCliAdapter {
 }
 
 pub(crate) fn make_cosh_core_adapter(mock_script: &str) -> CoshCoreAdapter {
-    CoshCoreAdapter {
-        program: mock_cli_path(mock_script),
-        allow_model_call: true,
-        session: Arc::default(),
-    }
+    CoshCoreAdapter::new(mock_cli_path(mock_script), true)
 }

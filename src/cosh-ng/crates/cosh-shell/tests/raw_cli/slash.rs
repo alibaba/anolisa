@@ -41,7 +41,7 @@ fn raw_cli_help_renders_slash_command_reference() {
         "{output}"
     );
     assert!(
-        normalized.contains("/extensions [list|detail] [name]"),
+        normalized.contains("/extensions <command> [options]"),
         "{output}"
     );
     assert!(

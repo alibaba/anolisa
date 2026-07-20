@@ -13,6 +13,7 @@ use super::cosh_core_process::{
     run_sync_cosh_core_process, start_control_protocol_cosh_core_process,
     suppress_synthetic_completion_after_transport_failure,
 };
+use super::cosh_core_service::PersistentCoshCoreRuntime;
 use super::prompt::provider_prompt_contract_with_evidence_access;
 use super::{
     agent_event_is_provider_progress, control_protocol, prompt_from_request_with_evidence_policy,
@@ -48,6 +49,7 @@ pub struct CoshCoreAdapter {
     pub allow_model_call: bool,
     /// Atomically owned active session, workspace, generation, and recovery state.
     pub session: Arc<Mutex<SessionRuntimeState>>,
+    pub(crate) runtime: Arc<PersistentCoshCoreRuntime>,
 }
 
 impl Default for CoshCoreAdapter {
@@ -67,11 +69,22 @@ impl Default for CoshCoreAdapter {
             program,
             allow_model_call: false,
             session: Arc::new(Mutex::new(SessionRuntimeState::default())),
+            runtime: Arc::new(PersistentCoshCoreRuntime::default()),
         }
     }
 }
 
 impl CoshCoreAdapter {
+    /// Creates an adapter for an explicit core executable.
+    pub fn new(program: impl Into<String>, allow_model_call: bool) -> Self {
+        Self {
+            program: program.into(),
+            allow_model_call,
+            session: Arc::new(Mutex::new(SessionRuntimeState::default())),
+            runtime: Arc::new(PersistentCoshCoreRuntime::default()),
+        }
+    }
+
     /// Enables or disables real model process execution.
     pub fn with_model_call(mut self, allow: bool) -> Self {
         self.allow_model_call = allow;
@@ -332,19 +345,10 @@ impl CoshCoreAdapter {
         }
 
         let resume_attempt = self.begin_resume_attempt(&mut prepared, &session_scope);
-        if mode.uses_control_protocol() {
-            return start_control_protocol_cosh_core_process(
-                request.id,
-                prepared,
-                Arc::clone(&self.session),
-                session_scope,
-                resume_attempt,
-            );
-        }
-
-        start_cancellable_cosh_core_process(
+        self.runtime.start_run(
             request.id,
             prepared,
+            mode,
             Arc::clone(&self.session),
             session_scope,
             resume_attempt,

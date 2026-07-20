@@ -1206,11 +1206,14 @@ fn raw_cli_cosh_core_recommend_mode_suppresses_shell_evidence_instructions() {
     write_executable(
         &cosh_core_path,
         r#"#!/bin/sh
-prompt="$*"
-case "$prompt" in
+read -r init
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true}}}}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-shell-evidence-recommend","model":"cosh-core-test"}'
+read -r user_message
+case "$user_message" in
   *cosh_shell_evidence*|*'```cosh-request'*) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-shell-evidence-recommend","is_error":true,"result":"recommend prompt exposed shell evidence request instructions"}'; exit 1 ;;
 esac
-case "$prompt" in
+case "$user_message" in
   *'say when shell evidence is needed instead of requesting it automatically'*) ;;
   *) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-shell-evidence-recommend","is_error":true,"result":"recommend prompt missing evidence limitation"}'; exit 1 ;;
 esac

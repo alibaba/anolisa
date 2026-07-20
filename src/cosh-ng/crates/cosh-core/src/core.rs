@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use futures::StreamExt;
@@ -16,6 +17,7 @@ use crate::auth::{
 use crate::compaction::CompactionRuntime;
 use crate::config::{self, CoreConfig};
 use crate::context::ContextBuilder;
+use crate::extension::{GenerationController, RuntimeGeneration, RuntimeSnapshot};
 use crate::hook::{HookDecision, HookNotification, HookSystem};
 use crate::loop_detect::LoopDetector;
 use crate::metrics::TurnMetrics;
@@ -24,10 +26,12 @@ use crate::provider::{ContentGenerator, GenerateConfig, GenerateEvent, Message};
 use crate::tool::{ToolContext, ToolKind, ToolRegistry, ToolResult};
 use crate::truncator::OutputTruncator;
 
+mod extensions;
+
 pub struct CoshCore {
     pub config: CoreConfig,
     pub provider: Box<dyn ContentGenerator>,
-    pub tools: ToolRegistry,
+    pub tools: Arc<ToolRegistry>,
     pub session_id: String,
     pub messages: Vec<Message>,
     /// Compaction runtime state: the active projection over the transcript
@@ -38,10 +42,13 @@ pub struct CoshCore {
     pub compaction: CompactionRuntime,
     pub model: String,
     pub shell_context: Option<ShellContext>,
+    pub extension_context: Option<String>,
     pub extra_params: Option<serde_json::Value>,
     pub hook_system: HookSystem,
     pub metrics: TurnMetrics,
     pub(crate) audit: CoreAuditRecorder,
+    pub extension_generation: GenerationController,
+    bound_extension_generation: u64,
     loaded_policy: LoadedPolicy,
     request_counter: AtomicU32,
     truncator: OutputTruncator,
@@ -49,50 +56,6 @@ pub struct CoshCore {
 }
 
 impl CoshCore {
-    pub fn new(
-        config: CoreConfig,
-        provider: Box<dyn ContentGenerator>,
-        tools: ToolRegistry,
-    ) -> Self {
-        Self::new_with_session_id(config, provider, tools, uuid::Uuid::new_v4().to_string())
-    }
-
-    pub(crate) fn new_with_session_id(
-        config: CoreConfig,
-        provider: Box<dyn ContentGenerator>,
-        tools: ToolRegistry,
-        session_id: String,
-    ) -> Self {
-        let model = config.resolve_provider().model;
-        let (loaded_policy, warning) = LoadedPolicy::load();
-        if let Some(w) = warning {
-            tracing::warn!("{w}");
-        }
-
-        let hook_system = HookSystem::from_config(&config.hooks);
-
-        let workspace = std::env::current_dir().ok();
-        let audit = CoreAuditRecorder::initialize(&session_id, workspace.as_deref());
-        Self {
-            config,
-            provider,
-            tools,
-            session_id,
-            messages: Vec::new(),
-            compaction: CompactionRuntime::default(),
-            model,
-            shell_context: None,
-            extra_params: None,
-            hook_system,
-            metrics: TurnMetrics::default(),
-            audit,
-            loaded_policy,
-            request_counter: AtomicU32::new(0),
-            truncator: OutputTruncator::default(),
-            loop_detector: LoopDetector::new(),
-        }
-    }
-
     pub fn tool_names(&self) -> Vec<String> {
         self.tools.names()
     }
@@ -141,12 +104,13 @@ impl CoshCore {
     /// reserve inside [`crate::compaction::estimate_prefix_tokens`] instead
     /// of being rendered here.
     pub(crate) fn estimate_prefix_tokens(&self) -> u64 {
-        let system_prompt = ContextBuilder::build_system_prompt(
+        let system_prompt = ContextBuilder::build_system_prompt_with_extensions(
             &self.cwd(),
             &self.tool_names(),
             &[],
             &self.config.agent.approval_mode,
             self.config.ai.output_language.as_deref(),
+            self.extension_context.as_deref(),
         );
         let declarations = serde_json::to_string(&self.tools.declarations()).unwrap_or_default();
         crate::compaction::estimate_prefix_tokens(&system_prompt, &declarations)
@@ -186,6 +150,10 @@ impl CoshCore {
             return Outcome::RequireApproval;
         }
 
+        if kind == ToolKind::External {
+            return Outcome::RequireApproval;
+        }
+
         if mode == "suggest" {
             return Outcome::RequireApproval;
         }
@@ -217,6 +185,8 @@ impl CoshCore {
     {
         let content = crate::redaction::redact_text(content);
 
+        self.bind_current_extension_snapshot();
+        let _generation_pin = self.extension_generation.pin();
         // Generate a unique run_id for this agent run.
         let run_id = uuid::Uuid::new_v4().to_string();
         self.hook_system.set_run_id(run_id.clone());
@@ -352,12 +322,13 @@ impl CoshCore {
             extra_params: self.extra_params.clone(),
         };
 
-        let system_prompt = ContextBuilder::build_system_prompt(
+        let system_prompt = ContextBuilder::build_system_prompt_with_extensions(
             &self.cwd(),
             &self.tool_names(),
             &skill_summaries,
             &self.config.agent.approval_mode,
             self.config.ai.output_language.as_deref(),
+            self.extension_context.as_deref(),
         );
         // Runtime prefix estimate (P): system prompt + serialized tool
         // declarations + the compaction module's reserve for hook context

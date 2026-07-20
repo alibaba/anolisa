@@ -91,6 +91,39 @@ Core 和 Shell 还会把脱敏、版本化的审计时间线写入
 SLS/metrics 导出保持不变。配置、保留、追踪和事故导出方法见
 [审计运维指南](../../docs/user-guide/zh/user-entrypoint/cosh-ng/cli/audit.md)。
 
+## cosh-shell 扩展
+
+扩展管理只通过 `cosh-shell` 内的 `/extensions` slash 命令暴露。`cosh`
+启动器继续保持薄 wrapper，`cosh-cli` 不增加扩展生命周期命令。
+
+```text
+/extensions list
+/extensions info example.ops
+/extensions new ./example.ops --template mcp
+/extensions install ./example.ops
+/extensions install https://example.com/example.ops.git --ref main
+/extensions link ./example.ops
+/extensions update example.ops
+/extensions update --all
+/extensions enable example.ops
+/extensions disable example.ops
+/extensions settings set example.ops region cn-hangzhou --scope user
+/extensions settings list example.ops
+/extensions doctor
+/extensions reload
+```
+
+install、link 和能力发生变化的 update 会先生成 preflight operation，并要求显式运行
+`/extensions consent <operation-id>`。敏感 setting 只保存到操作系统 secret store，
+展示时始终为 `[redacted]`；workspace setting 只对已信任项目生效。扩展 context
+有明确大小边界，并位于 project context 之后。local stdio MCP tool 使用完整
+`<extension>/mcp/<server>/<tool>` namespace，并经过正常 tool approval。
+Agent definition 会被严格校验和列出，但在统一 subagent executor 接入前明确报告
+`executable=false`。registry mutation 会构建 candidate generation。shell 会话复用
+同一个长生命周期 core process：空闲时 `/extensions reload` 立即切换健康 candidate；
+Agent run 忙碌时只排队一次 safe-point reload。当前 run 继续固定在原 generation，
+下一次 run 使用新 generation。
+
 ## 命令参考
 
 | 子命令 | 示例 | 后端 |

@@ -192,7 +192,7 @@ pub(in crate::adapter) enum SessionResumeAttempt {
 }
 
 impl SessionResumeAttempt {
-    fn session_id(&self) -> Option<&str> {
+    pub(in crate::adapter) fn session_id(&self) -> Option<&str> {
         match self {
             Self::Fresh { .. } => None,
             Self::Selected { session_id, .. } | Self::Active { session_id, .. } => Some(session_id),

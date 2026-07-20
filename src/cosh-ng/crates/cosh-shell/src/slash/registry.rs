@@ -170,7 +170,7 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
         },
         SlashCommandSpec {
             name: "/extensions",
-            usage: "/extensions [list|detail] [name]",
+            usage: "/extensions <command> [options]",
             summary_id: MessageId::HelpSummaryExtensions,
             group: Some("Registry"),
             scope: "config",

@@ -20,6 +20,7 @@ mod cosh_core_process;
 mod cosh_core_registry;
 #[cfg(test)]
 mod cosh_core_registry_tests;
+mod cosh_core_service;
 #[cfg(test)]
 mod cosh_core_tests;
 mod fake;
@@ -38,6 +39,7 @@ pub use cosh_core::{
     SessionClearResult, SessionErrorInfo, SessionHealth, SessionList, SessionManagementClient,
     SessionRecovery, SessionRecoveryState, SessionRuntimeState, SessionSummary,
 };
+pub(crate) use cosh_core_registry::RegistryQueryError;
 pub use fake::FakeAgentAdapter;
 pub(crate) use process::{
     agent_event_is_provider_progress, record_cancellation_pending_session,

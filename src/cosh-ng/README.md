@@ -95,6 +95,42 @@ SLS/metrics export is unchanged. See the
 [audit operations guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/cli/audit.md)
 for configuration, retention, tracing, and incident export.
 
+## Extensions in cosh-shell
+
+Extension management is exposed only through the `/extensions` slash command
+inside `cosh-shell`. The `cosh` launcher remains a thin startup wrapper, and
+`cosh-cli` does not expose extension lifecycle commands.
+
+```text
+/extensions list
+/extensions info example.ops
+/extensions new ./example.ops --template mcp
+/extensions install ./example.ops
+/extensions install https://example.com/example.ops.git --ref main
+/extensions link ./example.ops
+/extensions update example.ops
+/extensions update --all
+/extensions enable example.ops
+/extensions disable example.ops
+/extensions settings set example.ops region cn-hangzhou --scope user
+/extensions settings list example.ops
+/extensions doctor
+/extensions reload
+```
+
+Install, link, and capability-changing updates use a preflight operation and
+explicit `/extensions consent <operation-id>`. Sensitive settings are stored
+only in the operating-system secret store and are always displayed as
+`[redacted]`; workspace settings require an already trusted project. Extension
+context is bounded and injected after project context. Local stdio MCP tools
+use the full `<extension>/mcp/<server>/<tool>` namespace and follow normal tool
+approval. Agent definitions are validated and listed, but currently report
+`executable=false` until the unified subagent executor is available. Registry
+mutations build a candidate generation. The shell keeps one long-lived core
+process: `/extensions reload` switches a healthy candidate immediately while
+idle, or queues one safe-point reload while an Agent run is active. The active
+run stays pinned to its original generation and the next run sees the new one.
+
 ## Command reference
 
 | Subcommand | Example | Backend |

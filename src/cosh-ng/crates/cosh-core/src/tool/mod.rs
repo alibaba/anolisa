@@ -26,6 +26,8 @@ pub enum ToolKind {
     ShellEvidence,
     /// An external tool discovered from a configured MCP server.
     Mcp,
+    /// A tool contributed by an extension-owned external runtime.
+    External,
     Other,
 }
 

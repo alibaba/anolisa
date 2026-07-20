@@ -8,14 +8,11 @@ use crate::cli::CliArgs;
 use crate::compaction::{ContextBudget, ModelCapability};
 use crate::config::{self, CoreConfig};
 use crate::core::CoshCore;
-use crate::extension::ExtensionManager;
+use crate::extension::{ExtensionManager, RuntimeSnapshotBuilder};
 use crate::metrics::TurnMetrics;
 use crate::protocol::{AuthReason, InputMessage, OutputMessage, ShellControlRequest};
 use crate::session::{PersistedSession, ProviderSessionId, SessionError, SessionStore};
-use crate::skill::manager::expand_path;
-use crate::skill::SkillManager;
 use crate::sls;
-use crate::tool::ToolRegistry;
 
 pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> {
     apply_cli_overrides(args, &mut config);
@@ -30,46 +27,49 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> 
         }
     };
 
-    // --- Extension Manager setup ---
+    // Build and validate the complete runtime before authentication so invalid
+    // tool selections fail without entering the interactive auth protocol.
     let project_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let mut ext_manager = ExtensionManager::new(project_root.clone());
     if !args.bare {
         ext_manager.refresh();
     }
-
-    // --- Skill Manager setup ---
-    let custom_paths: Vec<std::path::PathBuf> = config
-        .skills
-        .custom_paths
+    let generation_id = crate::extension::state::publish_next_generation(None).unwrap_or_else(
+        |error| {
+            tracing::error!(code = %error.code(), "failed to persist extension generation: {error}");
+            1
+        },
+    );
+    let snapshot =
+        RuntimeSnapshotBuilder::new(&mut ext_manager, &config, project_root, generation_id)
+            .with_shell_evidence(args.enable_shell_evidence_tool)
+            .with_skill_loading(!args.bare)
+            .with_tool_selection(args.tools.as_deref())
+            .build()
+            .await;
+    if let Some(diagnostic) = snapshot
+        .diagnostics
         .iter()
-        .filter_map(|p| expand_path(p))
-        .collect();
-    let skill_manager = SkillManager::new(project_root, custom_paths, ext_manager.skill_dirs());
-    if !args.bare {
-        skill_manager.refresh().await;
-        skill_manager.start_watching().await;
+        .find(|diagnostic| diagnostic.code == "tool_selection_invalid")
+    {
+        let error = diagnostic.message.clone();
+        snapshot.mcp.shutdown().await;
+        let message = OutputMessage::result_error_with_code(
+            session.record.session_id.as_str(),
+            &error,
+            Some("InvalidToolSelection"),
+        );
+        if let Ok(json) = serde_json::to_string(&message) {
+            let _ = writeln!(writer, "{json}");
+            let _ = writer.flush();
+        }
+        eprintln!("[cosh-core] {error}");
+        return Ok(2);
+    }
+    for diagnostic in &snapshot.diagnostics {
+        tracing::warn!(code = %diagnostic.code, "{}", diagnostic.message);
     }
 
-    let mut tools = ToolRegistry::with_defaults(skill_manager);
-    if args.enable_shell_evidence_tool {
-        tools = tools.with_shell_evidence();
-    }
-    crate::tool::mcp::register_configured_tools(&mut tools, &config.mcp.servers).await;
-    if let Some(selection) = args.tools.as_deref() {
-        if let Err(error) = tools.retain_selected_tools(selection) {
-            let message = OutputMessage::result_error_with_code(
-                session.record.session_id.as_str(),
-                &error,
-                Some("InvalidToolSelection"),
-            );
-            if let Ok(json) = serde_json::to_string(&message) {
-                let _ = writeln!(writer, "{json}");
-                let _ = writer.flush();
-            }
-            eprintln!("[cosh-core] {error}");
-            return Ok(2);
-        }
-    }
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
 
@@ -93,11 +93,23 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> 
     let extra_params = resolved.extra_params.clone();
     session.finalize_model(&resolved.model, args.model.is_some());
 
-    let mut engine = CoshCore::new_with_session_id(
+    tracing::debug!(
+        generation = snapshot.generation.id,
+        declared_agents = snapshot.agents.list().len(),
+        executable_agents = 0,
+        "loaded extension runtime snapshot"
+    );
+    let mut engine = CoshCore::new_with_snapshot_and_session_id(
         config,
         provider,
-        tools,
+        snapshot,
         session.record.session_id.to_string(),
+    );
+    let live_extension_runtime = crate::registry::LiveExtensionRuntime::new(
+        engine.extension_generation.clone(),
+        args.enable_shell_evidence_tool,
+        !args.bare,
+        args.tools.clone(),
     );
     engine.extra_params = extra_params;
     engine.messages = session.record.messages.clone();
@@ -107,12 +119,6 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> 
     if !session.record.model.is_empty() {
         engine.model = session.record.model.clone();
     }
-    if !args.bare {
-        engine
-            .hook_system
-            .register_extension_hooks(&ext_manager.hook_definitions());
-    }
-
     if let Some(ref prompt) = args.prompt {
         if !session.resumable() {
             engine.emit(
@@ -155,8 +161,14 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> 
                 engine.emit(&mut writer, &err_msg);
             }
         }
+        engine.shutdown_extension_runtime().await;
         return Ok(0);
     }
+
+    let mut extensions = HeadlessExtensionRuntime {
+        manager: &mut ext_manager,
+        live: &live_extension_runtime,
+    };
 
     // Replay any lines that were buffered during the auth wait
     for buffered_line in buffered_lines {
@@ -167,12 +179,19 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> 
             &mut writer,
             args,
             &mut session,
+            &mut extensions,
         )
         .await
         {
             InputLineResult::Continue => {}
-            InputLineResult::Shutdown => return Ok(0),
-            InputLineResult::InvalidJson => return Ok(1),
+            InputLineResult::Shutdown => {
+                engine.shutdown_extension_runtime().await;
+                return Ok(0);
+            }
+            InputLineResult::InvalidJson => {
+                engine.shutdown_extension_runtime().await;
+                return Ok(1);
+            }
         }
     }
 
@@ -189,14 +208,22 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> 
             &mut writer,
             args,
             &mut session,
+            &mut extensions,
         )
         .await
         {
             InputLineResult::Continue => {}
-            InputLineResult::Shutdown => return Ok(0),
-            InputLineResult::InvalidJson => return Ok(1),
+            InputLineResult::Shutdown => {
+                engine.shutdown_extension_runtime().await;
+                return Ok(0);
+            }
+            InputLineResult::InvalidJson => {
+                engine.shutdown_extension_runtime().await;
+                return Ok(1);
+            }
         }
     }
+    engine.shutdown_extension_runtime().await;
     Ok(0)
 }
 
@@ -214,6 +241,7 @@ async fn process_input_line<W, R>(
     writer: &mut W,
     args: &CliArgs,
     session: &mut SessionRuntime,
+    extensions: &mut HeadlessExtensionRuntime<'_>,
 ) -> InputLineResult
 where
     W: io::Write,
@@ -235,6 +263,21 @@ where
             return InputLineResult::InvalidJson;
         }
     };
+
+    match extensions
+        .live
+        .refresh_linked_runtime(&engine.config, extensions.manager)
+        .await
+    {
+        Ok(true) => {
+            engine.drain_retired_extension_snapshots().await;
+            if let Err(error) = extensions.live.persist_current_generation() {
+                tracing::error!("failed to persist linked extension generation: {error}");
+            }
+        }
+        Ok(false) => {}
+        Err(error) => tracing::warn!("linked extension reload deferred: {error}"),
+    }
 
     match msg {
         InputMessage::ControlRequest {
@@ -379,14 +422,40 @@ where
                     engine.emit(writer, &err_msg);
                 }
             }
+            engine.drain_retired_extension_snapshots().await;
+            if let Err(error) = extensions.live.persist_current_generation() {
+                tracing::error!("failed to persist activated extension generation: {error}");
+            }
         }
 
         InputMessage::ControlResponse { .. } => {}
-        InputMessage::RegistryRequest { .. } => {
-            // Registry requests are handled in registry mode, ignore here
+        InputMessage::RegistryRequest {
+            request_id,
+            domain,
+            action,
+            params,
+        } => {
+            let response = crate::registry::handle_registry_request(
+                &request_id,
+                &domain,
+                &action,
+                &params,
+                &mut engine.config,
+                extensions.manager,
+                None,
+                Some(extensions.live),
+            )
+            .await;
+            engine.emit(writer, &response);
+            engine.drain_retired_extension_snapshots().await;
         }
     }
     InputLineResult::Continue
+}
+
+struct HeadlessExtensionRuntime<'a> {
+    manager: &'a mut ExtensionManager,
+    live: &'a crate::registry::LiveExtensionRuntime,
 }
 
 struct SessionRuntime {

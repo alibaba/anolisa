@@ -9,6 +9,7 @@ mod relay;
 mod relay_action;
 mod spawn;
 
+pub(crate) use event_parser::redact_extension_setting_value;
 pub(crate) use mode::{update_input_mode, RawInputMode};
 pub use mode::{PromptGhostCandidate, PromptGhostRoute, RawInputCapture, RawObserverAction};
 pub(crate) use pty::{
@@ -84,7 +85,8 @@ pub(crate) enum RawInputEvent {
 mod tests {
     use super::event_parser::{
         candidate_inline_hint, native_candidate_should_return_to_shell,
-        starts_native_intercept_candidate, CandidateLineBuffer, NativeLineState,
+        redact_extension_setting_value, starts_native_intercept_candidate, CandidateLineBuffer,
+        NativeLineState,
     };
     use super::relay::ExplicitExitTracker;
     use crate::input::InputClassifier;
@@ -102,6 +104,34 @@ mod tests {
             candidate_inline_hint("/sk"),
             Some("/skills [list|detail] [name]".to_string())
         );
+    }
+
+    #[test]
+    fn extension_setting_values_are_redacted_from_candidate_echo() {
+        let command = b"/extensions settings set fixture token secret-value --scope user";
+        let redacted = redact_extension_setting_value(command);
+        let shown = String::from_utf8(redacted).expect("redacted command remains UTF-8");
+        assert_eq!(
+            shown,
+            "/extensions settings set fixture token ************ ******* ****"
+        );
+        assert!(!shown.contains("secret-value"));
+    }
+
+    #[test]
+    fn extension_setting_value_is_redacted_from_first_typed_byte() {
+        let prefix = b"/extensions settings set fixture token ";
+        assert_eq!(redact_extension_setting_value(prefix), prefix);
+        assert_eq!(
+            redact_extension_setting_value(b"/extensions settings set fixture token s"),
+            b"/extensions settings set fixture token *"
+        );
+    }
+
+    #[test]
+    fn other_slash_values_are_not_redacted() {
+        let command = b"/extensions settings get fixture token";
+        assert_eq!(redact_extension_setting_value(command), command);
     }
 
     #[test]

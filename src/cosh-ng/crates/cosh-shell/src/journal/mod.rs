@@ -42,6 +42,8 @@ fn redacted_event(event: &ShellEvent) -> ShellEvent {
     event.terminal_output_ref = event.terminal_output_ref.as_deref().map(redact);
     if event.component.as_deref() == Some("card_secret") {
         event.input = event.input.as_ref().map(|_| "<redacted>".to_string());
+    } else if event.component.as_deref() == Some("slash") {
+        event.input = event.input.as_deref().map(redact_slash_input);
     } else {
         event.input = event.input.as_deref().map(redact);
     }
@@ -53,6 +55,14 @@ fn redacted_event(event: &ShellEvent) -> ShellEvent {
 
 fn redact(value: &str) -> String {
     crate::evidence::redact_sensitive_text(value).0
+}
+
+fn redact_slash_input(value: &str) -> String {
+    let extension_redacted = String::from_utf8(crate::raw_input::redact_extension_setting_value(
+        value.as_bytes(),
+    ))
+    .unwrap_or_else(|_| value.to_string());
+    redact(&extension_redacted)
 }
 
 pub fn read_shell_events(path: impl AsRef<Path>) -> io::Result<Vec<ShellEvent>> {
@@ -90,6 +100,7 @@ mod tests {
         let command_secret = "cli-secret-value";
         let prompt_secret = "ghp_abcdefghijklmnopqrstuvwxyz123456";
         let auth_secret = "short-auth-value";
+        let extension_secret = "extension-secret-value";
         let mut prompt = ShellEvent::user_input_intercepted(
             "session-1",
             format!("?? inspect token={prompt_secret}"),
@@ -99,6 +110,11 @@ mod tests {
             ShellEvent::user_input_intercepted("session-1", format!("auth-1:{auth_secret}"));
         auth.component = Some("card_secret".to_string());
         auth.message = Some("input".to_string());
+        let mut extension_setting = ShellEvent::user_input_intercepted(
+            "session-1",
+            format!("/extensions settings set fixture endpoint {extension_secret}"),
+        );
+        extension_setting.component = Some("slash".to_string());
         let mut path_event = ShellEvent::command_started(
             "session-token=session-secret",
             "command-token=command-id-secret",
@@ -121,6 +137,7 @@ mod tests {
                 ),
                 prompt,
                 auth,
+                extension_setting,
                 path_event,
             ],
         )
@@ -131,6 +148,7 @@ mod tests {
             command_secret,
             prompt_secret,
             auth_secret,
+            extension_secret,
             "session-secret",
             "command-id-secret",
             "cwd-secret",
@@ -150,6 +168,10 @@ mod tests {
             .as_deref()
             .is_some_and(|input| input.contains("token=<redacted>")));
         assert_eq!(events[2].input.as_deref(), Some("<redacted>"));
+        assert_eq!(
+            events[3].input.as_deref(),
+            Some("/extensions settings set fixture endpoint **********************")
+        );
         let _ = std::fs::remove_file(path);
     }
 

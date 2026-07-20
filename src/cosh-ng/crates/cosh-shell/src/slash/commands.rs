@@ -65,8 +65,8 @@ pub(super) fn render_slash_command<W: Write>(
             render_unknown(command, state, output)?;
             Ok(true)
         }
-        SlashCommand::Extensions(sub, arg) => {
-            render_extensions_command(sub, arg, adapter, state, output)?;
+        SlashCommand::Extensions(args) => {
+            render_extensions_command(args, adapter, state, output)?;
             Ok(true)
         }
         SlashCommand::Skills(sub, arg) => {
