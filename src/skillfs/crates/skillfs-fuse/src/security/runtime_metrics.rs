@@ -30,6 +30,8 @@ use std::time::Instant;
 use serde::Serialize;
 use tracing::warn;
 
+use super::telemetry_gate::{TELEMETRY_DISABLED_SENTINEL, telemetry_allowed_at};
+
 /// Default ops log path (shared with CLI ops and the legacy session summary).
 pub const SKILLFS_RUNTIME_METRICS_LOG_PATH: &str = "/var/log/anolisa/sls/ops/skillfs.jsonl";
 
@@ -99,17 +101,32 @@ impl RuntimeMetricRecord {
 /// Best-effort append-only JSONL writer for runtime metric records.
 pub struct RuntimeMetricsWriter {
     path: PathBuf,
+    /// Telemetry disable sentinel. Pinned to [`TELEMETRY_DISABLED_SENTINEL`] in
+    /// production (no override path exists); tests inject a temp path so the
+    /// gate does not depend on the host's real sentinel.
+    sentinel: PathBuf,
 }
 
 impl RuntimeMetricsWriter {
     /// Create a writer targeting `path`.
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            sentinel: PathBuf::from(TELEMETRY_DISABLED_SENTINEL),
+        }
     }
 
     /// Create a writer targeting the default deployment path.
     pub fn default_path() -> Self {
         Self::new(SKILLFS_RUNTIME_METRICS_LOG_PATH)
+    }
+
+    /// Override the telemetry sentinel path (tests only) so writer tests do not
+    /// depend on the host's real `/etc/anolisa/.telemetry_disabled`.
+    #[cfg(test)]
+    fn with_sentinel(mut self, sentinel: impl Into<PathBuf>) -> Self {
+        self.sentinel = sentinel.into();
+        self
     }
 
     /// The target file path.
@@ -120,6 +137,12 @@ impl RuntimeMetricsWriter {
     /// Append one record as a JSONL line. Skips silently when the file is
     /// absent; serialization/write failures are logged and swallowed.
     pub fn write(&self, record: &RuntimeMetricRecord) {
+        // Re-check the disable sentinel on every write (before serialization
+        // and open) so creating/removing it takes effect immediately; disabled
+        // is a normal state, so skip silently.
+        if !telemetry_allowed_at(&self.sentinel) {
+            return;
+        }
         if !self.path.exists() {
             return;
         }
@@ -291,8 +314,14 @@ mod tests {
     use super::*;
 
     fn sink_to(path: &Path) -> RuntimeMetricsSink {
+        // Point the gate at a sentinel beside the log file that tests never
+        // create, isolating them from the host's real sentinel.
+        let sentinel = path
+            .parent()
+            .map(|p| p.join(".telemetry_disabled"))
+            .unwrap_or_else(|| PathBuf::from("/nonexistent/.telemetry_disabled"));
         RuntimeMetricsSink::new(
-            RuntimeMetricsWriter::new(path),
+            RuntimeMetricsWriter::new(path).with_sentinel(sentinel),
             "sess-1".to_string(),
             "agent".to_string(),
         )
@@ -365,6 +394,28 @@ mod tests {
     fn writer_non_fatal_on_bad_path() {
         let sink = sink_to(Path::new("/nonexistent/deep/dir/skillfs.jsonl"));
         sink.record_skill_hit(); // no panic
+    }
+
+    #[test]
+    fn disabled_sentinel_suppresses_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("skillfs.jsonl");
+        std::fs::File::create(&path).unwrap();
+
+        // Sentinel present -> the writer must not append despite the log file
+        // existing.
+        let sentinel = dir.path().join(".telemetry_disabled");
+        std::fs::File::create(&sentinel).unwrap();
+        let writer = RuntimeMetricsWriter::new(&path).with_sentinel(&sentinel);
+        let sink = RuntimeMetricsSink::new(writer, "sess".to_string(), "agent".to_string());
+
+        sink.emit_mount_start();
+        sink.record_skill_hit();
+
+        assert!(
+            std::fs::read_to_string(&path).unwrap().is_empty(),
+            "disabled telemetry must not append any record"
+        );
     }
 
     #[test]

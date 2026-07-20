@@ -27,12 +27,12 @@ use skillfs_fuse::security::{
     ProtocolEventWriter, RefreshController, ReloadMode, RuntimeDecisionOutcome, RuntimeMetricsSink,
     RuntimeMetricsWriter, SecurityConfig, SecurityEventWriter, SecurityModeConfig,
     SessionStatsWriter, SkillfsSessionStats, SourceDriftObserver, StagingMatcher,
-    TrustedPeerConfig, TrustedWriterConfig, UnixSocketNotifyClient, bootstrap_activation,
-    resolve_events_path, resolve_protocol_events_path, spawn_drift_watcher,
+    SummaryWriteOutcome, TrustedPeerConfig, TrustedWriterConfig, UnixSocketNotifyClient,
+    bootstrap_activation, resolve_events_path, resolve_protocol_events_path, spawn_drift_watcher,
 };
 use skillfs_fuse::{FuseError as FuseErr, MountConfig, MountOptions, mount_configured};
 use tokio::signal;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 mod help_text;
 mod managed;
@@ -2322,20 +2322,32 @@ async fn cmd_mount(
             return;
         };
         let writer = SessionStatsWriter::default_path();
-        if let Err(e) = writer.write_summary(&summary) {
-            warn!(
-                error = %e,
-                path = %writer.path().display(),
-                "session stats: failed to flush summary (non-fatal)"
-            );
-        } else {
-            info!(
-                path = %writer.path().display(),
-                session_id = %session_id,
-                mount_duration_ms = summary.mount_duration_ms,
-                skill_hit_times = summary.skill_hit_times,
-                "session stats: summary flushed to session metrics log"
-            );
+        match writer.write_summary_with_outcome(&summary) {
+            Ok(SummaryWriteOutcome::Written) => {
+                info!(
+                    path = %writer.path().display(),
+                    session_id = %session_id,
+                    mount_duration_ms = summary.mount_duration_ms,
+                    skill_hit_times = summary.skill_hit_times,
+                    "session stats: summary flushed to session metrics log"
+                );
+            }
+            Ok(SummaryWriteOutcome::SkippedDisabled) => {
+                // Telemetry disabled by sentinel: nothing was written, so do
+                // not claim a flush. Normal state, not an error.
+                debug!(
+                    path = %writer.path().display(),
+                    session_id = %session_id,
+                    "session stats: telemetry disabled, summary not written"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    path = %writer.path().display(),
+                    "session stats: failed to flush summary (non-fatal)"
+                );
+            }
         }
     }
 

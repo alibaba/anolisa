@@ -113,6 +113,7 @@ pub mod refresh;
 pub mod runtime_metrics;
 pub mod session_stats;
 pub mod session_stats_writer;
+pub mod telemetry_gate;
 pub mod trusted_writer;
 
 pub use activation::{
@@ -203,7 +204,10 @@ pub use runtime_metrics::{
 pub use session_stats::{
     RuntimeDecisionOutcome, SkillfsSessionStats, SkillfsSessionSummary, serialize_session_summary,
 };
-pub use session_stats_writer::{SKILLFS_SESSION_METRICS_LOG_PATH, SessionStatsWriter};
+pub use session_stats_writer::{
+    SKILLFS_SESSION_METRICS_LOG_PATH, SessionStatsWriter, SummaryWriteOutcome,
+};
+pub use telemetry_gate::{TELEMETRY_DISABLED_SENTINEL, telemetry_allowed, telemetry_allowed_at};
 pub use trusted_writer::{
     FileId, LinuxProcCommResolver, ProcessIdentity, ProcessIdentityResolver, TrustedWriterConfig,
     TrustedWriterDecision, default_identity_resolver, evaluate_trusted_writer, read_comm_file,

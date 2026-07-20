@@ -72,6 +72,18 @@ pub fn fuse_available() -> bool {
         .unwrap_or(false)
 }
 
+/// Returns `true` when SLS telemetry is enabled on the host, i.e. the real
+/// `/etc/anolisa/.telemetry_disabled` sentinel is absent.
+///
+/// Tests that mount with a `RuntimeMetricsSink` and assert metric records must
+/// skip when this is `false`: the production writer pins the real sentinel (no
+/// override exists), so a disabled host writes zero records and the assertions
+/// cannot hold. The enabled write path stays covered by the writer unit tests,
+/// which inject a temp sentinel.
+pub fn telemetry_enabled() -> bool {
+    skillfs_fuse::security::telemetry_allowed()
+}
+
 /// Skip the current test (early `return`) with a deterministic stderr line
 /// when FUSE is unavailable. Use at the top of every FUSE-dependent test.
 #[macro_export]

@@ -12,6 +12,22 @@ fn bin_path() -> &'static str {
     env!("CARGO_BIN_EXE_skillfs")
 }
 
+/// Skip guard for record-expecting tests.
+///
+/// The CLI subprocess checks the real `/etc/anolisa/.telemetry_disabled` at
+/// runtime, and there is deliberately no production override to relocate it.
+/// When telemetry is disabled on the host, the CLI writes zero ops records, so
+/// the "expect one record" assertions below cannot hold — skip rather than
+/// fail. The enabled write path stays covered by the unit tests, which inject a
+/// temp sentinel. Returns `true` (and prints a SKIP line) when disabled.
+fn skip_if_telemetry_disabled() -> bool {
+    if skillfs_fuse::security::telemetry_allowed() {
+        return false;
+    }
+    eprintln!("SKIP: telemetry disabled on host (/etc/anolisa/.telemetry_disabled present)");
+    true
+}
+
 const VALID_SKILL: &str = r#"---
 name: good-skill
 description: A valid skill
@@ -115,6 +131,9 @@ fn run_with_merged_output_closed(args: &[&str], ops_log: &Path) -> std::process:
 
 #[test]
 fn list_appends_ops_record_on_success() {
+    if skip_if_telemetry_disabled() {
+        return;
+    }
     // /tmp-based temp dir required so the override prefix check accepts it.
     let dir = tempfile::tempdir_in("/tmp").expect("tempdir");
     let ops_log = make_ops_log(dir.path());
@@ -139,6 +158,9 @@ fn list_appends_ops_record_on_success() {
 
 #[test]
 fn validate_appends_ops_record_on_success() {
+    if skip_if_telemetry_disabled() {
+        return;
+    }
     let dir = tempfile::tempdir_in("/tmp").expect("tempdir");
     let ops_log = make_ops_log(dir.path());
 
@@ -156,6 +178,9 @@ fn validate_appends_ops_record_on_success() {
 
 #[test]
 fn validate_appends_record_before_nonzero_exit() {
+    if skip_if_telemetry_disabled() {
+        return;
+    }
     let dir = tempfile::tempdir_in("/tmp").expect("tempdir");
     let ops_log = make_ops_log(dir.path());
 
@@ -179,6 +204,9 @@ fn validate_appends_record_before_nonzero_exit() {
 
 #[test]
 fn classify_dry_run_appends_ops_record_on_success() {
+    if skip_if_telemetry_disabled() {
+        return;
+    }
     let dir = tempfile::tempdir_in("/tmp").expect("tempdir");
     let ops_log = make_ops_log(dir.path());
 
@@ -232,6 +260,9 @@ fn missing_ops_log_is_not_created_and_command_succeeds() {
 
 #[test]
 fn list_writes_one_record_when_stdout_reader_closes_early() {
+    if skip_if_telemetry_disabled() {
+        return;
+    }
     let dir = tempfile::tempdir_in("/tmp").expect("tempdir");
     let ops_log = make_ops_log(dir.path());
 
@@ -256,6 +287,9 @@ fn list_writes_one_record_when_stdout_reader_closes_early() {
 
 #[test]
 fn classify_dry_run_writes_one_record_when_stdout_reader_closes_early() {
+    if skip_if_telemetry_disabled() {
+        return;
+    }
     let dir = tempfile::tempdir_in("/tmp").expect("tempdir");
     let ops_log = make_ops_log(dir.path());
 
@@ -288,6 +322,9 @@ fn classify_dry_run_writes_one_record_when_stdout_reader_closes_early() {
 
 #[test]
 fn validate_writes_one_record_when_stdout_reader_closes_early() {
+    if skip_if_telemetry_disabled() {
+        return;
+    }
     let dir = tempfile::tempdir_in("/tmp").expect("tempdir");
     let ops_log = make_ops_log(dir.path());
 
@@ -317,6 +354,9 @@ fn mount_writes_one_record_through_guard_on_fast_failure() {
     // `finish` path emits exactly one "mount" record without a live mount. The
     // broken-pipe Drop path for `mount` is covered separately by
     // `mount_writes_one_record_when_merged_output_closes_early`.
+    if skip_if_telemetry_disabled() {
+        return;
+    }
     let dir = tempfile::tempdir_in("/tmp").expect("tempdir");
     let ops_log = make_ops_log(dir.path());
 
@@ -365,6 +405,9 @@ fn mount_writes_one_record_through_guard_on_fast_failure() {
 
 #[test]
 fn list_writes_one_record_when_merged_output_closes_early() {
+    if skip_if_telemetry_disabled() {
+        return;
+    }
     let dir = tempfile::tempdir_in("/tmp").expect("tempdir");
     let ops_log = make_ops_log(dir.path());
 
@@ -383,6 +426,9 @@ fn list_writes_one_record_when_merged_output_closes_early() {
 
 #[test]
 fn classify_dry_run_writes_one_record_when_merged_output_closes_early() {
+    if skip_if_telemetry_disabled() {
+        return;
+    }
     let dir = tempfile::tempdir_in("/tmp").expect("tempdir");
     let ops_log = make_ops_log(dir.path());
 
@@ -410,6 +456,9 @@ fn classify_dry_run_writes_one_record_when_merged_output_closes_early() {
 
 #[test]
 fn validate_writes_one_record_when_merged_output_closes_early() {
+    if skip_if_telemetry_disabled() {
+        return;
+    }
     let dir = tempfile::tempdir_in("/tmp").expect("tempdir");
     let ops_log = make_ops_log(dir.path());
 
@@ -431,6 +480,9 @@ fn validate_writes_one_record_when_merged_output_closes_early() {
 
 #[test]
 fn mount_writes_one_record_when_merged_output_closes_early() {
+    if skip_if_telemetry_disabled() {
+        return;
+    }
     // The first tracing write gets EPIPE, then tracing's internal error report
     // panics on the closed stderr. This happens before the command body and any
     // FUSE mount attempt; the guard records the panic and the test leaves no
