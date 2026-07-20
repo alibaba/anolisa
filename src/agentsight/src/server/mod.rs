@@ -13,8 +13,8 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use actix_cors::Cors;
-use actix_web::{get, web, App, HttpRequest, HttpResponse, HttpServer, Responder};
-use include_dir::{include_dir, Dir};
+use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, get, web};
+use include_dir::{Dir, include_dir};
 
 use crate::config::ServerAuthConfig;
 use crate::enforcement::{EnforcementClient, EnforcementCoordinator, EnforcementStore};
@@ -377,15 +377,15 @@ mod tests {
 
     use actix_web::http::StatusCode;
     use actix_web::test as awtest;
-    use actix_web::{web, App};
+    use actix_web::{App, web};
 
     use crate::grader::EvaluationStore;
     use crate::health::HealthStore;
 
     use super::auth::DashboardAuth;
     use super::{
-        configure_routes, serve_frontend, serve_frontend_root, AppState,
-        SecurityObservabilityConfig,
+        AppState, SecurityObservabilityConfig, configure_routes, serve_frontend,
+        serve_frontend_root,
     };
     use crate::config::ServerAuthConfig;
 
