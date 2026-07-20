@@ -226,6 +226,19 @@ def test_deploy_rejects_non_executable_skill_ledger_hook(tmp_path):
     assert "skill-ledger hook is not executable" in result.stderr
 
 
+def test_deploy_rejects_missing_code_scanner_hook(tmp_path):
+    source = tmp_path / "extension-source"
+    shutil.copytree(_EXTENSION_DIR, source)
+    (source / "hooks" / "code_scanner_hook.py").unlink()
+
+    result, calls, qwen_home = _run_deploy(tmp_path, source)
+
+    assert result.returncode == 1
+    assert calls == []
+    assert not (qwen_home / "extensions").exists()
+    assert "missing code scanner hook" in result.stderr
+
+
 def test_deploy_rejects_missing_trace_context_helper(tmp_path):
     source = tmp_path / "extension-source"
     shutil.copytree(_EXTENSION_DIR, source)

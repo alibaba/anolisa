@@ -45,6 +45,7 @@ require_agent_sec_cli() {
     agent-sec-cli scan-pii --help >/dev/null 2>&1 || die "agent-sec-cli scan-pii is unavailable"
     agent-sec-cli skill-ledger check --help >/dev/null 2>&1 || die "agent-sec-cli skill-ledger check is unavailable"
     agent-sec-cli observability record --help >/dev/null 2>&1 || die "agent-sec-cli observability record is unavailable"
+    agent-sec-cli scan-code --help >/dev/null 2>&1 || die "agent-sec-cli scan-code is unavailable"
 }
 
 require_plugin_files() {

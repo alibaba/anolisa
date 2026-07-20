@@ -110,7 +110,7 @@ _AGENT_SEC_CLI = textwrap.dedent("""\
     #!/usr/bin/env bash
     set -euo pipefail
     case "$*" in
-        "scan-pii --help"|"skill-ledger check --help"|"observability record --help")
+        "scan-pii --help"|"skill-ledger check --help"|"observability record --help"|"scan-code --help")
             exit 0
             ;;
         *)
@@ -119,10 +119,17 @@ _AGENT_SEC_CLI = textwrap.dedent("""\
     esac
     """)
 
-_AGENT_SEC_CLI_PII_ONLY = textwrap.dedent("""\
+_AGENT_SEC_CLI_WITHOUT_SKILL_LEDGER = textwrap.dedent("""\
     #!/usr/bin/env bash
     set -euo pipefail
-    [[ "$*" == "scan-pii --help" ]]
+    case "$*" in
+        "scan-pii --help"|"observability record --help"|"scan-code --help")
+            exit 0
+            ;;
+        *)
+            exit 2
+            ;;
+    esac
     """)
 
 
@@ -251,7 +258,7 @@ def test_install_rejects_cli_without_skill_ledger(tmp_path: Path) -> None:
         tmp_path,
         qodercli_script=_QODER_WITH_PLUGINS,
         python_script=_python_version_script((3, 11)),
-        agent_sec_cli_script=_AGENT_SEC_CLI_PII_ONLY,
+        agent_sec_cli_script=_AGENT_SEC_CLI_WITHOUT_SKILL_LEDGER,
     )
 
     assert proc.returncode != 0

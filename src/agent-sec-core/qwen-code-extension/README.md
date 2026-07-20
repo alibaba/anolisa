@@ -1,9 +1,9 @@
 # Qwen Code extension
 
 全本地、零 Token 成本地为 Qwen Code 提供 prompt 与 PII/凭据扫描、生命周期
-Observability，以及已纳管 Skill 的 Skill Ledger 校验。扩展通过 Qwen Code 原生
-command hook 挂载，不自行实现 HookRegistry、事件聚合器或启动预检；policy hook
-同步返回安全决策，Observability hook 异步记录生命周期事件。
+Observability、已纳管 Skill 的 Skill Ledger 校验，以及 shell 命令执行前的本地
+code scanner。扩展通过 Qwen Code 原生 command hook 挂载，不自行实现 HookRegistry、
+事件聚合器或启动预检；policy hook 同步返回安全决策，Observability hook 异步记录生命周期事件。
 
 协议依据是 Qwen Code 官方的
 [Hooks 文档](https://qwenlm.github.io/qwen-code-docs/en/users/features/hooks/)；
@@ -180,6 +180,11 @@ scanner 返回 `deny`，才会按上述点位阻断。
 `agent-sec-observability` 仍异步执行并保持 fail-open：任何脚本、PII 扫描或记录写入异常
 都不会改变 Qwen Code 的执行决策。敏感指标在写入前由本地 `scan-pii` 脱敏；脱敏失败时
 直接丢弃对应敏感字段。
+
+Code scanner hook 与 observability hook 独立挂载，作为同步
+`PreToolUse` hook 仅处理 `run_shell_command`；默认 `CODE_SCANNER_MODE=observe` 不改变
+工具执行，设置为 `ask` 或 `deny` 时会按 Qwen Code 官方 `permissionDecision` 协议请求确认或拒绝本次命令。敏感指标在写入前由本地 `scan-pii` 脱敏；脱敏失败时直接丢弃
+对应敏感字段。
 
 ## 测试
 

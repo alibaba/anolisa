@@ -69,6 +69,20 @@
         ]
       },
       {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "agent-sec-code-scan-bash-command",
+            "description": "Scans Bash commands for security issues before execution",
+            "command": "python3",
+            "args": ["${QODER_PLUGIN_ROOT}/hooks/code_scanner_hook.py"],
+            "timeout": 10,
+            "statusMessage": "Scanning command for security issues..."
+          }
+        ]
+      },
+      {
         "matcher": "",
         "hooks": [
           {

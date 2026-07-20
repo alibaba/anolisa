@@ -481,7 +481,7 @@ def test_non_object_json_returns_noop_without_cli(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out) == {}
 
 
-def test_manifest_mounts_skill_ledger_before_observability_and_pii_hooks():
+def test_manifest_mounts_skill_ledger_code_scanner_observability_and_pii_hooks():
     manifest = json.loads((_EXTENSION_DIR / "qwen-extension.json").read_text())
     expected_events = {
         "UserPromptSubmit",
@@ -494,7 +494,7 @@ def test_manifest_mounts_skill_ledger_before_observability_and_pii_hooks():
 
     assert set(manifest["hooks"]) == expected_events
     pre_tool_entries = manifest["hooks"]["PreToolUse"]
-    assert len(pre_tool_entries) == 2
+    assert len(pre_tool_entries) == 3
     skill_group = pre_tool_entries[0]
     assert skill_group["matcher"] == "^skill$"
     assert skill_group["sequential"] is True
@@ -504,6 +504,18 @@ def test_manifest_mounts_skill_ledger_before_observability_and_pii_hooks():
     assert skill_hook["command"] == (
         'python3 "${extensionPath}${/}hooks${/}skill_ledger_hook.py"'
     )
+
+    scanner_group = pre_tool_entries[1]
+    assert scanner_group["matcher"] == "^run_shell_command$"
+    scanner_hooks = scanner_group["hooks"]
+    assert len(scanner_hooks) == 1
+    scanner_hook = scanner_hooks[0]
+    assert scanner_hook["name"] == "agent-sec-code-scan-shell-command"
+    assert scanner_hook["command"] == (
+        'python3 "${extensionPath}${/}hooks${/}code_scanner_hook.py"'
+    )
+    assert scanner_hook["timeout"] == 10000
+    assert "async" not in scanner_hook
 
     for event_name, entries in manifest["hooks"].items():
         policy_group = entries[-1]
