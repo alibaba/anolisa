@@ -29,6 +29,8 @@ import subprocess
 import sys
 from typing import Any
 
+from trace_context import with_trace_context
+
 # -- config ----------------------------------------------------------------
 
 _MODE = os.environ.get("PROMPT_SCANNER_MODE", "observe").strip().lower()
@@ -47,27 +49,6 @@ _DEFAULT_SOURCE = "user_input"
 def _noop() -> str:
     """Return an empty Qwen Code HookOutput JSON string."""
     return json.dumps({})
-
-
-def _trace_context(input_data: dict[str, Any]) -> dict[str, str]:
-    """Build canonical trace context for agent-sec-cli."""
-    context: dict[str, str] = {"agent_name": "qwen"}
-    session_id = input_data.get("session_id")
-    if isinstance(session_id, str) and session_id.strip():
-        context["session_id"] = session_id.strip()
-    return context
-
-
-def _with_trace_context(args: list[str], input_data: dict[str, Any]) -> list[str]:
-    """Prepend hidden agent-sec-cli trace-context args."""
-    return [
-        args[0],
-        "--trace-context",
-        json.dumps(
-            _trace_context(input_data), ensure_ascii=False, separators=(",", ":")
-        ),
-        *args[1:],
-    ]
 
 
 def _build_reason(scan_result: dict[str, Any]) -> str:
@@ -141,7 +122,7 @@ def main() -> None:
     # Passing the prompt through stdin avoids /proc/<pid>/cmdline exposure and
     # the Linux MAX_ARG_STRLEN limit on argument length.
     try:
-        cmd = _with_trace_context(
+        cmd = with_trace_context(
             [
                 "agent-sec-cli",
                 "scan-prompt",
