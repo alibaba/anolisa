@@ -379,6 +379,18 @@ class TestRuleEngineFalsePositive(unittest.TestCase):
         r = self.engine.detect("请用中文反驳这个观点")
         self.assertFalse(r.detected)
 
+    def test_benign_multi_line_tech_document(self):
+        """Multi-line technical docs must not have unrelated words stitched by DOTALL."""
+        text = (
+            "1. 请忽略之前版本的错误\n"
+            "2. 按照新的指令执行操作\n"
+            "3. 如果遇到问题直接输出错误日志"
+        )
+        r = self.engine.detect(text)
+        self.assertFalse(r.detected)
+        ids = [d.rule_id for d in r.details]
+        self.assertNotIn("INJ-015", ids)
+
     # --- Patterns moved from L1 to L2 must no longer trigger L1 ---
 
     def test_benign_ignore_previous_instructions(self):

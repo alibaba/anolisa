@@ -268,6 +268,7 @@ rules:
     category: direct_injection
     subcategory: instruction_override
     severity: high
+    single_line: true
     patterns:
       - '(忽略|无视|忘记).{0,20}(指令|问题|提问|请求).{0,20}(直接|请|现在).{0,10}(输出|回答|复述|回复)'
     keywords:
