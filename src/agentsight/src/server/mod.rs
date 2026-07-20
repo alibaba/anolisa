@@ -13,8 +13,8 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use actix_cors::Cors;
-use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, get, web};
-use include_dir::{Dir, include_dir};
+use actix_web::{get, web, App, HttpRequest, HttpResponse, HttpServer, Responder};
+use include_dir::{include_dir, Dir};
 
 use crate::config::ServerAuthConfig;
 use crate::enforcement::{EnforcementClient, EnforcementCoordinator, EnforcementStore};
@@ -189,6 +189,7 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 // AgentSight-owned enforcement API routes
                 .service(enforcement::health)
                 .service(enforcement::apply_binding)
+                .service(enforcement::apply_file_binding)
                 .service(enforcement::list_bindings)
                 .service(enforcement::detach_binding)
                 .service(enforcement::list_violations)
@@ -376,15 +377,15 @@ mod tests {
 
     use actix_web::http::StatusCode;
     use actix_web::test as awtest;
-    use actix_web::{App, web};
+    use actix_web::{web, App};
 
     use crate::grader::EvaluationStore;
     use crate::health::HealthStore;
 
     use super::auth::DashboardAuth;
     use super::{
-        AppState, SecurityObservabilityConfig, configure_routes, serve_frontend,
-        serve_frontend_root,
+        configure_routes, serve_frontend, serve_frontend_root, AppState,
+        SecurityObservabilityConfig,
     };
     use crate::config::ServerAuthConfig;
 
@@ -427,6 +428,16 @@ mod tests {
         let response = awtest::call_service(&app, request).await;
 
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let request = awtest::TestRequest::post()
+            .uri("/api/enforcement/file-bindings")
+            .insert_header(("content-type", "application/json"))
+            .set_payload("{")
+            .to_request();
+
+        let response = awtest::call_service(&app, request).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[actix_web::test]
