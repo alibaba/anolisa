@@ -1,7 +1,7 @@
 //! Desired-state coordinator between AgentSight, SQLite, and the enforcer.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -12,70 +12,99 @@ use uuid::Uuid;
 use super::{EnforcementClient, EnforcementError, EnforcementStore, EnforcementStoreError};
 
 const INGESTION_UNAVAILABLE_MESSAGE: &str = "violation ingestion is not subscribed";
-const READY_BIT: u64 = 1;
+
+type WorkerTask = Box<dyn FnOnce() + Send + 'static>;
+
+struct WorkerToken {
+    _identity: (),
+}
+
+#[derive(Default)]
+struct IngestionState {
+    current: Option<Arc<WorkerToken>>,
+    ready: bool,
+}
 
 #[derive(Clone)]
 struct IngestionReadiness {
-    state: Arc<AtomicU64>,
+    state: Arc<Mutex<IngestionState>>,
 }
 
 impl IngestionReadiness {
     fn new() -> Self {
         Self {
-            state: Arc::new(AtomicU64::new(0)),
+            state: Arc::new(Mutex::new(IngestionState::default())),
         }
     }
 
-    fn begin_worker(&self) -> u64 {
-        self.advance_generation()
+    fn candidate(&self) -> Arc<WorkerToken> {
+        Arc::new(WorkerToken { _identity: () })
+    }
+
+    fn install(&self, worker: Arc<WorkerToken>) {
+        let mut state = self.state();
+        state.current = Some(worker);
+        state.ready = false;
     }
 
     fn stop(&self) {
-        self.advance_generation();
+        let mut state = self.state();
+        state.current = None;
+        state.ready = false;
     }
 
-    fn mark_ready(&self, generation: u64) -> bool {
-        self.state
-            .compare_exchange(
-                generation,
-                generation | READY_BIT,
-                Ordering::Release,
-                Ordering::Acquire,
-            )
-            .is_ok()
+    fn clear_if_current(&self, worker: &Arc<WorkerToken>) {
+        let mut state = self.state();
+        if state
+            .current
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, worker))
+        {
+            state.current = None;
+            state.ready = false;
+        }
     }
 
-    fn mark_not_ready(&self, generation: u64) {
-        let _ = self.state.compare_exchange(
-            generation | READY_BIT,
-            generation,
-            Ordering::Release,
-            Ordering::Acquire,
-        );
+    fn mark_ready(&self, worker: &Arc<WorkerToken>) -> bool {
+        let mut state = self.state();
+        if state
+            .current
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, worker))
+        {
+            state.ready = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn mark_not_ready(&self, worker: &Arc<WorkerToken>) {
+        let mut state = self.state();
+        if state
+            .current
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, worker))
+        {
+            state.ready = false;
+        }
     }
 
     fn is_ready(&self) -> bool {
-        self.state.load(Ordering::Acquire) & READY_BIT != 0
+        self.state().ready
     }
 
-    fn is_current(&self, generation: u64) -> bool {
-        self.state.load(Ordering::Acquire) & !READY_BIT == generation
+    fn is_current(&self, worker: &Arc<WorkerToken>) -> bool {
+        self.state()
+            .current
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, worker))
     }
 
-    fn advance_generation(&self) -> u64 {
-        let mut current = self.state.load(Ordering::Acquire);
-        loop {
-            let next = (current & !READY_BIT).wrapping_add(2);
-            match self.state.compare_exchange_weak(
-                current,
-                next,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return next,
-                Err(actual) => current = actual,
-            }
-        }
+    fn state(&self) -> MutexGuard<'_, IngestionState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -201,16 +230,43 @@ impl EnforcementCoordinator {
     ///
     /// # Errors
     ///
-    /// Returns an I/O error when the worker thread cannot be spawned.
+    /// Returns an I/O error when the worker thread cannot be spawned or activated.
     pub fn start_ingestion(&self) -> Result<JoinHandle<()>, EnforcementCoordinatorError> {
-        let generation = self.ingestion_readiness.begin_worker();
+        self.start_ingestion_with(|worker| {
+            thread::Builder::new()
+                .name("agentsight-enforcement-ingestion".into())
+                .spawn(worker)
+        })
+    }
+
+    fn start_ingestion_with<F>(
+        &self,
+        spawn: F,
+    ) -> Result<JoinHandle<()>, EnforcementCoordinatorError>
+    where
+        F: FnOnce(WorkerTask) -> Result<JoinHandle<()>, std::io::Error>,
+    {
+        let worker = self.ingestion_readiness.candidate();
         let client = self.client.clone();
         let store = self.store.clone();
         let ingestion_readiness = self.ingestion_readiness.clone();
-        thread::Builder::new()
-            .name("agentsight-enforcement-ingestion".into())
-            .spawn(move || ingest_loop(client, store, ingestion_readiness, generation))
-            .map_err(Into::into)
+        let worker_token = Arc::clone(&worker);
+        let (activate, activation) = mpsc::sync_channel(0);
+        let task = Box::new(move || {
+            if activation.recv().is_ok() {
+                ingest_loop(client, store, ingestion_readiness, worker_token);
+            }
+        });
+        let handle = spawn(task)?;
+        self.ingestion_readiness.install(Arc::clone(&worker));
+        if activate.send(()).is_err() {
+            self.ingestion_readiness.clear_if_current(&worker);
+            return Err(EnforcementCoordinatorError::Thread(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "activate enforcement ingestion worker",
+            )));
+        }
+        Ok(handle)
     }
 
     /// Requests the ingestion worker to stop at its next bounded read interval.
@@ -242,21 +298,21 @@ fn ingest_loop(
     client: EnforcementClient,
     store: EnforcementStore,
     ingestion_readiness: IngestionReadiness,
-    generation: u64,
+    worker: Arc<WorkerToken>,
 ) {
     let mut backoff = Duration::from_millis(100);
-    while ingestion_readiness.is_current(generation) {
-        ingestion_readiness.mark_not_ready(generation);
+    while ingestion_readiness.is_current(&worker) {
+        ingestion_readiness.mark_not_ready(&worker);
         match client.subscribe() {
             Ok(mut subscription) => {
-                if !ingestion_readiness.mark_ready(generation) {
+                if !ingestion_readiness.mark_ready(&worker) {
                     break;
                 }
                 backoff = Duration::from_millis(100);
-                while ingestion_readiness.is_current(generation) {
+                while ingestion_readiness.is_current(&worker) {
                     match subscription.next_event() {
                         Ok(Some(event)) => {
-                            if !ingestion_readiness.is_current(generation) {
+                            if !ingestion_readiness.is_current(&worker) {
                                 break;
                             }
                             if let Err(error) = store.insert_violation(&event) {
@@ -267,8 +323,8 @@ fn ingest_loop(
                         }
                         Ok(None) => {}
                         Err(error) => {
-                            ingestion_readiness.mark_not_ready(generation);
-                            if !ingestion_readiness.is_current(generation) {
+                            ingestion_readiness.mark_not_ready(&worker);
+                            if !ingestion_readiness.is_current(&worker) {
                                 break;
                             }
                             let message = format!("enforcement subscription lost: {error}");
@@ -283,8 +339,8 @@ fn ingest_loop(
                 }
             }
             Err(error) => {
-                ingestion_readiness.mark_not_ready(generation);
-                if ingestion_readiness.is_current(generation) {
+                ingestion_readiness.mark_not_ready(&worker);
+                if ingestion_readiness.is_current(&worker) {
                     let message = format!("enforcement unavailable: {error}");
                     if let Err(store_error) = store.mark_active_degraded(&message) {
                         eprintln!(
@@ -294,21 +350,21 @@ fn ingest_loop(
                 }
             }
         }
-        ingestion_readiness.mark_not_ready(generation);
-        sleep_until_superseded(&ingestion_readiness, generation, backoff);
+        ingestion_readiness.mark_not_ready(&worker);
+        sleep_until_superseded(&ingestion_readiness, &worker, backoff);
         backoff = backoff.saturating_mul(2).min(Duration::from_secs(5));
     }
-    ingestion_readiness.mark_not_ready(generation);
+    ingestion_readiness.mark_not_ready(&worker);
 }
 
 fn sleep_until_superseded(
     ingestion_readiness: &IngestionReadiness,
-    generation: u64,
+    worker: &Arc<WorkerToken>,
     duration: Duration,
 ) {
     let step = Duration::from_millis(50);
     let mut elapsed = Duration::ZERO;
-    while elapsed < duration && ingestion_readiness.is_current(generation) {
+    while elapsed < duration && ingestion_readiness.is_current(worker) {
         let remaining = duration.saturating_sub(elapsed);
         let sleep = remaining.min(step);
         thread::sleep(sleep);
@@ -321,20 +377,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn failed_start_does_not_supersede_ready_worker() {
+        let coordinator = EnforcementCoordinator::new(
+            EnforcementClient::new("/tmp/unused-enforcement.sock"),
+            EnforcementStore::open(":memory:").expect("test store should open"),
+        );
+        let active = coordinator.ingestion_readiness.candidate();
+        coordinator.ingestion_readiness.install(Arc::clone(&active));
+        assert!(coordinator.ingestion_readiness.mark_ready(&active));
+
+        let result = coordinator
+            .start_ingestion_with(|_| Err(std::io::Error::other("fixture thread spawn failure")));
+
+        assert!(matches!(
+            result,
+            Err(EnforcementCoordinatorError::Thread(_))
+        ));
+        assert!(coordinator.ingestion_readiness.is_current(&active));
+        assert!(coordinator.ingestion_readiness.is_ready());
+    }
+
+    #[test]
+    fn ancient_worker_never_becomes_current_after_replacements() {
+        let readiness = IngestionReadiness::new();
+        let ancient = readiness.candidate();
+        readiness.install(Arc::clone(&ancient));
+        assert!(readiness.mark_ready(&ancient));
+
+        for _ in 0..10_000 {
+            let current = readiness.candidate();
+            readiness.install(Arc::clone(&current));
+            assert!(!readiness.is_current(&ancient));
+            assert!(!readiness.mark_ready(&ancient));
+            assert!(readiness.mark_ready(&current));
+        }
+    }
+
+    #[test]
     fn superseded_worker_cannot_publish_or_revoke_current_readiness() {
         let readiness = IngestionReadiness::new();
-        let first = readiness.begin_worker();
-        assert!(readiness.mark_ready(first));
+        let first = readiness.candidate();
+        readiness.install(Arc::clone(&first));
+        assert!(readiness.mark_ready(&first));
 
-        let second = readiness.begin_worker();
+        let second = readiness.candidate();
+        readiness.install(Arc::clone(&second));
         assert!(!readiness.is_ready());
-        assert!(!readiness.mark_ready(first));
-        assert!(readiness.mark_ready(second));
-        readiness.mark_not_ready(first);
+        assert!(!readiness.mark_ready(&first));
+        assert!(readiness.mark_ready(&second));
+        readiness.mark_not_ready(&first);
         assert!(readiness.is_ready());
 
         readiness.stop();
-        assert!(!readiness.mark_ready(second));
+        assert!(!readiness.mark_ready(&second));
         assert!(!readiness.is_ready());
     }
 }
