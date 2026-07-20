@@ -221,6 +221,8 @@ version = "0.7.1"
 dependencies = [
  "actix-cors",
  "actix-web",
+ "agentsight-enforcement-protocol",
+ "agentsight-enforcer",
  "anyhow",
  "async-stream",
  "async-trait",

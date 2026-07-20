@@ -100,6 +100,10 @@ include_dir = { version = "0.7", optional = true }
 # hf-hub for downloading tokenizer files (patched to use GitHub version below)
 hf-hub = "0.5"
 notify = "6"
+agentsight-enforcement-protocol = { path = "crates/enforcement-protocol" }
+
+[dev-dependencies]
+agentsight-enforcer = { path = "crates/agentsight-enforcer", default-features = false, features = ["mock-backend"] }
 
 # [profile.release]
 # debug = true

@@ -49,6 +49,7 @@ pub mod atif;
 pub(crate) mod background;
 pub mod chrome_trace;
 pub mod discovery;
+pub mod enforcement;
 pub mod event;
 pub mod ffi;
 pub mod genai;
