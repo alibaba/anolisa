@@ -1069,6 +1069,7 @@ mod tests {
             health_store: Arc::new(RwLock::new(HealthStore::new())),
             interruption_store: None,
             evaluation_store: Arc::clone(&evaluation_store),
+            enforcement: None,
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
         });
@@ -1273,6 +1274,7 @@ mod tests {
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
             interruption_store: None,
+            enforcement: None,
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
         })
@@ -1395,6 +1397,7 @@ mod tests {
             evaluation_store: Arc::new(
                 EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
             ),
+            enforcement: None,
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms },
             auth,
         })
@@ -1492,6 +1495,7 @@ mod tests {
             evaluation_store: Arc::new(
                 EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
             ),
+            enforcement: None,
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
         })

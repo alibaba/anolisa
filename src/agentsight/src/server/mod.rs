@@ -4,6 +4,7 @@
 //! AgentSight storage data, and optionally serves the embedded frontend.
 
 pub mod auth;
+mod enforcement;
 mod handlers;
 mod token_savings;
 
@@ -16,6 +17,7 @@ use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, get, web}
 use include_dir::{Dir, include_dir};
 
 use crate::config::ServerAuthConfig;
+use crate::enforcement::{EnforcementClient, EnforcementCoordinator, EnforcementStore};
 use crate::grader::EvaluationStore;
 use crate::health::{HealthChecker, HealthStore};
 use crate::storage::sqlite::InterruptionStore;
@@ -52,6 +54,8 @@ pub struct AppState {
     pub interruption_store: Option<Arc<InterruptionStore>>,
     /// Grader evaluation store
     pub evaluation_store: Arc<EvaluationStore>,
+    /// Desired enforcement state and privileged-service client.
+    pub enforcement: Option<Arc<EnforcementCoordinator>>,
     /// agent-sec security observability integration configuration
     pub security_observability: SecurityObservabilityConfig,
     /// Dashboard authentication state
@@ -182,6 +186,12 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(handlers::security_observability_sessions)
                 .service(handlers::security_observability_runs)
                 .service(handlers::security_observability_timeline)
+                // AgentSight-owned enforcement API routes
+                .service(enforcement::health)
+                .service(enforcement::apply_binding)
+                .service(enforcement::list_bindings)
+                .service(enforcement::detach_binding)
+                .service(enforcement::list_violations)
                 // Skill Metrics API routes
                 .service(handlers::skill_metrics_all)
                 .service(handlers::skill_metrics_downloads)
@@ -221,6 +231,22 @@ pub async fn run_server(
         EvaluationStore::new_with_path(&storage_path)
             .map_err(|error| std::io::Error::other(error.to_string()))?,
     );
+
+    let enforcement_socket = std::env::var_os("AGENTSIGHT_ENFORCER_SOCKET")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/run/agentsight/enforcer.sock"));
+    let enforcement_path = storage_path
+        .parent()
+        .unwrap_or(std::path::Path::new("/var/log/sysak/.agentsight"))
+        .join("enforcement.db");
+    let enforcement = Arc::new(EnforcementCoordinator::new(
+        EnforcementClient::new(enforcement_socket),
+        EnforcementStore::open(&enforcement_path)
+            .map_err(|error| std::io::Error::other(error.to_string()))?,
+    ));
+    let enforcement_ingestion = enforcement
+        .start_ingestion()
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
 
     // Initialize dashboard authentication
     let storage_base = storage_path
@@ -289,6 +315,7 @@ pub async fn run_server(
         health_store,
         interruption_store,
         evaluation_store,
+        enforcement: Some(Arc::clone(&enforcement)),
         security_observability,
         auth: dashboard_auth.clone(),
     });
@@ -304,7 +331,7 @@ pub async fn run_server(
         );
     }
 
-    HttpServer::new(move || {
+    let server = match HttpServer::new(move || {
         let cors = Cors::default()
             .allow_any_origin()
             .allowed_methods(vec!["GET", "DELETE", "POST", "OPTIONS"])
@@ -317,9 +344,28 @@ pub async fn run_server(
             .app_data(data.clone())
             .configure(configure_routes)
     })
-    .bind((host, port))?
-    .run()
-    .await
+    .bind((host, port))
+    {
+        Ok(server) => server,
+        Err(error) => {
+            stop_enforcement_ingestion(&enforcement, enforcement_ingestion);
+            return Err(error);
+        }
+    };
+    let server_result = server.run().await;
+
+    stop_enforcement_ingestion(&enforcement, enforcement_ingestion);
+    server_result
+}
+
+fn stop_enforcement_ingestion(
+    coordinator: &EnforcementCoordinator,
+    ingestion: std::thread::JoinHandle<()>,
+) {
+    coordinator.stop_ingestion();
+    if ingestion.join().is_err() {
+        log::error!("AgentSight enforcement ingestion worker panicked during shutdown");
+    }
 }
 
 #[cfg(test)]
@@ -367,6 +413,23 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn configure_routes_registers_enforcement_routes() {
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state(0))
+                .configure(configure_routes),
+        )
+        .await;
+        let request = awtest::TestRequest::get()
+            .uri("/api/enforcement/health")
+            .to_request();
+
+        let response = awtest::call_service(&app, request).await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[actix_web::test]
     async fn frontend_routes_handle_root_and_tail_paths() {
         let app = awtest::init_service(
             App::new()
@@ -401,6 +464,7 @@ mod tests {
             evaluation_store: Arc::new(
                 EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
             ),
+            enforcement: None,
             security_observability: SecurityObservabilityConfig { timeout_ms },
             auth,
         })
