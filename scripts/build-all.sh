@@ -1812,6 +1812,7 @@ install_sight() {
     if [[ "$INSTALL_MODE" == "system" ]]; then
         setcap_arg="SETCAP=0"
         stop_systemd_service_for_install agentsight.service
+        stop_systemd_service_for_install agentsight-enforcer.service
     fi
     run_component_make_install "agentsight" "$dir" "$setcap_arg"
     if [[ "$INSTALL_MODE" == "system" ]]; then
@@ -1821,6 +1822,7 @@ install_sight() {
         else
             warn "setcap not found; agentsight trace may need sudo"
         fi
+        refresh_systemd_service agentsight-enforcer.service
         refresh_systemd_service agentsight.service
     else
         warn "agentsight user install skips systemd/setcap; trace/audit may need sudo or manual setcap."
@@ -1961,6 +1963,7 @@ uninstall_sec_core() {
 uninstall_sight() {
     step "Uninstalling agentsight"
     stop_systemd_service agentsight.service
+    stop_systemd_service agentsight-enforcer.service
     local dir="$PROJECT_ROOT/src/agentsight"
     run_component_make_uninstall "agentsight" "$dir" || true
     if $DRY_RUN; then

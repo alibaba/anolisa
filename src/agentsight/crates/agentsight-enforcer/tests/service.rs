@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::io::BufReader;
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -65,6 +65,36 @@ fn changed_duplicate_conflicts() {
         backend.apply(changed),
         Err(BackendError::BindingConflict(_))
     ));
+}
+
+#[test]
+fn bind_recovers_a_stale_socket_after_unclean_shutdown() {
+    let socket_path =
+        PathBuf::from("/tmp").join(format!("agentsight-stale-{}.sock", Uuid::new_v4()));
+    let listener = UnixListener::bind(&socket_path).expect("fixture socket should bind");
+    drop(listener);
+
+    let service = EnforcerService::bind(&socket_path, Arc::new(MockBackend::new()), None)
+        .expect("stale service socket should be replaced");
+
+    drop(service);
+    assert!(!socket_path.exists());
+}
+
+#[test]
+fn bind_never_replaces_a_non_socket_path() {
+    let socket_path =
+        PathBuf::from("/tmp").join(format!("agentsight-file-{}.sock", Uuid::new_v4()));
+    fs::write(&socket_path, b"owned by another service").expect("fixture file should exist");
+
+    let result = EnforcerService::bind(&socket_path, Arc::new(MockBackend::new()), None);
+
+    assert!(result.is_err());
+    assert_eq!(
+        fs::read(&socket_path).expect("fixture file must remain"),
+        b"owned by another service"
+    );
+    fs::remove_file(socket_path).expect("fixture file should clean up");
 }
 
 struct ServiceFixture {

@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::io::BufReader;
+use std::os::unix::fs::FileTypeExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -47,6 +48,7 @@ impl<B: EnforcementBackend> EnforcerService<B> {
         allowed_gid: Option<u32>,
     ) -> Result<Self, ServiceError> {
         let socket_path = socket_path.as_ref().to_path_buf();
+        prepare_socket_path(&socket_path)?;
         let listener = UnixListener::bind(&socket_path)?;
         fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o660))?;
         listener.set_nonblocking(true)?;
@@ -83,6 +85,31 @@ impl<B: EnforcementBackend> EnforcerService<B> {
             }
         }
         Ok(())
+    }
+}
+
+fn prepare_socket_path(socket_path: &Path) -> Result<(), std::io::Error> {
+    let metadata = match fs::symlink_metadata(socket_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_socket() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            format!("refusing to replace non-socket path {socket_path:?}"),
+        ));
+    }
+    match UnixStream::connect(socket_path) {
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            format!("enforcer is already listening at {socket_path:?}"),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+            fs::remove_file(socket_path)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
     }
 }
 

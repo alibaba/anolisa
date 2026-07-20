@@ -1,6 +1,7 @@
 [Unit]
 Description=AgentSight - eBPF-based AI Agent Observability Tool
-After=network.target
+Wants=agentsight-enforcer.service
+After=network.target agentsight-enforcer.service
 StartLimitIntervalSec=86400
 StartLimitBurst=10
 
