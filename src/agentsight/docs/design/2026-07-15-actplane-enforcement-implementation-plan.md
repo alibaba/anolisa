@@ -154,17 +154,16 @@ git commit -m "feat(sight): add enforcement protocol"
 - Consumes: Task 1 protocol.
 - Produces: `EnforcementBackend`, `BackendError`, `MockBackend`, `EventHub`, and `EnforcerService`.
 
-- [ ] **Step 1: Add daemon features and pinned dependencies**
+- [ ] **Step 1: Add the daemon member and mock feature**
 
-Add `crates/agentsight-enforcer` to the root workspace members, then add the two
-official ActPlane Git dependencies to `[workspace.dependencies]`, both pinned to
-`a62e5d9d96f91101cda019519053e950d532380a`.
+Add `crates/agentsight-enforcer` to the root workspace members. Keep this task
+independent of Git and BPF dependencies so its protocol and UDS tests are
+portable and deterministic.
 
 ```toml
 [features]
 default = ["mock-backend"]
 mock-backend = []
-actplane = ["dep:actplane-ifc-compiler", "dep:ebpf-ifc-engine"]
 
 [dependencies]
 agentsight-enforcement-protocol = { path = "../enforcement-protocol" }
@@ -173,8 +172,6 @@ libc = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
-actplane-ifc-compiler = { workspace = true, optional = true }
-ebpf-ifc-engine = { workspace = true, optional = true }
 ```
 
 - [ ] **Step 2: Write failing idempotency and UDS tests**
@@ -237,6 +234,17 @@ git commit -m "feat(sight): add enforcer daemon"
 **Interfaces:**
 - Consumes: `EnforcementBackend`, `EventHub`, `actplane_ifc_compiler::compile_str`, and `ebpf_ifc_engine::PinnedEngine`.
 - Produces: `ActPlaneBackend::open() -> Result<Self, BackendError>`.
+
+- [ ] **Step 0: Add the pinned upstream feature dependencies**
+
+Add the `actplane` feature and the two optional official Git dependencies to the
+enforcer manifest. Declare both in `[workspace.dependencies]`, pinned to
+`a62e5d9d96f91101cda019519053e950d532380a`:
+
+```toml
+actplane-ifc-compiler = { git = "https://github.com/eunomia-bpf/ActPlane.git", rev = "a62e5d9d96f91101cda019519053e950d532380a" }
+ebpf-ifc-engine = { git = "https://github.com/eunomia-bpf/ActPlane.git", rev = "a62e5d9d96f91101cda019519053e950d532380a" }
+```
 
 - [ ] **Step 1: Write failing pure-helper tests**
 
