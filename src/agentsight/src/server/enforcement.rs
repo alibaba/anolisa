@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use actix_web::{delete, get, post, web, HttpResponse};
+use actix_web::{HttpResponse, delete, get, post, web};
 use agentsight_enforcement_protocol::ApplyPolicy;
 use serde::Deserialize;
 use serde_json::json;
@@ -142,26 +142,6 @@ where
 }
 
 fn validate_target_identity(root_pid: i32, expected_start_time: u64) -> Result<(), String> {
-    if root_pid <= 1 {
-        return Err("root_pid must identify a non-init process".into());
-    }
-    if root_pid == std::process::id() as i32 {
-        return Err("AgentSight cannot enforce itself".into());
-    }
-    let stat_path = format!("/proc/{root_pid}/stat");
-    let stat = fs::read_to_string(&stat_path)
-        .map_err(|error| format!("cannot read {stat_path}: {error}"))?;
-    let open = stat
-        .find('(')
-        .ok_or_else(|| "invalid proc stat".to_string())?;
-    let close = stat
-        .rfind(')')
-        .filter(|close| *close > open)
-        .ok_or_else(|| "invalid proc stat".to_string())?;
-    let process_name = &stat[open + 1..close];
-    if matches!(process_name, "agentsight" | "agentsight-enforcer") {
-        return Err(format!("cannot target protected service {process_name}"));
-    }
     let actual_start_time = read_target_start_time(root_pid)?;
     if actual_start_time != expected_start_time {
         return Err(format!(
@@ -234,6 +214,9 @@ fn read_target_start_time(root_pid: i32) -> Result<u64, String> {
     if root_pid <= 1 {
         return Err("root_pid must identify a non-init process".into());
     }
+    if root_pid == std::process::id() as i32 {
+        return Err("AgentSight cannot enforce itself".into());
+    }
     let stat_path = format!("/proc/{root_pid}/stat");
     let stat = fs::read_to_string(&stat_path)
         .map_err(|error| format!("cannot read {stat_path}: {error}"))?;
@@ -244,6 +227,13 @@ fn read_target_start_time(root_pid: i32) -> Result<u64, String> {
         .rfind(')')
         .filter(|close| *close > open)
         .ok_or_else(|| "invalid proc stat".to_string())?;
+    let process_name = &stat[open + 1..close];
+    if matches!(
+        process_name,
+        "agentsight" | "agentsight-enfo" | "agentsight-enforcer"
+    ) {
+        return Err(format!("cannot target protected service {process_name}"));
+    }
     stat[close + 1..]
         .split_whitespace()
         .nth(19)
@@ -357,9 +347,11 @@ mod tests {
         assert!(binding.policy_id.starts_with("agentsight-file-open:"));
         assert!(binding.policy_dsl.contains("source AGENT = exec \"**\""));
         assert!(binding.policy_dsl.contains("block open file"));
-        assert!(binding
-            .policy_dsl
-            .contains(path.canonicalize().unwrap().to_str().unwrap()));
+        assert!(
+            binding
+                .policy_dsl
+                .contains(path.canonicalize().unwrap().to_str().unwrap())
+        );
 
         child.kill().expect("fixture process should stop");
         child.wait().expect("fixture process should exit");
@@ -369,16 +361,82 @@ mod tests {
     #[test]
     fn rejects_unsafe_file_binding_inputs() {
         let directory = std::env::temp_dir();
-        assert!(build_file_binding(FileBindingRequest {
-            agent_id: "".into(),
-            session_id: None,
-            root_pid: 1,
-            path: directory,
-        })
-        .is_err());
+        assert!(
+            build_file_binding(FileBindingRequest {
+                agent_id: "".into(),
+                session_id: None,
+                root_pid: 1,
+                path: directory,
+            })
+            .is_err()
+        );
 
         assert!(validate_policy_path(std::path::Path::new("relative/secret")).is_err());
         assert!(validate_policy_path(std::path::Path::new("/tmp/quote\"secret")).is_err());
+    }
+
+    #[test]
+    fn rejects_self_file_binding_target() {
+        let path = std::env::temp_dir().join(format!("agentsight-secret-{}", Uuid::new_v4()));
+        fs::write(&path, b"fixture").expect("fixture file should exist");
+
+        assert!(
+            build_file_binding(FileBindingRequest {
+                agent_id: "qoder".into(),
+                session_id: None,
+                root_pid: std::process::id() as i32,
+                path: path.clone(),
+            })
+            .is_err()
+        );
+
+        fs::remove_file(path).expect("fixture file should be removed");
+    }
+
+    #[test]
+    fn rejects_protected_service_file_binding_targets() {
+        let directory =
+            std::env::temp_dir().join(format!("agentsight-protected-{}", Uuid::new_v4()));
+        fs::create_dir(&directory).expect("fixture directory should exist");
+        let path = directory.join("secret");
+        fs::write(&path, b"fixture").expect("fixture file should exist");
+
+        for process_name in ["agentsight", "agentsight-enforcer"] {
+            let executable = directory.join(process_name);
+            std::os::unix::fs::symlink("/bin/sleep", &executable)
+                .expect("protected-service fixture should exist");
+            let mut child = std::process::Command::new(&executable)
+                .arg("30")
+                .spawn()
+                .expect("fixture process should start");
+            let stat = fs::read_to_string(format!("/proc/{}/stat", child.id()))
+                .expect("fixture proc stat should exist");
+            let open = stat
+                .find('(')
+                .expect("fixture proc stat should contain open");
+            let close = stat
+                .rfind(')')
+                .expect("fixture proc stat should contain close");
+            let expected_process_name: String = process_name.chars().take(15).collect();
+            assert_eq!(&stat[open + 1..close], expected_process_name);
+
+            assert!(
+                build_file_binding(FileBindingRequest {
+                    agent_id: "qoder".into(),
+                    session_id: None,
+                    root_pid: child.id() as i32,
+                    path: path.clone(),
+                })
+                .is_err()
+            );
+
+            child.kill().expect("fixture process should stop");
+            child.wait().expect("fixture process should exit");
+            fs::remove_file(executable).expect("protected-service fixture should be removed");
+        }
+
+        fs::remove_file(path).expect("fixture file should be removed");
+        fs::remove_dir(directory).expect("fixture directory should be removed");
     }
 
     #[test]
