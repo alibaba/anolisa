@@ -1,0 +1,89 @@
+diff --git a/bpf/src/lib.rs b/bpf/src/lib.rs
+index d19021d9..f4c05985 100644
+--- a/bpf/src/lib.rs
++++ b/bpf/src/lib.rs
+@@ -69,6 +69,10 @@ const FEAT_FILE_FLOW: u32 = 1 << 6;
+ const FEAT_BLOCK_EXEC: u32 = 1 << 7;
+ const FEAT_BLOCK_FILE: u32 = 1 << 8;
+ const FEAT_BLOCK_CONNECT: u32 = 1 << 9;
++const PINNED_FILE_PROFILE_MARKER: &str =
++    "agentsight_profile_file_v1_a62e5d9d96f91101cda019519053e950d532380a";
++const PINNED_FULL_PROFILE_MARKER: &str =
++    "agentsight_profile_full_v1_a62e5d9d96f91101cda019519053e950d532380a";
+ #[derive(Clone, Debug, Eq, PartialEq)]
+ struct PinnedEnginePaths {
+     root: PathBuf,
+@@ -446,6 +450,21 @@ fn pin_loaded_maps(
+     Ok(())
+ }
+ 
++fn pin_profile_marker(
++    bpf: &Ebpf,
++    paths: &PinnedEnginePaths,
++    reserve: HookReserve,
++    created: &mut Vec<PathBuf>,
++) -> io::Result<()> {
++    let marker = paths.map(reserve.profile_marker());
++    bpf.map("cap_state")
++        .ok_or_else(|| err("map cap_state missing for profile marker"))?
++        .pin(&marker)
++        .map_err(|e| err(format!("pin profile marker at {}: {e}", marker.display())))?;
++    created.push(marker);
++    Ok(())
++}
++
+ fn pin_pending_links(
+     paths: &PinnedEnginePaths,
+     links: Vec<(String, FdLink)>,
+@@ -517,6 +536,13 @@ fn pinned_engine_present(paths: &PinnedEnginePaths, reserve: HookReserve) -> io:
+             return Ok(false);
+         }
+     }
++    let marker = reserve.profile_marker();
++    if !paths.map(marker).try_exists()? {
++        return Err(err(format!(
++            "ActPlane pinned metadata mismatch at {}: expected {marker}; remove the pin root before changing ActPlane revision, profile, or schema",
++            paths.root.display()
++        )));
++    }
+     let budget = HookBudget::for_pinned_reserve(reserve);
+     for spec in TRACEPOINTS {
+         let exists = paths.link(spec.name).try_exists()?;
+@@ -1656,6 +1682,14 @@ impl HookReserve {
+         }
+     }
+ 
++    fn profile_marker(self) -> &'static str {
++        if self.file_open_only {
++            PINNED_FILE_PROFILE_MARKER
++        } else {
++            PINNED_FULL_PROFILE_MARKER
++        }
++    }
++
+     fn pinned_profile_value(value: Option<&str>) -> io::Result<Self> {
+         match value {
+             None => Ok(HookReserve::full_profile()),
+@@ -2066,6 +2100,7 @@ impl Loader {
+             let mut created = Vec::new();
+             let pin_result = (|| -> io::Result<()> {
+                 pin_loaded_maps(&bpf, paths, &mut created)?;
++                pin_profile_marker(&bpf, paths, hook_reserve, &mut created)?;
+                 pin_pending_links(paths, pending_links, &mut created)
+             })();
+             match pin_result {
+@@ -3124,6 +3159,14 @@ mod tests {
+         assert!(!lsm_link_expected("enforce_bpf_syscall", budget, true));
+     }
+ 
++    #[test]
++    fn pinned_profile_marker_captures_revision_profile_and_schema() {
++        let marker = HookReserve::file_enforcement().profile_marker();
++        assert!(marker.contains("file_v1"));
++        assert!(marker.contains("a62e5d9d96f91101cda019519053e950d532380a"));
++        assert_ne!(marker, HookReserve::full_profile().profile_marker());
++    }
++
+     #[test]
+     fn unknown_pinned_profile_is_rejected() {
+         let error = HookReserve::pinned_profile_value(Some("file-enforcment"))

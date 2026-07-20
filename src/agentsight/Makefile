@@ -16,8 +16,7 @@ build: ## Build agentsight binary
 build-enforcer: ## Build the privileged ActPlane enforcement daemon
 	env -u DESTDIR -u MAKEFLAGS -u MFLAGS -u MAKEOVERRIDES \
 		LIBBPF_SYS_LIBRARY_PATH="$(LIBBPF_SYS_LIBRARY_PATH)" \
-		cargo build --release -p agentsight-enforcer \
-			--no-default-features --features actplane
+		./scripts/build-enforcer.sh
 
 .PHONY: build-frontend
 build-frontend: ## Build and embed frontend into frontend-dist/

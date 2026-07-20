@@ -150,6 +150,30 @@ fn coordinator_error(error: EnforcementCoordinatorError) -> HttpResponse {
             "binding_not_found",
             false,
         ),
+        EnforcementCoordinatorError::Client(crate::enforcement::EnforcementError::Remote {
+            code,
+            ..
+        }) if matches!(code.as_str(), "compile_failure" | "stale_process") => (
+            actix_web::http::StatusCode::UNPROCESSABLE_ENTITY,
+            code.as_str(),
+            false,
+        ),
+        EnforcementCoordinatorError::Client(crate::enforcement::EnforcementError::Remote {
+            code,
+            ..
+        }) if code == "binding_conflict" => (
+            actix_web::http::StatusCode::CONFLICT,
+            "binding_conflict",
+            false,
+        ),
+        EnforcementCoordinatorError::Client(crate::enforcement::EnforcementError::Remote {
+            code,
+            ..
+        }) if code == "missing_binding" => (
+            actix_web::http::StatusCode::NOT_FOUND,
+            "binding_not_found",
+            false,
+        ),
         EnforcementCoordinatorError::Client(_) => (
             actix_web::http::StatusCode::SERVICE_UNAVAILABLE,
             "enforcer_unavailable",
@@ -223,5 +247,29 @@ mod tests {
         assert!(validate_target_identity(pid, start_time + 1).is_err());
         child.kill().unwrap();
         child.wait().unwrap();
+    }
+
+    #[test]
+    fn maps_policy_rejections_to_actionable_http_statuses() {
+        for (code, expected) in [
+            (
+                "compile_failure",
+                actix_web::http::StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                "stale_process",
+                actix_web::http::StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            ("binding_conflict", actix_web::http::StatusCode::CONFLICT),
+            ("missing_binding", actix_web::http::StatusCode::NOT_FOUND),
+        ] {
+            let response = coordinator_error(EnforcementCoordinatorError::Client(
+                crate::enforcement::EnforcementError::Remote {
+                    code: code.into(),
+                    message: "fixture rejection".into(),
+                },
+            ));
+            assert_eq!(response.status(), expected);
+        }
     }
 }

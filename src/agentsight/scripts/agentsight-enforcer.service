@@ -13,6 +13,7 @@ RuntimeDirectory=agentsight
 RuntimeDirectoryMode=0750
 UMask=0007
 Environment=AGENTSIGHT_ENFORCER_SOCKET=/run/agentsight/enforcer.sock
+Environment=ACTPLANE_PINNED_PROFILE=file-enforcement
 NoNewPrivileges=no
 PrivateTmp=yes
 ProtectHome=yes
