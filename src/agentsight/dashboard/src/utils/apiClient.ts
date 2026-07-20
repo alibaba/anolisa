@@ -87,6 +87,130 @@ async function apiFetch<T>(url: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+// ─── Enforcement APIs ───────────────────────────────────────────────────────
+
+export interface EnforcementHealth {
+  ready: boolean;
+  backend: string;
+  message: string | null;
+}
+
+export interface EnforcementBinding {
+  request: {
+    binding_id: string;
+    agent_id: string;
+    session_id: string | null;
+    root_pid: number;
+    process_start_time: number;
+    policy_id: string;
+    policy_revision: string;
+    policy_dsl: string;
+  };
+  state: 'pending' | 'enforced' | 'failed' | 'degraded' | 'detaching' | 'detached';
+  message: string | null;
+  domain_id: number | null;
+}
+
+export interface EnforcementViolation {
+  event_id: string;
+  binding_id: string;
+  agent_id: string;
+  session_id: string | null;
+  policy_id: string;
+  policy_revision: string;
+  pid: number;
+  ppid: number | null;
+  process_start_time: number;
+  operation: string;
+  target: string;
+  effect: 'notify' | 'block' | 'kill';
+  blocked: boolean;
+  killed: boolean;
+  rule_id: string | null;
+  reason: string | null;
+  occurred_at_ns: number;
+  observed_at_ns: number;
+  actplane_revision: string;
+}
+
+export interface FileBindingInput {
+  agent_id: string;
+  session_id?: string;
+  root_pid: number;
+  path: string;
+}
+
+export class EnforcementApiError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly code: string,
+    message: string,
+    public readonly retryable: boolean,
+  ) {
+    super(message);
+    this.name = 'EnforcementApiError';
+  }
+}
+
+async function enforcementRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    credentials: 'same-origin',
+  });
+  if (res.status === 401) {
+    window.location.hash = '#/login';
+    throw new Error('Authentication required');
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => null) as {
+      error?: { code?: string; message?: string; retryable?: boolean };
+    } | null;
+    const error = body?.error;
+    if (error && typeof error.code === 'string' && typeof error.message === 'string') {
+      throw new EnforcementApiError(
+        res.status,
+        error.code,
+        error.message,
+        Boolean(error.retryable),
+      );
+    }
+    throw new EnforcementApiError(
+      res.status,
+      'enforcement_request_failed',
+      res.statusText || 'Enforcement request failed',
+      false,
+    );
+  }
+  if (res.status === 204) {
+    return undefined as T;
+  }
+  return res.json() as Promise<T>;
+}
+
+export const fetchEnforcementHealth = () =>
+  enforcementRequest<EnforcementHealth>('/api/enforcement/health');
+
+export const fetchEnforcementBindings = () =>
+  enforcementRequest<{ bindings: EnforcementBinding[] }>('/api/enforcement/bindings');
+
+export const fetchEnforcementViolations = (limit = 100) =>
+  enforcementRequest<{ violations: EnforcementViolation[] }>(
+    `/api/enforcement/violations?limit=${Math.min(1000, Math.max(1, limit))}`,
+  );
+
+export const createFileBinding = (input: FileBindingInput) =>
+  enforcementRequest<EnforcementBinding>('/api/enforcement/file-bindings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+
+export const detachEnforcementBinding = (bindingId: string) =>
+  enforcementRequest<void>(
+    `/api/enforcement/bindings/${encodeURIComponent(bindingId)}`,
+    { method: 'DELETE' },
+  );
+
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 /**

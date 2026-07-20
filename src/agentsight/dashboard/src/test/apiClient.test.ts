@@ -30,6 +30,11 @@ import {
   fetchSecuritySessions,
   fetchSecurityRuns,
   fetchSecurityTimeline,
+  fetchEnforcementHealth,
+  fetchEnforcementBindings,
+  fetchEnforcementViolations,
+  createFileBinding,
+  detachEnforcementBinding,
 } from '../utils/apiClient';
 
 // Mock global fetch
@@ -475,6 +480,81 @@ describe('apiClient', () => {
     it('should throw on non-ok response', async () => {
       mockFetch.mockResolvedValueOnce(mockErrorResponse(500, 'Internal Server Error'));
       await expect(fetchSkillMetrics()).rejects.toThrow();
+    });
+  });
+
+  describe('Enforcement APIs', () => {
+    it('fetches enforcement health', async () => {
+      const health = { ready: true, backend: 'actplane', message: null };
+      mockFetch.mockResolvedValueOnce(mockJsonResponse(health));
+
+      await expect(fetchEnforcementHealth()).resolves.toEqual(health);
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/enforcement/health'),
+        expect.objectContaining({ credentials: 'same-origin' }),
+      );
+    });
+
+    it('lists enforcement bindings', async () => {
+      const bindings = { bindings: [] };
+      mockFetch.mockResolvedValueOnce(mockJsonResponse(bindings));
+
+      await expect(fetchEnforcementBindings()).resolves.toEqual(bindings);
+      expect(mockFetch.mock.calls[0][0]).toContain('/api/enforcement/bindings');
+    });
+
+    it('clamps the violation list limit', async () => {
+      mockFetch.mockResolvedValueOnce(mockJsonResponse({ violations: [] }));
+
+      await fetchEnforcementViolations(10_001);
+      expect(mockFetch.mock.calls[0][0]).toContain('/api/enforcement/violations?limit=1000');
+    });
+
+    it('creates a product-level file binding', async () => {
+      mockFetch.mockResolvedValueOnce(mockJsonResponse({ state: 'enforced' }));
+      await createFileBinding({
+        agent_id: 'qoder',
+        session_id: 'session-1',
+        root_pid: 45231,
+        path: '/root/.ssh/id_rsa',
+      });
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/enforcement/file-bindings'),
+        expect.objectContaining({
+          method: 'POST',
+          credentials: 'same-origin',
+          body: JSON.stringify({
+            agent_id: 'qoder',
+            session_id: 'session-1',
+            root_pid: 45231,
+            path: '/root/.ssh/id_rsa',
+          }),
+        }),
+      );
+    });
+
+    it('preserves structured enforcement errors', async () => {
+      mockFetch.mockResolvedValueOnce(mockJsonResponse({
+        error: { code: 'invalid_file_binding', message: 'path must be absolute', retryable: false },
+      }, 400));
+      await expect(createFileBinding({
+        agent_id: 'qoder', root_pid: 2, path: 'relative',
+      })).rejects.toMatchObject({ status: 400, code: 'invalid_file_binding', retryable: false });
+    });
+
+    it('redirects to login after an unauthorized enforcement response', async () => {
+      window.location.hash = '';
+      mockFetch.mockResolvedValueOnce(mockJsonResponse({ error: 'unauthorized' }, 401));
+
+      await expect(fetchEnforcementHealth()).rejects.toThrow('Authentication required');
+      expect(window.location.hash).toBe('#/login');
+    });
+
+    it('detaches the selected binding', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 204, text: async () => '' });
+      await detachEnforcementBinding('binding-1');
+      expect(mockFetch.mock.calls[0][0]).toContain('/api/enforcement/bindings/binding-1');
+      expect(mockFetch.mock.calls[0][1]).toMatchObject({ method: 'DELETE' });
     });
   });
 });
