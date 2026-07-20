@@ -244,6 +244,11 @@ fn read_target_start_time(root_pid: i32) -> Result<u64, String> {
 
 fn coordinator_error(error: EnforcementCoordinatorError) -> HttpResponse {
     let (status, code, retryable) = match &error {
+        EnforcementCoordinatorError::IngestionUnavailable => (
+            actix_web::http::StatusCode::SERVICE_UNAVAILABLE,
+            "enforcement_ingestion_unavailable",
+            true,
+        ),
         EnforcementCoordinatorError::Store(
             crate::enforcement::EnforcementStoreError::MissingBinding(_),
         ) => (
@@ -497,5 +502,24 @@ mod tests {
             ));
             assert_eq!(response.status(), expected);
         }
+    }
+
+    #[actix_web::test]
+    async fn maps_ingestion_unavailable_to_retryable_service_unavailable() {
+        let response = coordinator_error(EnforcementCoordinatorError::IngestionUnavailable);
+        assert_eq!(
+            response.status(),
+            actix_web::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        let body = actix_web::body::to_bytes(response.into_body())
+            .await
+            .expect("error response body should load");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("error response should be JSON");
+        assert_eq!(
+            value["error"]["code"],
+            serde_json::Value::String("enforcement_ingestion_unavailable".into())
+        );
+        assert_eq!(value["error"]["retryable"], serde_json::Value::Bool(true));
     }
 }
