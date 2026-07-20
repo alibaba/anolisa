@@ -1,3 +1,4 @@
+use anolisa_core::InstalledState;
 use anolisa_platform::fs_layout::FsLayout;
 use tempfile::tempdir;
 
@@ -263,4 +264,32 @@ fn malformed_writable_state_is_fatal() {
     .expect_err("writable malformed state must fail");
 
     assert!(err.to_string().contains("failed to load installed state"));
+}
+
+#[test]
+fn writable_state_with_mismatched_scope_is_fatal() {
+    let tmp = tempdir().expect("tempdir");
+    let layout = FsLayout::system(Some(tmp.path().join("system")));
+    let mut state = InstalledState::default();
+    state.upsert_object(component("forged-user-record"));
+    state
+        .save(&layout.state_dir.join(INSTALLED_STATE_FILE))
+        .expect("save mismatched state");
+
+    let err = StateView::from_layouts(
+        "test",
+        vec![(
+            layout,
+            RootSpec {
+                scope: StateScope::System,
+                writable: true,
+            },
+        )],
+    )
+    .expect_err("scope-mismatched writable state must fail closed");
+
+    assert!(
+        err.reason()
+            .contains("does not match the active system layout")
+    );
 }

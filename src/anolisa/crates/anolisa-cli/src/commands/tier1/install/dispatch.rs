@@ -9,18 +9,19 @@
 
 use std::path::Path;
 
-use anolisa_core::executor::execute_delegated_steps;
-use anolisa_core::facts::{FactsError, ObserveRequest, assemble_facts, pending_journal_for};
+use anolisa_core::executor::{DelegatedExecutionTarget, execute_delegated_steps};
+use anolisa_core::facts::{
+    FactsError, JournalEvidence, ObserveRequest, assemble_facts, pending_journal_for,
+};
 use anolisa_core::lock::InstallLock;
 use anolisa_core::owned_executor::{OwnedExecutionError, execute_owned_steps};
 use anolisa_core::planner::{
-    HookKind, InstallRequest, Intent, Plan, PlanError, ProviderTarget, Step, plan,
+    HookKind, InstallRequest, Intent, NativeProbe, Plan, PlanError, ProviderTarget, Step, plan,
 };
 use anolisa_core::providers::{DelegatedProvider, ProviderError};
 use anolisa_core::record_sink::{DelegatedIdentity, RecordContext, StoreRecordSink};
 use anolisa_core::state::{ObjectKind, OperationRecord};
 use anolisa_core::state_store::StateStore;
-use anolisa_core::transaction::Transaction;
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError};
 use anolisa_platform::pkg_transaction::PackageTransaction;
@@ -35,6 +36,7 @@ use anolisa_core::domain::{InstallationScope, NativePm, ProviderBinding};
 
 use crate::commands::common;
 use crate::commands::common::RepoPersistPolicy;
+use crate::commands::tier1::recovery::LockedJournalGate;
 use crate::commands::tier1::rpm_install;
 use crate::context::{CliContext, InstallMode};
 use crate::repo_config::{
@@ -79,16 +81,10 @@ pub(crate) fn host_backends(
     let layout = common::resolve_layout(ctx);
     let env = anolisa_env::EnvService::detect();
     let repo_config = common::load_repo_config(ctx, &layout, COMMAND, RepoPersistPolicy::Require)?;
-    let state_path = layout.state_dir.join("installed.toml");
-    let store = StateStore::load(&state_path, privilege::effective_uid()).map_err(|err| {
-        CliError::Runtime {
-            command,
-            reason: format!("failed to load installed state: {err}"),
-        }
-    })?;
-    let resolved = common::lookup_component_name_in_store(component, &store, ctx, COMMAND);
+    let (resolved, view, _) = common::resolve_install_target(component, ctx, &command)?;
+    let store = &view.writable.state;
 
-    let rpm_repo = if install_family(args, &store, &resolved, &repo_config) == "rpm" {
+    let rpm_repo = if install_family(args, store, &resolved, &repo_config) == "rpm" {
         configured_rpm_repo_source(&repo_config, &env)?
     } else {
         None
@@ -136,12 +132,22 @@ fn install_family(
 pub(crate) struct PlannedComponent {
     pub(crate) command: String,
     pub(crate) component: String,
+    /// Lifecycle resolution pinned the literal input, so backend-level
+    /// package aliases must not rewrite it to another component. This holds
+    /// for an exact visible identity and for incomplete cross-scope
+    /// visibility where aliasing would be unsafe.
+    pub(crate) component_identity_pinned: bool,
     pub(crate) family: String,
     pub(crate) native_package: Option<String>,
     pub(crate) scope: InstallationScope,
     pub(crate) now: String,
     pub(crate) store: StateStore,
     pub(crate) route: PlannedRoute,
+}
+
+struct ResolvedInstallIdentity {
+    component: String,
+    pinned: bool,
 }
 
 /// Which executor family the plan routed to, or the idempotent NoOp.
@@ -193,7 +199,6 @@ pub(crate) fn plan_component(
 ) -> Result<PlannedComponent, CliError> {
     let command = format!("{COMMAND} {input}");
     let layout = common::resolve_layout(ctx);
-    let state_path = layout.state_dir.join("installed.toml");
     let journal_dir = rpm_install::journal_dir(&layout);
     let uid = privilege::effective_uid();
     let scope = match ctx.install_mode {
@@ -204,19 +209,12 @@ pub(crate) fn plan_component(
     let env = anolisa_env::EnvService::detect();
     let repo_config = common::load_repo_config(ctx, &layout, COMMAND, RepoPersistPolicy::Require)?;
 
-    let store = StateStore::load(&state_path, uid).map_err(|err| CliError::Runtime {
-        command: command.clone(),
-        reason: format!("failed to load installed state: {err}"),
-    })?;
-
-    // Resolve package aliases (e.g., "copilot-shell" → "cosh") before
-    // addressing state, matching update/repair resolution.
-    let resolved = common::lookup_component_name_in_store(input, &store, ctx, COMMAND);
-    let mut component = resolved;
-
-    if store.find(ObjectKind::Component, &component).is_none() {
-        common::reject_visible_non_writable_component(ctx, &command, &component)?;
-    }
+    // Resolve identity across all visible roots, but bind install planning to
+    // the writable scope only. A user install may therefore shadow an
+    // existing system installation without mutating or inheriting it.
+    let (mut component, view, component_identity_pinned) =
+        common::resolve_install_target(input, ctx, &command)?;
+    let store = view.writable.state;
 
     if let Some(explicit) = args.backend.as_deref()
         && let Some(warning) = RepoConfig::backend_name_deprecation_warning(explicit)
@@ -268,11 +266,14 @@ pub(crate) fn plan_component(
     // Same for a pending operation journal: it blocks any new mutation, and
     // the refusal must not depend on the rpm candidate chain or the raw repo
     // resolving.
-    let pending =
-        pending_journal_for(&journal_dir, &component).map_err(|err| CliError::Runtime {
-            command: command.clone(),
-            reason: err.to_string(),
-        })?;
+    let pending = pending_journal_for(
+        JournalEvidence::new(&journal_dir, &store.operations),
+        &component,
+    )
+    .map_err(|err| CliError::Runtime {
+        command: command.clone(),
+        reason: err.to_string(),
+    })?;
     if pending.is_some() {
         return Err(plan_error_to_cli(
             PlanError::PendingOperation,
@@ -405,6 +406,7 @@ pub(crate) fn plan_component(
     Ok(PlannedComponent {
         command,
         component,
+        component_identity_pinned,
         family,
         native_package,
         scope,
@@ -428,6 +430,7 @@ fn execute_planned(
     let PlannedComponent {
         command,
         mut component,
+        component_identity_pinned,
         family,
         native_package,
         scope,
@@ -468,7 +471,10 @@ fn execute_planned(
                 &layout,
                 &env,
                 &repo_config,
-                component.clone(),
+                ResolvedInstallIdentity {
+                    component: component.clone(),
+                    pinned: component_identity_pinned,
+                },
                 &command,
             )?;
             component = resolution.component.clone();
@@ -507,6 +513,7 @@ fn execute_planned(
         // contract refusal (mode mismatch, component conflict, malformed
         // hooks) is an argument error, not a failed transaction.
         let validated = validate_owned_install(ctx, &layout, &store, resolution, &command)?;
+        let provider = DelegatedProvider::new(query, txn);
         return install_owned(
             &component,
             ctx,
@@ -518,6 +525,8 @@ fn execute_planned(
             &steps,
             &plan_labels,
             validated,
+            native_package.as_deref(),
+            &provider,
             &command,
         );
     }
@@ -599,9 +608,13 @@ fn resolve_owned_artifact(
     layout: &FsLayout,
     env: &anolisa_env::EnvFacts,
     repo_config: &RepoConfig,
-    component: String,
+    identity: ResolvedInstallIdentity,
     command: &str,
 ) -> Result<RawResolution, CliError> {
+    let ResolvedInstallIdentity {
+        component,
+        pinned: component_identity_pinned,
+    } = identity;
     let (backend_name, backend) = repo_config
         .select_backend(Some("raw"))
         .map_err(|err| repo_config_err(err, true))?;
@@ -636,6 +649,7 @@ fn resolve_owned_artifact(
         backend,
         component,
         args.package.as_deref(),
+        component_identity_pinned,
     );
     resolve_raw(
         ctx,
@@ -741,9 +755,8 @@ fn resolve_fresh_delegated(
 
 /// Execute an owned install plan (I1) through the raw backend.
 ///
-/// The store is re-read under the install lock so a concurrent operation
-/// that installed or quarantined the component between planning and locking
-/// is detected instead of overwritten.
+/// The state and relevant system package are re-read under the install lock,
+/// preventing a stale fresh-install plan from claiming either authority.
 #[expect(clippy::too_many_arguments)]
 fn install_owned(
     target: &str,
@@ -756,6 +769,8 @@ fn install_owned(
     steps: &[Step],
     plan_labels: &[String],
     validated: ValidatedInstall,
+    native_package: Option<&str>,
+    provider: &DelegatedProvider,
     command: &str,
 ) -> Result<InstallOutcome, CliError> {
     // No root pre-check for an owned install: `--prefix` may point at a
@@ -769,12 +784,11 @@ fn install_owned(
         command: command.to_string(),
         reason: format!("failed to acquire install lock: {err}"),
     })?;
-    let mut store = StateStore::load(state_path, privilege::effective_uid()).map_err(|err| {
-        CliError::Runtime {
+    let mut store = StateStore::load_for_layout(state_path, privilege::effective_uid(), layout)
+        .map_err(|err| CliError::Runtime {
             command: command.to_string(),
             reason: format!("failed to load installed state: {err}"),
-        }
-    })?;
+        })?;
     if store.find(ObjectKind::Component, target).is_some() || quarantined(&store, target) {
         return Err(CliError::Runtime {
             command: command.to_string(),
@@ -783,17 +797,11 @@ fn install_owned(
             ),
         });
     }
+    revalidate_native_absence(native_package, provider, now, target, command)?;
 
-    let mut journal = Transaction::begin_with_subject(
-        COMMAND,
-        Some(target),
-        state_path.to_path_buf(),
-        journal_dir,
-    )
-    .map_err(|err| CliError::Runtime {
-        command: command.to_string(),
-        reason: format!("failed to begin operation journal: {err}"),
-    })?;
+    let evidence = JournalEvidence::new(journal_dir, &store.operations);
+    let mut journal_gate = LockedJournalGate::load(&_lock, evidence, command)?;
+    let mut journal = journal_gate.begin(COMMAND, target, state_path.to_path_buf(), command)?;
     let operation_id = journal.operation_id.clone();
 
     let (result, retained_note) = {
@@ -814,7 +822,8 @@ fn install_owned(
         let note = ops.retained_packages_note();
         (result, note)
     };
-    let outcome = result.map_err(|err| owned_error_to_cli(err, target, command, &retained_note))?;
+    let outcome =
+        result.map_err(|err| owned_error_to_cli(err, target, scope, command, &retained_note))?;
 
     // Operation history is best-effort bookkeeping on top of the committed
     // record: the install already succeeded, so a history-write failure
@@ -887,12 +896,11 @@ fn install_delegated(
         command: command.to_string(),
         reason: format!("failed to acquire install lock: {err}"),
     })?;
-    let mut store = StateStore::load(state_path, privilege::effective_uid()).map_err(|err| {
-        CliError::Runtime {
+    let mut store = StateStore::load_for_layout(state_path, privilege::effective_uid(), layout)
+        .map_err(|err| CliError::Runtime {
             command: command.to_string(),
             reason: format!("failed to load installed state: {err}"),
-        }
-    })?;
+        })?;
     if store.find(ObjectKind::Component, target).is_some() || quarantined(&store, target) {
         return Err(CliError::Runtime {
             command: command.to_string(),
@@ -901,17 +909,11 @@ fn install_delegated(
             ),
         });
     }
+    revalidate_native_absence(Some(package), provider, now, target, command)?;
 
-    let mut journal = Transaction::begin_with_subject(
-        COMMAND,
-        Some(target),
-        state_path.to_path_buf(),
-        journal_dir,
-    )
-    .map_err(|err| CliError::Runtime {
-        command: command.to_string(),
-        reason: format!("failed to begin operation journal: {err}"),
-    })?;
+    let evidence = JournalEvidence::new(journal_dir, &store.operations);
+    let mut journal_gate = LockedJournalGate::load(&_lock, evidence, command)?;
+    let mut journal = journal_gate.begin(COMMAND, target, state_path.to_path_buf(), command)?;
     let operation_id = journal.operation_id.clone();
 
     let context = RecordContext {
@@ -928,7 +930,14 @@ fn install_delegated(
     };
     let outcome = {
         let mut sink = StoreRecordSink::new(&mut store, state_path, context);
-        execute_delegated_steps(steps, provider, &mut sink, &mut journal, now)
+        execute_delegated_steps(
+            steps,
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some(package)),
+            provider,
+            &mut sink,
+            &mut journal,
+            now,
+        )
     }
     .map_err(|err| CliError::Runtime {
         command: command.to_string(),
@@ -975,6 +984,40 @@ fn install_delegated(
     Ok(InstallOutcome::Installed)
 }
 
+pub(crate) fn revalidate_native_absence(
+    package: Option<&str>,
+    provider: &DelegatedProvider,
+    now: &str,
+    target: &str,
+    command: &str,
+) -> Result<(), CliError> {
+    let Some(package) = package else {
+        return Ok(());
+    };
+    match provider.observe(package, now) {
+        Ok(NativeProbe::Absent) => Ok(()),
+        Ok(NativeProbe::Present { .. } | NativeProbe::MultipleVersions { .. }) => {
+            Err(CliError::InvalidArgument {
+                command: command.to_string(),
+                reason: format!(
+                    "system RPM '{package}' appeared while '{target}' was being resolved; nothing was changed — run `sudo anolisa --install-mode system adopt {target}` or retry after removing the external package"
+                ),
+            })
+        }
+        Ok(NativeProbe::NotProbed) => Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!("locked system-RPM probe for '{package}' did not run"),
+        }),
+        Err(ProviderError::Query(PackageQueryError::CommandMissing { command: bin })) => {
+            Err(rpm_tooling_missing_error(command, &bin, target))
+        }
+        Err(err) => Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!("locked rpm query failed for '{package}': {err}"),
+        }),
+    }
+}
+
 pub(crate) fn configured_rpm_repo_source(
     repo_config: &RepoConfig,
     env: &anolisa_env::EnvFacts,
@@ -1013,6 +1056,13 @@ pub(crate) fn require_configured_rpm_backend(
     }
 }
 
+/// Resolve the raw package while preserving a literal lifecycle identity.
+///
+/// `component_identity_pinned` prevents the backend-specific alias pass from
+/// changing the component selected by lifecycle resolution. Pinning applies
+/// both to exact visible identities and to incomplete cross-scope visibility;
+/// explicit package overrides and package maps may still choose the
+/// distribution package.
 pub(crate) fn resolve_raw_identity(
     layout: &FsLayout,
     env: &anolisa_env::EnvFacts,
@@ -1020,6 +1070,7 @@ pub(crate) fn resolve_raw_identity(
     backend: &BackendConfig,
     component: String,
     cli_override: Option<&str>,
+    component_identity_pinned: bool,
 ) -> (String, String) {
     if cli_override.is_some() || backend.package_map.contains_key(&component) {
         let package = repo_config.package_name(backend, &component, cli_override);
@@ -1034,7 +1085,11 @@ pub(crate) fn resolve_raw_identity(
         ResolutionUse::Install,
         ResolveOptions::default(),
     ) {
-        Ok(ResolutionSet::Unique(target)) => (target.component, target.package),
+        Ok(ResolutionSet::Unique(target))
+            if !component_identity_pinned || target.component == component =>
+        {
+            (target.component, target.package)
+        }
         _ => {
             let package = repo_config.package_name(backend, &component, cli_override);
             (component, package)
@@ -1055,9 +1110,11 @@ pub(crate) fn quarantined(store: &StateStore, component: &str) -> bool {
 fn owned_error_to_cli(
     err: OwnedExecutionError,
     target: &str,
+    scope: InstallationScope,
     command: &str,
     retained_note: &str,
 ) -> CliError {
+    let repair = common::scoped_component_command(scope, "repair", target);
     let reason = match err {
         OwnedExecutionError::StepFailed {
             step,
@@ -1077,10 +1134,13 @@ fn owned_error_to_cli(
                 )
             } else {
                 format!(
-                    "install of '{target}' failed at '{at}': {source}; undoing this run's changes reported problems ({}) — run `anolisa repair {target}`{retained_note}",
+                    "install of '{target}' failed at '{at}': {source}; undoing this run's changes reported problems ({}) — run `{repair}`{retained_note}",
                     rollback_warnings.join("; ")
                 )
             }
+        }
+        OwnedExecutionError::RecoveryUncertain { detail, .. } => {
+            format!("install of '{target}' failed: {detail}; run `{repair}`{retained_note}")
         }
         other => format!("install of '{target}' failed: {other}{retained_note}"),
     };
@@ -1260,6 +1320,85 @@ mod tests {
     use crate::repo_config::RepoConfig;
     use anolisa_platform::fs_layout::FsLayout;
     use tempfile::tempdir;
+
+    #[test]
+    fn raw_resolution_does_not_rewrite_exact_state_identity() {
+        let tmp = tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("repo");
+        let repo_v1 = repo_root.join("v1");
+        std::fs::create_dir_all(&repo_v1).expect("repo dir");
+        std::fs::write(
+            repo_v1.join("components.toml"),
+            r#"
+schema_version = 1
+
+[[components]]
+name = "cosh"
+
+[[components.backends]]
+kind = "raw"
+package = "cosh"
+
+[[components.aliases]]
+kind = "raw-package"
+name = "legacy-name"
+
+[[components]]
+name = "sec-core"
+
+[[components.backends]]
+kind = "raw"
+package = "agent-sec-core"
+"#,
+        )
+        .expect("component index");
+        let repo_config = RepoConfig::from_toml_str(&format!(
+            "schema_version = 1\ndefault_backend = \"raw\"\n[backends.raw]\nbase_url = \"file://{}\"\n",
+            repo_root.display()
+        ))
+        .expect("repo config");
+        let backend = repo_config.backends.get("raw").expect("raw backend");
+        let layout = FsLayout::system(Some(tmp.path().join("root")));
+        let env = anolisa_env::EnvService::detect();
+
+        let exact = resolve_raw_identity(
+            &layout,
+            &env,
+            &repo_config,
+            backend,
+            "legacy-name".to_string(),
+            None,
+            true,
+        );
+        let alias = resolve_raw_identity(
+            &layout,
+            &env,
+            &repo_config,
+            backend,
+            "legacy-name".to_string(),
+            None,
+            false,
+        );
+        let exact_with_mapped_package = resolve_raw_identity(
+            &layout,
+            &env,
+            &repo_config,
+            backend,
+            "sec-core".to_string(),
+            None,
+            true,
+        );
+
+        assert_eq!(
+            exact,
+            ("legacy-name".to_string(), "legacy-name".to_string())
+        );
+        assert_eq!(alias, ("cosh".to_string(), "cosh".to_string()));
+        assert_eq!(
+            exact_with_mapped_package,
+            ("sec-core".to_string(), "agent-sec-core".to_string())
+        );
+    }
 
     #[test]
     fn install_unknown_component_is_invalid_argument() {

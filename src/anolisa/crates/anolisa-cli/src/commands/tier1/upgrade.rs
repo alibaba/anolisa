@@ -37,8 +37,9 @@ use anolisa_core::domain::{
     Installation, InstallationScope, LifecycleStatus, ManagementRelation, NativePm, Observation,
     PackageIdentity, ProviderBinding,
 };
+use anolisa_core::facts::{JournalEvidence, JournalInventory};
 use anolisa_core::lock::InstallLock;
-use anolisa_core::state::{InstallMode as StateInstallMode, ObjectKind, OperationRecord};
+use anolisa_core::state::{ObjectKind, OperationRecord};
 use anolisa_core::state_store::StateStore;
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError};
@@ -708,7 +709,7 @@ fn run_upgrade_with_deps(
     reporter: &dyn ProgressReporter,
 ) -> Result<UpgradeResult, CliError> {
     let preview_store = common::load_state_store(ctx, command)?;
-    reject_upgrade_pending_claims(layout, &preview_store.operations, plan, command)?;
+    reject_upgrade_pending_claims(layout, &preview_store.operations, command)?;
 
     if dry_run {
         // Dry-run reads state/rpmdb without taking the install lock, applying a
@@ -751,13 +752,8 @@ fn run_upgrade_with_deps(
             reason: format!("failed to acquire install lock: {err}"),
         })?;
         let mut store = common::load_state_store(ctx, command)?;
-        reject_upgrade_pending_claims(layout, &store.operations, plan, command)?;
+        reject_upgrade_pending_claims(layout, &store.operations, command)?;
         let audit = new_upgrade_audit();
-
-        // Upgrade only runs in system mode; keep the state scope consistent with
-        // install/adopt so a fresh state file records the right mode/prefix.
-        store.install_mode = StateInstallMode::System;
-        store.prefix = layout.prefix.clone();
 
         let authorized = authorize_plan(&store, plan);
         errors.extend(authorized.errors);
@@ -805,10 +801,40 @@ fn run_upgrade_with_deps(
                         reason,
                     }),
                 },
-                Err(err) => errors.push(ErrorResult {
-                    name: cli.name.clone(),
-                    reason: txn_error_reason(err),
-                }),
+                Err(err) => match query.query_installed(&cli.package) {
+                    Ok(Some(info)) if info.version.to_string() != cli.from => {
+                        warnings.push(format!(
+                            "'{}' was upgraded despite the transaction failure; recording rpmdb truth",
+                            cli.package
+                        ));
+                        cli_updated = Some(UpdatedItem {
+                            name: cli.name.clone(),
+                            package: cli.package.clone(),
+                            from: cli.from.clone(),
+                            to: info.version.to_string(),
+                        });
+                    }
+                    Ok(Some(_)) => errors.push(ErrorResult {
+                        name: cli.name.clone(),
+                        reason: txn_error_reason(err),
+                    }),
+                    Ok(None) => errors.push(ErrorResult {
+                        name: cli.name.clone(),
+                        reason: format!(
+                            "{}; '{}' is now absent from rpmdb",
+                            txn_error_reason(err),
+                            cli.package
+                        ),
+                    }),
+                    Err(query_err) => errors.push(ErrorResult {
+                        name: cli.name.clone(),
+                        reason: format!(
+                            "{}; verifying '{}' afterwards also failed ({query_err})",
+                            txn_error_reason(err),
+                            cli.package
+                        ),
+                    }),
+                },
             }
         }
 
@@ -845,10 +871,15 @@ fn run_upgrade_with_deps(
                 }
                 // A one-member transaction has nothing to isolate: the member
                 // is the offender, exactly like the historical per-item run.
-                Err(err) if authorized.updates.len() == 1 => errors.push(ErrorResult {
-                    name: authorized.updates[0].name.clone(),
-                    reason: txn_error_reason(err),
-                }),
+                Err(err) if authorized.updates.len() == 1 => reconcile_failed_update(
+                    authorized.updates[0],
+                    &txn_error_reason(err),
+                    "transaction",
+                    query,
+                    &mut pending_updates,
+                    &mut errors,
+                    &mut warnings,
+                ),
                 Err(err) => degrade_merged_updates(
                     &authorized.updates,
                     &txn_error_reason(err),
@@ -892,10 +923,15 @@ fn run_upgrade_with_deps(
                         );
                     }
                 }
-                Err(err) if authorized.installs.len() == 1 => errors.push(ErrorResult {
-                    name: authorized.installs[0].name.clone(),
-                    reason: txn_error_reason(err),
-                }),
+                Err(err) if authorized.installs.len() == 1 => reconcile_failed_install(
+                    authorized.installs[0],
+                    &txn_error_reason(err),
+                    "transaction",
+                    query,
+                    &mut pending_installs,
+                    &mut errors,
+                    &mut warnings,
+                ),
                 Err(err) => degrade_merged_installs(
                     &authorized.installs,
                     &txn_error_reason(err),
@@ -1000,34 +1036,48 @@ fn stage_refreshed_update(
     warnings: &mut Vec<String>,
 ) {
     match query.query_installed(&update.package) {
-        Ok(Some(info)) => {
-            let source_repo = installed_origin_or_warn(query, &update.package, warnings);
-            pending_updates.push(PendingUpdate {
-                name: update.name.clone(),
-                package: update.package.clone(),
-                from: update.from.clone(),
-                refreshed: info,
-                source_repo,
-                adopt_if_missing: update.adopt_if_missing,
-                backfill_rpm_metadata: update.backfill_rpm_metadata,
-                record_only: false,
-            });
-        }
+        Ok(Some(info)) => stage_update_observation(
+            update,
+            info,
+            query,
+            pending_updates,
+            warnings,
+        ),
         Ok(None) => errors.push(ErrorResult {
             name: update.name.clone(),
             reason: format!(
-                "dnf upgraded '{}' but it is no longer in rpmdb under that name; run `anolisa repair {}`",
+                "dnf upgraded '{}' but it is no longer in rpmdb under that name; run `sudo anolisa --install-mode system repair {}`",
                 update.package, update.name
             ),
         }),
         Err(err) => errors.push(ErrorResult {
             name: update.name.clone(),
             reason: format!(
-                "dnf upgraded '{}' but reading the new version failed ({err}); run `anolisa repair {}`",
+                "dnf upgraded '{}' but reading the new version failed ({err}); run `sudo anolisa --install-mode system repair {}`",
                 update.package, update.name
             ),
         }),
     }
+}
+
+fn stage_update_observation(
+    update: &PlannedUpdate,
+    info: PackageInfo,
+    query: &dyn PackageQuery,
+    pending_updates: &mut Vec<PendingUpdate>,
+    warnings: &mut Vec<String>,
+) {
+    let source_repo = installed_origin_or_warn(query, &update.package, warnings);
+    pending_updates.push(PendingUpdate {
+        name: update.name.clone(),
+        package: update.package.clone(),
+        from: update.from.clone(),
+        refreshed: info,
+        source_repo,
+        adopt_if_missing: update.adopt_if_missing,
+        backfill_rpm_metadata: update.backfill_rpm_metadata,
+        record_only: false,
+    });
 }
 
 /// Re-read one freshly installed package from rpmdb and stage its record.
@@ -1040,13 +1090,7 @@ fn stage_refreshed_install(
 ) {
     match query.query_installed(&install.package) {
         Ok(Some(info)) => {
-            let source_repo = installed_origin_or_warn(query, &install.package, warnings);
-            pending_installs.push(PendingInstall {
-                name: install.name.clone(),
-                package: install.package.clone(),
-                refreshed: info,
-                source_repo,
-            });
+            stage_install_observation(install, info, query, pending_installs, warnings)
         }
         Ok(None) => errors.push(ErrorResult {
             name: install.name.clone(),
@@ -1065,11 +1109,95 @@ fn stage_refreshed_install(
     }
 }
 
-/// A merged `dnf update` failed. Degrade by fact: a member whose installed
-/// EVR moved anyway really was upgraded — record rpmdb truth instead of
-/// undoing anything (forward-only); a member whose EVR is unchanged provably
-/// kept a clean slot and retries alone, so the offending package fails with
-/// its own diagnostic instead of poisoning the whole set.
+fn stage_install_observation(
+    install: &PlannedInstall,
+    info: PackageInfo,
+    query: &dyn PackageQuery,
+    pending_installs: &mut Vec<PendingInstall>,
+    warnings: &mut Vec<String>,
+) {
+    let source_repo = installed_origin_or_warn(query, &install.package, warnings);
+    pending_installs.push(PendingInstall {
+        name: install.name.clone(),
+        package: install.package.clone(),
+        refreshed: info,
+        source_repo,
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconcile_failed_update(
+    update: &PlannedUpdate,
+    failure_reason: &str,
+    failure_kind: &str,
+    query: &dyn PackageQuery,
+    pending_updates: &mut Vec<PendingUpdate>,
+    errors: &mut Vec<ErrorResult>,
+    warnings: &mut Vec<String>,
+) {
+    match query.query_installed(&update.package) {
+        Ok(Some(info)) if info.version.to_string() != update.from => {
+            warnings.push(format!(
+                "'{}' was upgraded despite the {failure_kind} failure; recording rpmdb truth",
+                update.package
+            ));
+            stage_update_observation(update, info, query, pending_updates, warnings);
+        }
+        Ok(Some(_)) => errors.push(ErrorResult {
+            name: update.name.clone(),
+            reason: failure_reason.to_string(),
+        }),
+        Ok(None) => errors.push(ErrorResult {
+            name: update.name.clone(),
+            reason: format!(
+                "{failure_reason}; '{}' is now absent from rpmdb — run `sudo anolisa --install-mode system repair {}`",
+                update.package, update.name
+            ),
+        }),
+        Err(err) => errors.push(ErrorResult {
+            name: update.name.clone(),
+            reason: format!(
+                "{failure_reason}; verifying '{}' afterwards also failed ({err}) — run `sudo anolisa --install-mode system repair {}`",
+                update.package, update.name
+            ),
+        }),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconcile_failed_install(
+    install: &PlannedInstall,
+    failure_reason: &str,
+    failure_kind: &str,
+    query: &dyn PackageQuery,
+    pending_installs: &mut Vec<PendingInstall>,
+    errors: &mut Vec<ErrorResult>,
+    warnings: &mut Vec<String>,
+) {
+    match query.query_installed(&install.package) {
+        Ok(Some(info)) => {
+            warnings.push(format!(
+                "'{}' was installed despite the {failure_kind} failure; recording rpmdb truth",
+                install.package
+            ));
+            stage_install_observation(install, info, query, pending_installs, warnings);
+        }
+        Ok(None) => errors.push(ErrorResult {
+            name: install.name.clone(),
+            reason: failure_reason.to_string(),
+        }),
+        Err(err) => errors.push(ErrorResult {
+            name: install.name.clone(),
+            reason: format!(
+                "{failure_reason}; verifying '{}' afterwards also failed ({err}); state was not recorded — run `sudo anolisa --install-mode system repair {}`",
+                install.package, install.name
+            ),
+        }),
+    }
+}
+
+/// A merged `dnf update` failed. Only an exact pre-transaction EVR authorizes
+/// an individual retry; moved or indeterminate rpmdb state stays forward-only.
 #[allow(clippy::too_many_arguments)]
 fn degrade_merged_updates(
     updates: &[&PlannedUpdate],
@@ -1082,7 +1210,7 @@ fn degrade_merged_updates(
     warnings: &mut Vec<String>,
 ) {
     warnings.push(format!(
-        "merged dnf update failed ({merged_reason}); retrying its members individually"
+        "merged dnf update failed ({merged_reason}); checking members for safe individual retry"
     ));
     for update in updates {
         match query.query_installed(&update.package) {
@@ -1091,24 +1219,36 @@ fn degrade_merged_updates(
                     "'{}' was upgraded despite the merged transaction failure; recording rpmdb truth",
                     update.package
                 ));
-                stage_refreshed_update(update, query, pending_updates, errors, warnings);
+                stage_update_observation(update, info, query, pending_updates, warnings);
             }
-            Ok(_) => {
+            Ok(Some(_)) => {
                 reporter.report(&format!("Retrying {} individually...", update.name));
                 match txn.update(&[update.package.as_str()]) {
                     Ok(()) => {
                         stage_refreshed_update(update, query, pending_updates, errors, warnings);
                     }
-                    Err(err) => errors.push(ErrorResult {
-                        name: update.name.clone(),
-                        reason: txn_error_reason(err),
-                    }),
+                    Err(err) => reconcile_failed_update(
+                        update,
+                        &txn_error_reason(err),
+                        "retry",
+                        query,
+                        pending_updates,
+                        errors,
+                        warnings,
+                    ),
                 }
             }
+            Ok(None) => errors.push(ErrorResult {
+                name: update.name.clone(),
+                reason: format!(
+                    "merged dnf update failed ({merged_reason}) and '{}' is now absent from rpmdb; run `sudo anolisa --install-mode system repair {}`",
+                    update.package, update.name
+                ),
+            }),
             Err(err) => errors.push(ErrorResult {
                 name: update.name.clone(),
                 reason: format!(
-                    "merged dnf update failed ({merged_reason}) and verifying '{}' afterwards also failed ({err}); run `anolisa repair {}`",
+                    "merged dnf update failed ({merged_reason}) and verifying '{}' afterwards also failed ({err}); run `sudo anolisa --install-mode system repair {}`",
                     update.package, update.name
                 ),
             }),
@@ -1135,12 +1275,12 @@ fn degrade_merged_installs(
     ));
     for install in installs {
         match query.query_installed(&install.package) {
-            Ok(Some(_)) => {
+            Ok(Some(info)) => {
                 warnings.push(format!(
                     "'{}' was installed despite the merged transaction failure; recording rpmdb truth",
                     install.package
                 ));
-                stage_refreshed_install(install, query, pending_installs, errors, warnings);
+                stage_install_observation(install, info, query, pending_installs, warnings);
             }
             Ok(None) => {
                 reporter.report(&format!("Retrying {} individually...", install.name));
@@ -1148,10 +1288,15 @@ fn degrade_merged_installs(
                     Ok(()) => {
                         stage_refreshed_install(install, query, pending_installs, errors, warnings);
                     }
-                    Err(err) => errors.push(ErrorResult {
-                        name: install.name.clone(),
-                        reason: txn_error_reason(err),
-                    }),
+                    Err(err) => reconcile_failed_install(
+                        install,
+                        &txn_error_reason(err),
+                        "retry",
+                        query,
+                        pending_installs,
+                        errors,
+                        warnings,
+                    ),
                 }
             }
             Err(err) => errors.push(ErrorResult {
@@ -1168,34 +1313,50 @@ fn degrade_merged_installs(
 fn reject_upgrade_pending_claims(
     layout: &FsLayout,
     operations: &[OperationRecord],
-    plan: &UpgradePlan,
     command: &str,
 ) -> Result<(), CliError> {
-    for update in &plan.updates {
-        rpm_install::reject_pending_claim(
-            layout,
-            operations,
-            &[update.name.as_str(), update.package.as_str()],
-            command,
-        )?;
+    let journal_dir = rpm_install::journal_dir(layout);
+    let evidence = JournalEvidence::new(&journal_dir, operations);
+    let inventory = JournalInventory::load(evidence).map_err(|err| CliError::Runtime {
+        command: command.to_string(),
+        reason: err.to_string(),
+    })?;
+
+    // Reconciliation can write any delegated row, so recovery gates the root;
+    // legacy parsing runs first to retain its proven component repair target.
+    if let Some(pending) =
+        rpm_install::find_pending_claim_in_inventory(layout, &[], command, &inventory)?
+    {
+        return Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "a previous RPM install for component '{}' (package '{}') is pending recovery; run `sudo anolisa --install-mode system repair {}` before retrying",
+                pending.component, pending.package, pending.component
+            ),
+        });
     }
-    for install in &plan.installs {
-        rpm_install::reject_pending_claim(
-            layout,
-            operations,
-            &[install.name.as_str(), install.package.as_str()],
-            command,
-        )?;
-    }
-    for observed in &plan.observed_defaults {
-        rpm_install::reject_pending_claim(
-            layout,
-            operations,
-            &[observed.name.as_str(), observed.package.as_str()],
-            command,
-        )?;
-    }
-    Ok(())
+
+    let Some(entry) = inventory
+        .entries()
+        .iter()
+        .find(|entry| entry.is_effectively_pending())
+    else {
+        return Ok(());
+    };
+    let reason = match entry.transaction().subject.as_deref() {
+        Some(component) => format!(
+            "component '{component}' has a pending lifecycle operation at {}; run `sudo anolisa --install-mode system repair {component}` before upgrading this state root",
+            entry.path().display(),
+        ),
+        None => format!(
+            "an unattributed lifecycle operation is pending at {}; upgrade cannot prove which component it owns — inspect the journal and settle recovery before retrying",
+            entry.path().display()
+        ),
+    };
+    Err(CliError::Runtime {
+        command: command.to_string(),
+        reason,
+    })
 }
 
 /// Status for a completed real run: `ok` when nothing errored, `partial` when
@@ -1625,7 +1786,7 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
             outcome.errors.push(ErrorResult {
                 name: update.name.clone(),
                 reason: format!(
-                    "dnf upgraded '{}' but component '{}' vanished from ANOLISA state during the upgrade; run `anolisa repair {}` to refresh it",
+                    "dnf upgraded '{}' but component '{}' vanished from ANOLISA state during the upgrade; run `sudo anolisa --install-mode system repair {}` to refresh it",
                     update.package, update.name, update.name
                 ),
             });
@@ -1642,7 +1803,7 @@ fn finalize_upgrade(req: FinalizeUpgrade<'_>) -> Result<PersistOutcome, CliError
             outcome.errors.push(ErrorResult {
                 name: update.name.clone(),
                 reason: format!(
-                    "dnf upgraded '{}' but component '{}' changed ownership/package in ANOLISA state during the upgrade; state was not refreshed — run `anolisa repair {}`",
+                    "dnf upgraded '{}' but component '{}' changed ownership/package in ANOLISA state during the upgrade; state was not refreshed — run `sudo anolisa --install-mode system repair {}`",
                     update.package, update.name, update.name
                 ),
             });

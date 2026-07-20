@@ -145,4 +145,3 @@ entry = "plugin.yaml"
 [adapters.hermes.bundle]
 schema = 1
 entry = "plugin.yaml"
-

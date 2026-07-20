@@ -17,6 +17,7 @@ use serde::Serialize;
 
 use anolisa_core::central_log::{CentralLog, LogKind, LogRecord, LogStatus, Severity};
 use anolisa_core::domain::ProviderBinding;
+use anolisa_core::facts::{JournalEvidence, pending_journal_for};
 use anolisa_core::lock::InstallLock;
 use anolisa_core::state::{ObjectKind, OperationRecord};
 use anolisa_core::state_store::StateStore;
@@ -24,6 +25,7 @@ use anolisa_platform::privilege;
 
 use crate::color::Palette;
 use crate::commands::common;
+use crate::commands::tier1::rpm_install;
 use crate::context::CliContext;
 use crate::response::{CliError, render_json};
 
@@ -66,29 +68,26 @@ pub fn handle(args: ForgetArgs, ctx: &CliContext) -> Result<(), CliError> {
     let input = args.component.as_str();
     let command = format!("forget {input}");
     let layout = common::resolve_layout(ctx);
-    let state_path = layout.state_dir.join("installed.toml");
-    let store = StateStore::load(&state_path, privilege::effective_uid()).map_err(|err| {
-        CliError::Runtime {
-            command: command.clone(),
-            reason: format!("failed to load installed state: {err}"),
-        }
-    })?;
-    let resolved = common::lookup_component_name_in_store(input, &store, ctx, COMMAND);
+    let (resolved, view) = common::resolve_mutation_target(input, ctx, &command)?;
+    let store = view.writable.state;
     let target = resolved.as_str();
 
     // Forget also resolves quarantined records: it is the documented exit for
     // legacy state the migration refused to classify and repair cannot
     // recover.
     let provenance = record_provenance(&store, target);
-    if provenance.is_none() {
-        common::reject_visible_non_writable_component(ctx, &command, target)?;
-    }
     let provenance = provenance.ok_or_else(|| CliError::InvalidArgument {
         command: command.clone(),
         reason: format!(
             "component '{target}' is not installed — nothing to forget (run `anolisa status` to see what is tracked)"
         ),
     })?;
+    let journal_dir = rpm_install::journal_dir(&layout);
+    ensure_no_pending_journal(
+        JournalEvidence::new(&journal_dir, &store.operations),
+        target,
+        &command,
+    )?;
 
     // Adapter receipts must be released before the component is dropped:
     // silently orphaning a registered plugin is worse than refusing. This guard
@@ -181,12 +180,22 @@ fn persist_forget(
         command: command.to_string(),
         reason: format!("failed to acquire install lock: {err}"),
     })?;
-    let mut store = StateStore::load(&state_path, privilege::effective_uid()).map_err(|err| {
-        CliError::Runtime {
-            command: command.to_string(),
-            reason: format!("failed to load installed state: {err}"),
-        }
+    let mut store = StateStore::load_for_layout(&state_path, privilege::effective_uid(), &layout)
+        .map_err(|err| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("failed to load installed state: {err}"),
     })?;
+
+    // The planner treats pending recovery as a global precondition for every
+    // lifecycle mutation except repair. Forget bypasses the planner, so it
+    // must enforce the same rule under the authoritative lock; otherwise the
+    // surviving journal could later recreate the record just removed here.
+    let journal_dir = rpm_install::journal_dir(&layout);
+    ensure_no_pending_journal(
+        JournalEvidence::new(&journal_dir, &store.operations),
+        component,
+        command,
+    )?;
 
     // Authoritative adapter-claim guard, under the lock. The check in `handle`
     // is only a fast-fail / dry-run preview: a concurrent `adapter enable`
@@ -255,6 +264,27 @@ fn persist_forget(
         eprintln!("warning: failed to write central log: {err}");
     }
     Ok((operation_id, provenance))
+}
+
+fn ensure_no_pending_journal(
+    evidence: JournalEvidence<'_>,
+    component: &str,
+    command: &str,
+) -> Result<(), CliError> {
+    let pending = pending_journal_for(evidence, component).map_err(|err| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!("failed to inspect operation journals: {err}"),
+    })?;
+    if let Some(path) = pending {
+        return Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "component '{component}' has a pending operation journal at {}; run `anolisa repair {component}` before forgetting its state",
+                path.display()
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn remove_component_manifest_snapshot(
@@ -346,6 +376,7 @@ mod tests {
         InstallMode as StateInstallMode, InstalledObject, InstalledState, ObjectStatus, Ownership,
         RpmMetadata,
     };
+    use anolisa_core::transaction::Transaction;
 
     use crate::context::InstallMode;
 
@@ -656,6 +687,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pending_journal_blocks_forget_without_dropping_state_or_snapshot() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(
+            &c,
+            vec![rpm_observed_object(
+                "copilot-shell",
+                "copilot-shell",
+                "2.2.0-1.al8",
+            )],
+            Vec::new(),
+        );
+        let snapshot_dir = seed_manifest_snapshot(&c, "copilot-shell");
+        let layout = common::resolve_layout(&c);
+        let journal_dir = rpm_install::journal_dir(&layout);
+        let journal = Transaction::begin_with_subject(
+            "update",
+            Some("copilot-shell"),
+            layout.state_dir.join("installed.toml"),
+            &journal_dir,
+        )
+        .expect("pending journal");
+
+        let err = persist_forget(&c, "copilot-shell", "forget copilot-shell")
+            .expect_err("locked pending recovery check must block forget");
+
+        assert!(err.reason().contains("anolisa repair copilot-shell"));
+        assert!(
+            load_store(&c)
+                .find(ObjectKind::Component, "copilot-shell")
+                .is_some(),
+            "record must remain",
+        );
+        assert!(snapshot_dir.exists(), "snapshot must remain");
+        assert!(
+            Transaction::load_journal(&journal.journal_path)
+                .expect("reload journal")
+                .is_pending(),
+            "forget must not settle the journal",
+        );
+    }
+
     /// Dry-run leaves the state record in place.
     #[test]
     fn forget_dry_run_leaves_state_untouched() {
@@ -763,6 +837,53 @@ name = "copilot-shell"
         assert!(
             after.find(ObjectKind::Component, "cosh").is_none(),
             "state record for 'cosh' must be dropped",
+        );
+    }
+
+    #[test]
+    fn quarantined_exact_name_wins_over_repo_alias() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed_component_index(
+            &c,
+            r#"
+schema_version = 1
+
+[[components]]
+name = "cosh"
+
+[[components.aliases]]
+kind = "rpm-package"
+name = "legacy-name"
+"#,
+        );
+        seed(
+            &c,
+            vec![
+                unclassifiable_object("legacy-name"),
+                rpm_observed_object("cosh", "copilot-shell", "2.2.0-1.al8"),
+            ],
+            Vec::new(),
+        );
+
+        handle(
+            ForgetArgs {
+                component: "legacy-name".to_string(),
+            },
+            &c,
+        )
+        .expect("forget exact quarantine");
+
+        let after = load_store(&c);
+        assert!(
+            after
+                .quarantined
+                .iter()
+                .all(|entry| entry.record.name != "legacy-name")
+        );
+        assert!(
+            after.find(ObjectKind::Component, "cosh").is_some(),
+            "the alias target must not be forgotten",
         );
     }
 }

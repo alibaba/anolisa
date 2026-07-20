@@ -32,8 +32,6 @@ pub enum Intent {
     Adopt,
     /// Move to a newer version.
     Update(UpdateRequest),
-    /// Re-execute the install at the recorded version.
-    Reinstall,
     /// Make reality and record agree again.
     Repair,
     /// Remove the installation.
@@ -406,7 +404,6 @@ pub fn plan(intent: &Intent, facts: &Facts) -> Result<Plan, PlanError> {
         Intent::Install(req) => plan_install(req, facts),
         Intent::Adopt => plan_adopt(facts),
         Intent::Update(req) => plan_update(req, facts),
-        Intent::Reinstall => plan_reinstall(facts),
         Intent::Repair => plan_repair(facts),
         Intent::Uninstall(req) => plan_uninstall(req, facts),
     }
@@ -431,7 +428,7 @@ fn plan_install(req: &InstallRequest, facts: &Facts) -> Result<Plan, PlanError> 
                 ProviderBinding::Owned { artifact } => match &req.requested_version {
                     // I5: a different version through install is an update.
                     Some(v) if *v != artifact.version => Err(PlanError::UseUpdate),
-                    // I4: install is idempotent; reinstall is its own verb.
+                    // I4: install is idempotent for the recorded version.
                     _ => Ok(Plan::NoOp {
                         reason: NoOpReason::AlreadyInstalled,
                     }),
@@ -585,41 +582,6 @@ fn plan_update(req: &UpdateRequest, facts: &Facts) -> Result<Plan, PlanError> {
     }
 }
 
-/// Reinstall decision table (rows RI1–RI6).
-fn plan_reinstall(facts: &Facts) -> Result<Plan, PlanError> {
-    match &facts.record {
-        RecordFacts::Absent => Err(PlanError::NotInstalled), // RI1
-        RecordFacts::Quarantined(_) => Err(PlanError::NeedsAttention), // RI6
-        RecordFacts::Active(record) => match &record.binding {
-            ProviderBinding::Owned { .. } => Ok(Plan::execute(owned_replay_steps())), // RI2
-            ProviderBinding::Delegated {
-                relation: ManagementRelation::Observed,
-                ..
-            } => {
-                Err(PlanError::NotAdopted) // RI4
-            }
-            ProviderBinding::Delegated { .. } => {
-                if !probed_presence(&facts.native)? {
-                    return Err(PlanError::ExternallyRemoved); // RI5
-                }
-                let package = record_package(record, facts)?;
-                Ok(Plan::execute(vec![
-                    // RI3
-                    Step::NativeTransaction {
-                        pm: NativePm::Rpm,
-                        action: NativeAction::Reinstall,
-                        packages: vec![package.clone()],
-                    },
-                    Step::Observe {
-                        packages: vec![package],
-                    },
-                    Step::WriteRecord(RecordWrite::RefreshObservation),
-                ]))
-            }
-        },
-    }
-}
-
 /// Repair decision table (rows R1–R7).
 fn plan_repair(facts: &Facts) -> Result<Plan, PlanError> {
     // R1: repair is the journal's consumer.
@@ -629,16 +591,17 @@ fn plan_repair(facts: &Facts) -> Result<Plan, PlanError> {
     match &facts.record {
         RecordFacts::Absent => Err(PlanError::NotInstalled), // R7
         RecordFacts::Quarantined(_) => {
-            if facts.native.is_present() {
-                let package = facts
-                    .native
-                    .package()
-                    .expect("present probe carries a package")
-                    .to_string();
+            // A multi-version probe is as ambiguous on the quarantine exit
+            // as on the active rows (R3): rebuilding an observation from an
+            // arbitrary EVR would launder the ambiguity into the record.
+            if matches!(facts.native, NativeProbe::MultipleVersions { .. }) {
+                return Err(PlanError::AmbiguousPackage);
+            }
+            if let NativeProbe::Present { package, .. } = &facts.native {
                 return Ok(Plan::execute(vec![
                     // R5: rebuild from the native authority.
                     Step::Observe {
-                        packages: vec![package],
+                        packages: vec![package.clone()],
                     },
                     Step::WriteRecord(RecordWrite::DelegatedObserved),
                 ]));
@@ -752,8 +715,7 @@ fn plan_uninstall(req: &UninstallRequest, facts: &Facts) -> Result<Plan, PlanErr
     }
 }
 
-/// Steps replaying an owned installation at its recorded version. Shared by
-/// reinstall RI2 and repair R2 (same implementation, different trigger).
+/// Steps replaying an owned installation at its recorded version (repair R2).
 fn owned_replay_steps() -> Vec<Step> {
     vec![
         Step::BackupFiles,
@@ -972,7 +934,6 @@ mod tests {
             install(delegated_target()),
             Intent::Adopt,
             update(),
-            Intent::Reinstall,
             uninstall(false),
         ];
         for intent in intents {
@@ -1291,53 +1252,6 @@ mod tests {
         assert_eq!(plan(&update(), &f), Err(PlanError::ExternallyRemoved));
     }
 
-    // ---- reinstall ----------------------------------------------------
-
-    #[test]
-    fn ri1_ri6_terminal_records() {
-        let f = facts();
-        assert_eq!(plan(&Intent::Reinstall, &f), Err(PlanError::NotInstalled));
-        let mut f = facts();
-        f.record = RecordFacts::Quarantined(QuarantineReason::NoEvidence);
-        assert_eq!(plan(&Intent::Reinstall, &f), Err(PlanError::NeedsAttention));
-    }
-
-    #[test]
-    fn ri2_owned_replay_regardless_of_health() {
-        for verified in [Some(true), Some(false), None] {
-            let mut f = facts();
-            f.record = RecordFacts::Active(owned_record());
-            f.owned_files_verified = verified;
-            assert_eq!(
-                expect_steps(plan(&Intent::Reinstall, &f)),
-                owned_replay_steps()
-            );
-        }
-    }
-
-    #[test]
-    fn ri3_ri4_ri5_delegated_reinstall() {
-        let mut f = facts();
-        f.record = RecordFacts::Active(delegated_record(adopted()));
-        f.native = present();
-        assert_eq!(
-            expect_steps(plan(&Intent::Reinstall, &f)),
-            vec![
-                native_txn(NativeAction::Reinstall),
-                observe(),
-                Step::WriteRecord(RecordWrite::RefreshObservation),
-            ]
-        );
-        f.record = RecordFacts::Active(delegated_record(ManagementRelation::Observed));
-        assert_eq!(plan(&Intent::Reinstall, &f), Err(PlanError::NotAdopted));
-        f.record = RecordFacts::Active(delegated_record(managed()));
-        f.native = NativeProbe::Absent;
-        assert_eq!(
-            plan(&Intent::Reinstall, &f),
-            Err(PlanError::ExternallyRemoved)
-        );
-    }
-
     // ---- repair -------------------------------------------------------
 
     #[test]
@@ -1418,6 +1332,14 @@ mod tests {
             plan(&Intent::Repair, &f),
             Err(PlanError::RecordUnrecoverable)
         );
+        // An ambiguous probe refuses the rebuild, matching the active rows:
+        // never seed an observation from an arbitrary EVR.
+        let mut f = facts();
+        f.record = RecordFacts::Quarantined(QuarantineReason::NoEvidence);
+        f.native = NativeProbe::MultipleVersions {
+            package: PKG.to_string(),
+        };
+        assert_eq!(plan(&Intent::Repair, &f), Err(PlanError::AmbiguousPackage));
     }
 
     #[test]
@@ -1559,12 +1481,7 @@ mod tests {
         let mut f = facts();
         f.record = RecordFacts::Active(delegated_record(managed()));
         f.native = NativeProbe::NotProbed;
-        for intent in [
-            install(delegated_target()),
-            update(),
-            Intent::Reinstall,
-            Intent::Repair,
-        ] {
+        for intent in [install(delegated_target()), update(), Intent::Repair] {
             assert_eq!(
                 plan(&intent, &f),
                 Err(PlanError::MissingNativeProbe),

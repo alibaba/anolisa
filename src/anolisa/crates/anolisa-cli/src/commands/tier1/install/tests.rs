@@ -7,6 +7,7 @@
 use super::*;
 
 use anolisa_core::lock::{InstallLock, LockError};
+use anolisa_core::transaction::Transaction;
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError};
 use anolisa_platform::pkg_transaction::{PackageTransaction, PackageTransactionError};
@@ -633,8 +634,11 @@ pub struct FakeInstaller {
     /// Optional lock path probed from inside `install`.
     pub lock_probe: Option<PathBuf>,
     pub lock_was_held: Cell<bool>,
+    package_appears_under_lock_path: Option<PathBuf>,
     /// Optional installed.toml path replaced with a directory after dnf.
     pub block_state_save: Option<PathBuf>,
+    pending_race: Option<(PathBuf, PathBuf, String)>,
+    pending_race_injected: Cell<bool>,
 }
 
 impl FakeInstaller {
@@ -649,7 +653,10 @@ impl FakeInstaller {
             install_calls: Cell::new(0),
             lock_probe: None,
             lock_was_held: Cell::new(false),
+            package_appears_under_lock_path: None,
             block_state_save: None,
+            pending_race: None,
+            pending_race_injected: Cell::new(false),
         }
     }
     pub fn with_origin(mut self, repo: &str) -> Self {
@@ -664,9 +671,39 @@ impl FakeInstaller {
         self.lock_probe = Some(path);
         self
     }
+    pub fn package_appears_under_lock(mut self, path: PathBuf) -> Self {
+        self.package_appears_under_lock_path = Some(path);
+        self
+    }
     pub fn failing_state_save(mut self, path: PathBuf) -> Self {
         self.block_state_save = Some(path);
         self
+    }
+
+    pub fn injecting_pending_journal(mut self, layout: &FsLayout, subject: &str) -> Self {
+        self.pending_race = Some((
+            layout.state_dir.join("installed.toml"),
+            layout.state_dir.join("journal"),
+            subject.to_string(),
+        ));
+        self
+    }
+
+    fn maybe_inject_pending_journal(&self) {
+        let Some((state_path, journal_dir, subject)) = &self.pending_race else {
+            return;
+        };
+        if self.pending_race_injected.replace(true) {
+            return;
+        }
+        let journal = Transaction::begin_with_subject(
+            "install",
+            Some(subject),
+            state_path.clone(),
+            journal_dir,
+        )
+        .expect("inject pending journal between preflight and lock");
+        drop(journal);
     }
 
     fn component_capability(&self) -> String {
@@ -676,8 +713,14 @@ impl FakeInstaller {
 
 impl PackageQuery for FakeInstaller {
     fn query_installed(&self, package: &str) -> Result<Option<PackageInfo>, PackageQueryError> {
+        self.maybe_inject_pending_journal();
         if package != self.package {
             return Ok(None);
+        }
+        if let Some(path) = &self.package_appears_under_lock_path
+            && matches!(InstallLock::acquire(path), Err(LockError::Held { .. }))
+        {
+            *self.installed.borrow_mut() = Some(self.installs_to.clone());
         }
         Ok(self.installed.borrow().clone())
     }

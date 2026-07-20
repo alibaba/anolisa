@@ -14,11 +14,14 @@
 
 use thiserror::Error;
 
-use crate::domain::Observation;
+use anolisa_platform::pkg_transaction::PackageTransactionError;
+
+use crate::domain::{NativePm, Observation};
 use crate::planner::{NativeProbe, RecordWrite, Step};
 use crate::providers::{DelegatedProvider, ProviderError};
 use crate::transaction::{
-    Transaction, TransactionError, TransactionOutcomeStatus, TransactionStep,
+    DelegatedRecordAction, DelegatedRecoveryContext, Transaction, TransactionError,
+    TransactionOutcomeStatus, TransactionStep,
 };
 
 /// Journal phase label for native package-manager transactions.
@@ -27,6 +30,25 @@ pub const PHASE_NATIVE_TXN: &str = "delegated-txn";
 pub const PHASE_OBSERVE: &str = "delegated-observe";
 /// Journal phase label for state-record commits.
 pub const PHASE_RECORD: &str = "delegated-record";
+
+/// Native authority identity for one delegated execution subject.
+///
+/// The package is optional only for record-only quarantine drops. Binding it
+/// to the package manager in one value keeps execution and crash recovery on
+/// the same identity at every call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DelegatedExecutionTarget<'a> {
+    pm: NativePm,
+    package: Option<&'a str>,
+}
+
+impl<'a> DelegatedExecutionTarget<'a> {
+    /// Builds a target from the authoritative package manager and this
+    /// journal subject's resolved package, when one exists.
+    pub fn new(pm: NativePm, package: Option<&'a str>) -> Self {
+        Self { pm, package }
+    }
+}
 
 /// Persistence port for the final record commit. The executor decides *when*
 /// a record is written or dropped; the store behind this trait decides *how*
@@ -67,6 +89,13 @@ pub enum ExecutionError {
     UnsupportedStep {
         /// The offending step.
         step: Step,
+    },
+    /// The caller did not provide a unique subject package and record
+    /// transition for crash recovery.
+    #[error("invalid delegated recovery contract: {reason}")]
+    InvalidRecoveryContract {
+        /// Why the plan cannot be recovered unambiguously.
+        reason: String,
     },
     /// The native transaction failed. Forward-only: nothing was undone;
     /// `reobserved` carries the post-failure native facts per package so the
@@ -109,17 +138,19 @@ pub enum ExecutionError {
 /// the journal already holds. `observed_at` stamps every observation taken
 /// during this run — the caller owns the clock.
 ///
-/// On any failure the journal is finished as `Failed` — or `Partial` once a
-/// native transaction has committed, since real side effects then exist that
-/// the record does not reflect.
+/// On failure the journal is finished as `Failed`, or `Partial` once a native
+/// transaction committed or exited after it may have changed the host. The
+/// conservative `Partial` state keeps recovery available when a backend
+/// reports failure after applying some package operations.
 pub fn execute_delegated_steps(
     steps: &[Step],
+    target: DelegatedExecutionTarget<'_>,
     provider: &DelegatedProvider<'_>,
     sink: &mut dyn RecordSink,
     journal: &mut Transaction,
     observed_at: &str,
 ) -> Result<ExecutionOutcome, ExecutionError> {
-    execute_delegated_steps_resumed(steps, provider, sink, journal, observed_at, false)
+    execute_delegated_steps_resumed(steps, target, provider, sink, journal, observed_at, false)
 }
 
 /// Like [`execute_delegated_steps`], for plans whose native transaction has
@@ -132,6 +163,7 @@ pub fn execute_delegated_steps(
 /// failure finishes the journal as `Partial`, never as a clean `Failed`.
 pub fn execute_delegated_steps_resumed(
     steps: &[Step],
+    target: DelegatedExecutionTarget<'_>,
     provider: &DelegatedProvider<'_>,
     sink: &mut dyn RecordSink,
     journal: &mut Transaction,
@@ -146,15 +178,15 @@ pub fn execute_delegated_steps_resumed(
     }
 
     let base = journal.steps.len();
-    journal.record_steps(steps.iter().map(journal_step))?;
+    prepare_delegated_recovery(journal, target, steps)?;
 
     let mut observation: Option<Observation> = None;
-    let mut txn_ran = native_txn_committed;
+    let mut native_effect_may_exist = native_txn_committed;
     // Journal status once side effects may exist: before the native
     // transaction commits a failure is clean (`Failed`), after it the record
     // no longer matches reality (`Partial`).
-    let fail_status = |txn_ran: bool| {
-        if txn_ran {
+    let fail_status = |native_effect_may_exist: bool| {
+        if native_effect_may_exist {
             TransactionOutcomeStatus::Partial
         } else {
             TransactionOutcomeStatus::Failed
@@ -169,11 +201,11 @@ pub fn execute_delegated_steps_resumed(
             } => match provider.transact(*action, packages) {
                 Ok(()) => {
                     journal.mark_done(idx)?;
-                    txn_ran = true;
+                    native_effect_may_exist = true;
                 }
                 Err(source) => {
                     journal.mark_failed(idx, &source.to_string())?;
-                    journal.finish(fail_status(txn_ran))?;
+                    native_effect_may_exist |= native_failure_may_have_changed_host(&source);
                     // Forward-only: re-observe instead of undoing. A probe
                     // that fails too is dropped — this is diagnostics, not
                     // a second chance to fail.
@@ -186,6 +218,7 @@ pub fn execute_delegated_steps_resumed(
                                 .map(|probe| (package.clone(), probe))
                         })
                         .collect();
+                    journal.finish(fail_status(native_effect_may_exist))?;
                     return Err(ExecutionError::TransactionFailed { source, reobserved });
                 }
             },
@@ -203,7 +236,7 @@ pub fn execute_delegated_steps_resumed(
                                 _ => "absent",
                             };
                             journal.mark_failed(idx, &format!("{package} is {found}"))?;
-                            journal.finish(fail_status(txn_ran))?;
+                            journal.finish(fail_status(native_effect_may_exist))?;
                             return Err(ExecutionError::FactsChanged {
                                 package: package.clone(),
                                 found,
@@ -211,7 +244,7 @@ pub fn execute_delegated_steps_resumed(
                         }
                         Err(err) => {
                             journal.mark_failed(idx, &err.to_string())?;
-                            journal.finish(fail_status(txn_ran))?;
+                            journal.finish(fail_status(native_effect_may_exist))?;
                             return Err(ExecutionError::ObserveFailed(err));
                         }
                     }
@@ -222,7 +255,7 @@ pub fn execute_delegated_steps_resumed(
                 Ok(()) => journal.mark_done(idx)?,
                 Err(err) => {
                     journal.mark_failed(idx, &err.to_string())?;
-                    journal.finish(fail_status(txn_ran))?;
+                    journal.finish(fail_status(native_effect_may_exist))?;
                     return Err(ExecutionError::RecordCommitFailed(err));
                 }
             },
@@ -230,7 +263,7 @@ pub fn execute_delegated_steps_resumed(
                 Ok(()) => journal.mark_done(idx)?,
                 Err(err) => {
                     journal.mark_failed(idx, &err.to_string())?;
-                    journal.finish(fail_status(txn_ran))?;
+                    journal.finish(fail_status(native_effect_may_exist))?;
                     return Err(ExecutionError::RecordCommitFailed(err));
                 }
             },
@@ -245,6 +278,97 @@ pub fn execute_delegated_steps_resumed(
 
     journal.finish(TransactionOutcomeStatus::Ok)?;
     Ok(ExecutionOutcome { observation })
+}
+
+fn native_failure_may_have_changed_host(source: &ProviderError) -> bool {
+    matches!(
+        source,
+        ProviderError::Transaction(PackageTransactionError::TransactionFailed { .. })
+    )
+}
+
+fn prepare_delegated_recovery(
+    journal: &mut Transaction,
+    target: DelegatedExecutionTarget<'_>,
+    steps: &[Step],
+) -> Result<(), ExecutionError> {
+    let context = delegated_recovery_context(target, steps)?;
+    journal.record_delegated_steps(context, steps.iter().map(journal_step))?;
+    Ok(())
+}
+
+/// Derive the per-subject recovery identity represented by delegated steps.
+///
+/// Batch orchestrators use this identity when their first journal step names
+/// a shared native transaction rather than the component's complete plan.
+///
+/// # Errors
+///
+/// Returns [`ExecutionError::InvalidRecoveryContract`] unless the plan has
+/// exactly one record transition and every package-bearing step contains the
+/// subject package.
+pub fn delegated_recovery_context(
+    target: DelegatedExecutionTarget<'_>,
+    steps: &[Step],
+) -> Result<DelegatedRecoveryContext, ExecutionError> {
+    let actions: Vec<DelegatedRecordAction> = steps
+        .iter()
+        .filter_map(|step| match step {
+            Step::WriteRecord(RecordWrite::DelegatedManaged) => {
+                Some(DelegatedRecordAction::WriteManaged)
+            }
+            Step::WriteRecord(RecordWrite::DelegatedAdopted) => {
+                Some(DelegatedRecordAction::WriteAdopted)
+            }
+            Step::WriteRecord(RecordWrite::DelegatedObserved) => {
+                Some(DelegatedRecordAction::WriteObserved)
+            }
+            Step::WriteRecord(RecordWrite::RefreshObservation) => {
+                Some(DelegatedRecordAction::Refresh)
+            }
+            Step::DropRecord => Some(DelegatedRecordAction::Drop),
+            _ => None,
+        })
+        .collect();
+    let [record_action] = actions.as_slice() else {
+        return Err(ExecutionError::InvalidRecoveryContract {
+            reason: format!(
+                "expected exactly one delegated record transition, found {}",
+                actions.len()
+            ),
+        });
+    };
+
+    let package = target
+        .package
+        .map(str::trim)
+        .filter(|package| !package.is_empty());
+    if package.is_none() && *record_action != DelegatedRecordAction::Drop {
+        return Err(ExecutionError::InvalidRecoveryContract {
+            reason: "subject package is missing".to_string(),
+        });
+    }
+    if let Some(package) = package {
+        for packages in steps.iter().filter_map(|step| match step {
+            Step::NativeTransaction { packages, .. } | Step::Observe { packages } => Some(packages),
+            _ => None,
+        }) {
+            if !packages.iter().any(|candidate| candidate == package) {
+                return Err(ExecutionError::InvalidRecoveryContract {
+                    reason: format!(
+                        "subject package '{package}' is absent from delegated step packages [{}]",
+                        packages.join(", ")
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(DelegatedRecoveryContext {
+        pm: target.pm,
+        package: package.map(str::to_string),
+        record_action: *record_action,
+    })
 }
 
 /// Whether this executor interprets `step`.
@@ -355,6 +479,7 @@ mod tests {
 
         let outcome = execute_delegated_steps(
             &install_steps("cosh"),
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some("cosh")),
             &provider,
             &mut sink,
             &mut journal,
@@ -405,6 +530,7 @@ mod tests {
 
         let err = execute_delegated_steps(
             &install_steps("cosh"),
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some("cosh")),
             &provider,
             &mut sink,
             &mut journal,
@@ -421,10 +547,42 @@ mod tests {
         // Forward-only: exactly the one failed call, no compensating remove.
         assert_eq!(txn.calls.borrow().len(), 1);
         assert!(sink.writes.is_empty());
-        assert_eq!(journal.status, TransactionOutcomeStatus::Failed);
+        assert_eq!(journal.status, TransactionOutcomeStatus::Partial);
+        assert!(journal.is_pending());
         assert_eq!(journal.steps[0].status, TransactionStepStatus::Failed);
         // The remaining steps never ran and stay planned.
         assert_eq!(journal.steps[1].status, TransactionStepStatus::Planned);
+    }
+
+    #[test]
+    fn txn_failure_with_present_reobservation_stays_pending() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let query = query_present("cosh", "2.7.0");
+        let txn = FakeTxn {
+            fail: vec!["install"],
+            ..FakeTxn::default()
+        };
+        let provider = DelegatedProvider::new(&query, &txn);
+        let mut sink = MemSink::default();
+        let mut journal = journal(tmp.path());
+
+        let err = execute_delegated_steps(
+            &install_steps("cosh"),
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some("cosh")),
+            &provider,
+            &mut sink,
+            &mut journal,
+            NOW,
+        )
+        .expect_err("native failure must be reported");
+
+        assert!(matches!(
+            err,
+            ExecutionError::TransactionFailed { ref reobserved, .. }
+                if matches!(reobserved.as_slice(), [(package, NativeProbe::Present { .. })] if package == "cosh")
+        ));
+        assert_eq!(journal.status, TransactionOutcomeStatus::Partial);
+        assert!(journal.is_pending());
     }
 
     #[test]
@@ -441,6 +599,7 @@ mod tests {
 
         let err = execute_delegated_steps(
             &install_steps("cosh"),
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some("cosh")),
             &provider,
             &mut sink,
             &mut journal,
@@ -454,6 +613,42 @@ mod tests {
         assert_eq!(journal.status, TransactionOutcomeStatus::Partial);
         assert_eq!(journal.steps[0].status, TransactionStepStatus::Done);
         assert_eq!(journal.steps[2].status, TransactionStepStatus::Failed);
+        assert_eq!(
+            journal.delegated_recovery,
+            Some(DelegatedRecoveryContext {
+                pm: NativePm::Rpm,
+                package: Some("cosh".to_string()),
+                record_action: DelegatedRecordAction::WriteManaged,
+            })
+        );
+    }
+
+    #[test]
+    fn recovery_contract_rejects_a_package_outside_the_subject_plan() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let query = query_present("pkg-a", "2.7.0");
+        let txn = FakeTxn::default();
+        let provider = DelegatedProvider::new(&query, &txn);
+        let mut sink = MemSink::default();
+        let mut journal = journal(tmp.path());
+
+        let err = execute_delegated_steps(
+            &install_steps("pkg-a"),
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some("pkg-b")),
+            &provider,
+            &mut sink,
+            &mut journal,
+            NOW,
+        )
+        .expect_err("mismatched recovery package must fail closed");
+
+        assert!(matches!(
+            err,
+            ExecutionError::InvalidRecoveryContract { .. }
+        ));
+        assert!(txn.calls.borrow().is_empty());
+        assert!(journal.steps.is_empty());
+        assert_eq!(journal.delegated_recovery, None);
     }
 
     #[test]
@@ -471,6 +666,7 @@ mod tests {
 
         let err = execute_delegated_steps(
             &install_steps("cosh"),
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some("cosh")),
             &provider,
             &mut sink,
             &mut journal,
@@ -506,8 +702,15 @@ mod tests {
             },
             Step::DropRecord,
         ];
-        execute_delegated_steps(&steps, &provider, &mut sink, &mut journal, NOW)
-            .expect("execution ok");
+        execute_delegated_steps(
+            &steps,
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some("cosh")),
+            &provider,
+            &mut sink,
+            &mut journal,
+            NOW,
+        )
+        .expect("execution ok");
 
         assert_eq!(
             txn.calls.borrow().as_slice(),
@@ -528,8 +731,15 @@ mod tests {
         let mut sink = MemSink::default();
         let mut journal = journal(tmp.path());
 
-        execute_delegated_steps(&[Step::DropRecord], &provider, &mut sink, &mut journal, NOW)
-            .expect("execution ok");
+        execute_delegated_steps(
+            &[Step::DropRecord],
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some("cosh")),
+            &provider,
+            &mut sink,
+            &mut journal,
+            NOW,
+        )
+        .expect("execution ok");
 
         assert!(txn.calls.borrow().is_empty());
         assert_eq!(sink.drops, 1);
@@ -551,8 +761,15 @@ mod tests {
             },
             Step::WriteRecord(RecordWrite::DelegatedAdopted),
         ];
-        execute_delegated_steps(&steps, &provider, &mut sink, &mut journal, NOW)
-            .expect("execution ok");
+        execute_delegated_steps(
+            &steps,
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some("cosh")),
+            &provider,
+            &mut sink,
+            &mut journal,
+            NOW,
+        )
+        .expect("execution ok");
 
         assert!(txn.calls.borrow().is_empty());
         let (write, observation) = &sink.writes[0];
@@ -581,8 +798,15 @@ mod tests {
             },
             Step::WriteRecord(RecordWrite::RefreshObservation),
         ];
-        execute_delegated_steps(&steps, &provider, &mut sink, &mut journal, NOW)
-            .expect("execution ok");
+        execute_delegated_steps(
+            &steps,
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some("cosh")),
+            &provider,
+            &mut sink,
+            &mut journal,
+            NOW,
+        )
+        .expect("execution ok");
 
         assert_eq!(
             txn.calls.borrow().as_slice(),
@@ -613,9 +837,16 @@ mod tests {
             },
             Step::WriteRecord(RecordWrite::DelegatedManaged),
         ];
-        let err =
-            execute_delegated_steps_resumed(&steps, &provider, &mut sink, &mut journal, NOW, true)
-                .unwrap_err();
+        let err = execute_delegated_steps_resumed(
+            &steps,
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some("cosh")),
+            &provider,
+            &mut sink,
+            &mut journal,
+            NOW,
+            true,
+        )
+        .unwrap_err();
 
         assert!(matches!(err, ExecutionError::FactsChanged { .. }));
         assert_eq!(journal.status, TransactionOutcomeStatus::Partial);
@@ -636,9 +867,16 @@ mod tests {
             },
             Step::WriteRecord(RecordWrite::DelegatedManaged),
         ];
-        let outcome =
-            execute_delegated_steps_resumed(&steps, &provider, &mut sink, &mut journal, NOW, true)
-                .expect("execution ok");
+        let outcome = execute_delegated_steps_resumed(
+            &steps,
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some("cosh")),
+            &provider,
+            &mut sink,
+            &mut journal,
+            NOW,
+            true,
+        )
+        .expect("execution ok");
 
         // No native call from the tail itself; the record absorbed the fresh
         // observation and the journal closed clean.
@@ -667,8 +905,15 @@ mod tests {
             },
             Step::PlaceFiles,
         ];
-        let err =
-            execute_delegated_steps(&steps, &provider, &mut sink, &mut journal, NOW).unwrap_err();
+        let err = execute_delegated_steps(
+            &steps,
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some("cosh")),
+            &provider,
+            &mut sink,
+            &mut journal,
+            NOW,
+        )
+        .unwrap_err();
 
         assert!(matches!(
             err,
@@ -692,6 +937,7 @@ mod tests {
 
         let err = execute_delegated_steps(
             &[Step::RecoverJournal],
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some("cosh")),
             &provider,
             &mut sink,
             &mut journal,
@@ -724,6 +970,7 @@ mod tests {
 
         execute_delegated_steps(
             &install_steps("cosh"),
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some("cosh")),
             &provider,
             &mut sink,
             &mut journal,

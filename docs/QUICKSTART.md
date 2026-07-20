@@ -36,26 +36,28 @@ anolisa list
 
 ## Install Components
 
-Install components on demand. Most components run in user mode; `agentsight` and `agent-sec-core` require system mode (sudo).
+Install components on demand. The current `agentsight`, `agent-sec-core`,
+`ws-ckpt`, and `skillfs` artifacts require system mode; the other examples
+below support user mode.
 
 ```bash
 # Token optimization
 anolisa install tokenless
 
 # Workspace checkpoints (btrfs COW)
-anolisa install ws-ckpt
+sudo anolisa --install-mode system install ws-ckpt
 
 # Observability (requires sudo — eBPF needs root)
-sudo anolisa install agentsight
+sudo anolisa --install-mode system install agentsight
 
 # Security (requires sudo)
-sudo anolisa install agent-sec-core
+sudo anolisa --install-mode system install agent-sec-core
 
 # Persistent memory (MCP file-based)
 anolisa install agent-memory
 
 # Skill filesystem (FUSE virtual views)
-anolisa install skillfs
+sudo anolisa --install-mode system install skillfs
 
 # OS skill library
 anolisa install os-skills

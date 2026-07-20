@@ -86,7 +86,7 @@ pub enum ComponentCommands {
     /// List available components from the component index
     #[command(visible_alias = "ls")]
     List(tier1::list::ListArgs),
-    /// Install a component from a configured backend (raw today; rpm/npm planned)
+    /// Install a component from a configured raw or RPM backend
     Install(tier1::install::InstallArgs),
     /// Uninstall a component
     Uninstall(tier1::uninstall::UninstallArgs),
@@ -100,15 +100,13 @@ pub enum ComponentCommands {
     Restart(tier1::restart::RestartArgs),
     /// Update a component (`update <component>`), the CLI binary (`self`), or everything (`all`)
     Update(tier1::update::UpdateArgs),
-    /// Reinstall a component at its currently installed version
-    Reinstall(tier1::reinstall::ReinstallArgs),
     /// Upgrade the RPM/system image to the target toolchain profile (system-only)
     Upgrade(tier1::upgrade::UpgradeArgs),
     /// Reconcile a component's ANOLISA state with rpmdb after manual RPM changes
     Repair(tier1::repair::RepairArgs),
     /// Drop a component's ANOLISA state record without any package operation
     Forget(tier1::forget::ForgetArgs),
-    /// Record an already-installed system RPM as rpm-observed (system scope)
+    /// Record an already-installed system RPM as adopted (system scope)
     Adopt(tier1::adopt::AdoptArgs),
     /// Manage component-to-framework adapters
     Adapter(adapter::AdapterArgs),
@@ -212,7 +210,6 @@ pub fn dispatch(cli: Cli, ctx: &CliContext) -> Result<(), CliError> {
             ComponentCommands::Logs(args) => tier1::logs::handle(args, ctx),
             ComponentCommands::Restart(args) => tier1::restart::handle(args, ctx),
             ComponentCommands::Update(args) => tier1::update::handle(args, ctx),
-            ComponentCommands::Reinstall(args) => tier1::reinstall::handle(args, ctx),
             ComponentCommands::Upgrade(args) => tier1::upgrade::handle(args, ctx),
             ComponentCommands::Repair(args) => tier1::repair::handle(args, ctx),
             ComponentCommands::Forget(args) => tier1::forget::handle(args, ctx),
@@ -405,15 +402,12 @@ fn command_policy(command: &Commands) -> CommandPolicy {
                 CommandPolicy::new("update", CommandScope::ReadOnly)
             }
             ComponentCommands::Update(_) => mode_scoped("update", true),
-            // Reinstall mutates like update: real execution needs the mode's
-            // privilege, `--dry-run` previews the plan without root.
-            ComponentCommands::Reinstall(_) => mode_scoped("reinstall", true),
             // `upgrade` is a system-only RPM image mutation: real execution
             // needs root. `--dry-run` waives only the root requirement, not the
             // system-mode one, so an explicit system-mode dry-run can preview
             // the plan without root (matching `repair`).
             ComponentCommands::Upgrade(_) => system_only("upgrade", true),
-            ComponentCommands::Repair(_) => system_only("repair", true),
+            ComponentCommands::Repair(_) => mode_scoped("repair", true),
             ComponentCommands::Forget(_) => mode_scoped("forget", true),
             ComponentCommands::Adopt(_) => system_only("adopt", false),
             ComponentCommands::Adapter(args) => {
@@ -590,6 +584,27 @@ mod tests {
 
         validate_global_args_with_euid(&ctx, mode_scoped("install", true), 1000, true)
             .expect("non-root system dry-run should reach preview-capable handlers");
+    }
+
+    #[test]
+    fn repair_policy_covers_user_and_system_owned_scopes() {
+        let command = Commands::Component(ComponentCommands::Repair(tier1::repair::RepairArgs {
+            component: "cosh".to_string(),
+        }));
+        let policy = command_policy(&command);
+
+        validate_global_args_with_euid(&user_ctx(), policy, 1000, true)
+            .expect("non-root user repair should reach its owned state");
+        validate_global_args_with_euid(&ctx_with_prefix(PathBuf::from("/")), policy, 0, true)
+            .expect("root system repair should reach its owned state");
+        let err = validate_global_args_with_euid(
+            &ctx_with_prefix(PathBuf::from("/")),
+            policy,
+            1000,
+            true,
+        )
+        .expect_err("real system repair still requires root");
+        assert_eq!(err.code(), "PERMISSION_DENIED");
     }
 
     #[test]

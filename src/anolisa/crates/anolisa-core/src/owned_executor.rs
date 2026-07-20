@@ -171,6 +171,22 @@ pub enum OwnedExecutionError {
     /// The journal itself could not be persisted.
     #[error(transparent)]
     Journal(#[from] TransactionError),
+    /// Journal persistence failed after execution had begun. Compensation is
+    /// still attempted, and every diagnostic from that attempt is retained.
+    #[error("{detail}")]
+    RecoveryUncertain {
+        /// Complete diagnostic rendered by CLI callers.
+        detail: String,
+        /// The journal failure that entered this recovery path.
+        #[source]
+        journal_source: TransactionError,
+        /// Whether at least one registered compensation ran.
+        rolled_back: bool,
+        /// Best-effort cleanup trouble from undo primitives.
+        rollback_warnings: Vec<String>,
+        /// A second journal failure while recording the compensation result.
+        recovery_journal_error: Option<TransactionError>,
+    },
 }
 
 /// Compensation registered by a completed step, replayed in reverse order.
@@ -184,6 +200,7 @@ enum Compensation {
     /// Put the backup back (from [`Step::BackupFiles`]); ordered after
     /// `UndoPlaceFiles` by the reverse replay, so the restored tree wins.
     RestoreBackup,
+    RestoreState,
 }
 
 /// Execute the owned steps of a plan in order, journaling each one and
@@ -245,41 +262,43 @@ pub fn execute_owned_steps(
 
         match result {
             Ok(success) => {
-                journal.mark_done(idx)?;
                 warnings.extend(success.warnings);
-                match step {
-                    Step::PlaceFiles => compensations.push((idx, Compensation::UndoPlaceFiles)),
-                    Step::EnableServices => {
-                        compensations.push((idx, Compensation::UndoEnableServices));
-                    }
-                    Step::BackupFiles => compensations.push((idx, Compensation::RestoreBackup)),
-                    // Removing files is only recoverable through a backup
-                    // registered earlier in this same plan; stopping or
-                    // restarting services is a host-visible change no undo
-                    // primitive reverses.
-                    Step::RemoveOwnedFiles => {
-                        let has_backup = compensations
-                            .iter()
-                            .any(|(_, c)| matches!(c, Compensation::RestoreBackup));
-                        if !has_backup {
-                            irreversible_side_effect = true;
-                        }
-                    }
-                    Step::StopServices | Step::RestartServices => {
-                        irreversible_side_effect = true;
-                    }
-                    _ => {}
+                register_compensation(step, idx, &mut compensations, &mut irreversible_side_effect);
+                if let Err(source) = journal.mark_done(idx) {
+                    let report = compensate(ops, journal, &compensations, irreversible_side_effect);
+                    return Err(recovery_uncertain(
+                        format!("persisting completion of {step:?} failed"),
+                        source,
+                        report,
+                    ));
                 }
             }
             Err(source) => {
-                journal.mark_failed(idx, &source.to_string())?;
-                let (rolled_back, rollback_warnings) =
-                    compensate(ops, journal, &compensations, irreversible_side_effect)?;
+                if let Err(journal_error) = journal.mark_failed(idx, &source.to_string()) {
+                    let report = compensate(ops, journal, &compensations, irreversible_side_effect);
+                    return Err(recovery_uncertain(
+                        format!(
+                            "step {step:?} failed ({source}) and its failure could not be persisted"
+                        ),
+                        journal_error,
+                        report,
+                    ));
+                }
+                let mut report = compensate(ops, journal, &compensations, irreversible_side_effect);
+                if let Some(journal_error) = report.journal_error.take() {
+                    return Err(recovery_uncertain(
+                        format!(
+                            "step {step:?} failed ({source}) and its compensation outcome could not be persisted"
+                        ),
+                        journal_error,
+                        report,
+                    ));
+                }
                 return Err(OwnedExecutionError::StepFailed {
                     step: step.clone(),
                     source,
-                    rolled_back,
-                    rollback_warnings,
+                    rolled_back: report.rolled_back,
+                    rollback_warnings: report.warnings,
                     warnings,
                 });
             }
@@ -290,45 +309,134 @@ pub fn execute_owned_steps(
     Ok(OwnedExecutionOutcome { warnings })
 }
 
-/// Unwind registered compensations in reverse order and finish the journal
-/// with the honest terminal status. Returns `(rolled_back, warnings)`.
+fn register_compensation(
+    step: &Step,
+    idx: usize,
+    compensations: &mut Vec<(usize, Compensation)>,
+    irreversible_side_effect: &mut bool,
+) {
+    match step {
+        Step::PlaceFiles => compensations.push((idx, Compensation::UndoPlaceFiles)),
+        Step::EnableServices => compensations.push((idx, Compensation::UndoEnableServices)),
+        Step::BackupFiles => compensations.push((idx, Compensation::RestoreBackup)),
+        Step::WriteRecord(_) | Step::DropRecord => {
+            compensations.push((idx, Compensation::RestoreState));
+        }
+        Step::RemoveOwnedFiles => {
+            let has_backup = compensations
+                .iter()
+                .any(|(_, compensation)| matches!(compensation, Compensation::RestoreBackup));
+            if !has_backup {
+                *irreversible_side_effect = true;
+            }
+        }
+        Step::StopServices | Step::RestartServices => {
+            *irreversible_side_effect = true;
+        }
+        _ => {}
+    }
+}
+
+struct CompensationReport {
+    rolled_back: bool,
+    warnings: Vec<String>,
+    journal_error: Option<TransactionError>,
+}
+
 fn compensate(
     ops: &mut dyn OwnedOps,
     journal: &mut Transaction,
     compensations: &[(usize, Compensation)],
     irreversible_side_effect: bool,
-) -> Result<(bool, Vec<String>), TransactionError> {
+) -> CompensationReport {
     if compensations.is_empty() {
         // Nothing to unwind. If an uncompensatable side effect already
         // committed, the host no longer matches the record: Partial. If the
         // failure struck before anything touched the host: a clean Failed.
-        journal.finish(if irreversible_side_effect {
-            TransactionOutcomeStatus::Partial
-        } else {
-            TransactionOutcomeStatus::Failed
-        })?;
-        return Ok((false, Vec::new()));
+        let journal_error = journal
+            .finish(if irreversible_side_effect {
+                TransactionOutcomeStatus::Partial
+            } else {
+                TransactionOutcomeStatus::Failed
+            })
+            .err();
+        return CompensationReport {
+            rolled_back: false,
+            warnings: Vec::new(),
+            journal_error,
+        };
     }
 
     let mut warnings: Vec<String> = Vec::new();
+    let mut first_journal_error: Option<TransactionError> = None;
     for (idx, compensation) in compensations.iter().rev() {
         let undo_warnings = match compensation {
             Compensation::UndoPlaceFiles => ops.undo_place_files(),
             Compensation::UndoEnableServices => ops.undo_enable_services(),
             Compensation::RestoreBackup => ops.restore_backup(),
+            Compensation::RestoreState => journal
+                .restore_state()
+                .err()
+                .map(|err| vec![err.to_string()])
+                .unwrap_or_default(),
         };
         warnings.extend(undo_warnings);
-        journal.mark_rolled_back(*idx)?;
+        if let Err(err) = journal.mark_rolled_back(*idx)
+            && first_journal_error.is_none()
+        {
+            first_journal_error = Some(err);
+        }
     }
 
     // Cleanup trouble or an uncompensatable side effect means the unwind
     // cannot claim the host is back to its pre-plan state.
-    journal.finish(if warnings.is_empty() && !irreversible_side_effect {
+    let status = if warnings.is_empty() && !irreversible_side_effect {
         TransactionOutcomeStatus::RolledBack
     } else {
         TransactionOutcomeStatus::Partial
-    })?;
-    Ok((true, warnings))
+    };
+    if let Err(err) = journal.finish(status)
+        && first_journal_error.is_none()
+    {
+        first_journal_error = Some(err);
+    }
+    CompensationReport {
+        rolled_back: true,
+        warnings,
+        journal_error: first_journal_error,
+    }
+}
+
+fn recovery_uncertain(
+    cause: String,
+    journal_source: TransactionError,
+    report: CompensationReport,
+) -> OwnedExecutionError {
+    let cleanup = if report.rolled_back && report.warnings.is_empty() {
+        "host compensation completed".to_string()
+    } else if report.rolled_back {
+        format!(
+            "host compensation reported problems ({})",
+            report.warnings.join("; ")
+        )
+    } else {
+        "no compensatable host changes were registered".to_string()
+    };
+    let recovery_journal_detail = report
+        .journal_error
+        .as_ref()
+        .map(|err| format!("; recording the compensation outcome also failed ({err})"))
+        .unwrap_or_default();
+    let detail = format!(
+        "{cause}: {journal_source}; {cleanup}{recovery_journal_detail}; host recovery is uncertain"
+    );
+    OwnedExecutionError::RecoveryUncertain {
+        detail,
+        journal_source,
+        rolled_back: report.rolled_back,
+        rollback_warnings: report.warnings,
+        recovery_journal_error: report.journal_error,
+    }
 }
 
 /// Whether this executor interprets `step`.
@@ -395,6 +503,8 @@ mod tests {
         fail_on: Option<&'static str>,
         warn_on: Option<&'static str>,
         undo_warnings: Vec<String>,
+        break_journal_on: Option<&'static str>,
+        journal_path: Option<std::path::PathBuf>,
     }
 
     impl FakeOps {
@@ -407,6 +517,12 @@ mod tests {
 
         fn run(&mut self, name: &str) -> Result<StepSuccess, OwnedOpError> {
             self.calls.push(name.to_string());
+            if self.break_journal_on == Some(name)
+                && let Some(path) = &self.journal_path
+            {
+                std::fs::remove_file(path).expect("remove journal");
+                std::fs::create_dir(path).expect("block journal persistence");
+            }
             if self.fail_on == Some(name) {
                 return Err(OwnedOpError(format!("{name} exploded")));
             }
@@ -628,6 +744,67 @@ mod tests {
             .collect();
         assert_eq!(undo_calls, vec!["undo_enable_services", "undo_place_files"]);
         assert_eq!(journal.status, TransactionOutcomeStatus::RolledBack);
+    }
+
+    #[test]
+    fn mark_done_failure_unwinds_the_completed_step_and_prior_effects() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let mut journal = journal(tmp.path());
+        let mut ops = FakeOps {
+            break_journal_on: Some("enable_services"),
+            journal_path: Some(journal.journal_path.clone()),
+            undo_warnings: vec!["service cleanup remained uncertain".to_string()],
+            ..FakeOps::default()
+        };
+
+        let err = execute_owned_steps(
+            &[Step::PlaceFiles, Step::EnableServices],
+            &mut ops,
+            &mut journal,
+        )
+        .expect_err("journal persistence must fail");
+
+        let detail = err.to_string();
+        assert!(
+            detail.contains("service cleanup remained uncertain"),
+            "{detail}"
+        );
+        assert!(detail.contains("journal"), "{detail}");
+        assert_eq!(
+            ops.calls,
+            vec![
+                "place_files",
+                "enable_services",
+                "undo_enable_services",
+                "undo_place_files",
+            ]
+        );
+    }
+
+    #[test]
+    fn mark_failed_persistence_failure_still_unwinds_prior_effects() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let mut journal = journal(tmp.path());
+        let mut ops = FakeOps {
+            fail_on: Some("set_capabilities"),
+            break_journal_on: Some("set_capabilities"),
+            journal_path: Some(journal.journal_path.clone()),
+            ..FakeOps::default()
+        };
+
+        let err = execute_owned_steps(
+            &[Step::PlaceFiles, Step::SetCapabilities],
+            &mut ops,
+            &mut journal,
+        )
+        .expect_err("failed-step journaling must fail");
+
+        assert!(matches!(err, OwnedExecutionError::RecoveryUncertain { .. }));
+        assert!(err.to_string().contains("SetCapabilities"));
+        assert_eq!(
+            ops.calls,
+            vec!["place_files", "set_capabilities", "undo_place_files"]
+        );
     }
 
     #[test]

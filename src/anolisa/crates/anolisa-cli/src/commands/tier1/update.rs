@@ -43,8 +43,8 @@ use anolisa_core::central_log::{CentralLog, LogKind, LogRecord, LogStatus, Sever
 use anolisa_core::domain::{
     InstallationScope, ManagementRelation, NativePm, OwnedArtifact, ProviderBinding,
 };
-use anolisa_core::executor::execute_delegated_steps;
-use anolisa_core::facts::{ObserveRequest, assemble_facts};
+use anolisa_core::executor::{DelegatedExecutionTarget, execute_delegated_steps};
+use anolisa_core::facts::{JournalEvidence, ObserveRequest, assemble_facts};
 use anolisa_core::lock::InstallLock;
 use anolisa_core::owned_executor::{OwnedExecutionError, execute_owned_steps};
 use anolisa_core::planner::{
@@ -56,7 +56,6 @@ use anolisa_core::record_sink::{DelegatedIdentity, RecordContext, StoreRecordSin
 use anolisa_core::self_update::{self, ProgressFn, SelfUpdateOutcome};
 use anolisa_core::state::{ObjectKind, OperationRecord};
 use anolisa_core::state_store::StateStore;
-use anolisa_core::transaction::Transaction;
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError};
 use anolisa_platform::pkg_transaction::{PackageTransaction, PackageTransactionError};
@@ -66,6 +65,7 @@ use anolisa_platform::rpm_repo::DnfRepoSource;
 use anolisa_platform::rpm_transaction::RpmTransaction;
 
 use super::install::{RawReplayOps, RawResolution, resolve_raw, resolve_raw_inputs_for_component};
+use super::recovery::LockedJournalGate;
 use super::rpm_install;
 use crate::color::Palette;
 use crate::commands::common;
@@ -89,7 +89,7 @@ const ANOLISA_RPM_REPO_ID: &str = "anolisa-configured";
 /// Arguments for the unified update command surface.
 ///
 /// `anolisa update <component>` updates a single component directly; the
-/// `self` and `all` subcommands cover the CLI binary and the (future) batch
+/// `self` and `all` subcommands cover the CLI binary and batch
 /// update. `args_conflicts_with_subcommands` keeps the positional and the
 /// subcommands mutually exclusive so `update foo self` is a parse error.
 #[derive(Debug, Parser)]
@@ -146,8 +146,8 @@ pub enum UpdateCommands {
 ///
 /// # Errors
 ///
-/// Returns [`CliError`] when the selected update operation fails, no target is
-/// given, or the operation is not implemented yet.
+/// Returns [`CliError`] when the selected update operation fails or no target
+/// is given.
 pub fn handle(args: UpdateArgs, ctx: &CliContext) -> Result<(), CliError> {
     // `--check` is the read-only upgrade-detection entry (issue #1410). It is
     // dispatched before the mutating forms so a stray component/subcommand is
@@ -255,21 +255,14 @@ pub(crate) fn update_backends(
 ) -> Result<(RpmPackageQuery, RpmTransaction), CliError> {
     let command = format!("update {component}");
     let layout = common::resolve_layout(ctx);
-    let state_path = layout.state_dir.join("installed.toml");
-    let store = StateStore::load(&state_path, privilege::effective_uid()).map_err(|err| {
-        CliError::Runtime {
-            command: command.clone(),
-            reason: format!("failed to load installed state: {err}"),
-        }
-    })?;
-    let resolved = common::lookup_component_name_in_store(component, &store, ctx, COMMAND);
+    let (resolved, view) = common::resolve_mutation_target(component, ctx, &command)?;
+    let store = &view.writable.state;
     let is_delegated = matches!(
         store
             .find(ObjectKind::Component, &resolved)
             .map(|r| &r.binding),
         Some(ProviderBinding::Delegated { .. })
     );
-    drop(store);
     if is_delegated {
         let repo_config =
             common::load_repo_config(ctx, &layout, &command, RepoPersistPolicy::Require)?;
@@ -356,7 +349,6 @@ pub(crate) fn plan_component_update(
 ) -> Result<PlannedComponentUpdate, CliError> {
     let command = format!("update {input}");
     let layout = common::resolve_layout(ctx);
-    let state_path = layout.state_dir.join("installed.toml");
     let journal_dir = rpm_install::journal_dir(&layout);
     let uid = privilege::effective_uid();
     let scope = match ctx.install_mode {
@@ -365,19 +357,9 @@ pub(crate) fn plan_component_update(
     };
     let now = now_iso8601();
 
-    let store = StateStore::load(&state_path, uid).map_err(|err| CliError::Runtime {
-        command: command.clone(),
-        reason: format!("failed to load installed state: {err}"),
-    })?;
-
-    // Resolve package aliases (e.g., "copilot-shell" → "cosh") before
-    // addressing state, matching install/uninstall resolution.
-    let resolved = common::lookup_component_name_in_store(input, &store, ctx, COMMAND);
+    let (resolved, view) = common::resolve_mutation_target(input, ctx, &command)?;
+    let store = view.writable.state;
     let target = resolved.as_str();
-
-    if store.find(ObjectKind::Component, target).is_none() {
-        common::reject_visible_non_writable_component(ctx, &command, target)?;
-    }
 
     // The probe target comes from the record; update never switches the
     // package a component is bound to.
@@ -673,9 +655,11 @@ fn execute_planned_update(
         command: command.clone(),
         reason: format!("failed to acquire install lock: {err}"),
     })?;
-    let mut store = StateStore::load(&state_path, uid).map_err(|err| CliError::Runtime {
-        command: command.clone(),
-        reason: format!("failed to load installed state: {err}"),
+    let mut store = StateStore::load_for_layout(&state_path, uid, &layout).map_err(|err| {
+        CliError::Runtime {
+            command: command.clone(),
+            reason: format!("failed to load installed state: {err}"),
+        }
     })?;
     if !native_update_authorized(&store, target, native_package.as_deref()) {
         return Err(CliError::Runtime {
@@ -687,12 +671,9 @@ fn execute_planned_update(
     }
 
     let package = native_package.clone().unwrap_or_else(|| target.to_string());
-    let mut journal =
-        Transaction::begin_with_subject(COMMAND, Some(target), state_path.clone(), &journal_dir)
-            .map_err(|err| CliError::Runtime {
-                command: command.clone(),
-                reason: format!("failed to begin operation journal: {err}"),
-            })?;
+    let evidence = JournalEvidence::new(&journal_dir, &store.operations);
+    let mut journal_gate = LockedJournalGate::load(&_lock, evidence, &command)?;
+    let mut journal = journal_gate.begin(COMMAND, target, state_path.clone(), &command)?;
     let operation_id = journal.operation_id.clone();
 
     let context = RecordContext {
@@ -709,7 +690,14 @@ fn execute_planned_update(
     };
     let outcome = {
         let mut sink = StoreRecordSink::new(&mut store, &state_path, context);
-        execute_delegated_steps(&steps, &provider, &mut sink, &mut journal, &now)
+        execute_delegated_steps(
+            &steps,
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some(&package)),
+            &provider,
+            &mut sink,
+            &mut journal,
+            &now,
+        )
     }
     .map_err(|err| match err {
         // dnf missing even though the rpmdb query succeeded: same guidance
@@ -815,12 +803,11 @@ fn update_owned(
         command: command.to_string(),
         reason: format!("failed to acquire install lock: {err}"),
     })?;
-    let mut store = StateStore::load(state_path, privilege::effective_uid()).map_err(|err| {
-        CliError::Runtime {
+    let mut store = StateStore::load_for_layout(state_path, privilege::effective_uid(), layout)
+        .map_err(|err| CliError::Runtime {
             command: command.to_string(),
             reason: format!("failed to load installed state: {err}"),
-        }
-    })?;
+        })?;
     let prior = match store
         .find(ObjectKind::Component, target)
         .map(|r| &r.binding)
@@ -847,16 +834,9 @@ fn update_owned(
         }
     };
 
-    let mut journal = Transaction::begin_with_subject(
-        COMMAND,
-        Some(target),
-        state_path.to_path_buf(),
-        journal_dir,
-    )
-    .map_err(|err| CliError::Runtime {
-        command: command.to_string(),
-        reason: format!("failed to begin operation journal: {err}"),
-    })?;
+    let evidence = JournalEvidence::new(journal_dir, &store.operations);
+    let mut journal_gate = LockedJournalGate::load(&_lock, evidence, command)?;
+    let mut journal = journal_gate.begin(COMMAND, target, state_path.to_path_buf(), command)?;
     let operation_id = journal.operation_id.clone();
 
     let outcome = {
@@ -881,7 +861,7 @@ fn update_owned(
         }
         result
     }
-    .map_err(|err| owned_error_to_cli(err, target, command))?;
+    .map_err(|err| owned_error_to_cli(err, target, scope, command))?;
 
     // Operation history is best-effort bookkeeping on top of the committed
     // record, exactly like the delegated path.
@@ -1078,7 +1058,13 @@ fn plan_error_to_cli(
 
 /// Map an owned-executor failure to a CLI error that reports honestly what
 /// happened to the host: cleanly restored, partially restored, or untouched.
-fn owned_error_to_cli(err: OwnedExecutionError, target: &str, command: &str) -> CliError {
+fn owned_error_to_cli(
+    err: OwnedExecutionError,
+    target: &str,
+    scope: InstallationScope,
+    command: &str,
+) -> CliError {
+    let repair = common::scoped_component_command(scope, "repair", target);
     let reason = match err {
         OwnedExecutionError::StepFailed {
             step,
@@ -1096,10 +1082,13 @@ fn owned_error_to_cli(err: OwnedExecutionError, target: &str, command: &str) -> 
                 )
             } else {
                 format!(
-                    "update of '{target}' failed at '{at}': {source}; restoring the previous files reported problems ({}) — run `anolisa repair {target}`",
+                    "update of '{target}' failed at '{at}': {source}; restoring the previous files reported problems ({}) — run `{repair}`",
                     rollback_warnings.join("; ")
                 )
             }
+        }
+        OwnedExecutionError::RecoveryUncertain { detail, .. } => {
+            format!("update of '{target}' failed: {detail}; run `{repair}`")
         }
         other => format!("update of '{target}' failed: {other}"),
     };

@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::domain::ProviderBinding;
+use crate::domain::{InstallationScope, ProviderBinding};
 use crate::hooks::HookSpec;
 use crate::manifest::ServiceScope;
 use crate::state::{
@@ -299,6 +299,7 @@ impl LifecyclePlan {
         store: &StateStore,
     ) -> Self {
         let target_obj = store.find(ObjectKind::Component, target);
+        let target_scope = target_obj.map(|installation| installation.scope);
 
         let mut components: Vec<ComponentLifecyclePlan> = Vec::new();
         let mut warnings: Vec<String> = Vec::new();
@@ -340,7 +341,7 @@ impl LifecyclePlan {
             ));
         }
 
-        let phases = build_phases(operation, target, &components);
+        let phases = build_phases(operation, target, target_scope, &components);
 
         let requires_privilege = components
             .iter()
@@ -476,6 +477,7 @@ fn default_hooks_for(operation: LifecycleOperation) -> Vec<HookAction> {
 fn build_phases(
     operation: LifecycleOperation,
     component: &str,
+    scope: Option<InstallationScope>,
     components: &[ComponentLifecyclePlan],
 ) -> Vec<LifecyclePhase> {
     let mut phases: Vec<LifecyclePhase> = Vec::new();
@@ -535,7 +537,7 @@ fn build_phases(
                 },
                 rollback_hint: match f.action {
                     FileActionKind::Remove => {
-                        Some("anolisa install <component> (reinstall)".to_string())
+                        scope.map(|scope| scoped_lifecycle_command(scope, "repair", &c.name))
                     }
                     _ => None,
                 },
@@ -564,11 +566,22 @@ fn build_phases(
             action: "remove_object".to_string(),
             target: component.to_string(),
             mode: LifecycleMode::Execute,
-            rollback_hint: Some("anolisa install <component> (reinstall)".to_string()),
+            rollback_hint: scope.map(|scope| scoped_lifecycle_command(scope, "install", component)),
         });
     }
 
     phases
+}
+
+fn scoped_lifecycle_command(scope: InstallationScope, operation: &str, component: &str) -> String {
+    match scope {
+        InstallationScope::System => {
+            format!("sudo anolisa --install-mode system {operation} {component}")
+        }
+        InstallationScope::User { .. } => {
+            format!("anolisa --install-mode user {operation} {component}")
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -920,6 +933,33 @@ mod tests {
             .expect("external file in plan");
         assert_eq!(ext_action.action, FileActionKind::Refuse);
         assert_eq!(ext_action.owner, FileOwner::External);
+
+        let remove_file = plan
+            .phases
+            .iter()
+            .find(|phase| phase.name == "remove_file")
+            .expect("remove_file phase");
+        assert_eq!(
+            remove_file.rollback_hint.as_deref(),
+            Some("sudo anolisa --install-mode system repair agentsight"),
+        );
+        let remove_state = plan
+            .phases
+            .iter()
+            .find(|phase| phase.name == "remove_state")
+            .expect("remove_state phase");
+        assert_eq!(
+            remove_state.rollback_hint.as_deref(),
+            Some("sudo anolisa --install-mode system install agentsight"),
+        );
+    }
+
+    #[test]
+    fn recovery_hint_preserves_user_scope() {
+        assert_eq!(
+            scoped_lifecycle_command(InstallationScope::User { uid: 1000 }, "repair", "cosh",),
+            "anolisa --install-mode user repair cosh",
+        );
     }
 
     #[test]

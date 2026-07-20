@@ -15,7 +15,11 @@ use std::collections::HashMap;
 use serde::Serialize;
 
 use anolisa_core::domain::NativePm;
-use anolisa_core::executor::{PHASE_NATIVE_TXN, execute_delegated_steps_resumed};
+use anolisa_core::executor::{
+    DelegatedExecutionTarget, PHASE_NATIVE_TXN, delegated_recovery_context,
+    execute_delegated_steps_resumed,
+};
+use anolisa_core::facts::JournalEvidence;
 use anolisa_core::lock::InstallLock;
 use anolisa_core::planner::{NativeAction, NativeProbe, RecordWrite, Step};
 use anolisa_core::providers::DelegatedProvider;
@@ -32,6 +36,7 @@ use anolisa_platform::privilege;
 use crate::color::Palette;
 use crate::commands::common;
 use crate::commands::common::RepoPersistPolicy;
+use crate::commands::tier1::recovery::LockedJournalGate;
 use crate::commands::tier1::rpm_install;
 use crate::context::CliContext;
 use crate::response::{CliError, render_json, render_json_with_status};
@@ -45,7 +50,7 @@ use super::{COMMAND, InstallArgs};
 use super::io_util::now_iso8601;
 use super::{
     PlannedComponent, PlannedRoute, handle_one, host_backends, plan_component, quarantined,
-    require_configured_rpm_backend, step_label,
+    require_configured_rpm_backend, revalidate_native_absence, step_label,
 };
 // ── --all support ───────────────────────────────────────────────────
 
@@ -489,10 +494,19 @@ fn execute_merged_group_with_deps(
         Ok(lock) => lock,
         Err(err) => return all_failed(&group, &format!("failed to acquire install lock: {err}")),
     };
-    let mut store = match StateStore::load(&state_path, privilege::effective_uid()) {
-        Ok(store) => store,
-        Err(err) => return all_failed(&group, &format!("failed to load installed state: {err}")),
+    let mut store =
+        match StateStore::load_for_layout(&state_path, privilege::effective_uid(), &layout) {
+            Ok(store) => store,
+            Err(err) => {
+                return all_failed(&group, &format!("failed to load installed state: {err}"));
+            }
+        };
+    let evidence = JournalEvidence::new(&journal_dir, &store.operations);
+    let mut journal_gate = match LockedJournalGate::load(&_lock, evidence, BATCH_COMMAND) {
+        Ok(gate) => gate,
+        Err(err) => return all_failed(&group, &err.reason()),
     };
+    let provider = DelegatedProvider::new(query, txn);
 
     // Re-validate each slot under the lock and open its journal, mirroring
     // the single-component race check.
@@ -509,17 +523,15 @@ fn execute_merged_group_with_deps(
             ));
             continue;
         }
-        match Transaction::begin_with_subject(
-            COMMAND,
-            Some(target),
-            state_path.clone(),
-            &journal_dir,
-        ) {
+        if let Err(err) =
+            revalidate_native_absence(Some(&item.package), &provider, &now, target, BATCH_COMMAND)
+        {
+            items.push(failed_item(&item.name, err.reason().to_string()));
+            continue;
+        }
+        match journal_gate.begin(COMMAND, target, state_path.clone(), BATCH_COMMAND) {
             Ok(journal) => active.push((item, journal)),
-            Err(err) => items.push(failed_item(
-                &item.name,
-                format!("failed to begin operation journal: {err}"),
-            )),
+            Err(err) => items.push(failed_item(&item.name, err.reason().to_string())),
         }
     }
     if active.is_empty() {
@@ -535,12 +547,25 @@ fn execute_merged_group_with_deps(
         .collect();
     let txn_label = all_packages.join(",");
     for (item, journal) in &mut active {
-        if let Err(err) = journal.record_step(TransactionStep::planned(
-            PHASE_NATIVE_TXN,
-            txn_label.clone(),
-            "install",
-            None,
-        )) {
+        let journal_result = delegated_recovery_context(
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some(&item.package)),
+            item.planned.route.steps(),
+        )
+        .map_err(|err| err.to_string())
+        .and_then(|context| {
+            journal
+                .record_delegated_steps(
+                    context,
+                    [TransactionStep::planned(
+                        PHASE_NATIVE_TXN,
+                        txn_label.clone(),
+                        "install",
+                        None,
+                    )],
+                )
+                .map_err(|err| err.to_string())
+        });
+        if let Err(err) = journal_result {
             // A journal that cannot be written now would also not absorb the
             // transaction outcome; refusing the whole group before any side
             // effect is the honest move.
@@ -556,7 +581,6 @@ fn execute_merged_group_with_deps(
         }
     }
 
-    let provider = DelegatedProvider::new(query, txn);
     match provider.transact(NativeAction::Install, &all_packages) {
         Ok(()) => {
             // The members' per-component operations link back to one parent
@@ -596,6 +620,7 @@ fn execute_merged_group_with_deps(
                     let mut sink = StoreRecordSink::new(&mut store, &state_path, context);
                     execute_delegated_steps_resumed(
                         tail,
+                        DelegatedExecutionTarget::new(NativePm::Rpm, Some(&item.package)),
                         &provider,
                         &mut sink,
                         &mut journal,
@@ -791,14 +816,16 @@ pub(crate) fn resolve_all_components(
 mod tests {
     use super::*;
 
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
 
     use anolisa_core::domain::{InstallationScope, ManagementRelation, ProviderBinding};
-    use anolisa_core::facts::pending_journal_for;
+    use anolisa_core::facts::{JournalEvidence, pending_journal_for};
+    use anolisa_platform::pkg_query::{PackageInfo, PackageQueryError};
     use anolisa_platform::pkg_transaction::PackageTransactionError;
 
     use super::super::tests::{
-        FakeQuery, load_store, pkg_info, system_ctx_with_configured_rpm_repo,
+        FakeInstaller, FakeQuery, load_store, pkg_info, system_ctx_with_configured_rpm_repo,
     };
 
     const NOW: &str = "2026-07-17T00:00:00Z";
@@ -823,6 +850,7 @@ mod tests {
     struct BatchTxn {
         calls: RefCell<Vec<(String, Vec<String>)>>,
         fail_install: bool,
+        attempted: Rc<Cell<bool>>,
     }
 
     impl BatchTxn {
@@ -830,12 +858,46 @@ mod tests {
             Self {
                 calls: RefCell::new(Vec::new()),
                 fail_install,
+                attempted: Rc::new(Cell::new(false)),
             }
+        }
+
+        fn query_after_attempt(
+            &self,
+            installed: Vec<(String, PackageInfo)>,
+        ) -> TransactionAwareQuery {
+            TransactionAwareQuery {
+                installed,
+                attempted: Rc::clone(&self.attempted),
+            }
+        }
+    }
+
+    struct TransactionAwareQuery {
+        installed: Vec<(String, PackageInfo)>,
+        attempted: Rc<Cell<bool>>,
+    }
+
+    impl PackageQuery for TransactionAwareQuery {
+        fn query_installed(&self, package: &str) -> Result<Option<PackageInfo>, PackageQueryError> {
+            if !self.attempted.get() {
+                return Ok(None);
+            }
+            Ok(self
+                .installed
+                .iter()
+                .find(|(name, _)| name == package)
+                .map(|(_, info)| info.clone()))
+        }
+
+        fn query_available(&self, _package: &str) -> Result<Vec<PackageInfo>, PackageQueryError> {
+            Ok(Vec::new())
         }
     }
 
     impl PackageTransaction for BatchTxn {
         fn install(&self, packages: &[&str]) -> Result<(), PackageTransactionError> {
+            self.attempted.set(true);
             self.calls.borrow_mut().push((
                 "install".to_string(),
                 packages.iter().map(|p| (*p).to_string()).collect(),
@@ -888,6 +950,7 @@ mod tests {
         PlannedComponent {
             command: format!("install {component}"),
             component: component.to_string(),
+            component_identity_pinned: false,
             family: "rpm".to_string(),
             native_package: Some(package.to_string()),
             scope: InstallationScope::System,
@@ -946,20 +1009,17 @@ mod tests {
     #[test]
     fn merged_group_shares_one_native_transaction_and_records_each_member() {
         let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
-        let query = FakeQuery {
-            installed: vec![
-                (
-                    "pkg-a".to_string(),
-                    pkg_info("pkg-a", "1.0.0", Some("1.al4"), "x86_64"),
-                ),
-                (
-                    "pkg-b".to_string(),
-                    pkg_info("pkg-b", "2.0.0", Some("1.al4"), "x86_64"),
-                ),
-            ],
-            ..Default::default()
-        };
         let txn = BatchTxn::new(false);
+        let query = txn.query_after_attempt(vec![
+            (
+                "pkg-a".to_string(),
+                pkg_info("pkg-a", "1.0.0", Some("1.al4"), "x86_64"),
+            ),
+            (
+                "pkg-b".to_string(),
+                pkg_info("pkg-b", "2.0.0", Some("1.al4"), "x86_64"),
+            ),
+        ]);
         let mut degrade = |name: &str| -> Result<InstallOutcome, CliError> {
             panic!("a committed merged transaction must not degrade ({name})");
         };
@@ -1040,12 +1100,65 @@ mod tests {
         let journal_dir = rpm_install::journal_dir(&layout);
         for component in ["a", "b"] {
             assert!(
-                pending_journal_for(&journal_dir, component)
+                pending_journal_for(JournalEvidence::new(&journal_dir, &[]), component)
                     .expect("scan journals")
                     .is_none(),
                 "journal for {component} must be settled"
             );
         }
+    }
+
+    #[test]
+    fn pending_journal_injected_after_batch_planning_blocks_dnf_and_state_write() {
+        let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+        let layout = common::resolve_layout(&ctx);
+        let state_path = layout.state_dir.join("installed.toml");
+        StateStore::empty().save(&state_path).expect("seed state");
+        let journal_dir = rpm_install::journal_dir(&layout);
+        let pending =
+            Transaction::begin_with_subject(COMMAND, Some("a"), state_path.clone(), &journal_dir)
+                .expect("inject pending journal after planning");
+        drop(pending);
+        let state_before = std::fs::read(&state_path).expect("read state");
+        let journals_before = std::fs::read_dir(&journal_dir)
+            .expect("journal dir")
+            .count();
+        let query = FakeQuery::default();
+        let txn = BatchTxn::new(false);
+        let mut degrade = |name: &str| -> Result<InstallOutcome, CliError> {
+            panic!("a recovery-blocked member must not degrade ({name})");
+        };
+
+        let items = execute_merged_group_with_deps(
+            vec![i2_item("a", "pkg-a")],
+            &batch_args(),
+            &ctx,
+            &query,
+            &txn,
+            true,
+            &mut degrade,
+        );
+
+        assert!(txn.calls.borrow().is_empty(), "dnf must not run");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].status, "failed");
+        assert!(
+            items[0]
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("anolisa repair a"))
+        );
+        assert_eq!(
+            std::fs::read(&state_path).expect("read state"),
+            state_before
+        );
+        assert_eq!(
+            std::fs::read_dir(&journal_dir)
+                .expect("journal dir")
+                .count(),
+            journals_before,
+            "the locked executor must not create a second journal"
+        );
     }
 
     #[test]
@@ -1093,7 +1206,7 @@ mod tests {
         let journal_dir = rpm_install::journal_dir(&layout);
         for component in ["a", "b"] {
             assert!(
-                pending_journal_for(&journal_dir, component)
+                pending_journal_for(JournalEvidence::new(&journal_dir, &[]), component)
                     .expect("scan journals")
                     .is_none(),
                 "failed merged journal for {component} must not stay pending"
@@ -1106,14 +1219,11 @@ mod tests {
         let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
         // dnf failed but pkg-a reached the rpmdb anyway: real side effects
         // for `a`, provably none for `b`.
-        let query = FakeQuery {
-            installed: vec![(
-                "pkg-a".to_string(),
-                pkg_info("pkg-a", "1.0.0", Some("1.al4"), "x86_64"),
-            )],
-            ..Default::default()
-        };
         let txn = BatchTxn::new(true);
+        let query = txn.query_after_attempt(vec![(
+            "pkg-a".to_string(),
+            pkg_info("pkg-a", "1.0.0", Some("1.al4"), "x86_64"),
+        )]);
         let degraded = RefCell::new(Vec::new());
         let mut degrade = |name: &str| -> Result<InstallOutcome, CliError> {
             degraded.borrow_mut().push(name.to_string());
@@ -1143,14 +1253,21 @@ mod tests {
         // intent routes to repair; the clean member's does not.
         let layout = common::resolve_layout(&ctx);
         let journal_dir = rpm_install::journal_dir(&layout);
-        assert!(
-            pending_journal_for(&journal_dir, "a")
-                .expect("scan journals")
-                .is_some(),
-            "partial journal for a must stay pending"
+        let pending = pending_journal_for(JournalEvidence::new(&journal_dir, &[]), "a")
+            .expect("scan journals")
+            .expect("partial journal for a must stay pending");
+        let journal = Transaction::load_journal(&pending).expect("load partial journal");
+        let recovery = journal
+            .delegated_recovery
+            .expect("per-subject recovery contract");
+        assert_eq!(recovery.package.as_deref(), Some("pkg-a"));
+        assert_eq!(
+            recovery.record_action,
+            anolisa_core::transaction::DelegatedRecordAction::WriteManaged
         );
+        assert_eq!(journal.steps[0].target, "pkg-a,pkg-b");
         assert!(
-            pending_journal_for(&journal_dir, "b")
+            pending_journal_for(JournalEvidence::new(&journal_dir, &[]), "b")
                 .expect("scan journals")
                 .is_none()
         );
@@ -1186,25 +1303,22 @@ mod tests {
     #[test]
     fn merged_group_revalidates_slots_under_the_lock() {
         let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
-        let query = FakeQuery {
-            installed: vec![
-                (
-                    "pkg-a".to_string(),
-                    pkg_info("pkg-a", "1.0.0", Some("1.al4"), "x86_64"),
-                ),
-                (
-                    "pkg-b".to_string(),
-                    pkg_info("pkg-b", "2.0.0", Some("1.al4"), "x86_64"),
-                ),
-            ],
-            ..Default::default()
-        };
+        let txn = BatchTxn::new(false);
+        let query = txn.query_after_attempt(vec![
+            (
+                "pkg-a".to_string(),
+                pkg_info("pkg-a", "1.0.0", Some("1.al4"), "x86_64"),
+            ),
+            (
+                "pkg-b".to_string(),
+                pkg_info("pkg-b", "2.0.0", Some("1.al4"), "x86_64"),
+            ),
+        ]);
         let mut degrade = |name: &str| -> Result<InstallOutcome, CliError> {
             panic!("must not degrade ({name})");
         };
 
         // First merged run records both members.
-        let txn = BatchTxn::new(false);
         let items = execute_merged_group_with_deps(
             vec![i2_item("a", "pkg-a"), i2_item("b", "pkg-b")],
             &batch_args(),
@@ -1240,6 +1354,36 @@ mod tests {
                     .contains("appeared while this install was resolving")
             );
         }
+    }
+
+    #[test]
+    fn merged_group_rechecks_native_absence_under_lock() {
+        let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+        let layout = common::resolve_layout(&ctx);
+        let fake = FakeInstaller::new("pkg-a", pkg_info("pkg-a", "1.0.0", Some("1.al4"), "x86_64"))
+            .package_appears_under_lock(layout.lock_file.clone());
+        let mut degrade = |name: &str| -> Result<InstallOutcome, CliError> {
+            panic!("a stale merged plan must not degrade ({name})");
+        };
+
+        let items = execute_merged_group_with_deps(
+            vec![i2_item("a", "pkg-a")],
+            &batch_args(),
+            &ctx,
+            &fake,
+            &fake,
+            true,
+            &mut degrade,
+        );
+
+        assert_eq!(fake.install_calls.get(), 0, "dnf must not run");
+        let item = item_status(&items, "a");
+        assert_eq!(item.status, "failed");
+        assert!(
+            item.reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("appeared"))
+        );
     }
 
     /// The `plan` key is dry-run-only wire surface: absent entirely for

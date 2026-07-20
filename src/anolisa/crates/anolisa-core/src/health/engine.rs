@@ -16,7 +16,9 @@ use std::time::{Duration, Instant};
 use anolisa_platform::fs_layout::FsLayout;
 
 use super::spec::{CheckOutcome, CheckSpec, CheckStatus};
+use crate::manifest::{ServiceScope, ServiceSpec, declared_unit_scope};
 use crate::path_safety::{PathBoundaryError, validate_owned_path};
+use crate::service::{ServiceManager, ServiceState};
 
 /// Default per-process probe timeout. Generous for `--version`/`--help`
 /// smoke probes while keeping a hostile or wedged child bounded.
@@ -35,17 +37,41 @@ const SHELL_METACHARS: &[char] = &[
 ];
 
 /// Execution context for [`run_check`].
-///
-/// v1 needs only the layout (path bounding + placeholder expansion) and the
-/// dry-run flag. `systemd_active` and friends will extend this with a
-/// `ServiceManager` handle when those checks graduate from
-/// [`CheckStatus::Unsupported`].
 pub struct CheckEnv<'a> {
     /// Layout that bounds probe paths and expands `{bindir}`-style templates.
     pub layout: &'a FsLayout,
     /// When true, every node short-circuits to [`CheckStatus::Skipped`] and
     /// no process is spawned — owners never handle a dry-run flag themselves.
     pub dry_run: bool,
+    /// Backends for `systemd_active` probes. `None` keeps those checks at
+    /// [`CheckStatus::Unsupported`] — callers without service authority
+    /// (or on hosts without one) simply omit it.
+    pub service_probes: Option<ServiceProbes<'a>>,
+}
+
+/// Scope-routed backends for `systemd_active` probes.
+///
+/// A manifest may declare both system- and user-scope services and point
+/// health checks at either, so a single manager cannot answer a whole spec
+/// tree: each `systemd_active` leaf is routed to the manager owning its
+/// unit's declared scope.
+pub struct ServiceProbes<'a> {
+    /// Backend answering system-scope units (`systemctl`).
+    pub system: &'a dyn ServiceManager,
+    /// Backend answering user-scope units (`systemctl --user`).
+    pub user: &'a dyn ServiceManager,
+    /// `[[component.services]]` declarations assigning each unit its scope;
+    /// a unit with no covering declaration probes as system scope.
+    pub declared: &'a [ServiceSpec],
+}
+
+impl ServiceProbes<'_> {
+    fn manager_for(&self, unit: &str) -> &dyn ServiceManager {
+        match declared_unit_scope(self.declared, unit) {
+            ServiceScope::System => self.system,
+            ServiceScope::User => self.user,
+        }
+    }
 }
 
 /// Run one (possibly aggregate) check spec and return a structured outcome.
@@ -137,9 +163,16 @@ fn run_leaf(spec: &CheckSpec, env: &CheckEnv<'_>) -> CheckOutcome {
             argv,
             expect_exit_code,
         } => check_command(env, argv, *expect_exit_code),
+        CheckSpec::SystemdActive { service } => match &env.service_probes {
+            Some(probes) => check_systemd_active(probes.manager_for(service), service),
+            None => CheckOutcome::leaf(
+                label_for(spec),
+                CheckStatus::Unsupported,
+                Some("no service manager available for this probe".to_string()),
+            ),
+        },
         // v1 stubs: interface frozen, execution deferred to the owning slice.
-        CheckSpec::SystemdActive { .. }
-        | CheckSpec::PortListen { .. }
+        CheckSpec::PortListen { .. }
         | CheckSpec::HttpGet { .. }
         | CheckSpec::BinaryCapabilities { .. } => CheckOutcome::leaf(
             label_for(spec),
@@ -278,6 +311,50 @@ fn check_file_exists(env: &CheckEnv<'_>, path: &str, mode: Option<&str>) -> Chec
             label,
             CheckStatus::Failed,
             Some(format!("stat failed for '{expanded}': {err}")),
+        ),
+    }
+}
+
+/// `systemd_active` probe through the caller-supplied [`ServiceManager`].
+/// The mapping mirrors the manager's vocabulary: only `Active` proves
+/// health; a missing or stopped unit is a failure; a backend that refuses
+/// the host (user mode, containers, non-Linux) is `Unsupported` because
+/// nothing was proven either way.
+fn check_systemd_active(manager: &dyn ServiceManager, service: &str) -> CheckOutcome {
+    let label = format!("systemd_active service={service}");
+    if !manager.supported() {
+        let reason = manager
+            .unsupported_reason()
+            .unwrap_or("service manager not supported in this environment")
+            .to_string();
+        return CheckOutcome::leaf(label, CheckStatus::Unsupported, Some(reason));
+    }
+    match manager.probe_service(service) {
+        Ok(outcome) => match outcome.state {
+            ServiceState::Active => CheckOutcome::leaf(
+                label,
+                CheckStatus::Ok,
+                Some(format!("unit '{service}' is active")),
+            ),
+            ServiceState::NotSupported => CheckOutcome::leaf(
+                label,
+                CheckStatus::Unsupported,
+                Some(if outcome.message.is_empty() {
+                    "service manager unsupported".to_string()
+                } else {
+                    outcome.message.clone()
+                }),
+            ),
+            other => CheckOutcome::leaf(
+                label,
+                CheckStatus::Failed,
+                Some(format!("unit '{service}' state '{}'", other.as_str())),
+            ),
+        },
+        Err(err) => CheckOutcome::leaf(
+            label,
+            CheckStatus::Failed,
+            Some(format!("probe failed for '{service}': {err}")),
         ),
     }
 }
@@ -540,6 +617,7 @@ mod tests {
             &CheckEnv {
                 layout: &layout,
                 dry_run: false,
+                service_probes: None,
             },
         );
         assert_eq!(out.status, CheckStatus::Ok, "detail={:?}", out.detail);
@@ -560,6 +638,7 @@ mod tests {
             &CheckEnv {
                 layout: &layout,
                 dry_run: false,
+                service_probes: None,
             },
         );
         assert_eq!(out.status, CheckStatus::Failed);
@@ -581,6 +660,7 @@ mod tests {
             &CheckEnv {
                 layout: &layout,
                 dry_run: false,
+                service_probes: None,
             },
         );
         assert_eq!(out.status, CheckStatus::Failed);
@@ -600,6 +680,7 @@ mod tests {
             &CheckEnv {
                 layout: &layout,
                 dry_run: false,
+                service_probes: None,
             },
         );
         assert_eq!(ok.status, CheckStatus::Ok);
@@ -614,6 +695,7 @@ mod tests {
             &CheckEnv {
                 layout: &layout,
                 dry_run: false,
+                service_probes: None,
             },
         );
         assert_eq!(out.status, CheckStatus::Failed);
@@ -631,6 +713,7 @@ mod tests {
             &CheckEnv {
                 layout: &layout,
                 dry_run: false,
+                service_probes: None,
             },
         );
         assert_eq!(
@@ -654,6 +737,7 @@ mod tests {
             &CheckEnv {
                 layout: &layout,
                 dry_run: false,
+                service_probes: None,
             },
         );
         assert_eq!(out.status, CheckStatus::Unsupported);
@@ -684,6 +768,7 @@ mod tests {
             &CheckEnv {
                 layout: &layout,
                 dry_run: false,
+                service_probes: None,
             },
         );
         assert_eq!(out.status, CheckStatus::Failed);
@@ -715,6 +800,7 @@ mod tests {
             &CheckEnv {
                 layout: &layout,
                 dry_run: true,
+                service_probes: None,
             },
         );
         assert_eq!(out.status, CheckStatus::Skipped);
@@ -723,7 +809,7 @@ mod tests {
     }
 
     #[test]
-    fn systemd_active_is_unsupported_in_v1() {
+    fn systemd_active_is_unsupported_without_a_manager() {
         let home = tempdir().expect("tempdir");
         let layout = layout_for(home.path());
         let out = run_check(
@@ -733,8 +819,191 @@ mod tests {
             &CheckEnv {
                 layout: &layout,
                 dry_run: false,
+                service_probes: None,
             },
         );
         assert_eq!(out.status, CheckStatus::Unsupported);
+    }
+
+    #[test]
+    fn systemd_active_probes_through_the_service_manager() {
+        use crate::service::{FakeServiceManager, ServiceOp, ServiceState};
+
+        let home = tempdir().expect("tempdir");
+        let layout = layout_for(home.path());
+        let manager = FakeServiceManager::new();
+        let spec = CheckSpec::SystemdActive {
+            service: "agentsight.service".to_string(),
+        };
+
+        // Inactive unit → the check fails with the state in the detail.
+        let out = run_check(
+            &spec,
+            &CheckEnv {
+                layout: &layout,
+                dry_run: false,
+                service_probes: Some(ServiceProbes {
+                    system: &manager,
+                    user: &manager,
+                    declared: &[],
+                }),
+            },
+        );
+        assert_eq!(out.status, CheckStatus::Failed);
+        assert!(out.detail.as_deref().unwrap_or("").contains("inactive"));
+
+        // Active unit → ok.
+        manager.set_state(ServiceState::Active);
+        let out = run_check(
+            &spec,
+            &CheckEnv {
+                layout: &layout,
+                dry_run: false,
+                service_probes: Some(ServiceProbes {
+                    system: &manager,
+                    user: &manager,
+                    declared: &[],
+                }),
+            },
+        );
+        assert_eq!(out.status, CheckStatus::Ok, "detail={:?}", out.detail);
+
+        // Probe error → failed, never a panic.
+        manager.fail(ServiceOp::Probe, "agentsight.service");
+        let out = run_check(
+            &spec,
+            &CheckEnv {
+                layout: &layout,
+                dry_run: false,
+                service_probes: Some(ServiceProbes {
+                    system: &manager,
+                    user: &manager,
+                    declared: &[],
+                }),
+            },
+        );
+        assert_eq!(out.status, CheckStatus::Failed);
+    }
+
+    #[test]
+    fn systemd_active_unsupported_backend_reports_unsupported() {
+        use crate::service::NotSupportedServiceManager;
+
+        let home = tempdir().expect("tempdir");
+        let layout = layout_for(home.path());
+        let manager =
+            NotSupportedServiceManager::new("user mode has no systemd authority".to_string());
+        let out = run_check(
+            &CheckSpec::SystemdActive {
+                service: "agentsight.service".to_string(),
+            },
+            &CheckEnv {
+                layout: &layout,
+                dry_run: false,
+                service_probes: Some(ServiceProbes {
+                    system: &manager,
+                    user: &manager,
+                    declared: &[],
+                }),
+            },
+        );
+        assert_eq!(out.status, CheckStatus::Unsupported);
+    }
+
+    #[test]
+    fn systemd_active_routes_leaves_by_declared_scope() {
+        use crate::manifest::{ServiceScope, ServiceSpec};
+        use crate::service::{FakeServiceManager, ServiceOp, ServiceState};
+
+        let home = tempdir().expect("tempdir");
+        let layout = layout_for(home.path());
+        let system = FakeServiceManager::new();
+        system.set_state(ServiceState::Active);
+        let user = FakeServiceManager::new();
+        user.set_state(ServiceState::Active);
+        // Only the user unit is declared; the daemon unit has no covering
+        // declaration and must default to the system manager.
+        let declared = vec![ServiceSpec {
+            unit: "agentsight-user.service".to_string(),
+            scope: ServiceScope::User,
+            enable: true,
+            start: true,
+            instance: None,
+        }];
+        let spec = CheckSpec::AllOf {
+            checks: vec![
+                CheckSpec::SystemdActive {
+                    service: "agentsight.service".to_string(),
+                },
+                CheckSpec::SystemdActive {
+                    service: "agentsight-user.service".to_string(),
+                },
+            ],
+            timeout_secs: None,
+        };
+
+        let out = run_check(
+            &spec,
+            &CheckEnv {
+                layout: &layout,
+                dry_run: false,
+                service_probes: Some(ServiceProbes {
+                    system: &system,
+                    user: &user,
+                    declared: &declared,
+                }),
+            },
+        );
+
+        assert_eq!(out.status, CheckStatus::Ok, "detail={:?}", out.detail);
+        assert_eq!(
+            system.calls(),
+            vec![(ServiceOp::Probe, "agentsight.service".to_string())]
+        );
+        assert_eq!(
+            user.calls(),
+            vec![(ServiceOp::Probe, "agentsight-user.service".to_string())]
+        );
+    }
+
+    #[test]
+    fn systemd_active_routes_template_instances_to_the_declared_scope() {
+        use crate::manifest::{ServiceScope, ServiceSpec};
+        use crate::service::{FakeServiceManager, ServiceOp, ServiceState};
+
+        let home = tempdir().expect("tempdir");
+        let layout = layout_for(home.path());
+        let system = FakeServiceManager::new();
+        let user = FakeServiceManager::new();
+        user.set_state(ServiceState::Active);
+        let declared = vec![ServiceSpec {
+            unit: "anolisa-memory@.service".to_string(),
+            scope: ServiceScope::User,
+            enable: true,
+            start: true,
+            instance: Some("%u".to_string()),
+        }];
+
+        let out = run_check(
+            &CheckSpec::SystemdActive {
+                service: "anolisa-memory@alice.service".to_string(),
+            },
+            &CheckEnv {
+                layout: &layout,
+                dry_run: false,
+                service_probes: Some(ServiceProbes {
+                    system: &system,
+                    user: &user,
+                    declared: &declared,
+                }),
+            },
+        );
+
+        assert_eq!(out.status, CheckStatus::Ok, "detail={:?}", out.detail);
+        assert!(system.calls().is_empty(), "system manager must not be hit");
+        assert_eq!(
+            user.calls(),
+            vec![(ServiceOp::Probe, "anolisa-memory@alice.service".to_string())]
+        );
     }
 }

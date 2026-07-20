@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anolisa_core::ObjectKind;
@@ -42,9 +43,17 @@ pub(crate) struct ScopedStateRoot {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct UnavailableStateRoot {
+    pub(crate) scope: StateScope,
+    pub(crate) state_path: PathBuf,
+    pub(crate) reason: String,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct StateView {
     pub(crate) writable: ScopedStateRoot,
     pub(crate) visible_roots: Vec<ScopedStateRoot>,
+    pub(crate) unavailable_roots: Vec<UnavailableStateRoot>,
     pub(crate) warnings: Vec<String>,
 }
 
@@ -84,6 +93,58 @@ impl StateView {
         Self::from_layouts(command, roots)
     }
 
+    /// Build the visible view around a writable state snapshot the caller
+    /// already loaded under its command-specific error contract.
+    pub(crate) fn load_with_writable_state(
+        ctx: &CliContext,
+        command: &str,
+        visibility: StateVisibility,
+        state: StateStore,
+    ) -> Result<Self, CliError> {
+        let layout = common::resolve_layout(ctx);
+        let state_path = layout.state_dir.join(INSTALLED_STATE_FILE);
+        let writable = ScopedStateRoot {
+            scope: scope_for_mode(ctx.install_mode),
+            layout,
+            state_path,
+            writable: true,
+            state,
+        };
+        let mut visible_roots = vec![writable.clone()];
+        let mut unavailable_roots = Vec::new();
+        let mut warnings = Vec::new();
+
+        if ctx.install_mode == InstallMode::User && visibility == StateVisibility::UserPlusSystem {
+            let system_layout = FsLayout::system(ctx.prefix.clone());
+            let system_state_path = system_layout.state_dir.join(INSTALLED_STATE_FILE);
+            match load_root_state(command, &system_layout, &system_state_path, false) {
+                Ok(state) => visible_roots.push(ScopedStateRoot {
+                    scope: StateScope::System,
+                    layout: system_layout,
+                    state_path: system_state_path,
+                    writable: false,
+                    state,
+                }),
+                Err(RootLoad::Warning(warning)) => {
+                    unavailable_roots.push(UnavailableStateRoot {
+                        scope: StateScope::System,
+                        state_path: system_state_path,
+                        reason: warning.clone(),
+                    });
+                    warnings.push(warning);
+                }
+                Err(RootLoad::Fatal(err)) => return Err(err),
+            }
+        }
+
+        Ok(Self {
+            writable,
+            visible_roots,
+            unavailable_roots,
+            warnings,
+        })
+    }
+
     pub(crate) fn visible_components(&self) -> Vec<ScopedInstalledObject<'_>> {
         let mut records = Vec::new();
         for root in &self.visible_roots {
@@ -109,43 +170,171 @@ impl StateView {
         records
     }
 
+    /// Whether any visible root owns an active or quarantined component under
+    /// this exact name. Exact state identity precedes package aliases.
+    pub(crate) fn has_exact_component(&self, component: &str) -> bool {
+        self.exact_component_root(component).is_some()
+    }
+
+    pub(crate) fn resolve_mutation_component_identity(
+        &self,
+        command: &str,
+        input: &str,
+    ) -> Result<Option<String>, CliError> {
+        if let Some(root) = self.exact_component_root(input) {
+            return if root.writable {
+                Ok(Some(input.to_string()))
+            } else {
+                Err(non_writable_component_error(
+                    self.writable.scope,
+                    root.scope,
+                    command,
+                    input,
+                ))
+            };
+        }
+        self.reject_incomplete_alias_visibility(command, input)?;
+
+        let mut owners: BTreeMap<String, Vec<&ScopedStateRoot>> = BTreeMap::new();
+        for root in &self.visible_roots {
+            for installation in root
+                .state
+                .installations
+                .iter()
+                .filter(|installation| installation.kind == ObjectKind::Component)
+            {
+                if record_package_alias(installation) == Some(input) {
+                    owners
+                        .entry(installation.name.clone())
+                        .or_default()
+                        .push(root);
+                }
+            }
+            for quarantined in root
+                .state
+                .quarantined
+                .iter()
+                .filter(|quarantined| quarantined.record.kind == ObjectKind::Component)
+            {
+                if quarantined_package_alias(&quarantined.record) == Some(input) {
+                    owners
+                        .entry(quarantined.record.name.clone())
+                        .or_default()
+                        .push(root);
+                }
+            }
+        }
+
+        if owners.len() > 1 {
+            return Err(CliError::InvalidArgument {
+                command: command.to_string(),
+                reason: format!(
+                    "package identity '{input}' is claimed by multiple components ({}); use an exact component name",
+                    owners.keys().cloned().collect::<Vec<_>>().join(", ")
+                ),
+            });
+        }
+        let Some((component, roots)) = owners.into_iter().next() else {
+            return Ok(None);
+        };
+        if roots.iter().any(|root| root.writable) {
+            return Ok(Some(component));
+        }
+        let root = roots[0];
+        Err(non_writable_component_error(
+            self.writable.scope,
+            root.scope,
+            command,
+            input,
+        ))
+    }
+
     pub(crate) fn reject_non_writable_component_mutation(
         &self,
         command: &str,
         component: &str,
     ) -> Result<(), CliError> {
+        if let Some(root) = self.exact_component_root(component) {
+            if root.writable {
+                return Ok(());
+            }
+            return Err(non_writable_component_error(
+                self.writable.scope,
+                root.scope,
+                command,
+                component,
+            ));
+        }
         if let Some(record) = self.visible_components().into_iter().find(|record| {
             record.active
                 && !record.mutable_by_current_invocation
-                && (record.object.name == component
-                    || record_package_alias(record.object) == Some(component))
+                && record_package_alias(record.object) == Some(component)
         }) {
-            let scope = record.scope();
-            return Err(CliError::PermissionDenied {
-                command: command.to_string(),
-                reason: format!(
-                    "component '{component}' is {}-scope and read-only from the current {}-mode invocation",
-                    scope.label(),
-                    self.writable.scope.label(),
-                ),
-                hint: Some(scope_mutation_hint(scope, command)),
-            });
+            return Err(non_writable_component_error(
+                self.writable.scope,
+                record.scope(),
+                command,
+                component,
+            ));
         }
         Ok(())
+    }
+
+    /// Refuse alias inference when one of the roots that could own the exact
+    /// input identity could not be loaded.
+    pub(crate) fn reject_incomplete_alias_visibility(
+        &self,
+        command: &str,
+        input: &str,
+    ) -> Result<(), CliError> {
+        if self.unavailable_roots.is_empty() {
+            return Ok(());
+        }
+        let roots = self
+            .unavailable_roots
+            .iter()
+            .map(|root| {
+                format!(
+                    "{} scope at {} ({})",
+                    root.scope.label(),
+                    root.state_path.display(),
+                    root.reason
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "cannot resolve '{input}' through a repository alias because visible state is incomplete: {roots}; restore state readability or use an exact name already present in the writable scope"
+            ),
+        })
+    }
+
+    fn exact_component_root(&self, component: &str) -> Option<&ScopedStateRoot> {
+        self.visible_roots
+            .iter()
+            .find(|root| root.state.contains_record(ObjectKind::Component, component))
     }
 
     fn from_layouts(command: &str, roots: Vec<(FsLayout, RootSpec)>) -> Result<Self, CliError> {
         let mut visible_roots = Vec::new();
         let mut writable = None;
+        let mut unavailable_roots = Vec::new();
         let mut warnings = Vec::new();
 
         for (layout, spec) in roots {
             let state_path = layout.state_dir.join(INSTALLED_STATE_FILE);
-            let loaded = load_root_state(command, &state_path, spec.writable);
+            let loaded = load_root_state(command, &layout, &state_path, spec.writable);
             let state = match loaded {
                 Ok(state) => state,
                 Err(RootLoad::Fatal(err)) => return Err(err),
                 Err(RootLoad::Warning(warning)) => {
+                    unavailable_roots.push(UnavailableStateRoot {
+                        scope: spec.scope,
+                        state_path,
+                        reason: warning.clone(),
+                    });
                     warnings.push(warning);
                     continue;
                 }
@@ -173,8 +362,26 @@ impl StateView {
         Ok(Self {
             writable,
             visible_roots,
+            unavailable_roots,
             warnings,
         })
+    }
+}
+
+fn non_writable_component_error(
+    current_scope: StateScope,
+    record_scope: StateScope,
+    command: &str,
+    component: &str,
+) -> CliError {
+    CliError::PermissionDenied {
+        command: command.to_string(),
+        reason: format!(
+            "component '{component}' is {}-scope and read-only from the current {}-mode invocation",
+            record_scope.label(),
+            current_scope.label(),
+        ),
+        hint: Some(scope_mutation_hint(record_scope, command)),
     }
 }
 
@@ -203,6 +410,15 @@ fn record_package_alias(installation: &Installation) -> Option<&str> {
     }
 }
 
+fn quarantined_package_alias(installation: &anolisa_core::state::InstalledObject) -> Option<&str> {
+    installation.raw_package.as_deref().or_else(|| {
+        installation
+            .rpm_metadata
+            .as_ref()
+            .map(|metadata| metadata.package_name.as_str())
+    })
+}
+
 enum RootLoad {
     Fatal(CliError),
     Warning(String),
@@ -210,10 +426,11 @@ enum RootLoad {
 
 fn load_root_state(
     command: &str,
+    layout: &FsLayout,
     state_path: &Path,
     writable: bool,
 ) -> Result<StateStore, RootLoad> {
-    StateStore::load(state_path, privilege::effective_uid()).map_err(|err| {
+    StateStore::load_for_layout(state_path, privilege::effective_uid(), layout).map_err(|err| {
         if writable {
             RootLoad::Fatal(CliError::InvalidArgument {
                 command: command.to_string(),

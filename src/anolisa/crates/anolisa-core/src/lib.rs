@@ -72,7 +72,9 @@ pub use distribution::{
 };
 pub use download::{DownloadCache, DownloadError, DownloadedArtifact};
 pub use feature_flags::FeatureStore;
-pub use health::{CheckEnv, CheckOutcome, CheckSpec, CheckStatus, Protocol, run_check};
+pub use health::{
+    CheckEnv, CheckOutcome, CheckSpec, CheckStatus, Protocol, ServiceProbes, run_check,
+};
 pub use hooks::{
     HookOutcome, HookPhase, HookRunResult, HookSkipReason, HookSpec, resolve_manifest_hooks,
     run_hook, run_hooks,
@@ -89,8 +91,8 @@ pub use lifecycle::{
 };
 pub use lock::{InstallLock, LockError};
 pub use manifest::{
-    AdapterSpec, ComponentManifest, DependencyKind, DistributionSelector, FileKind, HealthSpec,
-    PackageNames, RuntimeDependency, ServiceScope,
+    AdapterSpec, ComponentManifest, DependencyKind, DistributionSelector, FileKind, PackageNames,
+    RuntimeDependency, ServiceScope, declared_unit_scope,
 };
 pub use metadata::MetadataClient;
 pub use provisioner::{
@@ -126,6 +128,7 @@ pub use state::{
 };
 pub use telemetry::{TelemetryConfig, TelemetryError, TelemetryStarter, validate_sls_account_id};
 pub use transaction::{
-    JOURNAL_SCHEMA_VERSION, RollbackAction, RollbackActionKind, Transaction, TransactionError,
-    TransactionOutcome, TransactionOutcomeStatus, TransactionStep, TransactionStepStatus,
+    DelegatedRecordAction, DelegatedRecoveryContext, JOURNAL_SCHEMA_VERSION, RollbackAction,
+    RollbackActionKind, Transaction, TransactionError, TransactionOutcome,
+    TransactionOutcomeStatus, TransactionStep, TransactionStepStatus,
 };

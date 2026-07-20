@@ -20,13 +20,14 @@ use anolisa_core::central_log::CentralLog;
 use anolisa_core::domain::{
     Installation, InstallationScope, LifecycleStatus, OwnedArtifact, ProviderBinding,
 };
-use anolisa_core::install_runner::{InstallRunner, InstalledFile};
+use anolisa_core::install_runner::{InstallRunner, InstalledFile, PreparedFileSet};
 use anolisa_core::lifecycle::prepare_backup;
 use anolisa_core::owned_executor::{OwnedOpError, OwnedOps, StepSuccess};
 use anolisa_core::path_safety::validate_owned_path;
 use anolisa_core::planner::{HookKind, RecordWrite};
 use anolisa_core::state::{FileOwner, ObjectKind, OwnedFile, OwnedFileKind, ServiceRef};
 use anolisa_core::state_store::StateStore;
+use anolisa_core::transaction::restore_backup_file;
 use anolisa_core::{
     ResolvedLifecycleHooks, ServiceActivation, ServiceRequest, ServiceRunOutcome, ServiceScope,
     apply_capabilities, apply_services, capability_for_install_mode, deactivate_services,
@@ -46,6 +47,12 @@ use super::raw::{InstallHooks, prepare_raw_execution, resolve_install_hooks};
 use super::render::artifact_type_wire;
 use super::types::{PreparedInstall, RawResolution};
 
+struct ReplayBackup {
+    source: PathBuf,
+    dest: PathBuf,
+    sha256: Option<String>,
+}
+
 /// Raw-backend [`OwnedOps`] for one replay operation.
 pub(crate) struct RawReplayOps<'a> {
     ctx: &'a CliContext,
@@ -63,12 +70,12 @@ pub(crate) struct RawReplayOps<'a> {
     prior: OwnedArtifact,
     /// Prepared artifact + resolved contract, set by `download_verify`.
     prepared: Option<PreparedInstall>,
+    prepared_files: Option<PreparedFileSet>,
     /// Files this run placed, set by `place_files`.
     placed: Vec<InstalledFile>,
     /// Manifest snapshot this run wrote, set by `place_files`.
     manifest_path: Option<PathBuf>,
-    /// `(backup copy, original path)` pairs taken by `backup_files`.
-    backups: Vec<(PathBuf, PathBuf)>,
+    backups: Vec<ReplayBackup>,
     backup_root: PathBuf,
     /// Activation result, read back by the record commit.
     service_run: Option<ServiceRunOutcome>,
@@ -107,6 +114,7 @@ impl<'a> RawReplayOps<'a> {
             resolution: Some(resolution),
             prior,
             prepared: None,
+            prepared_files: None,
             placed: Vec::new(),
             manifest_path: None,
             backups: Vec::new(),
@@ -176,6 +184,13 @@ impl OwnedOps for RawReplayOps<'_> {
         })?;
         let prepared = prepare_raw_execution(self.ctx, self.layout, resolution)
             .map_err(|err| OwnedOpError(err.to_string()))?;
+        let prepared_files = InstallRunner::new(self.layout)
+            .prepare_replacement_files(
+                artifact_type_wire(&prepared.resolution.entry.artifact_type),
+                &prepared.artifact_path,
+                &prepared.files,
+            )
+            .map_err(|err| OwnedOpError(format!("failed to inspect verified payload: {err}")))?;
         let mut warnings = Vec::new();
         if self.runtime_preflight {
             let manifest = anolisa_core::ComponentManifest::from_toml_str(&prepared.manifest_toml)
@@ -188,6 +203,7 @@ impl OwnedOps for RawReplayOps<'_> {
                 .map_err(|err| OwnedOpError(err.reason()))?;
         }
         self.prepared = Some(prepared);
+        self.prepared_files = Some(prepared_files);
         Ok(StepSuccess::with_warnings(warnings))
     }
 
@@ -209,7 +225,11 @@ impl OwnedOps for RawReplayOps<'_> {
             })?;
             let backup_path = self.backup_root.join(format!("{idx}.bak"));
             match prepare_backup(&file.path, &backup_path) {
-                Ok(Some(_)) => self.backups.push((backup_path, file.path.clone())),
+                Ok(Some(artifact)) => self.backups.push(ReplayBackup {
+                    source: backup_path,
+                    dest: file.path.clone(),
+                    sha256: artifact.into_sha256(),
+                }),
                 // Already gone from disk — nothing to preserve; placement
                 // recreates it.
                 Ok(None) => {}
@@ -225,15 +245,14 @@ impl OwnedOps for RawReplayOps<'_> {
     }
 
     fn place_files(&mut self) -> Result<StepSuccess, OwnedOpError> {
-        let prepared = self.prepared()?;
+        let prepared_files = self.prepared_files.take().ok_or_else(|| {
+            OwnedOpError("internal: placement ran before payload preparation".to_string())
+        })?;
         let runner = InstallRunner::new(self.layout);
         let outcome = runner
-            .install_files(
-                artifact_type_wire(&prepared.resolution.entry.artifact_type),
-                &prepared.artifact_path,
-                &prepared.files,
-            )
+            .install_prepared(prepared_files)
             .map_err(|err| OwnedOpError(format!("placing files failed: {err}")))?;
+        let prepared = self.prepared()?;
         match write_installed_component_manifest(
             self.layout,
             &self.component,
@@ -400,14 +419,13 @@ impl OwnedOps for RawReplayOps<'_> {
 
     fn restore_backup(&mut self) -> Vec<String> {
         let mut warnings = Vec::new();
-        for (backup, original) in &self.backups {
-            if let Some(parent) = original.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            if let Err(err) = fs::copy(backup, original) {
+        for backup in &self.backups {
+            if let Err(err) =
+                restore_backup_file(&backup.source, &backup.dest, backup.sha256.as_deref())
+            {
                 warnings.push(format!(
                     "failed to restore {} from its backup: {err}",
-                    original.display()
+                    backup.dest.display()
                 ));
             }
         }
@@ -765,6 +783,7 @@ impl OwnedOps for QuarantineRestoreOps<'_> {
 /// validated before any lock or journal exists.
 pub(crate) struct ValidatedInstall {
     prepared: PreparedInstall,
+    prepared_files: PreparedFileSet,
     manifest: anolisa_core::ComponentManifest,
     hooks: InstallHooks,
 }
@@ -812,8 +831,19 @@ pub(crate) fn validate_owned_install(
         });
     }
     let hooks = resolve_install_hooks(&manifest, layout, &component)?;
+    let prepared_files = InstallRunner::new(layout)
+        .prepare_files(
+            artifact_type_wire(&prepared.resolution.entry.artifact_type),
+            &prepared.artifact_path,
+            &prepared.files,
+        )
+        .map_err(|err| CliError::Runtime {
+            command: command.to_string(),
+            reason: format!("failed to inspect verified install payload: {err}"),
+        })?;
     Ok(ValidatedInstall {
         prepared,
+        prepared_files,
         manifest,
         hooks,
     })
@@ -860,6 +890,7 @@ pub(crate) struct RawInstallOps<'a> {
     log: CentralLog,
     /// Prepared artifact + resolved contract, validated pre-lock.
     prepared: Option<PreparedInstall>,
+    prepared_files: Option<PreparedFileSet>,
     /// Parsed contract manifest, validated pre-lock.
     manifest: Option<anolisa_core::ComponentManifest>,
     /// Install hooks resolved from the contract, validated pre-lock.
@@ -890,6 +921,12 @@ impl<'a> RawInstallOps<'a> {
         store: &'a mut StateStore,
         state_path: &'a Path,
     ) -> Self {
+        let ValidatedInstall {
+            prepared,
+            prepared_files,
+            manifest,
+            hooks,
+        } = validated;
         Self {
             ctx,
             layout,
@@ -898,9 +935,10 @@ impl<'a> RawInstallOps<'a> {
             now,
             env: anolisa_env::EnvService::detect(),
             log: CentralLog::open(layout.central_log.clone()),
-            prepared: Some(validated.prepared),
-            manifest: Some(validated.manifest),
-            hooks: Some(validated.hooks),
+            prepared: Some(prepared),
+            prepared_files: Some(prepared_files),
+            manifest: Some(manifest),
+            hooks: Some(hooks),
             provisioned_packages: Vec::new(),
             placed: Vec::new(),
             manifest_path: None,
@@ -1002,15 +1040,14 @@ impl OwnedOps for RawInstallOps<'_> {
     }
 
     fn place_files(&mut self) -> Result<StepSuccess, OwnedOpError> {
-        let prepared = self.prepared()?;
+        let prepared_files = self.prepared_files.take().ok_or_else(|| {
+            OwnedOpError("internal: placement ran before payload preparation".to_string())
+        })?;
         let runner = InstallRunner::new(self.layout);
         let outcome = runner
-            .install_files(
-                artifact_type_wire(&prepared.resolution.entry.artifact_type),
-                &prepared.artifact_path,
-                &prepared.files,
-            )
+            .install_prepared(prepared_files)
             .map_err(|err| OwnedOpError(format!("placing files failed: {err}")))?;
+        let prepared = self.prepared()?;
         match write_installed_component_manifest(
             self.layout,
             &self.component,

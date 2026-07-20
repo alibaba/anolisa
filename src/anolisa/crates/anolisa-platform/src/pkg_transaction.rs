@@ -4,8 +4,9 @@
 //! [`PackageQuery`](crate::pkg_query::PackageQuery): where the query contract
 //! only reads rpmdb / repo metadata, this one runs the package-manager
 //! transactions ANOLISA delegates to dnf/rpm — `install`, `update`,
-//! `reinstall`, and `remove`, used by `anolisa install` / `update` /
-//! `reinstall` / `uninstall` for delegated (rpm-backed) components.
+//! `reinstall`, and `remove`. The CLI uses them from `anolisa install`,
+//! `update`, `repair`, and `uninstall`; `reinstall` is a backend repair
+//! operation, not a standalone CLI command.
 //!
 //! The trait is object-safe so the CLI can hold a `&dyn PackageTransaction`
 //! and inject a fake in tests instead of shelling out to a live `dnf`.

@@ -41,7 +41,7 @@ pub(crate) use io_util::*;
 mod owned_ops;
 pub(crate) use owned_ops::*;
 
-// `pub(crate)` so sibling commands exercising the raw pipeline (reinstall's
+// `pub(crate)` so sibling commands exercising the raw pipeline (repair's
 // owned replay) can reuse the local-repo fixtures.
 #[cfg(test)]
 pub(crate) mod tests;

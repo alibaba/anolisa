@@ -29,13 +29,15 @@
 //!   6. Calls `restart_service(unit)` per unit. Per-unit failures are collected
 //!      as warnings; a unit systemctl refuses does NOT abort the whole op.
 //!
-//! Restart is intentionally lock-free: it does not mutate `installed.toml` and
-//! is safe to run concurrently with other ANOLISA invocations.
+//! The selected state-root lock covers lookup through service dispatch. This
+//! prevents restart from racing teardown and makes the same pending-recovery
+//! gate used by other lifecycle mutations authoritative here as well.
 
 use clap::Parser;
 
 use anolisa_core::domain::{Installation, ProviderBinding};
-use anolisa_core::state_store::StateStore;
+use anolisa_core::facts::JournalEvidence;
+use anolisa_core::lock::InstallLock;
 use anolisa_core::{
     ObjectKind, ServiceManager, ServiceScope, ServiceState,
     service_for_install_mode as service_factory,
@@ -48,6 +50,8 @@ use anolisa_platform::rpm_query::RpmPackageQuery;
 
 use crate::color::Palette;
 use crate::commands::common;
+use crate::commands::tier1::recovery::LockedJournalGate;
+use crate::commands::tier1::rpm_install;
 use crate::context::CliContext;
 use crate::response::{CliError, render_json};
 
@@ -62,22 +66,23 @@ pub struct RestartArgs {
 pub fn handle(args: RestartArgs, ctx: &CliContext) -> Result<(), CliError> {
     let command = format!("restart {}", args.component);
 
-    let layout = common::resolve_layout(ctx);
     let install_mode = ctx.install_mode.as_str();
-
-    let state_path = layout.state_dir.join("installed.toml");
-    let state = StateStore::load(&state_path, anolisa_platform::privilege::effective_uid())
-        .map_err(|err| CliError::Runtime {
-            command: command.clone(),
-            reason: format!(
-                "failed to load installed state at {}: {err}",
-                state_path.display()
-            ),
-        })?;
-
-    let resolved = common::lookup_component_name_in_store(&args.component, &state, ctx, &command);
-
-    let comp = state
+    let layout = common::resolve_layout(ctx);
+    let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
+        command: command.clone(),
+        reason: format!("failed to acquire install lock: {err}"),
+    })?;
+    let (resolved, view) = common::resolve_mutation_target(&args.component, ctx, &command)?;
+    let journal_dir = rpm_install::journal_dir(&layout);
+    let journal_gate = LockedJournalGate::load(
+        &_lock,
+        JournalEvidence::new(&journal_dir, &view.writable.state.operations),
+        &command,
+    )?;
+    journal_gate.ensure_clear(&resolved, &command)?;
+    let comp = view
+        .writable
+        .state
         .find(ObjectKind::Component, &resolved)
         .ok_or_else(|| CliError::InvalidArgument {
             command: command.clone(),
@@ -534,8 +539,16 @@ fn render_human(
 mod tests {
     use super::*;
 
+    use crate::commands::tier1::rpm_install;
     use crate::context::InstallMode;
+    use anolisa_core::domain::{
+        InstallationScope, LifecycleStatus, OwnedArtifact, ProviderBinding,
+    };
+    use anolisa_core::state::ServiceRef;
+    use anolisa_core::state_store::StateStore;
+    use anolisa_core::transaction::Transaction;
     use anolisa_platform::command::CommandOutput;
+    use anolisa_platform::fs_layout::FsLayout;
     use std::path::PathBuf;
     use tempfile::tempdir;
 
@@ -597,6 +610,62 @@ mod tests {
             "reason must mention 'not installed': {}",
             err.reason()
         );
+    }
+
+    #[test]
+    fn restart_refuses_a_pending_lifecycle_before_service_side_effects() {
+        let tmp = tempdir().expect("tmpdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let state_path = layout.state_dir.join("installed.toml");
+        let mut store = StateStore::empty_for_layout(&layout);
+        store.upsert(Installation {
+            kind: ObjectKind::Component,
+            name: "agentsight".to_string(),
+            scope: InstallationScope::System,
+            binding: ProviderBinding::Owned {
+                artifact: OwnedArtifact {
+                    version: "1.0.0".to_string(),
+                    distribution_source: None,
+                    raw_package: None,
+                    manifest_digest: None,
+                    files: Vec::new(),
+                    services: vec![ServiceRef {
+                        name: "agentsight.service".to_string(),
+                        manager: "systemd".to_string(),
+                        restartable: true,
+                        enabled: true,
+                        scope: ServiceScope::System,
+                    }],
+                    external_modified_files: Vec::new(),
+                    provisioned_packages: Vec::new(),
+                },
+            },
+            status: LifecycleStatus::Installed,
+            installed_at: "2026-07-21T00:00:00Z".to_string(),
+            last_operation_id: None,
+            subscription_scope: Default::default(),
+            enabled_features: Vec::new(),
+            health: Vec::new(),
+        });
+        store.save(&state_path).expect("save state");
+        let _pending = Transaction::begin_with_subject(
+            "uninstall",
+            Some("agentsight"),
+            state_path.clone(),
+            &rpm_install::journal_dir(&layout),
+        )
+        .expect("begin pending uninstall");
+
+        let err = handle(
+            RestartArgs {
+                component: "agentsight".to_string(),
+            },
+            &ctx_with_prefix(InstallMode::System, Some(tmp.path().to_path_buf())),
+        )
+        .expect_err("pending lifecycle must block restart");
+
+        assert!(err.reason().contains("pending operation journal"), "{err}");
+        assert!(err.reason().contains("anolisa repair agentsight"), "{err}");
     }
 
     #[test]

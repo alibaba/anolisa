@@ -552,8 +552,8 @@ agent-memory
 ### 诊断工具
 
 ```bash
-# 组件级诊断 + 自动修复
-anolisa doctor agent-memory --fix
+# 组件级诊断（按输出的 fix plan 手动处理）
+anolisa doctor agent-memory
 
 # 适配器状态
 anolisa adapter status agent-memory
@@ -575,7 +575,7 @@ RUST_LOG=agent_memory=debug agent-memory
 | 索引检索对刚写入的内容查不到 | 还在 200 ms debounce 窗口内 | 重试，或用 `mem_grep`（直接走文件系统正则，不依赖索引） |
 | `mem_promote` 报 `session not found` | `MEMORY_SESSION_ID`/`MEMORY_SESSION_DIR` 未设或 scratch 不存在 | 见 Promote 工作流 |
 | OpenClaw 插件未加载 | `openclaw` CLI 不在 PATH | 安装 OpenClaw 后重跑 `install.sh` |
-| 手动 dnf 操作后状态不同步 | — | `anolisa repair agent-memory` / `anolisa forget` / `anolisa adopt` |
+| 手动 dnf 操作后 system 状态不同步 | — | `sudo anolisa --install-mode system repair agent-memory`；仅在为仍存在的 RPM 重建记录时使用 system-scoped `forget` / `adopt` |
 
 深入排查：`RUST_LOG=agent_memory=debug` 启动，检查服务端 stderr 与 `<mount>/.anolisa/audit.log`。
 

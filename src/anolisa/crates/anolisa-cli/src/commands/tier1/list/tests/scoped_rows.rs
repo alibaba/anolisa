@@ -49,10 +49,16 @@ fn user_record_shadows_system_record_in_list_rows() {
 
     let rows = build_rows_from_view(&index, &args, &view, None);
 
-    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].name, "agentsight");
     assert_eq!(rows[0].scope, "user");
+    assert!(rows[0].active);
     assert!(rows[0].mutable_by_current_invocation);
+    assert_eq!(rows[1].name, "agentsight");
+    assert_eq!(rows[1].scope, "system");
+    assert!(!rows[1].active);
+    assert!(!rows[1].mutable_by_current_invocation);
+    assert_eq!(rows[1].shadowed_by.as_deref(), Some("user"));
 }
 
 fn user_plus_system_view(user_state: StateStore, system_state: StateStore) -> StateView {
@@ -80,6 +86,7 @@ fn user_plus_system_view(user_state: StateStore, system_state: StateStore) -> St
     StateView {
         writable: user_root.clone(),
         visible_roots: vec![user_root, system_root],
+        unavailable_roots: Vec::new(),
         warnings: Vec::new(),
     }
 }

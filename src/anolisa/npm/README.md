@@ -14,15 +14,12 @@ npm install -g @anolisa/cli
 # Install a component
 anolisa install tokenless
 
-# Enable a capability
-anolisa enable agent-observability
-
 # Check component status
-anolisa status
+anolisa status tokenless
 
 # Manage adapters
-anolisa adapter list
-anolisa adapter enable sec-core openclaw
+anolisa adapter scan
+anolisa adapter enable tokenless openclaw
 ```
 
 ## Platform Support

@@ -55,20 +55,20 @@ anolisa install <component>
 
 ### Available Components
 
-| Component | Description | Mode |
-|-----------|-------------|------|
-| `cosh` | Copilot Shell — AI terminal assistant | user |
-| `os-skills` | System management and DevOps skills | user |
-| `tokenless` | Token optimization (compression) | user |
-| `ws-ckpt` | Workspace checkpoint/rollback | user |
-| `skillfs` | FUSE virtual skill filesystem | user |
-| `agent-memory` | MCP-based persistent memory | user |
+| Component | Description | Supported modes |
+|-----------|-------------|-----------------|
+| `cosh` | Copilot Shell — AI terminal assistant | user, system |
+| `os-skills` | System management and DevOps skills | user, system |
+| `tokenless` | Token optimization (compression) | user, system |
+| `ws-ckpt` | Workspace checkpoint/rollback | **system** |
+| `skillfs` | FUSE virtual skill filesystem | **system** |
+| `agent-memory` | MCP-based persistent memory | user, system |
 | `agentsight` | eBPF tracing and dashboard | **system** |
 | `agent-sec-core` | Security hardening | **system** |
 
-> **Note**: Components marked **system** require `sudo`:
+> **Note**: System-only components require `sudo` and an explicit system scope:
 > ```bash
-> sudo anolisa install agentsight
+> sudo anolisa --install-mode system install agentsight
 > ```
 
 ### Install All Components
@@ -89,10 +89,11 @@ sudo yum install <component>
 
 ## Step 4: Adapter Setup
 
-Adapters bridge components to specific Agent frameworks. Install adapters after installing the component:
+Adapters bridge components to specific Agent frameworks. Enable an adapter after installing the component:
 
 ```bash
-anolisa adapter install <component> --runtime <runtime>
+anolisa adapter scan
+anolisa adapter enable <component> [framework]
 ```
 
 ### Examples
@@ -137,10 +138,13 @@ Remove a specific component:
 anolisa uninstall <component>
 ```
 
-Remove all ANOLISA components:
+There is no batch uninstall command. List the installed records, then remove
+each intended component explicitly so its authority and package-removal policy
+are reviewed independently:
 
 ```bash
-anolisa uninstall --all
+anolisa list --installed
+anolisa uninstall <component>
 ```
 
 ---
@@ -156,8 +160,11 @@ anolisa update <component>
 Update all installed components:
 
 ```bash
-anolisa update --all
+anolisa update all
 ```
+
+`update all` updates recorded components but not the CLI binary. Use
+`anolisa update self` for the CLI.
 
 ---
 

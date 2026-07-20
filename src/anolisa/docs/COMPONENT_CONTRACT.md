@@ -107,7 +107,7 @@ Typical paths:
 
 The package-owned contract is the source provided by RPM or raw artifacts. The
 state snapshot is ANOLISA's runtime record and may be used by commands such as
-`anolisa adapter install <component> <framework>` after the component has been
+`anolisa adapter enable <component> <framework>` after the component has been
 installed or adopted.
 
 ## Discovery Order
@@ -128,5 +128,6 @@ publish an ANOLISA component contract.
 
 ## Contract Template
 
-Use `src/anolisa/templates/component-runtime.toml` as the example schema for
-new component contracts.
+Use a shipped component manifest such as
+[`manifests/components/cosh/component.toml`](../manifests/components/cosh/component.toml)
+as the example schema for new component contracts.

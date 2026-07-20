@@ -383,7 +383,7 @@ pub(crate) fn resolve_rpm_component_name(
 
 /// In-memory alias resolution only — no rpmdb/dnf queries.
 ///
-/// Used by [`common::lookup_component_name`](crate::commands::common::lookup_component_name)
+/// Used by [`common::lookup_component_name_in_store`](crate::commands::common::lookup_component_name_in_store)
 /// for commands that address existing state. Checks the component index for
 /// component-name, backend-package, and alias matches across both RPM and Raw
 /// backends. Returns `None` when no match is found or the match is ambiguous

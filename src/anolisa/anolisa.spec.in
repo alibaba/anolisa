@@ -78,29 +78,16 @@ install -m 0755 target/release/anolisa %{buildroot}%{_bindir}/anolisa
 install -d %{buildroot}%{_sysconfdir}/anolisa
 install -m 0644 manifests/repo.toml %{buildroot}%{_sysconfdir}/anolisa/repo.toml
 
-# -- manifests (capabilities, osbase, runtime) --
+# -- manifests (osbase) --
 # NOTE: data files under %{_datadir_anolisa} are intentionally NOT installed.
-# The CLI either ships them at runtime via the distribution-index, or the
-# admin stages them manually. Re-enable the block below if you need to
-# bundle the local manifests into the RPM.
-#for d in capabilities osbase runtime; do
-#    install -d %{buildroot}%{_datadir_anolisa}/manifests/$d
-#    cp -pR manifests/$d/. %{buildroot}%{_datadir_anolisa}/manifests/$d/
-#done
+# Component manifests are downloaded from the distribution backend at install
+# time and the CLI fetches + caches the distribution index from the mirror at
+# runtime, so a datadir copy of either would never be read. Re-enable the
+# block below if you need to bundle the osbase manifests into the RPM.
+#install -d %{buildroot}%{_datadir_anolisa}/manifests/osbase
+#cp -pR manifests/osbase/. %{buildroot}%{_datadir_anolisa}/manifests/osbase/
 #find %{buildroot}%{_datadir_anolisa}/manifests -type d -exec chmod 0755 {} \;
 #find %{buildroot}%{_datadir_anolisa}/manifests -type f -exec chmod 0644 {} \;
-
-# -- distribution-index --
-# Prefer the OSS-targeted template (index.oss.toml) with @ANOLISA_MIRROR@ /
-# @ANOLISA_CHANNEL@ placeholders substituted at build time, exactly like the
-# upstream install-anolisa.sh does at install time.
-#install -d %{buildroot}%{_datadir_anolisa}/manifests/distribution-index
-#sed \
-#    -e 's|@ANOLISA_MIRROR@|%{_anolisa_mirror}|g' \
-#    -e 's|@ANOLISA_CHANNEL@|%{_anolisa_channel}|g' \
-#    manifests/distribution-index/index.oss.toml \
-#    > %{buildroot}%{_datadir_anolisa}/manifests/distribution-index/index.toml
-#chmod 0644 %{buildroot}%{_datadir_anolisa}/manifests/distribution-index/index.toml
 
 # -- templates (execution policy is consumed by the CLI's scope gate) --
 #install -d %{buildroot}%{_datadir_anolisa}/templates

@@ -25,7 +25,7 @@ use crate::domain::{
 };
 use crate::lock::{InstallLock, LockError};
 use crate::sandbox_manifest::{ManifestError, SandboxManifest, ScenarioConfig};
-use crate::state::{InstallMode as StateInstallMode, ObjectKind};
+use crate::state::ObjectKind;
 use crate::state_store::StateStore;
 
 // ===========================================================================
@@ -296,6 +296,17 @@ fn sandbox_dispatch(
     request: &OsbaseInstallRequest,
     env: &EnvFacts,
 ) -> Result<OsbaseInstallOutcome, OsbaseInstallError> {
+    let layout = FsLayout::system(None);
+    let runtime = HostManifestInstallRuntime;
+    sandbox_dispatch_with(request, env, &layout, &runtime)
+}
+
+fn sandbox_dispatch_with(
+    request: &OsbaseInstallRequest,
+    env: &EnvFacts,
+    layout: &FsLayout,
+    runtime: &impl ManifestInstallRuntime,
+) -> Result<OsbaseInstallOutcome, OsbaseInstallError> {
     let manifest = SandboxManifest::load()?;
 
     let scenario = manifest.find_scenario(&request.target).ok_or_else(|| {
@@ -312,6 +323,7 @@ fn sandbox_dispatch(
     let scenario = scenario.clone();
 
     if request.dry_run {
+        load_state_for_layout(layout)?;
         eprintln!("[osbase] scenario: {}", scenario.name);
         let outcome = build_dry_run_outcome(request, &scenario);
         // Print phase plan in pipeline order so Direct and Helper paths
@@ -326,7 +338,7 @@ fn sandbox_dispatch(
         return Ok(outcome);
     }
 
-    run_manifest_install(request, env, &scenario)
+    run_manifest_install(request, env, &scenario, layout, runtime)
 }
 
 /// Build a dry-run outcome showing what would happen.
@@ -447,6 +459,28 @@ enum VerifyOutcome {
     Failed(String),
 }
 
+trait ManifestInstallRuntime {
+    fn install_packages(&self, packages: &[String]) -> Result<String, String>;
+    fn enable_services(&self, services: &[String]) -> Result<String, String>;
+    fn verify(&self, scenario: &ScenarioConfig) -> VerifyOutcome;
+}
+
+struct HostManifestInstallRuntime;
+
+impl ManifestInstallRuntime for HostManifestInstallRuntime {
+    fn install_packages(&self, packages: &[String]) -> Result<String, String> {
+        run_dnf_install(packages)
+    }
+
+    fn enable_services(&self, services: &[String]) -> Result<String, String> {
+        run_enable_services(services)
+    }
+
+    fn verify(&self, scenario: &ScenarioConfig) -> VerifyOutcome {
+        run_post_verify(scenario)
+    }
+}
+
 /// Scenario-aware post-install verification.
 ///
 /// If `scenario.verify_commands` is non-empty, each entry is executed as a
@@ -514,6 +548,19 @@ fn run_verify_cmd(cmd: &str, args: &[&str], label: &str) -> Result<(), String> {
     }
 }
 
+fn load_state_for_layout(layout: &FsLayout) -> Result<StateStore, OsbaseInstallError> {
+    let state_path = layout.state_dir.join("installed.toml");
+    StateStore::load_for_layout(
+        &state_path,
+        anolisa_platform::privilege::effective_uid(),
+        layout,
+    )
+    .map_err(|error| OsbaseInstallError::PhaseFailed {
+        phase: "state".to_string(),
+        message: format!("failed to load state: {error}"),
+    })
+}
+
 /// Execute the five-phase manifest-driven install:
 /// 1. Preflight (kernel + KVM)
 /// 2. Packages (full stack from manifest)
@@ -524,6 +571,8 @@ fn run_manifest_install(
     request: &OsbaseInstallRequest,
     env: &EnvFacts,
     scenario: &ScenarioConfig,
+    layout: &FsLayout,
+    runtime: &impl ManifestInstallRuntime,
 ) -> Result<OsbaseInstallOutcome, OsbaseInstallError> {
     let mut phases = Vec::new();
     let mut warnings = Vec::new();
@@ -564,7 +613,6 @@ fn run_manifest_install(
     // ─── Acquire InstallLock ─────────────────────────────────────────────
     // Lock covers the full mutation window: packages → services → state.
     // Held until the function returns (drop releases the lock).
-    let layout = FsLayout::system(None);
     let _lock = InstallLock::acquire(&layout.lock_file).map_err(|e| match e {
         LockError::Held { path } => OsbaseInstallError::PhaseFailed {
             phase: "lock".to_string(),
@@ -578,6 +626,8 @@ fn run_manifest_install(
             message: format!("failed to acquire install lock: {other}"),
         },
     })?;
+    let state_path = layout.state_dir.join("installed.toml");
+    let mut store = load_state_for_layout(layout)?;
 
     // ─── Phase 2: Packages ───────────────────────────────────────────────
     if scenario.packages.is_empty() {
@@ -590,7 +640,7 @@ fn run_manifest_install(
     } else {
         let pkg_list = scenario.packages.join(" ");
         eprintln!("[osbase] installing packages: {pkg_list}");
-        match run_dnf_install(&scenario.packages) {
+        match runtime.install_packages(&scenario.packages) {
             Ok(msg) => {
                 eprintln!("[osbase] dnf install completed (exit_code=0)");
                 phases.push(PhaseResult {
@@ -633,7 +683,7 @@ fn run_manifest_install(
             "[osbase] enabling services: {}",
             scenario.services.join(", ")
         );
-        match run_enable_services(&scenario.services) {
+        match runtime.enable_services(&scenario.services) {
             Ok(msg) => {
                 phases.push(PhaseResult {
                     name: "services".to_string(),
@@ -664,7 +714,7 @@ fn run_manifest_install(
 
     // ─── Phase 4: Verify ─────────────────────────────────────────────────
     if !request.skip_verify {
-        match run_post_verify(scenario) {
+        match runtime.verify(scenario) {
             VerifyOutcome::Passed(msg) => {
                 phases.push(PhaseResult {
                     name: "verify".to_string(),
@@ -705,15 +755,7 @@ fn run_manifest_install(
 
     // ─── Phase 5: State ─────────────────────────────────────────────────────
     // Lock is already held (acquired before Phase 2).
-    let state_path = layout.state_dir.join("installed.toml");
     let state_result = (|| -> Result<String, String> {
-        let mut store = StateStore::load(&state_path, anolisa_platform::privilege::effective_uid())
-            .map_err(|e| format!("failed to load state: {e}"))?;
-
-        // Mark state as system-scoped so other tools interpret paths correctly.
-        store.install_mode = StateInstallMode::System;
-        store.prefix = layout.prefix.clone();
-
         let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
         // The scenario's packages are dnf-managed: record a delegated,
         // managed installation. The record marks existence; dnf owns the
@@ -914,7 +956,51 @@ fn run_dnf_install(packages: &[String]) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
+    use crate::state::OperationRecord;
+
+    #[derive(Default)]
+    struct CountingRuntime {
+        package_calls: Cell<usize>,
+        service_calls: Cell<usize>,
+        verify_calls: Cell<usize>,
+    }
+
+    impl ManifestInstallRuntime for CountingRuntime {
+        fn install_packages(&self, packages: &[String]) -> Result<String, String> {
+            self.package_calls.set(self.package_calls.get() + 1);
+            Ok(format!("installed: {}", packages.join(" ")))
+        }
+
+        fn enable_services(&self, services: &[String]) -> Result<String, String> {
+            self.service_calls.set(self.service_calls.get() + 1);
+            Ok(format!("enabled: {}", services.join(", ")))
+        }
+
+        fn verify(&self, _scenario: &ScenarioConfig) -> VerifyOutcome {
+            self.verify_calls.set(self.verify_calls.get() + 1);
+            VerifyOutcome::NothingToVerify
+        }
+    }
+
+    fn write_operation_only_user_state(system_layout: &FsLayout, home: &std::path::Path) {
+        let user_layout =
+            FsLayout::user_with_overrides(home.to_path_buf(), None, None, None, None, None);
+        let mut store = StateStore::empty_for_layout(&user_layout);
+        store.operations.push(OperationRecord {
+            id: "op-1".to_string(),
+            command: "install cosh".to_string(),
+            status: "started".to_string(),
+            started_at: "2026-07-21T00:00:00Z".to_string(),
+            finished_at: None,
+            parent_operation_id: None,
+        });
+        store
+            .save(&system_layout.state_dir.join("installed.toml"))
+            .expect("save mismatched state");
+    }
 
     fn req(domain: OsbaseDomain, target: &str) -> OsbaseInstallRequest {
         OsbaseInstallRequest {
@@ -1003,10 +1089,13 @@ mod tests {
     #[test]
     fn known_scenarios_resolve_dry_run() {
         let env = root_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().join("system")));
+        let runtime = CountingRuntime::default();
         for s in ["runc", "rund", "firecracker", "gvisor", "landlock"] {
             let r = req(OsbaseDomain::Sandbox, s);
-            let outcome =
-                execute_install(&r, &env).unwrap_or_else(|_| panic!("scenario '{s}' should work"));
+            let outcome = sandbox_dispatch_with(&r, &env, &layout, &runtime)
+                .unwrap_or_else(|_| panic!("scenario '{s}' should work"));
             assert_eq!(outcome.exit_code, 0);
             assert_eq!(outcome.target, s);
 
@@ -1028,6 +1117,51 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn dry_run_rejects_mismatched_state_scope() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().join("system")));
+        write_operation_only_user_state(&layout, &tmp.path().join("home"));
+        let runtime = CountingRuntime::default();
+
+        let err = sandbox_dispatch_with(
+            &req(OsbaseDomain::Sandbox, "runc"),
+            &root_env(),
+            &layout,
+            &runtime,
+        )
+        .expect_err("dry-run must validate the executable state scope");
+
+        assert!(matches!(
+            err,
+            OsbaseInstallError::PhaseFailed { ref phase, .. } if phase == "state"
+        ));
+        assert_eq!(runtime.package_calls.get(), 0);
+        assert_eq!(runtime.service_calls.get(), 0);
+        assert_eq!(runtime.verify_calls.get(), 0);
+    }
+
+    #[test]
+    fn state_scope_is_validated_before_native_side_effects() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().join("system")));
+        write_operation_only_user_state(&layout, &tmp.path().join("home"));
+        let runtime = CountingRuntime::default();
+        let mut request = req(OsbaseDomain::Sandbox, "runc");
+        request.dry_run = false;
+
+        let err = sandbox_dispatch_with(&request, &root_env(), &layout, &runtime)
+            .expect_err("state mismatch must stop the install");
+
+        assert!(matches!(
+            err,
+            OsbaseInstallError::PhaseFailed { ref phase, .. } if phase == "state"
+        ));
+        assert_eq!(runtime.package_calls.get(), 0);
+        assert_eq!(runtime.service_calls.get(), 0);
+        assert_eq!(runtime.verify_calls.get(), 0);
     }
 
     #[test]

@@ -32,26 +32,27 @@ anolisa env
 anolisa list
 ```
 
-按需安装组件。大部分组件使用 user mode；`agentsight` 和 `agent-sec-core` 需要 system mode（sudo）。
+按需安装组件。当前 `agentsight`、`agent-sec-core`、`ws-ckpt` 和 `skillfs`
+制品要求 system mode；下列其他示例支持 user mode。
 
 ```bash
 # Token 优化
 anolisa install tokenless
 
 # 工作区快照（基于 btrfs COW）
-anolisa install ws-ckpt
+sudo anolisa --install-mode system install ws-ckpt
 
 # 可观测性（需要 sudo — eBPF 依赖 root）
-sudo anolisa install agentsight
+sudo anolisa --install-mode system install agentsight
 
 # 安全内核（需要 sudo）
-sudo anolisa install agent-sec-core
+sudo anolisa --install-mode system install agent-sec-core
 
 # 持久记忆（MCP 文件形态）
 anolisa install agent-memory
 
 # 技能文件系统（FUSE 虚拟视图）
-anolisa install skillfs
+sudo anolisa --install-mode system install skillfs
 
 # OS 技能库
 anolisa install os-skills

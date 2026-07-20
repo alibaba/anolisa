@@ -69,10 +69,12 @@ impl<'a> StoreRecordSink<'a> {
         self.store
     }
 
-    fn save(&self) -> Result<(), RecordSinkError> {
-        self.store
+    fn persist_candidate(&mut self, candidate: StateStore) -> Result<(), RecordSinkError> {
+        candidate
             .save(self.state_path)
-            .map_err(|err| RecordSinkError(err.to_string()))
+            .map_err(|err| RecordSinkError(err.to_string()))?;
+        *self.store = candidate;
+        Ok(())
     }
 
     fn delegated_identity(&self) -> Result<&DelegatedIdentity, RecordSinkError> {
@@ -112,8 +114,9 @@ impl<'a> StoreRecordSink<'a> {
     ) -> Result<(), RecordSinkError> {
         let identity = self.delegated_identity()?.clone();
         let operation_id = self.context.operation_id.clone();
+        let mut candidate = self.store.clone();
 
-        if let Some(existing) = self.store.find_mut(self.context.kind, &self.context.name)
+        if let Some(existing) = candidate.find_mut(self.context.kind, &self.context.name)
             && let ProviderBinding::Delegated {
                 pm,
                 package,
@@ -131,7 +134,7 @@ impl<'a> StoreRecordSink<'a> {
             }
             existing.status = LifecycleStatus::Installed;
             existing.last_operation_id = operation_id;
-            return self.save();
+            return self.persist_candidate(candidate);
         }
 
         let installation = self.new_installation(ProviderBinding::Delegated {
@@ -142,8 +145,8 @@ impl<'a> StoreRecordSink<'a> {
             relation,
             last_observed: observation.cloned(),
         });
-        self.store.upsert(installation);
-        self.save()
+        candidate.upsert(installation);
+        self.persist_candidate(candidate)
     }
 }
 
@@ -162,8 +165,9 @@ impl RecordSink for StoreRecordSink<'_> {
                     ))
                 })?;
                 let installation = self.new_installation(ProviderBinding::Owned { artifact });
-                self.store.upsert(installation);
-                self.save()
+                let mut candidate = self.store.clone();
+                candidate.upsert(installation);
+                self.persist_candidate(candidate)
             }
             RecordWrite::DelegatedManaged => self.write_delegated(
                 ManagementRelation::Managed {
@@ -184,7 +188,8 @@ impl RecordSink for StoreRecordSink<'_> {
                 let name = self.context.name.clone();
                 let operation_id = self.context.operation_id.clone();
                 let identity = self.context.delegated.clone();
-                let Some(existing) = self.store.find_mut(self.context.kind, &name) else {
+                let mut candidate = self.store.clone();
+                let Some(existing) = candidate.find_mut(self.context.kind, &name) else {
                     return Err(RecordSinkError(format!(
                         "cannot refresh observation: no record for '{name}'"
                     )));
@@ -214,14 +219,15 @@ impl RecordSink for StoreRecordSink<'_> {
                 }
                 existing.status = LifecycleStatus::Installed;
                 existing.last_operation_id = operation_id;
-                self.save()
+                self.persist_candidate(candidate)
             }
         }
     }
 
     fn drop_record(&mut self) -> Result<(), RecordSinkError> {
-        self.store.remove(self.context.kind, &self.context.name);
-        self.save()
+        let mut candidate = self.store.clone();
+        candidate.remove(self.context.kind, &self.context.name);
+        self.persist_candidate(candidate)
     }
 }
 
@@ -519,5 +525,40 @@ mod tests {
             .write_record(RecordWrite::DelegatedManaged, None)
             .unwrap_err();
         assert!(err.to_string().contains("no native package identity"));
+    }
+
+    #[test]
+    fn failed_write_does_not_mutate_the_shared_store() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let blocked_parent = tmp.path().join("not-a-directory");
+        std::fs::write(&blocked_parent, b"block").expect("write blocker");
+        let path = blocked_parent.join("installed.toml");
+        let mut store = StateStore::empty();
+        let mut sink = StoreRecordSink::new(&mut store, &path, context("cosh"));
+
+        sink.write_record(RecordWrite::DelegatedManaged, Some(&observation("2.7.0")))
+            .expect_err("save must fail");
+
+        assert!(sink.store().find(ObjectKind::Component, "cosh").is_none());
+    }
+
+    #[test]
+    fn failed_drop_does_not_mutate_the_shared_store() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let good_path = tmp.path().join("installed.toml");
+        let mut store = StateStore::empty();
+        {
+            let mut sink = StoreRecordSink::new(&mut store, &good_path, context("cosh"));
+            sink.write_record(RecordWrite::DelegatedManaged, Some(&observation("2.7.0")))
+                .expect("seed");
+        }
+        let blocked_parent = tmp.path().join("not-a-directory");
+        std::fs::write(&blocked_parent, b"block").expect("write blocker");
+        let path = blocked_parent.join("installed.toml");
+        let mut sink = StoreRecordSink::new(&mut store, &path, context("cosh"));
+
+        sink.drop_record().expect_err("save must fail");
+
+        assert!(sink.store().find(ObjectKind::Component, "cosh").is_some());
     }
 }

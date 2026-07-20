@@ -41,11 +41,11 @@ View component logs:
 # View logs for a specific component
 anolisa logs <component>
 
-# Follow logs in real-time
-anolisa logs <component> --follow
+# Show warning and error records
+anolisa logs <component> --severity warn
 
 # Show last N lines
-anolisa logs <component> --tail 50
+anolisa logs <component> --limit 50
 ```
 
 ---
@@ -93,11 +93,11 @@ ls -la /dev/fuse
 **Solution**:
 
 ```bash
-# Check network connectivity
-anolisa doctor --check network
+# Inspect the detected environment
+anolisa env
 
 # Retry with verbose output
-anolisa install tokenless --verbose
+anolisa --verbose install tokenless
 
 # Alternative: use YUM
 sudo yum install tokenless
@@ -116,8 +116,8 @@ rustup show
 # Update to latest stable
 rustup update stable
 
-# Check for missing system dependencies
-anolisa doctor --check build-deps
+# Inspect the detected build environment
+anolisa env
 ```
 
 ---
@@ -218,8 +218,9 @@ ls /dev/fuse
 # Check kernel version (>= 5.4 recommended)
 uname -r
 
-# Verify eBPF support
-anolisa doctor --check ebpf
+# Inspect kernel capabilities, then diagnose the installed component
+anolisa env
+sudo anolisa --install-mode system doctor agentsight
 
 # AgentSight requires system mode
 sudo anolisa install agentsight

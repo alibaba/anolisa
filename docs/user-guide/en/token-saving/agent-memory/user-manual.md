@@ -552,8 +552,8 @@ Handshake + tool call:
 ### Diagnostic tools
 
 ```bash
-# Component-level diagnosis + auto-fix
-anolisa doctor agent-memory --fix
+# Component-level diagnosis (follow the reported fix plan manually)
+anolisa doctor agent-memory
 
 # Adapter status
 anolisa adapter status agent-memory
@@ -575,7 +575,7 @@ RUST_LOG=agent_memory=debug agent-memory
 | search misses just-written content | inside the 200 ms debounce window | retry, or use `mem_grep` (regex on the filesystem, no index) |
 | `mem_promote` reports `session not found` | `MEMORY_SESSION_ID`/`MEMORY_SESSION_DIR` unset or scratch missing | see Promote workflow |
 | OpenClaw plugin not loaded | `openclaw` CLI not on PATH | rerun `install.sh` after installing OpenClaw |
-| state out of sync after manual dnf | — | `anolisa repair agent-memory` / `anolisa forget` / `anolisa adopt` |
+| system state out of sync after manual dnf | — | `sudo anolisa --install-mode system repair agent-memory`; use system-scoped `forget` / `adopt` only when intentionally rebuilding the record for a present RPM |
 
 For deeper investigation: start with `RUST_LOG=agent_memory=debug` and inspect both stderr and `<mount>/.anolisa/audit.log`.
 

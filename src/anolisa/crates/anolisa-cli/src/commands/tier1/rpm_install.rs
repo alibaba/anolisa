@@ -1,11 +1,14 @@
 //! Durable intent and recovery helpers for fresh delegated RPM installs.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+use anolisa_core::facts::JournalEvidence;
+use anolisa_core::facts::{JournalInventory, is_legacy_rpm_install_journal};
+#[cfg(test)]
 use anolisa_core::state::OperationRecord;
 use anolisa_core::transaction::{
-    Transaction, TransactionError, TransactionOutcomeStatus, TransactionStepStatus,
+    Transaction, TransactionError, TransactionOutcomeStatus, TransactionStep, TransactionStepStatus,
 };
 use anolisa_platform::fs_layout::FsLayout;
 
@@ -80,8 +83,6 @@ pub(crate) fn begin_fresh_install(
     package: &str,
     command: &str,
 ) -> Result<PendingRpmInstall, CliError> {
-    use anolisa_core::transaction::TransactionStep;
-
     let state_path = layout.state_dir.join("installed.toml");
     let mut transaction = Transaction::begin("install", state_path, &journal_dir(layout))
         .map_err(|err| journal_error(command, "create pending RPM install", err))?;
@@ -108,11 +109,20 @@ pub(crate) fn begin_fresh_install(
     })
 }
 
+fn has_legacy_install_marker(step: &TransactionStep) -> bool {
+    step.phase == INSTALL_PHASE || step.action == INSTALL_ACTION
+}
+
+fn has_legacy_state_marker(step: &TransactionStep) -> bool {
+    step.phase == STATE_PHASE || step.action == STATE_ACTION
+}
+
 /// Find one live RPM claim matching a component or package alias.
 ///
 /// `operations` is the operation history the claims are checked against; the
 /// v4 `InstalledState` and the v5 `StateStore` carry the same record shape,
 /// so callers on either model pass their history slice.
+#[cfg(test)]
 pub(crate) fn find_pending_claim(
     layout: &FsLayout,
     operations: &[OperationRecord],
@@ -120,49 +130,30 @@ pub(crate) fn find_pending_claim(
     command: &str,
 ) -> Result<Option<PendingRpmInstall>, CliError> {
     let dir = journal_dir(layout);
-    let entries = match fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => {
-            return Err(CliError::Runtime {
-                command: command.to_string(),
-                reason: format!(
-                    "failed to scan RPM recovery journals in {}: {err}",
-                    dir.display()
-                ),
-            });
-        }
-    };
-    let mut paths = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|err| CliError::Runtime {
-            command: command.to_string(),
-            reason: format!(
-                "failed to read an RPM recovery journal entry in {}: {err}",
-                dir.display()
-            ),
-        })?;
-        let path = entry.path();
-        if path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.ends_with(".journal.toml"))
-        {
-            paths.push(path);
-        }
-    }
-    paths.sort();
+    let evidence = JournalEvidence::new(&dir, operations);
+    let inventory = JournalInventory::load(evidence).map_err(|err| CliError::Runtime {
+        command: command.to_string(),
+        reason: err.to_string(),
+    })?;
+    find_pending_claim_in_inventory(layout, claims, command, &inventory)
+}
 
+/// Find one legacy two-step RPM claim in an already validated journal
+/// inventory.
+pub(crate) fn find_pending_claim_in_inventory(
+    layout: &FsLayout,
+    claims: &[&str],
+    command: &str,
+    inventory: &JournalInventory,
+) -> Result<Option<PendingRpmInstall>, CliError> {
     let mut matches = Vec::new();
-    for path in paths {
-        let transaction = Transaction::load_journal(&path).map_err(|err| CliError::Runtime {
-            command: command.to_string(),
-            reason: format!(
-                "cannot read recovery journal {}: {err}; automatic recovery is unsafe — inspect the journal and cross-check installed.toml with rpmdb before removing any recovery marker",
-                path.display()
-            ),
-        })?;
-        let Some(pending) = parse_pending(transaction, &path, layout, operations, command)? else {
+    for entry in inventory.entries() {
+        if !entry.is_effectively_pending() {
+            continue;
+        }
+        let Some(pending) =
+            parse_pending(entry.transaction().clone(), entry.path(), layout, command)?
+        else {
             continue;
         };
         if claims.is_empty()
@@ -191,61 +182,44 @@ pub(crate) fn find_pending_claim(
                 })
                 .collect::<Vec<_>>()
                 .join("; ");
+            let target = if claims.is_empty() {
+                "the state root".to_string()
+            } else {
+                format!("'{}'", claims.join("', '"))
+            };
             Err(CliError::Runtime {
                 command: command.to_string(),
                 reason: format!(
-                    "multiple pending RPM installs match '{}': {journals}; refusing to choose an owner automatically — verify each package in rpmdb and inspect the listed journals before removing any recovery marker",
-                    claims.join("', '")
+                    "multiple pending RPM installs match {target}: {journals}; refusing to choose an owner automatically — verify each package in rpmdb and inspect the listed journals before removing any recovery marker"
                 ),
             })
         }
     }
 }
 
-pub(crate) fn reject_pending_claim(
-    layout: &FsLayout,
-    operations: &[OperationRecord],
-    claims: &[&str],
-    command: &str,
-) -> Result<(), CliError> {
-    if let Some(pending) = find_pending_claim(layout, operations, claims, command)? {
-        return Err(CliError::Runtime {
-            command: command.to_string(),
-            reason: format!(
-                "a previous RPM install for component '{}' (package '{}') is pending recovery; run `anolisa repair {}` before retrying",
-                pending.component, pending.package, pending.component
-            ),
-        });
-    }
-    Ok(())
-}
-
-/// Interpret one journal as a legacy pending RPM install claim.
+/// Interpret one effectively pending journal as a legacy RPM install claim.
 ///
-/// `operations` is the operation history the claim is checked against — the
-/// v4 `InstalledState` and the v5 `StateStore` both carry the same record
-/// shape, so callers on either model pass their history slice. Returns
-/// `Ok(None)` for journals that are not this shape (settled, already
-/// committed, or written by another pipeline); a *live* journal that matches
-/// this shape but is malformed fails closed.
+/// Callers must first classify the journal through [`JournalInventory`] with
+/// same-root operation history. Journals from another pipeline return
+/// `Ok(None)`; a live journal carrying legacy markers but an unsafe shape
+/// fails closed.
 pub(crate) fn parse_pending(
     transaction: Transaction,
     path: &Path,
     layout: &FsLayout,
-    operations: &[OperationRecord],
     command: &str,
 ) -> Result<Option<PendingRpmInstall>, CliError> {
     let install_steps = transaction
         .steps
         .iter()
         .enumerate()
-        .filter(|(_, step)| step.phase == INSTALL_PHASE || step.action == INSTALL_ACTION)
+        .filter(|(_, step)| has_legacy_install_marker(step))
         .collect::<Vec<_>>();
     let state_steps = transaction
         .steps
         .iter()
         .enumerate()
-        .filter(|(_, step)| step.phase == STATE_PHASE || step.action == STATE_ACTION)
+        .filter(|(_, step)| has_legacy_state_marker(step))
         .collect::<Vec<_>>();
     // `Transaction::begin` persists an empty revision before the initial step
     // batch. An interruption in that window is known to precede dnf, so the
@@ -253,26 +227,16 @@ pub(crate) fn parse_pending(
     if install_steps.is_empty() && state_steps.is_empty() {
         return Ok(None);
     }
-    if operations
-        .iter()
-        .any(|operation| operation.id == transaction.operation_id && operation.status == "ok")
-    {
+    if !transaction.is_pending() {
         return Ok(None);
     }
-    if !matches!(
-        transaction.status,
-        TransactionOutcomeStatus::InFlight | TransactionOutcomeStatus::Partial
-    ) {
+    if transaction.delegated_recovery.is_some() {
         return Ok(None);
     }
-    if transaction.operation != "install"
+    if transaction.subject.is_some()
+        || !is_legacy_rpm_install_journal(&transaction)
         || install_steps.len() != 1
         || state_steps.len() != 1
-        || install_steps[0].1.phase != INSTALL_PHASE
-        || install_steps[0].1.action != INSTALL_ACTION
-        || state_steps[0].1.phase != STATE_PHASE
-        || state_steps[0].1.action != STATE_ACTION
-        || install_steps[0].0 >= state_steps[0].0
         || install_steps[0].1.target.trim().is_empty()
         || !valid_component_name(state_steps[0].1.target.trim())
     {
@@ -330,6 +294,9 @@ pub(crate) fn journal_error(command: &str, action: &str, err: TransactionError) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anolisa_core::domain::NativePm;
+    use anolisa_core::transaction::{DelegatedRecordAction, DelegatedRecoveryContext};
+    use std::fs;
     use tempfile::tempdir;
 
     fn layout() -> (tempfile::TempDir, FsLayout) {
@@ -416,5 +383,73 @@ mod tests {
         assert!(err.reason().contains("installed.toml"));
         assert!(err.reason().contains("rpmdb"));
         assert!(err.reason().contains("before removing or editing"));
+    }
+
+    #[test]
+    fn ambiguous_legacy_shapes_remain_recovery_errors() {
+        for shape in ["reversed", "duplicate", "partial-marker", "foreign-step"] {
+            let (_tmp, layout) = layout();
+            let mut pending = begin_fresh_install(&layout, "cosh", "copilot-shell", "install cosh")
+                .expect("begin journal");
+            if shape == "reversed" {
+                pending.transaction.steps.reverse();
+            } else if shape == "duplicate" {
+                let duplicate = pending.transaction.steps[0].clone();
+                pending.transaction.steps[1] = duplicate;
+            } else if shape == "partial-marker" {
+                pending.transaction.steps[0].action = "other-action".to_string();
+            } else {
+                assert_eq!(shape, "foreign-step");
+                pending.transaction.steps.push(TransactionStep::planned(
+                    "other-phase",
+                    "cosh",
+                    "other-action",
+                    None,
+                ));
+            }
+            fs::write(
+                &pending.transaction.journal_path,
+                toml::to_string_pretty(&pending.transaction).expect("serialize journal"),
+            )
+            .expect("rewrite journal");
+
+            let err = find_pending_claim(&layout, &[], &["cosh"], "test")
+                .expect_err("ambiguous legacy journal must fail closed");
+
+            assert!(err.reason().contains(&pending.transaction.operation_id));
+            assert!(err.reason().contains("automatic recovery is unsafe"));
+        }
+    }
+
+    #[test]
+    fn explicit_delegated_context_is_not_a_legacy_rpm_claim() {
+        let (_tmp, layout) = layout();
+        let state_path = layout.state_dir.join("installed.toml");
+        let mut transaction = Transaction::begin_with_subject(
+            "install",
+            Some("cosh"),
+            state_path,
+            &journal_dir(&layout),
+        )
+        .expect("begin subjected journal");
+        transaction
+            .record_delegated_steps(
+                DelegatedRecoveryContext {
+                    pm: NativePm::Rpm,
+                    package: Some("copilot-shell".to_string()),
+                    record_action: DelegatedRecordAction::WriteManaged,
+                },
+                [
+                    TransactionStep::planned(INSTALL_PHASE, "copilot-shell", INSTALL_ACTION, None),
+                    TransactionStep::planned(STATE_PHASE, "cosh", STATE_ACTION, None),
+                ],
+            )
+            .expect("record hybrid steps");
+        drop(transaction);
+
+        let pending =
+            find_pending_claim(&layout, &[], &["cosh"], "test").expect("scan hybrid journal");
+
+        assert!(pending.is_none());
     }
 }

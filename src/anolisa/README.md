@@ -27,15 +27,16 @@ anolisa update all
 | Command | Description |
 |---------|-------------|
 | `list` | List available components (alias: `ls`) |
-| `install` | Install a component from configured backend (raw / rpm) |
+| `install` | Install a component from a configured raw or RPM backend |
 | `uninstall` | Uninstall a component |
 | `update` | Update a component, CLI itself (`self`), or all |
+| `upgrade` | Apply an RPM/system-image upgrade plan (system scope) |
 | `status` | Show component health |
 | `doctor` | Diagnose issues and suggest fixes |
 | `logs` | Query component logs |
 | `restart` | Restart a component service |
 | `repair` | Reconcile state after manual RPM changes |
-| `adopt` | Record an existing system RPM as managed |
+| `adopt` | Record an existing system RPM as adopted without default removal authority |
 | `forget` | Drop state record without package operations |
 
 ### Tier 2 — Management
@@ -60,6 +61,12 @@ anolisa update all
 
 Override with `--install-mode user|system`.
 
+Read-only discovery is broader than mutation scope: a user invocation can
+list, inspect, diagnose, and attach adapters to a visible system installation.
+Lifecycle mutations still target only the selected scope. Therefore
+`anolisa --install-mode user install <component>` may create a separate user
+installation even when the same component is already installed system-wide.
+
 ## Global Options
 
 | Flag | Effect |
@@ -69,6 +76,9 @@ Override with `--install-mode user|system`.
 | `-v, --verbose` | Increase verbosity |
 | `-q, --quiet` | Suppress non-error output |
 | `--no-color` | Disable colored output |
+
+See the [full CLI guide](../../docs/user-guide/en/user-entrypoint/anolisa-cli.md)
+for command forms, scope behavior, and recovery workflows.
 
 ## Architecture
 
@@ -82,7 +92,12 @@ Five-crate Cargo workspace:
 | `anolisa-build` | Build-time codegen and asset embedding |
 | `anolisa-platform` | Filesystem layout, systemd integration, IPC, privilege helpers |
 
-Supports dual backends: **raw** (OSS tar.gz) and **rpm** (dnf repository). Component metadata declared via `component.toml`.
+Supports dual backends: **raw** (OSS tar.gz) and **RPM** (dnf repository).
+The lifecycle planner separates ANOLISA-owned files from native-package
+authority and records crash-recovery intent before side effects. See the
+[lifecycle design](docs/design/install-lifecycle.md) for the authority,
+scope, transaction, and recovery invariants. Component metadata is declared
+through `component.toml`.
 
 ## Requirements
 

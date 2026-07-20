@@ -337,7 +337,11 @@ impl AdapterManager {
     /// at the boundary). Scope resolution follows the invoking uid, the
     /// same convention the CLI uses.
     fn load_state(&self) -> Result<StateStore, crate::state::StateError> {
-        Self::load_state_at(&self.state_path)
+        StateStore::load_for_layout(
+            &self.state_path,
+            anolisa_platform::privilege::effective_uid(),
+            &self.layout,
+        )
     }
 
     fn load_state_at(path: &Path) -> Result<StateStore, crate::state::StateError> {
@@ -2882,6 +2886,19 @@ mod tests {
         StateStore::load(path, anolisa_platform::privilege::effective_uid()).expect("load state")
     }
 
+    fn test_user_layout(root: &std::path::Path) -> (FsLayout, PathBuf) {
+        let home = root.join("home");
+        let layout = FsLayout::user_with_overrides(
+            home.clone(),
+            Some(root.join("user_data_home")),
+            None,
+            Some(root.join("user_state_home")),
+            None,
+            None,
+        );
+        (layout, home)
+    }
+
     /// The framework-agnostic Manager resolves the requirement by precedence
     /// only and never validates it — a present-but-empty value is passed
     /// through verbatim (the owning driver decides validity), and it never
@@ -3124,7 +3141,6 @@ mod tests {
                 ..Default::default()
             }],
             health_check: None,
-            health_checks: Vec::new(),
         }
     }
 
@@ -3318,7 +3334,13 @@ mod tests {
         let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
         std::fs::create_dir_all(&layout.state_dir).expect("mkdir state");
         std::fs::create_dir_all(&layout.log_dir).expect("mkdir log");
-        seed_installed_state(&layout.state_dir, "os-skills", ObjectStatus::Installed);
+        seed_installed_state(
+            &layout.state_dir,
+            crate::state::InstallMode::System,
+            &layout.prefix,
+            "os-skills",
+            ObjectStatus::Installed,
+        );
 
         let contract = r#"
 [component]
@@ -3376,7 +3398,11 @@ value = true
         let datadir = tmp.path().join("data");
 
         // Write installed.toml with an Adopted component, no snapshot.
-        let mut state = InstalledState::default();
+        let mut state = InstalledState {
+            install_mode: crate::state::InstallMode::System,
+            prefix: tmp.path().to_path_buf(),
+            ..InstalledState::default()
+        };
         state.upsert_object(InstalledObject {
             kind: ObjectKind::Component,
             name: "sec-core".to_string(),
@@ -3473,10 +3499,20 @@ dest = "{{datadir}}/adapters/{{component}}/openclaw/"
         )
     }
 
-    fn seed_installed_state(state_dir: &std::path::Path, component: &str, status: ObjectStatus) {
+    fn seed_installed_state(
+        state_dir: &std::path::Path,
+        install_mode: crate::state::InstallMode,
+        prefix: &std::path::Path,
+        component: &str,
+        status: ObjectStatus,
+    ) {
         use crate::state::{InstalledObject, ObjectKind, Ownership, SubscriptionScope};
 
-        let mut state = InstalledState::default();
+        let mut state = InstalledState {
+            install_mode,
+            prefix: prefix.to_path_buf(),
+            ..InstalledState::default()
+        };
         state.upsert_object(InstalledObject {
             kind: ObjectKind::Component,
             name: component.to_string(),
@@ -3591,8 +3627,17 @@ source = "adapters/openclaw"
         }
     }
 
-    fn seed_adapter_claim(state_dir: &std::path::Path, claim: AdapterClaim) {
-        let mut state = InstalledState::default();
+    fn seed_adapter_claim(
+        state_dir: &std::path::Path,
+        install_mode: crate::state::InstallMode,
+        prefix: &std::path::Path,
+        claim: AdapterClaim,
+    ) {
+        let mut state = InstalledState {
+            install_mode,
+            prefix: prefix.to_path_buf(),
+            ..InstalledState::default()
+        };
         state.upsert_adapter_claim(claim);
         std::fs::create_dir_all(state_dir).expect("mkdir state");
         state
@@ -3610,7 +3655,12 @@ source = "adapters/openclaw"
             .join("adapters")
             .join("tokenless")
             .join("openclaw");
-        seed_adapter_claim(&state_dir, openclaw_claim("tokenless", missing_resource));
+        seed_adapter_claim(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            openclaw_claim("tokenless", missing_resource),
+        );
 
         let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
         let mut manager = AdapterManager::new(layout, Some(tmp.path().join("home")), "test".into());
@@ -3652,7 +3702,12 @@ source = "adapters/openclaw"
             .join("adapters")
             .join("tokenless")
             .join("openclaw");
-        seed_adapter_claim(&state_dir, openclaw_claim("tokenless", missing_resource));
+        seed_adapter_claim(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            openclaw_claim("tokenless", missing_resource),
+        );
 
         let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
         let mut manager = AdapterManager::new(layout, Some(tmp.path().join("home")), "test".into());
@@ -3694,7 +3749,12 @@ source = "adapters/openclaw"
             .join("adapters")
             .join("tokenless")
             .join("openclaw");
-        seed_adapter_claim(&state_dir, openclaw_claim("tokenless", missing_resource));
+        seed_adapter_claim(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            openclaw_claim("tokenless", missing_resource),
+        );
 
         let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
         let mut manager = AdapterManager::new(layout, Some(tmp.path().join("home")), "test".into());
@@ -3723,7 +3783,13 @@ source = "adapters/openclaw"
         let state_dir = tmp.path().join("state");
         let datadir = tmp.path().join("data");
 
-        seed_installed_state(&state_dir, "tokenless", ObjectStatus::Installed);
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "tokenless",
+            ObjectStatus::Installed,
+        );
 
         // Contract without dest.
         write_contract_with_content(
@@ -3813,7 +3879,13 @@ source = "adapters/openclaw"
         let state_dir = tmp.path().join("state");
         let datadir = tmp.path().join("data");
 
-        seed_installed_state(&state_dir, "sec-core", ObjectStatus::Adopted);
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "sec-core",
+            ObjectStatus::Adopted,
+        );
 
         // Contract with custom dest.
         write_contract_with_content(
@@ -3878,7 +3950,13 @@ source = "adapters/openclaw"
         let state_dir = tmp.path().join("state");
         let datadir = tmp.path().join("data");
 
-        seed_installed_state(&state_dir, "sec-core", ObjectStatus::Adopted);
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "sec-core",
+            ObjectStatus::Adopted,
+        );
 
         // Contract with custom dest, but DO NOT create the directory.
         write_contract_with_content(
@@ -3944,7 +4022,13 @@ source = "adapters/openclaw"
         let state_dir = tmp.path().join("state");
         let datadir = tmp.path().join("data");
 
-        seed_installed_state(&state_dir, "sec-core", ObjectStatus::Adopted);
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "sec-core",
+            ObjectStatus::Adopted,
+        );
 
         // Contract with custom dest — directory does NOT exist.
         write_contract_with_content(
@@ -4006,13 +4090,21 @@ source = "adapters/openclaw"
     #[test]
     fn user_mode_uses_system_contract_dest() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let user_state = tmp.path().join("user_state");
-        let user_data = tmp.path().join("user_data");
-        let sys_state = tmp.path().join("sys_state");
-        let sys_data = tmp.path().join("sys_data");
+        let (user_layout, user_home) = test_user_layout(tmp.path());
+        let user_state = user_layout.state_dir.clone();
+        let user_data = user_layout.datadir.clone();
+        let system_layout = FsLayout::system(Some(tmp.path().join("system")));
+        let sys_state = system_layout.state_dir.clone();
+        let sys_data = system_layout.datadir.clone();
 
         // System has sec-core adopted with a custom dest.
-        seed_installed_state(&sys_state, "sec-core", ObjectStatus::Adopted);
+        seed_installed_state(
+            &sys_state,
+            crate::state::InstallMode::System,
+            &system_layout.prefix,
+            "sec-core",
+            ObjectStatus::Adopted,
+        );
         write_contract_with_content(
             &sys_data,
             "sec-core",
@@ -4024,15 +4116,12 @@ source = "adapters/openclaw"
         std::fs::write(custom_root.join("plugin.json"), b"{}").expect("write");
 
         // User state is empty.
-        std::fs::create_dir_all(&user_state).expect("mkdir user_state");
-        InstalledState::default()
+        std::fs::create_dir_all(&user_state).expect("mkdir user state");
+        StateStore::empty_for_layout(&user_layout)
             .save(&user_state.join("installed.toml"))
             .expect("save empty user state");
 
-        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
-        let mut manager =
-            AdapterManager::new(layout, Some(tmp.path().to_path_buf()), "test".into());
-        manager.state_path = user_state.join("installed.toml");
+        let mut manager = AdapterManager::new(user_layout, Some(user_home), "test".into());
         manager.visible_roots = vec![
             VisibleRoot {
                 state_dir: user_state,
@@ -4067,12 +4156,20 @@ source = "adapters/openclaw"
     #[test]
     fn user_mode_skill_source_uses_system_datadir() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let user_state = tmp.path().join("user_state");
-        let user_data = tmp.path().join("user_data");
-        let sys_state = tmp.path().join("sys_state");
-        let sys_data = tmp.path().join("sys_data");
+        let (user_layout, user_home) = test_user_layout(tmp.path());
+        let user_state = user_layout.state_dir.clone();
+        let user_data = user_layout.datadir.clone();
+        let system_layout = FsLayout::system(Some(tmp.path().join("system")));
+        let sys_state = system_layout.state_dir.clone();
+        let sys_data = system_layout.datadir.clone();
 
-        seed_installed_state(&sys_state, "sec-core", ObjectStatus::Adopted);
+        seed_installed_state(
+            &sys_state,
+            crate::state::InstallMode::System,
+            &system_layout.prefix,
+            "sec-core",
+            ObjectStatus::Adopted,
+        );
 
         let contract = r#"
 [component]
@@ -4101,15 +4198,12 @@ source = "{datadir}/skills/code-scanner/"
         std::fs::write(skill_source.join("manifest.json"), b"{}").expect("write");
 
         // User state empty.
-        std::fs::create_dir_all(&user_state).expect("mkdir user_state");
-        InstalledState::default()
+        std::fs::create_dir_all(&user_state).expect("mkdir user state");
+        StateStore::empty_for_layout(&user_layout)
             .save(&user_state.join("installed.toml"))
             .expect("save empty user state");
 
-        let user_layout = FsLayout::system(Some(tmp.path().to_path_buf()));
-        let mut manager =
-            AdapterManager::new(user_layout, Some(tmp.path().to_path_buf()), "test".into());
-        manager.state_path = user_state.join("installed.toml");
+        let mut manager = AdapterManager::new(user_layout, Some(user_home), "test".into());
         manager.visible_roots = vec![
             VisibleRoot {
                 state_dir: user_state,
@@ -4166,20 +4260,25 @@ source = "{datadir}/skills/code-scanner/"
     #[test]
     fn user_component_does_not_fallback_to_system_contract() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let user_state = tmp.path().join("user_state");
-        let user_data = tmp.path().join("user_data");
-        let sys_state = tmp.path().join("sys_state");
-        let sys_data = tmp.path().join("sys_data");
+        let (user_layout, user_home) = test_user_layout(tmp.path());
+        let user_state = user_layout.state_dir.clone();
+        let user_data = user_layout.datadir.clone();
+        let system_layout = FsLayout::system(Some(tmp.path().join("system")));
+        let sys_state = system_layout.state_dir.clone();
+        let sys_data = system_layout.datadir.clone();
 
         // User state has tokenless installed, no contract anywhere in user scope.
-        seed_installed_state(&user_state, "tokenless", ObjectStatus::Installed);
+        seed_installed_state(
+            &user_state,
+            crate::state::InstallMode::User,
+            &user_layout.prefix,
+            "tokenless",
+            ObjectStatus::Installed,
+        );
         // System datadir has a valid contract.
         write_contract(&sys_data, "tokenless");
 
-        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
-        let mut manager =
-            AdapterManager::new(layout, Some(tmp.path().to_path_buf()), "test".into());
-        manager.state_path = user_state.join("installed.toml");
+        let mut manager = AdapterManager::new(user_layout, Some(user_home), "test".into());
         manager.visible_roots = vec![
             VisibleRoot {
                 state_dir: user_state.clone(),
@@ -4219,7 +4318,13 @@ source = "{datadir}/skills/code-scanner/"
         let sys_data = tmp.path().join("sys_data");
         let pkg_data = tmp.path().join("pkg_data");
 
-        seed_installed_state(&sys_state, "tokenless", ObjectStatus::Installed);
+        seed_installed_state(
+            &sys_state,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "tokenless",
+            ObjectStatus::Installed,
+        );
         // Contract in pkg_data (simulates /usr/share vs /usr/local/share).
         write_contract(&pkg_data, "tokenless");
 
@@ -4255,7 +4360,13 @@ source = "{datadir}/skills/code-scanner/"
         let package_datadir = tmp.path().join("usr/share/anolisa");
         let state_dir = tmp.path().join("var/lib/anolisa");
 
-        seed_installed_state(&state_dir, "sec-core", ObjectStatus::Adopted);
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "sec-core",
+            ObjectStatus::Adopted,
+        );
 
         // Contract lives under the package datadir (simulates RPM install).
         write_contract(&package_datadir, "sec-core");
@@ -4327,7 +4438,13 @@ source = "{datadir}/skills/code-scanner/"
         let package_datadir = tmp.path().join("usr/share/anolisa");
         let state_dir = tmp.path().join("var/lib/anolisa");
 
-        seed_installed_state(&state_dir, "sec-core", ObjectStatus::Adopted);
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "sec-core",
+            ObjectStatus::Adopted,
+        );
 
         let contract = r#"
 [component]
@@ -4420,25 +4537,30 @@ source = "{datadir}/skills/code-scanner/"
     #[test]
     fn user_scan_includes_system_component_via_system_root() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let user_state = tmp.path().join("user_state");
-        let user_data = tmp.path().join("user_data");
-        let sys_state = tmp.path().join("sys_state");
-        let sys_data = tmp.path().join("sys_data");
+        let (user_layout, user_home) = test_user_layout(tmp.path());
+        let user_state = user_layout.state_dir.clone();
+        let user_data = user_layout.datadir.clone();
+        let system_layout = FsLayout::system(Some(tmp.path().join("system")));
+        let sys_state = system_layout.state_dir.clone();
+        let sys_data = system_layout.datadir.clone();
 
         // Only system state has tokenless; contract in system datadir.
-        seed_installed_state(&sys_state, "tokenless", ObjectStatus::Installed);
+        seed_installed_state(
+            &sys_state,
+            crate::state::InstallMode::System,
+            &system_layout.prefix,
+            "tokenless",
+            ObjectStatus::Installed,
+        );
         write_contract(&sys_data, "tokenless");
 
         // User state is empty.
-        std::fs::create_dir_all(&user_state).expect("mkdir user_state");
-        InstalledState::default()
+        std::fs::create_dir_all(&user_state).expect("mkdir user state");
+        StateStore::empty_for_layout(&user_layout)
             .save(&user_state.join("installed.toml"))
             .expect("save empty user state");
 
-        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
-        let mut manager =
-            AdapterManager::new(layout, Some(tmp.path().to_path_buf()), "test".into());
-        manager.state_path = user_state.join("installed.toml");
+        let mut manager = AdapterManager::new(user_layout, Some(user_home), "test".into());
         manager.visible_roots = vec![
             VisibleRoot {
                 state_dir: user_state,
@@ -4982,7 +5104,13 @@ source = "{datadir}/skills/code-scanner/"
         let pkg_datadir = tmp.path().join("usr/share/anolisa");
         let abs_dest = tmp.path().join("opt/agent-sec/openclaw-plugin");
 
-        seed_installed_state(&state_dir, "sec-core", ObjectStatus::Adopted);
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "sec-core",
+            ObjectStatus::Adopted,
+        );
 
         // Contract lives under pkg_datadir (simulates RPM install to
         // /usr/share/anolisa). No contract under local_datadir.
@@ -5091,7 +5219,13 @@ source = "{{datadir}}/skills/code-scanner/"
         let pkg_datadir = tmp.path().join("usr/share/anolisa");
         let abs_dest = tmp.path().join("opt/agent-sec/openclaw-plugin");
 
-        seed_installed_state(&state_dir, "sec-core", ObjectStatus::Adopted);
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "sec-core",
+            ObjectStatus::Adopted,
+        );
 
         let package_contract = format!(
             r#"
@@ -5194,7 +5328,13 @@ source = "{{datadir}}/skills/code-scanner/"
         let pkg_datadir = tmp.path().join("usr/share/anolisa");
         let abs_dest = tmp.path().join("opt/agent-sec/openclaw-plugin");
 
-        seed_installed_state(&state_dir, "sec-core", ObjectStatus::Adopted);
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "sec-core",
+            ObjectStatus::Adopted,
+        );
 
         let contract = format!(
             r#"
@@ -5300,7 +5440,13 @@ source = "{{datadir}}/skills/code-scanner/"
         let state_dir = tmp.path().join("state");
         let pkg_datadir = tmp.path().join("pkg_data");
 
-        seed_installed_state(&state_dir, "sec-core", ObjectStatus::Adopted);
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "sec-core",
+            ObjectStatus::Adopted,
+        );
 
         let contract = valid_contract_toml("sec-core");
         write_contract(&pkg_datadir, "sec-core");
@@ -5344,7 +5490,13 @@ source = "{{datadir}}/skills/code-scanner/"
         let package_datadir = tmp.path().join("usr/share/anolisa");
         let state_dir = tmp.path().join("var/lib/anolisa");
 
-        seed_installed_state(&state_dir, "os-skills", ObjectStatus::Adopted);
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "os-skills",
+            ObjectStatus::Adopted,
+        );
 
         let contract = r#"
 [component]
@@ -5431,7 +5583,13 @@ dest = "{datadir}/skills"
         let package_datadir = tmp.path().join("usr/share/anolisa");
         let state_dir = tmp.path().join("var/lib/anolisa");
 
-        seed_installed_state(&state_dir, "os-skills", ObjectStatus::Adopted);
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "os-skills",
+            ObjectStatus::Adopted,
+        );
 
         let contract = r#"
 [component]
@@ -5504,7 +5662,13 @@ dest = "{datadir}/skills"
         let package_datadir = tmp.path().join("usr/share/anolisa");
         let state_dir = tmp.path().join("var/lib/anolisa");
 
-        seed_installed_state(&state_dir, "os-skills", ObjectStatus::Adopted);
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "os-skills",
+            ObjectStatus::Adopted,
+        );
 
         let contract = r#"
 [component]

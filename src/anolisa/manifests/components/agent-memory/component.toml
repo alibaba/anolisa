@@ -78,4 +78,3 @@ detect = { binary = "openclaw" }
 
 [adapters.bundle]
 entry = "openclaw.plugin.json"
-

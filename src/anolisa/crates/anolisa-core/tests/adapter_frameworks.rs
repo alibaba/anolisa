@@ -722,7 +722,7 @@ fn codex_enable_succeeds_with_bundle_under_packaged_datadir() {
     // the packaged datadir, so resolution lands there.
     seed_component(
         &layout,
-        &prefix,
+        &layout.prefix,
         "codex",
         "plugin",
         "{datadir}/adapters/{component}/codex/",

@@ -465,12 +465,12 @@ Each hook/plugin degrades independently — if the corresponding binary (`rtk` o
 ### Diagnostic tools
 
 ```bash
-# Component-level diagnosis + auto-fix
-anolisa doctor tokenless --fix
+# Component-level diagnosis (follow the reported fix plan manually)
+anolisa doctor tokenless
 
 # View detailed install plan
-anolisa install tokenless --verbose
-anolisa install tokenless --dry-run
+anolisa --verbose install tokenless
+anolisa --dry-run install tokenless
 
 # Adapter status
 anolisa adapter status tokenless
@@ -496,16 +496,16 @@ tokenless env-check --all --checklist
 | Tool Ready false NOT_READY | Inspect `tool-ready-spec.json`; run `tokenless env-check --tool <name> --fix` |
 | `retrieve` returns empty | Entry expired (TTL SQLite 1h / InMemory 5min); or compression ran with `--no-stash`; or `--stash-db` points at a different database |
 | adapter enable failed | `anolisa adapter scan` to confirm framework installed; `anolisa adapter status tokenless` for details |
-| State out of sync after manual dnf | `anolisa repair tokenless`; or `anolisa forget tokenless` then `anolisa adopt tokenless` |
+| System state out of sync after manual dnf | `sudo anolisa --install-mode system repair tokenless`; if the RPM is still present, use a system-scoped `forget` followed by `adopt` to recreate the record |
 
 ### State-inconsistency repair
 
 If `dnf remove` / `rpm -e` was used to directly modify an ANOLISA-managed package:
 
 ```bash
-anolisa repair tokenless         # repair state
-anolisa forget tokenless         # clear ANOLISA records only (leave package)
-anolisa adopt tokenless          # re-adopt
+sudo anolisa --install-mode system repair tokenless  # reconcile system state
+sudo anolisa --install-mode system forget tokenless  # drop only the system record
+sudo anolisa --install-mode system adopt tokenless   # re-adopt a present RPM
 ```
 
 ---

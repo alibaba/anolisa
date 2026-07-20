@@ -17,9 +17,254 @@ use crate::domain::{InstallationScope, ProviderBinding};
 use crate::integrity::{IntegrityStatus, check_owned_file};
 use crate::planner::{Facts, NativeProbe, RecordFacts};
 use crate::providers::{DelegatedProvider, ProviderError};
-use crate::state::ObjectKind;
+use crate::state::{ObjectKind, OperationRecord};
 use crate::state_store::StateStore;
-use crate::transaction::Transaction;
+use crate::transaction::{Transaction, TransactionError};
+
+const LEGACY_INSTALL_PHASE: &str = "rpm-install";
+const LEGACY_INSTALL_ACTION: &str = "dnf-install";
+const LEGACY_STATE_PHASE: &str = "rpm-state";
+const LEGACY_STATE_ACTION: &str = "commit-rpm-managed";
+
+/// Same-root evidence used to classify validated operation journals.
+///
+/// Binding the journal directory to its operation history prevents one scope
+/// from settling another scope's recovery markers accidentally.
+#[derive(Debug, Clone, Copy)]
+pub struct JournalEvidence<'a> {
+    journal_dir: &'a Path,
+    operations: &'a [OperationRecord],
+}
+
+impl<'a> JournalEvidence<'a> {
+    /// Bind a journal directory to the operation history from the same state
+    /// root.
+    pub const fn new(journal_dir: &'a Path, operations: &'a [OperationRecord]) -> Self {
+        Self {
+            journal_dir,
+            operations,
+        }
+    }
+
+    /// Journal directory covered by this evidence snapshot.
+    pub const fn journal_dir(self) -> &'a Path {
+        self.journal_dir
+    }
+}
+
+/// Whether a transaction uses the pre-subject two-step RPM install protocol.
+///
+/// One exact legacy step is accepted because a successful operation record
+/// can outlive a malformed final journal revision. Modern context fields,
+/// partial marker matches, duplicates, and foreign steps remain fail-closed.
+pub fn is_legacy_rpm_install_journal(transaction: &Transaction) -> bool {
+    if transaction.operation != "install"
+        || transaction.subject.is_some()
+        || transaction.delegated_recovery.is_some()
+        || transaction.steps.is_empty()
+        || transaction.steps.len() > 2
+    {
+        return false;
+    }
+
+    let mut install_index = None;
+    let mut state_index = None;
+    for (index, step) in transaction.steps.iter().enumerate() {
+        let slot = match (step.phase.as_str(), step.action.as_str()) {
+            (LEGACY_INSTALL_PHASE, LEGACY_INSTALL_ACTION) => &mut install_index,
+            (LEGACY_STATE_PHASE, LEGACY_STATE_ACTION) => &mut state_index,
+            _ => return false,
+        };
+        if slot.replace(index).is_some() {
+            return false;
+        }
+    }
+
+    match (install_index, state_index) {
+        (Some(install), Some(state)) => install < state,
+        (Some(_), None) | (None, Some(_)) => true,
+        (None, None) => false,
+    }
+}
+
+fn legacy_rpm_install_is_committed(
+    transaction: &Transaction,
+    operations: &[OperationRecord],
+) -> bool {
+    let mut matching = operations
+        .iter()
+        .filter(|operation| operation.id == transaction.operation_id);
+    is_legacy_rpm_install_journal(transaction)
+        && matching
+            .next()
+            .is_some_and(|operation| operation.status == "ok")
+        && matching.next().is_none()
+}
+
+fn validate_journal_binding(
+    transaction: &Transaction,
+    path: &Path,
+    journal_dir: &Path,
+) -> Result<(), TransactionError> {
+    if transaction.journal_path != path {
+        return Err(TransactionError::CorruptJournal(format!(
+            "{}: embedded journal_path {} does not match scanned path {}",
+            path.display(),
+            transaction.journal_path.display(),
+            path.display()
+        )));
+    }
+    let expected_state_path = journal_dir
+        .parent()
+        .ok_or_else(|| {
+            TransactionError::CorruptJournal(format!(
+                "{}: journal directory has no state root",
+                path.display()
+            ))
+        })?
+        .join("installed.toml");
+    if transaction.state_path != expected_state_path {
+        return Err(TransactionError::CorruptJournal(format!(
+            "{}: embedded state_path {} does not match state root path {}",
+            path.display(),
+            transaction.state_path.display(),
+            expected_state_path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// One validated transaction journal and the filesystem path it was loaded
+/// from.
+#[derive(Debug, Clone)]
+pub struct JournalEntry {
+    path: PathBuf,
+    transaction: Transaction,
+    effective_pending: bool,
+}
+
+impl JournalEntry {
+    /// Journal path discovered while scanning the state root.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Validated transaction stored at [`Self::path`].
+    pub fn transaction(&self) -> &Transaction {
+        &self.transaction
+    }
+
+    /// Whether recovery remains pending after applying compatible state
+    /// evidence.
+    pub fn is_effectively_pending(&self) -> bool {
+        self.effective_pending
+    }
+}
+
+/// Validated snapshot of every journal-shaped file under one state root.
+///
+/// Construction validates the entire directory before exposing any entry, so
+/// callers cannot accidentally accept an earlier matching journal while a
+/// later unreadable or unsupported journal leaves recovery scope unknown.
+#[derive(Debug, Clone, Default)]
+pub struct JournalInventory {
+    entries: Vec<JournalEntry>,
+}
+
+impl JournalInventory {
+    /// Load and validate every `*.journal.toml` file covered by `evidence`.
+    ///
+    /// A missing directory is an empty inventory. Enumeration, IO, parse, and
+    /// schema failures are returned with the directory or journal path that
+    /// made the recovery state untrustworthy.
+    pub fn load(evidence: JournalEvidence<'_>) -> Result<Self, FactsError> {
+        let journal_dir = evidence.journal_dir;
+        let entries = match fs::read_dir(journal_dir) {
+            Ok(entries) => entries,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(source) => {
+                return Err(FactsError::JournalScan {
+                    dir: journal_dir.to_path_buf(),
+                    source,
+                });
+            }
+        };
+        let mut paths = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| FactsError::JournalScan {
+                dir: journal_dir.to_path_buf(),
+                source,
+            })?;
+            let path = entry.path();
+            if !path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().ends_with(".journal.toml"))
+            {
+                continue;
+            }
+            paths.push(path);
+        }
+        paths.sort();
+
+        let entries = paths
+            .into_iter()
+            .map(|path| {
+                let transaction =
+                    Transaction::load_journal(&path).map_err(|source| FactsError::JournalLoad {
+                        path: path.clone(),
+                        source,
+                    })?;
+                validate_journal_binding(&transaction, &path, journal_dir).map_err(|source| {
+                    FactsError::JournalLoad {
+                        path: path.clone(),
+                        source,
+                    }
+                })?;
+                let effective_pending = transaction.is_pending()
+                    && !legacy_rpm_install_is_committed(&transaction, evidence.operations);
+                Ok(JournalEntry {
+                    path,
+                    transaction,
+                    effective_pending,
+                })
+            })
+            .collect::<Result<Vec<_>, FactsError>>()?;
+        Ok(Self { entries })
+    }
+
+    /// All validated journals, including settled entries retained for audit
+    /// and legacy recovery compatibility.
+    pub fn entries(&self) -> &[JournalEntry] {
+        &self.entries
+    }
+
+    /// First pending journal that may affect `subject`.
+    ///
+    /// Journals written before subject attribution existed match every
+    /// subject conservatively because their mutation scope is unknown.
+    pub fn blocking_for(&self, subject: &str) -> Option<&JournalEntry> {
+        self.entries.iter().find(|entry| {
+            entry.is_effectively_pending()
+                && match entry.transaction.subject.as_deref() {
+                    Some(candidate) => candidate == subject,
+                    None => true,
+                }
+        })
+    }
+
+    /// First pending journal explicitly attributed to `subject`.
+    ///
+    /// Unlike [`Self::blocking_for`], this excludes unattributed legacy
+    /// journals because conservative blocking is not proof of recovery
+    /// ownership.
+    pub fn recoverable_for(&self, subject: &str) -> Option<&JournalEntry> {
+        self.entries.iter().find(|entry| {
+            entry.is_effectively_pending() && entry.transaction.subject.as_deref() == Some(subject)
+        })
+    }
+}
 
 /// What to observe for one object.
 #[derive(Debug, Clone, Copy)]
@@ -57,6 +302,17 @@ pub enum FactsError {
         /// Underlying IO error.
         source: std::io::Error,
     },
+    /// A journal could not be read safely, parsed, or validated against the
+    /// supported schema. Mutation must stop because its subject and status
+    /// cannot be trusted.
+    #[error("cannot safely inspect operation journal {path}: {source}")]
+    JournalLoad {
+        /// Journal that failed validation.
+        path: PathBuf,
+        /// Parser, schema, or IO failure returned by the transaction layer.
+        #[source]
+        source: TransactionError,
+    },
 }
 
 /// Assemble [`Facts`] for one object.
@@ -79,7 +335,11 @@ pub fn assemble_facts(
         _ => NativeProbe::NotProbed,
     };
 
-    let pending_journal = pending_journal_for(journal_dir, req.name)?.is_some();
+    let pending_journal = pending_journal_for(
+        JournalEvidence::new(journal_dir, &store.operations),
+        req.name,
+    )?
+    .is_some();
 
     let active_adapter_claims: Vec<String> = store
         .adapter_claims
@@ -151,59 +411,31 @@ fn verify_owned_files(
 
 /// First pending journal attributed to `subject`, if any.
 ///
-/// A journal is pending when [`Transaction::is_pending`] holds (in flight
-/// or `Partial`). Attribution: a journal whose `subject` matches, or an
-/// unattributed journal (written before subjects existed) — the latter
-/// blocks conservatively, because an interrupted operation of unknown scope
-/// may well concern this object. Files that do not parse as journals are
-/// skipped: they cannot be attributed, and `repair` surfaces them through
-/// its own scan.
+/// A journal is effectively pending when [`Transaction::is_pending`] holds
+/// (in flight or `Partial`) and compatible same-root operation history does
+/// not prove an exact legacy RPM install committed. Attribution then matches
+/// the journal's `subject`; journals written before subjects existed block
+/// conservatively. Every journal-shaped file must load and use the supported
+/// schema before a result is returned: an unreadable or unrecognized journal
+/// has unknown scope and therefore fails closed.
 pub fn pending_journal_for(
-    journal_dir: &Path,
+    evidence: JournalEvidence<'_>,
     subject: &str,
 ) -> Result<Option<PathBuf>, FactsError> {
-    if !journal_dir.exists() {
-        return Ok(None);
-    }
-    let entries = fs::read_dir(journal_dir).map_err(|source| FactsError::JournalScan {
-        dir: journal_dir.to_path_buf(),
-        source,
-    })?;
-    for entry in entries {
-        let entry = entry.map_err(|source| FactsError::JournalScan {
-            dir: journal_dir.to_path_buf(),
-            source,
-        })?;
-        let path = entry.path();
-        if !path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.ends_with(".journal.toml"))
-        {
-            continue;
-        }
-        let Ok(journal) = Transaction::load_journal(&path) else {
-            continue;
-        };
-        if !journal.is_pending() {
-            continue;
-        }
-        match &journal.subject {
-            Some(s) if s == subject => return Ok(Some(path)),
-            None => return Ok(Some(path)),
-            Some(_) => continue,
-        }
-    }
-    Ok(None)
+    Ok(JournalInventory::load(evidence)?
+        .blocking_for(subject)
+        .map(|entry| entry.path.clone()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{Installation, LifecycleStatus, OwnedArtifact};
+    use crate::domain::{Installation, LifecycleStatus, NativePm, OwnedArtifact};
     use crate::providers::test_fakes::{FakeQuery, FakeTxn, InstalledOutcome, pkg_info};
-    use crate::state::{FileOwner, OwnedFile, OwnedFileKind};
-    use crate::transaction::TransactionOutcomeStatus;
+    use crate::state::{FileOwner, OperationRecord, OwnedFile, OwnedFileKind};
+    use crate::transaction::{
+        DelegatedRecordAction, DelegatedRecoveryContext, TransactionOutcomeStatus, TransactionStep,
+    };
 
     const NOW: &str = "2026-07-16T00:00:00Z";
 
@@ -247,6 +479,39 @@ mod tests {
             subscription_scope: Default::default(),
             enabled_features: Vec::new(),
             health: Vec::new(),
+        }
+    }
+
+    fn begin_legacy_journal(layout: &FsLayout, subject: Option<&str>) -> Transaction {
+        let mut journal = Transaction::begin_with_subject(
+            "install",
+            subject,
+            layout.state_dir.join("installed.toml"),
+            &layout.state_dir.join("journal"),
+        )
+        .expect("begin legacy journal");
+        journal
+            .record_steps([
+                TransactionStep::planned(
+                    LEGACY_INSTALL_PHASE,
+                    "copilot-shell",
+                    LEGACY_INSTALL_ACTION,
+                    None,
+                ),
+                TransactionStep::planned(LEGACY_STATE_PHASE, "cosh", LEGACY_STATE_ACTION, None),
+            ])
+            .expect("record legacy steps");
+        journal
+    }
+
+    fn operation(operation_id: &str, status: &str) -> OperationRecord {
+        OperationRecord {
+            id: operation_id.to_string(),
+            command: "install cosh".to_string(),
+            status: status.to_string(),
+            started_at: NOW.to_string(),
+            finished_at: Some(NOW.to_string()),
+            parent_operation_id: None,
         }
     }
 
@@ -316,12 +581,12 @@ mod tests {
         drop(journal);
 
         assert!(
-            pending_journal_for(&journal_dir, "cosh")
+            pending_journal_for(JournalEvidence::new(&journal_dir, &[]), "cosh")
                 .expect("scan")
                 .is_some()
         );
         assert!(
-            pending_journal_for(&journal_dir, "tokenless")
+            pending_journal_for(JournalEvidence::new(&journal_dir, &[]), "tokenless")
                 .expect("scan")
                 .is_none()
         );
@@ -346,7 +611,7 @@ mod tests {
             .expect("begin journal");
             journal.finish(status).expect("finish");
             assert!(
-                pending_journal_for(&journal_dir, subject)
+                pending_journal_for(JournalEvidence::new(&journal_dir, &[]), subject)
                     .expect("scan")
                     .is_none(),
                 "{status:?} journals are settled"
@@ -365,14 +630,14 @@ mod tests {
             .finish(TransactionOutcomeStatus::Partial)
             .expect("finish");
         assert!(
-            pending_journal_for(&journal_dir, "d")
+            pending_journal_for(JournalEvidence::new(&journal_dir, &[]), "d")
                 .expect("scan")
                 .is_some()
         );
     }
 
     #[test]
-    fn unattributed_pending_journal_blocks_conservatively() {
+    fn unattributed_pending_journal_blocks_but_is_not_recoverable() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let journal_dir = tmp.path().join("journal");
         let journal =
@@ -381,10 +646,293 @@ mod tests {
         drop(journal);
 
         assert!(
-            pending_journal_for(&journal_dir, "anything")
+            pending_journal_for(JournalEvidence::new(&journal_dir, &[]), "anything")
                 .expect("scan")
                 .is_some()
         );
+        let inventory = JournalInventory::load(JournalEvidence::new(&journal_dir, &[]))
+            .expect("load inventory");
+        assert!(inventory.blocking_for("anything").is_some());
+        assert!(inventory.recoverable_for("anything").is_none());
+    }
+
+    #[test]
+    fn committed_legacy_journal_does_not_block_an_unrelated_fact() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let layout = layout_under(tmp.path());
+        let journal_dir = layout.state_dir.join("journal");
+        let journal = begin_legacy_journal(&layout, None);
+        let operation_id = journal.operation_id.clone();
+        drop(journal);
+        let mut store = StateStore::empty();
+        store.operations.push(operation(&operation_id, "ok"));
+
+        let facts = assemble_facts(
+            &request("unrelated", None),
+            &store,
+            None,
+            &layout,
+            &journal_dir,
+        )
+        .expect("assemble facts");
+
+        assert!(!facts.pending_journal);
+    }
+
+    #[test]
+    fn subjected_journal_cannot_use_the_legacy_commit_override() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let layout = layout_under(tmp.path());
+        let journal_dir = layout.state_dir.join("journal");
+        let journal = begin_legacy_journal(&layout, Some("cosh"));
+        let operation_id = journal.operation_id.clone();
+        drop(journal);
+        let mut store = StateStore::empty();
+        store.operations.push(operation(&operation_id, "ok"));
+
+        let facts = assemble_facts(&request("cosh", None), &store, None, &layout, &journal_dir)
+            .expect("assemble facts");
+
+        assert!(facts.pending_journal);
+    }
+
+    #[test]
+    fn legacy_commit_override_requires_matching_success() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let layout = layout_under(tmp.path());
+        let journal_dir = layout.state_dir.join("journal");
+        let journal = begin_legacy_journal(&layout, None);
+        let operation_id = journal.operation_id.clone();
+        drop(journal);
+
+        for operations in [
+            vec![operation("different-operation", "ok")],
+            vec![operation(&operation_id, "failed")],
+            vec![operation(&operation_id, "partial")],
+            vec![
+                operation(&operation_id, "ok"),
+                operation(&operation_id, "failed"),
+            ],
+            vec![
+                operation(&operation_id, "ok"),
+                operation(&operation_id, "ok"),
+            ],
+        ] {
+            assert!(
+                pending_journal_for(JournalEvidence::new(&journal_dir, &operations), "cosh",)
+                    .expect("scan journal")
+                    .is_some()
+            );
+        }
+
+        assert!(
+            pending_journal_for(
+                JournalEvidence::new(&journal_dir, &[operation(&operation_id, "ok")]),
+                "cosh",
+            )
+            .expect("scan committed journal")
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn legacy_protocol_recognition_rejects_modern_or_ambiguous_shapes() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let layout = layout_under(tmp.path());
+        let legacy = begin_legacy_journal(&layout, None);
+        assert!(is_legacy_rpm_install_journal(&legacy));
+
+        let mut one_step = legacy.clone();
+        one_step.steps.pop();
+        assert!(is_legacy_rpm_install_journal(&one_step));
+
+        let mut delegated = legacy.clone();
+        delegated.delegated_recovery = Some(DelegatedRecoveryContext {
+            pm: NativePm::Rpm,
+            package: Some("copilot-shell".to_string()),
+            record_action: DelegatedRecordAction::WriteManaged,
+        });
+        assert!(!is_legacy_rpm_install_journal(&delegated));
+
+        let mut reversed = legacy.clone();
+        reversed.steps.reverse();
+        assert!(!is_legacy_rpm_install_journal(&reversed));
+
+        let mut duplicate = legacy.clone();
+        duplicate.steps[1] = duplicate.steps[0].clone();
+        assert!(!is_legacy_rpm_install_journal(&duplicate));
+
+        let mut partial_marker = legacy.clone();
+        partial_marker.steps[0].action = "other-action".to_string();
+        assert!(!is_legacy_rpm_install_journal(&partial_marker));
+
+        let mut foreign_step = legacy.clone();
+        foreign_step.steps.push(TransactionStep::planned(
+            "other-phase",
+            "cosh",
+            "other-action",
+            None,
+        ));
+        assert!(!is_legacy_rpm_install_journal(&foreign_step));
+
+        let mut wrong_operation = legacy;
+        wrong_operation.operation = "update".to_string();
+        assert!(!is_legacy_rpm_install_journal(&wrong_operation));
+    }
+
+    #[test]
+    fn corrupt_journal_fails_closed_with_its_path() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let journal_dir = tmp.path().join("journal");
+        fs::create_dir_all(&journal_dir).expect("journal dir");
+        let path = journal_dir.join("broken.journal.toml");
+        fs::write(&path, "this is not valid = [toml").expect("corrupt journal");
+
+        let err = pending_journal_for(JournalEvidence::new(&journal_dir, &[]), "cosh")
+            .expect_err("invalid journals have unknown scope and must block");
+
+        match err {
+            FactsError::JournalLoad {
+                path: failed_path,
+                source: TransactionError::CorruptJournal(_),
+            } => assert_eq!(failed_path, path),
+            other => panic!("expected corrupt journal error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn embedded_journal_path_mismatch_fails_closed() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let journal_dir = tmp.path().join("journal");
+        let mut journal = Transaction::begin_with_subject(
+            "install",
+            Some("cosh"),
+            tmp.path().join("installed.toml"),
+            &journal_dir,
+        )
+        .expect("journal");
+        let actual_path = journal.journal_path.clone();
+        journal.journal_path = tmp.path().join("outside.journal.toml");
+        fs::write(
+            &actual_path,
+            toml::to_string_pretty(&journal).expect("serialize journal"),
+        )
+        .expect("rewrite journal");
+
+        let err = pending_journal_for(JournalEvidence::new(&journal_dir, &[]), "cosh")
+            .expect_err("a journal cannot redirect recovery writes outside its scanned path");
+
+        match err {
+            FactsError::JournalLoad {
+                path,
+                source: TransactionError::CorruptJournal(reason),
+            } => {
+                assert_eq!(path, actual_path);
+                assert!(reason.contains("embedded journal_path"));
+            }
+            other => panic!("expected journal path binding error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn embedded_state_path_mismatch_fails_closed() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let journal_dir = tmp.path().join("journal");
+        let mut journal = Transaction::begin_with_subject(
+            "install",
+            Some("cosh"),
+            tmp.path().join("installed.toml"),
+            &journal_dir,
+        )
+        .expect("journal");
+        let actual_path = journal.journal_path.clone();
+        journal.state_path = tmp.path().join("outside-state.toml");
+        fs::write(
+            &actual_path,
+            toml::to_string_pretty(&journal).expect("serialize journal"),
+        )
+        .expect("rewrite journal");
+
+        let err = pending_journal_for(JournalEvidence::new(&journal_dir, &[]), "cosh")
+            .expect_err("a journal cannot redirect state recovery outside its scanned root");
+
+        match err {
+            FactsError::JournalLoad {
+                path,
+                source: TransactionError::CorruptJournal(reason),
+            } => {
+                assert_eq!(path, actual_path);
+                assert!(reason.contains("embedded state_path"));
+            }
+            other => panic!("expected state path binding error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn future_journal_schema_fails_closed_with_its_path() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let journal_dir = tmp.path().join("journal");
+        let journal = Transaction::begin_with_subject(
+            "install",
+            Some("cosh"),
+            tmp.path().join("installed.toml"),
+            &journal_dir,
+        )
+        .expect("journal");
+        let path = journal.journal_path.clone();
+        drop(journal);
+        let text = fs::read_to_string(&path).expect("read journal");
+        fs::write(
+            &path,
+            text.replacen("schema_version = 1", "schema_version = 999", 1),
+        )
+        .expect("write future journal");
+
+        let err = pending_journal_for(JournalEvidence::new(&journal_dir, &[]), "cosh")
+            .expect_err("unsupported journals have unknown scope and must block");
+
+        match err {
+            FactsError::JournalLoad {
+                path: failed_path,
+                source: TransactionError::CorruptJournal(reason),
+            } => {
+                assert_eq!(failed_path, path);
+                assert!(reason.contains("unsupported journal schema_version 999"));
+            }
+            other => panic!("expected future-schema journal error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn journal_scan_validates_all_files_before_returning_pending() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let journal_dir = tmp.path().join("journal");
+        let mut journal = Transaction::begin_with_subject(
+            "install",
+            Some("cosh"),
+            tmp.path().join("installed.toml"),
+            &journal_dir,
+        )
+        .expect("journal");
+        let first = journal_dir.join("000-pending.journal.toml");
+        fs::rename(&journal.journal_path, &first).expect("rename pending journal");
+        journal.journal_path = first.clone();
+        fs::write(
+            &first,
+            toml::to_string_pretty(&journal).expect("serialize renamed journal"),
+        )
+        .expect("rewrite renamed journal");
+        drop(journal);
+        let corrupt = journal_dir.join("zzz-corrupt.journal.toml");
+        fs::write(&corrupt, "invalid = [").expect("corrupt journal");
+
+        let err = pending_journal_for(JournalEvidence::new(&journal_dir, &[]), "cosh")
+            .expect_err("a later invalid journal must outrank an earlier match");
+
+        match err {
+            FactsError::JournalLoad { path, .. } => assert_eq!(path, corrupt),
+            other => panic!("expected journal load error, got {other:?}"),
+        }
     }
 
     #[test]

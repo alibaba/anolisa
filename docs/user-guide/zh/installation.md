@@ -55,20 +55,20 @@ anolisa install <component>
 
 ### 可用组件
 
-| 组件 | 说明 | 模式 |
-|------|------|------|
-| `cosh` | Copilot Shell — AI 终端助手 | user |
-| `os-skills` | 系统管理与 DevOps 技能 | user |
-| `tokenless` | Token 优化（压缩） | user |
-| `ws-ckpt` | 工作区快照/回滚 | user |
-| `skillfs` | FUSE 虚拟技能文件系统 | user |
-| `agent-memory` | 基于 MCP 的持久化记忆 | user |
+| 组件 | 说明 | 支持的模式 |
+|------|------|------------|
+| `cosh` | Copilot Shell — AI 终端助手 | user、system |
+| `os-skills` | 系统管理与 DevOps 技能 | user、system |
+| `tokenless` | Token 优化（压缩） | user、system |
+| `ws-ckpt` | 工作区快照/回滚 | **system** |
+| `skillfs` | FUSE 虚拟技能文件系统 | **system** |
+| `agent-memory` | 基于 MCP 的持久化记忆 | user、system |
 | `agentsight` | eBPF 追踪与 Dashboard | **system** |
 | `agent-sec-core` | 安全加固 | **system** |
 
-> **注意**：标记为 **system** 的组件需要 `sudo`：
+> **注意**：仅支持 system mode 的组件需要 `sudo` 并显式选择 system scope：
 > ```bash
-> sudo anolisa install agentsight
+> sudo anolisa --install-mode system install agentsight
 > ```
 
 ### 安装全部组件
@@ -89,10 +89,11 @@ sudo yum install <component>
 
 ## 第四步：适配器配置
 
-适配器将组件桥接到特定 Agent 框架。安装组件后再安装适配器：
+适配器将组件桥接到特定 Agent 框架。安装组件后再启用适配器：
 
 ```bash
-anolisa adapter install <component> --runtime <runtime>
+anolisa adapter scan
+anolisa adapter enable <component> [framework]
 ```
 
 ### 示例
@@ -137,10 +138,12 @@ anolisa doctor
 anolisa uninstall <component>
 ```
 
-移除所有 ANOLISA 组件：
+当前没有批量卸载命令。先列出安装记录，再逐个卸载目标组件，以便分别确认其
+authority 和系统软件包移除策略：
 
 ```bash
-anolisa uninstall --all
+anolisa list --installed
+anolisa uninstall <component>
 ```
 
 ---
@@ -156,8 +159,11 @@ anolisa update <component>
 更新所有已安装组件：
 
 ```bash
-anolisa update --all
+anolisa update all
 ```
+
+`update all` 只更新已记录的组件，不更新 CLI；更新 CLI 请使用
+`anolisa update self`。
 
 ---
 

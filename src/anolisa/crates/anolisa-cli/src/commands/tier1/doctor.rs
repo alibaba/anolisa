@@ -6,15 +6,18 @@
 //! executor exists.
 
 use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
-use anolisa_core::domain::{Installation, LifecycleStatus, ProviderBinding};
+use anolisa_core::domain::{Installation, LifecycleStatus, ManagementRelation, ProviderBinding};
+use anolisa_core::facts::{FactsError, JournalEvidence, JournalInventory};
 use anolisa_core::{
-    Catalog, CheckEnv, CheckOutcome, CheckSpec, CheckStatus, ComponentManifest, DependencyKind,
+    CheckEnv, CheckOutcome, CheckSpec, CheckStatus, ComponentManifest, DependencyKind,
     DependencyResolution, DependencyResolver, DependencyStatus, HealthEntry, ObjectKind,
-    ResolverEnv, ServiceManager, ServiceRef, ServiceScope, ServiceState, run_check,
-    service_for_install_mode, user_service_for_install_mode,
+    ResolverEnv, ServiceManager, ServiceRef, ServiceScope, ServiceState, check_owned_file,
+    run_check, service_for_install_mode, user_service_for_install_mode,
 };
 use anolisa_platform::fs_layout::FsLayout;
+use anolisa_platform::pkg_query::PackageQuery;
 use anolisa_platform::rpm_query::RpmPackageQuery;
 use clap::Parser;
 use serde::Serialize;
@@ -22,7 +25,8 @@ use serde::Serialize;
 use crate::color::Palette;
 use crate::commands::common;
 use crate::commands::state_view::{ScopedStateRoot, StateScope, StateView, StateVisibility};
-use crate::commands::tier1::status::{self, ComponentRecord, RpmDrift};
+use crate::commands::tier1::rpm_install;
+use crate::commands::tier1::status::{self, AggregateRecordSelection, ComponentRecord, RpmDrift};
 use crate::context::{CliContext, InstallMode};
 use crate::response::{CliError, render_json_with_status};
 
@@ -30,14 +34,13 @@ const COMMAND: &str = "doctor";
 
 #[derive(Parser)]
 pub struct DoctorArgs {
-    /// Diagnose a specific component (default: all installed)
+    /// Diagnose a specific component (default: all active installations).
     pub component: Option<String>,
-    /// Apply suggested fixes automatically.
+    /// Reserved for automatic fixes; this release reports suggestions only.
     ///
-    /// `doctor` with no `--fix` is read-only. `--fix` executes the fix
-    /// plan inside a transaction. Combining `--dry-run --fix` is
-    /// rejected as `INVALID_ARGUMENT`: `--dry-run` alone already shows
-    /// the diagnostic plan; `--fix` is the explicit "execute" verb.
+    /// `doctor` is read-only. This option returns `NOT_IMPLEMENTED` without
+    /// applying the reported fix plan; combining it with `--dry-run` is
+    /// rejected as `INVALID_ARGUMENT`.
     #[arg(long)]
     pub fix: bool,
 }
@@ -46,6 +49,8 @@ pub struct DoctorArgs {
 struct DoctorPayload {
     summary: DoctorSummary,
     components: Vec<DoctorComponent>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    recovery_roots: Vec<DoctorRecoveryRoot>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
     dry_run: bool,
@@ -57,7 +62,19 @@ struct DoctorSummary {
     ok: usize,
     degraded: usize,
     failed: usize,
+    recovery_roots_failed: usize,
     findings: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DoctorRecoveryRoot {
+    scope: String,
+    status: String,
+    state_path: String,
+    journal_dir: String,
+    findings: Vec<DoctorFinding>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    fix_plan: Vec<FixSuggestion>,
 }
 
 #[derive(Debug, Serialize)]
@@ -65,6 +82,8 @@ struct DoctorComponent {
     name: String,
     status: String,
     scope: String,
+    #[serde(skip)]
+    remediation_scope: StateScope,
     active: bool,
     mutable_by_current_invocation: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -145,7 +164,7 @@ struct FixSuggestion {
 struct DoctorProbeContext<'a> {
     layout: &'a FsLayout,
     resolver_env: &'a ResolverEnv,
-    rpm_query: &'a RpmPackageQuery,
+    rpm_query: &'a dyn PackageQuery,
     system_service: &'a dyn ServiceManager,
     user_service: &'a dyn ServiceManager,
     dry_run: bool,
@@ -153,11 +172,23 @@ struct DoctorProbeContext<'a> {
 
 struct DoctorViewContext<'a> {
     resolver_env: &'a ResolverEnv,
-    rpm_query: &'a RpmPackageQuery,
+    rpm_query: &'a dyn PackageQuery,
     current_system_service: &'a dyn ServiceManager,
     system_scope_service: &'a dyn ServiceManager,
     user_service: &'a dyn ServiceManager,
     dry_run: bool,
+}
+
+enum DoctorJournalScan {
+    Trusted(JournalInventory),
+    Blocked(DoctorRecoveryRoot),
+}
+
+struct DoctorJournalRoot {
+    scope: StateScope,
+    state_path: String,
+    journal_dir: String,
+    scan: DoctorJournalScan,
 }
 
 impl<'a> DoctorViewContext<'a> {
@@ -190,7 +221,7 @@ pub fn handle(args: DoctorArgs, ctx: &CliContext) -> Result<(), CliError> {
     }
 
     let payload = diagnose(args.component.as_deref(), ctx)?;
-    let has_issues = payload.summary.failed > 0 || payload.summary.degraded > 0;
+    let has_issues = payload_has_issues(&payload);
     render_doctor(ctx, &payload, !has_issues)?;
     if has_issues {
         return Err(CliError::DiagnosticsFound {
@@ -200,10 +231,15 @@ pub fn handle(args: DoctorArgs, ctx: &CliContext) -> Result<(), CliError> {
     Ok(())
 }
 
+fn payload_has_issues(payload: &DoctorPayload) -> bool {
+    payload.summary.failed > 0
+        || payload.summary.degraded > 0
+        || payload.summary.recovery_roots_failed > 0
+}
+
 fn diagnose(component: Option<&str>, ctx: &CliContext) -> Result<DoctorPayload, CliError> {
     let mut view = StateView::load(ctx, COMMAND, StateVisibility::UserPlusSystem)?;
     status::migrate_view_states(&mut view);
-    let catalogs = status::ScopedCatalogs::load(&view, COMMAND);
     let rpm_query = RpmPackageQuery::system();
     let component = component.map(|name| lookup_component_name_from_view(name, &view, ctx));
     let env = anolisa_env::EnvService::detect();
@@ -220,35 +256,41 @@ fn diagnose(component: Option<&str>, ctx: &CliContext) -> Result<DoctorPayload, 
         dry_run: ctx.dry_run,
     };
 
-    Ok(diagnose_from_view(
-        &view,
-        &catalogs,
-        component.as_deref(),
-        &view_ctx,
-    ))
+    Ok(diagnose_from_view(&view, component.as_deref(), &view_ctx))
 }
 
 fn diagnose_from_view(
     view: &StateView,
-    catalogs: &status::ScopedCatalogs,
     component: Option<&str>,
     view_ctx: &DoctorViewContext<'_>,
 ) -> DoctorPayload {
-    let records = status::select_components_from_view(view, catalogs, component, None, None);
+    // `None` keeps the projection from executing manifest health checks:
+    // doctor runs the same structured checks itself below (honoring
+    // dry-run), and a second executor here would double every probe.
+    let records = status::select_components_from_view(
+        view,
+        component,
+        AggregateRecordSelection::ActiveOnly,
+        None,
+        None,
+        None,
+    );
     let warnings = view.warnings.clone();
     let mut components = Vec::new();
+    let journal_roots = scan_journal_roots(view);
+    let mut claimed_journals = BTreeSet::new();
 
     for mut record in records {
         let root = root_for_record(view, &record);
+        let remediation_scope = root.map_or(view.writable.scope, |root| root.scope);
         let object =
             root.and_then(|root| root.state.find(ObjectKind::Component, record.name.as_str()));
         normalize_rpm_record(&mut record, object);
-        let catalog = root.and_then(|root| catalogs.catalog_for(root));
         let layout = root
             .map(|root| &root.layout)
             .unwrap_or(&view.writable.layout);
         let (manifest, manifest_warning) = if object.is_some() {
-            resolve_component_manifest(layout, catalog, &record.name)
+            resolve_component_manifest(layout, &record.name)
         } else {
             (None, None)
         };
@@ -260,31 +302,33 @@ fn diagnose_from_view(
             user_service: view_ctx.user_service,
             dry_run: view_ctx.dry_run,
         };
-        let component = diagnose_component(
-            record,
+        let mut component = diagnose_component(
+            &record,
+            remediation_scope,
             object,
             manifest.as_ref(),
             manifest_warning,
             &probe_ctx,
         );
+        apply_component_journal_guard(&journal_roots, &mut component, &mut claimed_journals);
+        dedupe_fix_plan(&mut component.fix_plan);
+        component.status = component_status(&component);
         components.push(component);
     }
 
-    let summary = summarize(&components);
+    let recovery_roots = collect_root_recovery(&journal_roots, &claimed_journals, component);
+    let summary = summarize(&components, &recovery_roots);
     DoctorPayload {
         summary,
         components,
+        recovery_roots,
         warnings,
         dry_run: view_ctx.dry_run,
     }
 }
 
 fn lookup_component_name_from_view(input: &str, view: &StateView, ctx: &CliContext) -> String {
-    if view
-        .visible_components()
-        .iter()
-        .any(|record| record.object.name == input)
-    {
+    if view.has_exact_component(input) {
         return input.to_string();
     }
     common::lookup_component_name_in_store(input, &view.writable.state, ctx, COMMAND)
@@ -301,7 +345,8 @@ fn root_for_record<'a>(
 }
 
 fn diagnose_component(
-    record: ComponentRecord,
+    record: &ComponentRecord,
+    remediation_scope: StateScope,
     object: Option<&Installation>,
     manifest: Option<&ComponentManifest>,
     manifest_warning: Option<String>,
@@ -311,6 +356,7 @@ fn diagnose_component(
         name: record.name.clone(),
         status: "ok".to_string(),
         scope: record.scope.clone(),
+        remediation_scope,
         active: record.active,
         mutable_by_current_invocation: record.mutable_by_current_invocation,
         shadowed_by: record.shadowed_by.clone(),
@@ -327,9 +373,9 @@ fn diagnose_component(
         fix_plan: Vec::new(),
     };
 
-    add_state_finding(&record, object, &mut out);
-    add_health_entries(&record, &mut out);
-    add_manifest_warning(manifest_warning, object, &mut out);
+    add_state_finding(record, object, &mut out);
+    add_health_entries(record, object, probe_ctx.layout, &mut out);
+    add_manifest_warning(manifest_warning, object, probe_ctx.layout, &mut out);
     add_structured_health(manifest, object, probe_ctx, &mut out);
     add_service_refs(manifest, object, probe_ctx, &mut out);
     add_runtime_dependencies(
@@ -340,25 +386,7 @@ fn diagnose_component(
         &mut out,
     );
     add_rpm_drift(object, probe_ctx.rpm_query, &mut out);
-
-    qualify_fix_plan_for_record(&record, &mut out.fix_plan);
-    dedupe_fix_plan(&mut out.fix_plan);
-    out.status = component_status(&out);
     out
-}
-
-fn qualify_fix_plan_for_record(record: &ComponentRecord, fix_plan: &mut [FixSuggestion]) {
-    if record.mutable_by_current_invocation || record.scope != "system" {
-        return;
-    }
-    for fix in fix_plan {
-        let Some(command) = fix.command.as_mut() else {
-            continue;
-        };
-        if let Some(rest) = command.strip_prefix("anolisa ") {
-            *command = format!("sudo anolisa --install-mode system {rest}");
-        }
-    }
 }
 
 fn normalize_rpm_record(record: &mut ComponentRecord, object: Option<&Installation>) {
@@ -396,9 +424,11 @@ fn add_state_finding(
                 "state",
                 None,
             ));
-            out.fix_plan.push(suggestion(
+            out.fix_plan.push(component_suggestion(
+                out.remediation_scope,
                 "install_component",
-                Some(format!("anolisa install {}", record.name)),
+                "install",
+                &record.name,
                 "install the component before running component-level diagnostics",
             ));
         }
@@ -432,7 +462,12 @@ fn add_state_finding(
     }
 }
 
-fn add_health_entries(record: &ComponentRecord, out: &mut DoctorComponent) {
+fn add_health_entries(
+    record: &ComponentRecord,
+    object: Option<&Installation>,
+    layout: &FsLayout,
+    out: &mut DoctorComponent,
+) {
     for entry in &record.health {
         out.health_checks.push(health_from_entry(entry));
         let Some(severity) = severity_for_health_status(&entry.status) else {
@@ -446,9 +481,12 @@ fn add_health_entries(record: &ComponentRecord, out: &mut DoctorComponent) {
             entry.reason.clone(),
         ));
         out.fix_plan.extend(suggestions_for_health(
+            out.remediation_scope,
             &record.name,
             &entry.name,
             &entry.status,
+            object,
+            layout,
         ));
     }
 }
@@ -456,6 +494,7 @@ fn add_health_entries(record: &ComponentRecord, out: &mut DoctorComponent) {
 fn add_manifest_warning(
     warning: Option<String>,
     object: Option<&Installation>,
+    layout: &FsLayout,
     out: &mut DoctorComponent,
 ) {
     let Some(warning) = warning else {
@@ -467,16 +506,21 @@ fn add_manifest_warning(
     if rpm_backed && warning.starts_with("component contract unavailable") {
         return;
     }
-    let fix = if rpm_backed {
-        suggestion(
+    let fixes = if rpm_backed {
+        vec![suggestion(
             "publish_component_contract",
             None,
             "include an ANOLISA component contract in the RPM package for full diagnostics",
-        )
+        )]
     } else {
-        suggestion(
-            "reinstall_component",
-            Some(format!("anolisa install {}", out.name)),
+        let repairable = common::installed_component_manifest_path(layout, &out.name, COMMAND)
+            .ok()
+            .is_some_and(|path| owned_file_damage_matches(object, layout, |owned| owned == path));
+        lifecycle_recovery_suggestions(
+            out.remediation_scope,
+            &out.name,
+            object,
+            RecoveryNeed::ArtifactDamage { repairable },
             "restore the installed component contract snapshot",
         )
     };
@@ -487,7 +531,7 @@ fn add_manifest_warning(
         "manifest",
         Some(warning),
     ));
-    out.fix_plan.push(fix);
+    out.fix_plan.extend(fixes);
 }
 
 fn add_structured_health(
@@ -521,7 +565,7 @@ fn add_structured_health(
     let skip_active_service_probe = object.status == LifecycleStatus::Disabled;
     let outcome = run_doctor_check(&spec, Some(manifest), probe_ctx, skip_active_service_probe);
     let component = out.name.clone();
-    add_check_outcome(&component, &outcome, out);
+    add_check_outcome(&component, object, probe_ctx.layout, &outcome, out);
 }
 
 fn run_doctor_check(
@@ -580,6 +624,7 @@ fn run_doctor_check(
             &CheckEnv {
                 layout: probe_ctx.layout,
                 dry_run: probe_ctx.dry_run,
+                service_probes: None,
             },
         ),
     }
@@ -740,14 +785,7 @@ fn service_scope_label(scope: ServiceScope) -> &'static str {
 
 fn systemd_active_scope(service: &str, manifest: Option<&ComponentManifest>) -> ServiceScope {
     manifest
-        .and_then(|manifest| {
-            manifest
-                .install
-                .services
-                .iter()
-                .find(|decl| service_decl_matches(&decl.unit, service))
-                .map(|decl| decl.scope)
-        })
+        .map(|manifest| anolisa_core::declared_unit_scope(&manifest.install.services, service))
         .unwrap_or(ServiceScope::System)
 }
 
@@ -780,13 +818,21 @@ fn add_service_refs(
         if explicit_systemd.contains(&service.name) {
             continue;
         }
-        add_service_ref(service, manifest, probe_ctx, skip_active_service_probe, out);
+        add_service_ref(
+            service,
+            manifest,
+            object,
+            probe_ctx,
+            skip_active_service_probe,
+            out,
+        );
     }
 }
 
 fn add_service_ref(
     service: &ServiceRef,
     manifest: Option<&ComponentManifest>,
+    object: &Installation,
     probe_ctx: &DoctorProbeContext<'_>,
     skip_active_service_probe: bool,
     out: &mut DoctorComponent,
@@ -846,7 +892,14 @@ fn add_service_ref(
     }
 
     match manager.probe_service(&service.name) {
-        Ok(outcome) => add_service_ref_outcome(service, outcome.state, Some(outcome.message), out),
+        Ok(outcome) => add_service_ref_outcome(
+            service,
+            outcome.state,
+            Some(outcome.message),
+            object,
+            probe_ctx.layout,
+            out,
+        ),
         Err(err) => {
             out.health_checks.push(DoctorHealthCheck {
                 name,
@@ -862,9 +915,11 @@ fn add_service_ref(
                 "service_ref",
                 Some(err.to_string()),
             ));
-            out.fix_plan.push(suggestion(
+            out.fix_plan.push(component_suggestion(
+                out.remediation_scope,
                 "inspect_logs",
-                Some(format!("anolisa logs {}", out.name)),
+                "logs",
+                &out.name,
                 "inspect service-manager errors for the component",
             ));
         }
@@ -875,6 +930,8 @@ fn add_service_ref_outcome(
     service: &ServiceRef,
     state: ServiceState,
     detail: Option<String>,
+    object: &Installation,
+    layout: &FsLayout,
     out: &mut DoctorComponent,
 ) {
     let status = state.as_str().to_string();
@@ -895,9 +952,11 @@ fn add_service_ref_outcome(
                 "service_ref",
                 detail,
             ));
-            out.fix_plan.push(suggestion(
+            out.fix_plan.push(component_suggestion(
+                out.remediation_scope,
                 "inspect_logs",
-                Some(format!("anolisa logs {}", out.name)),
+                "logs",
+                &out.name,
                 "inspect service startup progress",
             ));
         }
@@ -909,9 +968,15 @@ fn add_service_ref_outcome(
                 "service_ref",
                 detail,
             ));
-            out.fix_plan.push(suggestion(
-                "reinstall_component",
-                Some(format!("anolisa install {}", out.name)),
+            let repairable = owned_file_damage_matches(Some(object), layout, |path| {
+                path.file_name()
+                    .is_some_and(|name| name == std::ffi::OsStr::new(&service.name))
+            });
+            out.fix_plan.extend(lifecycle_recovery_suggestions(
+                out.remediation_scope,
+                &out.name,
+                Some(object),
+                RecoveryNeed::ArtifactDamage { repairable },
                 "restore the missing service unit",
             ));
         }
@@ -923,14 +988,18 @@ fn add_service_ref_outcome(
                 "service_ref",
                 detail,
             ));
-            out.fix_plan.push(suggestion(
+            out.fix_plan.push(component_suggestion(
+                out.remediation_scope,
                 "restart_component",
-                Some(format!("anolisa restart {}", out.name)),
+                "restart",
+                &out.name,
                 "restart the component service",
             ));
-            out.fix_plan.push(suggestion(
+            out.fix_plan.push(component_suggestion(
+                out.remediation_scope,
                 "inspect_logs",
-                Some(format!("anolisa logs {}", out.name)),
+                "logs",
+                &out.name,
                 "inspect service logs for the component",
             ));
         }
@@ -959,22 +1028,9 @@ fn service_should_be_active(service: &ServiceRef, manifest: Option<&ComponentMan
         .install
         .services
         .iter()
-        .find(|decl| service_decl_matches(&decl.unit, &service.name))
+        .find(|decl| decl.covers_unit(&service.name))
         .map(|decl| decl.start)
         .unwrap_or(true)
-}
-
-fn service_decl_matches(declared: &str, effective: &str) -> bool {
-    if declared == effective {
-        return true;
-    }
-    if let Some(prefix) = declared.strip_suffix("@.service") {
-        return effective
-            .strip_prefix(&format!("{prefix}@"))
-            .map(|rest| rest.ends_with(".service") && rest.len() > ".service".len())
-            .unwrap_or(false);
-    }
-    false
 }
 
 fn non_empty_or(value: String, fallback: &str) -> String {
@@ -985,7 +1041,13 @@ fn non_empty_or(value: String, fallback: &str) -> String {
     }
 }
 
-fn add_check_outcome(component: &str, outcome: &CheckOutcome, out: &mut DoctorComponent) {
+fn add_check_outcome(
+    component: &str,
+    object: &Installation,
+    layout: &FsLayout,
+    outcome: &CheckOutcome,
+    out: &mut DoctorComponent,
+) {
     let status = outcome.status.as_str().to_string();
     out.health_checks.push(DoctorHealthCheck {
         name: outcome.spec_label.clone(),
@@ -1021,12 +1083,17 @@ fn add_check_outcome(component: &str, outcome: &CheckOutcome, out: &mut DoctorCo
                 "structured_health",
                 outcome.detail.clone(),
             ));
-            out.fix_plan
-                .extend(suggestions_for_structured_health(component, outcome));
+            out.fix_plan.extend(suggestions_for_structured_health(
+                out.remediation_scope,
+                component,
+                object,
+                layout,
+                outcome,
+            ));
         }
     }
     for child in &outcome.children {
-        add_check_outcome(component, child, out);
+        add_check_outcome(component, object, layout, child, out);
     }
 }
 
@@ -1162,7 +1229,7 @@ fn add_dependency_resolution(resolution: &DependencyResolution, out: &mut Doctor
 
 fn add_rpm_drift(
     object: Option<&Installation>,
-    rpm_query: &RpmPackageQuery,
+    rpm_query: &dyn PackageQuery,
     out: &mut DoctorComponent,
 ) {
     let Some(object) = object else {
@@ -1189,9 +1256,11 @@ fn add_rpm_drift(
             "rpm",
             None,
         ));
-        out.fix_plan.push(suggestion(
+        out.fix_plan.push(component_suggestion(
+            out.remediation_scope,
             "repair_state",
-            Some(format!("anolisa repair {}", out.name)),
+            "repair",
+            &out.name,
             "backfill RPM package metadata from rpmdb",
         ));
         return;
@@ -1215,9 +1284,11 @@ fn add_rpm_drift(
                 "rpm",
                 Some(reason),
             ));
-            out.fix_plan.push(suggestion(
+            out.fix_plan.push(component_suggestion(
+                out.remediation_scope,
                 "repair_state",
-                Some(format!("anolisa repair {}", out.name)),
+                "repair",
+                &out.name,
                 "refresh ANOLISA state from rpmdb",
             ));
         }
@@ -1239,15 +1310,12 @@ fn add_rpm_drift(
                 "rpm",
                 None,
             ));
-            out.fix_plan.push(suggestion(
-                "forget_state",
-                Some(format!("anolisa forget {}", out.name)),
-                "drop the stale ANOLISA state record for a package that is gone from rpmdb",
-            ));
-            out.fix_plan.push(suggestion(
-                "reinstall_component",
-                Some(format!("anolisa install {}", out.name)),
-                "reinstall the component if it should remain managed",
+            out.fix_plan.extend(lifecycle_recovery_suggestions(
+                out.remediation_scope,
+                &out.name,
+                Some(object),
+                RecoveryNeed::DelegatedPackageMissing,
+                "reconcile the recorded package that is gone from rpmdb",
             ));
         }
         None => out.health_checks.push(DoctorHealthCheck {
@@ -1260,9 +1328,313 @@ fn add_rpm_drift(
     }
 }
 
+/// Validate each visible state root once before attributing journals to
+/// components. A malformed entry makes the whole root untrusted because an
+/// earlier matching journal cannot prove that a later entry is unrelated.
+fn scan_journal_roots(view: &StateView) -> Vec<DoctorJournalRoot> {
+    let mut roots = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for root in &view.visible_roots {
+        let state_path = root.state_path.display().to_string();
+        if !seen.insert(state_path.clone()) {
+            continue;
+        }
+        let journal_dir = rpm_install::journal_dir(&root.layout);
+        let evidence = JournalEvidence::new(&journal_dir, &root.state.operations);
+        roots.push(scan_journal_root(root.scope, state_path, evidence));
+    }
+
+    // A state file can be unavailable while its journal directory remains
+    // readable. Doctor still owns reporting recovery state for that root.
+    for root in &view.unavailable_roots {
+        let state_path = root.state_path.display().to_string();
+        if !seen.insert(state_path.clone()) {
+            continue;
+        }
+        let journal_dir = journal_dir_for_state_path(&root.state_path);
+        let evidence = JournalEvidence::new(&journal_dir, &[]);
+        roots.push(scan_journal_root(root.scope, state_path, evidence));
+    }
+
+    roots
+}
+
+fn scan_journal_root(
+    scope: StateScope,
+    state_path: String,
+    evidence: JournalEvidence<'_>,
+) -> DoctorJournalRoot {
+    let journal_dir_text = evidence.journal_dir().display().to_string();
+    let scan = match JournalInventory::load(evidence) {
+        Ok(inventory) => DoctorJournalScan::Trusted(inventory),
+        Err(err) => DoctorJournalScan::Blocked(journal_scan_failure(
+            scope,
+            &state_path,
+            &journal_dir_text,
+            err,
+        )),
+    };
+    DoctorJournalRoot {
+        scope,
+        state_path,
+        journal_dir: journal_dir_text,
+        scan,
+    }
+}
+
+fn journal_dir_for_state_path(state_path: &Path) -> PathBuf {
+    state_path
+        .parent()
+        .map(|parent| parent.join("journal"))
+        .unwrap_or_else(|| PathBuf::from("journal"))
+}
+
+fn journal_scan_failure(
+    scope: StateScope,
+    state_path: &str,
+    journal_dir: &str,
+    err: FactsError,
+) -> DoctorRecoveryRoot {
+    let (finding, fix) = match err {
+        FactsError::JournalLoad { path, source } => (
+            finding(
+                FindingSeverity::Error,
+                "operation_journal_unreadable",
+                "an operation journal cannot be validated safely",
+                "journal",
+                Some(format!("{}: {source}", path.display())),
+            ),
+            suggestion(
+                "inspect_operation_journal",
+                None,
+                format!(
+                    "preserve and inspect {}; its subject and status cannot be trusted, so lifecycle commands remain blocked for this state root",
+                    path.display()
+                ),
+            ),
+        ),
+        FactsError::JournalScan { dir, source } => (
+            finding(
+                FindingSeverity::Error,
+                "operation_journal_scan_failed",
+                "the operation journal directory cannot be inspected safely",
+                "journal",
+                Some(format!("{}: {source}", dir.display())),
+            ),
+            suggestion(
+                "inspect_operation_journal_directory",
+                None,
+                format!(
+                    "restore read access to {} before running lifecycle commands in this state root",
+                    dir.display()
+                ),
+            ),
+        ),
+        err => (
+            finding(
+                FindingSeverity::Error,
+                "operation_journal_check_failed",
+                "operation recovery state cannot be inspected safely",
+                "journal",
+                Some(err.to_string()),
+            ),
+            suggestion(
+                "inspect_operation_recovery_state",
+                None,
+                "inspect the operation journal directory before running lifecycle commands",
+            ),
+        ),
+    };
+    DoctorRecoveryRoot {
+        scope: scope.label().to_string(),
+        status: "failed".to_string(),
+        state_path: state_path.to_string(),
+        journal_dir: journal_dir.to_string(),
+        findings: vec![finding],
+        fix_plan: vec![fix],
+    }
+}
+
+/// Apply trusted, subject-specific recovery ordering to a diagnosed
+/// component. Root-wide failures and unattributed legacy journals suppress
+/// executable lifecycle advice without duplicating the root finding once per
+/// component.
+fn apply_component_journal_guard(
+    roots: &[DoctorJournalRoot],
+    out: &mut DoctorComponent,
+    claimed_journals: &mut BTreeSet<String>,
+) {
+    let Some(state_path) = out.state_path.as_deref() else {
+        return;
+    };
+    let Some(root) = roots.iter().find(|root| root.state_path == state_path) else {
+        return;
+    };
+    let DoctorJournalScan::Trusted(inventory) = &root.scan else {
+        remove_lifecycle_commands(&mut out.fix_plan);
+        return;
+    };
+
+    if inventory
+        .entries()
+        .iter()
+        .any(|entry| entry.is_effectively_pending() && entry.transaction().subject.is_none())
+    {
+        remove_lifecycle_commands(&mut out.fix_plan);
+        return;
+    }
+
+    let matching = inventory
+        .entries()
+        .iter()
+        .filter(|entry| {
+            entry.is_effectively_pending()
+                && entry.transaction().subject.as_deref() == Some(out.name.as_str())
+        })
+        .collect::<Vec<_>>();
+    if matching.is_empty() {
+        return;
+    }
+
+    remove_lifecycle_commands(&mut out.fix_plan);
+    let paths = matching
+        .iter()
+        .map(|entry| {
+            let path = entry.path().display().to_string();
+            claimed_journals.insert(path.clone());
+            path
+        })
+        .collect::<Vec<_>>();
+    out.findings.push(finding(
+        FindingSeverity::Error,
+        "operation_pending",
+        format!(
+            "component '{}' has an unfinished lifecycle operation",
+            out.name
+        ),
+        "journal",
+        Some(format!("pending journal: {}", paths.join(", "))),
+    ));
+    out.fix_plan.push(component_suggestion(
+        out.remediation_scope,
+        "repair_component",
+        "repair",
+        &out.name,
+        "recover the pending operation before running another lifecycle command",
+    ));
+    dedupe_fix_plan(&mut out.fix_plan);
+}
+
+fn collect_root_recovery(
+    roots: &[DoctorJournalRoot],
+    claimed_journals: &BTreeSet<String>,
+    selected_component: Option<&str>,
+) -> Vec<DoctorRecoveryRoot> {
+    let mut recovery = Vec::new();
+    for root in roots {
+        let DoctorJournalScan::Trusted(inventory) = &root.scan else {
+            if let DoctorJournalScan::Blocked(blocked) = &root.scan {
+                recovery.push(blocked.clone());
+            }
+            continue;
+        };
+        let mut findings = Vec::new();
+        let mut fix_plan = Vec::new();
+        for entry in inventory
+            .entries()
+            .iter()
+            .filter(|entry| entry.is_effectively_pending())
+        {
+            let path = entry.path().display().to_string();
+            match entry.transaction().subject.as_deref() {
+                None => {
+                    findings.push(finding(
+                        FindingSeverity::Error,
+                        "operation_pending_unattributed",
+                        "the state root has an unfinished operation with no trustworthy component attribution",
+                        "journal",
+                        Some(format!("pending journal: {path}")),
+                    ));
+                    fix_plan.push(suggestion(
+                        "inspect_operation_journal",
+                        None,
+                        format!(
+                            "preserve and inspect {path}; lifecycle commands remain blocked for this state root until its subject is established"
+                        ),
+                    ));
+                }
+                Some(subject)
+                    if !claimed_journals.contains(&path)
+                        && selected_component.is_none_or(|selected| selected == subject) =>
+                {
+                    findings.push(finding(
+                        FindingSeverity::Error,
+                        "operation_pending_unrepresented",
+                        format!(
+                            "component '{subject}' has an unfinished operation but no selected active record"
+                        ),
+                        "journal",
+                        Some(format!("pending journal: {path}")),
+                    ));
+                    fix_plan.push(component_suggestion(
+                        root.scope,
+                        "repair_component",
+                        "repair",
+                        subject,
+                        "recover the pending operation before running another lifecycle command",
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+        if findings.is_empty() {
+            continue;
+        }
+        dedupe_fix_plan(&mut fix_plan);
+        recovery.push(DoctorRecoveryRoot {
+            scope: root.scope.label().to_string(),
+            status: "failed".to_string(),
+            state_path: root.state_path.clone(),
+            journal_dir: root.journal_dir.clone(),
+            findings,
+            fix_plan,
+        });
+    }
+    recovery
+}
+
+fn remove_lifecycle_commands(fix_plan: &mut Vec<FixSuggestion>) {
+    fix_plan.retain(|fix| {
+        fix.command
+            .as_deref()
+            .is_none_or(|command| !is_component_lifecycle_command(command))
+    });
+}
+
+fn is_component_lifecycle_command(command: &str) -> bool {
+    let command = command.strip_prefix("sudo ").unwrap_or(command);
+    let Some(rest) = command.strip_prefix("anolisa ") else {
+        return false;
+    };
+    let rest = rest
+        .strip_prefix("--install-mode system ")
+        .or_else(|| rest.strip_prefix("--install-mode user "))
+        .unwrap_or(rest);
+    matches!(
+        rest.split_whitespace().next(),
+        Some("install" | "update" | "uninstall" | "repair" | "forget" | "adopt" | "restart")
+    )
+}
+
+/// Load the installed manifest snapshot for `component`. The snapshot is
+/// the only source for an installed component's contract — the same
+/// per-installation copy consumed by uninstall hooks, adapter discovery,
+/// status health probes, and contract reconciliation. A missing snapshot
+/// is reported as a note (adopted records and installs from before the
+/// snapshot machinery have none), an unreadable one as a parse warning.
 fn resolve_component_manifest(
     layout: &FsLayout,
-    catalog: Option<&Catalog>,
     component: &str,
 ) -> (Option<ComponentManifest>, Option<String>) {
     match common::installed_component_manifest_path(layout, component, COMMAND) {
@@ -1276,19 +1648,13 @@ fn resolve_component_manifest(
                 )),
             ),
         },
-        Ok(_) => match catalog.and_then(|c| c.component(component).cloned()) {
-            Some(manifest) => (Some(manifest), None),
-            None => (
-                None,
-                Some(format!(
-                    "component contract unavailable for '{component}': no installed snapshot or catalog entry found"
-                )),
-            ),
-        },
-        Err(err) => (
-            catalog.and_then(|c| c.component(component).cloned()),
-            Some(err.reason()),
+        Ok(_) => (
+            None,
+            Some(format!(
+                "component contract unavailable for '{component}': no installed manifest snapshot found"
+            )),
         ),
+        Err(err) => (None, Some(err.reason())),
     }
 }
 
@@ -1304,13 +1670,21 @@ fn resolver_env_from_facts(facts: &anolisa_env::EnvFacts) -> ResolverEnv {
     }
 }
 
-fn summarize(components: &[DoctorComponent]) -> DoctorSummary {
+fn summarize(
+    components: &[DoctorComponent],
+    recovery_roots: &[DoctorRecoveryRoot],
+) -> DoctorSummary {
     let mut summary = DoctorSummary {
         components_checked: components.len(),
         ok: 0,
         degraded: 0,
         failed: 0,
-        findings: components.iter().map(|c| c.findings.len()).sum(),
+        recovery_roots_failed: recovery_roots.len(),
+        findings: components.iter().map(|c| c.findings.len()).sum::<usize>()
+            + recovery_roots
+                .iter()
+                .map(|root| root.findings.len())
+                .sum::<usize>(),
     };
     for component in components {
         match component.status.as_str() {
@@ -1360,10 +1734,6 @@ fn render_doctor(ctx: &CliContext, payload: &DoctorPayload, ok: bool) -> Result<
 
 fn render_human(payload: &DoctorPayload, no_color: bool) {
     let color = Palette::new(no_color);
-    if payload.components.is_empty() {
-        println!("{}", color.muted("no installed components"));
-        return;
-    }
     println!(
         "{} {} checked, {} ok, {} degraded, {} failed",
         color.header("Doctor:"),
@@ -1374,6 +1744,50 @@ fn render_human(payload: &DoctorPayload, no_color: bool) {
     );
     for warning in &payload.warnings {
         println!("{} {warning}", color.warn("warning:"));
+    }
+    if payload.summary.recovery_roots_failed > 0 {
+        println!(
+            "{} {} state root(s) have blocked recovery state",
+            color.err("recovery:"),
+            payload.summary.recovery_roots_failed,
+        );
+    }
+    for root in &payload.recovery_roots {
+        println!(
+            "\n{} {} {} ({}, journal={})",
+            color.label("Recovery root:"),
+            root.state_path,
+            color.status(&root.status),
+            root.scope,
+            root.journal_dir,
+        );
+        for finding in &root.findings {
+            let sev = match finding.severity {
+                FindingSeverity::Warning => color.warn("warning"),
+                FindingSeverity::Error => color.err("error"),
+            };
+            println!("  {sev} [{}] {}", finding.code, finding.message);
+            if let Some(detail) = &finding.detail {
+                println!("    {} {detail}", color.muted("detail:"));
+            }
+        }
+        if !root.fix_plan.is_empty() {
+            println!("  {}", color.label("Recommended:"));
+            for fix in &root.fix_plan {
+                match &fix.command {
+                    Some(command) => println!(
+                        "    {} {}",
+                        color.command(command),
+                        color.muted(format!("({})", fix.reason))
+                    ),
+                    None => println!("    {} {}", fix.action, color.muted(&fix.reason)),
+                }
+            }
+        }
+    }
+    if payload.components.is_empty() {
+        println!("{}", color.muted("no installed components"));
+        return;
     }
     for component in &payload.components {
         let mut scope_meta = format!("scope={}", component.scope);
@@ -1441,18 +1855,36 @@ fn severity_for_health_status(status: &str) -> Option<FindingSeverity> {
     }
 }
 
-fn suggestions_for_health(component: &str, check_name: &str, status: &str) -> Vec<FixSuggestion> {
+fn suggestions_for_health(
+    remediation_scope: StateScope,
+    component: &str,
+    check_name: &str,
+    status: &str,
+    object: Option<&Installation>,
+    layout: &FsLayout,
+) -> Vec<FixSuggestion> {
     match status {
-        "missing_file" | "sha256_mismatch" => vec![suggestion(
-            "reinstall_component",
-            Some(format!("anolisa install {component}")),
-            "restore missing or modified ANOLISA-owned files",
-        )],
-        "command_failed" | "command_error" | "probe_error" | "timeout" => vec![suggestion(
-            "inspect_logs",
-            Some(format!("anolisa logs {component}")),
-            "inspect runtime logs for the failing health probe",
-        )],
+        "missing_file" | "sha256_mismatch" => {
+            let repairable = check_name.strip_prefix("integrity:").is_some_and(|path| {
+                owned_file_damage_matches(object, layout, |owned| owned == Path::new(path))
+            });
+            lifecycle_recovery_suggestions(
+                remediation_scope,
+                component,
+                object,
+                RecoveryNeed::ArtifactDamage { repairable },
+                "restore missing or modified ANOLISA-owned files",
+            )
+        }
+        "command_failed" | "command_error" | "probe_error" | "timeout" => {
+            vec![component_suggestion(
+                remediation_scope,
+                "inspect_logs",
+                "logs",
+                component,
+                "inspect runtime logs for the failing health probe",
+            )]
+        }
         "out_of_bounds" | "unsupported_target" | "unsupported_kind" | "not_regular_file"
         | "invalid_check" => vec![suggestion(
             "fix_manifest",
@@ -1468,24 +1900,138 @@ fn suggestions_for_health(component: &str, check_name: &str, status: &str) -> Ve
 }
 
 fn suggestions_for_structured_health(
+    remediation_scope: StateScope,
     component: &str,
+    object: &Installation,
+    layout: &FsLayout,
     outcome: &CheckOutcome,
 ) -> Vec<FixSuggestion> {
-    if outcome.spec_label.starts_with("file_exists")
-        || outcome.spec_label.starts_with("binary_version")
-        || outcome.spec_label.starts_with("binary_help")
-    {
-        vec![suggestion(
-            "reinstall_component",
-            Some(format!("anolisa install {component}")),
+    let owned_path = outcome
+        .spec_label
+        .strip_prefix("file_exists path=")
+        .or_else(|| outcome.spec_label.strip_prefix("binary_version binary="))
+        .or_else(|| outcome.spec_label.strip_prefix("binary_help binary="));
+    if let Some(path) = owned_path {
+        let repairable =
+            owned_file_damage_matches(Some(object), layout, |owned| owned == Path::new(path));
+        lifecycle_recovery_suggestions(
+            remediation_scope,
+            component,
+            Some(object),
+            RecoveryNeed::ArtifactDamage { repairable },
             "restore files required by the structured health check",
-        )]
+        )
     } else {
-        vec![suggestion(
+        vec![component_suggestion(
+            remediation_scope,
             "inspect_logs",
-            Some(format!("anolisa logs {component}")),
+            "logs",
+            component,
             "inspect runtime logs for the failing structured health check",
         )]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryNeed {
+    ArtifactDamage { repairable: bool },
+    DelegatedPackageMissing,
+}
+
+/// Whether the exact owned-file evidence will route `repair` through R2.
+///
+/// Keeping this probe identical to facts assembly prevents doctor from
+/// advertising a repair command that the lifecycle planner would reduce to
+/// `NothingToRepair`.
+fn owned_file_damage_matches(
+    object: Option<&Installation>,
+    layout: &FsLayout,
+    matches_evidence: impl Fn(&Path) -> bool,
+) -> bool {
+    let Some(Installation {
+        binding: ProviderBinding::Owned { artifact },
+        ..
+    }) = object
+    else {
+        return false;
+    };
+    artifact
+        .files
+        .iter()
+        .any(|file| matches_evidence(&file.path) && check_owned_file(layout, file).is_failure())
+}
+
+/// Map a diagnostic fact to commands the lifecycle planner can actually
+/// execute for the record's authority class.
+fn lifecycle_recovery_suggestions(
+    remediation_scope: StateScope,
+    component: &str,
+    object: Option<&Installation>,
+    need: RecoveryNeed,
+    reason: impl Into<String>,
+) -> Vec<FixSuggestion> {
+    let reason = reason.into();
+    match object.map(|object| &object.binding) {
+        None => vec![component_suggestion(
+            remediation_scope,
+            "install_component",
+            "install",
+            component,
+            reason,
+        )],
+        Some(ProviderBinding::Owned { .. }) => match need {
+            RecoveryNeed::ArtifactDamage { repairable: true } => vec![component_suggestion(
+                remediation_scope,
+                "repair_component",
+                "repair",
+                component,
+                reason,
+            )],
+            _ => vec![suggestion(
+                "inspect_component",
+                None,
+                format!("{reason}; the finding is not backed by a damaged owned-file record"),
+            )],
+        },
+        Some(ProviderBinding::Delegated {
+            relation: ManagementRelation::Managed { .. },
+            ..
+        }) if need == RecoveryNeed::DelegatedPackageMissing => {
+            vec![component_suggestion(
+                remediation_scope,
+                "repair_component",
+                "repair",
+                component,
+                reason,
+            )]
+        }
+        Some(ProviderBinding::Delegated { .. })
+            if need == RecoveryNeed::DelegatedPackageMissing =>
+        {
+            vec![
+                component_suggestion(
+                    remediation_scope,
+                    "forget_state",
+                    "forget",
+                    component,
+                    "first drop the stale tracking record; no native package removal is performed",
+                ),
+                component_suggestion(
+                    remediation_scope,
+                    "install_component",
+                    "install",
+                    component,
+                    "then reinstall after the forget command succeeds",
+                ),
+            ]
+        }
+        Some(ProviderBinding::Delegated { .. }) => vec![suggestion(
+            "inspect_component",
+            None,
+            format!(
+                "{reason}; this delegated record does not grant authority to rewrite package-owned files"
+            ),
+        )],
     }
 }
 
@@ -1504,6 +2050,26 @@ fn suggestion_for_dependency(kind: DependencyKind, remediation: &str) -> FixSugg
         DependencyKind::PlatformCapability => "satisfy_platform_requirement",
     };
     suggestion(action, command, remediation)
+}
+
+fn component_suggestion(
+    scope: StateScope,
+    action: impl Into<String>,
+    operation: &str,
+    component: &str,
+    reason: impl Into<String>,
+) -> FixSuggestion {
+    let mode = match scope {
+        StateScope::User => InstallMode::User,
+        StateScope::System => InstallMode::System,
+    };
+    suggestion(
+        action,
+        Some(common::scoped_component_command_for_mode(
+            mode, operation, component,
+        )),
+        reason,
+    )
 }
 
 fn suggestion(
@@ -1556,15 +2122,40 @@ fn dedupe_fix_plan(fix_plan: &mut Vec<FixSuggestion>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::state_view::StateScope;
+    use crate::commands::state_view::{StateScope, UnavailableStateRoot};
     use anolisa_core::domain::{
         InstallationScope, ManagementRelation, NativePm, OwnedArtifact, PackageIdentity,
     };
+    use anolisa_core::planner::{
+        Facts, InstallRequest, Intent, NativeAction, NativeProbe, NoOpReason, Plan, PlanError,
+        ProviderTarget, RecordFacts, Step, plan,
+    };
+    use anolisa_core::state::{
+        FileOwner, InstalledObject, ObjectStatus, OperationRecord, OwnedFile, OwnedFileKind,
+    };
+    use anolisa_core::state_migration::{QuarantineReason, QuarantinedObject};
     use anolisa_core::state_store::StateStore;
+    use anolisa_core::transaction::Transaction;
     use anolisa_core::{
         DependencyStatus, FakeServiceManager, HealthEntry, NotSupportedServiceManager, ServiceOp,
     };
+    use anolisa_platform::pkg_query::{PackageInfo, PackageQueryError};
     use std::path::PathBuf;
+
+    struct MissingPackageQuery;
+
+    impl PackageQuery for MissingPackageQuery {
+        fn query_installed(
+            &self,
+            _package: &str,
+        ) -> Result<Option<PackageInfo>, PackageQueryError> {
+            Ok(None)
+        }
+
+        fn query_available(&self, _package: &str) -> Result<Vec<PackageInfo>, PackageQueryError> {
+            Ok(Vec::new())
+        }
+    }
 
     fn record(name: &str, status: &str) -> ComponentRecord {
         ComponentRecord {
@@ -1641,11 +2232,54 @@ mod tests {
         )
     }
 
+    fn resolved_delegated_object(
+        name: &str,
+        package: &str,
+        relation: ManagementRelation,
+    ) -> Installation {
+        installation(
+            name,
+            LifecycleStatus::Installed,
+            ProviderBinding::Delegated {
+                pm: NativePm::Rpm,
+                package: PackageIdentity::Resolved {
+                    name: package.to_string(),
+                },
+                relation,
+                last_observed: None,
+            },
+        )
+    }
+
+    fn planner_facts(object: Installation, native: NativeProbe) -> Facts {
+        Facts {
+            scope: object.scope,
+            record: RecordFacts::Active(object),
+            native,
+            pending_journal: false,
+            active_adapter_claims: Vec::new(),
+            owned_files_verified: None,
+        }
+    }
+
     fn push_owned_service(installation: &mut Installation, service: ServiceRef) {
         let ProviderBinding::Owned { artifact } = &mut installation.binding else {
             panic!("fixture must be owned to carry services");
         };
         artifact.services.push(service);
+    }
+
+    fn push_owned_file(installation: &mut Installation, path: PathBuf) {
+        let ProviderBinding::Owned { artifact } = &mut installation.binding else {
+            panic!("fixture must be owned to carry files");
+        };
+        artifact.files.push(OwnedFile {
+            path,
+            owner: FileOwner::Anolisa,
+            sha256: Some("0".repeat(64)),
+            kind: OwnedFileKind::File,
+            referent: None,
+        });
     }
 
     fn service_ref(name: &str, scope: ServiceScope) -> ServiceRef {
@@ -1663,6 +2297,7 @@ mod tests {
             name: name.to_string(),
             status: "ok".to_string(),
             scope: "system".to_string(),
+            remediation_scope: StateScope::System,
             active: true,
             mutable_by_current_invocation: true,
             shadowed_by: None,
@@ -1679,7 +2314,7 @@ mod tests {
     fn probe_context<'a>(
         layout: &'a FsLayout,
         resolver_env: &'a ResolverEnv,
-        rpm_query: &'a RpmPackageQuery,
+        rpm_query: &'a dyn PackageQuery,
         system_service: &'a dyn ServiceManager,
         user_service: &'a dyn ServiceManager,
         dry_run: bool,
@@ -1694,9 +2329,102 @@ mod tests {
         }
     }
 
+    fn diagnose_missing_delegated(
+        layout: &FsLayout,
+        relation: ManagementRelation,
+    ) -> DoctorPayload {
+        let object = resolved_delegated_object("cosh", "copilot-shell", relation);
+        let view = system_view_with_layout(layout.clone(), state_with_component(object));
+        let resolver_env = ResolverEnv::default();
+        let query = MissingPackageQuery;
+        let system_service = FakeServiceManager::new();
+        let user_service = FakeServiceManager::with_scope(ServiceScope::User);
+        let view_ctx = DoctorViewContext {
+            resolver_env: &resolver_env,
+            rpm_query: &query,
+            current_system_service: &system_service,
+            system_scope_service: &system_service,
+            user_service: &user_service,
+            dry_run: false,
+        };
+        diagnose_from_view(&view, Some("cosh"), &view_ctx)
+    }
+
+    fn diagnose_inactive_owned(layout: &FsLayout) -> DoctorPayload {
+        let mut object = owned_object("agentsight", LifecycleStatus::Installed);
+        push_owned_service(
+            &mut object,
+            service_ref("agentsight.service", ServiceScope::System),
+        );
+        let view = system_view_with_layout(layout.clone(), state_with_component(object));
+        let resolver_env = ResolverEnv::default();
+        let rpm_query = RpmPackageQuery::system();
+        let system_service = FakeServiceManager::new();
+        let user_service = FakeServiceManager::with_scope(ServiceScope::User);
+        let view_ctx = DoctorViewContext {
+            resolver_env: &resolver_env,
+            rpm_query: &rpm_query,
+            current_system_service: &system_service,
+            system_scope_service: &system_service,
+            user_service: &user_service,
+            dry_run: false,
+        };
+        diagnose_from_view(&view, Some("agentsight"), &view_ctx)
+    }
+
     fn state_with_component(installation: Installation) -> StateStore {
         let mut store = StateStore::empty();
         store.installations.push(installation);
+        store
+    }
+
+    fn state_with_committed_legacy_journal(layout: &FsLayout) -> StateStore {
+        let pending =
+            rpm_install::begin_fresh_install(layout, "cosh", "copilot-shell", "install cosh")
+                .expect("begin legacy journal");
+        let operation_id = pending.transaction.operation_id.clone();
+        drop(pending);
+        let mut state = StateStore::empty();
+        state.operations.push(OperationRecord {
+            id: operation_id,
+            command: "install cosh".to_string(),
+            status: "ok".to_string(),
+            started_at: "2026-07-21T00:00:00Z".to_string(),
+            finished_at: Some("2026-07-21T00:00:01Z".to_string()),
+            parent_operation_id: None,
+        });
+        state
+    }
+
+    fn quarantined_state(name: &str) -> StateStore {
+        let mut store = StateStore::empty();
+        store.quarantined.push(QuarantinedObject {
+            record: InstalledObject {
+                kind: ObjectKind::Component,
+                name: name.to_string(),
+                version: "0.1.0".to_string(),
+                status: ObjectStatus::Failed,
+                manifest_digest: None,
+                distribution_source: None,
+                raw_package: None,
+                install_backend: None,
+                ownership: None,
+                rpm_metadata: None,
+                installed_at: "2026-06-01T00:00:00Z".to_string(),
+                last_operation_id: None,
+                managed: true,
+                adopted: false,
+                subscription_scope: Default::default(),
+                enabled_features: Vec::new(),
+                component_refs: Vec::new(),
+                files: Vec::new(),
+                external_modified_files: Vec::new(),
+                services: Vec::new(),
+                health: Vec::new(),
+                provisioned_packages: Vec::new(),
+            },
+            reason: QuarantineReason::NoEvidence,
+        });
         store
     }
 
@@ -1725,8 +2453,35 @@ mod tests {
         StateView {
             writable: user_root.clone(),
             visible_roots: vec![user_root, system_root],
+            unavailable_roots: Vec::new(),
             warnings: Vec::new(),
         }
+    }
+
+    /// System-only view over a caller-supplied layout, for tests that need
+    /// on-disk fixtures (e.g. installed-manifest snapshots) under a tempdir.
+    fn system_view_with_layout(layout: FsLayout, system_state: StateStore) -> StateView {
+        let system_root = ScopedStateRoot {
+            scope: StateScope::System,
+            state_path: layout.state_dir.join("installed.toml"),
+            layout,
+            writable: true,
+            state: system_state,
+        };
+        StateView {
+            writable: system_root.clone(),
+            visible_roots: vec![system_root],
+            unavailable_roots: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    /// Write an installed-manifest snapshot for `component` under the
+    /// layout's state_dir — the file `resolve_component_manifest` consumes.
+    fn write_manifest_snapshot(layout: &FsLayout, component: &str, manifest: &str) {
+        let dir = layout.state_dir.join("component-manifests").join(component);
+        std::fs::create_dir_all(&dir).expect("snapshot dir");
+        std::fs::write(dir.join("component.toml"), manifest).expect("write snapshot");
     }
 
     fn system_only_doctor_view(system_state: StateStore) -> StateView {
@@ -1740,6 +2495,7 @@ mod tests {
         StateView {
             writable: system_root.clone(),
             visible_roots: vec![system_root],
+            unavailable_roots: Vec::new(),
             warnings: Vec::new(),
         }
     }
@@ -1757,12 +2513,7 @@ mod tests {
             user_service: &user_service,
             dry_run: true,
         };
-        diagnose_from_view(
-            view,
-            &status::ScopedCatalogs::default(),
-            component,
-            &view_ctx,
-        )
+        diagnose_from_view(view, component, &view_ctx)
     }
 
     #[test]
@@ -1784,6 +2535,14 @@ mod tests {
             component.state_path.as_deref(),
             Some("/tmp/anolisa-system-state/installed.toml")
         );
+        assert_eq!(
+            component
+                .fix_plan
+                .iter()
+                .find(|fix| fix.action == "repair_state")
+                .and_then(|fix| fix.command.as_deref()),
+            Some("sudo anolisa --install-mode system repair agentsight")
+        );
     }
 
     #[test]
@@ -1803,6 +2562,51 @@ mod tests {
         assert!(!payload.components[1].active);
         assert_eq!(payload.components[1].shadowed_by.as_deref(), Some("user"));
         assert!(!payload.components[1].mutable_by_current_invocation);
+        assert_eq!(
+            payload.components[0]
+                .fix_plan
+                .iter()
+                .find(|fix| fix.action == "repair_state")
+                .and_then(|fix| fix.command.as_deref()),
+            Some("anolisa --install-mode user repair agentsight")
+        );
+        assert_eq!(
+            payload.components[1]
+                .fix_plan
+                .iter()
+                .find(|fix| fix.action == "repair_state")
+                .and_then(|fix| fix.command.as_deref()),
+            Some("sudo anolisa --install-mode system repair agentsight")
+        );
+    }
+
+    #[test]
+    fn unnamed_doctor_view_diagnoses_only_active_components() {
+        let user_state =
+            state_with_component(delegated_object("agentsight", LifecycleStatus::Installed));
+        let mut system_state =
+            state_with_component(delegated_object("agentsight", LifecycleStatus::Failed));
+        system_state
+            .installations
+            .push(delegated_object("agent-memory", LifecycleStatus::Installed));
+        let view = scoped_doctor_view(user_state, system_state);
+
+        let payload = diagnose_test_view(&view, None);
+
+        assert_eq!(payload.components.len(), 2);
+        assert!(payload.components.iter().all(|component| component.active));
+        assert!(
+            payload
+                .components
+                .iter()
+                .any(|component| { component.name == "agentsight" && component.scope == "user" })
+        );
+        assert!(
+            payload.components.iter().any(|component| {
+                component.name == "agent-memory" && component.scope == "system"
+            })
+        );
+        assert_eq!(payload.summary.failed, 0);
     }
 
     #[test]
@@ -1818,6 +2622,14 @@ mod tests {
         assert_eq!(payload.components[0].name, "system-tool");
         assert_eq!(payload.components[0].scope, "system");
         assert!(payload.components[0].mutable_by_current_invocation);
+        assert_eq!(
+            payload.components[0]
+                .fix_plan
+                .iter()
+                .find(|fix| fix.action == "repair_state")
+                .and_then(|fix| fix.command.as_deref()),
+            Some("sudo anolisa --install-mode system repair system-tool")
+        );
     }
 
     #[test]
@@ -1844,12 +2656,7 @@ mod tests {
             dry_run: false,
         };
 
-        let payload = diagnose_from_view(
-            &view,
-            &status::ScopedCatalogs::default(),
-            Some("agentsight"),
-            &view_ctx,
-        );
+        let payload = diagnose_from_view(&view, Some("agentsight"), &view_ctx);
 
         let service_ref = payload.components[0]
             .health_checks
@@ -1887,12 +2694,7 @@ mod tests {
             dry_run: false,
         };
 
-        let payload = diagnose_from_view(
-            &view,
-            &status::ScopedCatalogs::default(),
-            Some("agent-memory"),
-            &view_ctx,
-        );
+        let payload = diagnose_from_view(&view, Some("agent-memory"), &view_ctx);
 
         let service_ref = payload.components[0]
             .health_checks
@@ -1907,20 +2709,140 @@ mod tests {
         );
     }
 
+    /// The snapshot-declared health check has exactly one executor —
+    /// doctor's own structured pass. The status projection inside
+    /// `diagnose_from_view` must not run it a second time (it used to,
+    /// doubling every binary/command/systemd probe).
     #[test]
-    fn read_only_system_fix_plan_uses_system_mode_command() {
-        let mut rec = record("agentsight", "failed");
-        rec.mutable_by_current_invocation = false;
-        let mut fix_plan = vec![suggestion(
-            "repair_state",
-            Some("anolisa repair agentsight".to_string()),
-            "refresh ANOLISA state",
-        )];
+    fn doctor_probes_structured_health_exactly_once() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        write_manifest_snapshot(
+            &layout,
+            "agentsight",
+            r#"
+                [component]
+                name = "agentsight"
+                version = "0.1.0"
 
-        qualify_fix_plan_for_record(&rec, &mut fix_plan);
+                [component.layout]
+                modes = ["system"]
+
+                [[component.services]]
+                unit = "agentsight.service"
+
+                [component.health_check]
+                type = "systemd_active"
+                service = "agentsight.service"
+            "#,
+        );
+        let view = system_view_with_layout(
+            layout,
+            state_with_component(owned_object("agentsight", LifecycleStatus::Installed)),
+        );
+        let resolver_env = ResolverEnv::default();
+        let rpm_query = RpmPackageQuery::system();
+        let system_service = FakeServiceManager::new();
+        system_service.set_state(ServiceState::Active);
+        let user_service = FakeServiceManager::with_scope(ServiceScope::User);
+        let view_ctx = DoctorViewContext {
+            resolver_env: &resolver_env,
+            rpm_query: &rpm_query,
+            current_system_service: &system_service,
+            system_scope_service: &system_service,
+            user_service: &user_service,
+            dry_run: false,
+        };
+
+        let payload = diagnose_from_view(&view, Some("agentsight"), &view_ctx);
 
         assert_eq!(
-            fix_plan[0].command.as_deref(),
+            system_service.calls(),
+            vec![(ServiceOp::Probe, "agentsight.service".to_string())],
+            "the structured check must probe exactly once"
+        );
+        assert_eq!(
+            payload.components[0]
+                .health_checks
+                .iter()
+                .filter(|check| check.name.contains("systemd_active"))
+                .count(),
+            1,
+            "only doctor's own pass may report the structured check"
+        );
+    }
+
+    /// `doctor --dry-run` must not start any probe process: the projection
+    /// no longer executes manifest health, and doctor's own pass skips
+    /// every leaf under dry-run.
+    #[test]
+    fn doctor_dry_run_probes_nothing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        write_manifest_snapshot(
+            &layout,
+            "agentsight",
+            r#"
+                [component]
+                name = "agentsight"
+                version = "0.1.0"
+
+                [component.layout]
+                modes = ["system"]
+
+                [[component.services]]
+                unit = "agentsight.service"
+
+                [component.health_check]
+                type = "systemd_active"
+                service = "agentsight.service"
+            "#,
+        );
+        let view = system_view_with_layout(
+            layout,
+            state_with_component(owned_object("agentsight", LifecycleStatus::Installed)),
+        );
+        let resolver_env = ResolverEnv::default();
+        let rpm_query = RpmPackageQuery::system();
+        let system_service = FakeServiceManager::new();
+        let user_service = FakeServiceManager::with_scope(ServiceScope::User);
+        let view_ctx = DoctorViewContext {
+            resolver_env: &resolver_env,
+            rpm_query: &rpm_query,
+            current_system_service: &system_service,
+            system_scope_service: &system_service,
+            user_service: &user_service,
+            dry_run: true,
+        };
+
+        let payload = diagnose_from_view(&view, Some("agentsight"), &view_ctx);
+
+        assert!(
+            system_service.calls().is_empty() && user_service.calls().is_empty(),
+            "dry-run must not touch any service manager"
+        );
+        let check = payload.components[0]
+            .health_checks
+            .iter()
+            .find(|check| check.name.contains("systemd_active"))
+            .expect("structured check present");
+        assert_eq!(check.status, "skipped");
+    }
+
+    #[test]
+    fn read_only_system_fix_plan_uses_system_mode_command() {
+        let mut component = empty_component("agentsight");
+        component.mutable_by_current_invocation = false;
+        component.fix_plan.push(component_suggestion(
+            component.remediation_scope,
+            "repair_state",
+            "repair",
+            &component.name,
+            "refresh ANOLISA state",
+        ));
+
+        assert_eq!(
+            component.fix_plan[0].command.as_deref(),
             Some("sudo anolisa --install-mode system repair agentsight")
         );
     }
@@ -1933,27 +2855,707 @@ mod tests {
         assert_eq!(component.findings[0].code, "component_not_installed");
         assert_eq!(
             component.fix_plan[0].command.as_deref(),
-            Some("anolisa install ghost")
+            Some("sudo anolisa --install-mode system install ghost")
         );
     }
 
     #[test]
-    fn failed_health_recommends_reinstall() {
+    fn failed_owned_health_recommends_repair() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let missing = layout.bin_dir.join("agentsight");
         let mut rec = record("agentsight", "installed");
         rec.health.push(HealthEntry {
-            name: "integrity:/x".to_string(),
+            name: format!("integrity:{}", missing.display()),
             status: "missing_file".to_string(),
             checked_at: "2026-06-01T00:00:00Z".to_string(),
             reason: Some("missing file".to_string()),
         });
+        let mut obj = owned_object("agentsight", LifecycleStatus::Installed);
+        push_owned_file(&mut obj, missing);
         let mut component = empty_component(&rec.name);
-        add_health_entries(&rec, &mut component);
+        add_health_entries(&rec, Some(&obj), &layout, &mut component);
 
         assert_eq!(component.findings[0].severity, FindingSeverity::Error);
         assert_eq!(
             component.fix_plan[0].command.as_deref(),
-            Some("anolisa install agentsight")
+            Some("sudo anolisa --install-mode system repair agentsight")
         );
+
+        let mut facts = planner_facts(obj, NativeProbe::NotProbed);
+        facts.owned_files_verified = Some(false);
+        assert!(matches!(
+            plan(&Intent::Repair, &facts),
+            Ok(Plan::Execute { .. })
+        ));
+        assert_eq!(
+            plan(
+                &Intent::Install(InstallRequest {
+                    target: ProviderTarget::Owned {
+                        version: "1.0.0".to_string(),
+                    },
+                    requested_version: None,
+                }),
+                &facts,
+            ),
+            Ok(Plan::NoOp {
+                reason: NoOpReason::AlreadyInstalled,
+            })
+        );
+    }
+
+    #[test]
+    fn missing_owned_manifest_recommends_repair() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let manifest_path =
+            common::installed_component_manifest_path(&layout, "agentsight", COMMAND)
+                .expect("manifest path");
+        let mut object = owned_object("agentsight", LifecycleStatus::Installed);
+        push_owned_file(&mut object, manifest_path);
+        let mut component = empty_component("agentsight");
+
+        add_manifest_warning(
+            Some("component contract unavailable".to_string()),
+            Some(&object),
+            &layout,
+            &mut component,
+        );
+
+        assert_eq!(
+            component.fix_plan[0].command.as_deref(),
+            Some("sudo anolisa --install-mode system repair agentsight")
+        );
+    }
+
+    #[test]
+    fn missing_recorded_service_unit_recommends_repair() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let service = service_ref("agentsight.service", ServiceScope::System);
+        let mut object = owned_object("agentsight", LifecycleStatus::Installed);
+        push_owned_file(
+            &mut object,
+            layout.systemd_unit_dir.join("agentsight.service"),
+        );
+        let mut component = empty_component("agentsight");
+
+        add_service_ref_outcome(
+            &service,
+            ServiceState::NotInstalled,
+            None,
+            &object,
+            &layout,
+            &mut component,
+        );
+
+        assert_eq!(component.findings[0].code, "service_unit_missing");
+        assert_eq!(
+            component.fix_plan[0].command.as_deref(),
+            Some("sudo anolisa --install-mode system repair agentsight")
+        );
+    }
+
+    #[test]
+    fn managed_missing_package_recommends_executable_repair() {
+        let object = resolved_delegated_object(
+            "cosh",
+            "copilot-shell",
+            ManagementRelation::Managed {
+                since: "2026-06-01T00:00:00Z".to_string(),
+            },
+        );
+        let fixes = lifecycle_recovery_suggestions(
+            StateScope::System,
+            "cosh",
+            Some(&object),
+            RecoveryNeed::DelegatedPackageMissing,
+            "restore the missing package",
+        );
+
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(
+            fixes[0].command.as_deref(),
+            Some("sudo anolisa --install-mode system repair cosh")
+        );
+
+        let facts = planner_facts(object, NativeProbe::Absent);
+        assert!(matches!(
+            plan(&Intent::Repair, &facts),
+            Ok(Plan::Execute { steps, .. })
+                if matches!(
+                    steps.first(),
+                    Some(Step::NativeTransaction {
+                        action: NativeAction::Install,
+                        packages,
+                        ..
+                    }) if packages == &["copilot-shell".to_string()]
+                )
+        ));
+        assert_eq!(
+            plan(
+                &Intent::Install(InstallRequest {
+                    target: ProviderTarget::Delegated {
+                        pm: NativePm::Rpm,
+                        package: "copilot-shell".to_string(),
+                    },
+                    requested_version: None,
+                }),
+                &facts,
+            ),
+            Err(PlanError::ExternallyRemoved)
+        );
+    }
+
+    #[test]
+    fn tracked_missing_package_requires_forget_before_install() {
+        for relation in [
+            ManagementRelation::Adopted {
+                since: "2026-06-01T00:00:00Z".to_string(),
+            },
+            ManagementRelation::Observed,
+        ] {
+            let object = resolved_delegated_object("cosh", "copilot-shell", relation);
+            let fixes = lifecycle_recovery_suggestions(
+                StateScope::System,
+                "cosh",
+                Some(&object),
+                RecoveryNeed::DelegatedPackageMissing,
+                "reconcile missing package",
+            );
+
+            assert_eq!(fixes.len(), 2);
+            assert_eq!(
+                fixes[0].command.as_deref(),
+                Some("sudo anolisa --install-mode system forget cosh")
+            );
+            assert_eq!(
+                fixes[1].command.as_deref(),
+                Some("sudo anolisa --install-mode system install cosh")
+            );
+
+            let facts = planner_facts(object, NativeProbe::Absent);
+            assert_eq!(
+                plan(
+                    &Intent::Install(InstallRequest {
+                        target: ProviderTarget::Delegated {
+                            pm: NativePm::Rpm,
+                            package: "copilot-shell".to_string(),
+                        },
+                        requested_version: None,
+                    }),
+                    &facts,
+                ),
+                Err(PlanError::TrackedButAbsent)
+            );
+        }
+    }
+
+    #[test]
+    fn pending_journal_replaces_stale_record_sequence_with_repair() {
+        for relation in [
+            ManagementRelation::Adopted {
+                since: "2026-06-01T00:00:00Z".to_string(),
+            },
+            ManagementRelation::Observed,
+        ] {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+            let journal = Transaction::begin_with_subject(
+                "install",
+                Some("cosh"),
+                layout.state_dir.join("installed.toml"),
+                &rpm_install::journal_dir(&layout),
+            )
+            .expect("pending journal");
+            drop(journal);
+
+            let payload = diagnose_missing_delegated(&layout, relation);
+            let component = &payload.components[0];
+            let lifecycle_commands: Vec<&str> = component
+                .fix_plan
+                .iter()
+                .filter_map(|fix| fix.command.as_deref())
+                .filter(|command| is_component_lifecycle_command(command))
+                .collect();
+
+            assert_eq!(
+                lifecycle_commands,
+                vec!["sudo anolisa --install-mode system repair cosh"]
+            );
+            assert!(
+                component
+                    .findings
+                    .iter()
+                    .any(|finding| finding.code == "operation_pending")
+            );
+            assert!(component.fix_plan.iter().all(|fix| {
+                fix.command.as_deref() != Some("sudo anolisa --install-mode system forget cosh")
+            }));
+            assert!(component.fix_plan.iter().all(|fix| {
+                fix.command.as_deref() != Some("sudo anolisa --install-mode system install cosh")
+            }));
+        }
+    }
+
+    #[test]
+    fn pending_system_component_repair_is_qualified_after_journal_guard() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let user_layout = FsLayout::user_with_overrides(
+            root.join("home"),
+            Some(root.join("user-data")),
+            Some(root.join("user-config")),
+            Some(root.join("user-state")),
+            Some(root.join("user-cache")),
+            Some(root.join("user-runtime")),
+        );
+        let system_layout = FsLayout::system(Some(root.join("system")));
+        let user_root = ScopedStateRoot {
+            scope: StateScope::User,
+            state_path: user_layout.state_dir.join("installed.toml"),
+            layout: user_layout,
+            writable: true,
+            state: StateStore::empty(),
+        };
+        let system_state_path = system_layout.state_dir.join("installed.toml");
+        let system_root = ScopedStateRoot {
+            scope: StateScope::System,
+            state_path: system_state_path.clone(),
+            layout: system_layout.clone(),
+            writable: false,
+            state: state_with_component(delegated_object("agentsight", LifecycleStatus::Installed)),
+        };
+        let view = StateView {
+            writable: user_root.clone(),
+            visible_roots: vec![user_root, system_root],
+            unavailable_roots: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let journal = Transaction::begin_with_subject(
+            "update",
+            Some("agentsight"),
+            system_state_path,
+            &rpm_install::journal_dir(&system_layout),
+        )
+        .expect("pending journal");
+        drop(journal);
+
+        let payload = diagnose_test_view(&view, Some("agentsight"));
+        let component = &payload.components[0];
+        let lifecycle_commands = component
+            .fix_plan
+            .iter()
+            .filter_map(|fix| fix.command.as_deref())
+            .filter(|command| is_component_lifecycle_command(command))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            lifecycle_commands,
+            vec!["sudo anolisa --install-mode system repair agentsight"]
+        );
+        assert!(
+            component
+                .findings
+                .iter()
+                .any(|finding| finding.code == "operation_pending")
+        );
+    }
+
+    #[test]
+    fn writable_system_root_recovery_uses_system_mode_command() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let view = system_view_with_layout(layout.clone(), StateStore::empty());
+        let journal = Transaction::begin_with_subject(
+            "update",
+            Some("agentsight"),
+            view.writable.state_path.clone(),
+            &rpm_install::journal_dir(&layout),
+        )
+        .expect("pending journal");
+        drop(journal);
+
+        let payload = diagnose_test_view(&view, None);
+
+        assert_eq!(payload.recovery_roots.len(), 1);
+        assert_eq!(
+            payload.recovery_roots[0]
+                .fix_plan
+                .iter()
+                .find(|fix| fix.action == "repair_component")
+                .and_then(|fix| fix.command.as_deref()),
+            Some("sudo anolisa --install-mode system repair agentsight"),
+            "unexpected recovery root: {:#?}",
+            payload.recovery_roots[0]
+        );
+    }
+
+    #[test]
+    fn committed_legacy_journal_does_not_create_a_recovery_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let state = state_with_committed_legacy_journal(&layout);
+        let view = system_view_with_layout(layout, state);
+
+        let payload = diagnose_test_view(&view, None);
+
+        assert!(payload.recovery_roots.is_empty());
+    }
+
+    #[test]
+    fn committed_legacy_journal_does_not_suppress_component_lifecycle_advice() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let state = state_with_committed_legacy_journal(&layout);
+        let view = system_view_with_layout(layout, state);
+        let roots = scan_journal_roots(&view);
+        let mut component = empty_component("cosh");
+        component.state_path = Some(view.writable.state_path.display().to_string());
+        component.fix_plan.push(component_suggestion(
+            component.remediation_scope,
+            "install_component",
+            "install",
+            &component.name,
+            "restore the component",
+        ));
+        let mut claimed_journals = BTreeSet::new();
+
+        apply_component_journal_guard(&roots, &mut component, &mut claimed_journals);
+
+        assert_eq!(
+            component
+                .fix_plan
+                .iter()
+                .filter_map(|fix| fix.command.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["sudo anolisa --install-mode system install cosh"]
+        );
+        assert!(
+            component
+                .findings
+                .iter()
+                .all(|finding| finding.code != "operation_pending")
+        );
+    }
+
+    #[test]
+    fn unavailable_system_root_does_not_borrow_user_operation_history() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let user_layout = FsLayout::user_with_overrides(
+            root.join("home"),
+            Some(root.join("user-data")),
+            Some(root.join("user-config")),
+            Some(root.join("user-state")),
+            Some(root.join("user-cache")),
+            Some(root.join("user-runtime")),
+        );
+        let system_layout = FsLayout::system(Some(root.join("system")));
+        let pending = rpm_install::begin_fresh_install(
+            &system_layout,
+            "cosh",
+            "copilot-shell",
+            "install cosh",
+        )
+        .expect("begin system legacy journal");
+        let operation_id = pending.transaction.operation_id.clone();
+        drop(pending);
+        let mut user_state = StateStore::empty();
+        user_state.operations.push(OperationRecord {
+            id: operation_id,
+            command: "install cosh".to_string(),
+            status: "ok".to_string(),
+            started_at: "2026-07-21T00:00:00Z".to_string(),
+            finished_at: Some("2026-07-21T00:00:01Z".to_string()),
+            parent_operation_id: None,
+        });
+        let user_root = ScopedStateRoot {
+            scope: StateScope::User,
+            state_path: user_layout.state_dir.join("installed.toml"),
+            layout: user_layout,
+            writable: true,
+            state: user_state,
+        };
+        let system_state_path = system_layout.state_dir.join("installed.toml");
+        let view = StateView {
+            writable: user_root.clone(),
+            visible_roots: vec![user_root],
+            unavailable_roots: vec![UnavailableStateRoot {
+                scope: StateScope::System,
+                state_path: system_state_path,
+                reason: "system state unavailable".to_string(),
+            }],
+            warnings: vec!["system state unavailable".to_string()],
+        };
+
+        let payload = diagnose_test_view(&view, None);
+
+        assert!(payload.recovery_roots.iter().any(|recovery| {
+            recovery.scope == "system"
+                && recovery
+                    .findings
+                    .iter()
+                    .any(|finding| finding.code == "operation_pending_unattributed")
+        }));
+    }
+
+    #[test]
+    fn corrupt_journal_suppresses_executable_lifecycle_advice() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let journal_dir = rpm_install::journal_dir(&layout);
+        std::fs::create_dir_all(&journal_dir).expect("journal dir");
+        let path = journal_dir.join("broken.journal.toml");
+        std::fs::write(&path, "invalid = [").expect("corrupt journal");
+
+        let payload = diagnose_missing_delegated(&layout, ManagementRelation::Observed);
+        let component = &payload.components[0];
+
+        assert!(component.fix_plan.iter().all(|fix| {
+            fix.command
+                .as_deref()
+                .is_none_or(|command| !is_component_lifecycle_command(command))
+        }));
+        assert!(payload.recovery_roots[0].findings.iter().any(|finding| {
+            finding.code == "operation_journal_unreadable"
+                && finding
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains(path.to_string_lossy().as_ref()))
+        }));
+        assert!(payload.recovery_roots[0].fix_plan.iter().any(|fix| {
+            fix.action == "inspect_operation_journal"
+                && fix.command.is_none()
+                && fix.reason.contains(path.to_string_lossy().as_ref())
+        }));
+    }
+
+    #[test]
+    fn corrupt_journal_suppresses_inactive_service_restart() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let journal_dir = rpm_install::journal_dir(&layout);
+        std::fs::create_dir_all(&journal_dir).expect("journal dir");
+        std::fs::write(journal_dir.join("broken.journal.toml"), "invalid = [")
+            .expect("corrupt journal");
+
+        let payload = diagnose_inactive_owned(&layout);
+        let component = &payload.components[0];
+
+        assert!(
+            component
+                .fix_plan
+                .iter()
+                .all(|fix| fix.action != "restart_component")
+        );
+        assert!(component.fix_plan.iter().any(|fix| {
+            fix.action == "inspect_logs"
+                && fix.command.as_deref()
+                    == Some("sudo anolisa --install-mode system logs agentsight")
+        }));
+    }
+
+    #[test]
+    fn unattributed_journal_suppresses_inactive_service_restart() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let _pending = Transaction::begin(
+            "install",
+            layout.state_dir.join("installed.toml"),
+            &rpm_install::journal_dir(&layout),
+        )
+        .expect("unattributed pending journal");
+
+        let payload = diagnose_inactive_owned(&layout);
+        let component = &payload.components[0];
+
+        assert!(
+            component
+                .fix_plan
+                .iter()
+                .all(|fix| fix.action != "restart_component")
+        );
+        assert!(component.fix_plan.iter().any(|fix| {
+            fix.action == "inspect_logs"
+                && fix.command.as_deref()
+                    == Some("sudo anolisa --install-mode system logs agentsight")
+        }));
+    }
+
+    #[test]
+    fn matching_journal_replaces_inactive_service_restart_with_repair() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let _pending = Transaction::begin_with_subject(
+            "update",
+            Some("agentsight"),
+            layout.state_dir.join("installed.toml"),
+            &rpm_install::journal_dir(&layout),
+        )
+        .expect("matching pending journal");
+
+        let payload = diagnose_inactive_owned(&layout);
+        let component = &payload.components[0];
+
+        assert!(
+            component
+                .fix_plan
+                .iter()
+                .all(|fix| fix.action != "restart_component")
+        );
+        assert_eq!(
+            component
+                .fix_plan
+                .iter()
+                .filter_map(|fix| fix.command.as_deref())
+                .filter(|command| is_component_lifecycle_command(command))
+                .collect::<Vec<_>>(),
+            vec!["sudo anolisa --install-mode system repair agentsight"]
+        );
+        assert!(
+            component
+                .fix_plan
+                .iter()
+                .any(|fix| fix.action == "inspect_logs")
+        );
+    }
+
+    #[test]
+    fn future_journal_schema_suppresses_executable_lifecycle_advice() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let journal_dir = rpm_install::journal_dir(&layout);
+        let journal = Transaction::begin_with_subject(
+            "install",
+            Some("cosh"),
+            layout.state_dir.join("installed.toml"),
+            &journal_dir,
+        )
+        .expect("journal");
+        let path = journal.journal_path.clone();
+        drop(journal);
+        let text = std::fs::read_to_string(&path).expect("read journal");
+        std::fs::write(
+            &path,
+            text.replacen("schema_version = 1", "schema_version = 999", 1),
+        )
+        .expect("future schema");
+
+        let payload = diagnose_missing_delegated(
+            &layout,
+            ManagementRelation::Adopted {
+                since: "2026-06-01T00:00:00Z".to_string(),
+            },
+        );
+        let component = &payload.components[0];
+
+        assert!(component.fix_plan.iter().all(|fix| {
+            fix.command
+                .as_deref()
+                .is_none_or(|command| !is_component_lifecycle_command(command))
+        }));
+        assert!(payload.recovery_roots[0].findings.iter().any(|finding| {
+            finding.code == "operation_journal_unreadable"
+                && finding
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("schema_version 999"))
+        }));
+    }
+
+    #[test]
+    fn corrupt_journal_is_reported_without_active_components() {
+        for state in [StateStore::empty(), quarantined_state("legacy-name")] {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+            let journal_dir = rpm_install::journal_dir(&layout);
+            std::fs::create_dir_all(&journal_dir).expect("journal dir");
+            let path = journal_dir.join("broken.journal.toml");
+            std::fs::write(&path, "invalid = [").expect("corrupt journal");
+            let view = system_view_with_layout(layout, state);
+
+            let payload = diagnose_test_view(&view, None);
+
+            assert!(payload.components.is_empty());
+            assert!(payload_has_issues(&payload));
+            assert_eq!(payload.recovery_roots.len(), 1);
+            assert_eq!(payload.recovery_roots[0].findings.len(), 1);
+            assert!(
+                payload.recovery_roots[0].findings[0]
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains(path.to_string_lossy().as_ref()))
+            );
+        }
+    }
+
+    #[test]
+    fn corrupt_journal_is_reported_once_for_a_multi_component_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let journal_dir = rpm_install::journal_dir(&layout);
+        std::fs::create_dir_all(&journal_dir).expect("journal dir");
+        std::fs::write(journal_dir.join("broken.journal.toml"), "invalid = [")
+            .expect("corrupt journal");
+        let mut state = StateStore::empty();
+        state
+            .installations
+            .push(owned_object("component-a", LifecycleStatus::Installed));
+        state
+            .installations
+            .push(owned_object("component-b", LifecycleStatus::Installed));
+        let view = system_view_with_layout(layout, state);
+
+        let payload = diagnose_test_view(&view, None);
+
+        assert_eq!(payload.components.len(), 2);
+        assert_eq!(payload.recovery_roots.len(), 1);
+        assert_eq!(payload.recovery_roots[0].findings.len(), 1);
+        assert!(payload.components.iter().all(|component| {
+            component.findings.iter().all(|finding| {
+                finding.code != "operation_journal_unreadable"
+                    && finding.code != "operation_journal_scan_failed"
+            }) && component.fix_plan.iter().all(|fix| {
+                fix.command
+                    .as_deref()
+                    .is_none_or(|command| !is_component_lifecycle_command(command))
+            })
+        }));
+    }
+
+    #[test]
+    fn unproven_artifact_damage_has_no_noop_command() {
+        let layout = FsLayout::system(None);
+        let owned = owned_object("agentsight", LifecycleStatus::Installed);
+        let owned_fixes = lifecycle_recovery_suggestions(
+            StateScope::System,
+            "agentsight",
+            Some(&owned),
+            RecoveryNeed::ArtifactDamage { repairable: false },
+            "restore an untracked service unit",
+        );
+        assert_eq!(owned_fixes.len(), 1);
+        assert_eq!(owned_fixes[0].command, None);
+
+        let managed = resolved_delegated_object(
+            "cosh",
+            "copilot-shell",
+            ManagementRelation::Managed {
+                since: "2026-06-01T00:00:00Z".to_string(),
+            },
+        );
+        let managed_fixes = lifecycle_recovery_suggestions(
+            StateScope::System,
+            "cosh",
+            Some(&managed),
+            RecoveryNeed::ArtifactDamage { repairable: false },
+            "restore package-owned files",
+        );
+        assert_eq!(managed_fixes.len(), 1);
+        assert_eq!(managed_fixes[0].command, None);
+
+        assert!(!owned_file_damage_matches(Some(&owned), &layout, |_| true));
     }
 
     #[test]
@@ -2007,6 +3609,7 @@ mod tests {
     #[test]
     fn rpm_missing_contract_does_not_degrade_component() {
         let obj = delegated_object("tokenless", LifecycleStatus::Installed);
+        let layout = FsLayout::system(None);
         let mut component = empty_component("tokenless");
 
         add_manifest_warning(
@@ -2015,6 +3618,7 @@ mod tests {
                     .to_string(),
             ),
             Some(&obj),
+            &layout,
             &mut component,
         );
 
@@ -2033,10 +3637,11 @@ mod tests {
             reason: None,
         });
         let obj = owned_object("agent-memory", LifecycleStatus::Installed);
+        let layout = FsLayout::system(None);
         let mut component = empty_component(&rec.name);
 
         add_state_finding(&rec, Some(&obj), &mut component);
-        add_health_entries(&rec, &mut component);
+        add_health_entries(&rec, Some(&obj), &layout, &mut component);
 
         assert!(component.findings.is_empty());
         assert!(component.fix_plan.is_empty());
@@ -2228,7 +3833,7 @@ mod tests {
         assert_eq!(component.findings[0].code, "service_not_active");
         assert_eq!(
             component.fix_plan[0].command.as_deref(),
-            Some("anolisa restart agentsight")
+            Some("sudo anolisa --install-mode system restart agentsight")
         );
     }
 

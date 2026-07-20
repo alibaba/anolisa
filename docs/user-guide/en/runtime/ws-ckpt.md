@@ -28,7 +28,7 @@ When AI Agents modify code, configurations, or data files, mistakes can be costl
 ### Option 1: anolisa CLI (recommended)
 
 ```bash
-anolisa install ws-ckpt
+sudo anolisa --install-mode system install ws-ckpt
 ```
 
 ### Option 2: YUM (Alinux, requires ANOLISA YUM repo)

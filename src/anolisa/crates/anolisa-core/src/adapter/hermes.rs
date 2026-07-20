@@ -836,32 +836,84 @@ fn now_iso8601() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::{OsStr, OsString};
+    use std::sync::{Mutex, MutexGuard};
+
+    const HERMES_ENV_KEYS: [&str; 2] = ["HERMES_BIN", "HERMES_HOME"];
+    static HERMES_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct HermesEnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        saved: [(&'static str, Option<OsString>); 2],
+    }
+
+    impl HermesEnvGuard {
+        fn acquire() -> Self {
+            let lock = HERMES_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let saved = HERMES_ENV_KEYS.map(|key| (key, std::env::var_os(key)));
+            // SAFETY: every Hermes unit test that reads or mutates these
+            // process-wide variables holds HERMES_ENV_LOCK.
+            unsafe {
+                for key in HERMES_ENV_KEYS {
+                    std::env::remove_var(key);
+                }
+            }
+            Self { _lock: lock, saved }
+        }
+
+        fn set(&self, key: &'static str, value: impl AsRef<OsStr>) {
+            assert!(HERMES_ENV_KEYS.contains(&key));
+            // SAFETY: this guard holds HERMES_ENV_LOCK.
+            unsafe { std::env::set_var(key, value) }
+        }
+
+        fn remove(&self, key: &'static str) {
+            assert!(HERMES_ENV_KEYS.contains(&key));
+            // SAFETY: this guard holds HERMES_ENV_LOCK.
+            unsafe { std::env::remove_var(key) }
+        }
+    }
+
+    impl Drop for HermesEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: the lock remains held while restoring the original
+            // process environment for the next test.
+            unsafe {
+                for (key, value) in &self.saved {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn hermes_home_resolution() {
-        // SAFETY: test-only; env mutation is acceptable in serial tests.
-        unsafe {
-            // With env var set.
-            std::env::set_var("HERMES_HOME", "/opt/hermes");
-            assert_eq!(
-                hermes_home(Some(Path::new("/home/alice"))),
-                Some(PathBuf::from("/opt/hermes"))
-            );
-            // Trailing slashes are stripped.
-            std::env::set_var("HERMES_HOME", "/opt/hermes///");
-            assert_eq!(
-                hermes_home(Some(Path::new("/home/alice"))),
-                Some(PathBuf::from("/opt/hermes"))
-            );
-            // Empty env var falls back to user_home.
-            std::env::set_var("HERMES_HOME", "");
-            assert_eq!(
-                hermes_home(Some(Path::new("/home/alice"))),
-                Some(PathBuf::from("/home/alice/.hermes"))
-            );
-            // No env var, no user_home.
-            std::env::remove_var("HERMES_HOME");
-        }
+        let env = HermesEnvGuard::acquire();
+        // With env var set.
+        env.set("HERMES_HOME", "/opt/hermes");
+        assert_eq!(
+            hermes_home(Some(Path::new("/home/alice"))),
+            Some(PathBuf::from("/opt/hermes"))
+        );
+        // Trailing slashes are stripped.
+        env.set("HERMES_HOME", "/opt/hermes///");
+        assert_eq!(
+            hermes_home(Some(Path::new("/home/alice"))),
+            Some(PathBuf::from("/opt/hermes"))
+        );
+        // Empty env var falls back to user_home.
+        env.set("HERMES_HOME", "");
+        assert_eq!(
+            hermes_home(Some(Path::new("/home/alice"))),
+            Some(PathBuf::from("/home/alice/.hermes"))
+        );
+        // No env var, no user_home.
+        env.remove("HERMES_HOME");
         assert_eq!(hermes_home(None), None);
         // No env var, with user_home.
         assert_eq!(
@@ -888,6 +940,7 @@ mod tests {
 
     #[test]
     fn list_cmd_uses_plain_and_no_bundled() {
+        let _env = HermesEnvGuard::acquire();
         let cmd = build_list_cmd();
         assert_eq!(cmd.program, "hermes");
         assert_eq!(cmd.args, vec!["plugins", "list", "--plain", "--no-bundled"]);
@@ -895,6 +948,7 @@ mod tests {
 
     #[test]
     fn enable_cmd_shape() {
+        let _env = HermesEnvGuard::acquire();
         let cmd = build_enable_cmd("agent-sec");
         assert_eq!(cmd.program, "hermes");
         assert_eq!(cmd.args, vec!["plugins", "enable", "agent-sec"]);
@@ -902,6 +956,7 @@ mod tests {
 
     #[test]
     fn disable_cmd_shape() {
+        let _env = HermesEnvGuard::acquire();
         let cmd = build_disable_cmd("agent-sec");
         assert_eq!(cmd.args, vec!["plugins", "disable", "agent-sec"]);
     }
@@ -1031,6 +1086,7 @@ mod tests {
     #[test]
     fn only_declared_skills_are_planned_and_claimed() {
         use crate::adapter::driver::DeclaredSkill;
+        let _env = HermesEnvGuard::acquire();
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
         std::fs::create_dir_all(root.join("skills/sec-audit")).expect("mkdir");
@@ -1100,6 +1156,7 @@ mod tests {
     #[test]
     fn skill_bundle_plan_and_claim_skip_plugin_enable() {
         use crate::adapter::driver::DeclaredSkill;
+        let env = HermesEnvGuard::acquire();
 
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("marker"), b"x").expect("write");
@@ -1156,20 +1213,8 @@ mod tests {
             panic!("expected Hermes driver payload");
         }
 
-        let previous_bin = std::env::var_os("HERMES_BIN");
-        // SAFETY: test-only; restored before the test returns.
-        unsafe {
-            std::env::set_var("HERMES_BIN", "/bin/sh");
-        }
+        env.set("HERMES_BIN", "/bin/sh");
         let report = driver.status(&claim, &ctx).expect("status");
-        // SAFETY: test-only; restore the process environment.
-        unsafe {
-            if let Some(value) = previous_bin {
-                std::env::set_var("HERMES_BIN", value);
-            } else {
-                std::env::remove_var("HERMES_BIN");
-            }
-        }
 
         assert_eq!(report.summary, AdapterSummary::Healthy);
         assert!(

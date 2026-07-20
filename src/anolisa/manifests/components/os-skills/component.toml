@@ -262,4 +262,3 @@ target = "{datadir}/skills"
 source = "share/anolisa/adapters/os-skills/manifest.json"
 target = "{datadir}/adapters/os-skills/manifest.json"
 mode = "0644"
-

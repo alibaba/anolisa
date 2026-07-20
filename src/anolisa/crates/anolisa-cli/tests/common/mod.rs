@@ -1,6 +1,11 @@
 //! Bounded subprocess support shared by CLI integration tests.
 
+// Cargo compiles this module once per integration-test crate, each of which
+// intentionally uses a different subset of the shared process helpers.
+#![allow(dead_code)]
+
 use std::io;
+use std::path::Path;
 use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Output, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
@@ -57,10 +62,24 @@ pub(crate) fn run(arguments: &[&str]) -> Output {
 }
 
 pub(crate) fn run_with_stdout(arguments: &[&str], stdout: Stdio) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_anolisa"));
+    command.args(arguments);
+    run_command(command, stdout)
+}
+
+pub(crate) fn run_with_path_env(arguments: &[&str], env: &[(&str, &Path)]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_anolisa"));
+    command.args(arguments);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    run_command(command, Stdio::piped())
+}
+
+fn run_command(mut command: Command, stdout: Stdio) -> Output {
     let deadline = Instant::now() + PROCESS_TIMEOUT;
     let mut child = ChildGuard(
-        Command::new(env!("CARGO_BIN_EXE_anolisa"))
-            .args(arguments)
+        command
             .stdout(stdout)
             .stderr(Stdio::piped())
             .spawn()

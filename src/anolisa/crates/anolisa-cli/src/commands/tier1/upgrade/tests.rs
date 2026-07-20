@@ -5,8 +5,9 @@
 
 use super::*;
 
+use anolisa_core::state::InstallMode as StateInstallMode;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
 use anolisa_platform::pkg_query::{PackageInfo, PackageQueryError, PackageVersion};
@@ -16,7 +17,11 @@ use anolisa_core::adapter::contract::{
 };
 use anolisa_core::central_log::LogFilter;
 use anolisa_core::state::{
-    InstalledObject, InstalledState, ObjectStatus, Ownership, RpmMetadata, SubscriptionScope,
+    InstalledObject, InstalledState, ObjectStatus, OperationRecord, Ownership, RpmMetadata,
+    SubscriptionScope,
+};
+use anolisa_core::transaction::{
+    DelegatedRecordAction, DelegatedRecoveryContext, Transaction, TransactionStep,
 };
 
 // `Activity` and `ProgressReporter` reach the tests through the module glob
@@ -45,6 +50,7 @@ struct FakeHost {
     fail_query: HashSet<String>,
     /// packages whose next installed query fails once, then recovers.
     fail_query_once: RefCell<HashSet<String>>,
+    query_sequence: RefCell<HashMap<String, VecDeque<Option<PackageInfo>>>>,
     /// package -> source repo returned by `installed_origin`.
     origins: HashMap<String, String>,
     /// packages whose `installed_origin` returns an error.
@@ -63,6 +69,13 @@ impl FakeHost {
 
     fn with_origin(mut self, package: &str, origin: &str) -> Self {
         self.origins.insert(package.to_string(), origin.to_string());
+        self
+    }
+
+    fn with_query_sequence(self, package: &str, observations: Vec<Option<PackageInfo>>) -> Self {
+        self.query_sequence
+            .borrow_mut()
+            .insert(package.to_string(), observations.into());
         self
     }
 
@@ -93,6 +106,11 @@ impl PackageQuery for FakeHost {
         }
         if self.missing_after.contains(package) {
             return Ok(None);
+        }
+        if let Some(observations) = self.query_sequence.borrow_mut().get_mut(package)
+            && let Some(observation) = observations.pop_front()
+        {
+            return Ok(observation);
         }
         Ok(self.installed.get(package).cloned())
     }
@@ -303,6 +321,54 @@ fn seed_state(layout: &FsLayout, objects: Vec<InstalledObject>) {
 /// Load the persisted state as the v5 store (post-upgrade assertions).
 fn load_store(layout: &FsLayout) -> StateStore {
     StateStore::load(&layout.state_dir.join("installed.toml"), 0).expect("load store")
+}
+
+fn record_successful_operation(layout: &FsLayout, operation_id: String) {
+    let state_path = layout.state_dir.join("installed.toml");
+    let mut store = load_store(layout);
+    store.operations.push(OperationRecord {
+        id: operation_id,
+        command: "install cosh".to_string(),
+        status: "ok".to_string(),
+        started_at: "2026-07-14T00:00:00Z".to_string(),
+        finished_at: Some("2026-07-14T00:00:01Z".to_string()),
+        parent_operation_id: None,
+    });
+    store.save(&state_path).expect("save committed operation");
+}
+
+fn begin_delegated_pending(
+    layout: &FsLayout,
+    operation: &str,
+    subject: &str,
+    package: &str,
+    transaction_target: &str,
+    record_action: DelegatedRecordAction,
+) -> PathBuf {
+    let state_path = layout.state_dir.join("installed.toml");
+    let mut journal = Transaction::begin_with_subject(
+        operation,
+        Some(subject),
+        state_path,
+        &rpm_install::journal_dir(layout),
+    )
+    .expect("begin new-format journal");
+    journal
+        .record_delegated_steps(
+            DelegatedRecoveryContext {
+                pm: NativePm::Rpm,
+                package: Some(package.to_string()),
+                record_action,
+            },
+            [
+                TransactionStep::planned("delegated-txn", transaction_target, operation, None),
+                TransactionStep::planned("delegated-record", subject, "write-record", None),
+            ],
+        )
+        .expect("persist new-format steps");
+    let path = journal.journal_path.clone();
+    drop(journal);
+    path
 }
 
 /// Find a component installation or panic with a readable message.
@@ -532,6 +598,340 @@ fn upgrade_rejects_pending_rpm_claim_before_any_transaction() {
         assert!(err.reason().contains("repair cosh"));
     }
     assert!(host.txn_calls().is_empty());
+}
+
+#[test]
+fn upgrade_rejects_new_format_install_journal_with_committed_operation() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    seed_state(&layout, Vec::new());
+    let state_path = layout.state_dir.join("installed.toml");
+    let journal_path = begin_delegated_pending(
+        &layout,
+        "install",
+        "cosh",
+        "copilot-shell",
+        "copilot-shell",
+        DelegatedRecordAction::WriteManaged,
+    );
+    let journal = Transaction::load_journal(&journal_path).expect("load new-format journal");
+    record_successful_operation(&layout, journal.operation_id);
+    let state_before = std::fs::read(&state_path).expect("read state");
+    let host = FakeHost::default();
+    let plan = build_plan(
+        None,
+        &cli_noop(),
+        &[component_check(
+            "cosh",
+            Some("copilot-shell"),
+            None,
+            None,
+            None,
+            ACTION_INSTALL,
+            None,
+        )],
+    );
+
+    let err = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect_err("new-format install journal must block upgrade");
+
+    assert!(
+        err.reason()
+            .contains("sudo anolisa --install-mode system repair cosh")
+    );
+    assert!(
+        err.reason()
+            .contains(journal_path.to_string_lossy().as_ref())
+    );
+    assert!(host.txn_calls().is_empty());
+    assert_eq!(
+        std::fs::read(&state_path).expect("read state"),
+        state_before
+    );
+}
+
+#[test]
+fn upgrade_rejects_new_format_update_journal_before_any_transaction() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    seed_state(
+        &layout,
+        vec![rpm_component(
+            "cosh",
+            "copilot-shell",
+            "1.0.0-1.al4",
+            Ownership::RpmManaged,
+        )],
+    );
+    let state_path = layout.state_dir.join("installed.toml");
+    let state_before = std::fs::read(&state_path).expect("read state");
+    begin_delegated_pending(
+        &layout,
+        "update",
+        "cosh",
+        "copilot-shell",
+        "copilot-shell",
+        DelegatedRecordAction::Refresh,
+    );
+    let host = FakeHost::default();
+    let plan = build_plan(
+        None,
+        &cli_noop(),
+        &[component_check(
+            "cosh",
+            Some("copilot-shell"),
+            Some("rpm-managed"),
+            Some("1.0.0-1.al4"),
+            Some("1.1.0-1.al4"),
+            ACTION_UPDATE,
+            None,
+        )],
+    );
+
+    let err = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect_err("new-format update journal must block upgrade");
+
+    assert!(
+        err.reason()
+            .contains("sudo anolisa --install-mode system repair cosh")
+    );
+    assert!(host.txn_calls().is_empty());
+    assert_eq!(
+        std::fs::read(&state_path).expect("read state"),
+        state_before
+    );
+}
+
+#[test]
+fn upgrade_rejects_new_format_batch_member_journal() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    seed_state(&layout, Vec::new());
+    let state_path = layout.state_dir.join("installed.toml");
+    let state_before = std::fs::read(&state_path).expect("read state");
+    begin_delegated_pending(
+        &layout,
+        "install",
+        "sec-core",
+        "agent-sec-core",
+        "copilot-shell,agent-sec-core",
+        DelegatedRecordAction::WriteManaged,
+    );
+    let host = FakeHost::default();
+    let plan = build_plan(
+        None,
+        &cli_noop(),
+        &[component_check(
+            "sec-core",
+            Some("agent-sec-core"),
+            None,
+            None,
+            None,
+            ACTION_INSTALL,
+            None,
+        )],
+    );
+
+    let err = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect_err("a new-format batch member journal must block upgrade");
+
+    assert!(
+        err.reason()
+            .contains("sudo anolisa --install-mode system repair sec-core")
+    );
+    assert!(host.txn_calls().is_empty());
+    assert_eq!(
+        std::fs::read(&state_path).expect("read state"),
+        state_before
+    );
+}
+
+#[test]
+fn empty_plan_reconciliation_stops_for_pending_delegated_subject() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    seed_state(
+        &layout,
+        vec![rpm_component(
+            "cosh",
+            "copilot-shell",
+            "1.0.0-1.al4",
+            Ownership::RpmManaged,
+        )],
+    );
+    let state_path = layout.state_dir.join("installed.toml");
+    let state_before = std::fs::read(&state_path).expect("read state");
+    begin_delegated_pending(
+        &layout,
+        "update",
+        "cosh",
+        "copilot-shell",
+        "copilot-shell",
+        DelegatedRecordAction::Refresh,
+    );
+    let host = FakeHost::default().with_installed(
+        "copilot-shell",
+        info("copilot-shell", "1.1.0", Some("1.al4")),
+    );
+    let plan = build_plan(None, &cli_noop(), &[]);
+
+    let err = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect_err("root-wide reconciliation must not cross pending recovery");
+
+    assert!(
+        err.reason()
+            .contains("sudo anolisa --install-mode system repair cosh")
+    );
+    assert!(host.query_calls().is_empty(), "no reconciliation query");
+    assert!(host.txn_calls().is_empty(), "no dnf transaction");
+    assert_eq!(
+        std::fs::read(&state_path).expect("read state"),
+        state_before,
+        "rejected reconciliation must not rewrite state",
+    );
+}
+
+#[test]
+fn empty_plan_reconciliation_stops_for_pending_legacy_claim() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    seed_state(
+        &layout,
+        vec![rpm_component(
+            "cosh",
+            "copilot-shell",
+            "1.0.0-1.al4",
+            Ownership::RpmManaged,
+        )],
+    );
+    let state_path = layout.state_dir.join("installed.toml");
+    let state_before = std::fs::read(&state_path).expect("read state");
+    rpm_install::begin_fresh_install(&layout, "cosh", "copilot-shell", "install cosh")
+        .expect("begin pending legacy install");
+    let host = FakeHost::default().with_installed(
+        "copilot-shell",
+        info("copilot-shell", "1.1.0", Some("1.al4")),
+    );
+    let plan = build_plan(None, &cli_noop(), &[]);
+
+    let err = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect_err("root-wide reconciliation must not cross a legacy claim");
+
+    assert!(
+        err.reason()
+            .contains("sudo anolisa --install-mode system repair cosh")
+    );
+    assert!(host.query_calls().is_empty(), "no reconciliation query");
+    assert!(host.txn_calls().is_empty(), "no dnf transaction");
+    assert_eq!(
+        std::fs::read(&state_path).expect("read state"),
+        state_before,
+        "rejected reconciliation must not rewrite state",
+    );
+}
+
+#[test]
+fn committed_legacy_journal_does_not_block_empty_plan() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    seed_state(&layout, Vec::new());
+    let state_path = layout.state_dir.join("installed.toml");
+    let pending =
+        rpm_install::begin_fresh_install(&layout, "cosh", "copilot-shell", "install cosh")
+            .expect("begin committed legacy install");
+    let journal_path = pending.transaction.journal_path.clone();
+    let operation_id = pending.transaction.operation_id.clone();
+    drop(pending);
+    record_successful_operation(&layout, operation_id);
+    let state_before = std::fs::read(&state_path).expect("read state");
+    let journal_before = std::fs::read(&journal_path).expect("read legacy journal");
+    let host = FakeHost::default();
+    let plan = build_plan(None, &cli_noop(), &[]);
+
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("committed legacy journal must not block upgrade");
+
+    assert_eq!(result.status, STATUS_OK);
+    assert!(result.reconciled.is_empty());
+    assert!(result.errors.is_empty());
+    assert!(host.query_calls().is_empty());
+    assert!(host.txn_calls().is_empty());
+    assert_eq!(
+        std::fs::read(&state_path).expect("read state"),
+        state_before,
+        "a committed no-op must not rewrite state",
+    );
+    assert_eq!(
+        std::fs::read(&journal_path).expect("read legacy journal"),
+        journal_before,
+        "upgrade must not rewrite a committed legacy journal",
+    );
 }
 
 // ── plan conversion ──────────────────────────────────────────────────────────
@@ -2702,10 +3102,15 @@ fn apply_reports_phases_even_when_an_item_fails() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let ctx = system_ctx(tmp.path().to_path_buf());
     let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
-    let mut host = FakeHost::default().with_installed(
-        "copilot-shell",
-        info("copilot-shell", "1.1.0", Some("1.al4")),
-    );
+    let mut host = FakeHost::default()
+        .with_installed(
+            "copilot-shell",
+            info("copilot-shell", "1.1.0", Some("1.al4")),
+        )
+        .with_installed(
+            "agent-sec-core",
+            info("agent-sec-core", "1.0.0", Some("1.al4")),
+        );
     host.fail_update.insert("agent-sec-core".to_string());
     // Both components are seeded so they are authorized against locked state and
     // both reach the `dnf` layer; only the second one's transaction fails there.
@@ -2895,6 +3300,155 @@ fn merged_install_shares_one_dnf_transaction() {
     );
 }
 
+#[test]
+fn single_update_failure_records_moved_rpmdb_truth() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let mut host = FakeHost::default().with_installed(
+        "copilot-shell",
+        info("copilot-shell", "1.1.0", Some("1.al4")),
+    );
+    host.fail_update.insert("copilot-shell".to_string());
+    seed_state(
+        &layout,
+        vec![rpm_component(
+            "cosh",
+            "copilot-shell",
+            "1.0.0-1.al4",
+            Ownership::RpmManaged,
+        )],
+    );
+    let plan = build_plan(
+        None,
+        &cli_noop(),
+        &[component_check(
+            "cosh",
+            Some("copilot-shell"),
+            Some("rpm-managed"),
+            Some("1.0.0-1.al4"),
+            Some("1.1.0-1.al4"),
+            ACTION_UPDATE,
+            None,
+        )],
+    );
+
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("apply");
+
+    assert_eq!(result.status, STATUS_OK);
+    assert_eq!(result.updated.len(), 1);
+    assert!(result.errors.is_empty());
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("despite the transaction failure"))
+    );
+}
+
+#[test]
+fn single_install_failure_records_landed_rpmdb_truth() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let mut host = FakeHost::default()
+        .with_installed("agentsight", info("agentsight", "2.0.0", Some("1.al4")));
+    host.fail_install.insert("agentsight".to_string());
+    let plan = build_plan(
+        None,
+        &cli_noop(),
+        &[component_check(
+            "agentsight",
+            Some("agentsight"),
+            None,
+            None,
+            Some("2.0.0-1.al4"),
+            ACTION_INSTALL,
+            None,
+        )],
+    );
+
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("apply");
+
+    assert_eq!(result.status, STATUS_OK);
+    assert_eq!(result.installed.len(), 1);
+    assert!(result.errors.is_empty());
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("despite the transaction failure"))
+    );
+}
+
+#[test]
+fn single_install_failure_reports_repair_when_rpmdb_recheck_fails() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let mut host = FakeHost::default();
+    host.fail_install.insert("agentsight".to_string());
+    host.fail_query.insert("agentsight".to_string());
+    let plan = build_plan(
+        None,
+        &cli_noop(),
+        &[component_check(
+            "agentsight",
+            Some("agentsight"),
+            None,
+            None,
+            Some("2.0.0-1.al4"),
+            ACTION_INSTALL,
+            None,
+        )],
+    );
+
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("apply");
+
+    assert_eq!(result.status, STATUS_FAILED);
+    assert!(result.installed.is_empty());
+    assert_eq!(result.errors.len(), 1);
+    assert!(
+        result.errors[0]
+            .reason
+            .contains("sudo anolisa --install-mode system repair agentsight")
+    );
+    assert_eq!(host.query_calls(), vec!["agentsight"]);
+}
+
 /// A merged update failure isolates the offender: the member whose slot
 /// provably did not move retries alone and lands, the offender fails with
 /// its own diagnostic, and nothing is retried twice.
@@ -2989,6 +3543,176 @@ fn merged_update_failure_retries_clean_members_individually() {
             .any(|w| w.contains("merged dnf update failed")),
         "the degrade must be announced as a warning: {:?}",
         result.warnings
+    );
+}
+
+#[test]
+fn merged_update_failure_does_not_retry_an_absent_member() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let mut host = FakeHost::default().with_installed(
+        "agent-sec-core",
+        info("agent-sec-core", "1.0.0", Some("1.al4")),
+    );
+    host.missing_after.insert("copilot-shell".to_string());
+    host.fail_update.insert("copilot-shell".to_string());
+    seed_state(
+        &layout,
+        vec![
+            rpm_component(
+                "cosh",
+                "copilot-shell",
+                "1.0.0-1.al4",
+                Ownership::RpmManaged,
+            ),
+            rpm_component(
+                "sec-core",
+                "agent-sec-core",
+                "1.0.0-1.al4",
+                Ownership::RpmManaged,
+            ),
+        ],
+    );
+    let components = vec![
+        component_check(
+            "cosh",
+            Some("copilot-shell"),
+            Some("rpm-managed"),
+            Some("1.0.0-1.al4"),
+            Some("1.1.0-1.al4"),
+            ACTION_UPDATE,
+            None,
+        ),
+        component_check(
+            "sec-core",
+            Some("agent-sec-core"),
+            Some("rpm-managed"),
+            Some("1.0.0-1.al4"),
+            Some("1.1.0-1.al4"),
+            ACTION_UPDATE,
+            None,
+        ),
+    ];
+    let plan = build_plan(None, &cli_noop(), &components);
+
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("apply");
+
+    assert_eq!(result.status, STATUS_PARTIAL);
+    assert_eq!(
+        host.txn_calls(),
+        vec![
+            "update:copilot-shell,agent-sec-core".to_string(),
+            "update:agent-sec-core".to_string(),
+        ],
+        "an absent member must not receive a second native update"
+    );
+    assert_eq!(result.updated.len(), 1);
+    assert_eq!(result.updated[0].name, "sec-core");
+    assert_eq!(result.errors.len(), 1);
+    assert_eq!(result.errors[0].name, "cosh");
+    assert!(
+        result.errors[0]
+            .reason
+            .contains("sudo anolisa --install-mode system repair cosh")
+    );
+}
+
+#[test]
+fn failed_isolated_update_retry_records_late_rpmdb_movement() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let ctx = system_ctx(tmp.path().to_path_buf());
+    let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+    let mut host = FakeHost::default()
+        .with_installed(
+            "copilot-shell",
+            info("copilot-shell", "1.1.0", Some("1.al4")),
+        )
+        .with_installed(
+            "agent-sec-core",
+            info("agent-sec-core", "1.0.0", Some("1.al4")),
+        )
+        .with_query_sequence(
+            "copilot-shell",
+            vec![
+                Some(info("copilot-shell", "1.0.0", Some("1.al4"))),
+                Some(info("copilot-shell", "1.1.0", Some("1.al4"))),
+            ],
+        );
+    host.fail_update.insert("copilot-shell".to_string());
+    seed_state(
+        &layout,
+        vec![
+            rpm_component(
+                "cosh",
+                "copilot-shell",
+                "1.0.0-1.al4",
+                Ownership::RpmManaged,
+            ),
+            rpm_component(
+                "sec-core",
+                "agent-sec-core",
+                "1.0.0-1.al4",
+                Ownership::RpmManaged,
+            ),
+        ],
+    );
+    let plan = build_plan(
+        None,
+        &cli_noop(),
+        &[
+            component_check(
+                "cosh",
+                Some("copilot-shell"),
+                Some("rpm-managed"),
+                Some("1.0.0-1.al4"),
+                Some("1.1.0-1.al4"),
+                ACTION_UPDATE,
+                None,
+            ),
+            component_check(
+                "sec-core",
+                Some("agent-sec-core"),
+                Some("rpm-managed"),
+                Some("1.0.0-1.al4"),
+                Some("1.1.0-1.al4"),
+                ACTION_UPDATE,
+                None,
+            ),
+        ],
+    );
+
+    let result = run_upgrade_with_deps(
+        &ctx,
+        &layout,
+        &plan,
+        &host,
+        &host,
+        true,
+        false,
+        COMMAND,
+        &NoopReporter,
+    )
+    .expect("apply");
+
+    assert_eq!(result.updated.len(), 2);
+    assert!(result.errors.is_empty());
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("despite the retry failure"))
     );
 }
 

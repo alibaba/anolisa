@@ -108,4 +108,3 @@ strict = false
 type = "binary_version"
 binary = "{bindir}/cosh-cli"
 timeout_secs = 5
-

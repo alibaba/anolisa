@@ -261,6 +261,31 @@ fn delegated_install_lock_failure_precedes_dnf() {
 }
 
 #[test]
+fn delegated_install_rechecks_native_absence_under_lock() {
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    let layout = common::resolve_layout(&ctx);
+    let fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+    )
+    .package_appears_under_lock(layout.lock_file.clone());
+    let mut a = args("copilot-shell");
+    a.backend = Some("rpm".to_string());
+
+    let err = install_component_with_deps("copilot-shell", &a, &ctx, &fake, &fake, true)
+        .expect_err("an external RPM appearing before locked execution must block dnf");
+
+    assert_eq!(fake.install_calls.get(), 0, "dnf must not run");
+    assert!(err.reason().contains("appeared"), "got: {}", err.reason());
+    assert!(
+        load_store(&ctx)
+            .find(ObjectKind::Component, "copilot-shell")
+            .is_none(),
+        "a refused race must not claim a managed record"
+    );
+}
+
+#[test]
 fn delegated_install_corrupt_state_fails_before_dnf() {
     let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
     let layout = common::resolve_layout(&ctx);
@@ -511,6 +536,43 @@ fn pending_journal_blocks_install_before_dnf() {
         assert!(err.reason().contains("repair"), "got: {}", err.reason());
         assert_eq!(fake.install_calls.get(), 0);
     }
+}
+
+#[test]
+fn pending_journal_injected_after_install_preflight_blocks_locked_execution() {
+    let (_tmp, ctx) = system_ctx_with_configured_rpm_repo(false);
+    let layout = common::resolve_layout(&ctx);
+    let state_path = layout.state_dir.join("installed.toml");
+    anolisa_core::state_store::StateStore::empty()
+        .save(&state_path)
+        .expect("seed state");
+    let state_before = std::fs::read(&state_path).expect("read state");
+    let fake = FakeInstaller::new(
+        "copilot-shell",
+        pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+    )
+    .injecting_pending_journal(&layout, "copilot-shell");
+    let mut install_args = args("copilot-shell");
+    install_args.backend = Some("rpm".to_string());
+    install_args.package = Some("copilot-shell".to_string());
+
+    let err = install_component_with_deps("copilot-shell", &install_args, &ctx, &fake, &fake, true)
+        .expect_err("the locked recovery gate must catch the injected journal");
+
+    assert!(
+        err.reason().contains("anolisa repair copilot-shell"),
+        "got: {}",
+        err.reason()
+    );
+    assert_eq!(fake.install_calls.get(), 0, "dnf must not run");
+    assert_eq!(
+        std::fs::read(&state_path).expect("read state"),
+        state_before
+    );
+    let journals = load_journals(&layout);
+    assert_eq!(journals.len(), 1, "no second journal may be created");
+    assert!(journals[0].is_pending());
+    assert_eq!(journals[0].subject.as_deref(), Some("copilot-shell"));
 }
 
 fn load_journals(layout: &FsLayout) -> Vec<Transaction> {

@@ -8,7 +8,7 @@ pub mod forget;
 pub mod install;
 pub mod list;
 pub mod logs;
-pub mod reinstall;
+pub(crate) mod recovery;
 pub mod repair;
 pub mod restart;
 pub(crate) mod rpm_install;

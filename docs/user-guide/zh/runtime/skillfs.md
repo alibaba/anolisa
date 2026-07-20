@@ -39,7 +39,7 @@ SkillFS。
 
 ```bash
 # 推荐包安装
-anolisa install skillfs
+sudo anolisa --install-mode system install skillfs
 
 # 开发者源码构建
 cd src/skillfs

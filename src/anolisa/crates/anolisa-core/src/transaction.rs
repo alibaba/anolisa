@@ -41,6 +41,8 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::domain::NativePm;
+
 /// Schema version for the transaction journal on disk. Bump on
 /// incompatible changes; old journals with a different version are
 /// reported as [`TransactionError::CorruptJournal`] so callers don't
@@ -61,6 +63,47 @@ pub enum TransactionStepStatus {
     Failed,
     /// Step was intentionally skipped (idempotency, preconditions, …).
     Skipped,
+}
+
+/// State mutation a delegated operation expects after reconciling the native
+/// package authority.
+///
+/// Recovery records this separately from transaction steps because a merged
+/// native transaction names every package in the batch, while each journal
+/// belongs to exactly one component and must preserve that component's
+/// management relation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegatedRecordAction {
+    /// Create or replace the record with a managed relation.
+    WriteManaged,
+    /// Create or replace the record with an adopted relation.
+    WriteAdopted,
+    /// Create or replace the record with an observed relation.
+    WriteObserved,
+    /// Refresh an existing delegated record without changing its relation.
+    Refresh,
+    /// Remove the record after the native or record-only uninstall converges.
+    Drop,
+}
+
+/// Per-subject recovery identity for a delegated lifecycle operation.
+///
+/// `TransactionStep::target` remains an audit description of the external
+/// side effect and may therefore contain a whole batch. This context is the
+/// wire-level contract repair uses to select the one package and record
+/// transition belonging to [`Transaction::subject`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DelegatedRecoveryContext {
+    /// Native package manager whose database is authoritative.
+    pub pm: NativePm,
+    /// Resolved package owned by this journal's subject. Record-only drops
+    /// of quarantined state may omit it because no native identity was ever
+    /// trusted or acted upon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
+    /// Record transition intended by the interrupted operation.
+    pub record_action: DelegatedRecordAction,
 }
 
 /// Discriminator for rollback strategies. Each variant pairs with the
@@ -247,6 +290,11 @@ pub struct Transaction {
     /// `None` and are treated as unattributed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
+    /// Explicit delegated recovery contract for this subject. Journals
+    /// written before this additive field existed load as `None`; repair only
+    /// infers their identity when the old step data is unambiguous.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegated_recovery: Option<DelegatedRecoveryContext>,
     /// RFC3339 UTC timestamp captured during `begin`.
     pub started_at: String,
     /// RFC3339 UTC timestamp captured during `finish`. `None` while the
@@ -351,6 +399,7 @@ impl Transaction {
             operation_id,
             operation: operation.to_string(),
             subject: subject.map(str::to_string),
+            delegated_recovery: None,
             started_at,
             finished_at: None,
             state_path,
@@ -372,6 +421,51 @@ impl Transaction {
             self.status,
             TransactionOutcomeStatus::InFlight | TransactionOutcomeStatus::Partial
         )
+    }
+
+    /// Persist a delegated recovery contract and its first steps atomically.
+    ///
+    /// A recovery identity without steps cannot prove which external side
+    /// effects may have run. Keeping both in one journal revision prevents a
+    /// crash between those writes from turning an incomplete intent into an
+    /// apparently recoverable operation. Repeating the same contract may add
+    /// later steps; rebinding it to another identity is rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransactionError::Failed`] when `steps` is empty or the
+    /// journal already carries a different contract. Persistence failures
+    /// leave the in-memory transaction unchanged.
+    pub fn record_delegated_steps(
+        &mut self,
+        context: DelegatedRecoveryContext,
+        steps: impl IntoIterator<Item = TransactionStep>,
+    ) -> Result<(), TransactionError> {
+        let steps = steps.into_iter().collect::<Vec<_>>();
+        if steps.is_empty() {
+            return Err(TransactionError::Failed(format!(
+                "delegated recovery intent for operation {} has no steps",
+                self.operation_id
+            )));
+        }
+        if let Some(existing) = &self.delegated_recovery {
+            if existing != &context {
+                return Err(TransactionError::Failed(format!(
+                    "refused to replace delegated recovery context for operation {}",
+                    self.operation_id
+                )));
+            }
+        }
+        let previous_context = self.delegated_recovery.clone();
+        let previous_step_count = self.steps.len();
+        self.delegated_recovery.get_or_insert(context);
+        self.steps.extend(steps);
+        if let Err(err) = self.persist() {
+            self.delegated_recovery = previous_context;
+            self.steps.truncate(previous_step_count);
+            return Err(err);
+        }
+        Ok(())
     }
 
     /// Append a step to the journal and persist.
@@ -504,39 +598,7 @@ impl Transaction {
             .as_ref()
             .ok_or_else(|| TransactionError::Rollback("restore_file: missing dest".to_string()))?;
 
-        let meta = fs::symlink_metadata(source)
-            .map_err(|err| TransactionError::Io(source.clone(), err))?;
-        if meta.file_type().is_symlink() {
-            let referent =
-                fs::read_link(source).map_err(|err| TransactionError::Io(source.clone(), err))?;
-            if let Some(parent) = dest.parent()
-                && !parent.as_os_str().is_empty()
-            {
-                fs::create_dir_all(parent)
-                    .map_err(|err| TransactionError::Io(parent.to_path_buf(), err))?;
-            }
-            match fs::remove_file(dest) {
-                Ok(()) => {}
-                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-                Err(err) => return Err(TransactionError::Io(dest.clone(), err)),
-            }
-            std::os::unix::fs::symlink(&referent, dest)
-                .map_err(|err| TransactionError::Io(dest.clone(), err))?;
-            return Ok(());
-        }
-
-        let bytes = fs::read(source).map_err(|err| TransactionError::Io(source.clone(), err))?;
-        if let Some(expected) = &rollback.sha256 {
-            let actual = sha256_hex(&bytes);
-            if &actual != expected {
-                return Err(TransactionError::Rollback(format!(
-                    "sha256 mismatch restoring {}: expected {expected}, got {actual}",
-                    source.display()
-                )));
-            }
-        }
-        write_atomic(dest, &bytes).map_err(|err| TransactionError::Rollback(err.to_string()))?;
-        Ok(())
+        restore_backup_file(source, dest, rollback.sha256.as_deref())
     }
 
     /// Load a previously-written journal. Returns
@@ -556,6 +618,12 @@ impl Transaction {
                 "{}: unsupported journal schema_version {}",
                 path.display(),
                 tx.schema_version
+            )));
+        }
+        if tx.delegated_recovery.is_some() && tx.steps.is_empty() {
+            return Err(TransactionError::CorruptJournal(format!(
+                "{}: recovery context has no operation steps",
+                path.display()
             )));
         }
         Ok(tx)
@@ -628,6 +696,56 @@ impl Transaction {
         write_atomic(&self.journal_path, content.as_bytes())
             .map_err(|err| TransactionError::Io(self.journal_path.clone(), err))
     }
+}
+
+/// Restore one backup without following a destination leaf symlink.
+///
+/// Regular-file bytes are optionally verified and installed with an atomic
+/// sibling rename. A symlink backup is recreated as the same link. This is
+/// the shared rollback primitive for journaled and in-process compensation.
+///
+/// # Errors
+///
+/// Returns an IO error when the backup cannot be read or the destination
+/// cannot be replaced, and [`TransactionError::Rollback`] when a supplied
+/// digest does not match the backup bytes.
+pub fn restore_backup_file(
+    source: &Path,
+    dest: &Path,
+    expected_sha256: Option<&str>,
+) -> Result<(), TransactionError> {
+    let meta = fs::symlink_metadata(source)
+        .map_err(|err| TransactionError::Io(source.to_path_buf(), err))?;
+    if meta.file_type().is_symlink() {
+        let referent =
+            fs::read_link(source).map_err(|err| TransactionError::Io(source.to_path_buf(), err))?;
+        if let Some(parent) = dest.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)
+                .map_err(|err| TransactionError::Io(parent.to_path_buf(), err))?;
+        }
+        match fs::remove_file(dest) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(TransactionError::Io(dest.to_path_buf(), err)),
+        }
+        std::os::unix::fs::symlink(&referent, dest)
+            .map_err(|err| TransactionError::Io(dest.to_path_buf(), err))?;
+        return Ok(());
+    }
+
+    let bytes = fs::read(source).map_err(|err| TransactionError::Io(source.to_path_buf(), err))?;
+    if let Some(expected) = expected_sha256 {
+        let actual = sha256_hex(&bytes);
+        if actual != expected {
+            return Err(TransactionError::Rollback(format!(
+                "sha256 mismatch restoring {}: expected {expected}, got {actual}",
+                source.display()
+            )));
+        }
+    }
+    write_atomic(dest, &bytes).map_err(|err| TransactionError::Rollback(err.to_string()))
 }
 
 /// Mint a fresh operation id outside a journal, in the same format
@@ -832,6 +950,92 @@ mod tests {
         let reloaded = Transaction::load_journal(&tx.journal_path).expect("load");
         assert_eq!(reloaded.steps, tx.steps);
         assert_eq!(reloaded.steps.len(), 2);
+    }
+
+    #[test]
+    fn delegated_recovery_intent_persists_context_and_steps_together() {
+        let tmp = tempdir().expect("tempdir");
+        let (state_path, journal_dir) = fresh(&tmp);
+        let mut tx =
+            Transaction::begin_with_subject("install", Some("cosh"), state_path, &journal_dir)
+                .expect("begin");
+        let context = DelegatedRecoveryContext {
+            pm: NativePm::Rpm,
+            package: Some("copilot-shell".to_string()),
+            record_action: DelegatedRecordAction::WriteManaged,
+        };
+        let steps = [TransactionStep::planned(
+            "delegated-txn",
+            "copilot-shell",
+            "install",
+            None,
+        )];
+
+        let err = tx
+            .record_delegated_steps(context.clone(), [])
+            .expect_err("context-only intent must fail");
+        assert!(matches!(err, TransactionError::Failed(_)));
+        let empty = Transaction::load_journal(&tx.journal_path).expect("load empty journal");
+        assert_eq!(empty.delegated_recovery, None);
+        assert!(empty.steps.is_empty());
+
+        tx.record_delegated_steps(context.clone(), steps)
+            .expect("persist delegated intent");
+
+        let reloaded = Transaction::load_journal(&tx.journal_path).expect("load");
+        assert_eq!(reloaded.delegated_recovery, Some(context));
+        assert_eq!(reloaded.steps, tx.steps);
+        assert_eq!(reloaded.steps.len(), 1);
+
+        let before = tx.clone();
+        let err = tx
+            .record_delegated_steps(
+                DelegatedRecoveryContext {
+                    pm: NativePm::Rpm,
+                    package: Some("another-package".to_string()),
+                    record_action: DelegatedRecordAction::WriteManaged,
+                },
+                [TransactionStep::planned(
+                    "delegated-record",
+                    "state",
+                    "write-delegated-managed",
+                    None,
+                )],
+            )
+            .expect_err("rebind must fail");
+        assert!(matches!(err, TransactionError::Failed(_)));
+        assert_eq!(tx, before, "a rejected rebind must not append steps");
+    }
+
+    #[test]
+    fn load_journal_rejects_recovery_context_without_steps() {
+        let tmp = tempdir().expect("tempdir");
+        let (state_path, journal_dir) = fresh(&tmp);
+        let mut tx =
+            Transaction::begin_with_subject("install", Some("skillfs"), state_path, &journal_dir)
+                .expect("begin");
+        tx.delegated_recovery = Some(DelegatedRecoveryContext {
+            pm: NativePm::Rpm,
+            package: Some("skillfs".to_string()),
+            record_action: DelegatedRecordAction::WriteManaged,
+        });
+        tx.persist().expect("persist malformed fixture");
+
+        let err = Transaction::load_journal(&tx.journal_path)
+            .expect_err("context-only journal must be corrupt");
+
+        assert!(matches!(err, TransactionError::CorruptJournal(_)));
+    }
+
+    #[test]
+    fn legacy_journal_without_recovery_context_still_loads() {
+        let tmp = tempdir().expect("tempdir");
+        let (state_path, journal_dir) = fresh(&tmp);
+        let tx = Transaction::begin_with_subject("install", Some("cosh"), state_path, &journal_dir)
+            .expect("begin");
+
+        let reloaded = Transaction::load_journal(&tx.journal_path).expect("load");
+        assert_eq!(reloaded.delegated_recovery, None);
     }
 
     #[test]
@@ -1041,6 +1245,39 @@ journal_path = "/tmp/x.journal.toml"
         let meta = std_fs::symlink_metadata(&dest).expect("dest exists");
         assert!(meta.file_type().is_symlink(), "dest must be a link");
         assert_eq!(std_fs::read_link(&dest).expect("read_link"), referent);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn restore_backup_file_replaces_a_destination_leaf_symlink() {
+        let tmp = tempdir().expect("tempdir");
+        let backup = tmp.path().join("backup/0.bak");
+        let dest = tmp.path().join("bin/tool");
+        let outside = tmp.path().join("outside-target");
+        std_fs::create_dir_all(backup.parent().expect("backup parent")).expect("mkdir backup");
+        std_fs::create_dir_all(dest.parent().expect("dest parent")).expect("mkdir dest");
+        std_fs::write(&backup, b"owned bytes").expect("seed backup");
+        std_fs::write(&outside, b"outside bytes").expect("seed outside target");
+        std::os::unix::fs::symlink(&outside, &dest).expect("plant destination symlink");
+
+        restore_backup_file(&backup, &dest, Some(&sha256_hex(b"owned bytes")))
+            .expect("restore backup");
+
+        assert_eq!(
+            std_fs::read(&outside).expect("read outside target"),
+            b"outside bytes",
+            "restore must not follow a destination leaf symlink"
+        );
+        assert!(
+            !std_fs::symlink_metadata(&dest)
+                .expect("stat restored destination")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std_fs::read(&dest).expect("read restored file"),
+            b"owned bytes"
+        );
     }
 
     #[test]

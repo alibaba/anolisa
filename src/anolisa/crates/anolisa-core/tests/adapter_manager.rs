@@ -24,6 +24,7 @@ use anolisa_core::adapter::claim::{
 };
 use anolisa_core::adapter::driver::{AdapterSummary, ConditionStatus};
 use anolisa_core::adapter::manager::{AdapterManager, EnableOptions, EnableOutcome};
+use anolisa_core::state::InstallMode as StateInstallMode;
 use anolisa_core::state_store::StateStore;
 use anolisa_platform::fs_layout::FsLayout;
 
@@ -572,6 +573,8 @@ fn user_layout_enable_accepts_system_installed_component() {
         .expect("enable system component from user layout");
 
     let user_state = load_state_at(&user_layout.state_dir.join("installed.toml"));
+    assert_eq!(user_state.install_mode, StateInstallMode::User);
+    assert_eq!(user_state.prefix, user_layout.prefix);
     assert!(
         user_state
             .find_adapter_claim(COMPONENT, FRAMEWORK)

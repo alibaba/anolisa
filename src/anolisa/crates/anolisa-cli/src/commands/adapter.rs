@@ -42,7 +42,6 @@ use anolisa_core::adapter::manager::{
     AdapterManager, AdapterSourceStatus, DisableOutcome, EnableOptions, EnableOutcome, ScanEntry,
     ScanReport, StatusReport,
 };
-use anolisa_core::state_store::StateStore;
 
 use crate::commands::common;
 use crate::context::CliContext;
@@ -310,9 +309,8 @@ fn handle_enable(
     allow_unsafe_plugin_install: bool,
 ) -> Result<(), CliError> {
     const COMMAND: &str = "adapter enable";
-    let installed = common::load_state_store(ctx, COMMAND).unwrap_or_else(|_| StateStore::empty());
-    let component = common::lookup_component_name_in_store(component, &installed, ctx, COMMAND);
-    let manager = build_manager(ctx);
+    let (component, view) = common::resolve_adapter_target(component, ctx, COMMAND)?;
+    let manager = common::build_adapter_manager_from_view(ctx, &view);
     let outcome = manager
         .enable_with_options(
             &component,
@@ -378,9 +376,8 @@ fn handle_disable(
     framework: Option<&str>,
 ) -> Result<(), CliError> {
     const COMMAND: &str = "adapter disable";
-    let installed = common::load_state_store(ctx, COMMAND).unwrap_or_else(|_| StateStore::empty());
-    let component = common::lookup_component_name_in_store(component, &installed, ctx, COMMAND);
-    let manager = build_manager(ctx);
+    let (component, view) = common::resolve_adapter_target(component, ctx, COMMAND)?;
+    let manager = common::build_adapter_manager_from_view(ctx, &view);
     let outcome: DisableOutcome = manager
         .disable(&component, framework, ctx.dry_run)
         .map_err(|e| map_err(COMMAND, e))?;
@@ -460,17 +457,16 @@ fn disable_target(outcome: &DisableOutcome) -> String {
 
 fn handle_status(ctx: &CliContext, component: Option<&str>) -> Result<(), CliError> {
     const COMMAND: &str = "adapter status";
-    let component = match component {
+    let (component, manager) = match component {
         Some(name) => {
-            let installed =
-                common::load_state_store(ctx, COMMAND).unwrap_or_else(|_| StateStore::empty());
-            Some(common::lookup_component_name_in_store(
-                name, &installed, ctx, COMMAND,
-            ))
+            let (component, view) = common::resolve_adapter_target(name, ctx, COMMAND)?;
+            (
+                Some(component),
+                common::build_adapter_manager_from_view(ctx, &view),
+            )
         }
-        None => None,
+        None => (None, build_manager(ctx)),
     };
-    let manager = build_manager(ctx);
     let report: StatusReport = manager
         .status(component.as_deref())
         .map_err(|e| map_err(COMMAND, e))?;

@@ -548,6 +548,15 @@ pub enum StateError {
         /// Highest schema version this reader supports.
         supported: u32,
     },
+    /// File-level metadata or a record scope conflicts with the state root
+    /// selected by the caller.
+    #[error("installed state at {path} does not match the active layout: {reason}")]
+    LayoutMismatch {
+        /// State path whose scope contract is inconsistent.
+        path: PathBuf,
+        /// Expected and observed layout facts.
+        reason: String,
+    },
 }
 
 impl InstalledState {

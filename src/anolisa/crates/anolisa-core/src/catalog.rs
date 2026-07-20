@@ -6,8 +6,10 @@
 //! 2. `system` — `/etc/anolisa/manifests` (optional, ops overrides).
 //! 3. `user`   — `~/.config/anolisa/manifests` (optional, per-user overrides).
 //!
-//! Within each layer the loader walks `runtime/*.toml` and `osbase/*.toml`
-//! and keys entries by manifest name. Within a layer, files are sorted by
+//! Within each layer the loader walks `osbase/*.toml` and keys entries by
+//! manifest name. (The `runtime/` subdirectory was retired: installed
+//! component manifests live in the per-installation snapshot under the
+//! state dir, not in the catalog.) Within a layer, files are sorted by
 //! path; later files and later layers with the same key replace earlier
 //! entries.
 //!
@@ -89,7 +91,7 @@ fn load_layer(
         return Ok(());
     }
 
-    for sub in ["runtime", "osbase"] {
+    for sub in ["osbase"] {
         for path in manifest_paths(&root.join(sub)) {
             let m = ComponentManifest::from_file(&path).map_err(CatalogError::from)?;
             // Deterministic overlay: manifest_paths() is sorted, so later
@@ -131,18 +133,18 @@ mod tests {
         bundled_root().join("components")
     }
 
-    /// Stages the real contracts into the `runtime/*.toml` layout the layer
+    /// Stages the real contracts into the `osbase/*.toml` layout the layer
     /// walker expects; returns how many contracts were staged.
     fn stage_real_contracts(layer_root: &Path) -> usize {
-        let runtime_dir = layer_root.join("runtime");
-        fs::create_dir_all(&runtime_dir).expect("mkdir staged runtime layer");
+        let osbase_dir = layer_root.join("osbase");
+        fs::create_dir_all(&osbase_dir).expect("mkdir staged osbase layer");
         let mut staged = 0;
         for entry in fs::read_dir(real_contracts_root()).expect("read components dir") {
             let entry = entry.expect("components dir entry");
             let contract = entry.path().join("component.toml");
             if contract.is_file() {
                 let name = entry.file_name();
-                let dest = runtime_dir.join(format!("{}.toml", name.to_string_lossy()));
+                let dest = osbase_dir.join(format!("{}.toml", name.to_string_lossy()));
                 fs::copy(&contract, dest).expect("stage contract");
                 staged += 1;
             }
@@ -156,7 +158,7 @@ mod tests {
                 [component]
                 name = "{name}"
                 version = "0.0.1"
-                layer = "runtime"
+                layer = "osbase"
                 display_name = "{display_name}"
             "#
         )
@@ -182,10 +184,10 @@ mod tests {
     #[test]
     fn user_layer_overrides_bundled() {
         let tmp = tempdir().expect("tempdir");
-        let runtime_dir = tmp.path().join("runtime");
-        fs::create_dir_all(&runtime_dir).expect("mkdir runtime_dir");
+        let osbase_dir = tmp.path().join("osbase");
+        fs::create_dir_all(&osbase_dir).expect("mkdir osbase_dir");
         fs::write(
-            runtime_dir.join("agentsight.toml"),
+            osbase_dir.join("agentsight.toml"),
             minimal_component_toml("agentsight", "USER LAYER OVERRIDE"),
         )
         .expect("write override");
@@ -218,15 +220,15 @@ mod tests {
     fn system_layer_then_user_layer_precedence() {
         let sys = tempdir().expect("sys tempdir");
         let usr = tempdir().expect("usr tempdir");
-        fs::create_dir_all(sys.path().join("runtime")).expect("mkdir sys runtime");
-        fs::create_dir_all(usr.path().join("runtime")).expect("mkdir usr runtime");
+        fs::create_dir_all(sys.path().join("osbase")).expect("mkdir sys osbase");
+        fs::create_dir_all(usr.path().join("osbase")).expect("mkdir usr osbase");
         fs::write(
-            sys.path().join("runtime/agent-memory.toml"),
+            sys.path().join("osbase/agent-memory.toml"),
             minimal_component_toml("agent-memory", "SYSTEM"),
         )
         .expect("write sys");
         fs::write(
-            usr.path().join("runtime/agent-memory.toml"),
+            usr.path().join("osbase/agent-memory.toml"),
             minimal_component_toml("agent-memory", "USER"),
         )
         .expect("write usr");
@@ -246,15 +248,15 @@ mod tests {
     #[test]
     fn duplicate_manifest_names_use_last_loaded_entry() {
         let tmp = tempdir().expect("tempdir");
-        let runtime_dir = tmp.path().join("runtime");
-        fs::create_dir_all(&runtime_dir).expect("mkdir runtime_dir");
+        let osbase_dir = tmp.path().join("osbase");
+        fs::create_dir_all(&osbase_dir).expect("mkdir osbase_dir");
         fs::write(
-            runtime_dir.join("00-first.toml"),
+            osbase_dir.join("00-first.toml"),
             minimal_component_toml("duplicate-component", "FIRST"),
         )
         .expect("write first");
         fs::write(
-            runtime_dir.join("99-last.toml"),
+            osbase_dir.join("99-last.toml"),
             minimal_component_toml("duplicate-component", "LAST"),
         )
         .expect("write last");

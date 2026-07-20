@@ -40,7 +40,7 @@ it cannot mount SkillFS.
 
 ```bash
 # Recommended package install
-anolisa install skillfs
+sudo anolisa --install-mode system install skillfs
 
 # Source build for developers
 cd src/skillfs

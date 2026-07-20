@@ -47,4 +47,3 @@ target = "{datadir}/runtime/skills/skillfs"
 type = "binary_version"
 binary = "{bindir}/skillfs"
 timeout_secs = 5
-

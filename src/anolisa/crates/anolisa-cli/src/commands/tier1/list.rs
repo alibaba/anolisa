@@ -155,53 +155,60 @@ fn build_rows_from_view(
     index
         .components
         .iter()
-        .filter_map(|entry| {
-            let active = visible_components
+        .flat_map(|entry| {
+            let matching_records = visible_components
                 .iter()
-                .find(|record| record.object.name == entry.name && record.active);
-            let (projection, row_scope) = match active {
-                Some(record) => (
-                    project_component(entry, &record.root.state, rpm_query),
-                    RowScope {
-                        scope: record.scope().label().to_string(),
-                        active: true,
-                        mutable_by_current_invocation: record.mutable_by_current_invocation,
-                        shadowed_by: record
-                            .shadowed_by
-                            .map(StateScope::label)
-                            .map(str::to_string),
-                        state_path: Some(record.root.state_path.display().to_string()),
-                    },
-                ),
-                None => {
-                    let projection = project_component(entry, &view.writable.state, rpm_query);
-                    let scope = match projection.local_state {
-                        self::state_view::LocalState::Observed => view.writable.scope.label(),
-                        self::state_view::LocalState::Tracked
-                        | self::state_view::LocalState::Installed
-                        | self::state_view::LocalState::Drifted
-                        | self::state_view::LocalState::Missing
-                        | self::state_view::LocalState::Failed
-                        | self::state_view::LocalState::Degraded
-                        | self::state_view::LocalState::Disabled
-                        | self::state_view::LocalState::NotInstalled => "none",
-                    };
-                    (
-                        projection,
-                        RowScope {
-                            scope: scope.to_string(),
-                            active: false,
-                            mutable_by_current_invocation: false,
-                            shadowed_by: None,
-                            state_path: None,
-                        },
-                    )
-                }
-            };
-            if args.installed && !projection.local_state.matches_installed_filter() {
-                return None;
+                .filter(|record| record.object.name == entry.name)
+                .collect::<Vec<_>>();
+            if !matching_records.is_empty() {
+                return matching_records
+                    .into_iter()
+                    .filter_map(|record| {
+                        let projection = project_component(entry, &record.root.state, rpm_query);
+                        if args.installed && !projection.local_state.matches_installed_filter() {
+                            return None;
+                        }
+                        let row_scope = RowScope {
+                            scope: record.scope().label().to_string(),
+                            active: record.active,
+                            mutable_by_current_invocation: record.mutable_by_current_invocation,
+                            shadowed_by: record
+                                .shadowed_by
+                                .map(StateScope::label)
+                                .map(str::to_string),
+                            state_path: Some(record.root.state_path.display().to_string()),
+                        };
+                        Some(entry_to_row(entry, projection, row_scope))
+                    })
+                    .collect::<Vec<_>>();
             }
-            Some(entry_to_row(entry, projection, row_scope))
+
+            let projection = project_component(entry, &view.writable.state, rpm_query);
+            if args.installed && !projection.local_state.matches_installed_filter() {
+                return Vec::new();
+            }
+            let scope = match projection.local_state {
+                self::state_view::LocalState::Observed => view.writable.scope.label(),
+                self::state_view::LocalState::Tracked
+                | self::state_view::LocalState::Installed
+                | self::state_view::LocalState::Drifted
+                | self::state_view::LocalState::Missing
+                | self::state_view::LocalState::Failed
+                | self::state_view::LocalState::Degraded
+                | self::state_view::LocalState::Disabled
+                | self::state_view::LocalState::NotInstalled => "none",
+            };
+            vec![entry_to_row(
+                entry,
+                projection,
+                RowScope {
+                    scope: scope.to_string(),
+                    active: false,
+                    mutable_by_current_invocation: false,
+                    shadowed_by: None,
+                    state_path: None,
+                },
+            )]
         })
         .collect()
 }

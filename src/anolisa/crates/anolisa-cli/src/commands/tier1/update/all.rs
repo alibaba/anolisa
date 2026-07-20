@@ -15,7 +15,11 @@ use std::collections::HashMap;
 use serde::Serialize;
 
 use anolisa_core::domain::NativePm;
-use anolisa_core::executor::{PHASE_NATIVE_TXN, execute_delegated_steps_resumed};
+use anolisa_core::executor::{
+    DelegatedExecutionTarget, PHASE_NATIVE_TXN, delegated_recovery_context,
+    execute_delegated_steps_resumed,
+};
+use anolisa_core::facts::JournalEvidence;
 use anolisa_core::lock::InstallLock;
 use anolisa_core::planner::{NativeAction, NativeProbe, RecordWrite, Step};
 use anolisa_core::providers::DelegatedProvider;
@@ -31,6 +35,7 @@ use anolisa_platform::privilege;
 
 use crate::color::Palette;
 use crate::commands::common;
+use crate::commands::tier1::recovery::LockedJournalGate;
 use crate::commands::tier1::rpm_install;
 use crate::context::CliContext;
 use crate::response::{CliError, render_json, render_json_with_status};
@@ -75,12 +80,11 @@ struct UpdateAllPayload {
 pub(crate) fn handle_update_all(ctx: &CliContext) -> Result<(), CliError> {
     let layout = common::resolve_layout(ctx);
     let state_path = layout.state_dir.join("installed.toml");
-    let store = StateStore::load(&state_path, privilege::effective_uid()).map_err(|err| {
-        CliError::Runtime {
+    let store = StateStore::load_for_layout(&state_path, privilege::effective_uid(), &layout)
+        .map_err(|err| CliError::Runtime {
             command: BATCH_COMMAND.to_string(),
             reason: format!("failed to load installed state: {err}"),
-        }
-    })?;
+        })?;
     let names: Vec<String> = store
         .installations
         .iter()
@@ -432,9 +436,17 @@ fn execute_merged_updates_with_deps(
         Ok(lock) => lock,
         Err(err) => return all_failed(&group, &format!("failed to acquire install lock: {err}")),
     };
-    let mut store = match StateStore::load(&state_path, privilege::effective_uid()) {
-        Ok(store) => store,
-        Err(err) => return all_failed(&group, &format!("failed to load installed state: {err}")),
+    let mut store =
+        match StateStore::load_for_layout(&state_path, privilege::effective_uid(), &layout) {
+            Ok(store) => store,
+            Err(err) => {
+                return all_failed(&group, &format!("failed to load installed state: {err}"));
+            }
+        };
+    let evidence = JournalEvidence::new(&journal_dir, &store.operations);
+    let mut journal_gate = match LockedJournalGate::load(&_lock, evidence, BATCH_COMMAND) {
+        Ok(gate) => gate,
+        Err(err) => return all_failed(&group, &err.reason()),
     };
 
     // Re-validate each member's authority under the lock and open its
@@ -452,17 +464,9 @@ fn execute_merged_updates_with_deps(
             ));
             continue;
         }
-        match Transaction::begin_with_subject(
-            COMMAND,
-            Some(target),
-            state_path.clone(),
-            &journal_dir,
-        ) {
+        match journal_gate.begin(COMMAND, target, state_path.clone(), BATCH_COMMAND) {
             Ok(journal) => active.push((item, journal)),
-            Err(err) => items.push(failed_item(
-                &item.name,
-                format!("failed to begin operation journal: {err}"),
-            )),
+            Err(err) => items.push(failed_item(&item.name, err.reason().to_string())),
         }
     }
     if active.is_empty() {
@@ -478,12 +482,29 @@ fn execute_merged_updates_with_deps(
         .collect();
     let txn_label = all_packages.join(",");
     for (item, journal) in &mut active {
-        if let Err(err) = journal.record_step(TransactionStep::planned(
-            PHASE_NATIVE_TXN,
-            txn_label.clone(),
-            "update",
-            None,
-        )) {
+        let plan_steps = match &item.planned.route {
+            PlannedUpdateRoute::Delegated { steps } => steps.as_slice(),
+            _ => unreachable!("merged members are classified as delegated"),
+        };
+        let journal_result = delegated_recovery_context(
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some(&item.package)),
+            plan_steps,
+        )
+        .map_err(|err| err.to_string())
+        .and_then(|context| {
+            journal
+                .record_delegated_steps(
+                    context,
+                    [TransactionStep::planned(
+                        PHASE_NATIVE_TXN,
+                        txn_label.clone(),
+                        "update",
+                        None,
+                    )],
+                )
+                .map_err(|err| err.to_string())
+        });
+        if let Err(err) = journal_result {
             // A journal that cannot be written now would also not absorb the
             // transaction outcome; refusing the whole group before any side
             // effect is the honest move.
@@ -543,6 +564,7 @@ fn execute_merged_updates_with_deps(
                     let mut sink = StoreRecordSink::new(&mut store, &state_path, context);
                     execute_delegated_steps_resumed(
                         tail,
+                        DelegatedExecutionTarget::new(NativePm::Rpm, Some(&item.package)),
                         &provider,
                         &mut sink,
                         &mut journal,
@@ -617,38 +639,39 @@ fn execute_merged_updates_with_deps(
             items
         }
         Err(source) => {
-            // Forward-only classification: re-observe each member and let
-            // the facts decide. An EVR that moved anyway means real side
-            // effects — Partial journal, repair reconciles. An unmoved EVR
-            // proves the slot is untouched — degrade to a per-item re-plan
-            // that isolates the offender.
+            // Forward-only classification: only the exact pre-transaction
+            // EVR proves a member untouched. Every other observation remains
+            // Partial because retrying could apply a second native update.
             let reason = source.to_string();
             let mut clean: Vec<String> = Vec::new();
             for (item, mut journal) in active {
                 let target = item.planned.target.as_str();
-                let moved = match provider.observe(&item.package, &now) {
+                let uncertain_reason = match provider.observe(&item.package, &now) {
                     Ok(NativeProbe::Present { observation, .. }) => {
                         let seen = observation.evr.unwrap_or(observation.version);
                         match &item.planned.native_from {
-                            Some(from) => &seen != from,
-                            // No planning-time EVR to compare against: side
-                            // effects cannot be ruled out.
-                            None => true,
+                            Some(from) if &seen == from => None,
+                            Some(_) => Some("changed in the rpmdb".to_string()),
+                            None => {
+                                Some("has no planning-time EVR for a safe comparison".to_string())
+                            }
                         }
                     }
-                    // Absent or multi-version: the update transaction did
-                    // not produce this, but the slot needs the planner's
-                    // judgement — a per-item re-plan reads the fresh facts.
-                    Ok(_) => false,
-                    // A probe that fails cannot prove the slot is clean.
-                    Err(_) => true,
+                    Ok(NativeProbe::Absent) => Some("is absent from the rpmdb".to_string()),
+                    Ok(NativeProbe::MultipleVersions { .. }) => {
+                        Some("has multiple installed versions in the rpmdb".to_string())
+                    }
+                    Ok(NativeProbe::NotProbed) => {
+                        Some("could not be re-observed in the rpmdb".to_string())
+                    }
+                    Err(err) => Some(format!("could not be re-observed in the rpmdb: {err}")),
                 };
-                let journal_outcome = if moved {
+                let journal_outcome = if let Some(uncertain_reason) = uncertain_reason {
                     items.push(failed_item(
                         &item.name,
                         format!(
-                            "merged native transaction failed after '{}' changed in the rpmdb: {reason}; run `anolisa repair {target}` to reconcile",
-                            item.package
+                            "merged native transaction failed and '{}' {uncertain_reason}: {reason}; run `anolisa repair {target}` to reconcile",
+                            item.package,
                         ),
                     ));
                     TransactionOutcomeStatus::Partial
@@ -709,7 +732,7 @@ mod tests {
     use std::collections::HashMap as StdHashMap;
 
     use anolisa_core::domain::InstallationScope;
-    use anolisa_core::facts::pending_journal_for;
+    use anolisa_core::facts::{JournalEvidence, pending_journal_for};
     use anolisa_core::state::{
         InstallMode as StateInstallMode, InstalledObject, InstalledState, Ownership,
     };
@@ -726,6 +749,7 @@ mod tests {
     /// that a merged batch shared one dnf run.
     struct FakeHost {
         installed: StdHashMap<String, PackageInfo>,
+        multiple_versions: Vec<String>,
         calls: RefCell<Vec<(String, Vec<String>)>>,
         fail_update: bool,
     }
@@ -737,14 +761,29 @@ mod tests {
                     .iter()
                     .map(|(name, info)| ((*name).to_string(), info.clone()))
                     .collect(),
+                multiple_versions: Vec::new(),
                 calls: RefCell::new(Vec::new()),
                 fail_update,
             }
+        }
+
+        fn with_multiple_versions(mut self, packages: &[&str]) -> Self {
+            self.multiple_versions = packages
+                .iter()
+                .map(|package| (*package).to_string())
+                .collect();
+            self
         }
     }
 
     impl PackageQuery for FakeHost {
         fn query_installed(&self, package: &str) -> Result<Option<PackageInfo>, PackageQueryError> {
+            if self.multiple_versions.iter().any(|name| name == package) {
+                return Err(PackageQueryError::UnexpectedOutput {
+                    command: "rpm".to_string(),
+                    detail: "2 installed versions".to_string(),
+                });
+            }
             Ok(self.installed.get(package).cloned())
         }
         fn query_available(&self, _package: &str) -> Result<Vec<PackageInfo>, PackageQueryError> {
@@ -988,11 +1027,73 @@ mod tests {
         let journal_dir = rpm_install::journal_dir(&layout);
         for component in ["cosh", "sec-core"] {
             assert!(
-                pending_journal_for(&journal_dir, component)
+                pending_journal_for(JournalEvidence::new(&journal_dir, &[]), component)
                     .expect("scan journals")
                     .is_none()
             );
         }
+    }
+
+    #[test]
+    fn pending_journal_injected_after_batch_planning_blocks_dnf_and_state_write() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        managed_pair(&c);
+        let layout = common::resolve_layout(&c);
+        let state_path = layout.state_dir.join("installed.toml");
+        let journal_dir = rpm_install::journal_dir(&layout);
+        let pending = Transaction::begin_with_subject(
+            COMMAND,
+            Some("cosh"),
+            state_path.clone(),
+            &journal_dir,
+        )
+        .expect("inject pending journal after planning");
+        drop(pending);
+        let state_before = std::fs::read(&state_path).expect("read state");
+        let journals_before = std::fs::read_dir(&journal_dir)
+            .expect("journal dir")
+            .count();
+        let host = FakeHost::new(
+            &[(
+                "copilot-shell",
+                pkg_info("copilot-shell", "1.0.0", Some("1.al4"), "x86_64"),
+            )],
+            false,
+        );
+        let mut degrade = |name: &str| -> Result<UpdateOutcome, CliError> {
+            panic!("a recovery-blocked member must not degrade ({name})");
+        };
+
+        let items = execute_merged_updates_with_deps(
+            vec![u5_item("cosh", "copilot-shell", "1.0.0-1.al4")],
+            &c,
+            &host,
+            &host,
+            true,
+            &mut degrade,
+        );
+
+        assert!(host.calls.borrow().is_empty(), "dnf must not run");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].status, "failed");
+        assert!(
+            items[0]
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("anolisa repair cosh"))
+        );
+        assert_eq!(
+            std::fs::read(&state_path).expect("read state"),
+            state_before
+        );
+        assert_eq!(
+            std::fs::read_dir(&journal_dir)
+                .expect("journal dir")
+                .count(),
+            journals_before,
+            "the locked executor must not create a second journal"
+        );
     }
 
     #[test]
@@ -1051,7 +1152,7 @@ mod tests {
         let journal_dir = rpm_install::journal_dir(&layout);
         for component in ["cosh", "sec-core"] {
             assert!(
-                pending_journal_for(&journal_dir, component)
+                pending_journal_for(JournalEvidence::new(&journal_dir, &[]), component)
                     .expect("scan journals")
                     .is_none()
             );
@@ -1107,16 +1208,76 @@ mod tests {
 
         let layout = common::resolve_layout(&c);
         let journal_dir = rpm_install::journal_dir(&layout);
-        assert!(
-            pending_journal_for(&journal_dir, "cosh")
-                .expect("scan journals")
-                .is_some(),
-            "partial journal for the moved member must stay pending"
+        let pending = pending_journal_for(JournalEvidence::new(&journal_dir, &[]), "cosh")
+            .expect("scan journals")
+            .expect("partial journal for the moved member must stay pending");
+        let journal = Transaction::load_journal(&pending).expect("load partial journal");
+        let recovery = journal
+            .delegated_recovery
+            .expect("per-subject recovery contract");
+        assert_eq!(recovery.package.as_deref(), Some("copilot-shell"));
+        assert_eq!(
+            recovery.record_action,
+            anolisa_core::transaction::DelegatedRecordAction::Refresh
         );
+        assert_eq!(journal.steps[0].target, "copilot-shell,agent-sec-core");
         assert!(
-            pending_journal_for(&journal_dir, "sec-core")
+            pending_journal_for(JournalEvidence::new(&journal_dir, &[]), "sec-core")
                 .expect("scan journals")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn merged_update_failure_keeps_partial_journal_for_multiple_versions() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed_many(
+            &c,
+            vec![rpm_object(
+                "cosh",
+                "copilot-shell",
+                "1.0.0-1.al4",
+                Ownership::RpmManaged,
+                anolisa_core::state::ObjectStatus::Installed,
+            )],
+        );
+        let host = FakeHost::new(&[], true).with_multiple_versions(&["copilot-shell"]);
+        let degraded = RefCell::new(Vec::new());
+        let mut degrade = |name: &str| -> Result<UpdateOutcome, CliError> {
+            degraded.borrow_mut().push(name.to_string());
+            Ok(UpdateOutcome::Updated)
+        };
+
+        let items = execute_merged_updates_with_deps(
+            vec![u5_item("cosh", "copilot-shell", "1.0.0-1.al4")],
+            &c,
+            &host,
+            &host,
+            true,
+            &mut degrade,
+        );
+
+        assert_eq!(host.calls.borrow().len(), 1, "dnf must run only once");
+        assert!(
+            degraded.borrow().is_empty(),
+            "an indeterminate rpmdb state must not trigger a second update"
+        );
+        let cosh = find(&items, "cosh");
+        assert_eq!(cosh.status, "failed");
+        assert!(
+            cosh.reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("anolisa repair cosh"))
+        );
+
+        let layout = common::resolve_layout(&c);
+        let journal_dir = rpm_install::journal_dir(&layout);
+        assert!(
+            pending_journal_for(JournalEvidence::new(&journal_dir, &[]), "cosh")
+                .expect("scan journals")
+                .is_some(),
+            "an indeterminate result must retain its Partial journal"
         );
     }
 

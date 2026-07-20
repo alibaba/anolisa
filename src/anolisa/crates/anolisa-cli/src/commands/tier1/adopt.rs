@@ -15,15 +15,16 @@ use clap::Parser;
 use serde::Serialize;
 
 use anolisa_core::domain::{InstallationScope, ManagementRelation, NativePm, ProviderBinding};
-use anolisa_core::executor::execute_delegated_steps;
-use anolisa_core::facts::{FactsError, ObserveRequest, assemble_facts, pending_journal_for};
+use anolisa_core::executor::{DelegatedExecutionTarget, execute_delegated_steps};
+use anolisa_core::facts::{
+    FactsError, JournalEvidence, ObserveRequest, assemble_facts, pending_journal_for,
+};
 use anolisa_core::lock::InstallLock;
 use anolisa_core::planner::{Intent, Plan, PlanError, Step, plan};
 use anolisa_core::providers::{DelegatedProvider, ProviderError};
 use anolisa_core::record_sink::{DelegatedIdentity, RecordContext, StoreRecordSink};
 use anolisa_core::state::{ObjectKind, OperationRecord};
 use anolisa_core::state_store::StateStore;
-use anolisa_core::transaction::Transaction;
 use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError};
 use anolisa_platform::pkg_transaction::{PackageTransaction, PackageTransactionError};
 use anolisa_platform::privilege;
@@ -35,6 +36,7 @@ use crate::commands::tier1::install::{
     installed_version_label, now_iso8601, rpm_package_candidates_with_index,
     snapshot_datadir_contract,
 };
+use crate::commands::tier1::recovery::LockedJournalGate;
 use crate::commands::tier1::rpm_install;
 use crate::context::{CliContext, InstallMode};
 use crate::resolution::{ResolutionUse, load_optional_component_index};
@@ -126,14 +128,8 @@ pub(crate) fn adopt_with_query(
     let now = now_iso8601();
     let env = anolisa_env::EnvService::detect();
 
-    let store = StateStore::load(&state_path, uid).map_err(|err| CliError::Runtime {
-        command: command.clone(),
-        reason: format!("failed to load installed state: {err}"),
-    })?;
-
-    // Resolve package aliases (e.g., "copilot-shell" → "cosh") before
-    // addressing state, matching install/update/repair resolution.
-    let mut component = common::lookup_component_name_in_store(target, &store, ctx, COMMAND);
+    let (mut component, view) = common::resolve_mutation_target(target, ctx, &command)?;
+    let store = view.writable.state;
 
     // Quarantined records and pending journals decide the outcome before any
     // rpmdb resolution has to run — the refusal must not depend on the
@@ -146,11 +142,14 @@ pub(crate) fn adopt_with_query(
             &command,
         ));
     }
-    let pending =
-        pending_journal_for(&journal_dir, &component).map_err(|err| CliError::Runtime {
-            command: command.clone(),
-            reason: err.to_string(),
-        })?;
+    let pending = pending_journal_for(
+        JournalEvidence::new(&journal_dir, &store.operations),
+        &component,
+    )
+    .map_err(|err| CliError::Runtime {
+        command: command.clone(),
+        reason: err.to_string(),
+    })?;
     if pending.is_some() {
         return Err(plan_error_to_cli(
             PlanError::PendingOperation,
@@ -244,15 +243,7 @@ pub(crate) fn adopt_with_query(
         &layout,
         &journal_dir,
     )
-    .map_err(|err| match err {
-        FactsError::Probe(ProviderError::Query(PackageQueryError::CommandMissing {
-            command: bin,
-        })) => rpm_tooling_missing_error(&command, &bin, &component),
-        err => CliError::Runtime {
-            command: command.clone(),
-            reason: err.to_string(),
-        },
-    })?;
+    .map_err(|err| adopt_facts_error(err, &command, &component))?;
 
     let package_label = native_package.clone().unwrap_or_else(|| component.clone());
     let steps = match plan(&Intent::Adopt, &facts) {
@@ -302,10 +293,7 @@ pub(crate) fn adopt_with_query(
         &journal_dir,
         scope,
         &now,
-        &steps,
-        &plan_labels,
         &provider,
-        prior_version,
         &command,
     )
 }
@@ -369,9 +357,8 @@ fn resolve_fresh_adopt(
 /// Execute an adopt plan (A1 or A6): at most one observation plus a record
 /// write, under the install lock.
 ///
-/// The store is re-read under the lock and the plan's shape re-validated so
-/// a concurrent operation that recorded the component between planning and
-/// locking is refused instead of overwritten.
+/// The store and native facts are re-read under the lock, then the planner is
+/// run again so execution never consumes a stale lock-external decision.
 #[expect(clippy::too_many_arguments)]
 fn execute_adopt_plan(
     component: &str,
@@ -383,34 +370,56 @@ fn execute_adopt_plan(
     journal_dir: &std::path::Path,
     scope: InstallationScope,
     now: &str,
-    steps: &[Step],
-    plan_labels: &[String],
     provider: &DelegatedProvider,
-    prior_version: Option<String>,
     command: &str,
 ) -> Result<(), CliError> {
     let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
         command: command.to_string(),
         reason: format!("failed to acquire install lock: {err}"),
     })?;
-    let mut store = StateStore::load(state_path, privilege::effective_uid()).map_err(|err| {
-        CliError::Runtime {
+    let mut store = StateStore::load_for_layout(state_path, privilege::effective_uid(), layout)
+        .map_err(|err| CliError::Runtime {
             command: command.to_string(),
             reason: format!("failed to load installed state: {err}"),
-        }
-    })?;
+        })?;
     adopt_authorized(&store, component, shape, command)?;
 
-    let mut journal = Transaction::begin_with_subject(
-        COMMAND,
-        Some(component),
-        state_path.to_path_buf(),
+    let observe_request = ObserveRequest {
+        kind: ObjectKind::Component,
+        name: component,
+        scope,
+        native_package: Some(package),
+        observed_at: now,
+        verify_owned_files: false,
+    };
+    let locked_facts = assemble_facts(
+        &observe_request,
+        &store,
+        Some(provider),
+        layout,
         journal_dir,
     )
-    .map_err(|err| CliError::Runtime {
-        command: command.to_string(),
-        reason: format!("failed to begin operation journal: {err}"),
-    })?;
+    .map_err(|err| adopt_facts_error(err, command, component))?;
+    let locked_steps = match plan(&Intent::Adopt, &locked_facts) {
+        Ok(Plan::Execute { steps, .. }) => steps,
+        Ok(Plan::NoOp { .. }) => {
+            return Err(CliError::Runtime {
+                command: command.to_string(),
+                reason: format!(
+                    "the facts for '{component}' changed while this adopt was resolving; nothing was changed — re-run `anolisa adopt {component}`"
+                ),
+            });
+        }
+        Err(err) => return Err(plan_error_to_cli(err, component, package, command)),
+    };
+    let plan_labels = locked_steps.iter().map(step_label).collect::<Vec<_>>();
+    let prior_version = store
+        .find(ObjectKind::Component, component)
+        .map(installed_version_label);
+
+    let evidence = JournalEvidence::new(journal_dir, &store.operations);
+    let mut journal_gate = LockedJournalGate::load(&_lock, evidence, command)?;
+    let mut journal = journal_gate.begin(COMMAND, component, state_path.to_path_buf(), command)?;
     let operation_id = journal.operation_id.clone();
 
     let context = RecordContext {
@@ -427,7 +436,14 @@ fn execute_adopt_plan(
     };
     let outcome = {
         let mut sink = StoreRecordSink::new(&mut store, state_path, context);
-        execute_delegated_steps(steps, provider, &mut sink, &mut journal, now)
+        execute_delegated_steps(
+            &locked_steps,
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some(package)),
+            provider,
+            &mut sink,
+            &mut journal,
+            now,
+        )
     }
     .map_err(|err| CliError::Runtime {
         command: command.to_string(),
@@ -472,9 +488,21 @@ fn execute_adopt_plan(
             action: "adopted",
             operation_id: Some(operation_id),
             dry_run: false,
-            plan: plan_labels.to_vec(),
+            plan: plan_labels,
         },
     )
+}
+
+fn adopt_facts_error(err: FactsError, command: &str, component: &str) -> CliError {
+    match err {
+        FactsError::Probe(ProviderError::Query(PackageQueryError::CommandMissing {
+            command: bin,
+        })) => rpm_tooling_missing_error(command, &bin, component),
+        err => CliError::Runtime {
+            command: command.to_string(),
+            reason: err.to_string(),
+        },
+    }
 }
 
 /// Re-validation under the install lock: the plan was made from a pre-lock
@@ -662,6 +690,7 @@ mod tests {
     use super::*;
     use crate::context::InstallMode;
 
+    use std::cell::Cell;
     use std::path::PathBuf;
 
     use anolisa_core::domain::PackageIdentity;
@@ -746,6 +775,51 @@ mod tests {
                 .find(|(p, _)| p == package)
                 .map(|(_, v)| v.clone())
                 .unwrap_or_default())
+        }
+    }
+
+    struct DisappearingQuery {
+        installed: PackageInfo,
+        calls: Cell<usize>,
+    }
+
+    impl PackageQuery for DisappearingQuery {
+        fn query_installed(
+            &self,
+            _package: &str,
+        ) -> Result<Option<PackageInfo>, PackageQueryError> {
+            let call = self.calls.get();
+            self.calls.set(call + 1);
+            Ok((call == 0).then(|| self.installed.clone()))
+        }
+
+        fn query_available(&self, _package: &str) -> Result<Vec<PackageInfo>, PackageQueryError> {
+            Ok(Vec::new())
+        }
+
+        fn installed_origin(&self, _package: &str) -> Result<Option<String>, PackageQueryError> {
+            Ok(None)
+        }
+
+        fn what_provides_installed(
+            &self,
+            _capability: &str,
+        ) -> Result<Vec<String>, PackageQueryError> {
+            Ok(Vec::new())
+        }
+
+        fn what_provides_available(
+            &self,
+            _capability: &str,
+        ) -> Result<Vec<String>, PackageQueryError> {
+            Ok(Vec::new())
+        }
+
+        fn provided_capabilities_installed(
+            &self,
+            _package: &str,
+        ) -> Result<Vec<String>, PackageQueryError> {
+            Ok(Vec::new())
         }
     }
 
@@ -945,6 +1019,32 @@ mod tests {
             Some("1.0.0-1.al8"),
             "the cached observation is preserved, not refreshed",
         );
+    }
+
+    #[test]
+    fn adopt_rejects_observed_package_removed_before_locked_execution() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(
+            &c,
+            vec![component_object(
+                "copilot-shell",
+                Ownership::RpmObserved,
+                false,
+            )],
+        );
+        let query = DisappearingQuery {
+            installed: pkg_info("copilot-shell", "2.0.0", Some("1.al8"), "x86_64"),
+            calls: Cell::new(0),
+        };
+
+        let result = adopt_with_query("copilot-shell", None, &c, &query);
+
+        result.expect_err("the locked observation must reject the vanished package");
+        let store = load_store(&c);
+        let (_, relation, _) = delegated_parts(&store, "copilot-shell");
+        assert_eq!(relation, ManagementRelation::Observed);
+        assert_eq!(query.calls.get(), 2);
     }
 
     /// Re-adopting an already-adopted component is a NoOp (A7): nothing is

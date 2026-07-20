@@ -28,7 +28,7 @@ AI Agent 修改代码、配置或数据文件时，误操作代价高昂。ws-ck
 ### 方式一：anolisa CLI（推荐）
 
 ```bash
-anolisa install ws-ckpt
+sudo anolisa --install-mode system install ws-ckpt
 ```
 
 ### 方式二：YUM（Alinux，需配置 ANOLISA YUM 源）

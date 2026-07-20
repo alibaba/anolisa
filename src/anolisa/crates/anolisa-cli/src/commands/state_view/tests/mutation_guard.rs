@@ -2,7 +2,7 @@ use anolisa_platform::fs_layout::FsLayout;
 use tempfile::tempdir;
 
 use super::super::{RootSpec, StateScope, StateView};
-use super::support::{component, rpm_component, user_layout, write_state};
+use super::support::{component, quarantined_component, rpm_component, user_layout, write_state};
 
 #[test]
 fn read_only_system_record_blocks_lifecycle_mutation() {
@@ -162,4 +162,41 @@ fn read_only_system_record_blocks_lifecycle_mutation_by_raw_package_name() {
         }
         other => panic!("expected permission error, got {other:?}"),
     }
+}
+
+#[test]
+fn read_only_system_quarantine_blocks_exact_name_mutation() {
+    let tmp = tempdir().expect("tempdir");
+    let user_layout = user_layout(tmp.path().join("home"));
+    let system_layout = FsLayout::system(Some(tmp.path().join("system")));
+    write_state(&user_layout, Vec::new());
+    write_state(&system_layout, vec![quarantined_component("legacy-name")]);
+
+    let view = StateView::from_layouts(
+        "test",
+        vec![
+            (
+                user_layout,
+                RootSpec {
+                    scope: StateScope::User,
+                    writable: true,
+                },
+            ),
+            (
+                system_layout,
+                RootSpec {
+                    scope: StateScope::System,
+                    writable: false,
+                },
+            ),
+        ],
+    )
+    .expect("state view");
+
+    assert!(view.has_exact_component("legacy-name"));
+    let err = view
+        .reject_non_writable_component_mutation("repair legacy-name", "legacy-name")
+        .expect_err("system quarantine must remain addressable but read-only");
+    assert_eq!(err.code(), "PERMISSION_DENIED");
+    assert!(err.reason().contains("system-scope"));
 }

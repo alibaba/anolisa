@@ -275,6 +275,8 @@ fn install_raw_end_to_end_from_local_repo() {
     assert_eq!(saved_manifest.component.version, "0.2.0");
 
     let store = load_v5_store(&layout);
+    assert_eq!(store.install_mode, StateInstallMode::System);
+    assert_eq!(store.prefix, layout.prefix);
     let installation = store
         .find(ObjectKind::Component, "agentsight")
         .expect("component object must be recorded");
@@ -306,6 +308,37 @@ fn install_raw_end_to_end_from_local_repo() {
     );
     assert_eq!(store.operations.len(), 1);
     assert!(store.operations[0].id.starts_with("op-install-"));
+}
+
+#[test]
+fn system_raw_install_rechecks_native_absence_under_lock() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo(&tmp.path().join("repo"));
+    let ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    let layout = FsLayout::system(Some(prefix));
+    let fake = FakeInstaller::new(
+        "agentsight",
+        pkg_info("agentsight", "0.2.0", Some("1.al8"), "x86_64"),
+    )
+    .package_appears_under_lock(layout.lock_file.clone());
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+
+    let err = install_component_with_deps("agentsight", &a, &ctx, &fake, &NoTxn, true)
+        .expect_err("an external RPM appearing before raw placement must block install");
+
+    assert!(err.reason().contains("appeared"), "got: {}", err.reason());
+    assert!(
+        !layout.bin_dir.join("agentsight").exists(),
+        "a refused race must not place owned files"
+    );
+    assert!(
+        load_v5_store(&layout)
+            .find(ObjectKind::Component, "agentsight")
+            .is_none(),
+        "a refused race must not claim an owned record"
+    );
 }
 
 #[test]

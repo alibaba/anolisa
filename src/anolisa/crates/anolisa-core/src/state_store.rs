@@ -4,7 +4,7 @@
 //! The v5 file stores [`Installation`] records directly plus quarantined
 //! legacy records verbatim. A schema ≤ 4 file is parsed through the legacy
 //! [`InstalledState`] wire type and pushed through
-//! [`migrate_state`](crate::state_migration::migrate_state) exactly once —
+//! [`migrate_state`] exactly once —
 //! the domain types never learn to read the old field soup.
 //!
 //! Migration is lazy on disk by design: loading never writes. The first
@@ -16,6 +16,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use anolisa_platform::fs_layout::{FsLayout, InstallMode as LayoutInstallMode};
 use serde::{Deserialize, Serialize};
 
 use crate::adapter::claim::AdapterClaim;
@@ -101,6 +102,80 @@ impl StateStore {
         }
     }
 
+    /// Create an empty store whose file metadata matches `layout`.
+    pub fn empty_for_layout(layout: &FsLayout) -> Self {
+        let mut store = Self::empty();
+        store.set_layout_metadata(layout);
+        store
+    }
+
+    fn set_layout_metadata(&mut self, layout: &FsLayout) {
+        self.install_mode = match layout.mode {
+            LayoutInstallMode::System => InstallMode::System,
+            LayoutInstallMode::User => InstallMode::User,
+        };
+        self.prefix = layout.prefix.clone();
+    }
+
+    /// Load state for a concrete filesystem layout and enforce its scope.
+    ///
+    /// A state without lifecycle, recovery, backup, or adapter records may
+    /// adopt the selected layout. Otherwise file metadata and every
+    /// installation scope must already match; conflicting state is rejected
+    /// before planning or save.
+    pub fn load_for_layout(path: &Path, uid: u32, layout: &FsLayout) -> Result<Self, StateError> {
+        let mut store = Self::load(path, uid)?;
+        if store.installations.is_empty()
+            && store.quarantined.is_empty()
+            && store.backups.is_empty()
+            && store.operations.is_empty()
+            && store.adapter_claims.is_empty()
+        {
+            store.set_layout_metadata(layout);
+            return Ok(store);
+        }
+
+        let (expected_mode, expected_scope, layout_label) = match layout.mode {
+            LayoutInstallMode::System => (
+                InstallMode::System,
+                InstallationScope::System,
+                "system".to_string(),
+            ),
+            LayoutInstallMode::User => (
+                InstallMode::User,
+                InstallationScope::User { uid },
+                format!("user(uid={uid})"),
+            ),
+        };
+        if store.install_mode != expected_mode || store.prefix != layout.prefix {
+            return Err(StateError::LayoutMismatch {
+                path: path.to_path_buf(),
+                reason: format!(
+                    "state metadata install_mode={}, prefix={} does not match the active {layout_label} layout install_mode={}, prefix={}",
+                    install_mode_label(store.install_mode),
+                    store.prefix.display(),
+                    install_mode_label(expected_mode),
+                    layout.prefix.display(),
+                ),
+            });
+        }
+        if let Some(installation) = store
+            .installations
+            .iter()
+            .find(|installation| installation.scope != expected_scope)
+        {
+            return Err(StateError::LayoutMismatch {
+                path: path.to_path_buf(),
+                reason: format!(
+                    "installation '{}' has scope {}, which does not match the active {layout_label} layout",
+                    installation.name,
+                    installation_scope_label(installation.scope),
+                ),
+            });
+        }
+        Ok(store)
+    }
+
     /// Load state from `path`, migrating a legacy (schema ≤ 4) file in
     /// memory. A missing file is a fresh store, not an error.
     ///
@@ -119,7 +194,18 @@ impl StateStore {
             source,
         })?;
 
-        if probe.schema_version >= STORE_SCHEMA_VERSION {
+        // Refuse files from a newer schema: serde would silently drop the
+        // fields that schema keeps its records in, and the next save would
+        // rewrite the file as v5 — destroying data the newer writer owned.
+        if probe.schema_version > STORE_SCHEMA_VERSION {
+            return Err(StateError::NewerSchema {
+                path: path.to_path_buf(),
+                found: probe.schema_version,
+                supported: STORE_SCHEMA_VERSION,
+            });
+        }
+
+        if probe.schema_version == STORE_SCHEMA_VERSION {
             let file: StateFileV5 =
                 toml::from_str(&content).map_err(|source| StateError::Parse {
                     path: path.to_path_buf(),
@@ -230,6 +316,19 @@ impl StateStore {
             .find(|i| i.kind == kind && i.name == name)
     }
 
+    /// Whether active or quarantined state owns the exact object name.
+    ///
+    /// Name resolution uses this before consulting package aliases so an
+    /// inert quarantine remains directly addressable by `repair` and
+    /// `forget` instead of being remapped to an unrelated component.
+    pub fn contains_record(&self, kind: ObjectKind, name: &str) -> bool {
+        self.find(kind, name).is_some()
+            || self
+                .quarantined
+                .iter()
+                .any(|entry| entry.record.kind == kind && entry.record.name == name)
+    }
+
     /// Mutable access to an active installation.
     pub fn find_mut(&mut self, kind: ObjectKind, name: &str) -> Option<&mut Installation> {
         self.installations
@@ -319,6 +418,20 @@ impl StateStore {
             .iter()
             .filter(|c| c.component == component)
             .collect()
+    }
+}
+
+const fn install_mode_label(mode: InstallMode) -> &'static str {
+    match mode {
+        InstallMode::System => "system",
+        InstallMode::User => "user",
+    }
+}
+
+fn installation_scope_label(scope: InstallationScope) -> String {
+    match scope {
+        InstallationScope::System => "system".to_string(),
+        InstallationScope::User { uid } => format!("user(uid={uid})"),
     }
 }
 
@@ -437,6 +550,81 @@ started_at = "2026-07-01T00:00:00Z"
     }
 
     #[test]
+    fn scoped_load_initializes_empty_layout_metadata() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let layout = FsLayout::system(Some(tmp.path().join("system")));
+        let path = layout.state_dir.join("installed.toml");
+
+        let store = StateStore::load_for_layout(&path, 1000, &layout).expect("load empty");
+
+        assert_eq!(store.install_mode, InstallMode::System);
+        assert_eq!(store.prefix, layout.prefix);
+    }
+
+    #[test]
+    fn scoped_load_rejects_file_metadata_mismatch() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let system_layout = FsLayout::system(Some(tmp.path().join("system")));
+        let user_layout =
+            FsLayout::user_with_overrides(tmp.path().join("home"), None, None, None, None, None);
+        let path = system_layout.state_dir.join("installed.toml");
+        let mut store = StateStore::empty();
+        store.set_layout_metadata(&system_layout);
+        store.upsert(owned_installation("cosh", "2.7.0"));
+        store.save(&path).expect("save system state");
+
+        let err = StateStore::load_for_layout(&path, 1000, &user_layout)
+            .expect_err("metadata mismatch must fail");
+
+        assert!(matches!(err, StateError::LayoutMismatch { .. }));
+        assert!(err.to_string().contains("state metadata"));
+    }
+
+    #[test]
+    fn scoped_load_rejects_operation_only_metadata_mismatch() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let system_layout = FsLayout::system(Some(tmp.path().join("system")));
+        let user_layout =
+            FsLayout::user_with_overrides(tmp.path().join("home"), None, None, None, None, None);
+        let path = system_layout.state_dir.join("installed.toml");
+        let mut store = StateStore::empty_for_layout(&user_layout);
+        store.operations.push(OperationRecord {
+            id: "op-1".to_string(),
+            command: "install cosh".to_string(),
+            status: "started".to_string(),
+            started_at: "2026-07-21T00:00:00Z".to_string(),
+            finished_at: None,
+            parent_operation_id: None,
+        });
+        store.save(&path).expect("save user operation state");
+
+        let err = StateStore::load_for_layout(&path, 1000, &system_layout)
+            .expect_err("operation history must preserve its original scope");
+
+        assert!(matches!(err, StateError::LayoutMismatch { .. }));
+        assert!(err.to_string().contains("state metadata"));
+    }
+
+    #[test]
+    fn scoped_load_rejects_installation_scope_mismatch() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let layout = FsLayout::system(Some(tmp.path().join("system")));
+        let path = layout.state_dir.join("installed.toml");
+        let mut store = StateStore::empty();
+        store.set_layout_metadata(&layout);
+        let mut installation = owned_installation("cosh", "2.7.0");
+        installation.scope = InstallationScope::User { uid: 1000 };
+        store.upsert(installation);
+        store.save(&path).expect("save mismatched record");
+
+        let err = StateStore::load_for_layout(&path, 1000, &layout)
+            .expect_err("record scope mismatch must fail");
+
+        assert!(matches!(err, StateError::LayoutMismatch { .. }));
+        assert!(err.to_string().contains("installation 'cosh'"));
+    }
+
+    #[test]
     fn legacy_file_migrates_at_the_load_boundary() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let path = write_file(tmp.path(), "installed.toml", LEGACY_V4);
@@ -466,6 +654,33 @@ started_at = "2026-07-01T00:00:00Z"
         // Non-object payloads carry over untouched.
         assert_eq!(store.operations.len(), 1);
         assert_eq!(store.migration_audit.len(), 4);
+    }
+
+    /// A file written by a newer schema must be refused, not read as v5:
+    /// serde would drop the newer schema's fields and the next save would
+    /// rewrite the file as v5, silently destroying that data.
+    #[test]
+    fn newer_schema_file_is_refused_and_left_untouched() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let future_v6 = "schema_version = 6\n\
+                         updated_at = \"2026-07-20T00:00:00Z\"\n\
+                         install_mode = \"system\"\n\
+                         prefix = \"/\"\n\
+                         anolisa_version = \"future\"\n\
+                         future_only = \"must-survive\"\n";
+        let path = write_file(tmp.path(), "installed.toml", future_v6);
+
+        let err = StateStore::load(&path, 1000).expect_err("v6 must be refused");
+        assert!(matches!(
+            err,
+            StateError::NewerSchema {
+                found: 6,
+                supported: STORE_SCHEMA_VERSION,
+                ..
+            }
+        ));
+        // Refusal is read-only: the newer writer's bytes are untouched.
+        assert_eq!(fs::read_to_string(&path).expect("read back"), future_v6);
     }
 
     #[test]
@@ -594,6 +809,9 @@ started_at = "2026-07-01T00:00:00Z"
         let tmp = tempfile::tempdir().expect("tmpdir");
         let path = write_file(tmp.path(), "installed.toml", LEGACY_V4);
         let mut store = StateStore::load(&path, 1000).expect("load legacy");
+
+        assert!(store.contains_record(ObjectKind::Component, "cosh"));
+        assert!(store.contains_record(ObjectKind::Component, "mystery"));
 
         assert!(store.remove(ObjectKind::Component, "cosh"));
         assert!(store.remove(ObjectKind::Component, "mystery"));

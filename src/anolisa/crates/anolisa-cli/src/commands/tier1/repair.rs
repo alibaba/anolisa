@@ -17,6 +17,7 @@
 //!   as an active owned record (R6);
 //! - everything else → an explicit refusal naming the way out.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use chrono::{SecondsFormat, Utc};
@@ -26,10 +27,10 @@ use serde::Serialize;
 use anolisa_core::central_log::{CentralLog, LogKind, LogRecord, LogStatus, Severity};
 use anolisa_core::domain::{
     Installation, InstallationScope, LifecycleStatus, ManagementRelation, NativePm, Observation,
-    PackageIdentity, ProviderBinding,
+    ProviderBinding,
 };
-use anolisa_core::executor::execute_delegated_steps;
-use anolisa_core::facts::{ObserveRequest, assemble_facts, pending_journal_for};
+use anolisa_core::executor::{DelegatedExecutionTarget, RecordSink, execute_delegated_steps};
+use anolisa_core::facts::{JournalEvidence, JournalInventory, ObserveRequest, assemble_facts};
 use anolisa_core::lock::InstallLock;
 use anolisa_core::owned_executor::{OwnedExecutionError, execute_owned_steps};
 use anolisa_core::planner::{Intent, NativeProbe, Plan, PlanError, RecordWrite, Step, plan};
@@ -38,7 +39,9 @@ use anolisa_core::record_sink::{DelegatedIdentity, RecordContext, StoreRecordSin
 use anolisa_core::state::{ObjectKind, OperationRecord};
 use anolisa_core::state_migration::QuarantinedObject;
 use anolisa_core::state_store::StateStore;
-use anolisa_core::transaction::{Transaction, TransactionOutcomeStatus};
+use anolisa_core::transaction::{
+    DelegatedRecordAction, DelegatedRecoveryContext, Transaction, TransactionOutcomeStatus,
+};
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError};
 use anolisa_platform::pkg_transaction::{PackageTransaction, PackageTransactionError};
@@ -54,6 +57,7 @@ use crate::commands::tier1::install::{
     refresh_datadir_contract_snapshot, resolve_raw, resolve_raw_inputs_for_component,
     rpm_package_candidates_with_index, snapshot_datadir_contract,
 };
+use crate::commands::tier1::recovery::LockedJournalGate;
 use crate::commands::tier1::rpm_install::{self, PendingRpmInstall};
 use crate::commands::tier1::update::rpm_repo_source_for_update;
 use crate::context::CliContext;
@@ -107,22 +111,14 @@ struct RepairResultPayload {
 pub fn handle(args: RepairArgs, ctx: &CliContext) -> Result<(), CliError> {
     let command = format!("repair {}", args.component);
     let layout = common::resolve_layout(ctx);
-    let state_path = layout.state_dir.join("installed.toml");
-    let store = StateStore::load(&state_path, privilege::effective_uid()).map_err(|err| {
-        CliError::Runtime {
-            command: command.clone(),
-            reason: format!("failed to load installed state: {err}"),
-        }
-    })?;
-    let resolved = common::lookup_component_name_in_store(&args.component, &store, ctx, COMMAND);
+    let (resolved, view) = common::resolve_mutation_target(&args.component, ctx, &command)?;
+    let store = &view.writable.state;
     let is_delegated = matches!(
         store
             .find(ObjectKind::Component, &resolved)
             .map(|r| &r.binding),
         Some(ProviderBinding::Delegated { .. })
     );
-    drop(store);
-
     // R4 may re-run `dnf install`; when the component is delegated and an
     // ANOLISA rpm repo is configured, pin the transaction to it exactly like
     // update does. Unlike update, repair must not *require* the repo: R3 and
@@ -181,19 +177,9 @@ fn repair_attempt(
     };
     let now = now_iso8601();
 
-    let store = StateStore::load(&state_path, uid).map_err(|err| CliError::Runtime {
-        command: command.clone(),
-        reason: format!("failed to load installed state: {err}"),
-    })?;
-
-    // Resolve package aliases (e.g., "copilot-shell" → "cosh") before
-    // addressing state, matching install/update resolution.
-    let resolved = common::lookup_component_name_in_store(input, &store, ctx, COMMAND);
+    let (resolved, view) = common::resolve_mutation_target(input, ctx, &command)?;
+    let store = view.writable.state;
     let target = resolved.as_str();
-
-    if store.find(ObjectKind::Component, target).is_none() {
-        common::reject_visible_non_writable_component(ctx, &command, target)?;
-    }
 
     // The probe target: an active delegated record's resolved package (a
     // legacy record without one resolves through the adopt candidate chain
@@ -346,6 +332,7 @@ fn repair_attempt(
             });
         }
         return match recover_journal(
+            input,
             target,
             ctx,
             &layout,
@@ -364,7 +351,7 @@ fn repair_attempt(
     // R6: restore a quarantined record whose files verified intact. The plan
     // is a single record write; nothing touches the host.
     if matches!(steps.as_slice(), [Step::WriteRecord(RecordWrite::Owned)]) {
-        return repair_restore_quarantined(
+        let execution = repair_restore_quarantined(
             target,
             ctx,
             &layout,
@@ -375,6 +362,13 @@ fn repair_attempt(
             &steps,
             &plan_labels,
             &command,
+        )?;
+        return continue_after_locked_repair(
+            execution,
+            may_recover_journal,
+            target,
+            &command,
+            || repair_attempt(input, ctx, query, txn, is_root, true),
         );
     }
 
@@ -394,7 +388,7 @@ fn repair_attempt(
                 });
             }
         };
-        return repair_owned_replay(
+        let execution = repair_owned_replay(
             target,
             ctx,
             &layout,
@@ -406,6 +400,13 @@ fn repair_attempt(
             &plan_labels,
             prior,
             &command,
+        )?;
+        return continue_after_locked_repair(
+            execution,
+            may_recover_journal,
+            target,
+            &command,
+            || repair_attempt(input, ctx, query, txn, is_root, true),
         );
     }
 
@@ -441,7 +442,7 @@ fn repair_attempt(
     };
     drop(store);
 
-    repair_delegated(
+    let execution = repair_delegated(
         target,
         ctx,
         &layout,
@@ -456,7 +457,34 @@ fn repair_attempt(
         &provider,
         manifest_drifted,
         &command,
-    )
+    )?;
+    continue_after_locked_repair(execution, may_recover_journal, target, &command, || {
+        repair_attempt(input, ctx, query, txn, is_root, true)
+    })
+}
+
+enum LockedRepairExecution {
+    Completed,
+    RecoveryAppeared,
+}
+
+fn continue_after_locked_repair(
+    execution: LockedRepairExecution,
+    may_recover_journal: bool,
+    target: &str,
+    command: &str,
+    retry: impl FnOnce() -> Result<(), CliError>,
+) -> Result<(), CliError> {
+    match execution {
+        LockedRepairExecution::Completed => Ok(()),
+        LockedRepairExecution::RecoveryAppeared if may_recover_journal => retry(),
+        LockedRepairExecution::RecoveryAppeared => Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "another operation journal for '{target}' appeared after the last recovery; run `anolisa repair {target}` again"
+            ),
+        }),
+    }
 }
 
 /// Execute a delegated repair plan (R3/R4/R5) under the install lock, with
@@ -477,17 +505,21 @@ fn repair_delegated(
     provider: &DelegatedProvider<'_>,
     manifest_drifted: bool,
     command: &str,
-) -> Result<(), CliError> {
+) -> Result<LockedRepairExecution, CliError> {
     let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
         command: command.to_string(),
         reason: format!("failed to acquire install lock: {err}"),
     })?;
-    let mut store = StateStore::load(state_path, privilege::effective_uid()).map_err(|err| {
-        CliError::Runtime {
+    let mut store = StateStore::load_for_layout(state_path, privilege::effective_uid(), layout)
+        .map_err(|err| CliError::Runtime {
             command: command.to_string(),
             reason: format!("failed to load installed state: {err}"),
-        }
-    })?;
+        })?;
+    let evidence = JournalEvidence::new(journal_dir, &store.operations);
+    let mut journal_gate = LockedJournalGate::load(&_lock, evidence, command)?;
+    if journal_gate.pending_path(target).is_some() {
+        return Ok(LockedRepairExecution::RecoveryAppeared);
+    }
     if !delegated_repair_authorized(&store, target, package, steps) {
         return Err(CliError::Runtime {
             command: command.to_string(),
@@ -497,16 +529,7 @@ fn repair_delegated(
         });
     }
 
-    let mut journal = Transaction::begin_with_subject(
-        COMMAND,
-        Some(target),
-        state_path.to_path_buf(),
-        journal_dir,
-    )
-    .map_err(|err| CliError::Runtime {
-        command: command.to_string(),
-        reason: format!("failed to begin operation journal: {err}"),
-    })?;
+    let mut journal = journal_gate.begin(COMMAND, target, state_path.to_path_buf(), command)?;
     let operation_id = journal.operation_id.clone();
 
     let context = RecordContext {
@@ -523,7 +546,14 @@ fn repair_delegated(
     };
     let outcome = {
         let mut sink = StoreRecordSink::new(&mut store, state_path, context);
-        execute_delegated_steps(steps, provider, &mut sink, &mut journal, now)
+        execute_delegated_steps(
+            steps,
+            DelegatedExecutionTarget::new(NativePm::Rpm, Some(package)),
+            provider,
+            &mut sink,
+            &mut journal,
+            now,
+        )
     }
     .map_err(|err| match err {
         anolisa_core::executor::ExecutionError::TransactionFailed {
@@ -631,7 +661,8 @@ fn repair_delegated(
             operation_id: Some(operation_id),
             manifest_reconciliation: manifest_drifted.then_some("component manifest drift"),
         },
-    )
+    )?;
+    Ok(LockedRepairExecution::Completed)
 }
 
 /// Execute the quarantine-restore plan (R6) under the install lock: rebuild
@@ -648,17 +679,21 @@ fn repair_restore_quarantined(
     steps: &[Step],
     plan_labels: &[String],
     command: &str,
-) -> Result<(), CliError> {
+) -> Result<LockedRepairExecution, CliError> {
     let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
         command: command.to_string(),
         reason: format!("failed to acquire install lock: {err}"),
     })?;
-    let mut store = StateStore::load(state_path, privilege::effective_uid()).map_err(|err| {
-        CliError::Runtime {
+    let mut store = StateStore::load_for_layout(state_path, privilege::effective_uid(), layout)
+        .map_err(|err| CliError::Runtime {
             command: command.to_string(),
             reason: format!("failed to load installed state: {err}"),
-        }
-    })?;
+        })?;
+    let evidence = JournalEvidence::new(journal_dir, &store.operations);
+    let mut journal_gate = LockedJournalGate::load(&_lock, evidence, command)?;
+    if journal_gate.pending_path(target).is_some() {
+        return Ok(LockedRepairExecution::RecoveryAppeared);
+    }
     // Re-validate under the lock: the quarantined record must still exist
     // and no active record may have claimed the name in the window.
     let version = match (
@@ -676,16 +711,7 @@ fn repair_restore_quarantined(
         }
     };
 
-    let mut journal = Transaction::begin_with_subject(
-        COMMAND,
-        Some(target),
-        state_path.to_path_buf(),
-        journal_dir,
-    )
-    .map_err(|err| CliError::Runtime {
-        command: command.to_string(),
-        reason: format!("failed to begin operation journal: {err}"),
-    })?;
+    let mut journal = journal_gate.begin(COMMAND, target, state_path.to_path_buf(), command)?;
     let operation_id = journal.operation_id.clone();
 
     {
@@ -698,7 +724,7 @@ fn repair_restore_quarantined(
         );
         execute_owned_steps(steps, &mut ops, &mut journal)
     }
-    .map_err(|err| owned_error_to_cli(err, target, command))?;
+    .map_err(|err| owned_error_to_cli(err, target, scope, command))?;
 
     store.operations.push(OperationRecord {
         id: operation_id.clone(),
@@ -736,7 +762,8 @@ fn repair_restore_quarantined(
             operation_id: Some(operation_id),
             manifest_reconciliation: None,
         },
-    )
+    )?;
+    Ok(LockedRepairExecution::Completed)
 }
 
 /// Execute an owned replay plan (R2) against the raw backend, pinned to the
@@ -758,7 +785,7 @@ fn repair_owned_replay(
     plan_labels: &[String],
     prior: anolisa_core::domain::OwnedArtifact,
     command: &str,
-) -> Result<(), CliError> {
+) -> Result<LockedRepairExecution, CliError> {
     // No root pre-check: `--prefix` may point at a user-writable tree, and a
     // genuine permission problem fails the exact step and unwinds honestly.
 
@@ -786,15 +813,19 @@ fn repair_owned_replay(
         command: command.to_string(),
         reason: format!("failed to acquire install lock: {err}"),
     })?;
-    let mut store = StateStore::load(state_path, privilege::effective_uid()).map_err(|err| {
-        CliError::Runtime {
+    let mut store = StateStore::load_for_layout(state_path, privilege::effective_uid(), layout)
+        .map_err(|err| CliError::Runtime {
             command: command.to_string(),
             reason: format!("failed to load installed state: {err}"),
-        }
-    })?;
+        })?;
+    let evidence = JournalEvidence::new(journal_dir, &store.operations);
+    let mut journal_gate = LockedJournalGate::load(&_lock, evidence, command)?;
+    if journal_gate.pending_path(target).is_some() {
+        return Ok(LockedRepairExecution::RecoveryAppeared);
+    }
     let prior = match store
         .find(ObjectKind::Component, target)
-        .map(|r| &r.binding)
+        .map(|record| &record.binding)
     {
         Some(ProviderBinding::Owned { artifact }) if artifact.version == prior.version => {
             artifact.clone()
@@ -808,17 +839,7 @@ fn repair_owned_replay(
             });
         }
     };
-
-    let mut journal = Transaction::begin_with_subject(
-        COMMAND,
-        Some(target),
-        state_path.to_path_buf(),
-        journal_dir,
-    )
-    .map_err(|err| CliError::Runtime {
-        command: command.to_string(),
-        reason: format!("failed to begin operation journal: {err}"),
-    })?;
+    let mut journal = journal_gate.begin(COMMAND, target, state_path.to_path_buf(), command)?;
     let operation_id = journal.operation_id.clone();
 
     let outcome = {
@@ -842,7 +863,7 @@ fn repair_owned_replay(
         }
         result
     }
-    .map_err(|err| owned_error_to_cli(err, target, command))?;
+    .map_err(|err| owned_error_to_cli(err, target, scope, command))?;
 
     store.operations.push(OperationRecord {
         id: operation_id.clone(),
@@ -884,7 +905,8 @@ fn repair_owned_replay(
             operation_id: Some(operation_id),
             manifest_reconciliation: None,
         },
-    )
+    )?;
+    Ok(LockedRepairExecution::Completed)
 }
 
 /// What consuming a pending journal (R1) left behind.
@@ -909,6 +931,7 @@ enum Recovery {
 /// (R2) or nothing does.
 #[expect(clippy::too_many_arguments)]
 fn recover_journal(
+    input: &str,
     target: &str,
     ctx: &CliContext,
     layout: &FsLayout,
@@ -923,83 +946,130 @@ fn recover_journal(
         command: command.to_string(),
         reason: format!("failed to acquire install lock: {err}"),
     })?;
-    let mut store = StateStore::load(state_path, privilege::effective_uid()).map_err(|err| {
-        CliError::Runtime {
+    let mut store = StateStore::load_for_layout(state_path, privilege::effective_uid(), layout)
+        .map_err(|err| CliError::Runtime {
             command: command.to_string(),
             reason: format!("failed to load installed state: {err}"),
-        }
-    })?;
+        })?;
 
     // Re-find the journal under the lock; a concurrent repair may have
     // consumed it, which simply unblocks the replan.
-    let Some(path) = pending_journal_for(journal_dir, target).map_err(|err| CliError::Runtime {
+    let evidence = JournalEvidence::new(journal_dir, &store.operations);
+    let inventory = JournalInventory::load(evidence).map_err(|err| CliError::Runtime {
         command: command.to_string(),
         reason: err.to_string(),
-    })?
-    else {
+    })?;
+    let Some(blocker) = inventory.blocking_for(target) else {
         return Ok(Recovery::Cleared);
     };
-    let mut journal = Transaction::load_journal(&path).map_err(|err| CliError::Runtime {
-        command: command.to_string(),
-        reason: format!(
-            "cannot read recovery journal {}: {err}; automatic recovery is unsafe — inspect the journal and cross-check installed.toml before removing any recovery marker",
-            path.display()
-        ),
-    })?;
 
     // Legacy pending RPM install claim (the pre-pipeline durable-intent
-    // journal): complete it the way the old recovery path did.
-    if let Some(pending) =
-        rpm_install::parse_pending(journal.clone(), &path, layout, &store.operations, command)?
-    {
+    // journal): conservative blocking alone does not establish ownership,
+    // so recover only an exact, unique component or package claim.
+    if blocker.transaction().subject.is_none() {
+        let claims = if input == target {
+            vec![target]
+        } else {
+            vec![target, input]
+        };
+        let pending = rpm_install::find_pending_claim_in_inventory(
+            layout,
+            &claims,
+            command,
+            &inventory,
+        )?
+        .filter(|pending| pending.transaction.journal_path == blocker.path())
+        .ok_or_else(|| CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "pending journal at {} has no subject attributable to '{target}'; it was left pending because automatic recovery would be unsafe",
+                blocker.path().display()
+            ),
+        })?;
         return recover_legacy_rpm_install(
             pending, ctx, layout, &mut store, state_path, scope, now, provider, command,
         );
     }
 
-    // Pipeline journal: classify by its steps. A native-transaction or
-    // observe step names the package the interrupted operation ran against.
-    let package = journal
-        .steps
-        .iter()
-        .find(|s| {
-            s.phase == anolisa_core::executor::PHASE_NATIVE_TXN
-                || s.phase == anolisa_core::executor::PHASE_OBSERVE
-        })
-        .and_then(|s| s.target.split(',').next())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
+    let entry = inventory
+        .recoverable_for(target)
+        .ok_or_else(|| CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "pending journal at {} does not belong to '{target}'; it was left pending",
+                blocker.path().display()
+            ),
+        })?;
+    let path = entry.path().to_path_buf();
+    let mut journal = entry.transaction().clone();
 
-    let Some(package) = package else {
-        // Owned operation: its compensation stack lived in the interrupted
-        // process and cannot be replayed from the journal. Terminate the
-        // journal honestly and let the replan converge — the integrity probe
-        // routes damaged files into R2 and healthy ones into a no-op.
+    // Preserve strict rejection of subject-bound journals that imitate only
+    // part of the legacy RPM protocol.
+    if let Some(pending) = rpm_install::parse_pending(journal.clone(), &path, layout, command)? {
+        return recover_legacy_rpm_install(
+            pending, ctx, layout, &mut store, state_path, scope, now, provider, command,
+        );
+    }
+
+    let Some(recovery) = delegated_recovery_context(&journal, &store, target, command)? else {
+        if journal.operation == "install" {
+            let committed = store
+                .find(ObjectKind::Component, target)
+                .is_some_and(|record| {
+                    record.scope == scope
+                        && record.status == LifecycleStatus::Installed
+                        && record.last_operation_id.as_deref()
+                            == Some(journal.operation_id.as_str())
+                        && matches!(record.binding, ProviderBinding::Owned { .. })
+                });
+            if committed {
+                journal
+                    .finish(TransactionOutcomeStatus::Ok)
+                    .map_err(|err| journal_finish_error(&journal, command, err))?;
+                return Ok(Recovery::Cleared);
+            }
+            return Err(CliError::Runtime {
+                command: command.to_string(),
+                reason: format!(
+                    "pending fresh owned install for '{target}' has no durable recovery context; the journal was left pending because automatic recovery would be unsafe"
+                ),
+            });
+        }
         journal
             .finish(TransactionOutcomeStatus::Failed)
             .map_err(|err| journal_finish_error(&journal, command, err))?;
         return Ok(Recovery::Cleared);
     };
 
+    if recovery.record_action == DelegatedRecordAction::Drop {
+        return recover_delegated_drop(
+            target, ctx, layout, state_path, scope, now, provider, command, &mut store, journal,
+            recovery,
+        );
+    }
+    let package = recovery.package.as_deref().ok_or_else(|| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!(
+            "pending delegated operation for '{target}' has no subject package; the journal was left pending because automatic recovery would be unsafe"
+        ),
+    })?;
+
     match provider
-        .observe(&package, now)
+        .observe(package, now)
         .map_err(|err| probe_error(err, command, target))?
     {
         NativeProbe::Present { observation, .. } => {
-            if store.find(ObjectKind::Component, target).is_some() {
-                // The record survived the interruption; whatever step died,
-                // the replan re-observes and reconciles (R3). The journal's
-                // story is over.
-                journal
-                    .finish(TransactionOutcomeStatus::Ok)
-                    .map_err(|err| journal_finish_error(&journal, command, err))?;
-                return Ok(Recovery::Cleared);
-            }
-            // The native transaction ran but the record commit did not:
-            // adopt the result as managed, under the same conflict guard the
-            // legacy path uses.
-            if let Some(owner) = store_claim_owner(&store, target, &package) {
+            ensure_recovery_write_authorized(
+                &store,
+                target,
+                package,
+                recovery.pm,
+                recovery.record_action,
+                command,
+            )?;
+            if let Some(owner) = store_claim_owner(&store, target, package)
+                && owner.name != target
+            {
                 return Err(CliError::Runtime {
                     command: command.to_string(),
                     reason: format!(
@@ -1009,15 +1079,17 @@ fn recover_journal(
                 });
             }
             let operation_id = journal.operation_id.clone();
-            commit_recovered_managed(
+            commit_recovered_delegated(
                 &mut store,
                 state_path,
                 target,
-                &package,
-                &observation,
+                Some(package),
+                Some(&observation),
                 scope,
-                now,
+                &journal.started_at,
                 &operation_id,
+                recovery.pm,
+                recovery.record_action,
                 command,
             )?;
             journal
@@ -1032,15 +1104,16 @@ fn recover_journal(
                 now,
                 LogStatus::Ok,
                 format!(
-                    "recovered interrupted {} of component {target} (package {package}) as rpm-managed",
-                    journal.operation
+                    "recovered interrupted {} of component {target} (package {package}) with {}",
+                    journal.operation,
+                    delegated_record_action_label(recovery.record_action),
                 ),
             );
             render_result(
                 ctx,
                 &RepairResultPayload {
                     component: target.to_string(),
-                    package: Some(package),
+                    package: Some(package.to_string()),
                     action: "recovered-journal".to_string(),
                     from_version: None,
                     to_version: Some(
@@ -1078,6 +1151,452 @@ fn recover_journal(
                 ),
             })
         }
+    }
+}
+
+/// Read the explicit per-subject contract, or conservatively decode a
+/// journal written before that additive field existed.
+fn delegated_recovery_context(
+    journal: &Transaction,
+    store: &StateStore,
+    target: &str,
+    command: &str,
+) -> Result<Option<DelegatedRecoveryContext>, CliError> {
+    if let Some(context) = &journal.delegated_recovery {
+        if journal.subject.as_deref() != Some(target) {
+            return Err(unsafe_recovery_contract_error(
+                journal,
+                command,
+                "the explicit delegated recovery contract has no exact subject",
+            ));
+        }
+        if journal.steps.is_empty() {
+            return Err(unsafe_recovery_contract_error(
+                journal,
+                command,
+                "the explicit delegated recovery contract has no journal steps",
+            ));
+        }
+        if context.record_action != DelegatedRecordAction::Drop
+            && context
+                .package
+                .as_deref()
+                .is_none_or(|package| package.trim().is_empty())
+        {
+            return Err(unsafe_recovery_contract_error(
+                journal,
+                command,
+                "the explicit delegated recovery contract has no package",
+            ));
+        }
+        if journal.steps.iter().any(|step| {
+            record_action_from_journal_action(&step.action).is_some()
+                && delegated_action_from_journal_step(step).is_none()
+        }) {
+            return Err(unsafe_recovery_contract_error(
+                journal,
+                command,
+                "the explicit record transition uses a non-delegated phase or target",
+            ));
+        }
+        if journal
+            .steps
+            .iter()
+            .filter_map(delegated_action_from_journal_step)
+            .any(|action| action != context.record_action)
+        {
+            return Err(unsafe_recovery_contract_error(
+                journal,
+                command,
+                "the explicit record transition conflicts with the journal steps",
+            ));
+        }
+        if let Some(package) = context.package.as_deref()
+            && journal
+                .steps
+                .iter()
+                .filter(|step| {
+                    step.phase == anolisa_core::executor::PHASE_NATIVE_TXN
+                        || step.phase == anolisa_core::executor::PHASE_OBSERVE
+                })
+                .any(|step| {
+                    !step
+                        .target
+                        .split(',')
+                        .map(str::trim)
+                        .any(|candidate| candidate == package)
+                })
+        {
+            return Err(unsafe_recovery_contract_error(
+                journal,
+                command,
+                "the explicit package identity conflicts with the journal steps",
+            ));
+        }
+        return Ok(Some(context.clone()));
+    }
+
+    if journal.steps.iter().any(|step| {
+        record_action_from_journal_action(&step.action).is_some()
+            && delegated_action_from_journal_step(step).is_none()
+            && !is_owned_drop_record_step(step)
+    }) {
+        return Err(unsafe_recovery_contract_error(
+            journal,
+            command,
+            "the legacy record transition uses an unknown phase or target",
+        ));
+    }
+
+    let mut action: Option<DelegatedRecordAction> = None;
+    for candidate in journal
+        .steps
+        .iter()
+        .filter_map(delegated_action_from_journal_step)
+    {
+        if action.is_some_and(|existing| existing != candidate) {
+            return Err(unsafe_recovery_contract_error(
+                journal,
+                command,
+                "the legacy journal contains conflicting record transitions",
+            ));
+        }
+        action = Some(candidate);
+    }
+
+    let native_packages: BTreeSet<String> = journal
+        .steps
+        .iter()
+        .filter(|step| step.phase == anolisa_core::executor::PHASE_NATIVE_TXN)
+        .flat_map(|step| step.target.split(','))
+        .map(str::trim)
+        .filter(|package| !package.is_empty())
+        .map(str::to_string)
+        .collect();
+    let observed_packages: BTreeSet<String> = journal
+        .steps
+        .iter()
+        .filter(|step| step.phase == anolisa_core::executor::PHASE_OBSERVE)
+        .flat_map(|step| step.target.split(','))
+        .map(str::trim)
+        .filter(|package| !package.is_empty())
+        .map(str::to_string)
+        .collect();
+    if observed_packages.len() > 1 {
+        return Err(unsafe_recovery_contract_error(
+            journal,
+            command,
+            &format!(
+                "the legacy journal observes multiple packages ({}) but has no per-subject mapping",
+                observed_packages.into_iter().collect::<Vec<_>>().join(", ")
+            ),
+        ));
+    }
+    let observed_package = observed_packages.into_iter().next();
+    if let Some(observed) = observed_package.as_deref()
+        && !native_packages.is_empty()
+        && !native_packages.contains(observed)
+    {
+        return Err(unsafe_recovery_contract_error(
+            journal,
+            command,
+            "the legacy observe step conflicts with its native transaction",
+        ));
+    }
+    if observed_package.is_none() && native_packages.len() > 1 {
+        return Err(unsafe_recovery_contract_error(
+            journal,
+            command,
+            &format!(
+                "the legacy journal names multiple packages ({}) but has no per-subject mapping",
+                native_packages.into_iter().collect::<Vec<_>>().join(", ")
+            ),
+        ));
+    }
+
+    // An old owned journal has neither a delegated phase nor a delegated
+    // record transition. Do not infer from its operation verb alone.
+    if native_packages.is_empty() && observed_package.is_none() && action.is_none() {
+        return Ok(None);
+    }
+    let action = action
+        .or(match journal.operation.as_str() {
+            "install" => Some(DelegatedRecordAction::WriteManaged),
+            "adopt" => Some(DelegatedRecordAction::WriteAdopted),
+            "update" | "repair" => Some(DelegatedRecordAction::Refresh),
+            "uninstall" => Some(DelegatedRecordAction::Drop),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            unsafe_recovery_contract_error(
+                journal,
+                command,
+                "the legacy journal does not identify its intended record transition",
+            )
+        })?;
+
+    let package = observed_package
+        .or_else(|| native_packages.into_iter().next())
+        .or_else(|| {
+            store
+                .find(ObjectKind::Component, target)
+                .and_then(|record| match &record.binding {
+                    ProviderBinding::Delegated { package, .. } => {
+                        package.resolved_name().map(str::to_string)
+                    }
+                    ProviderBinding::Owned { .. } => None,
+                })
+        });
+    if package.is_none() && action != DelegatedRecordAction::Drop {
+        return Err(unsafe_recovery_contract_error(
+            journal,
+            command,
+            "the legacy journal has no unique package identity",
+        ));
+    }
+    Ok(Some(DelegatedRecoveryContext {
+        pm: NativePm::Rpm,
+        package,
+        record_action: action,
+    }))
+}
+
+fn delegated_action_from_journal_step(
+    step: &anolisa_core::transaction::TransactionStep,
+) -> Option<DelegatedRecordAction> {
+    if step.phase != anolisa_core::executor::PHASE_RECORD || step.target != "state" {
+        return None;
+    }
+    record_action_from_journal_action(&step.action)
+}
+
+fn record_action_from_journal_action(action: &str) -> Option<DelegatedRecordAction> {
+    match action {
+        "write-delegated-managed" => Some(DelegatedRecordAction::WriteManaged),
+        "write-delegated-adopted" => Some(DelegatedRecordAction::WriteAdopted),
+        "write-delegated-observed" => Some(DelegatedRecordAction::WriteObserved),
+        "refresh-observation" => Some(DelegatedRecordAction::Refresh),
+        "drop-record" => Some(DelegatedRecordAction::Drop),
+        _ => None,
+    }
+}
+
+fn is_owned_drop_record_step(step: &anolisa_core::transaction::TransactionStep) -> bool {
+    step.phase == anolisa_core::owned_executor::PHASE_RECORD
+        && step.target == "state"
+        && step.action == "drop-record"
+}
+
+fn unsafe_recovery_contract_error(journal: &Transaction, command: &str, detail: &str) -> CliError {
+    CliError::Runtime {
+        command: command.to_string(),
+        reason: format!(
+            "cannot recover pending journal {} safely: {detail}; the journal was left pending — inspect it and cross-check installed.toml before changing recovery state",
+            journal.journal_path.display()
+        ),
+    }
+}
+
+fn ensure_recovery_write_authorized(
+    store: &StateStore,
+    target: &str,
+    package: &str,
+    pm: NativePm,
+    action: DelegatedRecordAction,
+    command: &str,
+) -> Result<(), CliError> {
+    let Some(existing) = store.find(ObjectKind::Component, target) else {
+        return Ok(());
+    };
+    let ProviderBinding::Delegated {
+        pm: existing_pm,
+        package: existing_package,
+        relation,
+        ..
+    } = &existing.binding
+    else {
+        return Err(recovery_record_conflict(target, package, command));
+    };
+    let identity_matches = *existing_pm == pm
+        && existing_package
+            .resolved_name()
+            .is_none_or(|existing| existing == package);
+    let relation_allows = match action {
+        DelegatedRecordAction::WriteManaged => {
+            matches!(relation, ManagementRelation::Managed { .. })
+        }
+        DelegatedRecordAction::WriteAdopted => matches!(
+            relation,
+            ManagementRelation::Observed | ManagementRelation::Adopted { .. }
+        ),
+        DelegatedRecordAction::WriteObserved => {
+            matches!(relation, ManagementRelation::Observed)
+        }
+        DelegatedRecordAction::Refresh => true,
+        DelegatedRecordAction::Drop => true,
+    };
+    if identity_matches && relation_allows {
+        Ok(())
+    } else {
+        Err(recovery_record_conflict(target, package, command))
+    }
+}
+
+fn recovery_record_conflict(target: &str, package: &str, command: &str) -> CliError {
+    CliError::Runtime {
+        command: command.to_string(),
+        reason: format!(
+            "state for '{target}' no longer matches the pending recovery contract for package '{package}'; refusing to overwrite its current authority — inspect the pending journal and installed.toml"
+        ),
+    }
+}
+
+fn authorize_recovery_drop(
+    store: &StateStore,
+    target: &str,
+    recovery: &DelegatedRecoveryContext,
+    command: &str,
+) -> Result<bool, CliError> {
+    let Some(existing) = store.find(ObjectKind::Component, target) else {
+        if quarantined_record(store, target).is_some() && recovery.package.is_some() {
+            return Err(recovery_record_conflict(
+                target,
+                recovery.package.as_deref().unwrap_or("<missing>"),
+                command,
+            ));
+        }
+        return Ok(false);
+    };
+    let package = recovery
+        .package
+        .as_deref()
+        .ok_or_else(|| recovery_record_conflict(target, "<missing>", command))?;
+    let ProviderBinding::Delegated {
+        pm,
+        package: recorded_package,
+        relation,
+        ..
+    } = &existing.binding
+    else {
+        return Err(recovery_record_conflict(target, package, command));
+    };
+    if *pm != recovery.pm || recorded_package.resolved_name() != Some(package) {
+        return Err(recovery_record_conflict(target, package, command));
+    }
+    Ok(matches!(relation, ManagementRelation::Managed { .. }))
+}
+
+#[expect(clippy::too_many_arguments)]
+fn recover_delegated_drop(
+    target: &str,
+    ctx: &CliContext,
+    layout: &FsLayout,
+    state_path: &Path,
+    scope: InstallationScope,
+    now: &str,
+    provider: &DelegatedProvider<'_>,
+    command: &str,
+    store: &mut StateStore,
+    mut journal: Transaction,
+    recovery: DelegatedRecoveryContext,
+) -> Result<Recovery, CliError> {
+    let managed = authorize_recovery_drop(store, target, &recovery, command)?;
+    let package = recovery.package.as_deref();
+    let ran_native_remove = journal.steps.iter().any(|step| {
+        step.phase == anolisa_core::executor::PHASE_NATIVE_TXN && step.action == "remove"
+    });
+    if let Some(package) = package {
+        match provider
+            .observe(package, now)
+            .map_err(|err| probe_error(err, command, target))?
+        {
+            NativeProbe::Present { .. } if ran_native_remove => {
+                journal
+                    .finish(TransactionOutcomeStatus::Failed)
+                    .map_err(|err| journal_finish_error(&journal, command, err))?;
+                return Err(CliError::Runtime {
+                    command: command.to_string(),
+                    reason: format!(
+                        "the interrupted uninstall of '{target}' left package '{package}' present; its journal is now Failed and state was preserved — re-run `anolisa uninstall {target}`"
+                    ),
+                });
+            }
+            NativeProbe::Present { .. } if managed => {
+                return Err(unsafe_recovery_contract_error(
+                    &journal,
+                    command,
+                    "a managed record is still backed by a present package but the journal has no native removal",
+                ));
+            }
+            NativeProbe::MultipleVersions { .. } => {
+                return Err(CliError::Runtime {
+                    command: command.to_string(),
+                    reason: format!(
+                        "package '{package}' has multiple installed versions; cannot settle the pending uninstall for '{target}' unambiguously"
+                    ),
+                });
+            }
+            NativeProbe::Present { .. } | NativeProbe::Absent | NativeProbe::NotProbed => {}
+        }
+    } else if ran_native_remove {
+        return Err(unsafe_recovery_contract_error(
+            &journal,
+            command,
+            "a native removal has no package identity",
+        ));
+    }
+
+    let operation_id = journal.operation_id.clone();
+    commit_recovered_delegated(
+        store,
+        state_path,
+        target,
+        package,
+        None,
+        scope,
+        &journal.started_at,
+        &operation_id,
+        recovery.pm,
+        DelegatedRecordAction::Drop,
+        command,
+    )?;
+    journal
+        .finish(TransactionOutcomeStatus::Ok)
+        .map_err(|err| journal_finish_error(&journal, command, err))?;
+    append_repair_log(
+        layout,
+        ctx,
+        target,
+        command,
+        &operation_id,
+        now,
+        LogStatus::Ok,
+        format!("completed interrupted record removal for component {target}"),
+    );
+    render_result(
+        ctx,
+        &RepairResultPayload {
+            component: target.to_string(),
+            package: package.map(str::to_string),
+            action: "recovered-journal".to_string(),
+            from_version: None,
+            to_version: None,
+            dry_run: false,
+            plan: Vec::new(),
+            operation_id: Some(operation_id),
+            manifest_reconciliation: None,
+        },
+    )?;
+    Ok(Recovery::Recovered)
+}
+
+fn delegated_record_action_label(action: DelegatedRecordAction) -> &'static str {
+    match action {
+        DelegatedRecordAction::WriteManaged => "managed record write",
+        DelegatedRecordAction::WriteAdopted => "adopted record write",
+        DelegatedRecordAction::WriteObserved => "observed record write",
+        DelegatedRecordAction::Refresh => "observation refresh",
+        DelegatedRecordAction::Drop => "record removal",
     }
 }
 
@@ -1205,8 +1724,81 @@ fn recover_legacy_rpm_install(
     }
 }
 
-/// Commit a recovered delegated record as managed, with the operation
-/// mirrored into history, and persist the store.
+/// Apply the record transition declared before the delegated side effect.
+#[expect(clippy::too_many_arguments)]
+fn commit_recovered_delegated(
+    store: &mut StateStore,
+    state_path: &Path,
+    component: &str,
+    package: Option<&str>,
+    observation: Option<&Observation>,
+    scope: InstallationScope,
+    started_at: &str,
+    operation_id: &str,
+    pm: NativePm,
+    action: DelegatedRecordAction,
+    command: &str,
+) -> Result<(), CliError> {
+    let write = match action {
+        DelegatedRecordAction::WriteManaged => Some(RecordWrite::DelegatedManaged),
+        DelegatedRecordAction::WriteAdopted => Some(RecordWrite::DelegatedAdopted),
+        DelegatedRecordAction::WriteObserved => Some(RecordWrite::DelegatedObserved),
+        DelegatedRecordAction::Refresh => Some(RecordWrite::RefreshObservation),
+        DelegatedRecordAction::Drop => None,
+    };
+    if write.is_some() && package.is_none() {
+        return Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "cannot apply recovered {} for '{component}' without a package identity",
+                delegated_record_action_label(action)
+            ),
+        });
+    }
+
+    if !store
+        .operations
+        .iter()
+        .any(|operation| operation.id == operation_id)
+    {
+        store.operations.push(OperationRecord {
+            id: operation_id.to_string(),
+            command: command.to_string(),
+            status: "ok".to_string(),
+            started_at: started_at.to_string(),
+            finished_at: Some(now_iso8601()),
+            parent_operation_id: None,
+        });
+    }
+    let context = RecordContext {
+        kind: ObjectKind::Component,
+        name: component.to_string(),
+        scope,
+        now: started_at.to_string(),
+        operation_id: Some(operation_id.to_string()),
+        delegated: package.map(|package| DelegatedIdentity {
+            pm,
+            package: package.to_string(),
+        }),
+        owned_artifact: None,
+    };
+    let result = {
+        let mut sink = StoreRecordSink::new(store, state_path, context);
+        match write {
+            Some(write) => sink.write_record(write, observation),
+            None => sink.drop_record(),
+        }
+    };
+    result.map_err(|err| CliError::Runtime {
+        command: command.to_string(),
+        reason: format!(
+            "failed to apply recovered {} for '{component}': {err}",
+            delegated_record_action_label(action)
+        ),
+    })
+}
+
+/// Commit a recovered legacy delegated install as managed.
 #[expect(clippy::too_many_arguments)]
 fn commit_recovered_managed(
     store: &mut StateStore,
@@ -1219,39 +1811,19 @@ fn commit_recovered_managed(
     operation_id: &str,
     command: &str,
 ) -> Result<(), CliError> {
-    store.upsert(Installation {
-        kind: ObjectKind::Component,
-        name: component.to_string(),
+    commit_recovered_delegated(
+        store,
+        state_path,
+        component,
+        Some(package),
+        Some(observation),
         scope,
-        binding: ProviderBinding::Delegated {
-            pm: NativePm::Rpm,
-            package: PackageIdentity::Resolved {
-                name: package.to_string(),
-            },
-            relation: ManagementRelation::Managed {
-                since: started_at.to_string(),
-            },
-            last_observed: Some(observation.clone()),
-        },
-        status: LifecycleStatus::Installed,
-        installed_at: started_at.to_string(),
-        last_operation_id: Some(operation_id.to_string()),
-        subscription_scope: Default::default(),
-        enabled_features: Vec::new(),
-        health: Vec::new(),
-    });
-    store.operations.push(OperationRecord {
-        id: operation_id.to_string(),
-        command: command.to_string(),
-        status: "ok".to_string(),
-        started_at: started_at.to_string(),
-        finished_at: Some(now_iso8601()),
-        parent_operation_id: None,
-    });
-    store.save(state_path).map_err(|err| CliError::Runtime {
-        command: command.to_string(),
-        reason: format!("failed to save recovered state: {err}"),
-    })
+        started_at,
+        operation_id,
+        NativePm::Rpm,
+        DelegatedRecordAction::WriteManaged,
+        command,
+    )
 }
 
 /// The record of a different owner that already claims this component name
@@ -1455,7 +2027,13 @@ fn plan_error_to_cli(err: PlanError, target: &str, command: &str) -> CliError {
 
 /// Map an owned-executor failure to a CLI error that reports honestly what
 /// happened to the host: cleanly restored, partially restored, or untouched.
-fn owned_error_to_cli(err: OwnedExecutionError, target: &str, command: &str) -> CliError {
+fn owned_error_to_cli(
+    err: OwnedExecutionError,
+    target: &str,
+    scope: InstallationScope,
+    command: &str,
+) -> CliError {
+    let repair = common::scoped_component_command(scope, "repair", target);
     let reason = match err {
         OwnedExecutionError::StepFailed {
             step,
@@ -1473,10 +2051,13 @@ fn owned_error_to_cli(err: OwnedExecutionError, target: &str, command: &str) -> 
                 )
             } else {
                 format!(
-                    "repair of '{target}' failed at '{at}': {source}; restoring the previous files reported problems ({}) — run `anolisa repair {target}` again",
+                    "repair of '{target}' failed at '{at}': {source}; restoring the previous files reported problems ({}) — run `{repair}` again",
                     rollback_warnings.join("; ")
                 )
             }
+        }
+        OwnedExecutionError::RecoveryUncertain { detail, .. } => {
+            format!("repair of '{target}' failed: {detail}; run `{repair}` again")
         }
         other => format!("repair of '{target}' failed: {other}"),
     };
@@ -1680,6 +2261,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    use anolisa_core::domain::LifecycleStatus;
     use anolisa_core::executor::PHASE_NATIVE_TXN;
     use anolisa_core::owned_executor::PHASE_FILES;
     use anolisa_core::state::{
@@ -1690,6 +2272,45 @@ mod tests {
     use anolisa_platform::pkg_query::{PackageInfo, PackageVersion};
 
     use crate::context::InstallMode;
+
+    #[test]
+    fn locked_pending_reenters_recovery_after_releasing_the_lock() {
+        let retries = Cell::new(0);
+
+        continue_after_locked_repair(
+            LockedRepairExecution::RecoveryAppeared,
+            true,
+            "cosh",
+            "repair cosh",
+            || {
+                retries.set(retries.get() + 1);
+                Ok(())
+            },
+        )
+        .expect("new recovery chain should be replanned once");
+
+        assert_eq!(retries.get(), 1);
+    }
+
+    #[test]
+    fn second_locked_pending_requires_another_repair_invocation() {
+        let retries = Cell::new(0);
+
+        let err = continue_after_locked_repair(
+            LockedRepairExecution::RecoveryAppeared,
+            false,
+            "cosh",
+            "repair cosh",
+            || {
+                retries.set(retries.get() + 1);
+                Ok(())
+            },
+        )
+        .expect_err("one invocation must not consume two recovery chains");
+
+        assert_eq!(retries.get(), 0);
+        assert!(err.reason().contains("repair cosh"));
+    }
 
     /// Configurable in-memory rpm backend. Repair may query (R3/R5), install
     /// (R4), or neither (owned paths); every other transaction verb is a
@@ -2680,7 +3301,12 @@ mod tests {
 
         let layout = common::resolve_layout(ctx);
         let repo_root = tmp.join("repo");
-        let base_url = write_local_repo_component(&repo_root, "skillfs", "1.0.0", &["system"]);
+        let base_url = write_local_repo_component(
+            &repo_root,
+            "skillfs",
+            "1.0.0",
+            &[ctx.install_mode.as_str()],
+        );
         fs::create_dir_all(&layout.etc_dir).expect("etc dir");
         fs::write(
             layout.etc_dir.join("repo.toml"),
@@ -2727,6 +3353,24 @@ mod tests {
         }
         assert_eq!(store.operations.len(), 1);
         assert!(store.operations[0].command.starts_with("repair"));
+    }
+
+    #[test]
+    fn damaged_user_owned_record_replays_without_native_privileges() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::User, false);
+        let (state_path, binary) = seed_damaged_owned(tmp.path(), &ctx);
+        let fake = FakeRpm::new("unrelated", None);
+
+        repair_with_deps("skillfs", &ctx, &fake, &fake, false).expect("user repair ok");
+
+        assert!(binary.is_file(), "owned payload should be restored");
+        let store = StateStore::load(&state_path, 0).expect("reload");
+        let record = store
+            .find(ObjectKind::Component, "skillfs")
+            .expect("record");
+        assert!(matches!(record.scope, InstallationScope::User { .. }));
+        assert!(matches!(record.binding, ProviderBinding::Owned { .. }));
     }
 
     #[test]
@@ -2796,6 +3440,119 @@ mod tests {
                 .any(|op| op.id == operation_id && op.status == "ok"),
             "the recovered install's operation id enters history"
         );
+    }
+
+    #[test]
+    fn subjectless_legacy_install_is_not_recovered_for_an_unrelated_target() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(&ctx, Vec::new());
+        let layout = common::resolve_layout(&ctx);
+        let pending =
+            rpm_install::begin_fresh_install(&layout, "cosh", "copilot-shell", "install cosh")
+                .expect("begin pending install");
+        let journal_path = pending.transaction.journal_path.clone();
+        drop(pending);
+        let fake = FakeRpm::new(
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.7.0", Some("1.al4"), "x86_64")),
+        );
+
+        let result = repair_with_deps("skillfs", &ctx, &fake, &fake, false);
+
+        result.expect_err("an unrelated target must not own the legacy journal");
+        assert!(
+            load_store(&ctx)
+                .find(ObjectKind::Component, "cosh")
+                .is_none()
+        );
+        assert_eq!(
+            Transaction::load_journal(&journal_path)
+                .expect("reload journal")
+                .status,
+            TransactionOutcomeStatus::InFlight,
+        );
+    }
+
+    #[test]
+    fn malformed_legacy_journal_stays_pending() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(&ctx, Vec::new());
+        let layout = common::resolve_layout(&ctx);
+        let state_path = layout.state_dir.join("installed.toml");
+        let state_before = fs::read(&state_path).expect("read state");
+        let mut pending =
+            rpm_install::begin_fresh_install(&layout, "cosh", "copilot-shell", "install cosh")
+                .expect("begin pending install");
+        pending.transaction.steps.reverse();
+        let journal_path = pending.transaction.journal_path.clone();
+        fs::write(
+            &journal_path,
+            toml::to_string_pretty(&pending.transaction).expect("serialize journal"),
+        )
+        .expect("rewrite journal");
+        drop(pending);
+        let fake = FakeRpm::new(
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.7.0", Some("1.al4"), "x86_64")),
+        );
+
+        let err = repair_with_deps("cosh", &ctx, &fake, &fake, false)
+            .expect_err("ambiguous legacy recovery must fail closed");
+
+        assert!(err.reason().contains("automatic recovery is unsafe"));
+        let journal = Transaction::load_journal(&journal_path).expect("reload journal");
+        assert_eq!(journal.status, TransactionOutcomeStatus::InFlight);
+        assert_eq!(fs::read(&state_path).expect("re-read state"), state_before);
+        assert_eq!(fake.install_calls.get(), 0);
+    }
+
+    #[test]
+    fn subject_only_legacy_hybrid_stays_pending_without_replanning() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(
+            &ctx,
+            vec![rpm_object(
+                "cosh",
+                "copilot-shell",
+                "2.6.0-1.al4",
+                Ownership::RpmManaged,
+                false,
+            )],
+        );
+        let layout = common::resolve_layout(&ctx);
+        let state_path = layout.state_dir.join("installed.toml");
+        let state_before = fs::read(&state_path).expect("read state");
+        let mut pending =
+            rpm_install::begin_fresh_install(&layout, "cosh", "copilot-shell", "install cosh")
+                .expect("begin pending install");
+        pending.transaction.subject = Some("cosh".to_string());
+        let journal_path = pending.transaction.journal_path.clone();
+        fs::write(
+            &journal_path,
+            toml::to_string_pretty(&pending.transaction).expect("serialize hybrid journal"),
+        )
+        .expect("rewrite hybrid journal");
+        drop(pending);
+        let fake = FakeRpm::new(
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.7.0", Some("1.al4"), "x86_64")),
+        );
+
+        let err = repair_with_deps("cosh", &ctx, &fake, &fake, false)
+            .expect_err("subject-only legacy hybrid must fail closed");
+
+        assert!(err.reason().contains("automatic recovery is unsafe"));
+        assert_eq!(
+            Transaction::load_journal(&journal_path)
+                .expect("reload journal")
+                .status,
+            TransactionOutcomeStatus::InFlight
+        );
+        assert_eq!(fs::read(&state_path).expect("re-read state"), state_before);
+        assert_eq!(fake.install_calls.get(), 0);
     }
 
     #[test]
@@ -2881,6 +3638,409 @@ mod tests {
         path
     }
 
+    fn write_explicit_delegated_journal(
+        layout: &FsLayout,
+        operation: &str,
+        subject: &str,
+        package: &str,
+        record_action: DelegatedRecordAction,
+        shared_native_target: Option<&str>,
+    ) -> PathBuf {
+        let state_path = layout.state_dir.join("installed.toml");
+        let journal_dir = rpm_install::journal_dir(layout);
+        let mut journal =
+            Transaction::begin_with_subject(operation, Some(subject), state_path, &journal_dir)
+                .expect("begin journal");
+        let record_step = match record_action {
+            DelegatedRecordAction::WriteManaged => "write-delegated-managed",
+            DelegatedRecordAction::WriteAdopted => "write-delegated-adopted",
+            DelegatedRecordAction::WriteObserved => "write-delegated-observed",
+            DelegatedRecordAction::Refresh => "refresh-observation",
+            DelegatedRecordAction::Drop => "drop-record",
+        };
+        let native_action = match operation {
+            "uninstall" => "remove",
+            "update" => "update",
+            _ => "install",
+        };
+        let mut steps = shared_native_target
+            .map(|target| TransactionStep::planned(PHASE_NATIVE_TXN, target, native_action, None))
+            .into_iter()
+            .collect::<Vec<_>>();
+        steps.push(TransactionStep::planned(
+            anolisa_core::executor::PHASE_RECORD,
+            "state",
+            record_step,
+            None,
+        ));
+        journal
+            .record_delegated_steps(
+                DelegatedRecoveryContext {
+                    pm: NativePm::Rpm,
+                    package: Some(package.to_string()),
+                    record_action,
+                },
+                steps,
+            )
+            .expect("record recovery contract");
+        let path = journal.journal_path.clone();
+        drop(journal);
+        path
+    }
+
+    #[test]
+    fn delegated_drop_rejects_a_package_that_does_not_bind_the_record() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(
+            &ctx,
+            vec![rpm_object(
+                "cosh",
+                "copilot-shell",
+                "2.6.0-1.al4",
+                Ownership::RpmManaged,
+                false,
+            )],
+        );
+        let layout = common::resolve_layout(&ctx);
+        let state_path = layout.state_dir.join("installed.toml");
+        let state_before = fs::read(&state_path).expect("read state");
+        let journal_dir = rpm_install::journal_dir(&layout);
+        let mut journal = Transaction::begin_with_subject(
+            "uninstall",
+            Some("cosh"),
+            state_path.clone(),
+            &journal_dir,
+        )
+        .expect("begin journal");
+        journal.delegated_recovery = Some(DelegatedRecoveryContext {
+            pm: NativePm::Rpm,
+            package: Some("unrelated".to_string()),
+            record_action: DelegatedRecordAction::Drop,
+        });
+        journal
+            .record_step(TransactionStep::planned(
+                anolisa_core::executor::PHASE_RECORD,
+                "state",
+                "drop-record",
+                None,
+            ))
+            .expect("persist crafted drop intent");
+        let journal_path = journal.journal_path.clone();
+        drop(journal);
+        let fake = FakeRpm::new("unrelated", None);
+
+        let err = repair_with_deps("cosh", &ctx, &fake, &fake, false)
+            .expect_err("mismatched drop contract must fail closed");
+
+        assert!(err.reason().contains("no longer matches"), "got: {err}");
+        assert_eq!(fs::read(&state_path).expect("re-read state"), state_before);
+        assert_eq!(
+            Transaction::load_journal(&journal_path)
+                .expect("reload journal")
+                .status,
+            TransactionOutcomeStatus::InFlight
+        );
+    }
+
+    #[test]
+    fn explicit_delegated_drop_requires_an_exact_subject() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(
+            &ctx,
+            vec![rpm_object(
+                "cosh",
+                "copilot-shell",
+                "2.6.0-1.al4",
+                Ownership::RpmManaged,
+                false,
+            )],
+        );
+        let layout = common::resolve_layout(&ctx);
+        let state_path = layout.state_dir.join("installed.toml");
+        let state_before = fs::read(&state_path).expect("read state");
+        let journal_dir = rpm_install::journal_dir(&layout);
+        let mut journal = Transaction::begin("uninstall", state_path.clone(), &journal_dir)
+            .expect("begin subjectless journal");
+        journal.delegated_recovery = Some(DelegatedRecoveryContext {
+            pm: NativePm::Rpm,
+            package: Some("copilot-shell".to_string()),
+            record_action: DelegatedRecordAction::Drop,
+        });
+        journal
+            .record_step(TransactionStep::planned(
+                anolisa_core::executor::PHASE_RECORD,
+                "state",
+                "drop-record",
+                None,
+            ))
+            .expect("persist subjectless drop intent");
+        let journal_path = journal.journal_path.clone();
+        drop(journal);
+        let fake = FakeRpm::new(
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.6.0", Some("1.al4"), "x86_64")),
+        );
+
+        let err = repair_with_deps("cosh", &ctx, &fake, &fake, false)
+            .expect_err("explicit recovery without a subject must fail closed");
+
+        assert!(err.reason().contains("subject"), "got: {err}");
+        assert_eq!(fs::read(&state_path).expect("re-read state"), state_before);
+        assert_eq!(
+            Transaction::load_journal(&journal_path)
+                .expect("reload journal")
+                .status,
+            TransactionOutcomeStatus::InFlight
+        );
+    }
+
+    #[test]
+    fn explicit_delegated_drop_rejects_an_owned_record_phase() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        let layout = common::resolve_layout(&ctx);
+        fs::create_dir_all(&layout.bin_dir).expect("mkdir bin");
+        let file_path = layout.bin_dir.join("skillfs");
+        fs::write(&file_path, b"payload").expect("write file");
+        seed(
+            &ctx,
+            vec![raw_object(
+                "skillfs",
+                "1.0.0",
+                vec![anolisa_file(file_path)],
+            )],
+        );
+        let state_path = layout.state_dir.join("installed.toml");
+        let state_before = fs::read(&state_path).expect("read state");
+        let journal_dir = rpm_install::journal_dir(&layout);
+        let mut journal = Transaction::begin_with_subject(
+            "uninstall",
+            Some("skillfs"),
+            state_path.clone(),
+            &journal_dir,
+        )
+        .expect("begin journal");
+        journal
+            .record_delegated_steps(
+                DelegatedRecoveryContext {
+                    pm: NativePm::Rpm,
+                    package: Some("skillfs".to_string()),
+                    record_action: DelegatedRecordAction::Drop,
+                },
+                [TransactionStep::planned(
+                    anolisa_core::owned_executor::PHASE_RECORD,
+                    "state",
+                    "drop-record",
+                    None,
+                )],
+            )
+            .expect("persist malformed recovery contract");
+        let journal_path = journal.journal_path.clone();
+        drop(journal);
+        let fake = FakeRpm::new("skillfs", None);
+
+        let err = repair_with_deps("skillfs", &ctx, &fake, &fake, false)
+            .expect_err("mixed recovery family must fail closed");
+
+        assert!(err.reason().contains("non-delegated phase"), "got: {err}");
+        assert_eq!(fs::read(&state_path).expect("re-read state"), state_before);
+        assert_eq!(
+            Transaction::load_journal(&journal_path)
+                .expect("reload journal")
+                .status,
+            TransactionOutcomeStatus::InFlight,
+        );
+    }
+
+    #[test]
+    fn context_only_managed_drop_keeps_state_when_the_package_is_present() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(
+            &ctx,
+            vec![rpm_object(
+                "cosh",
+                "copilot-shell",
+                "2.6.0-1.al4",
+                Ownership::RpmManaged,
+                false,
+            )],
+        );
+        let layout = common::resolve_layout(&ctx);
+        let state_path = layout.state_dir.join("installed.toml");
+        let state_before = fs::read(&state_path).expect("read state");
+        let journal_dir = rpm_install::journal_dir(&layout);
+        let mut journal = Transaction::begin_with_subject(
+            "uninstall",
+            Some("cosh"),
+            state_path.clone(),
+            &journal_dir,
+        )
+        .expect("begin journal");
+        journal.delegated_recovery = Some(DelegatedRecoveryContext {
+            pm: NativePm::Rpm,
+            package: Some("copilot-shell".to_string()),
+            record_action: DelegatedRecordAction::Drop,
+        });
+        fs::write(
+            &journal.journal_path,
+            toml::to_string_pretty(&journal).expect("serialize context-only journal"),
+        )
+        .expect("persist context-only journal");
+        let journal_path = journal.journal_path.clone();
+        drop(journal);
+        let fake = FakeRpm::new(
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.6.0", Some("1.al4"), "x86_64")),
+        );
+
+        let err = repair_with_deps("cosh", &ctx, &fake, &fake, false)
+            .expect_err("context-only managed drop must fail closed");
+
+        assert!(
+            err.reason()
+                .contains("recovery context has no operation steps"),
+            "got: {err}"
+        );
+        assert_eq!(fs::read(&state_path).expect("re-read state"), state_before);
+        assert_eq!(
+            toml::from_str::<Transaction>(
+                &fs::read_to_string(&journal_path).expect("read malformed journal")
+            )
+            .expect("parse journal without structural validation")
+            .status,
+            TransactionOutcomeStatus::InFlight
+        );
+    }
+
+    #[test]
+    fn adopted_record_only_drop_still_succeeds_with_a_present_package() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(
+            &ctx,
+            vec![rpm_object(
+                "cosh",
+                "copilot-shell",
+                "2.6.0-1.al4",
+                Ownership::RpmObserved,
+                true,
+            )],
+        );
+        let layout = common::resolve_layout(&ctx);
+        let journal_path = write_explicit_delegated_journal(
+            &layout,
+            "uninstall",
+            "cosh",
+            "copilot-shell",
+            DelegatedRecordAction::Drop,
+            None,
+        );
+        let fake = FakeRpm::new(
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.6.0", Some("1.al4"), "x86_64")),
+        );
+
+        repair_with_deps("cosh", &ctx, &fake, &fake, false)
+            .expect("record-only adopted drop remains recoverable");
+
+        assert!(
+            load_store(&ctx)
+                .find(ObjectKind::Component, "cosh")
+                .is_none()
+        );
+        assert_eq!(
+            Transaction::load_journal(&journal_path)
+                .expect("reload journal")
+                .status,
+            TransactionOutcomeStatus::Ok
+        );
+    }
+
+    #[test]
+    fn managed_record_only_drop_succeeds_when_the_package_is_absent() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(
+            &ctx,
+            vec![rpm_object(
+                "cosh",
+                "copilot-shell",
+                "2.6.0-1.al4",
+                Ownership::RpmManaged,
+                false,
+            )],
+        );
+        let layout = common::resolve_layout(&ctx);
+        let journal_path = write_explicit_delegated_journal(
+            &layout,
+            "uninstall",
+            "cosh",
+            "copilot-shell",
+            DelegatedRecordAction::Drop,
+            None,
+        );
+        let fake = FakeRpm::new("copilot-shell", None);
+
+        repair_with_deps("cosh", &ctx, &fake, &fake, false)
+            .expect("an absent managed package permits the record drop");
+
+        assert!(
+            load_store(&ctx)
+                .find(ObjectKind::Component, "cosh")
+                .is_none()
+        );
+        assert_eq!(
+            Transaction::load_journal(&journal_path)
+                .expect("reload journal")
+                .status,
+            TransactionOutcomeStatus::Ok
+        );
+    }
+
+    #[test]
+    fn managed_drop_finishes_after_the_native_remove_landed() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(
+            &ctx,
+            vec![rpm_object(
+                "cosh",
+                "copilot-shell",
+                "2.6.0-1.al4",
+                Ownership::RpmManaged,
+                false,
+            )],
+        );
+        let layout = common::resolve_layout(&ctx);
+        let journal_path = write_explicit_delegated_journal(
+            &layout,
+            "uninstall",
+            "cosh",
+            "copilot-shell",
+            DelegatedRecordAction::Drop,
+            Some("copilot-shell"),
+        );
+        let fake = FakeRpm::new("copilot-shell", None);
+
+        repair_with_deps("cosh", &ctx, &fake, &fake, false)
+            .expect("a landed native removal permits the record drop");
+
+        assert!(
+            load_store(&ctx)
+                .find(ObjectKind::Component, "cosh")
+                .is_none()
+        );
+        assert_eq!(
+            Transaction::load_journal(&journal_path)
+                .expect("reload journal")
+                .status,
+            TransactionOutcomeStatus::Ok
+        );
+    }
+
     #[test]
     fn interrupted_delegated_update_settles_the_journal_and_replans() {
         let tmp = tempfile::tempdir().expect("tmpdir");
@@ -2942,6 +4102,154 @@ mod tests {
     }
 
     #[test]
+    fn explicit_batch_recovery_uses_the_subject_package() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(&ctx, Vec::new());
+        let layout = common::resolve_layout(&ctx);
+        let journal_path = write_explicit_delegated_journal(
+            &layout,
+            "install",
+            "b",
+            "pkg-b",
+            DelegatedRecordAction::WriteManaged,
+            Some("pkg-a,pkg-b"),
+        );
+        let fake = FakeRpm::new(
+            "pkg-b",
+            Some(pkg_info("pkg-b", "1.0.0", Some("1.al4"), "x86_64")),
+        );
+
+        repair_with_deps("b", &ctx, &fake, &fake, false).expect("repair b");
+
+        let record = find_component(&ctx, "b");
+        match &record.binding {
+            ProviderBinding::Delegated {
+                package, relation, ..
+            } => {
+                assert_eq!(package.resolved_name(), Some("pkg-b"));
+                assert!(matches!(relation, ManagementRelation::Managed { .. }));
+            }
+            other => panic!("expected delegated record, got {other:?}"),
+        }
+        assert_eq!(
+            Transaction::load_journal(&journal_path)
+                .expect("reload journal")
+                .status,
+            TransactionOutcomeStatus::Ok
+        );
+    }
+
+    #[test]
+    fn legacy_batch_journal_without_subject_mapping_stays_pending() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(&ctx, Vec::new());
+        let layout = common::resolve_layout(&ctx);
+        let journal_path =
+            write_pipeline_journal(&layout, "install", "b", PHASE_NATIVE_TXN, "pkg-a,pkg-b");
+        let fake = FakeRpm::new(
+            "pkg-b",
+            Some(pkg_info("pkg-b", "1.0.0", Some("1.al4"), "x86_64")),
+        );
+
+        let err = repair_with_deps("b", &ctx, &fake, &fake, false).unwrap_err();
+
+        assert!(err.reason().contains("multiple packages"), "got: {err}");
+        let journal = Transaction::load_journal(&journal_path).expect("reload journal");
+        assert_eq!(journal.status, TransactionOutcomeStatus::InFlight);
+        assert!(load_store(&ctx).installations.is_empty());
+    }
+
+    #[test]
+    fn legacy_batch_journal_uses_a_unique_subject_observation() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(&ctx, Vec::new());
+        let layout = common::resolve_layout(&ctx);
+        let journal_path =
+            write_pipeline_journal(&layout, "install", "b", PHASE_NATIVE_TXN, "pkg-a,pkg-b");
+        let mut journal = Transaction::load_journal(&journal_path).expect("load journal");
+        journal
+            .record_step(TransactionStep::planned(
+                anolisa_core::executor::PHASE_OBSERVE,
+                "pkg-b",
+                "observe",
+                None,
+            ))
+            .expect("record subject observation");
+        let fake = FakeRpm::new(
+            "pkg-b",
+            Some(pkg_info("pkg-b", "1.0.0", Some("1.al4"), "x86_64")),
+        );
+
+        repair_with_deps("b", &ctx, &fake, &fake, false).expect("repair b");
+
+        let record = find_component(&ctx, "b");
+        assert!(matches!(
+            &record.binding,
+            ProviderBinding::Delegated {
+                package,
+                relation: ManagementRelation::Managed { .. },
+                ..
+            } if package.resolved_name() == Some("pkg-b")
+        ));
+        assert_eq!(
+            Transaction::load_journal(&journal_path)
+                .expect("reload journal")
+                .status,
+            TransactionOutcomeStatus::Ok
+        );
+    }
+
+    #[test]
+    fn interrupted_adopt_preserves_the_adopted_relation() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(
+            &ctx,
+            vec![rpm_object(
+                "cosh",
+                "copilot-shell",
+                "2.6.0-1.al4",
+                Ownership::RpmObserved,
+                false,
+            )],
+        );
+        let layout = common::resolve_layout(&ctx);
+        let journal_path = write_explicit_delegated_journal(
+            &layout,
+            "adopt",
+            "cosh",
+            "copilot-shell",
+            DelegatedRecordAction::WriteAdopted,
+            None,
+        );
+        let fake = FakeRpm::new(
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "2.7.0", Some("1.al4"), "x86_64")),
+        );
+
+        repair_with_deps("cosh", &ctx, &fake, &fake, false).expect("repair adopt");
+
+        let record = find_component(&ctx, "cosh");
+        assert!(matches!(
+            record.binding,
+            ProviderBinding::Delegated {
+                relation: ManagementRelation::Adopted { .. },
+                ..
+            }
+        ));
+        assert_eq!(observed_evr(&record).as_deref(), Some("2.7.0-1.al4"));
+        assert_eq!(
+            Transaction::load_journal(&journal_path)
+                .expect("reload journal")
+                .status,
+            TransactionOutcomeStatus::Ok
+        );
+    }
+
+    #[test]
     fn interrupted_delegated_operation_with_absent_package_terminates() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
@@ -2986,6 +4294,160 @@ mod tests {
             journal.status,
             TransactionOutcomeStatus::Failed,
             "an owned journal's compensation state died with the process; it is terminated, not replayed"
+        );
+    }
+
+    #[test]
+    fn fresh_owned_install_without_recovery_context_stays_pending() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(&ctx, Vec::new());
+        let layout = common::resolve_layout(&ctx);
+        let journal_path =
+            write_pipeline_journal(&layout, "install", "skillfs", PHASE_FILES, "owned-files");
+        let fake = FakeRpm::new("unrelated", None);
+
+        let result = repair_with_deps("skillfs", &ctx, &fake, &fake, false);
+
+        result.expect_err("unknown fresh-owned side effects must remain pending");
+        assert_eq!(
+            Transaction::load_journal(&journal_path)
+                .expect("reload journal")
+                .status,
+            TransactionOutcomeStatus::InFlight,
+        );
+        assert!(
+            load_store(&ctx)
+                .find(ObjectKind::Component, "skillfs")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn fresh_owned_install_with_matching_committed_record_is_settled() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        let layout = common::resolve_layout(&ctx);
+        let state_path = layout.state_dir.join("installed.toml");
+        let journal_dir = rpm_install::journal_dir(&layout);
+        let mut journal =
+            Transaction::begin_with_subject("install", Some("skillfs"), state_path, &journal_dir)
+                .expect("begin journal");
+        journal
+            .record_steps([TransactionStep::planned(
+                PHASE_FILES,
+                "owned-files",
+                "place-files",
+                None,
+            )])
+            .expect("record step");
+        let journal_path = journal.journal_path.clone();
+        let operation_id = journal.operation_id.clone();
+        drop(journal);
+
+        let mut object = raw_object("skillfs", "1.0.0", Vec::new());
+        object.last_operation_id = Some(operation_id);
+        seed(&ctx, vec![object]);
+        let fake = FakeRpm::new("unrelated", None);
+
+        repair_with_deps("skillfs", &ctx, &fake, &fake, false)
+            .expect("matching committed record settles the journal");
+
+        assert_eq!(
+            Transaction::load_journal(&journal_path)
+                .expect("reload journal")
+                .status,
+            TransactionOutcomeStatus::Ok,
+        );
+        assert_eq!(
+            load_store(&ctx)
+                .find(ObjectKind::Component, "skillfs")
+                .expect("record")
+                .status,
+            LifecycleStatus::Installed,
+        );
+    }
+
+    #[test]
+    fn interrupted_owned_uninstall_drop_terminates_and_replans() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        let layout = common::resolve_layout(&ctx);
+        fs::create_dir_all(&layout.bin_dir).expect("mkdir bin");
+        let file_path = layout.bin_dir.join("skillfs");
+        fs::write(&file_path, b"payload").expect("write file");
+        seed(
+            &ctx,
+            vec![raw_object(
+                "skillfs",
+                "1.0.0",
+                vec![anolisa_file(file_path)],
+            )],
+        );
+        let state_path = layout.state_dir.join("installed.toml");
+        let journal_dir = rpm_install::journal_dir(&layout);
+        let mut journal =
+            Transaction::begin_with_subject("uninstall", Some("skillfs"), state_path, &journal_dir)
+                .expect("begin journal");
+        journal
+            .record_steps([TransactionStep::planned(
+                anolisa_core::owned_executor::PHASE_RECORD,
+                "state",
+                "drop-record",
+                None,
+            )])
+            .expect("record owned drop");
+        let journal_path = journal.journal_path.clone();
+        drop(journal);
+        let fake = FakeRpm::new("unrelated", None);
+
+        repair_with_deps("skillfs", &ctx, &fake, &fake, false).expect("repair ok");
+
+        assert!(
+            load_store(&ctx)
+                .find(ObjectKind::Component, "skillfs")
+                .is_some()
+        );
+        assert_eq!(
+            Transaction::load_journal(&journal_path)
+                .expect("reload journal")
+                .status,
+            TransactionOutcomeStatus::Failed,
+        );
+    }
+
+    #[test]
+    fn interrupted_owned_uninstall_after_record_drop_clears_the_journal() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let ctx = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(&ctx, Vec::new());
+        let layout = common::resolve_layout(&ctx);
+        let state_path = layout.state_dir.join("installed.toml");
+        let journal_dir = rpm_install::journal_dir(&layout);
+        let mut journal =
+            Transaction::begin_with_subject("uninstall", Some("skillfs"), state_path, &journal_dir)
+                .expect("begin journal");
+        journal
+            .record_steps([TransactionStep::planned(
+                anolisa_core::owned_executor::PHASE_RECORD,
+                "state",
+                "drop-record",
+                None,
+            )])
+            .expect("record owned drop");
+        let journal_path = journal.journal_path.clone();
+        drop(journal);
+        let fake = FakeRpm::new("unrelated", None);
+
+        let err = repair_with_deps("skillfs", &ctx, &fake, &fake, false)
+            .expect_err("completed uninstall has no record left to repair");
+
+        assert!(err.reason().contains("not installed"), "got: {err}");
+        assert_eq!(
+            Transaction::load_journal(&journal_path)
+                .expect("reload journal")
+                .status,
+            TransactionOutcomeStatus::Failed,
         );
     }
 
