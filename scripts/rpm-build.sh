@@ -5,7 +5,7 @@
 #   ./scripts/rpm-build.sh <package>        Build a single package
 #   ./scripts/rpm-build.sh all              Build all packages
 #
-# Packages: copilot-shell, agent-sec-core, os-skills, agentsight, tokenless, agent-memory, skillfs, cosh-ng
+# Packages: copilot-shell, agent-sec-core, os-skills, agentsight, tokenless, agent-memory, skillfs, anolisa, cosh-ng
 #
 # Environment variables:
 #   VERSION    Override version for .spec.in templates (default: auto-detect)
@@ -636,6 +636,76 @@ build_agent_memory() {
 }
 
 # =============================================================================
+# anolisa
+# =============================================================================
+build_anolisa() {
+    log "=========================================="
+    log "Building RPM: anolisa"
+    log "=========================================="
+
+    log "Step 1/3: Creating source tarball from committed snapshot..."
+    local snapshot_tmp
+    snapshot_tmp=$(mktemp -d)
+    (
+        trap 'rm -rf -- "$snapshot_tmp"' EXIT
+        local extract_dir="${snapshot_tmp}/source"
+        mkdir -p "$extract_dir"
+
+        # Both source archives must share this snapshot so a dirty worktree
+        # cannot pair committed sources with dependencies from another revision.
+        git -C "$ROOT_DIR" archive --format=tar HEAD:src/anolisa |
+            tar -xf - -C "$extract_dir"
+
+        local spec_in="${extract_dir}/anolisa.spec.in"
+        if [ ! -f "$spec_in" ]; then
+            err "Spec template not found in committed snapshot: $spec_in"
+            return 1
+        fi
+
+        local version="${VERSION:-}"
+        if [ -z "$version" ]; then
+            version=$(grep -m1 '^version = ' "${extract_dir}/Cargo.toml" | sed 's/version = "\(.*\)"/\1/' 2>/dev/null || true)
+        fi
+        if [ -z "$version" ]; then
+            err "Cannot determine anolisa version from committed Cargo.toml. Set VERSION to override it."
+            return 1
+        fi
+
+        local pkg_name
+        pkg_name=$(parse_spec_name "$spec_in")
+        local pkg_dir="${snapshot_tmp}/${pkg_name}"
+        mv "$extract_dir" "$pkg_dir"
+        spec_in="${pkg_dir}/anolisa.spec.in"
+
+        local tarball_name="${pkg_name}-${version}.tar.gz"
+        local vendor_tarball_name="${pkg_name}-${version}-vendor.tar.gz"
+        local spec_file
+        spec_file=$(process_spec_template "$spec_in" "$version")
+
+        tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$snapshot_tmp" "$pkg_name"
+
+        log "Step 2/3: Creating vendor tarball ${vendor_tarball_name}..."
+        local vendor_tmp
+        vendor_tmp=$(mktemp -d)
+        (
+            trap 'rm -rf -- "$vendor_tmp"' EXIT
+            (
+                cd "$pkg_dir"
+                cargo vendor --locked "${vendor_tmp}/vendor" >/dev/null
+            )
+            tar -czf "${BUILD_DIR}/SOURCES/${vendor_tarball_name}" -C "$vendor_tmp" vendor
+        )
+
+        log "Step 3/3: Running rpmbuild..."
+        "$RPMBUILD" -ba --nodeps \
+            --define "_topdir ${BUILD_DIR}" \
+            "$spec_file"
+
+        ok "anolisa RPM built successfully"
+    )
+}
+
+# =============================================================================
 # skillfs
 # =============================================================================
 build_skillfs() {
@@ -1048,6 +1118,8 @@ usage() {
     echo "  tokenless                 Build tokenless RPM"
     echo "  agent-memory              Build agent-memory RPM"
     echo "  skillfs                   Build skillfs RPM"
+    echo "  anolisa                   Build anolisa RPM"
+    echo "  cosh-ng                   Build cosh-ng RPM"
     echo "  gvisor-runsc              Build gvisor-runsc RPM (sandbox)"
     echo "  containerd-shim-runsc-v1  Build containerd-shim-runsc-v1 RPM (sandbox)"
     echo "  atelet                    Build atelet RPM (sandbox, placeholder)"
@@ -1104,6 +1176,9 @@ case "$TARGET" in
     skillfs)
         build_skillfs
         ;;
+    anolisa)
+        build_anolisa
+        ;;
     cosh-ng)
         build_cosh_ng
         ;;
@@ -1133,6 +1208,7 @@ case "$TARGET" in
         build_tokenless
         build_agent_memory
         build_skillfs
+        build_anolisa
         build_cosh_ng
         ;;
     *)
