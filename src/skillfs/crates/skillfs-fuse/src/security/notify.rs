@@ -15,7 +15,8 @@
 //! [`super::ActiveSkillResolver`] mapping. The existing trusted view stays
 //! in place until the daemon writes a new `activation.json` / xattr.
 //!
-//! Wire format follows `SKILL_LEDGER_SKILLFS_ACTIVATION_CN.md` §变更通知接口.
+//! Wire format follows §4 of `SKILL_LEDGER_SKILLFS_INTEGRATION_zh.md`
+//! (SkillFS Notify v2 contract).
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read as IoRead, Write as IoWrite};
