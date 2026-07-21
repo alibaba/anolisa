@@ -583,4 +583,161 @@ mod tests {
         assert_eq!(resolve_firecracker_vcpus(&no_override, None), 1);
         assert_eq!(resolve_firecracker_memory(&no_override, None).unwrap(), 256);
     }
+
+    #[test]
+    fn firecracker_memory_only_fc_override_no_vm() {
+        // fc.memory set, vm absent => uses fc.memory
+        let fc = FirecrackerConfig {
+            memory: Some("512Mi".into()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_firecracker_memory(&fc, None).unwrap(), 512);
+    }
+
+    #[test]
+    fn firecracker_vcpus_only_vm_layer() {
+        // fc.vcpus absent, vm present => uses vm.vcpus
+        let fc = FirecrackerConfig::default();
+        let vm = VmConfig {
+            vcpus: 8,
+            memory: "256Mi".into(),
+        };
+        assert_eq!(resolve_firecracker_vcpus(&fc, Some(&vm)), 8);
+    }
+
+    #[test]
+    fn firecracker_memory_invalid_value_returns_error() {
+        // Invalid memory string should propagate as BackendError
+        let fc = FirecrackerConfig {
+            memory: Some("not-a-size".into()),
+            ..Default::default()
+        };
+        let result = resolve_firecracker_memory(&fc, None);
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("not-a-size"),
+            "error should reference the invalid value: {err_msg}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn firecracker_spawn_rejects_non_utf8_paths() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let tmp = std::env::temp_dir().join("blaze-test-non-utf8");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Create a subdirectory whose name contains invalid UTF-8 bytes
+        let bad_name = OsStr::from_bytes(b"images-\xff\xfe");
+        let non_utf8_dir = tmp.join(bad_name);
+
+        // On macOS (APFS/HFS+), non-UTF-8 directory names are unsupported; skip gracefully.
+        if std::fs::create_dir_all(&non_utf8_dir).is_err() {
+            eprintln!("skipping: filesystem does not support non-UTF-8 directory names");
+            let _ = std::fs::remove_dir_all(&tmp);
+            return;
+        }
+
+        // Place image files inside the non-UTF-8 directory so exists() checks pass
+        std::fs::write(non_utf8_dir.join("vmlinux"), b"fake-kernel").unwrap();
+        std::fs::write(non_utf8_dir.join("rootfs.ext4"), b"fake-rootfs").unwrap();
+
+        let spawner = FirecrackerSpawner {
+            images_dir: non_utf8_dir,
+        };
+        let instance = fixture_instance(BackendKind::Firecracker);
+        let result = spawner
+            .spawn(
+                &instance,
+                &PathBuf::from("/usr/bin/firecracker"),
+                &tmp,
+                &BackendConfigs {
+                    firecracker: Some(FirecrackerConfig::default()),
+                },
+                None,
+            )
+            .await;
+
+        assert!(result.is_err(), "non-UTF-8 path must produce an error");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("not valid UTF-8"),
+            "error should mention UTF-8 validation failure: {err_msg}"
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn firecracker_spawn_missing_vmlinux_returns_error() {
+        let tmp = std::env::temp_dir().join("blaze-test-missing-vmlinux");
+        let _ = std::fs::create_dir_all(&tmp);
+        // Only create rootfs, omit vmlinux
+        std::fs::write(tmp.join("rootfs.ext4"), b"fake-rootfs").unwrap();
+        let _ = std::fs::remove_file(tmp.join("vmlinux"));
+
+        let spawner = FirecrackerSpawner {
+            images_dir: tmp.clone(),
+        };
+        let instance = fixture_instance(BackendKind::Firecracker);
+        let result = spawner
+            .spawn(
+                &instance,
+                &PathBuf::from("/usr/bin/firecracker"),
+                &tmp,
+                &BackendConfigs {
+                    firecracker: Some(FirecrackerConfig::default()),
+                },
+                None,
+            )
+            .await;
+
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("vmlinux not found"),
+            "should report vmlinux missing: {err_msg}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn firecracker_spawn_missing_rootfs_returns_error() {
+        let tmp = std::env::temp_dir().join("blaze-test-missing-rootfs");
+        let _ = std::fs::create_dir_all(&tmp);
+        // Only create vmlinux, omit rootfs
+        std::fs::write(tmp.join("vmlinux"), b"fake-kernel").unwrap();
+        let _ = std::fs::remove_file(tmp.join("rootfs.ext4"));
+
+        let spawner = FirecrackerSpawner {
+            images_dir: tmp.clone(),
+        };
+        let instance = fixture_instance(BackendKind::Firecracker);
+        let result = spawner
+            .spawn(
+                &instance,
+                &PathBuf::from("/usr/bin/firecracker"),
+                &tmp,
+                &BackendConfigs {
+                    firecracker: Some(FirecrackerConfig::default()),
+                },
+                None,
+            )
+            .await;
+
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("rootfs not found"),
+            "should report rootfs missing: {err_msg}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
