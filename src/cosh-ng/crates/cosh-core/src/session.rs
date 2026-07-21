@@ -1,232 +1,316 @@
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+//! Versioned, workspace-scoped persistence for provider conversation sessions.
+
+use std::fmt;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
 
 use crate::provider::Message;
 
-pub struct SessionStore {
-    base_dir: PathBuf,
-}
+mod io;
+mod listing;
+mod scoped;
+mod store;
+mod summary;
 
-impl SessionStore {
-    pub fn new(persist_dir: &str) -> Self {
-        let base_dir = if persist_dir.starts_with('~') {
-            dirs::home_dir().unwrap_or_default().join(&persist_dir[2..])
-        } else {
-            PathBuf::from(persist_dir)
-        };
-        Self { base_dir }
-    }
+pub use store::SessionStore;
+pub(crate) use summary::bounded_summary_text;
 
-    fn session_path(&self, session_id: &str) -> PathBuf {
-        self.base_dir.join(format!("{session_id}.json"))
-    }
+pub(super) const CURRENT_SCHEMA_VERSION: u32 = 1;
 
-    pub fn persist(&self, session_id: &str, messages: &[Message]) -> Result<(), String> {
-        std::fs::create_dir_all(&self.base_dir)
-            .map_err(|e| format!("Failed to create session dir: {e}"))?;
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+/// Canonical provider conversation identifier accepted by persistence paths.
+pub struct ProviderSessionId(String);
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&self.base_dir, std::fs::Permissions::from_mode(0o700))
-                .map_err(|e| format!("Failed to secure session dir: {e}"))?;
+impl ProviderSessionId {
+    /// Parses a lowercase canonical UUID before any filesystem path is built.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError::InvalidId`] for malformed or non-canonical UUIDs.
+    pub fn parse(value: &str) -> Result<Self, SessionError> {
+        let parsed = uuid::Uuid::parse_str(value).map_err(|_| SessionError::InvalidId {
+            value: value.to_string(),
+        })?;
+        if parsed.to_string() != value {
+            return Err(SessionError::InvalidId {
+                value: value.to_string(),
+            });
         }
-
-        let mut safe_messages = messages.to_vec();
-        crate::redaction::redact_messages(&mut safe_messages);
-        let json = serde_json::to_string_pretty(&safe_messages)
-            .map_err(|e| format!("Failed to serialize messages: {e}"))?;
-
-        let path = self.session_path(session_id);
-        let mut options = OpenOptions::new();
-        options.create(true).truncate(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(&path)
-            .map_err(|e| format!("Failed to open session file: {e}"))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| format!("Failed to secure session file: {e}"))?;
-        }
-        file.write_all(json.as_bytes())
-            .map_err(|e| format!("Failed to write session file: {e}"))?;
-
-        Ok(())
+        Ok(Self(value.to_string()))
     }
 
-    pub fn resume(&self, session_id: &str) -> Result<Vec<Message>, String> {
-        let path = self.session_path(session_id);
-        Self::load_from_path(&path)
+    /// Generates a new provider conversation identifier.
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4().to_string())
     }
 
-    pub fn load_from_path(path: &Path) -> Result<Vec<Message>, String> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read session file: {e}"))?;
-
-        let mut messages: Vec<Message> = serde_json::from_str(&content)
-            .map_err(|e| format!("Failed to parse session file: {e}"))?;
-        crate::redaction::redact_messages(&mut messages);
-        Ok(messages)
-    }
-
-    pub fn list(&self) -> Vec<String> {
-        let Ok(entries) = std::fs::read_dir(&self.base_dir) else {
-            return Vec::new();
-        };
-        entries
-            .flatten()
-            .filter_map(|e| {
-                let path = e.path();
-                if path.extension().is_some_and(|ext| ext == "json") {
-                    path.file_stem().map(|s| s.to_string_lossy().to_string())
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-
-    pub fn clear(&self, session_id: &str) -> Result<(), String> {
-        let path = self.session_path(session_id);
-        if path.exists() {
-            std::fs::remove_file(&path)
-                .map_err(|e| format!("Failed to remove session file: {e}"))?;
-        }
-        Ok(())
+    /// Returns the canonical UUID text.
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::provider::MessageContent;
+impl Default for ProviderSessionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-    #[test]
-    fn persist_and_resume() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = SessionStore::new(dir.path().to_str().unwrap());
+impl fmt::Display for ProviderSessionId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
 
-        let messages = vec![Message::user("hello"), Message::assistant("hi there")];
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+/// Health reported during session discovery.
+pub enum SessionHealth {
+    /// The envelope can be loaded and resumed.
+    Ready,
+    /// The stored JSON or envelope contract is malformed.
+    Corrupt,
+    /// The envelope uses a schema version this binary cannot load.
+    Incompatible,
+    /// The envelope belongs to another canonical workspace.
+    ScopeMismatch,
+}
 
-        store.persist("test-session", &messages).unwrap();
-        let loaded = store.resume("test-session").unwrap();
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Versioned provider conversation envelope stored on disk.
+pub struct PersistedSession {
+    /// Persistence schema version.
+    pub schema_version: u32,
+    /// Immutable provider conversation identity.
+    pub session_id: ProviderSessionId,
+    /// Canonical workspace that owns the session.
+    pub workspace_scope: String,
+    /// Creation timestamp in Unix milliseconds.
+    pub created_at_ms: u64,
+    /// Last committed timestamp in Unix milliseconds.
+    pub updated_at_ms: u64,
+    /// Model associated with the conversation.
+    pub model: String,
+    /// Optimistic concurrency generation.
+    pub generation: u64,
+    /// Model-visible conversation history.
+    pub messages: Vec<Message>,
+}
 
-        assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded[0].role, "user");
-        assert_eq!(loaded[1].role, "assistant");
+impl PersistedSession {
+    /// Builds an uncommitted schema-v1 session envelope.
+    pub fn new(
+        session_id: ProviderSessionId,
+        workspace_scope: String,
+        model: String,
+        messages: Vec<Message>,
+    ) -> Self {
+        let now = now_ms();
+        Self {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            session_id,
+            workspace_scope,
+            created_at_ms: now,
+            updated_at_ms: now,
+            model,
+            generation: 0,
+            messages,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Bounded metadata exposed to session-management clients.
+pub struct SessionSummary {
+    /// Provider conversation identity.
+    pub session_id: ProviderSessionId,
+    /// Canonical owning workspace.
+    pub workspace_scope: String,
+    /// Creation timestamp in Unix milliseconds.
+    pub created_at_ms: u64,
+    /// Last update timestamp in Unix milliseconds.
+    pub updated_at_ms: u64,
+    /// Model name when recoverable from the envelope.
+    pub model: Option<String>,
+    /// Model-visible message count.
+    pub message_count: usize,
+    /// First user prompt used as a picker preview.
+    pub first_prompt: Option<String>,
+    /// Detected schema version, when available.
+    pub schema_version: Option<u32>,
+    /// Discovery health.
+    pub health: SessionHealth,
+}
+
+#[derive(Debug, Clone)]
+/// Stable persistence and recovery failure categories.
+pub enum SessionError {
+    /// A caller supplied a non-canonical provider ID.
+    InvalidId {
+        /// Rejected value.
+        value: String,
+    },
+    /// A pagination cursor does not match the supported opaque format.
+    InvalidCursor {
+        /// Rejected cursor.
+        cursor: String,
+    },
+    /// A management request exceeds a bounded protocol contract.
+    InvalidRequest {
+        /// Rejected request detail.
+        message: String,
+    },
+    /// No stored session exists for the requested ID.
+    NotFound {
+        /// Requested provider ID.
+        session_id: String,
+    },
+    /// A filesystem operation failed.
+    Io {
+        /// Operation being attempted.
+        operation: &'static str,
+        /// Affected path.
+        path: PathBuf,
+        /// Underlying I/O error.
+        message: String,
+    },
+    /// Stored content could not be decoded safely.
+    Corrupt {
+        /// Affected provider ID.
+        session_id: String,
+        /// Decode or invariant failure.
+        message: String,
+    },
+    /// Stored content uses an unsupported schema.
+    IncompatibleVersion {
+        /// Affected provider ID.
+        session_id: String,
+        /// Unsupported schema version.
+        version: u32,
+    },
+    /// Stored content belongs to another workspace.
+    ScopeMismatch {
+        /// Affected provider ID.
+        session_id: String,
+        /// Requested canonical workspace.
+        expected: String,
+        /// Workspace recorded in the envelope.
+        actual: String,
+    },
+    /// Another writer changed or locked the session.
+    Conflict {
+        /// Affected provider ID.
+        session_id: String,
+    },
+    /// The caller attempted to clear a protected session.
+    ActiveSession {
+        /// Protected provider ID.
+        session_id: String,
+    },
+}
+
+impl SessionError {
+    /// Returns the stable machine-readable error code.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidId { .. } => "invalid_id",
+            Self::InvalidCursor { .. } => "invalid_cursor",
+            Self::InvalidRequest { .. } => "invalid_request",
+            Self::NotFound { .. } => "not_found",
+            Self::Io { .. } => "io",
+            Self::Corrupt { .. } => "corrupt",
+            Self::IncompatibleVersion { .. } => "incompatible_version",
+            Self::ScopeMismatch { .. } => "scope_mismatch",
+            Self::Conflict { .. } => "conflict",
+            Self::ActiveSession { .. } => "active_session",
+        }
     }
 
-    #[test]
-    fn list_sessions() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = SessionStore::new(dir.path().to_str().unwrap());
-
-        store.persist("sess-1", &[Message::user("a")]).unwrap();
-        store.persist("sess-2", &[Message::user("b")]).unwrap();
-
-        let mut sessions = store.list();
-        sessions.sort();
-        assert_eq!(sessions, vec!["sess-1", "sess-2"]);
+    /// Reports whether the shell can remain usable after this failure.
+    pub fn recoverable(&self) -> bool {
+        true
     }
 
-    #[test]
-    fn clear_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = SessionStore::new(dir.path().to_str().unwrap());
-
-        store.persist("sess-1", &[Message::user("a")]).unwrap();
-        assert!(store.resume("sess-1").is_ok());
-
-        store.clear("sess-1").unwrap();
-        assert!(store.resume("sess-1").is_err());
+    /// Returns a concise user recovery hint.
+    pub fn hint(&self) -> Option<&'static str> {
+        match self {
+            Self::InvalidId { .. } => Some("Use the canonical session UUID shown by session list."),
+            Self::InvalidCursor { .. } => Some("Refresh the session list and restart pagination."),
+            Self::InvalidRequest { .. } => {
+                Some("Retry with a bounded request that follows the session protocol.")
+            }
+            Self::NotFound { .. } => Some("Refresh the session list and choose an existing entry."),
+            Self::Corrupt { .. } => Some("Clear the damaged session after confirming its ID."),
+            Self::IncompatibleVersion { .. } => {
+                Some("Upgrade cosh-core or clear the incompatible session.")
+            }
+            Self::ScopeMismatch { .. } => Some("Resume the session from its original workspace."),
+            Self::Conflict { .. } => Some("Retry after the other session writer has completed."),
+            Self::ActiveSession { .. } => {
+                Some("Select another session before clearing this protected session.")
+            }
+            Self::Io { .. } => Some("Check the session directory permissions and retry."),
+        }
     }
+}
 
-    #[test]
-    fn resume_nonexistent() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = SessionStore::new(dir.path().to_str().unwrap());
-        assert!(store.resume("nonexistent").is_err());
-    }
-
-    #[test]
-    fn list_empty_dir() {
-        let store = SessionStore::new("/nonexistent/path");
-        assert!(store.list().is_empty());
-    }
-
-    #[test]
-    fn persisted_and_resumed_sessions_are_redacted() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = SessionStore::new(dir.path().to_str().unwrap());
-        let secret = "sk-session-secret-value";
-        let messages = vec![Message {
-            role: "user".to_string(),
-            content: MessageContent::Text(format!("use api_key={secret}")),
-            tool_call_id: None,
-            name: None,
-            tool_calls: None,
-        }];
-
-        store.persist("secret-session", &messages).unwrap();
-
-        let content = std::fs::read_to_string(store.session_path("secret-session")).unwrap();
-        assert!(!content.contains(secret), "{content}");
-        assert!(content.contains("<redacted>"), "{content}");
-
-        let resumed = store.resume("secret-session").unwrap();
-        assert!(!resumed[0].content.as_text().contains(secret));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn session_storage_uses_private_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let session_dir = dir.path().join("sessions");
-        let store = SessionStore::new(session_dir.to_str().unwrap());
-
-        store
-            .persist("private-session", &[Message::user("safe")])
-            .unwrap();
-
-        let dir_mode = std::fs::metadata(&session_dir)
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        let file_mode = std::fs::metadata(store.session_path("private-session"))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(dir_mode, 0o700);
-        assert_eq!(file_mode, 0o600);
-    }
-
-    #[test]
-    fn loading_legacy_sessions_redacts_before_replay() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("legacy.json");
-        let secret = "ghp_abcdefghijklmnopqrstuvwxyz123456";
-        std::fs::write(
-            &path,
-            format!(
-                r#"[{{"role":"user","content":"replay {secret}","tool_call_id":null,"name":null,"tool_calls":null}}]"#
+impl fmt::Display for SessionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidId { value } => write!(formatter, "invalid session ID: {value}"),
+            Self::InvalidCursor { cursor } => {
+                write!(formatter, "invalid session pagination cursor: {cursor}")
+            }
+            Self::InvalidRequest { message } => {
+                write!(formatter, "invalid session management request: {message}")
+            }
+            Self::NotFound { session_id } => write!(formatter, "session not found: {session_id}"),
+            Self::Io {
+                operation,
+                path,
+                message,
+            } => write!(
+                formatter,
+                "session {operation} failed for {}: {message}",
+                path.display()
             ),
-        )
-        .unwrap();
-
-        let loaded = SessionStore::load_from_path(&path).unwrap();
-
-        assert!(!loaded[0].content.as_text().contains(secret));
-        assert!(loaded[0].content.as_text().contains("<redacted>"));
+            Self::Corrupt {
+                session_id,
+                message,
+            } => write!(formatter, "session {session_id} is corrupt: {message}"),
+            Self::IncompatibleVersion {
+                session_id,
+                version,
+            } => write!(
+                formatter,
+                "session {session_id} uses unsupported schema version {version}"
+            ),
+            Self::ScopeMismatch {
+                session_id,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "session {session_id} belongs to {actual}, not {expected}"
+            ),
+            Self::Conflict { session_id } => {
+                write!(formatter, "session {session_id} changed concurrently")
+            }
+            Self::ActiveSession { session_id } => {
+                write!(formatter, "session {session_id} is protected")
+            }
+        }
     }
+}
+
+impl std::error::Error for SessionError {}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
 }

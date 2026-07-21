@@ -8,6 +8,7 @@ use super::{
 pub struct MockProvider {
     pub responses: Vec<Vec<GenerateEvent>>,
     call_index: std::sync::atomic::AtomicUsize,
+    echo_history: bool,
 }
 
 impl MockProvider {
@@ -15,6 +16,7 @@ impl MockProvider {
         Self {
             responses,
             call_index: std::sync::atomic::AtomicUsize::new(0),
+            echo_history: false,
         }
     }
 
@@ -41,16 +43,43 @@ impl MockProvider {
             GenerateEvent::MessageEnd,
         ]])
     }
+
+    pub fn history_echo() -> Self {
+        Self {
+            responses: Vec::new(),
+            call_index: std::sync::atomic::AtomicUsize::new(0),
+            echo_history: true,
+        }
+    }
+
+    pub fn partial_error() -> Self {
+        Self::new(vec![vec![
+            GenerateEvent::TextDelta("partial response".to_string()),
+            GenerateEvent::Error("recoverable mock provider error".to_string()),
+        ]])
+    }
 }
 
 #[async_trait]
 impl ContentGenerator for MockProvider {
     async fn generate(
         &self,
-        _messages: &[Message],
+        messages: &[Message],
         _tools: &[ToolDeclaration],
         _config: &GenerateConfig,
     ) -> Result<GenerateStream, String> {
+        if self.echo_history {
+            let history = messages
+                .iter()
+                .filter(|message| message.role == "user")
+                .map(|message| message.content.as_text())
+                .collect::<Vec<_>>()
+                .join(" | ");
+            return Ok(Box::pin(stream::iter(vec![
+                GenerateEvent::TextDelta(format!("mock history: {history}")),
+                GenerateEvent::MessageEnd,
+            ])));
+        }
         let idx = self
             .call_index
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);

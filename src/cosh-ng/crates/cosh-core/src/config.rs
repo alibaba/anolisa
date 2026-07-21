@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -157,8 +157,10 @@ impl Default for SessionConfig {
 fn default_true() -> bool {
     true
 }
+pub(crate) const DEFAULT_SESSION_PERSIST_DIR: &str = "~/.copilot-shell/cosh-core/sessions";
+
 fn default_persist_dir() -> String {
-    "sessions".to_string()
+    DEFAULT_SESSION_PERSIST_DIR.to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -435,19 +437,20 @@ fn apply_logging_layer(config: &mut LoggingConfig, layer: &PartialLoggingConfig)
 
 impl CoreConfig {
     pub fn load() -> Self {
+        let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Self::load_for_workspace(&workspace)
+    }
+
+    /// Loads the project layer from the workspace that owns the provider turn.
+    pub fn load_for_workspace(workspace: &Path) -> Self {
         crate::migrate::try_migrate();
 
-        let project_path = std::env::current_dir()
-            .ok()
-            .map(|p| p.join(".copilot-shell/config.toml"));
+        let project_path = workspace.join(".copilot-shell/config.toml");
         let user_path = config_dir().join("config.toml");
         let system_path = PathBuf::from("/etc/copilot-shell/config.toml");
 
-        let mut config = Self::load_from_paths(
-            Some(&system_path),
-            Some(&user_path),
-            project_path.as_deref(),
-        );
+        let mut config =
+            Self::load_from_paths(Some(&system_path), Some(&user_path), Some(&project_path));
         config.apply_env_overrides();
         config
     }

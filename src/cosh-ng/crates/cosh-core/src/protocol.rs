@@ -207,6 +207,10 @@ pub enum OutputMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         errors: Option<Vec<String>>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        session_error_code: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_error_phase: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         env_delta: Option<EnvDelta>,
@@ -249,6 +253,8 @@ pub struct CoreControlCapabilities {
 pub struct SystemPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_resumable: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -413,11 +419,17 @@ pub struct EnvDelta {
 // =====================================================================
 
 impl OutputMessage {
-    pub fn system_init(session_id: &str, model: &str, tools: Vec<String>) -> Self {
+    pub fn system_init(
+        session_id: &str,
+        model: &str,
+        tools: Vec<String>,
+        session_resumable: bool,
+    ) -> Self {
         Self::System {
             subtype: "init".to_string(),
             payload: SystemPayload {
                 session_id: Some(session_id.to_string()),
+                session_resumable: Some(session_resumable),
                 model: Some(model.to_string()),
                 tools: Some(tools),
                 ..Default::default()
@@ -501,6 +513,8 @@ impl OutputMessage {
             is_error: false,
             result: Some(result.to_string()),
             errors: None,
+            session_error_code: None,
+            session_error_phase: None,
             session_id: Some(session_id.to_string()),
             env_delta: None,
             duration_ms: None,
@@ -513,6 +527,27 @@ impl OutputMessage {
             is_error: true,
             result: Some(error.to_string()),
             errors: Some(vec![error.to_string()]),
+            session_error_code: None,
+            session_error_phase: None,
+            session_id: Some(session_id.to_string()),
+            env_delta: None,
+            duration_ms: None,
+        }
+    }
+
+    pub fn session_result_error(
+        session_id: &str,
+        error: &str,
+        session_error_code: &str,
+        session_error_phase: &str,
+    ) -> Self {
+        Self::Result {
+            subtype: Some("error".to_string()),
+            is_error: true,
+            result: Some(error.to_string()),
+            errors: Some(vec![error.to_string()]),
+            session_error_code: Some(session_error_code.to_string()),
+            session_error_phase: Some(session_error_phase.to_string()),
             session_id: Some(session_id.to_string()),
             env_delta: None,
             duration_ms: None,
@@ -803,12 +838,14 @@ mod tests {
             "sess-1",
             "mock-model",
             vec!["shell".to_string(), "read_file".to_string()],
+            true,
         );
         let json = serde_json::to_string(&msg).unwrap();
         let v: Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["type"], "system");
         assert_eq!(v["subtype"], "init");
         assert_eq!(v["session_id"], "sess-1");
+        assert_eq!(v["session_resumable"], true);
         assert_eq!(v["model"], "mock-model");
     }
 
@@ -975,6 +1012,19 @@ mod tests {
         let v: Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["type"], "result");
         assert_eq!(v["is_error"], true);
+        assert!(v.get("session_error_code").is_none());
+    }
+
+    #[test]
+    fn serialize_structured_session_result_error() {
+        let msg =
+            OutputMessage::session_result_error("sess-1", "session missing", "not_found", "load");
+        let json = serde_json::to_string(&msg).unwrap();
+        let v: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "result");
+        assert_eq!(v["is_error"], true);
+        assert_eq!(v["session_error_code"], "not_found");
+        assert_eq!(v["session_error_phase"], "load");
     }
 
     #[test]

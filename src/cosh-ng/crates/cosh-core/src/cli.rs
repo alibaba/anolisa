@@ -26,6 +26,14 @@ pub struct CliArgs {
     #[arg(long, value_name = "SESSION_ID")]
     pub resume: Option<String>,
 
+    /// Override the workspace scope used for session persistence
+    #[arg(long, value_name = "PATH", hide = true)]
+    pub workspace: Option<String>,
+
+    /// Run one provider-free session management request from stdin
+    #[arg(long, hide = true)]
+    pub session_control: bool,
+
     /// Increase stderr log verbosity
     #[arg(long)]
     pub verbose: bool,
@@ -59,5 +67,9 @@ impl CliArgs {
 
     pub fn is_registry(&self) -> bool {
         self.registry
+    }
+
+    pub fn is_session_control(&self) -> bool {
+        self.session_control
     }
 }

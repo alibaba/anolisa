@@ -383,6 +383,7 @@ dependencies = [
  "notify",
  "regex",
  "reqwest",
+ "rustix 0.38.44",
  "scrypt",
  "serde",
  "serde_json",

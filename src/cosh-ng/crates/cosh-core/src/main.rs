@@ -20,6 +20,7 @@ mod provider;
 mod redaction;
 mod registry;
 mod session;
+mod session_control;
 mod skill;
 mod sls;
 mod state;
@@ -27,6 +28,7 @@ mod tool;
 mod truncator;
 
 use clap::Parser;
+use std::path::PathBuf;
 
 use config::CoreConfig;
 use provider::openai_compat::OpenAICompatProvider;
@@ -34,6 +36,12 @@ use provider::profile;
 
 fn create_provider(config: &CoreConfig) -> Box<dyn provider::ContentGenerator> {
     let resolved = config.resolve_provider();
+    if resolved.provider_type == "mock" {
+        if resolved.model == "mock-partial-error" {
+            return Box::new(provider::mock::MockProvider::partial_error());
+        }
+        return Box::new(provider::mock::MockProvider::history_echo());
+    }
     // Aliyun provider uses AK/SK, not API key
     if resolved.provider_type == "aliyun" {
         if resolved.auth_source.as_deref() == Some("ecs_ram_role") {
@@ -74,6 +82,9 @@ fn create_provider_from_resolved(
 /// Check if auth is needed (no API key or AK/SK configured).
 fn needs_auth(config: &CoreConfig) -> bool {
     let resolved = config.resolve_provider();
+    if resolved.provider_type == "mock" {
+        return false;
+    }
     if resolved.provider_type == "aliyun" {
         if resolved.auth_source.as_deref() == Some("ecs_ram_role") {
             return false;
@@ -86,7 +97,15 @@ fn needs_auth(config: &CoreConfig) -> bool {
 #[tokio::main]
 async fn main() {
     let args = cli::CliArgs::parse();
-    let config = CoreConfig::load();
+    if args.is_session_control() {
+        std::process::exit(session_control::run());
+    }
+    let workspace = args
+        .workspace
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let config = CoreConfig::load_for_workspace(&workspace);
 
     let log_level = config.logging.effective_level(args.verbose);
     logging::init_logging(&log_level);

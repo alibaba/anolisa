@@ -1,4 +1,5 @@
 use std::io;
+use std::path::PathBuf;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -9,6 +10,7 @@ use crate::core::CoshCore;
 use crate::extension::ExtensionManager;
 use crate::metrics::TurnMetrics;
 use crate::protocol::{AuthReason, InputMessage, OutputMessage, ShellControlRequest};
+use crate::session::{PersistedSession, ProviderSessionId, SessionError, SessionStore};
 use crate::skill::manager::expand_path;
 use crate::skill::SkillManager;
 use crate::sls;
@@ -17,9 +19,17 @@ use crate::tool::ToolRegistry;
 pub async fn run(args: &CliArgs, mut config: CoreConfig) {
     apply_cli_overrides(args, &mut config);
 
-    let stdin = BufReader::new(tokio::io::stdin());
     let stdout = io::stdout();
     let mut writer = io::BufWriter::new(stdout.lock());
+    let mut session = match SessionRuntime::initialize(args, &config) {
+        Ok(session) => session,
+        Err(error) => {
+            emit_session_error(&mut writer, args.resume.as_deref(), &error);
+            return;
+        }
+    };
+
+    let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
 
     // --- Auth check: if no API key, request auth from Shell ---
@@ -40,6 +50,7 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) {
 
     let resolved = config.resolve_provider();
     let extra_params = resolved.extra_params.clone();
+    session.finalize_model(&resolved.model, args.model.is_some());
 
     // --- Extension Manager setup ---
     let project_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -63,20 +74,33 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) {
     }
     let mut engine = CoshCore::new(config, provider, tools);
     engine.extra_params = extra_params;
+    engine.session_id = session.record.session_id.to_string();
+    engine.messages = session.record.messages.clone();
+    if !session.record.model.is_empty() {
+        engine.model = session.record.model.clone();
+    }
     engine
         .hook_system
         .register_extension_hooks(&ext_manager.hook_definitions());
 
-    if let Some(ref sid) = args.resume {
-        engine.session_id = sid.clone();
-    }
-
     if let Some(ref prompt) = args.prompt {
+        if !session.resumable() {
+            engine.emit(
+                &mut writer,
+                &OutputMessage::system_init(
+                    &engine.session_id,
+                    &engine.model,
+                    engine.tool_names(),
+                    false,
+                ),
+            );
+        }
         let start = std::time::Instant::now();
-        match engine
+        let turn_result = engine
             .handle_user_message(prompt, &mut lines, &mut writer)
-            .await
-        {
+            .await;
+        let persist_result = session.persist(&engine);
+        match combine_turn_and_persist(turn_result, persist_result) {
             Ok(()) => {
                 let duration = start.elapsed();
                 sls::append_sls_log(&engine.build_sls_record(duration));
@@ -85,15 +109,17 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) {
                     is_error: false,
                     result: Some("completed".to_string()),
                     errors: None,
+                    session_error_code: None,
+                    session_error_phase: None,
                     session_id: Some(engine.session_id.clone()),
                     env_delta: None,
                     duration_ms: Some(duration.as_millis() as u64),
                 };
                 engine.emit(&mut writer, &result_msg);
             }
-            Err(e) => {
+            Err(failure) => {
                 sls::append_sls_log(&engine.build_sls_record(start.elapsed()));
-                let err_msg = OutputMessage::result_error(&engine.session_id, &e);
+                let err_msg = failure.output_message(&engine.session_id);
                 engine.emit(&mut writer, &err_msg);
             }
         }
@@ -108,6 +134,7 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) {
             &mut lines,
             &mut writer,
             args.enable_shell_evidence_tool,
+            &mut session,
         )
         .await
         {
@@ -127,6 +154,7 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) {
             &mut lines,
             &mut writer,
             args.enable_shell_evidence_tool,
+            &mut session,
         )
         .await
         {
@@ -142,6 +170,7 @@ async fn process_input_line<W, R>(
     lines: &mut tokio::io::Lines<R>,
     writer: &mut W,
     enable_shell_evidence_tool: bool,
+    session: &mut SessionRuntime,
 ) -> bool
 where
     W: io::Write,
@@ -169,6 +198,7 @@ where
                     &engine.session_id,
                     &engine.model,
                     engine.tool_names(),
+                    session.resumable(),
                 );
                 engine.emit(writer, &init_msg);
 
@@ -209,7 +239,8 @@ where
                 );
             }
             ShellControlRequest::ReloadConfig => {
-                engine.config = CoreConfig::load();
+                engine.config =
+                    CoreConfig::load_for_workspace(std::path::Path::new(session.workspace_scope()));
                 engine.emit(writer, &OutputMessage::system_status("config_reloaded"));
             }
             ShellControlRequest::ConfigOverride {
@@ -233,8 +264,16 @@ where
             ..
         } => {
             if let Some(sid) = session_id {
-                if !sid.is_empty() {
-                    engine.session_id = sid;
+                if !sid.is_empty() && sid != "default" && sid != engine.session_id {
+                    let error = format!(
+                        "session identity conflict: initialized {}, received {sid}",
+                        engine.session_id
+                    );
+                    engine.emit(
+                        writer,
+                        &OutputMessage::result_error(&engine.session_id, &error),
+                    );
+                    return true;
                 }
             }
             if let Some(ctx) = shell_context {
@@ -245,10 +284,11 @@ where
             engine.metrics = TurnMetrics::default();
             let start = std::time::Instant::now();
 
-            match engine
+            let turn_result = engine
                 .handle_user_message(&message.content, lines, writer)
-                .await
-            {
+                .await;
+            let persist_result = session.persist(engine);
+            match combine_turn_and_persist(turn_result, persist_result) {
                 Ok(()) => {
                     let duration = start.elapsed();
                     sls::append_sls_log(&engine.build_sls_record(duration));
@@ -257,15 +297,17 @@ where
                         is_error: false,
                         result: Some("completed".to_string()),
                         errors: None,
+                        session_error_code: None,
+                        session_error_phase: None,
                         session_id: Some(engine.session_id.clone()),
                         env_delta: None,
                         duration_ms: Some(duration.as_millis() as u64),
                     };
                     engine.emit(writer, &result_msg);
                 }
-                Err(e) => {
+                Err(failure) => {
                     sls::append_sls_log(&engine.build_sls_record(start.elapsed()));
-                    let err_msg = OutputMessage::result_error(&engine.session_id, &e);
+                    let err_msg = failure.output_message(&engine.session_id);
                     engine.emit(writer, &err_msg);
                 }
             }
@@ -277,6 +319,146 @@ where
         }
     }
     true
+}
+
+struct SessionRuntime {
+    store: Option<SessionStore>,
+    workspace_scope: String,
+    record: PersistedSession,
+    auto_persist: bool,
+    resumed: bool,
+}
+
+impl SessionRuntime {
+    fn initialize(args: &CliArgs, config: &CoreConfig) -> Result<Self, SessionError> {
+        let workspace = args
+            .workspace
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let store = match SessionStore::for_workspace(&config.session.persist_dir, &workspace) {
+            Ok(store) => Some(store),
+            // Resume cannot proceed without the store, but a fresh turn can:
+            // degrade to a non-resumable session instead of refusing to run.
+            Err(error) => {
+                if args.resume.is_some() {
+                    return Err(error);
+                }
+                tracing::warn!("session persistence disabled: {error}");
+                None
+            }
+        };
+        let workspace_scope = store
+            .as_ref()
+            .map(|store| store.workspace_scope().to_string())
+            .unwrap_or_else(|| workspace.to_string_lossy().into_owned());
+        let record = match (args.resume.as_deref(), store.as_ref()) {
+            (Some(value), Some(store)) => {
+                let session_id = ProviderSessionId::parse(value)?;
+                store.load(&session_id)?
+            }
+            _ => PersistedSession::new(
+                ProviderSessionId::new(),
+                workspace_scope.clone(),
+                String::new(),
+                Vec::new(),
+            ),
+        };
+        Ok(Self {
+            store,
+            workspace_scope,
+            record,
+            auto_persist: config.session.auto_persist,
+            resumed: args.resume.is_some(),
+        })
+    }
+
+    fn workspace_scope(&self) -> &str {
+        &self.workspace_scope
+    }
+
+    fn finalize_model(&mut self, resolved_model: &str, explicit_override: bool) {
+        if !self.resumed || explicit_override || self.record.model.is_empty() {
+            self.record.model = resolved_model.to_string();
+        }
+    }
+
+    fn persist(&mut self, engine: &CoshCore) -> Result<(), SessionError> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(());
+        };
+        if !self.auto_persist {
+            return Ok(());
+        }
+        self.record.messages = engine.messages.clone();
+        self.record.model = engine.model.clone();
+        store.persist(&mut self.record)
+    }
+
+    fn resumable(&self) -> bool {
+        self.auto_persist && self.store.is_some()
+    }
+}
+
+struct TurnFailure {
+    message: String,
+    session_error_code: Option<&'static str>,
+}
+
+impl TurnFailure {
+    fn output_message(&self, session_id: &str) -> OutputMessage {
+        match self.session_error_code {
+            Some(code) => {
+                OutputMessage::session_result_error(session_id, &self.message, code, "persist")
+            }
+            None => OutputMessage::result_error(session_id, &self.message),
+        }
+    }
+}
+
+fn combine_turn_and_persist(
+    turn: Result<(), String>,
+    persist: Result<(), SessionError>,
+) -> Result<(), TurnFailure> {
+    match (turn, persist) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(turn_error), Ok(())) => Err(TurnFailure {
+            message: turn_error,
+            session_error_code: None,
+        }),
+        (Ok(()), Err(persist_error)) => Err(TurnFailure {
+            message: format!(
+                "session persistence failed [{}]: {persist_error}",
+                persist_error.code()
+            ),
+            session_error_code: Some(persist_error.code()),
+        }),
+        (Err(turn_error), Err(persist_error)) => Err(TurnFailure {
+            message: format!(
+                "{turn_error}; session persistence failed [{}]: {persist_error}",
+                persist_error.code()
+            ),
+            session_error_code: Some(persist_error.code()),
+        }),
+    }
+}
+
+fn emit_session_error<W: io::Write>(
+    writer: &mut W,
+    requested_id: Option<&str>,
+    error: &SessionError,
+) {
+    let session_id = requested_id.unwrap_or("<new>");
+    let message = format!("session recovery failed [{}]: {error}", error.code());
+    if let Ok(json) = serde_json::to_string(&OutputMessage::session_result_error(
+        session_id,
+        &message,
+        error.code(),
+        "load",
+    )) {
+        let _ = writeln!(writer, "{json}");
+        let _ = writer.flush();
+    }
 }
 
 fn apply_cli_overrides(args: &CliArgs, config: &mut CoreConfig) {

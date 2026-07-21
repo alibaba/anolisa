@@ -74,7 +74,7 @@ fn initialize_returns_system_init() {
 fn user_message_returns_assistant_and_result() {
     let msgs = run_with_input(&[
         r#"{"type":"control_request","request_id":"init-1","request":{"subtype":"initialize"}}"#,
-        r#"{"type":"user","message":{"role":"user","content":"hello"},"session_id":"test-sess","parent_tool_use_id":null}"#,
+        r#"{"type":"user","message":{"role":"user","content":"hello"},"parent_tool_use_id":null}"#,
         r#"{"type":"control_request","request_id":"shut-1","request":{"subtype":"shutdown"}}"#,
     ]);
 
@@ -93,8 +93,39 @@ fn user_message_returns_assistant_and_result() {
     let has_result = msgs.iter().any(|m| m["type"] == "result");
     assert!(has_result, "expected a result message");
 
+    let init = msgs
+        .iter()
+        .find(|m| m["type"] == "system" && m["subtype"] == "init")
+        .unwrap();
     let result = msgs.iter().find(|m| m["type"] == "result").unwrap();
-    assert_eq!(result["session_id"], "test-sess");
+    assert_eq!(result["session_id"], init["session_id"]);
+}
+
+#[test]
+fn user_message_cannot_replace_initialized_session_id() {
+    let msgs = run_with_input(&[
+        r#"{"type":"control_request","request_id":"init-1","request":{"subtype":"initialize"}}"#,
+        r#"{"type":"user","message":{"role":"user","content":"hello"},"session_id":"default","parent_tool_use_id":null}"#,
+        r#"{"type":"user","message":{"role":"user","content":"replace"},"session_id":"00000000-0000-4000-8000-000000000000","parent_tool_use_id":null}"#,
+        r#"{"type":"control_request","request_id":"shut-1","request":{"subtype":"shutdown"}}"#,
+    ]);
+
+    let init = msgs
+        .iter()
+        .find(|message| message["type"] == "system" && message["subtype"] == "init")
+        .expect("system init");
+    let results = msgs
+        .iter()
+        .filter(|message| message["type"] == "result")
+        .collect::<Vec<_>>();
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["session_id"], init["session_id"]);
+    assert_eq!(results[1]["session_id"], init["session_id"]);
+    assert_eq!(results[1]["is_error"], true);
+    assert!(results[1]["result"]
+        .as_str()
+        .is_some_and(|value| value.contains("session identity conflict")));
 }
 
 #[test]
