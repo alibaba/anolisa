@@ -83,6 +83,24 @@ fn persisted_and_loaded_sessions_are_redacted() {
 }
 
 #[test]
+fn load_bounds_oversized_model_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let mut session = new_session(&store, "bounded model on load");
+    store.persist(&mut session).unwrap();
+    let path = store.session_file(&session.session_id);
+    let mut envelope: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    envelope["model"] = serde_json::Value::String("m".repeat(64 * 1024));
+    fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+
+    let loaded = store.load(&session.session_id).unwrap();
+
+    assert!(loaded.model.len() <= MAX_SUMMARY_MODEL_BYTES);
+    assert!(loaded.model.ends_with('…'));
+}
+
+#[test]
 fn loading_legacy_sessions_redacts_before_replay() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");

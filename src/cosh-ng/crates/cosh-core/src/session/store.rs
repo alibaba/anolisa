@@ -18,7 +18,10 @@ use super::listing::{
     collect_list_page, entry_is_after_cursor, format_list_cursor, parse_list_cursor,
 };
 use super::scoped::ScopedStorage;
-use super::summary::{bounded_summary_text, summary_from_session, MAX_SUMMARY_WORKSPACE_BYTES};
+use super::summary::{
+    bounded_summary_text, summary_from_session, MAX_SUMMARY_MODEL_BYTES,
+    MAX_SUMMARY_WORKSPACE_BYTES,
+};
 use super::{
     PersistedSession, ProviderSessionId, SessionError, SessionHealth, SessionSummary,
     CURRENT_SCHEMA_VERSION,
@@ -465,6 +468,10 @@ impl SessionStore {
         // Envelopes are redacted at persist time; redacting again on load
         // keeps externally written or pre-redaction files equally safe.
         crate::redaction::redact_messages(&mut session.messages);
+        // Bound untrusted model metadata to the summary budget so resume
+        // cannot replay an oversized string into init payloads or provider
+        // state that the 256-byte summary bound already refuses to carry.
+        session.model = bounded_summary_text(&session.model, MAX_SUMMARY_MODEL_BYTES);
         Ok(session)
     }
 

@@ -492,6 +492,70 @@ fn resume_explicit_model_overrides_persisted_model() {
 }
 
 #[test]
+fn resume_bounds_oversized_persisted_model_in_init() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let workspace = temp.path().join("workspace");
+    let store = temp.path().join("sessions");
+    fs::create_dir_all(&home).expect("create home");
+    fs::create_dir_all(&workspace).expect("create workspace");
+    configure(&home, &store);
+
+    let first = json_lines(&run_prompt(&home, &workspace, &["remember bounded model"]));
+    let session_id = first
+        .iter()
+        .find(|message| message["type"] == "result")
+        .and_then(|message| message["session_id"].as_str())
+        .expect("persisted session id");
+    let scoped_dir = fs::read_dir(&store)
+        .expect("read session root")
+        .filter_map(Result::ok)
+        .find(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .expect("workspace-scoped session directory")
+        .path();
+    let session_path = scoped_dir.join(format!("{session_id}.json"));
+    let mut envelope: Value =
+        serde_json::from_slice(&fs::read(&session_path).expect("read session"))
+            .expect("session envelope");
+    envelope["model"] = Value::String("oversized-model-".repeat(65_536));
+    fs::write(
+        &session_path,
+        serde_json::to_vec(&envelope).expect("serialize oversized model"),
+    )
+    .expect("write oversized model");
+
+    let resumed = json_lines(&run_protocol(
+        &home,
+        &workspace,
+        &["--resume", session_id],
+        &[
+            json!({
+                "type": "control_request",
+                "request_id": "init-1",
+                "request": {"subtype": "initialize"}
+            }),
+            json!({
+                "type": "control_request",
+                "request_id": "shutdown-1",
+                "request": {"subtype": "shutdown"}
+            }),
+        ],
+    ));
+    let init = resumed
+        .iter()
+        .find(|message| message["type"] == "system" && message["subtype"] == "init")
+        .expect("resumed system init");
+    let model = init["model"].as_str().expect("bounded init model");
+
+    assert!(
+        model.len() <= 256,
+        "init model not bounded: {}",
+        model.len()
+    );
+    assert!(model.ends_with('…'), "{model}");
+}
+
+#[test]
 fn authentication_selected_model_initializes_new_session() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = temp.path().join("home");
