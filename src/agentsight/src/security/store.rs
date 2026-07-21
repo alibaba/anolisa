@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use agentsight_enforcement_protocol::{DestinationClass, SecurityEvent, SecurityEventKind};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -313,11 +313,21 @@ impl SecurityStore {
             [&case.correlation_key],
             |row| row.get(0),
         )?;
+        let next_position: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(position) + 1, 0)
+             FROM risk_evidence_links WHERE case_id = ?1",
+            [&stored_case_id],
+            |row| row.get(0),
+        )?;
         for (position, event_id) in evidence_ids.iter().enumerate() {
             transaction.execute(
                 "INSERT OR IGNORE INTO risk_evidence_links (case_id, event_id, position)
                  VALUES (?1, ?2, ?3)",
-                params![stored_case_id, event_id.to_string(), position as i64],
+                params![
+                    stored_case_id,
+                    event_id.to_string(),
+                    next_position + position as i64
+                ],
             )?;
         }
         transaction.commit()?;

@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -97,6 +97,49 @@ fn repeated_decision_does_not_duplicate_the_case() {
 }
 
 #[test]
+fn dns_destination_retries_share_one_case_and_append_evidence() {
+    let backend = MockBackend::new();
+    let binding_id = Uuid::new_v4();
+    let request = audit_request(binding_id);
+    backend
+        .apply(request)
+        .expect("binding should apply for retry fixture");
+    let receiver = backend.subscribe_security_events();
+    backend
+        .emit_credential_exfiltration(binding_id, "/root/.ssh/id_rsa", "198.51.100.10:443")
+        .expect("first destination should emit");
+    backend
+        .emit_credential_exfiltration(binding_id, "/root/.ssh/id_rsa", "198.51.100.11:443")
+        .expect("second destination should emit");
+
+    let store = Arc::new(SecurityStore::open_in_memory().expect("fixture store should open"));
+    let coordinator = SecurityCoordinator::new(
+        EnforcementClient::new("/unused/agentsight-enforcer.sock"),
+        Arc::clone(&store),
+    );
+    for _ in 0..8 {
+        coordinator
+            .ingest(receiver.recv().expect("mock event should arrive"))
+            .expect("mock event should ingest");
+    }
+
+    let cases = store.list_cases(100, 0).expect("case list should load");
+    assert_eq!(cases.len(), 1, "DNS fallback must remain one risk case");
+    let detail = store
+        .case_detail(cases[0].case_id)
+        .expect("case detail should load");
+    assert_eq!(detail.evidence.len(), 8);
+    assert!(matches!(
+        detail.evidence[0].kind,
+        SecurityEventKind::FileAction(_)
+    ));
+    assert!(matches!(
+        detail.evidence[4].kind,
+        SecurityEventKind::FileAction(_)
+    ));
+}
+
+#[test]
 fn observe_chain_persists_events_without_opening_a_case() {
     let (store, _) = ingest_mock_chain(PolicyMode::Observe);
 
@@ -104,10 +147,12 @@ fn observe_chain_persists_events_without_opening_a_case() {
         store.summary().expect("summary should load").total_events,
         4
     );
-    assert!(store
-        .list_cases(100, 0)
-        .expect("case list should load")
-        .is_empty());
+    assert!(
+        store
+            .list_cases(100, 0)
+            .expect("case list should load")
+            .is_empty()
+    );
 }
 
 #[test]

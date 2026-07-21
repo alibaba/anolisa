@@ -171,14 +171,7 @@ fn ingest_event(
     } else {
         RiskSeverity::High
     };
-    let correlation_key = format!(
-        "{}:{}:{}:{}:{}",
-        event.identity.binding_id,
-        decision.policy_id,
-        decision.policy_revision,
-        decision.source_event_id,
-        decision.sink_event_id
-    );
+    let correlation_key = risk_correlation_key(&event, decision, &source, &sink);
     let case = RiskCase {
         case_id: event.event_id,
         correlation_key,
@@ -201,6 +194,34 @@ fn ingest_event(
     evidence_ids.push(event.event_id);
     store.upsert_case(&case, &evidence_ids)?;
     Ok(())
+}
+
+fn risk_correlation_key(
+    decision_event: &SecurityEvent,
+    decision: &agentsight_enforcement_protocol::PolicyDecision,
+    source: &SecurityEvent,
+    sink: &SecurityEvent,
+) -> String {
+    const BURST_WINDOW_NS: u64 = 5_000_000_000;
+
+    let source_resource = match &source.kind {
+        SecurityEventKind::FileAction(action) => action.path.as_str(),
+        _ => "unknown-source",
+    };
+    let burst = source.occurred_at_ns / BURST_WINDOW_NS;
+    format!(
+        "burst-v1:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+        decision_event.identity.binding_id,
+        decision.policy_id,
+        decision.policy_revision,
+        source.identity.pid,
+        source.identity.process_start_time,
+        sink.identity.pid,
+        sink.identity.process_start_time,
+        burst,
+        source_resource.len(),
+        source_resource
+    )
 }
 
 fn subscription_loop(
