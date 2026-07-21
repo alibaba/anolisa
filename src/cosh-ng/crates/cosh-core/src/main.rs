@@ -106,7 +106,11 @@ async fn main() {
         .as_deref()
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    let config = CoreConfig::load_for_workspace(&workspace);
+    let config = if args.bare {
+        CoreConfig::load_bare()
+    } else {
+        CoreConfig::load_for_workspace(&workspace)
+    };
 
     let log_level = config.logging.effective_level(args.verbose);
     logging::init_logging(&log_level);
@@ -115,9 +119,13 @@ async fn main() {
     if args.is_registry() {
         registry::run(&args, config).await;
     } else if args.is_headless() {
-        let exit_code = headless::run(&args, config).await;
-        if exit_code != 0 {
-            std::process::exit(exit_code);
+        match headless::run(&args, config).await {
+            Ok(0) => {}
+            Ok(exit_code) => std::process::exit(exit_code),
+            Err(error) => {
+                eprintln!("[cosh-core] {error}");
+                std::process::exit(2);
+            }
         }
     } else {
         interactive::run(&args, config).await;

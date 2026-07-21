@@ -455,6 +455,23 @@ impl CoreConfig {
         config
     }
 
+    pub fn load_bare() -> Self {
+        crate::migrate::try_migrate();
+
+        let user_path = config_dir().join("config.toml");
+        let system_path = PathBuf::from("/etc/copilot-shell/config.toml");
+        let mut config = Self::load_from_paths(Some(&system_path), Some(&user_path), None);
+        config.apply_env_overrides();
+        config.apply_bare_isolation();
+        config
+    }
+
+    fn apply_bare_isolation(&mut self) {
+        self.hooks = HooksConfig::default();
+        self.skills = SkillsConfig::default();
+        self.session.auto_persist = false;
+    }
+
     fn load_from_paths(
         system_path: Option<&std::path::Path>,
         user_path: Option<&std::path::Path>,
@@ -940,6 +957,52 @@ active_model = "project-model"
         assert_eq!(config.ai.active_model.as_deref(), Some("project-model"));
         assert_eq!(resolved.api_key, "sk-user");
         assert_eq!(resolved.model, "project-model");
+    }
+
+    #[test]
+    fn bare_config_preserves_user_provider_but_ignores_project_and_runtime_extensions() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user_path = tmp.path().join("user-config.toml");
+        let project_path = tmp.path().join("project-config.toml");
+        std::fs::write(
+            &user_path,
+            r#"
+[ai]
+active_provider = "user-provider"
+active_model = "user-model"
+
+[ai.providers.user-provider]
+api_key = "sk-user"
+
+[hooks]
+enabled = true
+
+[skills]
+enabled = true
+custom_paths = ["/user/skills"]
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &project_path,
+            r#"
+[ai]
+active_model = "project-model"
+"#,
+        )
+        .unwrap();
+
+        let mut config = CoreConfig::load_from_paths(None, Some(&user_path), None);
+        config.apply_bare_isolation();
+
+        assert_eq!(config.ai.active_provider.as_deref(), Some("user-provider"));
+        assert_eq!(config.ai.active_model.as_deref(), Some("user-model"));
+        assert_eq!(config.resolve_provider().api_key, "sk-user");
+        assert!(!config.hooks.enabled);
+        assert!(!config.skills.enabled);
+        assert!(config.skills.custom_paths.is_empty());
+        assert!(!config.session.auto_persist);
+        assert!(project_path.exists());
     }
 
     #[test]

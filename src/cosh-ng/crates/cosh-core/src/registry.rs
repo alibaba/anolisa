@@ -10,7 +10,7 @@ use crate::protocol::{InputMessage, OutputMessage};
 use crate::skill::manager::expand_path;
 use crate::skill::SkillManager;
 
-pub async fn run(_args: &CliArgs, mut config: CoreConfig) {
+pub async fn run(args: &CliArgs, mut config: CoreConfig) {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut writer = io::BufWriter::new(stdout.lock());
@@ -18,7 +18,9 @@ pub async fn run(_args: &CliArgs, mut config: CoreConfig) {
     // --- Extension Manager setup (no LLM/provider init) ---
     let project_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let mut ext_manager = ExtensionManager::new(project_root.clone());
-    ext_manager.refresh();
+    if !args.bare {
+        ext_manager.refresh();
+    }
 
     // --- Skill Manager setup ---
     let custom_paths: Vec<std::path::PathBuf> = config
@@ -28,7 +30,9 @@ pub async fn run(_args: &CliArgs, mut config: CoreConfig) {
         .filter_map(|p| expand_path(p))
         .collect();
     let skill_manager = SkillManager::new(project_root, custom_paths, ext_manager.skill_dirs());
-    skill_manager.refresh().await;
+    if !args.bare {
+        skill_manager.refresh().await;
+    }
 
     // Read one line from stdin
     let line = {

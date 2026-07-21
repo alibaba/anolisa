@@ -72,10 +72,7 @@ impl CoshCore {
     }
 
     pub fn tool_names(&self) -> Vec<String> {
-        let mut names = self.tools.names();
-        names.push("ask_user_question".to_string());
-        names.sort();
-        names
+        self.tools.names()
     }
 
     pub fn emit<W: Write>(&self, writer: &mut W, msg: &OutputMessage) {
@@ -490,20 +487,22 @@ impl CoshCore {
             }
 
             if tool_calls.is_empty() {
-                if let Some(synthetic) = parse_cosh_question_text(&text_buf) {
-                    let result = self
-                        .handle_ask_user("synthetic-ask", &synthetic, reader, writer)
-                        .await;
-                    if result.is_error {
+                if self.tools.supports_ask_user_question() {
+                    if let Some(synthetic) = parse_cosh_question_text(&text_buf) {
+                        let result = self
+                            .handle_ask_user("synthetic-ask", &synthetic, reader, writer)
+                            .await;
+                        if result.is_error {
+                            self.messages.push(Message::assistant(&text_buf));
+                            return Ok(());
+                        }
                         self.messages.push(Message::assistant(&text_buf));
-                        return Ok(());
+                        self.messages.push(Message::user(&format!(
+                            "User answered the question: {}",
+                            result.output
+                        )));
+                        continue;
                     }
-                    self.messages.push(Message::assistant(&text_buf));
-                    self.messages.push(Message::user(&format!(
-                        "User answered the question: {}",
-                        result.output
-                    )));
-                    continue;
                 }
 
                 // ─── Hook: Stop ───
@@ -555,7 +554,7 @@ impl CoshCore {
                 let params: serde_json::Value =
                     serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null);
 
-                if tc.name == "ask_user_question" {
+                if tc.name == "ask_user_question" && self.tools.supports_ask_user_question() {
                     let result = self.handle_ask_user(&tc.id, &params, reader, writer).await;
                     self.messages.push(Message::tool_result(
                         &tc.id,

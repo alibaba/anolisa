@@ -68,6 +68,7 @@ pub trait Tool: Send + Sync {
 pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn Tool>>,
     skill_manager: Option<Arc<SkillManager>>,
+    ask_user_question_enabled: bool,
 }
 
 impl ToolRegistry {
@@ -75,6 +76,7 @@ impl ToolRegistry {
         Self {
             tools: HashMap::new(),
             skill_manager: None,
+            ask_user_question_enabled: true,
         }
     }
 
@@ -88,8 +90,43 @@ impl ToolRegistry {
 
     pub fn names(&self) -> Vec<String> {
         let mut names: Vec<_> = self.tools.keys().cloned().collect();
+        if self.ask_user_question_enabled {
+            names.push("ask_user_question".to_string());
+        }
         names.sort();
         names
+    }
+
+    pub fn retain_selected_tools(&mut self, selection: &str) -> Result<(), String> {
+        if selection == "default" {
+            return Ok(());
+        }
+
+        let selected: std::collections::HashSet<_> = selection
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .collect();
+        let available: std::collections::HashSet<_> = self
+            .tools
+            .keys()
+            .map(String::as_str)
+            .chain(std::iter::once("ask_user_question"))
+            .collect();
+        let mut unknown: Vec<_> = selected.difference(&available).copied().collect();
+        unknown.sort_unstable();
+        if !unknown.is_empty() {
+            return Err(format!("unknown tools: {}", unknown.join(",")));
+        }
+
+        self.tools
+            .retain(|name, _| selected.contains(name.as_str()));
+        self.ask_user_question_enabled = selected.contains("ask_user_question");
+        Ok(())
+    }
+
+    pub fn supports_ask_user_question(&self) -> bool {
+        self.ask_user_question_enabled
     }
 
     pub fn with_defaults(skill_manager: Arc<SkillManager>) -> Self {
@@ -157,40 +194,42 @@ impl ToolRegistry {
                 parameters: t.parameters_schema(),
             })
             .collect();
-        decls.push(ToolDeclaration {
-            name: "ask_user_question".to_string(),
-            description: "Ask the user a question. Use this when you need clarification or want the user to choose between options.".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "question": {
-                        "type": "string",
-                        "description": "The question to ask the user"
-                    },
-                    "options": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "label": { "type": "string" },
-                                "description": { "type": "string" }
-                            },
-                            "required": ["label"]
+        if self.ask_user_question_enabled {
+            decls.push(ToolDeclaration {
+                name: "ask_user_question".to_string(),
+                description: "Ask the user a question. Use this when you need clarification or want the user to choose between options.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "question": {
+                            "type": "string",
+                            "description": "The question to ask the user"
                         },
-                        "description": "Options for the user to choose from"
+                        "options": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "label": { "type": "string" },
+                                    "description": { "type": "string" }
+                                },
+                                "required": ["label"]
+                            },
+                            "description": "Options for the user to choose from"
+                        },
+                        "allow_free_text": {
+                            "type": "boolean",
+                            "description": "Whether to allow free-text input (default: true)"
+                        },
+                        "multi_select": {
+                            "type": "boolean",
+                            "description": "Whether to allow selecting multiple options (default: false)"
+                        }
                     },
-                    "allow_free_text": {
-                        "type": "boolean",
-                        "description": "Whether to allow free-text input (default: true)"
-                    },
-                    "multi_select": {
-                        "type": "boolean",
-                        "description": "Whether to allow selecting multiple options (default: false)"
-                    }
-                },
-                "required": ["question"]
-            }),
-        });
+                    "required": ["question"]
+                }),
+            });
+        }
         decls.sort_by(|a, b| a.name.cmp(&b.name));
         decls
     }
@@ -244,7 +283,7 @@ mod tests {
         let mut registry = ToolRegistry::new();
         registry.register(Box::new(DummyTool));
         let names = registry.names();
-        assert_eq!(names, vec!["dummy"]);
+        assert_eq!(names, vec!["ask_user_question", "dummy"]);
     }
 
     #[test]
@@ -255,6 +294,61 @@ mod tests {
         assert_eq!(decls.len(), 2);
         assert!(decls.iter().any(|d| d.name == "dummy"));
         assert!(decls.iter().any(|d| d.name == "ask_user_question"));
+    }
+
+    #[test]
+    fn empty_tool_selection_removes_builtin_and_pseudo_tools() {
+        let mut registry = ToolRegistry::with_defaults_for_test();
+
+        registry
+            .retain_selected_tools("")
+            .expect("empty selection is valid");
+
+        assert!(registry.names().is_empty());
+        assert!(registry.declarations().is_empty());
+    }
+
+    #[test]
+    fn named_tool_selection_is_consistent_across_names_and_declarations() {
+        let mut registry = ToolRegistry::with_defaults_for_test();
+
+        registry
+            .retain_selected_tools("read_file,ask_user_question")
+            .expect("known selection");
+
+        assert_eq!(
+            registry.names(),
+            vec!["ask_user_question".to_string(), "read_file".to_string()]
+        );
+        let declaration_names: Vec<_> = registry
+            .declarations()
+            .into_iter()
+            .map(|declaration| declaration.name)
+            .collect();
+        assert_eq!(declaration_names, registry.names());
+    }
+
+    #[test]
+    fn default_tool_selection_preserves_existing_tools() {
+        let mut registry = ToolRegistry::with_defaults_for_test();
+        let before = registry.names();
+
+        registry
+            .retain_selected_tools("default")
+            .expect("default selection");
+
+        assert_eq!(registry.names(), before);
+    }
+
+    #[test]
+    fn unknown_tool_selection_is_rejected() {
+        let mut registry = ToolRegistry::with_defaults_for_test();
+
+        let error = registry
+            .retain_selected_tools("read_file,missing_tool")
+            .expect_err("unknown tool must fail closed");
+
+        assert!(error.contains("missing_tool"));
     }
 
     #[test]

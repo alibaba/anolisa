@@ -28,6 +28,17 @@ fn run_registry_request_with_context(
     home: &Path,
     cwd: Option<&Path>,
 ) -> Value {
+    run_registry_request_with_args(domain, action, params, home, cwd, &[])
+}
+
+fn run_registry_request_with_args(
+    domain: &str,
+    action: &str,
+    params: Value,
+    home: &Path,
+    cwd: Option<&Path>,
+    args: &[&str],
+) -> Value {
     let bin = binary_path();
     let request = serde_json::json!({
         "type": "registry_request",
@@ -40,6 +51,7 @@ fn run_registry_request_with_context(
     let mut command = Command::new(&bin);
     command
         .arg("--registry")
+        .args(args)
         .env("HOME", home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -65,6 +77,43 @@ fn run_registry_request_with_context(
         .map(|l| serde_json::from_str::<Value>(l).unwrap_or_else(|e| panic!("bad JSON: {e}: {l}")))
         .next()
         .expect("expected at least one response line")
+}
+
+#[test]
+fn bare_registry_does_not_discover_project_skills() {
+    let home = tempfile::tempdir().expect("temp home");
+    let project = tempfile::tempdir().expect("temp project");
+    let skill_dir = project.path().join(".copilot-shell/skills/project-skill");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: project-skill\ndescription: project only\n---\n\nBody.",
+    )
+    .unwrap();
+
+    let regular = run_registry_request_with_args(
+        "skills",
+        "list",
+        Value::Null,
+        home.path(),
+        Some(project.path()),
+        &[],
+    );
+    let bare = run_registry_request_with_args(
+        "skills",
+        "list",
+        Value::Null,
+        home.path(),
+        Some(project.path()),
+        &["--bare"],
+    );
+
+    assert!(regular["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|skill| skill["name"] == "project-skill"));
+    assert!(bare["data"].as_array().unwrap().is_empty(), "{bare}");
 }
 
 #[test]

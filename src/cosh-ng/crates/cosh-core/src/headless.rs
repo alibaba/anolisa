@@ -16,7 +16,7 @@ use crate::skill::SkillManager;
 use crate::sls;
 use crate::tool::ToolRegistry;
 
-pub async fn run(args: &CliArgs, mut config: CoreConfig) -> i32 {
+pub async fn run(args: &CliArgs, mut config: CoreConfig) -> Result<i32, String> {
     apply_cli_overrides(args, &mut config);
 
     let stdout = io::stdout();
@@ -25,7 +25,7 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> i32 {
         Ok(session) => session,
         Err(error) => {
             emit_session_error(&mut writer, args.resume.as_deref(), &error);
-            return 0;
+            return Ok(0);
         }
     };
 
@@ -55,7 +55,9 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> i32 {
     // --- Extension Manager setup ---
     let project_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let mut ext_manager = ExtensionManager::new(project_root.clone());
-    ext_manager.refresh();
+    if !args.bare {
+        ext_manager.refresh();
+    }
 
     // --- Skill Manager setup ---
     let custom_paths: Vec<std::path::PathBuf> = config
@@ -65,12 +67,17 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> i32 {
         .filter_map(|p| expand_path(p))
         .collect();
     let skill_manager = SkillManager::new(project_root, custom_paths, ext_manager.skill_dirs());
-    skill_manager.refresh().await;
-    skill_manager.start_watching().await;
+    if !args.bare {
+        skill_manager.refresh().await;
+        skill_manager.start_watching().await;
+    }
 
     let mut tools = ToolRegistry::with_defaults(skill_manager);
     if args.enable_shell_evidence_tool {
         tools = tools.with_shell_evidence();
+    }
+    if let Some(selection) = args.tools.as_deref() {
+        tools.retain_selected_tools(selection)?;
     }
     let mut engine = CoshCore::new(config, provider, tools);
     engine.extra_params = extra_params;
@@ -79,9 +86,11 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> i32 {
     if !session.record.model.is_empty() {
         engine.model = session.record.model.clone();
     }
-    engine
-        .hook_system
-        .register_extension_hooks(&ext_manager.hook_definitions());
+    if !args.bare {
+        engine
+            .hook_system
+            .register_extension_hooks(&ext_manager.hook_definitions());
+    }
 
     if let Some(ref prompt) = args.prompt {
         if !session.resumable() {
@@ -124,7 +133,7 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> i32 {
                 engine.emit(&mut writer, &err_msg);
             }
         }
-        return 0;
+        return Ok(0);
     }
 
     // Replay any lines that were buffered during the auth wait
@@ -134,14 +143,14 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> i32 {
             &mut engine,
             &mut lines,
             &mut writer,
-            args.enable_shell_evidence_tool,
+            args,
             &mut session,
         )
         .await
         {
             InputLineResult::Continue => {}
-            InputLineResult::Shutdown => return 0,
-            InputLineResult::InvalidJson => return 1,
+            InputLineResult::Shutdown => return Ok(0),
+            InputLineResult::InvalidJson => return Ok(1),
         }
     }
 
@@ -156,17 +165,17 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) -> i32 {
             &mut engine,
             &mut lines,
             &mut writer,
-            args.enable_shell_evidence_tool,
+            args,
             &mut session,
         )
         .await
         {
             InputLineResult::Continue => {}
-            InputLineResult::Shutdown => return 0,
-            InputLineResult::InvalidJson => return 1,
+            InputLineResult::Shutdown => return Ok(0),
+            InputLineResult::InvalidJson => return Ok(1),
         }
     }
-    0
+    Ok(0)
 }
 
 enum InputLineResult {
@@ -181,7 +190,7 @@ async fn process_input_line<W, R>(
     engine: &mut CoshCore,
     lines: &mut tokio::io::Lines<R>,
     writer: &mut W,
-    enable_shell_evidence_tool: bool,
+    args: &CliArgs,
     session: &mut SessionRuntime,
 ) -> InputLineResult
 where
@@ -213,7 +222,10 @@ where
             ShellControlRequest::Initialize => {
                 engine.emit(
                     writer,
-                    &OutputMessage::initialize_success(&request_id, enable_shell_evidence_tool),
+                    &OutputMessage::initialize_success(
+                        &request_id,
+                        args.enable_shell_evidence_tool,
+                    ),
                 );
                 let init_msg = OutputMessage::system_init(
                     &engine.session_id,
@@ -261,7 +273,7 @@ where
             }
             ShellControlRequest::ReloadConfig => {
                 engine.config =
-                    CoreConfig::load_for_workspace(std::path::Path::new(session.workspace_scope()));
+                    load_runtime_config(args, std::path::Path::new(session.workspace_scope()));
                 engine.emit(writer, &OutputMessage::system_status("config_reloaded"));
             }
             ShellControlRequest::ConfigOverride {
@@ -492,6 +504,16 @@ fn apply_cli_overrides(args: &CliArgs, config: &mut CoreConfig) {
     }
 }
 
+fn load_runtime_config(args: &CliArgs, workspace: &std::path::Path) -> CoreConfig {
+    let mut config = if args.bare {
+        CoreConfig::load_bare()
+    } else {
+        CoreConfig::load_for_workspace(workspace)
+    };
+    apply_cli_overrides(args, &mut config);
+    config
+}
+
 /// Request authentication from Shell via the control protocol.
 /// Returns a Provider if auth succeeds, None otherwise.
 /// Buffered lines consumed during auth wait are appended to `buffered`.
@@ -542,4 +564,33 @@ where
 
     // Create provider from new config
     Some(crate::create_provider(config))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use clap::Parser;
+
+    use super::*;
+
+    #[test]
+    fn bare_reload_keeps_project_config_isolated() {
+        let workspace = tempfile::tempdir().expect("temp workspace");
+        let project_config = workspace.path().join(".copilot-shell/config.toml");
+        fs::create_dir_all(project_config.parent().expect("config parent"))
+            .expect("create project config directory");
+        fs::write(
+            project_config,
+            "[agent]\napproval_mode = \"project-only-mode\"\n",
+        )
+        .expect("write project config");
+        let args = CliArgs::try_parse_from(["cosh-core", "--headless", "--bare"])
+            .expect("parse bare args");
+
+        let config = load_runtime_config(&args, workspace.path());
+
+        assert_ne!(config.agent.approval_mode, "project-only-mode");
+        assert!(!config.session.auto_persist);
+    }
 }

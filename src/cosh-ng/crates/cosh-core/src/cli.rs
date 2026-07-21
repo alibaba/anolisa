@@ -22,6 +22,14 @@ pub struct CliArgs {
     #[arg(long, value_name = "TOOLS")]
     pub allowed_tools: Option<String>,
 
+    /// Comma-separated tools exposed to the model (default|empty|names)
+    #[arg(long, value_name = "TOOLS")]
+    pub tools: Option<String>,
+
+    /// Disable project config, hooks, skills, and extensions
+    #[arg(long)]
+    pub bare: bool,
+
     /// Resume an existing session
     #[arg(long, value_name = "SESSION_ID")]
     pub resume: Option<String>,
@@ -71,5 +79,32 @@ impl CliArgs {
 
     pub fn is_session_control(&self) -> bool {
         self.session_control
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tools_and_bare_are_generic_headless_flags() {
+        let args = CliArgs::try_parse_from(["cosh-core", "--headless", "--bare", "--tools", ""])
+            .expect("parse analyzer isolation flags");
+
+        assert!(args.headless);
+        assert!(args.bare);
+        assert_eq!(args.tools.as_deref(), Some(""));
+        assert!(args.allowed_tools.is_none());
+    }
+
+    #[test]
+    fn tools_default_is_distinct_from_empty() {
+        let default_args = CliArgs::try_parse_from(["cosh-core", "--tools", "default"])
+            .expect("parse default tools");
+        let empty_args =
+            CliArgs::try_parse_from(["cosh-core", "--tools", ""]).expect("parse empty tools");
+
+        assert_eq!(default_args.tools.as_deref(), Some("default"));
+        assert_eq!(empty_args.tools.as_deref(), Some(""));
     }
 }
