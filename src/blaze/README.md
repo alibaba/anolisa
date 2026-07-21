@@ -59,6 +59,26 @@ and a policies directory containing per-workload-class policy files.
 
 See `src/blaze/examples/` for annotated sample configurations.
 
+### VM Resource Configuration
+
+Blaze resolves vCPU and memory settings using a three-layer fallback chain:
+
+1. **Backend-specific** (`[backend.firecracker].vcpus` / `.memory`) — highest priority
+2. **Policy-level** (`[vm].vcpus` / `[vm].memory`) — shared across backends
+3. **Code default** (1 vCPU, 256 MiB) — fallback when unspecified
+
+Example in a policy file:
+
+```toml
+[vm]
+vcpus = 2
+memory = "512Mi"
+
+[backend.firecracker]
+vcpus = 4        # overrides [vm].vcpus for Firecracker only
+memory = "1Gi"   # overrides [vm].memory for Firecracker only
+```
+
 ## API Endpoints
 
 | Method | Path | Description |
