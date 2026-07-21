@@ -102,6 +102,11 @@ pids_max = 4096
 
 # ---------------------------------------------------------------------------
 # VM generic resource spec. Only consumed by VM backends.
+#
+# VM resource resolution order:
+# 1. [backend.firecracker].vcpus / .memory  (highest priority)
+# 2. [vm].vcpus / .memory                   (policy-level default)
+# 3. Code default: 1 vCPU, 256Mi            (fallback)
 # ---------------------------------------------------------------------------
 [vm]
 vcpus = 4
