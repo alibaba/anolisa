@@ -37,7 +37,7 @@ TOON_VER := 0.5.0
 VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 
 .PHONY: build build-tokenless build-toon build-openclaw-plugin \
-        stamp-adapter-templates check-component-contract \
+        stamp-adapter-templates generate-component-contract \
         install uninstall test lint clean \
         install-binaries install-helpers install-adapter-resources install-cosh-extension \
         adapter-install adapter-uninstall adapter-scan \
@@ -70,6 +70,8 @@ build-toon:
 # Generate adapter config files from .in templates (VERSION from Cargo.toml).
 stamp-adapter-templates: $(ADAPTER_TEMPLATES) $(COMPONENT_CONTRACT)
 
+generate-component-contract: $(COMPONENT_CONTRACT)
+
 $(ADAPTER_SRC_DIR)/manifest.json: $(ADAPTER_SRC_DIR)/manifest.json.in Cargo.toml
 	@echo "==> Generating manifest.json (version=$(VERSION))..."
 	sed 's/@VERSION@/$(VERSION)/g' $< > $@
@@ -77,16 +79,6 @@ $(ADAPTER_SRC_DIR)/manifest.json: $(ADAPTER_SRC_DIR)/manifest.json.in Cargo.toml
 $(COMPONENT_CONTRACT): $(COMPONENT_CONTRACT).in Cargo.toml
 	@echo "==> Generating component contract (version=$(VERSION))..."
 	sed 's/@VERSION@/$(VERSION)/g' $< > $@
-
-check-component-contract:
-	@tmp=$$(mktemp); \
-		cp "$(COMPONENT_CONTRACT)" "$$tmp"; \
-		trap 'cp "$$tmp" "$(COMPONENT_CONTRACT)"; rm -f "$$tmp"' EXIT; \
-		$(MAKE) -B "$(COMPONENT_CONTRACT)"; \
-		cmp -s "$$tmp" "$(COMPONENT_CONTRACT)" || { \
-			diff -u "$$tmp" "$(COMPONENT_CONTRACT)"; \
-			exit 1; \
-		}
 
 $(ADAPTER_SRC_DIR)/openclaw/package.json: $(ADAPTER_SRC_DIR)/openclaw/package.json.in Cargo.toml
 	@echo "==> Generating openclaw/package.json (version=$(VERSION))..."
@@ -206,7 +198,7 @@ clean:
 	rm -f  $(ADAPTER_TEMPLATES) $(COMPONENT_CONTRACT)
 
 # Create source tarball (excludes build artifacts)
-dist: clean
+dist: clean stamp-adapter-templates
 	@echo "==> Creating tarball (with pre-patched rtk source)..."
 	just setup-rtk
 	tar czf ../tokenless-$(VERSION).tar.gz \

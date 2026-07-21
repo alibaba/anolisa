@@ -47,7 +47,7 @@ COMPONENT_CONTRACT := .anolisa/component.toml
 RPMBUILD_DIR ?= $(HOME)/rpmbuild
 SPEC_FILE := $(NAME).spec
 
-.PHONY: all build build-openclaw-plugin sync-versions test lint fmt clean install \
+.PHONY: all build build-openclaw-plugin sync-versions generate-component-contract test lint fmt clean install \
         install-adapter-resources uninstall dist spec rpm srpm \
         smoke help
 
@@ -108,7 +108,9 @@ $(COMPONENT_CONTRACT): $(COMPONENT_CONTRACT).in Cargo.toml
 	@echo "==> Generating component contract (version=$(VERSION))..."
 	@sed 's/@VERSION@/$(VERSION)/g' $< > $@
 
-build-openclaw-plugin: sync-versions $(COMPONENT_CONTRACT) ## Build openclaw TS plugin (dist/index.js)
+generate-component-contract: $(COMPONENT_CONTRACT)
+
+build-openclaw-plugin: sync-versions generate-component-contract ## Build openclaw TS plugin (dist/index.js)
 	@echo "==> Building $(NAME) OpenClaw plugin..."
 	# --legacy-peer-deps: the plugin declares `openclaw: "*"` as a peer
 	# but the dev openclaw resolves to CalVer 2026.5.7, which npm 7+'s
