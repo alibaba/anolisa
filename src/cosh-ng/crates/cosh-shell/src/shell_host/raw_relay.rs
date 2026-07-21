@@ -23,6 +23,14 @@ use super::prompt_replay::{
     prompt_prefixed_replay_bytes, prompt_replay_bytes, strip_replayed_prompt_prefix,
 };
 
+mod input_events;
+mod terminal_recovery;
+
+use input_events::drain_raw_input_events;
+use terminal_recovery::{
+    restore_terminal_after_interrupted_command, PendingTerminalRecovery, TerminalRecoveryOwner,
+};
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn read_raw_until_exit<W: Write, F>(
     master: &mut File,
@@ -58,7 +66,6 @@ where
             continue;
         }
         drain_raw_input_events(
-            master,
             input_events,
             parser,
             output,
@@ -219,7 +226,6 @@ where
             continue;
         }
         drain_raw_input_events(
-            master,
             input_events,
             parser,
             output,
@@ -348,137 +354,6 @@ where
             return Ok(());
         }
         thread::sleep(Duration::from_millis(10));
-    }
-    Ok(())
-}
-
-fn drain_raw_input_events<W: Write>(
-    _master: &mut File,
-    input_events: &Receiver<RawInputEvent>,
-    parser: &mut OscParser,
-    output: &mut W,
-    prompt: &str,
-    native_candidate_echoed_len: &mut usize,
-) -> io::Result<()> {
-    let native_mode = prompt.is_empty();
-    while let Ok(event) = input_events.try_recv() {
-        match event {
-            RawInputEvent::ShellInputActivity => parser.push_shell_input_activity_event(),
-            RawInputEvent::CtrlC => {
-                parser.push_control_event("ctrl_c");
-            }
-            RawInputEvent::CandidateRedraw { input, hint } => {
-                if native_mode {
-                    if input.len() >= *native_candidate_echoed_len {
-                        output.write_all(&input[*native_candidate_echoed_len..])?;
-                    } else {
-                        let erased = *native_candidate_echoed_len - input.len();
-                        for _ in 0..erased {
-                            write!(output, "\x08 \x08")?;
-                        }
-                    }
-                    *native_candidate_echoed_len = input.len();
-                } else {
-                    write!(output, "\r\x1b[2K{prompt}")?;
-                    output.write_all(&input)?;
-                    if let Some(hint) = hint {
-                        write!(output, "\x1b[s\x1b[2m {hint}\x1b[0m\x1b[u")?;
-                    }
-                }
-                output.flush()?;
-            }
-            RawInputEvent::CandidateCommit(input) => {
-                if native_mode {
-                    if input.len() > *native_candidate_echoed_len {
-                        output.write_all(&input[*native_candidate_echoed_len..])?;
-                    }
-                    *native_candidate_echoed_len = 0;
-                } else {
-                    write!(output, "\r\x1b[2K")?;
-                    write!(output, "{prompt}")?;
-                    output.write_all(&input)?;
-                }
-                writeln!(output)?;
-                output.flush()?;
-            }
-            RawInputEvent::PromptGhostClear => {
-                clear_prompt_ghost_line(parser, output, prompt, native_candidate_echoed_len)?;
-            }
-            RawInputEvent::PromptGhostDismissed => {
-                parser.push_prompt_ghost_event("dismissed");
-            }
-            RawInputEvent::PromptGhostIntercept {
-                input,
-                suggestion_id,
-            } => {
-                let session_id = parser.session_id.clone();
-                let component = suggestion_id
-                    .map(|id| format!("prompt_ghost:{id}"))
-                    .unwrap_or_else(|| "prompt_ghost".to_string());
-                parser.push_intercept_event(&session_id, input, None, &component);
-            }
-            RawInputEvent::CandidateClearLine => {
-                if native_mode {
-                    for _ in 0..*native_candidate_echoed_len {
-                        write!(output, "\x08 \x08")?;
-                    }
-                    *native_candidate_echoed_len = 0;
-                } else if !native_mode {
-                    write!(output, "\r\x1b[2K{prompt}")?;
-                }
-                output.flush()?;
-            }
-            RawInputEvent::UserIntercept(input, reason) => {
-                let session_id = parser.session_id.clone();
-                parser.push_intercept_event(&session_id, input, None, reason.as_str())
-            }
-            RawInputEvent::CardFocus(id, selected) => {
-                parser.push_card_event("focus", &format!("{id}:{selected}"))
-            }
-            RawInputEvent::CardToggle(id, selected) => {
-                parser.push_card_event("toggle", &format!("{id}:{selected}"))
-            }
-            RawInputEvent::CardInput(id, text) => {
-                parser.push_card_event("input", &format!("{id}:{text}"))
-            }
-            RawInputEvent::CardSecretInput(id, text) => {
-                parser.push_secret_card_event("input", &format!("{id}:{text}"))
-            }
-            RawInputEvent::CardApprove(id) => parser.push_card_event("approve", &id),
-            RawInputEvent::CardAlwaysTrust(id) => parser.push_card_event("always_trust", &id),
-            RawInputEvent::CardDeny(id) => parser.push_card_event("deny", &id),
-            RawInputEvent::CardDetails(id) => parser.push_card_event("details", &id),
-            RawInputEvent::CardCancel(id) => parser.push_card_event("cancel", &id),
-            RawInputEvent::CardAnswer(answer) => parser.push_card_event("answer", &answer),
-            RawInputEvent::CardSecretAnswer(answer) => {
-                parser.push_secret_card_event("answer", &answer)
-            }
-            RawInputEvent::QuestionCancel(id) => parser.push_card_event("question_cancel", &id),
-            RawInputEvent::EvidenceSend(id) => parser.push_card_event("evidence_send", &id),
-            RawInputEvent::EvidenceIgnore(id) => parser.push_card_event("evidence_ignore", &id),
-            RawInputEvent::EvidenceCancel(id) => parser.push_card_event("evidence_cancel", &id),
-            RawInputEvent::ModeFocus(id, selected) => {
-                parser.push_card_event("mode_focus", &format!("{id}:{selected}"))
-            }
-            RawInputEvent::ModeSet(id, selected) => {
-                parser.push_card_event("mode_set", &format!("{id}:{selected}"))
-            }
-            RawInputEvent::ModeCancel(id) => parser.push_card_event("mode_cancel", &id),
-            RawInputEvent::ConfigFocus(id, selected) => {
-                parser.push_card_event("config_focus", &format!("{id}:{selected}"))
-            }
-            RawInputEvent::ConfigSave(id) => parser.push_card_event("config_save", &id),
-            RawInputEvent::ConfigCancel(id) => parser.push_card_event("config_cancel", &id),
-            RawInputEvent::ConfigLanguageFocus(id, selected) => {
-                parser.push_card_event("config_language_focus", &format!("{id}:{selected}"))
-            }
-            RawInputEvent::ConfigLanguageSet(id, selected) => {
-                parser.push_card_event("config_language_set", &format!("{id}:{selected}"))
-            }
-            RawInputEvent::ConfigLanguageCancel(id) => {
-                parser.push_card_event("config_language_cancel", &id)
-            }
-        }
     }
     Ok(())
 }
@@ -732,117 +607,6 @@ fn restore_prompt_display_before_handoff<W: Write>(
     output.flush()?;
     mark_pending_prompt_replayed(parser, raw_prompt, display_start);
     *replayed_prompt_prefix = Some(raw_prompt.to_vec());
-    Ok(())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TerminalRecoveryOwner {
-    CoshTimeoutInterrupt,
-}
-
-#[derive(Default)]
-struct PendingTerminalRecovery {
-    owner: Option<TerminalRecoveryOwner>,
-    snapshot: Option<libc::termios>,
-}
-
-impl PendingTerminalRecovery {
-    fn record_intervention_start(&mut self, terminal_fd: i32) {
-        self.snapshot = read_recoverable_terminal_snapshot(terminal_fd)
-            .ok()
-            .flatten();
-        self.owner = None;
-    }
-
-    fn mark_owner(&mut self, owner: TerminalRecoveryOwner, terminal_fd: i32) {
-        if self.snapshot.is_none() {
-            self.snapshot = read_recoverable_terminal_snapshot(terminal_fd)
-                .ok()
-                .flatten();
-        }
-        self.owner = Some(owner);
-    }
-
-    fn clear(&mut self) {
-        self.owner = None;
-        self.snapshot = None;
-    }
-
-    fn restore_modes(&self, terminal_fd: i32) -> io::Result<()> {
-        if self.owner.is_none() {
-            return Ok(());
-        }
-        if let Some(snapshot) = self.snapshot {
-            restore_pty_terminal_modes_from_snapshot(terminal_fd, snapshot)
-        } else {
-            restore_pty_terminal_modes_to_minimal_sane(terminal_fd)
-        }
-    }
-
-    fn request_shell_recovery(&self, path: &Path) -> io::Result<()> {
-        if self.owner.is_none() {
-            return Ok(());
-        }
-        std::fs::write(path, b"1")
-    }
-}
-
-fn restore_terminal_after_interrupted_command(
-    terminal_fd: i32,
-    parser: &OscParser,
-    pending_terminal_restore: &mut PendingTerminalRecovery,
-) -> io::Result<bool> {
-    if pending_terminal_restore.owner.is_none()
-        || shell_has_active_foreground_command(&parser.events)
-        || !shell_has_completed_foreground_command(&parser.events)
-    {
-        return Ok(false);
-    }
-    pending_terminal_restore.restore_modes(terminal_fd)?;
-    pending_terminal_restore.clear();
-    Ok(false)
-}
-
-fn read_pty_terminal_modes(terminal_fd: i32) -> io::Result<libc::termios> {
-    let mut termios = unsafe { std::mem::zeroed::<libc::termios>() };
-    if unsafe { libc::tcgetattr(terminal_fd, &mut termios) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(termios)
-}
-
-fn read_recoverable_terminal_snapshot(terminal_fd: i32) -> io::Result<Option<libc::termios>> {
-    let termios = read_pty_terminal_modes(terminal_fd)?;
-    if terminal_modes_look_like_external_command_state(&termios) {
-        Ok(Some(termios))
-    } else {
-        Ok(None)
-    }
-}
-
-fn terminal_modes_look_like_external_command_state(termios: &libc::termios) -> bool {
-    let required = libc::ECHO | libc::ICANON | libc::ISIG;
-    termios.c_lflag & required == required
-}
-
-fn restore_pty_terminal_modes_from_snapshot(
-    terminal_fd: i32,
-    snapshot: libc::termios,
-) -> io::Result<()> {
-    if unsafe { libc::tcsetattr(terminal_fd, libc::TCSANOW, &snapshot) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-fn restore_pty_terminal_modes_to_minimal_sane(terminal_fd: i32) -> io::Result<()> {
-    let mut termios = read_pty_terminal_modes(terminal_fd)?;
-    termios.c_lflag |= libc::ICANON | libc::ISIG | libc::IEXTEN | libc::ECHO;
-    termios.c_iflag |= libc::ICRNL | libc::IXON;
-    termios.c_oflag |= libc::OPOST;
-    if unsafe { libc::tcsetattr(terminal_fd, libc::TCSANOW, &termios) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
     Ok(())
 }
 

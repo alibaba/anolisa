@@ -92,6 +92,22 @@ fn claude_stream_parser_extracts_system_status() {
 }
 
 #[test]
+fn claude_stream_parser_does_not_commit_non_resumable_session_ids() {
+    let pending = Arc::new(Mutex::new(None));
+    let mut parser = ClaudeStreamParser::new("run-1".to_string(), Some(Arc::clone(&pending)));
+
+    parser.parse_line(
+        r#"{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000000","session_resumable":false,"model":"mock","tools":[]}"#,
+    );
+    parser.parse_line(
+        r#"{"type":"result","subtype":"success","session_id":"00000000-0000-4000-8000-000000000000","is_error":false,"result":"done"}"#,
+    );
+
+    assert_eq!(parser.session_resumable(), Some(false));
+    assert_eq!(pending.lock().expect("pending session").as_deref(), None);
+}
+
+#[test]
 fn claude_stream_parser_extracts_startup_progress_without_hook_noise() {
     let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
 
@@ -128,6 +144,22 @@ fn claude_stream_parser_extracts_result_errors_array() {
         &events[..],
         [AgentEvent::AgentFailed { error, .. }] if error.contains("Reached maximum budget")
     ));
+}
+
+#[test]
+fn claude_stream_parser_carries_structured_session_error_code() {
+    let mut parser = ClaudeStreamParser::new("run-session-error".to_string(), None);
+
+    let events = parser.parse_line(
+        r#"{"type":"result","subtype":"error","is_error":true,"errors":["load failed"],"session_error_code":"not_found","session_error_phase":"load"}"#,
+    );
+
+    assert!(matches!(
+        events.as_slice(),
+        [AgentEvent::AgentFailed { error, .. }] if error == "load failed"
+    ));
+    assert_eq!(parser.session_error_code(), Some("not_found"));
+    assert_eq!(parser.session_error_phase(), Some("load"));
 }
 
 #[test]

@@ -31,12 +31,17 @@ mod qwen_stream;
 pub use claude::ClaudeCodeAdapter;
 use claude_stream::ClaudeStreamParser;
 pub use control_protocol::*;
-pub use cosh_core::CoshCoreAdapter;
+pub use cosh_core::{
+    CoshCoreAdapter, SessionClearFailure, SessionClearInterruption, SessionClearPlan,
+    SessionClearResult, SessionErrorInfo, SessionHealth, SessionList, SessionManagementClient,
+    SessionRecovery, SessionRecoveryState, SessionRuntimeState, SessionSummary,
+};
 pub use fake::FakeAgentAdapter;
 pub(crate) use process::{
     agent_event_is_provider_progress, record_cancellation_pending_session,
-    run_provider_process_loop, spawn_provider_child, terminate_process_group, ProviderLineProgress,
-    ProviderPromptArgMode, ProviderRunOutcome, ProviderStdinMode,
+    run_provider_process_loop, spawn_provider_child, terminate_and_reap_process,
+    terminate_process_group, ProviderLineProgress, ProviderPromptArgMode, ProviderRunOutcome,
+    ProviderStdinMode,
 };
 pub use prompt::{
     prompt_from_request, prompt_from_request_with_evidence_access,
@@ -323,7 +328,7 @@ impl AdapterInstance {
         match self {
             Self::ClaudeCode(adapter) => adapter.session_id.lock().ok().and_then(|id| id.clone()),
             Self::QwenCli(adapter) => adapter.session_id.lock().ok().and_then(|id| id.clone()),
-            Self::CoshCore(adapter) => adapter.session_id.lock().ok().and_then(|id| id.clone()),
+            Self::CoshCore(adapter) => adapter.committed_session_id(),
             Self::Fake(_) => None,
         }
     }

@@ -8,7 +8,7 @@ use crate::hooks::{
     dirs_for_hook_loading, is_trusted_project_root, load_hook_feedback_preferences,
     project_hook_root_from_cwd,
 };
-use crate::runtime::cli_args::RawShellKind;
+use crate::runtime::cli_args::{LaunchOptions, RawShellKind, ResumeLaunch};
 use crate::runtime::prelude::*;
 use crate::runtime::startup::bootstrap_process_path_from_shell;
 use crate::runtime::state::{AnalysisMode, InlineState};
@@ -59,7 +59,11 @@ pub(crate) fn run_host_demo() -> i32 {
     render_loop_from_events(&output.events)
 }
 
-pub(crate) fn run_raw(adapter_name: &str, shell_kind: RawShellKind) -> i32 {
+pub(crate) fn run_raw(
+    adapter_name: &str,
+    shell_kind: RawShellKind,
+    launch_options: LaunchOptions,
+) -> i32 {
     let args = std::env::args().collect::<Vec<_>>();
 
     let Some(kind) = AdapterKind::parse(adapter_name) else {
@@ -109,6 +113,18 @@ pub(crate) fn run_raw(adapter_name: &str, shell_kind: RawShellKind) -> i32 {
 
     let adapter = build_adapter(kind);
     let mut inline_state = InlineState::with_raw_session_dir(&config.work_dir);
+    inline_state.shell_session_id = Some(config.session_id.clone());
+    if let Some(resume) = launch_options.resume {
+        inline_state
+            .control
+            .session_mut()
+            .set_pending_launch(match resume {
+                ResumeLaunch::Picker => crate::slash::session::SessionLaunchRequest::Picker,
+                ResumeLaunch::Session(id) => {
+                    crate::slash::session::SessionLaunchRequest::Resume(id)
+                }
+            });
+    }
     let snapshot_publisher = inline_state.shell_rewrite.start_worker();
     config.set_shell_environment_observer(move |snapshot| {
         snapshot_publisher.publish(snapshot);

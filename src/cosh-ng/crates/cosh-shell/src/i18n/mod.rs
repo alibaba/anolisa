@@ -1,8 +1,10 @@
 mod en;
 mod en_approval;
+mod en_session;
 mod message_id;
 mod message_id_all;
 mod zh;
+mod zh_session;
 
 use crate::config::Language;
 

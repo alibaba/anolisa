@@ -194,7 +194,7 @@ _cosh_should_intercept_unknown() {
   local argc="$3"
 
   case "$command" in
-    /agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/extensions|/help|/hooks|/mode|/select|/send-to-shell|/shell|/skills)
+    /agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/extensions|/help|/hooks|/mode|/resume|/select|/send-to-shell|/session|/shell|/skills)
       printf '%s' "slash"
       return 0
       ;;
@@ -231,7 +231,7 @@ _cosh_is_slash_control_candidate() {
   local command="$1"
 
   case "$command" in
-    /agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/extensions|/help|/hooks|/mode|/select|/send-to-shell|/shell|/skills)
+    /agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/extensions|/help|/hooks|/mode|/resume|/select|/send-to-shell|/session|/shell|/skills)
       return 0
       ;;
   esac
@@ -624,7 +624,7 @@ _cosh_should_intercept_unknown() {
   local argc="$3"
 
   case "$command" in
-    /agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/extensions|/help|/hooks|/mode|/select|/send-to-shell|/shell|/skills)
+    /agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/extensions|/help|/hooks|/mode|/resume|/select|/send-to-shell|/session|/shell|/skills)
       printf '%s' "slash"
       return 0
       ;;
@@ -661,7 +661,7 @@ _cosh_is_slash_control_candidate() {
   local command="$1"
 
   case "$command" in
-    /agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/extensions|/help|/hooks|/mode|/select|/send-to-shell|/shell|/skills)
+    /agent|/allow|/answer|/approval-mode|/approve|/audit|/auth|/cancel|/clear|/config|/copy|/debug|/deny|/details|/explain|/extensions|/help|/hooks|/mode|/resume|/select|/send-to-shell|/session|/shell|/skills)
       return 0
       ;;
   esac

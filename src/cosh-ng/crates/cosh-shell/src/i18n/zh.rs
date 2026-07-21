@@ -807,8 +807,6 @@ pub(super) fn message(id: MessageId) -> &'static str {
             "已允许 provider-native shell tool 执行"
         }
         MessageId::ApprovalHookHeading => "Hook 审查",
-        MessageId::ApprovalHookFallbackMessage => "Hook 需要您的审批才能继续执行。",
-        // Registry slash commands
         MessageId::HelpGroupRegistry => "Registry",
         MessageId::HelpSummaryExtensions => "列出/管理 cosh-core 扩展",
         MessageId::HelpSummarySkills => "列出/查看 cosh-core 技能",
@@ -820,5 +818,6 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::SlashHooksAgentUnavailable => "(cosh-core 后端不可用)",
         MessageId::SlashExtensionsEmptyBody => "未安装扩展。",
         MessageId::SlashSkillsEmptyBody => "未发现技能。",
+        _ => super::zh_session::message(id),
     }
 }

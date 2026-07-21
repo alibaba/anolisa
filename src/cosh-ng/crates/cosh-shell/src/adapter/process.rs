@@ -64,39 +64,67 @@ pub(crate) fn spawn_provider_child(
     stdin_mode: ProviderStdinMode,
     prompt_mode: ProviderPromptArgMode,
 ) -> Result<Child, AdapterError> {
-    let mut command = Command::new(&prepared.program);
-    command.args(&prepared.args);
-    match prompt_mode {
-        ProviderPromptArgMode::None => {}
-        ProviderPromptArgMode::TrailingArgIfNonEmpty => {
-            if !prepared.prompt.is_empty() {
-                command.arg(&prepared.prompt);
+    const MAX_SPAWN_ATTEMPTS: usize = 3;
+
+    for attempt in 0..MAX_SPAWN_ATTEMPTS {
+        let mut command = Command::new(&prepared.program);
+        command.args(&prepared.args);
+        match prompt_mode {
+            ProviderPromptArgMode::None => {}
+            ProviderPromptArgMode::TrailingArgIfNonEmpty => {
+                if !prepared.prompt.is_empty() {
+                    command.arg(&prepared.prompt);
+                }
+            }
+            ProviderPromptArgMode::QwenPromptFlag => {
+                command.arg("--prompt").arg(&prepared.prompt);
             }
         }
-        ProviderPromptArgMode::QwenPromptFlag => {
-            command.arg("--prompt").arg(&prepared.prompt);
-        }
-    }
-    match stdin_mode {
-        ProviderStdinMode::Null => {
-            command.stdin(Stdio::null());
-        }
-        ProviderStdinMode::Piped => {
-            command.stdin(Stdio::piped());
-        }
-    }
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() < 0 {
-                return Err(std::io::Error::last_os_error());
+        match stdin_mode {
+            ProviderStdinMode::Null => {
+                command.stdin(Stdio::null());
             }
-            Ok(())
-        });
+            ProviderStdinMode::Piped => {
+                command.stdin(Stdio::piped());
+            }
+        }
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        match command.spawn() {
+            Err(error)
+                if spawn_error_is_text_file_busy(&error) && attempt + 1 < MAX_SPAWN_ATTEMPTS =>
+            {
+                thread::sleep(Duration::from_millis(10));
+            }
+            result => {
+                return result.map_err(|err| AdapterError {
+                    message: format!("failed to run {provider_label}: {err}"),
+                });
+            }
+        }
     }
-    command.spawn().map_err(|err| AdapterError {
-        message: format!("failed to run {provider_label}: {err}"),
-    })
+
+    // The last attempt cannot enter the retry branch.
+    unreachable!("the bounded provider spawn loop always returns on its final attempt")
+}
+
+fn spawn_error_is_text_file_busy(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(libc::ETXTBSY)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -148,6 +176,8 @@ pub(crate) fn run_provider_process_loop(
     let stdout = match child.stdout.take() {
         Some(stdout) => stdout,
         None => {
+            terminate_and_reap_process(child);
+            clear_child_pid(&child_pid);
             let _ = sender.send(Err(AdapterError {
                 message: format!("failed to capture {provider_label} stdout"),
             }));
@@ -157,6 +187,8 @@ pub(crate) fn run_provider_process_loop(
     let stderr = match child.stderr.take() {
         Some(stderr) => stderr,
         None => {
+            terminate_and_reap_process(child);
+            clear_child_pid(&child_pid);
             let _ = sender.send(Err(AdapterError {
                 message: format!("failed to capture {provider_label} stderr"),
             }));
@@ -164,8 +196,8 @@ pub(crate) fn run_provider_process_loop(
         }
     };
 
-    let stdout_rx = spawn_stdout_reader(stdout, provider_label);
-    let stderr_tail = spawn_stderr_tail_reader(stderr, timeouts.stderr_tail_bytes);
+    let (stdout_rx, stdout_reader) = spawn_stdout_reader(stdout, provider_label);
+    let (stderr_tail, stderr_reader) = spawn_stderr_tail_reader(stderr, timeouts.stderr_tail_bytes);
     let mut watchdog = AgentProcessWatchdog::new(timeouts, Instant::now());
     let mut cancel_started_at = None::<Instant>;
     let mut cancel_killed = false;
@@ -185,10 +217,9 @@ pub(crate) fn run_provider_process_loop(
                 cancel_started_at = Some(now);
             }
         } else if let Some(timeout) = watchdog.timeout(now) {
-            terminate_process_group(child.id());
-            kill_process_group(child.id());
-            let _ = child.wait();
+            terminate_and_reap_process(child);
             clear_child_pid(&child_pid);
+            join_provider_readers(stdout_reader, stderr_reader);
             let _ = sender.send(Ok(AgentEvent::AgentFailed {
                 run_id,
                 error: timeout_failure_message(provider_label, timeout, &stderr_tail.snapshot()),
@@ -198,6 +229,7 @@ pub(crate) fn run_provider_process_loop(
 
         match child.try_wait() {
             Ok(Some(status)) => {
+                terminate_and_reap_process(child);
                 clear_child_pid(&child_pid);
                 if cancelled.load(Ordering::SeqCst) {
                     drain_cancellation_stdout_artifacts(
@@ -212,6 +244,7 @@ pub(crate) fn run_provider_process_loop(
                         &run_id,
                         &stderr_tail.snapshot(),
                     );
+                    join_provider_readers(stdout_reader, stderr_reader);
                     let _ = sender.send(Ok(AgentEvent::AgentCancelled {
                         run_id,
                         reason: "user requested cancellation".to_string(),
@@ -221,9 +254,11 @@ pub(crate) fn run_provider_process_loop(
                 if let Err(err) =
                     drain_pending_stdout_lines(&stdout_rx, &mut on_stdout_line, sender)
                 {
+                    join_provider_readers(stdout_reader, stderr_reader);
                     let _ = sender.send(Err(err));
                     return ProviderRunOutcome::Failed;
                 }
+                join_provider_readers(stdout_reader, stderr_reader);
                 return ProviderRunOutcome::Exited {
                     status,
                     stderr_tail: stderr_tail.snapshot(),
@@ -231,7 +266,9 @@ pub(crate) fn run_provider_process_loop(
             }
             Ok(None) => {}
             Err(err) => {
+                terminate_and_reap_process(child);
                 clear_child_pid(&child_pid);
+                join_provider_readers(stdout_reader, stderr_reader);
                 let _ = sender.send(Err(AdapterError {
                     message: format!("failed to poll {provider_label}: {err}"),
                 }));
@@ -275,14 +312,18 @@ pub(crate) fn run_provider_process_loop(
                 }
                 Err(err) => {
                     let _ = sender.send(Err(err));
-                    terminate_process_group(child.id());
+                    terminate_and_reap_process(child);
+                    clear_child_pid(&child_pid);
+                    join_provider_readers(stdout_reader, stderr_reader);
                     return ProviderRunOutcome::Failed;
                 }
             },
             Ok(ProviderIoEvent::Closed) => {}
             Ok(ProviderIoEvent::ReadError(message)) => {
                 let _ = sender.send(Err(AdapterError { message }));
-                terminate_process_group(child.id());
+                terminate_and_reap_process(child);
+                clear_child_pid(&child_pid);
+                join_provider_readers(stdout_reader, stderr_reader);
                 return ProviderRunOutcome::Failed;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => match on_idle() {
@@ -293,7 +334,9 @@ pub(crate) fn run_provider_process_loop(
                 }
                 Err(err) => {
                     let _ = sender.send(Err(err));
-                    terminate_process_group(child.id());
+                    terminate_and_reap_process(child);
+                    clear_child_pid(&child_pid);
+                    join_provider_readers(stdout_reader, stderr_reader);
                     return ProviderRunOutcome::Failed;
                 }
             },
@@ -428,9 +471,9 @@ pub(crate) fn agent_event_is_provider_progress(event: &AgentEvent) -> bool {
 fn spawn_stdout_reader(
     stdout: impl Read + Send + 'static,
     provider_label: &'static str,
-) -> mpsc::Receiver<ProviderIoEvent> {
+) -> (mpsc::Receiver<ProviderIoEvent>, thread::JoinHandle<()>) {
     let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
+    let reader = thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
             match line {
                 Ok(line) => {
@@ -448,13 +491,16 @@ fn spawn_stdout_reader(
         }
         let _ = tx.send(ProviderIoEvent::Closed);
     });
-    rx
+    (rx, reader)
 }
 
-fn spawn_stderr_tail_reader(stderr: impl Read + Send + 'static, limit: usize) -> StderrTail {
+fn spawn_stderr_tail_reader(
+    stderr: impl Read + Send + 'static,
+    limit: usize,
+) -> (StderrTail, thread::JoinHandle<()>) {
     let tail = StderrTail::new(limit);
     let reader_tail = tail.clone();
-    thread::spawn(move || {
+    let reader = thread::spawn(move || {
         let mut reader = BufReader::new(stderr);
         let mut buffer = [0_u8; 1024];
         loop {
@@ -468,7 +514,15 @@ fn spawn_stderr_tail_reader(stderr: impl Read + Send + 'static, limit: usize) ->
             }
         }
     });
-    tail
+    (tail, reader)
+}
+
+fn join_provider_readers(
+    stdout_reader: thread::JoinHandle<()>,
+    stderr_reader: thread::JoinHandle<()>,
+) {
+    let _ = stdout_reader.join();
+    let _ = stderr_reader.join();
 }
 
 fn timeout_failure_message(
@@ -510,8 +564,40 @@ pub(crate) fn terminate_process_group(pid: u32) {
     signal_process_group(pid, libc::SIGTERM);
 }
 
+pub(crate) fn terminate_and_reap_process(child: &mut Child) {
+    let pid = child.id();
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        kill_process_group_members(pid);
+        return;
+    }
+
+    terminate_process_group(pid);
+    let deadline = Instant::now() + Duration::from_millis(250);
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                kill_process_group_members(pid);
+                return;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(_) => break,
+        }
+    }
+
+    kill_process_group(pid);
+    let _ = child.wait();
+}
+
 fn kill_process_group(pid: u32) {
     signal_process_group(pid, libc::SIGKILL);
+}
+
+fn kill_process_group_members(pid: u32) {
+    let pid = pid as i32;
+    unsafe {
+        // The leader has already been reaped, so its positive PID may have been reused.
+        let _ = libc::kill(-pid, libc::SIGKILL);
+    }
 }
 
 fn signal_process_group(pid: u32, signal: i32) {

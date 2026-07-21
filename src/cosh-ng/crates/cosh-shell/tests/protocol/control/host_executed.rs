@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn cosh_core_host_executed_shell_result_uses_control_response() {
     let adapter = make_cosh_core_adapter("mock_cosh_core_host_executed_cli.sh");
-    let session_state = Arc::clone(&adapter.session_id);
+    let session_state = Arc::clone(&adapter.session);
     let request = make_request("cosh-core-test-host-executed");
     let handle = adapter.start_cancellable(request, CoshApprovalMode::Auto);
 
@@ -61,7 +61,7 @@ fn cosh_core_host_executed_shell_result_uses_control_response() {
         "expected cosh-core host-executed completion, got: {remaining:?}"
     );
     assert!(
-        wait_for_session_id(
+        wait_for_cosh_core_session(
             &session_state,
             "mock-cosh-core-host-executed",
             Duration::from_secs(1)
@@ -77,7 +77,7 @@ fn cosh_core_host_executed_shell_result_uses_control_response() {
 #[test]
 fn cosh_core_multi_host_executed_shell_results_stay_in_same_control_turn() {
     let adapter = make_cosh_core_adapter("mock_cosh_core_host_executed_multi_cli.sh");
-    let session_state = Arc::clone(&adapter.session_id);
+    let session_state = Arc::clone(&adapter.session);
     let request = make_request("cosh-core-test-host-executed-multi");
     let handle = adapter.start_cancellable(request, CoshApprovalMode::Auto);
 
@@ -115,7 +115,7 @@ fn cosh_core_multi_host_executed_shell_results_stay_in_same_control_turn() {
         "expected cosh-core multi host-executed completion, got: {remaining:?}"
     );
     assert!(
-        wait_for_session_id(
+        wait_for_cosh_core_session(
             &session_state,
             "mock-cosh-core-host-executed-multi",
             Duration::from_secs(1)
@@ -127,7 +127,7 @@ fn cosh_core_multi_host_executed_shell_results_stay_in_same_control_turn() {
 #[test]
 fn cosh_core_analysis_continuation_denies_reentrant_shell_request() {
     let adapter = make_cosh_core_adapter("mock_cosh_core_analysis_continuation_shell_request.sh");
-    let session_state = Arc::clone(&adapter.session_id);
+    let session_state = Arc::clone(&adapter.session);
     let mut request = make_request("cosh-core-analysis-continuation-deny");
     request.user_input =
         Some("ShellCommandCompleted evidence\ncommand: df -h\nstatus: completed".to_string());
@@ -163,7 +163,7 @@ fn cosh_core_analysis_continuation_denies_reentrant_shell_request() {
         "analysis-only shell request should be denied inside adapter, got: {events:?}"
     );
     assert!(
-        wait_for_session_id(
+        wait_for_cosh_core_session(
             &session_state,
             "mock-cosh-core-analysis-continuation",
             Duration::from_secs(1)

@@ -26,6 +26,7 @@ pub(super) enum SlashCommand<'a> {
     Unknown(&'a str),
     Extensions(Option<&'a str>, Option<&'a str>),
     Skills(Option<&'a str>, Option<&'a str>),
+    Session(&'a str),
 }
 
 impl<'a> SlashCommand<'a> {
@@ -69,6 +70,12 @@ impl<'a> SlashCommand<'a> {
                 let arg = parts.next();
                 Some(Self::Skills(sub, arg))
             }
+            "/session" => Some(Self::Session(
+                input.strip_prefix("/session").unwrap_or_default().trim(),
+            )),
+            "/resume" => Some(Self::Session(
+                input.strip_prefix("/resume").unwrap_or_default().trim(),
+            )),
             "/agent" | "/cancel" | "/clear" | "/copy" | "/details" | "/explain" | "/select"
             | "/send-to-shell" | "/shell" => None,
             "/" => Some(Self::Noop),
@@ -124,6 +131,18 @@ mod tests {
     }
 
     #[test]
+    fn session_commands_and_resume_alias_share_parser_path() {
+        match SlashCommand::parse("/session resume abc") {
+            Some(SlashCommand::Session(arguments)) => assert_eq!(arguments, "resume abc"),
+            _ => panic!("/session did not parse as a session command"),
+        }
+        match SlashCommand::parse("/resume abc") {
+            Some(SlashCommand::Session(arguments)) => assert_eq!(arguments, "abc"),
+            _ => panic!("/resume did not parse as a session command"),
+        }
+    }
+
+    #[test]
     fn hidden_and_contextual_commands_are_not_public_hints() {
         assert!(slash_hints("/co").iter().any(|hint| hint.name == "/config"));
         for prefix in ["/ag", "/ca", "/de", "/au", "/se", "/co", "/send", "/debug"] {
@@ -131,7 +150,7 @@ mod tests {
             assert!(
                 hints.iter().all(|hint| matches!(
                     hint.name,
-                    "/config" | "/mode" | "/hooks" | "/extensions" | "/skills"
+                    "/config" | "/session" | "/mode" | "/hooks" | "/extensions" | "/skills"
                 )),
                 "{prefix} returned non-public hints: {:?}",
                 hints.iter().map(|hint| hint.name).collect::<Vec<_>>()

@@ -23,6 +23,7 @@ pub(crate) use crate::runtime::state_prelude::CoshApprovalMode;
 use crate::runtime::state_prelude::{
     first_program_token, ApprovalPanelAction, CommandBlock, GovernedEvent, I18n, Language,
 };
+use crate::slash::session::SessionControlState;
 use crate::types::AgentContextBinding;
 
 pub(crate) struct AnalysisThrottle {
@@ -90,6 +91,7 @@ pub(crate) struct InlineState {
     pub(crate) evidence_requests: EvidenceRequestState,
     pub(crate) shell_evidence: ShellEvidenceState,
     pub(crate) session_blocks: Vec<CommandBlock>,
+    pub(crate) shell_session_id: Option<String>,
     pub(crate) shell_exited: bool,
     pub(crate) language: Language,
     pub(crate) approval_mode: CoshApprovalMode,
@@ -421,6 +423,7 @@ pub(crate) struct ControlState {
     active_config_language_panel_id: Option<String>,
     active_config_language_panel_height: usize,
     handled_config_actions: HashSet<String>,
+    session: SessionControlState,
     provider_tool: ProviderToolState,
     provider_shell_handoff_run_ids: HashSet<String>,
     interactive_shell_handoffs: Vec<PendingInteractiveShellHandoff>,
@@ -544,6 +547,12 @@ impl ControlState {
     }
     pub(crate) fn clear_active_config_language_panel_id(&mut self) {
         self.active_config_language_panel_id = None;
+    }
+    pub(crate) fn session(&self) -> &SessionControlState {
+        &self.session
+    }
+    pub(crate) fn session_mut(&mut self) -> &mut SessionControlState {
+        &mut self.session
     }
     pub(crate) fn provider_tool(&self) -> &ProviderToolState {
         &self.provider_tool

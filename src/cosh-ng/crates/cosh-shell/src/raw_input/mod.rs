@@ -61,6 +61,12 @@ pub(crate) enum RawInputEvent {
     ConfigLanguageFocus(String, usize),
     ConfigLanguageSet(String, usize),
     ConfigLanguageCancel(String),
+    SessionFocus(String, usize),
+    SessionToggle(String, usize),
+    SessionResume(String, usize),
+    SessionDelete(String),
+    SessionClearConfirm(String),
+    SessionCancel(String),
 }
 
 #[cfg(test)]

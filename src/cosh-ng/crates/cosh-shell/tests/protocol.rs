@@ -4,3 +4,5 @@ mod claude_stream;
 mod control;
 #[path = "protocol/provider_lifecycle.rs"]
 mod provider_lifecycle;
+#[path = "protocol/session_management.rs"]
+mod session_management;

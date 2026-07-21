@@ -555,8 +555,7 @@ exit 1
     let adapter = CoshCoreAdapter {
         program: program.to_string_lossy().to_string(),
         allow_model_call: true,
-        session_id: Arc::default(),
-        session_cwd: Arc::default(),
+        session: Arc::default(),
     };
     let handle = adapter.start_cancellable(request.clone(), CoshApprovalMode::Auto);
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -594,8 +593,7 @@ fn closed_cosh_core_control_handle(request: &AgentRequest) -> AgentRunHandle {
             .to_string_lossy()
             .to_string(),
         allow_model_call: true,
-        session_id: Arc::default(),
-        session_cwd: Arc::default(),
+        session: Arc::default(),
     };
     let handle = adapter.start_cancellable(request.clone(), CoshApprovalMode::Auto);
     let deadline = Instant::now() + Duration::from_secs(5);

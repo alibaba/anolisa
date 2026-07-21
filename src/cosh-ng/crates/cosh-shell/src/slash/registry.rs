@@ -65,6 +65,22 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
             state: SlashCommandState::Public,
         },
         SlashCommandSpec {
+            name: "/session",
+            usage: "/session [status|list|resume <id>|clear <id>...|clear --all]",
+            summary_id: MessageId::HelpSummarySession,
+            group: Some("Sessions"),
+            scope: "session",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
+            name: "/resume",
+            usage: "/resume [id]",
+            summary_id: MessageId::HelpSummarySession,
+            group: None,
+            scope: "session",
+            state: SlashCommandState::Hidden,
+        },
+        SlashCommandSpec {
             name: "/mode",
             usage: "/mode approval [recommend|auto|trust]",
             summary_id: MessageId::HelpSummaryModeApproval,
@@ -307,6 +323,9 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(visible.contains(&"/config language [auto|en-US|zh-CN]"));
+        assert!(visible
+            .iter()
+            .any(|usage| usage.starts_with("/session [status|list|resume")));
         assert!(visible.contains(&"/mode approval [recommend|auto|trust]"));
         assert!(visible.contains(&"/mode analysis [smart|auto|manual]"));
         assert!(visible.contains(&"/hooks"));
@@ -342,6 +361,7 @@ mod tests {
             "/copy",
             "/send-to-shell",
             "/debug",
+            "/resume",
             "/skill",
             "/approval-mode",
             "/allow",

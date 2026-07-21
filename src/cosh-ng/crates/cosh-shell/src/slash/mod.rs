@@ -13,6 +13,7 @@ pub(super) mod parser;
 pub(super) mod prompt;
 pub(crate) mod registry;
 pub(super) mod runtime;
+pub(super) mod session;
 pub(super) mod skills;
 #[cfg(test)]
 mod skills_tests;

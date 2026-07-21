@@ -3,9 +3,10 @@ use crate::question::choices::{
     question_choice_count as shared_question_choice_count, toggle_question_option,
 };
 use crate::ui::{
-    approval_action_at, hook_approval_action_at, hook_approval_action_max_index,
-    ApprovalPanelAction, APPROVAL_PANEL_ACTIONS,
+    approval_action_at, hook_approval_action_at, ApprovalPanelAction, APPROVAL_PANEL_ACTIONS,
 };
+
+mod navigation;
 
 #[derive(Debug, Default)]
 pub(super) struct CardInputState {
@@ -39,6 +40,11 @@ enum CardInputKind {
     ConfigLanguage {
         id: String,
         option_count: usize,
+    },
+    Session {
+        id: String,
+        option_count: usize,
+        confirming_clear: bool,
     },
     Evidence {
         id: String,
@@ -82,6 +88,16 @@ impl CardInputState {
                 id: id.clone(),
                 option_count: *option_count,
             },
+            RawInputCapture::Session {
+                id,
+                option_count,
+                confirming_clear,
+                ..
+            } => CardInputKind::Session {
+                id: id.clone(),
+                option_count: *option_count,
+                confirming_clear: *confirming_clear,
+            },
             RawInputCapture::Evidence { id } => CardInputKind::Evidence { id: id.clone() },
         };
         if self.active_kind.as_ref() != Some(&kind) {
@@ -97,6 +113,11 @@ impl CardInputState {
                     ..
                 }
                 | RawInputCapture::ConfigLanguage {
+                    selected,
+                    option_count,
+                    ..
+                }
+                | RawInputCapture::Session {
                     selected,
                     option_count,
                     ..
@@ -149,6 +170,9 @@ impl CardInputState {
                         }
                         RawInputCapture::ConfigLanguage { id, .. } => {
                             events.push(RawInputEvent::ConfigLanguageCancel(id.clone()))
+                        }
+                        RawInputCapture::Session { id, .. } => {
+                            events.push(RawInputEvent::SessionCancel(id.clone()))
                         }
                         RawInputCapture::Question { id, .. } => {
                             events.push(RawInputEvent::QuestionCancel(id.clone()))
@@ -214,6 +238,9 @@ impl CardInputState {
                         RawInputCapture::ConfigLanguage { id, .. } => {
                             events.push(RawInputEvent::ConfigLanguageCancel(id.clone()))
                         }
+                        RawInputCapture::Session { id, .. } => {
+                            events.push(RawInputEvent::SessionCancel(id.clone()))
+                        }
                         RawInputCapture::Question { id, .. } => {
                             events.push(RawInputEvent::QuestionCancel(id.clone()))
                         }
@@ -242,6 +269,10 @@ impl CardInputState {
                     }
                     RawInputCapture::ConfigLanguage { id, .. } => {
                         events.push(RawInputEvent::ConfigLanguageCancel(id.clone()));
+                        break;
+                    }
+                    RawInputCapture::Session { id, .. } => {
+                        events.push(RawInputEvent::SessionCancel(id.clone()));
                         break;
                     }
                     RawInputCapture::Question { id, .. } => {
@@ -283,6 +314,51 @@ impl CardInputState {
                     RawInputCapture::Mode { .. }
                     | RawInputCapture::Config { .. }
                     | RawInputCapture::ConfigLanguage { .. } => {
+                        idx += 1;
+                    }
+                    RawInputCapture::Session {
+                        id,
+                        option_count,
+                        confirming_clear,
+                        ..
+                    } => {
+                        match byte {
+                            b'j' | b'J' if !*confirming_clear => {
+                                let previous = self.selected;
+                                self.selected =
+                                    (self.selected + 1).min(option_count.saturating_sub(1));
+                                if self.selected != previous {
+                                    events.push(RawInputEvent::SessionFocus(
+                                        id.clone(),
+                                        self.selected,
+                                    ));
+                                }
+                            }
+                            b'k' | b'K' if !*confirming_clear => {
+                                let previous = self.selected;
+                                self.selected = self.selected.saturating_sub(1);
+                                if self.selected != previous {
+                                    events.push(RawInputEvent::SessionFocus(
+                                        id.clone(),
+                                        self.selected,
+                                    ));
+                                }
+                            }
+                            b' ' if !*confirming_clear && self.selected < *option_count => {
+                                events
+                                    .push(RawInputEvent::SessionToggle(id.clone(), self.selected));
+                            }
+                            b'd' | b'D' if !*confirming_clear => {
+                                events.push(RawInputEvent::SessionDelete(id.clone()));
+                            }
+                            b'y' | b'Y' if *confirming_clear => {
+                                events.push(RawInputEvent::SessionClearConfirm(id.clone()));
+                            }
+                            b'n' | b'N' if *confirming_clear => {
+                                events.push(RawInputEvent::SessionCancel(id.clone()));
+                            }
+                            _ => {}
+                        }
                         idx += 1;
                     }
                     RawInputCapture::Question {
@@ -329,210 +405,6 @@ impl CardInputState {
             }
         }
         events
-    }
-
-    fn consume_csi_sequence(
-        &mut self,
-        capture: &RawInputCapture,
-        input: &[u8],
-        idx: usize,
-        events: &mut Vec<RawInputEvent>,
-    ) -> Option<usize> {
-        let final_idx = (idx + 2..input.len()).find(|pos| is_csi_final_byte(input[*pos]))?;
-        let params = &input[idx + 2..final_idx];
-        let final_byte = input[final_idx];
-
-        match (params, final_byte) {
-            (b"", b'A' | b'B' | b'C' | b'D') => {
-                if let Some(event) = self.apply_arrow(capture, final_byte) {
-                    events.push(event);
-                }
-            }
-            (b"", b'Z') => {
-                if let Some(event) = self.apply_shift_tab(capture) {
-                    events.push(event);
-                }
-            }
-            (_, b'~') => {
-                // Bracketed paste and keypad sequences such as Delete end with
-                // '~'. The sequence itself is terminal control data; any pasted
-                // payload arrives as normal bytes between 200~ and 201~.
-            }
-            _ => {}
-        }
-
-        Some(final_idx + 1)
-    }
-
-    fn apply_arrow(&mut self, capture: &RawInputCapture, code: u8) -> Option<RawInputEvent> {
-        match capture {
-            RawInputCapture::Question { id, .. } => {
-                let choice_count = question_choice_count(capture);
-                if choice_count == 0 {
-                    return None;
-                }
-                let previous = self.selected;
-                match code {
-                    b'A' | b'D' => {
-                        self.selected = self.selected.saturating_sub(1);
-                    }
-                    b'B' | b'C' => {
-                        self.selected = (self.selected + 1).min(choice_count.saturating_sub(1));
-                    }
-                    _ => {}
-                }
-                if self.selected != previous {
-                    Some(RawInputEvent::CardFocus(id.clone(), self.selected))
-                } else {
-                    None
-                }
-            }
-            RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
-                let is_hook = matches!(capture, RawInputCapture::Approval { is_hook: true, .. });
-                let max_idx = if is_hook {
-                    hook_approval_action_max_index()
-                } else {
-                    approval_action_max_index()
-                };
-                let previous = self.selected;
-                match code {
-                    b'D' => self.selected = self.selected.saturating_sub(1),
-                    b'C' => self.selected = (self.selected + 1).min(max_idx),
-                    _ => {}
-                }
-                if self.selected != previous {
-                    Some(RawInputEvent::CardFocus(id.clone(), self.selected))
-                } else {
-                    None
-                }
-            }
-            RawInputCapture::Mode {
-                id, option_count, ..
-            }
-            | RawInputCapture::Config {
-                id, option_count, ..
-            }
-            | RawInputCapture::ConfigLanguage {
-                id, option_count, ..
-            } => {
-                if *option_count == 0 {
-                    return None;
-                }
-                let previous = self.selected;
-                match code {
-                    b'A' | b'D' => self.selected = self.selected.saturating_sub(1),
-                    b'B' | b'C' => {
-                        self.selected = (self.selected + 1).min(option_count.saturating_sub(1));
-                    }
-                    _ => {}
-                }
-                if self.selected != previous {
-                    match capture {
-                        RawInputCapture::Mode { .. } => {
-                            Some(RawInputEvent::ModeFocus(id.clone(), self.selected))
-                        }
-                        RawInputCapture::Config { .. } => {
-                            Some(RawInputEvent::ConfigFocus(id.clone(), self.selected))
-                        }
-                        RawInputCapture::ConfigLanguage { .. } => Some(
-                            RawInputEvent::ConfigLanguageFocus(id.clone(), self.selected),
-                        ),
-                        _ => None,
-                    }
-                } else {
-                    None
-                }
-            }
-            RawInputCapture::Evidence { .. } => None,
-        }
-    }
-
-    fn apply_tab(&mut self, capture: &RawInputCapture) -> Option<RawInputEvent> {
-        match capture {
-            RawInputCapture::Question { id, .. } => {
-                let choice_count = question_choice_count(capture);
-                let previous = self.selected;
-                if choice_count > 0 {
-                    self.selected = (self.selected + 1).min(choice_count.saturating_sub(1));
-                }
-                if self.selected != previous {
-                    Some(RawInputEvent::CardFocus(id.clone(), self.selected))
-                } else {
-                    None
-                }
-            }
-            RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
-                let max_idx = if matches!(capture, RawInputCapture::Approval { is_hook: true, .. })
-                {
-                    hook_approval_action_max_index()
-                } else {
-                    approval_action_max_index()
-                };
-                self.selected = (self.selected + 1).min(max_idx);
-                Some(RawInputEvent::CardFocus(id.clone(), self.selected))
-            }
-            RawInputCapture::Mode {
-                id, option_count, ..
-            }
-            | RawInputCapture::Config {
-                id, option_count, ..
-            }
-            | RawInputCapture::ConfigLanguage {
-                id, option_count, ..
-            } => {
-                if *option_count == 0 {
-                    return None;
-                }
-                self.selected = (self.selected + 1).min(option_count.saturating_sub(1));
-                match capture {
-                    RawInputCapture::Mode { .. } => {
-                        Some(RawInputEvent::ModeFocus(id.clone(), self.selected))
-                    }
-                    RawInputCapture::Config { .. } => {
-                        Some(RawInputEvent::ConfigFocus(id.clone(), self.selected))
-                    }
-                    RawInputCapture::ConfigLanguage { .. } => Some(
-                        RawInputEvent::ConfigLanguageFocus(id.clone(), self.selected),
-                    ),
-                    _ => None,
-                }
-            }
-            RawInputCapture::Evidence { .. } => None,
-        }
-    }
-
-    fn apply_shift_tab(&mut self, capture: &RawInputCapture) -> Option<RawInputEvent> {
-        match capture {
-            RawInputCapture::Question { id, .. } => {
-                let previous = self.selected;
-                self.selected = self.selected.saturating_sub(1);
-                if self.selected != previous {
-                    Some(RawInputEvent::CardFocus(id.clone(), self.selected))
-                } else {
-                    None
-                }
-            }
-            RawInputCapture::Approval { id, .. } | RawInputCapture::Consultation { id } => {
-                self.selected = self.selected.saturating_sub(1);
-                Some(RawInputEvent::CardFocus(id.clone(), self.selected))
-            }
-            RawInputCapture::Mode { id, .. } => {
-                self.selected = self.selected.saturating_sub(1);
-                Some(RawInputEvent::ModeFocus(id.clone(), self.selected))
-            }
-            RawInputCapture::Config { id, .. } => {
-                self.selected = self.selected.saturating_sub(1);
-                Some(RawInputEvent::ConfigFocus(id.clone(), self.selected))
-            }
-            RawInputCapture::ConfigLanguage { id, .. } => {
-                self.selected = self.selected.saturating_sub(1);
-                Some(RawInputEvent::ConfigLanguageFocus(
-                    id.clone(),
-                    self.selected,
-                ))
-            }
-            RawInputCapture::Evidence { .. } => None,
-        }
     }
 
     fn submit(&self, capture: &RawInputCapture) -> Option<RawInputEvent> {
@@ -623,6 +495,20 @@ impl CardInputState {
                 }
                 Some(RawInputEvent::ConfigLanguageSet(id.clone(), self.selected))
             }
+            RawInputCapture::Session {
+                id,
+                option_count,
+                confirming_clear,
+                ..
+            } => {
+                if *confirming_clear {
+                    return Some(RawInputEvent::SessionClearConfirm(id.clone()));
+                }
+                if *option_count == 0 || self.selected >= *option_count {
+                    return None;
+                }
+                Some(RawInputEvent::SessionResume(id.clone(), self.selected))
+            }
             RawInputCapture::Evidence { id } => Some(RawInputEvent::EvidenceSend(id.clone())),
         }
     }
@@ -662,6 +548,7 @@ fn cancel_event(capture: &RawInputCapture) -> RawInputEvent {
         RawInputCapture::ConfigLanguage { id, .. } => {
             RawInputEvent::ConfigLanguageCancel(id.clone())
         }
+        RawInputCapture::Session { id, .. } => RawInputEvent::SessionCancel(id.clone()),
         RawInputCapture::Question { id, .. } => RawInputEvent::QuestionCancel(id.clone()),
         RawInputCapture::Evidence { id } => RawInputEvent::EvidenceCancel(id.clone()),
     }
@@ -720,7 +607,8 @@ fn question_choice_count(capture: &RawInputCapture) -> usize {
         RawInputCapture::Approval { .. }
         | RawInputCapture::Consultation { .. }
         | RawInputCapture::Evidence { .. }
-        | RawInputCapture::Mode { .. }
+        | RawInputCapture::Session { .. } => 0,
+        RawInputCapture::Mode { .. }
         | RawInputCapture::Config { .. }
         | RawInputCapture::ConfigLanguage { .. } => 0,
     }

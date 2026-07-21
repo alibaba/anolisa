@@ -370,6 +370,60 @@ fn config_language_capture_selects_language_and_cancels() {
 }
 
 #[test]
+fn session_capture_navigates_toggles_deletes_and_resumes() {
+    let capture = RawInputCapture::Session {
+        id: "session-panel".to_string(),
+        option_count: 3,
+        selected: 0,
+        confirming_clear: false,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    assert_eq!(
+        state.consume(&capture, b"j d"),
+        vec![
+            RawInputEvent::SessionFocus("session-panel".to_string(), 1),
+            RawInputEvent::SessionToggle("session-panel".to_string(), 1),
+            RawInputEvent::SessionDelete("session-panel".to_string()),
+        ]
+    );
+
+    state.apply_capture(&capture);
+    assert_eq!(
+        state.consume(&capture, b"\x1b[B\n"),
+        vec![
+            RawInputEvent::SessionFocus("session-panel".to_string(), 2),
+            RawInputEvent::SessionResume("session-panel".to_string(), 2),
+        ]
+    );
+}
+
+#[test]
+fn session_clear_confirmation_accepts_and_cancels() {
+    let capture = RawInputCapture::Session {
+        id: "session-panel".to_string(),
+        option_count: 0,
+        selected: 0,
+        confirming_clear: true,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    assert_eq!(
+        state.consume(&capture, b"y"),
+        vec![RawInputEvent::SessionClearConfirm(
+            "session-panel".to_string()
+        )]
+    );
+    state.apply_capture(&capture);
+    assert_eq!(
+        state.consume(&capture, &[0x03]),
+        vec![RawInputEvent::SessionCancel("session-panel".to_string())]
+    );
+}
+
+#[test]
 fn approval_capture_handles_split_escape_arrow_sequence() {
     let capture = RawInputCapture::Approval {
         id: "req-1".to_string(),

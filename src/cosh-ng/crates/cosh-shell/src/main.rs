@@ -105,8 +105,8 @@ fn main() {
             std::process::exit(status);
         }
         if should_start_default_raw(&args[1..]) {
-            let (adapter_name, shell_kind) = configured_raw_invocation(&args[1..]);
-            let status = runtime::controller::run_raw(&adapter_name, shell_kind);
+            let (adapter_name, shell_kind, launch_options) = configured_raw_invocation(&args[1..]);
+            let status = runtime::controller::run_raw(&adapter_name, shell_kind, launch_options);
             std::process::exit(status);
         }
     }
@@ -115,8 +115,8 @@ fn main() {
         Some("demo") => runtime::controller::run_demo(),
         Some("host-demo") => runtime::controller::run_host_demo(),
         Some("raw") => {
-            let (adapter_name, shell_kind) = configured_raw_invocation(&args[2..]);
-            runtime::controller::run_raw(&adapter_name, shell_kind)
+            let (adapter_name, shell_kind, launch_options) = configured_raw_invocation(&args[2..]);
+            runtime::controller::run_raw(&adapter_name, shell_kind, launch_options)
         }
         Some("interactive") => {
             runtime::controller::run_interactive(args.get(2).map(String::as_str).unwrap_or("fake"))
@@ -129,7 +129,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: cosh-shell <demo|host-demo|raw|interactive|interactive-demo|adapter-demo [fake|claude|co|qwen|cosh-core] [--shell bash|zsh]>"
+                "usage: cosh-shell <demo|host-demo|raw|interactive|interactive-demo|adapter-demo [fake|claude|co|qwen|cosh-core] [--shell bash|zsh] [--resume [session-id]]>"
             );
             2
         }

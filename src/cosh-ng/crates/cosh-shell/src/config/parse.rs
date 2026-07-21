@@ -18,15 +18,11 @@ pub(super) fn parse_simple_config(content: &str, config: &mut CoshConfig) {
                 "shell.analysis_mode" => config.analysis_mode = value.into(),
                 "shell.approval_mode" => config.approval_mode = value.into(),
                 "shell.adapter_default" => config.adapter_default = value.into(),
-                "shell.trusted_command" => {
-                    if !value.is_empty() {
-                        config.trusted_commands.push(value.into());
-                    }
+                "shell.trusted_command" if !value.is_empty() => {
+                    config.trusted_commands.push(value.into());
                 }
-                "shell.trusted_project_root" => {
-                    if !value.is_empty() {
-                        config.trusted_project_roots.push(PathBuf::from(value));
-                    }
+                "shell.trusted_project_root" if !value.is_empty() => {
+                    config.trusted_project_roots.push(PathBuf::from(value));
                 }
                 "ui.language" => apply_language_value(config, value),
                 "ui.startup_banner" => config.startup_banner = parse_bool_value(value),

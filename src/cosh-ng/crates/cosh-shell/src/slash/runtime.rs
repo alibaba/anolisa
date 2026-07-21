@@ -4,6 +4,7 @@ use crate::slash::commands::render_slash_command;
 use crate::slash::config::render_config_card_actions;
 use crate::slash::parser::{slash_input, SlashCommand};
 use crate::slash::prompt::{clear_shell_prompt_line, write_shell_prompt};
+use crate::slash::session::{render_session_card_actions, render_session_launch};
 
 pub(crate) fn render_slash_actions<W: Write>(
     events: &[ShellEvent],
@@ -13,6 +14,8 @@ pub(crate) fn render_slash_actions<W: Write>(
     output: &mut W,
     event_index_base: usize,
 ) -> std::io::Result<()> {
+    render_session_launch(events, blocks, adapter, state, output)?;
+    render_session_card_actions(events, adapter, state, output, event_index_base)?;
     render_mode_card_actions(events, state, output, event_index_base)?;
     render_config_card_actions(events, state, output, event_index_base)?;
 

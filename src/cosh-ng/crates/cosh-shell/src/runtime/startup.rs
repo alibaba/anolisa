@@ -426,6 +426,7 @@ pub(crate) fn print_usage_help() {
            -c <command>            Execute command and exit (passthrough to bash/zsh)\n\
            -- <command> [args...]   Execute command directly and exit\n\
            --shell <shell>         Use specified shell (bash, zsh) [default: bash]\n\
+           --resume [session-id]   Open the session picker or resume a provider session\n\
            --isolated              Isolated mode: skip user rcfiles\n\
            --login, -l             Treat as login shell\n\
            --version               Print version\n\

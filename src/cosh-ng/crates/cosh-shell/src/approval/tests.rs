@@ -798,8 +798,7 @@ exit 1
     let adapter = CoshCoreAdapter {
         program: program.to_string_lossy().to_string(),
         allow_model_call: true,
-        session_id: std::sync::Arc::default(),
-        session_cwd: std::sync::Arc::default(),
+        session: std::sync::Arc::default(),
     };
     let handle = adapter.start_cancellable(request.clone(), CoshApprovalMode::Auto);
     let deadline = Instant::now() + Duration::from_secs(15);

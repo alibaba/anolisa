@@ -82,6 +82,12 @@ pub enum RawInputCapture {
         option_count: usize,
         selected: usize,
     },
+    Session {
+        id: String,
+        option_count: usize,
+        selected: usize,
+        confirming_clear: bool,
+    },
     Consultation {
         id: String,
     },

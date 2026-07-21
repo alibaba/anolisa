@@ -848,6 +848,6 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::SlashHooksAgentUnavailable => "(cosh-core backend unavailable)",
         MessageId::SlashExtensionsEmptyBody => "No extensions installed.",
         MessageId::SlashSkillsEmptyBody => "No skills found.",
-        _ => super::en_approval::message(id),
+        _ => super::en_session::message(id),
     }
 }

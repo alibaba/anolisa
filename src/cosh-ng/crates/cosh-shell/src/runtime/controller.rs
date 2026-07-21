@@ -185,6 +185,17 @@ fn approval_mode_from_config(value: &str) -> CoshApprovalMode {
 }
 
 pub(crate) fn pending_card_capture(state: &InlineState) -> Option<RawInputCapture> {
+    if let Some(session_panel) = state.control.session().pending_panel() {
+        return Some(RawInputCapture::Session {
+            id: session_panel.id.clone(),
+            option_count: session_panel.sessions.len(),
+            selected: session_panel.selected_option,
+            confirming_clear: matches!(
+                session_panel.phase,
+                crate::slash::session::RuntimeSessionPanelPhase::ConfirmClear
+            ),
+        });
+    }
     if let Some(mode_panel) = state.control.pending_mode_panel() {
         return Some(RawInputCapture::Mode {
             id: mode_panel.id.clone(),

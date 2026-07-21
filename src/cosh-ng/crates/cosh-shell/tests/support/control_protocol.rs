@@ -118,7 +118,6 @@ pub(crate) fn make_cosh_core_adapter(mock_script: &str) -> CoshCoreAdapter {
     CoshCoreAdapter {
         program: mock_cli_path(mock_script),
         allow_model_call: true,
-        session_id: Arc::default(),
-        session_cwd: Arc::default(),
+        session: Arc::default(),
     }
 }

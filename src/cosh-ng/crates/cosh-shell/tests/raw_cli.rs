@@ -52,6 +52,8 @@ mod recommendation;
 mod registry;
 #[path = "raw_cli/renderer.rs"]
 mod renderer;
+#[path = "raw_cli/session.rs"]
+mod session;
 #[path = "raw_cli/slash.rs"]
 mod slash;
 #[path = "raw_cli/startup.rs"]

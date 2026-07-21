@@ -22,6 +22,10 @@ pub(super) struct ClaudeStreamParser {
     emitted_text: bool,
     emitted_startup_status: bool,
     completed: bool,
+    session_capture_enabled: bool,
+    session_resumable: Option<bool>,
+    session_error_code: Option<String>,
+    session_error_phase: Option<String>,
 }
 
 impl ClaudeStreamParser {
@@ -37,7 +41,23 @@ impl ClaudeStreamParser {
             emitted_text: false,
             emitted_startup_status: false,
             completed: false,
+            session_capture_enabled: true,
+            session_resumable: None,
+            session_error_code: None,
+            session_error_phase: None,
         }
+    }
+
+    pub(super) fn session_resumable(&self) -> Option<bool> {
+        self.session_resumable
+    }
+
+    pub(super) fn session_error_code(&self) -> Option<&str> {
+        self.session_error_code.as_deref()
+    }
+
+    pub(super) fn session_error_phase(&self) -> Option<&str> {
+        self.session_error_phase.as_deref()
     }
 
     pub(super) fn parse_line(&mut self, line: &str) -> Vec<AgentEvent> {
@@ -92,6 +112,14 @@ impl ClaudeStreamParser {
 
         if value.get("type").and_then(|value| value.as_str()) == Some("result") {
             self.completed = true;
+            self.session_error_code = value
+                .get("session_error_code")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            self.session_error_phase = value
+                .get("session_error_phase")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
             if value.get("is_error").and_then(|value| value.as_bool()) == Some(true) {
                 events.push(AgentEvent::AgentFailed {
                     run_id: self.run_id.clone(),
@@ -111,6 +139,28 @@ impl ClaudeStreamParser {
     }
 
     fn remember_session_id(&mut self, value: &serde_json::Value) {
+        if value.get("type").and_then(|value| value.as_str()) == Some("system")
+            && value.get("subtype").and_then(|value| value.as_str()) == Some("init")
+        {
+            if let Some(resumable) = value
+                .get("session_resumable")
+                .and_then(|value| value.as_bool())
+            {
+                self.session_capture_enabled = resumable;
+                self.session_resumable = Some(resumable);
+                if !resumable {
+                    if let Some(state) = &self.session_state {
+                        if let Ok(mut current) = state.lock() {
+                            *current = None;
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+        if !self.session_capture_enabled {
+            return;
+        }
         let Some(session_id) = value.get("session_id").and_then(|value| value.as_str()) else {
             return;
         };
