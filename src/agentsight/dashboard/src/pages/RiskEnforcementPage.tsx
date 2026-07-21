@@ -230,6 +230,7 @@ export const RiskEnforcementPage: React.FC = () => {
                     <td className="px-4 py-3">
                       <button
                         type="button"
+                        aria-label={`解除 ${binding.request.agent_id}（PID ${binding.request.root_pid}）对 ${policyFilePath(binding.request.policy_dsl)} 的策略`}
                         disabled={!canMutate || binding.state === 'detached'}
                         onClick={() => void handleDetach(binding.request.binding_id)}
                         className="text-sm font-medium text-red-600 disabled:text-gray-300"

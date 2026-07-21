@@ -1,11 +1,8 @@
 diff --git a/bpf/src/lib.rs b/bpf/src/lib.rs
-index ae7c7cdc..d19021d9 100644
+index ae7c7cd..d19021d 100644
 --- a/bpf/src/lib.rs
 +++ b/bpf/src/lib.rs
-@@ -517,29 +517,39 @@ fn pinned_engine_present(paths: &PinnedEnginePaths, reserve: HookReserve) -> io:
-             return Ok(false);
-         }
-     }
+@@ -520,7 +520,5 @@ fn pinned_engine_present(paths: &PinnedEnginePaths, reserve: HookReserve) -> io:
 -    for name in [
 -        "handle_fork",
 -        "handle_exec_args",
@@ -18,12 +15,11 @@ index ae7c7cdc..d19021d9 100644
 +        let exists = paths.link(spec.name).try_exists()?;
 +        let expected = tracepoint_needed(spec, budget);
 +        if expected && !exists {
-             return Ok(false);
-         }
+@@ -528,0 +527,3 @@ fn pinned_engine_present(paths: &PinnedEnginePaths, reserve: HookReserve) -> io:
 +        if exists && !expected {
 +            return Err(pinned_profile_mismatch(paths, spec.name));
 +        }
-     }
+@@ -530,7 +531,6 @@ fn pinned_engine_present(paths: &PinnedEnginePaths, reserve: HookReserve) -> io:
 -    if bpf_lsm_active() {
 -        let required_lsm = if reserve.file_open_only {
 -            "enforce_file_open"
@@ -37,15 +33,11 @@ index ae7c7cdc..d19021d9 100644
 +        let exists = paths.link(name).try_exists()?;
 +        let expected = lsm_link_expected(name, budget, lsm_active);
 +        if expected && !exists {
-             return Ok(false);
-         }
+@@ -538,0 +539,3 @@ fn pinned_engine_present(paths: &PinnedEnginePaths, reserve: HookReserve) -> io:
 +        if exists && !expected {
 +            return Err(pinned_profile_mismatch(paths, name));
 +        }
-     }
-     Ok(true)
- }
- 
+@@ -542,0 +546,7 @@ fn pinned_engine_present(paths: &PinnedEnginePaths, reserve: HookReserve) -> io:
 +fn pinned_profile_mismatch(paths: &PinnedEnginePaths, link: &str) -> io::Error {
 +    err(format!(
 +        "ActPlane pinned hook profile mismatch at {}: unexpected link {link}; remove the pin root before changing profiles",
@@ -53,13 +45,7 @@ index ae7c7cdc..d19021d9 100644
 +    ))
 +}
 +
- fn hash_map_from_fd<K: aya::Pod, V: aya::Pod>(fd: &OwnedFd) -> io::Result<HashMap<MapData, K, V>> {
-     let data = MapData::from_fd(dup_owned_fd(fd)?).map_err(|e| err(format!("map from fd: {e}")))?;
-     HashMap::try_from(Map::HashMap(data)).map_err(|e| err(format!("typed hash map: {e}")))
-@@ -1174,6 +1184,32 @@ struct HookBudget {
- }
- 
- impl HookBudget {
+@@ -1176,0 +1187,26 @@ impl HookBudget {
 +    fn for_pinned_reserve(reserve: HookReserve) -> Self {
 +        let mut budget = HookBudget {
 +            features: reserve.policy_features,
@@ -86,13 +72,7 @@ index ae7c7cdc..d19021d9 100644
 +        budget
 +    }
 +
-     fn from_config(cfg: &CConfig, reserve: HookReserve) -> Self {
-         let profile = HookProfile::from_env();
-         let mut budget = match profile {
-@@ -1318,6 +1354,18 @@ fn lsm_needed_for_budget(
-     )
- }
- 
+@@ -1320,0 +1357,12 @@ fn lsm_needed_for_budget(
 +fn lsm_link_expected(name: &str, budget: HookBudget, lsm_active: bool) -> bool {
 +    lsm_active
 +        && lsm_needed_for_budget(
@@ -105,13 +85,7 @@ index ae7c7cdc..d19021d9 100644
 +        )
 +}
 +
- fn load_exec_tail_programs(bpf: &mut Ebpf) -> io::Result<()> {
-     let mut fds: Vec<(u32, ProgramFd)> = Vec::new();
- 
-@@ -1608,14 +1656,32 @@ impl HookReserve {
-         }
-     }
- 
+@@ -1611,4 +1659,6 @@ impl HookReserve {
 -    fn pinned_profile() -> Self {
 -        match std::env::var("ACTPLANE_PINNED_PROFILE") {
 -            Ok(value) if value.eq_ignore_ascii_case("file-enforcement") => {
@@ -122,13 +96,12 @@ index ae7c7cdc..d19021d9 100644
 +            Some(value) if value.eq_ignore_ascii_case("full") => Ok(HookReserve::full_profile()),
 +            Some(value) if value.eq_ignore_ascii_case("file-enforcement") => {
 +                Ok(HookReserve::file_enforcement())
-             }
+@@ -1616 +1666,3 @@ impl HookReserve {
 -            _ => HookReserve::full_profile(),
 +            Some(value) => Err(err(format!(
 +                "unsupported ACTPLANE_PINNED_PROFILE value {value:?}"
 +            ))),
-         }
-     }
+@@ -1618,0 +1671,14 @@ impl HookReserve {
 +
 +    fn pinned_profile() -> io::Result<Self> {
 +        let value = std::env::var("ACTPLANE_PINNED_PROFILE").ok();
@@ -143,23 +116,11 @@ index ae7c7cdc..d19021d9 100644
 +        ));
 +    }
 +    Ok(())
- }
- 
- fn empty_config_blob() -> Vec<u8> {
-@@ -1632,7 +1698,8 @@ fn empty_config_blob() -> Vec<u8> {
- impl PinnedEngine {
-     pub fn open_or_install_singleton() -> io::Result<Self> {
-         let paths = PinnedEnginePaths::from_env();
+@@ -1635 +1701,2 @@ impl PinnedEngine {
 -        let reserve = HookReserve::pinned_profile();
 +        let reserve = HookReserve::pinned_profile()?;
 +        validate_pinned_runtime(reserve, bpf_lsm_active())?;
-         let policy_features = reserve.policy_features;
-         if pinned_engine_present(&paths, reserve)? {
-             return Ok(Self {
-@@ -3043,6 +3110,29 @@ mod tests {
-         ));
-     }
- 
+@@ -3045,0 +3113,23 @@ mod tests {
 +    #[test]
 +    fn pinned_file_enforcement_requires_bpf_lsm() {
 +        let error = validate_pinned_runtime(HookReserve::file_enforcement(), false)
@@ -183,6 +144,3 @@ index ae7c7cdc..d19021d9 100644
 +            .contains("unsupported ACTPLANE_PINNED_PROFILE"));
 +    }
 +
-     #[test]
-     fn missing_map_delete_is_idempotent() {
-         assert!(ignore_missing_remove(Err(MapError::ElementNotFound), "fixture").is_ok());

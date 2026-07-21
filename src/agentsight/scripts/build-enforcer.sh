@@ -94,19 +94,21 @@ if [ "$ACTUAL_PREBUILT_BPF_BLOB" != "$ACTPLANE_PREBUILT_BPF_BLOB" ]; then
 fi
 
 ACTUAL_BPF_LIB_BLOB=$(git -C "$SOURCE_DIR" hash-object bpf/src/lib.rs)
+# Zero-context patches keep nested diffs whitespace-clean; exact input-blob
+# checks above prevent them from applying to any unreviewed source state.
 if [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_BASE_BPF_LIB_BLOB" ]; then
     for patch_file in $PATCH_FILES; do
-        git -C "$SOURCE_DIR" apply --check "$patch_file"
-        git -C "$SOURCE_DIR" apply "$patch_file"
+        git -C "$SOURCE_DIR" apply --unidiff-zero --check "$patch_file"
+        git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
     done
 elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0003_BPF_LIB_BLOB" ]; then
     for patch_file in $POST_0003_PATCH_FILES; do
-        git -C "$SOURCE_DIR" apply --check "$patch_file"
-        git -C "$SOURCE_DIR" apply "$patch_file"
+        git -C "$SOURCE_DIR" apply --unidiff-zero --check "$patch_file"
+        git -C "$SOURCE_DIR" apply --unidiff-zero "$patch_file"
     done
 elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_POST_0004_BPF_LIB_BLOB" ]; then
-    git -C "$SOURCE_DIR" apply --check "$LATEST_PATCH_FILE"
-    git -C "$SOURCE_DIR" apply "$LATEST_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply --unidiff-zero --check "$LATEST_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply --unidiff-zero "$LATEST_PATCH_FILE"
 elif [ "$ACTUAL_BPF_LIB_BLOB" != "$ACTPLANE_PATCHED_BPF_LIB_BLOB" ]; then
     echo "ActPlane BPF loader does not match the pinned revision or reviewed patch queue" >&2
     exit 1

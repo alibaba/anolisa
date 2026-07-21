@@ -187,7 +187,9 @@ describe('RiskEnforcementPage', () => {
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
     render(<RiskEnforcementPage />);
 
-    fireEvent.click(await screen.findByRole('button', { name: '解除策略' }));
+    fireEvent.click(await screen.findByRole('button', {
+      name: '解除 qoder（PID 45231）对 /root/.ssh/id_rsa 的策略',
+    }));
 
     await waitFor(() => expect(mockDetachEnforcementBinding).toHaveBeenCalledWith('binding-1'));
     expect(confirm).toHaveBeenCalled();

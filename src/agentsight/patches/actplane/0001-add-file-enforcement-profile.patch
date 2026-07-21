@@ -1,20 +1,11 @@
 diff --git a/bpf/src/lib.rs b/bpf/src/lib.rs
-index 9bcefcdc..ae7c7cdc 100644
+index 9bcefcd..ae7c7cd 100644
 --- a/bpf/src/lib.rs
 +++ b/bpf/src/lib.rs
-@@ -500,7 +500,7 @@ fn pinned_hash_map<K: aya::Pod, V: aya::Pod>(
-     HashMap::try_from(Map::HashMap(data)).map_err(|e| err(format!("pinned map {name}: {e}")))
- }
- 
+@@ -503 +503 @@ fn pinned_hash_map<K: aya::Pod, V: aya::Pod>(
 -fn pinned_engine_present(paths: &PinnedEnginePaths) -> io::Result<bool> {
 +fn pinned_engine_present(paths: &PinnedEnginePaths, reserve: HookReserve) -> io::Result<bool> {
-     for name in [
-         "rb",
-         "cap_req",
-@@ -527,8 +527,15 @@ fn pinned_engine_present(paths: &PinnedEnginePaths) -> io::Result<bool> {
-             return Ok(false);
-         }
-     }
+@@ -530,2 +530,9 @@ fn pinned_engine_present(paths: &PinnedEnginePaths) -> io::Result<bool> {
 -    if bpf_lsm_active() && !paths.link("enforce_bpf_syscall").try_exists()? {
 -        return Ok(false);
 +    if bpf_lsm_active() {
@@ -26,13 +17,7 @@ index 9bcefcdc..ae7c7cdc 100644
 +        if !paths.link(required_lsm).try_exists()? {
 +            return Ok(false);
 +        }
-     }
-     Ok(true)
- }
-@@ -576,7 +583,12 @@ fn map_get_optional<K: aya::Pod, V: aya::Pod>(
- 
- fn ignore_missing_remove(result: Result<(), MapError>, what: &str) -> io::Result<()> {
-     match result {
+@@ -579 +586,6 @@ fn ignore_missing_remove(result: Result<(), MapError>, what: &str) -> io::Result
 -        Ok(()) | Err(MapError::KeyNotFound) => Ok(()),
 +        Ok(()) | Err(MapError::KeyNotFound | MapError::ElementNotFound) => Ok(()),
 +        Err(MapError::SyscallError(error))
@@ -40,52 +25,23 @@ index 9bcefcdc..ae7c7cdc 100644
 +        {
 +            Ok(())
 +        }
-         Err(e) => Err(err(format!("{what}: {e}"))),
-     }
- }
-@@ -1157,6 +1169,8 @@ struct HookBudget {
-     features: u32,
-     file_write: bool,
-     advanced_tracepoints: bool,
+@@ -1159,0 +1172,2 @@ struct HookBudget {
 +    suppress_dataflow_tracepoints: bool,
 +    file_open_only: bool,
- }
- 
- impl HookBudget {
-@@ -1168,12 +1182,16 @@ impl HookBudget {
-                 file_write: config_has_file_write(cfg),
-                 advanced_tracepoints: profile.advanced_tracepoints()
-                     || reserve.advanced_tracepoints,
+@@ -1170,0 +1185,2 @@ impl HookBudget {
 +                suppress_dataflow_tracepoints: reserve.suppress_dataflow_tracepoints,
 +                file_open_only: reserve.file_open_only,
-             },
-             HookProfile::Full => HookBudget {
-                 features: config_features(cfg) | ALL_HOOK_FEATURES,
-                 file_write: true,
-                 advanced_tracepoints: profile.advanced_tracepoints()
-                     || reserve.advanced_tracepoints,
+@@ -1176,0 +1193,2 @@ impl HookBudget {
 +                suppress_dataflow_tracepoints: reserve.suppress_dataflow_tracepoints,
 +                file_open_only: reserve.file_open_only,
-             },
-         };
-         budget.features |= reserve.policy_features;
-@@ -1223,6 +1241,12 @@ impl HookBudget {
- }
- 
- fn tracepoint_needed(spec: &TracepointSpec, budget: HookBudget) -> bool {
+@@ -1225,0 +1244,6 @@ fn tracepoint_needed(spec: &TracepointSpec, budget: HookBudget) -> bool {
 +    if budget.suppress_dataflow_tracepoints {
 +        return matches!(
 +            spec.need,
 +            TracepointNeed::Core | TracepointNeed::CoreExec | TracepointNeed::ExecArgs
 +        );
 +    }
-     match spec.need {
-         TracepointNeed::Core => true,
-         TracepointNeed::CoreExec => false,
-@@ -1273,6 +1297,27 @@ fn lsm_needed(
-     }
- }
- 
+@@ -1275,0 +1300,21 @@ fn lsm_needed(
 +fn lsm_needed_for_budget(
 +    name: &str,
 +    block_exec: bool,
@@ -107,35 +63,15 @@ index 9bcefcdc..ae7c7cdc 100644
 +    )
 +}
 +
- fn load_exec_tail_programs(bpf: &mut Ebpf) -> io::Result<()> {
-     let mut fds: Vec<(u32, ProgramFd)> = Vec::new();
- 
-@@ -1509,6 +1554,7 @@ impl PinnedEnginePaths {
- #[derive(Debug)]
- pub struct PinnedEngine {
-     paths: PinnedEnginePaths,
+@@ -1511,0 +1557 @@ pub struct PinnedEngine {
 +    policy_features: u32,
- }
- 
- #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-@@ -1520,6 +1566,8 @@ struct HookReserve {
-     block_file: bool,
-     block_connect: bool,
-     advanced_tracepoints: bool,
+@@ -1522,0 +1569,2 @@ struct HookReserve {
 +    suppress_dataflow_tracepoints: bool,
 +    file_open_only: bool,
-     policy_features: u32,
- }
- 
-@@ -1541,9 +1589,33 @@ impl HookReserve {
-             block_file: true,
-             block_connect: true,
-             advanced_tracepoints: true,
+@@ -1543,0 +1592,2 @@ impl HookReserve {
 +            suppress_dataflow_tracepoints: false,
 +            file_open_only: false,
-             policy_features: PINNED_POLICY_FEATURES,
-         }
-     }
+@@ -1546,0 +1597,22 @@ impl HookReserve {
 +
 +    fn file_enforcement() -> Self {
 +        HookReserve {
@@ -158,13 +94,7 @@ index 9bcefcdc..ae7c7cdc 100644
 +            _ => HookReserve::full_profile(),
 +        }
 +    }
- }
- 
- fn empty_config_blob() -> Vec<u8> {
-@@ -1560,19 +1632,23 @@ fn empty_config_blob() -> Vec<u8> {
- impl PinnedEngine {
-     pub fn open_or_install_singleton() -> io::Result<Self> {
-         let paths = PinnedEnginePaths::from_env();
+@@ -1563,2 +1635,7 @@ impl PinnedEngine {
 -        if pinned_engine_present(&paths)? {
 -            return Ok(Self { paths });
 +        let reserve = HookReserve::pinned_profile();
@@ -174,16 +104,14 @@ index 9bcefcdc..ae7c7cdc 100644
 +                paths,
 +                policy_features,
 +            });
-         }
- 
+@@ -1567,5 +1644 @@ impl PinnedEngine {
 -        match Loader::load_with_pinned_layout(
 -            &empty_config_blob(),
 -            HookReserve::full_profile(),
 -            paths.clone(),
 -        ) {
 +        match Loader::load_with_pinned_layout(&empty_config_blob(), reserve, paths.clone()) {
-             Ok(installer) => {
-                 drop(installer);
+@@ -1574,2 +1647,5 @@ impl PinnedEngine {
 -                if pinned_engine_present(&paths)? {
 -                    Ok(Self { paths })
 +                if pinned_engine_present(&paths, reserve)? {
@@ -191,13 +119,7 @@ index 9bcefcdc..ae7c7cdc 100644
 +                        paths,
 +                        policy_features,
 +                    })
-                 } else {
-                     Err(err(format!(
-                         "pinned ActPlane engine missing after install at {}",
-@@ -1581,8 +1657,11 @@ impl PinnedEngine {
-                 }
-             }
-             Err(e) => {
+@@ -1584,2 +1660,5 @@ impl PinnedEngine {
 -                if pinned_engine_present(&paths)? {
 -                    Ok(Self { paths })
 +                if pinned_engine_present(&paths, reserve)? {
@@ -205,65 +127,26 @@ index 9bcefcdc..ae7c7cdc 100644
 +                        paths,
 +                        policy_features,
 +                    })
-                 } else {
-                     Err(e)
-                 }
-@@ -1625,7 +1704,7 @@ impl PinnedEngine {
-             ts_counts_fd: dup_pinned_map_fd(&self.paths, "ts_counts")?,
-             append_lock: Mutex::new(()),
-             append_lock_file: Some(open_append_lock()?),
+@@ -1628 +1707 @@ impl PinnedEngine {
 -            policy_features: PINNED_POLICY_FEATURES,
 +            policy_features: self.policy_features,
-         })
-     }
- 
-@@ -1810,7 +1889,7 @@ impl Loader {
-         let policy_features = hook_budget.features;
-         if let Some(paths) = pin_paths.as_ref() {
-             ensure_pinned_engine_dirs(paths)?;
+@@ -1813 +1892 @@ impl Loader {
 -            if pinned_engine_present(paths)? {
 +            if pinned_engine_present(paths, hook_reserve)? {
-                 return Err(err(format!(
-                     "ActPlane pinned engine already exists at {}; open pinned objects instead of loading another engine",
-                     paths.root.display()
-@@ -1888,13 +1967,13 @@ impl Loader {
-         if enforce {
-             let btf = Btf::from_sys_fs().map_err(|e| err(format!("btf: {e}")))?;
-             for (name, hook) in LSM_PROGS {
+@@ -1891 +1970 @@ impl Loader {
 -                if !lsm_needed(
 +                if !lsm_needed_for_budget(
-                     name,
-                     has_block_exec,
-                     has_block_file,
-                     has_block_connect,
-                     has_recv,
+@@ -1897 +1976 @@ impl Loader {
 -                    hook_budget.advanced_tracepoints,
 +                    hook_budget,
-                 ) {
-                     continue;
-                 }
-@@ -2886,6 +2965,8 @@ mod tests {
-             features: 0,
-             file_write: false,
-             advanced_tracepoints: false,
+@@ -2888,0 +2968,2 @@ mod tests {
 +            suppress_dataflow_tracepoints: false,
 +            file_open_only: false,
-         };
-         assert!(tracepoint_needed(spec("handle_fork"), empty));
-         assert!(!tracepoint_needed(spec("handle_exec"), empty));
-@@ -2900,6 +2981,8 @@ mod tests {
-             features: FEAT_FILE_FLOW,
-             file_write: false,
-             advanced_tracepoints: false,
+@@ -2902,0 +2984,2 @@ mod tests {
 +            suppress_dataflow_tracepoints: false,
 +            file_open_only: false,
-         };
-         assert!(tracepoint_needed(spec("trace_openat"), file));
-         assert!(tracepoint_needed(spec("trace_read_exit"), file));
-@@ -2917,6 +3000,63 @@ mod tests {
-     }
- 
-     #[test]
+@@ -2918,0 +3002,57 @@ mod tests {
++    #[test]
 +    fn pinned_file_enforcement_avoids_flow_tracepoints() {
 +        fn spec(name: &str) -> &'static TracepointSpec {
 +            TRACEPOINTS
@@ -320,7 +203,3 @@ index 9bcefcdc..ae7c7cdc 100644
 +        .is_ok());
 +    }
 +
-+    #[test]
-     fn file_flow_does_not_enable_lsm_file_hooks_without_block_file() {
-         assert!(lsm_needed(
-             "enforce_task_kill",
