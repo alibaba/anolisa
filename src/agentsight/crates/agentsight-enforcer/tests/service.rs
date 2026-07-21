@@ -207,3 +207,15 @@ fn uds_service_dispatches_lifecycle_and_streams_violations() {
     let listed = fixture.call(Command::ListBindings);
     assert_eq!(listed.result, Ok(ResponseBody::Bindings(Vec::new())));
 }
+
+#[test]
+fn security_subscription_is_explicitly_unavailable_until_backend_support_exists() {
+    let fixture = ServiceFixture::start();
+
+    let response = fixture.call(Command::SubscribeSecurityEvents);
+
+    let Err(error) = response.result else {
+        panic!("unfinished security subscription must not acknowledge success");
+    };
+    assert_eq!(error.code, "unsupported_command");
+}

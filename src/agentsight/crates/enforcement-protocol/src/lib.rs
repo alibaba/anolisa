@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod security;
+pub use security::*;
+
 /// Wire protocol version implemented by this crate.
 pub const PROTOCOL_VERSION: u16 = 1;
 
@@ -52,6 +55,8 @@ pub enum Command {
     ListBindings,
     /// Keeps the connection open and streams violation responses.
     SubscribeViolations,
+    /// Keeps the connection open and streams normalized security events.
+    SubscribeSecurityEvents,
 }
 
 /// Desired policy binding for one Agent process tree.
@@ -199,6 +204,8 @@ pub enum ResponseBody {
     Subscribed,
     /// One violation on a subscription connection.
     Violation(ViolationEvent),
+    /// One normalized security event on a subscription connection.
+    SecurityEvent(SecurityEvent),
 }
 
 /// Sanitized operation failure returned across the trust boundary.
@@ -344,5 +351,61 @@ mod tests {
         let error = read_frame::<_, Request>(&mut BufReader::new(Cursor::new(input)))
             .expect_err("oversized input must fail");
         assert!(matches!(error, ProtocolError::FrameTooLarge { .. }));
+    }
+
+    #[test]
+    fn security_subscription_command_round_trips_as_one_frame() {
+        let request = Request::new(Command::SubscribeSecurityEvents);
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &request).expect("fixture should encode");
+        let decoded: Request = read_frame(&mut BufReader::new(Cursor::new(bytes)))
+            .expect("fixture should decode")
+            .expect("frame should exist");
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn security_event_response_round_trips_as_one_frame() {
+        let event = SecurityEvent::policy_decision(
+            EventIdentity {
+                binding_id: Uuid::new_v4(),
+                agent_id: "agent-1".into(),
+                agent_name: None,
+                session_id: Some("session-1".into()),
+                conversation_id: None,
+                tool_call_id: None,
+                pid: 42,
+                process_start_time: 101,
+                ppid: None,
+                cgroup_id: None,
+                protocol_version: PROTOCOL_VERSION,
+                enforcer_version: "0.1.0".into(),
+                actplane_revision: "fixture-revision".into(),
+            },
+            PolicyDecision {
+                policy_id: "credential-exfiltration".into(),
+                policy_revision: 1,
+                source_event_id: Uuid::new_v4(),
+                sink_event_id: Uuid::new_v4(),
+                mode: PolicyMode::Audit,
+                requested_effect: Effect::Notify,
+                blocked: false,
+                killed: false,
+                errno: None,
+                risk_score: 60,
+                reason: "audit fixture".into(),
+            },
+        );
+        let response = Response {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: Uuid::new_v4(),
+            result: Ok(ResponseBody::SecurityEvent(event)),
+        };
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &response).expect("fixture should encode");
+        let decoded: Response = read_frame(&mut BufReader::new(Cursor::new(bytes)))
+            .expect("fixture should decode")
+            .expect("frame should exist");
+        assert_eq!(decoded, response);
     }
 }

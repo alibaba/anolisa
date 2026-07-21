@@ -147,6 +147,17 @@ fn handle_connection<B: EnforcementBackend>(
         }
     };
 
+    if matches!(request.command, Command::SubscribeSecurityEvents) {
+        return write_frame(
+            &mut stream,
+            &error_response(
+                request.request_id,
+                "unsupported_command",
+                "security event subscription is not available",
+            ),
+        );
+    }
+
     if matches!(request.command, Command::SubscribeViolations) {
         let receiver = backend.subscribe();
         write_frame(
@@ -186,6 +197,7 @@ fn dispatch<B: EnforcementBackend>(
         }
         Command::ListBindings => backend.bindings().map(ResponseBody::Bindings),
         Command::SubscribeViolations => Ok(ResponseBody::Subscribed),
+        Command::SubscribeSecurityEvents => Ok(ResponseBody::Subscribed),
     }
 }
 
