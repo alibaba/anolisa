@@ -455,7 +455,7 @@ impl BackendSpawner for MockSpawner {
         );
         Ok(SpawnHandle {
             pid: None,
-            backend: instance.backend,
+            backend: BackendKind::Mock,
             instance_id: instance.id,
         })
     }
@@ -528,7 +528,9 @@ mod tests {
             .expect("mock spawn never fails");
         assert!(handle.pid.is_none(), "mock must not produce real PIDs");
         assert_eq!(handle.instance_id, instance.id);
-        assert_eq!(handle.backend, BackendKind::Bubblewrap);
+        // MockSpawner always reports its true identity regardless of the
+        // policy-selected backend on the instance.
+        assert_eq!(handle.backend, BackendKind::Mock);
 
         let result = spawner.wait(&handle).await.expect("mock wait");
         assert_eq!(result.exit_code, Some(0));

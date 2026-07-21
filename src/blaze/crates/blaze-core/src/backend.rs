@@ -27,6 +27,7 @@ pub enum BackendKind {
     Bubblewrap,
     LinuxSandbox,
     Landlock,
+    Mock,
 }
 
 impl BackendKind {
@@ -44,6 +45,7 @@ impl BackendKind {
             BackendKind::Bubblewrap => "bubblewrap",
             BackendKind::LinuxSandbox => "linux-sandbox",
             BackendKind::Landlock => "landlock",
+            BackendKind::Mock => "mock",
         }
     }
 }
@@ -70,6 +72,7 @@ impl FromStr for BackendKind {
             "bubblewrap" => Ok(BackendKind::Bubblewrap),
             "linux-sandbox" => Ok(BackendKind::LinuxSandbox),
             "landlock" => Ok(BackendKind::Landlock),
+            "mock" => Ok(BackendKind::Mock),
             other => Err(BlazeError::PolicyEvalError {
                 reason: format!("unknown backend kind: {other}"),
             }),
@@ -134,6 +137,7 @@ mod tests {
             BackendKind::Bubblewrap,
             BackendKind::LinuxSandbox,
             BackendKind::Landlock,
+            BackendKind::Mock,
         ] {
             let s = kind.as_str();
             let parsed: BackendKind = s.parse().expect("round-trip");

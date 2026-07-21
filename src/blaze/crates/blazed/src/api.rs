@@ -153,6 +153,7 @@ struct CreateInstanceResp {
     instance: SandboxInstance,
     decision: RuntimeDecision,
     start_path: StartPath,
+    selected_backend: BackendKind,
 }
 
 fn list_instances(state: &Arc<ServerState>) -> Result<Response<Full<Bytes>>> {
@@ -201,20 +202,40 @@ async fn create_instance(state: &Arc<ServerState>, body: &[u8]) -> Result<Respon
         }
     };
 
-    // 2. Backend selection. v0.1 marks every backend in the priority
-    // list as available — production probing lands in Phase 2.
-    // TODO(v0.2): pass actual probe results from daemon startup into the
-    // selector so that unavailable backends are excluded from selection.
-    let availability: Vec<BackendStatus> = decision
-        .backend_priority
-        .iter()
-        .map(|kind| BackendStatus {
-            kind: *kind,
-            available: true,
-            version: None,
-        })
-        .collect();
-    let backend = select_backend(&decision.backend_priority, &availability)?;
+    // 2. Backend selection. Check which backends the daemon actually has
+    // configured; only those with an existing binary path are available.
+    let availability: Vec<BackendStatus> = {
+        let cfg = state
+            .config
+            .lock()
+            .map_err(|_| BlazeDaemonError::Internal("config lock poisoned".into()))?;
+        decision
+            .backend_priority
+            .iter()
+            .map(|kind| {
+                let available = cfg
+                    .backends
+                    .get(kind.as_str())
+                    .map(|p| p.exists())
+                    .unwrap_or(false);
+                BackendStatus {
+                    kind: *kind,
+                    available,
+                    version: None,
+                }
+            })
+            .collect()
+    };
+    // If no real backend is available the daemon is in dev/mock mode;
+    // fall back to the first policy entry so instance metadata is
+    // populated — the spawner (MockSpawner) will report the true
+    // backend in its SpawnHandle.
+    let backend = match select_backend(&decision.backend_priority, &availability) {
+        Ok(b) => b,
+        Err(_) => *decision.backend_priority.first().ok_or_else(|| {
+            BlazeDaemonError::Internal("policy has empty backend_priority".into())
+        })?,
+    };
 
     // 3. Pool lookup.
     let pool_key = PoolKey::new(backend, decision.workload_class, req.image_digest.clone());
@@ -290,7 +311,7 @@ async fn create_instance(state: &Arc<ServerState>, body: &[u8]) -> Result<Respon
     };
     let work_dir = state.state_dir.join(instance.id.to_string());
     let spawner = state.spawner.clone();
-    match spawner
+    let actual_backend = match spawner
         .spawn(
             &instance,
             &binary_path,
@@ -301,11 +322,13 @@ async fn create_instance(state: &Arc<ServerState>, body: &[u8]) -> Result<Respon
         .await
     {
         Ok(handle) => {
+            let real_backend = handle.backend;
             let mut handles = state
                 .spawn_handles
                 .lock()
                 .map_err(|_| BlazeDaemonError::Internal("spawn_handles lock poisoned".into()))?;
             handles.insert(instance.id, handle);
+            real_backend
         }
         Err(err) => {
             // Fail forward into Destroyed so the lifecycle stays
@@ -316,7 +339,7 @@ async fn create_instance(state: &Arc<ServerState>, body: &[u8]) -> Result<Respon
             state.metrics.inc(&state.metrics.instances_destroyed);
             return Err(err.into());
         }
-    }
+    };
     instance.transition(SandboxState::Running)?;
     instance.persist(&state.state_dir)?;
 
@@ -334,6 +357,7 @@ async fn create_instance(state: &Arc<ServerState>, body: &[u8]) -> Result<Respon
         instance,
         decision,
         start_path,
+        selected_backend: actual_backend,
     })
 }
 
