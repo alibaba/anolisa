@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to ANOLISA Anvil will be documented in this file.
+All notable changes to ANOLISA Blaze will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -54,7 +54,7 @@ Initial scaffold of ANOLISA Anvil per-host sandbox daemon.
 
 # 变更日志
 
-本文件记录 ANOLISA Anvil 的所有重要变更。
+本文件记录 ANOLISA Blaze 的所有重要变更。
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
