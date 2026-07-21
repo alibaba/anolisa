@@ -1,0 +1,28 @@
+diff --git a/bpf/src/lib.rs b/bpf/src/lib.rs
+index f4c05985..b45756c1 100644
+--- a/bpf/src/lib.rs
++++ b/bpf/src/lib.rs
+@@ -1906,6 +1906,22 @@ impl PinnedEngine {
+         )
+     }
+-
++
++    /// Consumes all records currently queued in the pinned event ring buffer.
++    ///
++    /// # Errors
++    ///
++    /// Returns an error when the pinned ring-buffer map cannot be opened.
++    pub fn drain_pending_events(&self) -> io::Result<usize> {
++        let data = pinned_map_data(&self.paths, "rb")?;
++        let mut ring =
++            RingBuf::try_from(Map::RingBuf(data)).map_err(|e| err(format!("pinned rb: {e}")))?;
++        let mut drained = 0;
++        while ring.next().is_some() {
++            drained += 1;
++        }
++        Ok(drained)
++    }
++
+     pub fn run(&self, stop: &AtomicBool, mut on: impl FnMut(Violation)) -> io::Result<()> {
+         let data = pinned_map_data(&self.paths, "rb")?;
+         let mut ring =

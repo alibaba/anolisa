@@ -78,7 +78,8 @@ impl ActPlaneBackend {
     /// # Errors
     ///
     /// Returns a kernel error when the pinned engine, exclusive runtime lock,
-    /// reload handle, self-protection, or initial cleanup cannot be established.
+    /// reload handle, self-protection, initial cleanup, or event drain cannot be
+    /// established.
     pub fn open() -> Result<Self, BackendError> {
         let engine = Arc::new(
             PinnedEngine::open_or_install_singleton()
@@ -101,7 +102,11 @@ impl ActPlaneBackend {
                     .clear_runtime_state()
                     .map_err(|error| kernel_error("clear stale runtime state", error))
             },
-            || Ok(0),
+            || {
+                engine
+                    .drain_pending_events()
+                    .map_err(|error| kernel_error("drain stale pinned events", error))
+            },
         )?;
 
         let state = Arc::new(RuntimeState::new());
@@ -497,6 +502,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    const _: fn(&PinnedEngine) -> std::io::Result<usize> = PinnedEngine::drain_pending_events;
 
     fn active_binding() -> ActiveBinding {
         ActiveBinding {

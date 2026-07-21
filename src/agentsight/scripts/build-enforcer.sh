@@ -5,15 +5,18 @@ set -eu
 ACTPLANE_REPOSITORY="https://github.com/eunomia-bpf/ActPlane.git"
 ACTPLANE_REVISION="a62e5d9d96f91101cda019519053e950d532380a"
 ACTPLANE_BASE_BPF_LIB_BLOB="9bcefcdca83b89635788beaf8de15f33252427bb"
-ACTPLANE_PATCHED_BPF_LIB_BLOB="f4c0598596a5134725cc1e2fd27da4a5f6a16cdd"
+ACTPLANE_PREVIOUS_PATCHED_BPF_LIB_BLOB="f4c0598596a5134725cc1e2fd27da4a5f6a16cdd"
+ACTPLANE_PATCHED_BPF_LIB_BLOB="b45756c17b78566162794e6520146165c12e196a"
 ACTPLANE_PREBUILT_BPF_BLOB="0ef15841f84be784774024ad844e70bc6124a753"
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 AGENTSIGHT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 PATCH_DIR="$AGENTSIGHT_ROOT/patches/actplane"
+LATEST_PATCH_FILE="$PATCH_DIR/0004-drain-stale-pinned-events.patch"
 PATCH_FILES="$PATCH_DIR/0001-add-file-enforcement-profile.patch
 $PATCH_DIR/0002-validate-file-enforcement-profile.patch
-$PATCH_DIR/0003-pin-profile-metadata.patch"
+$PATCH_DIR/0003-pin-profile-metadata.patch
+$LATEST_PATCH_FILE"
 CARGO=${CARGO:-cargo}
 
 DECLARED_REVISION_COUNT=$(grep -F -c "rev = \"$ACTPLANE_REVISION\"" "$AGENTSIGHT_ROOT/Cargo.toml" || true)
@@ -91,6 +94,9 @@ if [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_BASE_BPF_LIB_BLOB" ]; then
         git -C "$SOURCE_DIR" apply --check "$patch_file"
         git -C "$SOURCE_DIR" apply "$patch_file"
     done
+elif [ "$ACTUAL_BPF_LIB_BLOB" = "$ACTPLANE_PREVIOUS_PATCHED_BPF_LIB_BLOB" ]; then
+    git -C "$SOURCE_DIR" apply --check "$LATEST_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply "$LATEST_PATCH_FILE"
 elif [ "$ACTUAL_BPF_LIB_BLOB" != "$ACTPLANE_PATCHED_BPF_LIB_BLOB" ]; then
     echo "ActPlane BPF loader does not match the pinned revision or reviewed patch queue" >&2
     exit 1
