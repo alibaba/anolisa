@@ -45,13 +45,20 @@ enabled = true
 custom_paths = []
 
 [session]
-# Session persistence directory (relative to ~/.copilot-shell/)
-persist_dir = "sessions"
+# Root for workspace-scoped provider conversations
+persist_dir = "~/.copilot-shell/cosh-core/sessions"
+# Disable to keep turns in memory only; emitted IDs will not be resumed
 auto_persist = true
 
 [logging]
 level = "warn"
 ```
+
+The project layer is loaded from
+`<workspace>/.copilot-shell/config.toml`, where `workspace` is the path passed
+through `--workspace` or the session-management request. Relative
+`session.persist_dir` values are resolved from that workspace, not from the
+Core process's launcher directory.
 
 ## cosh-shell Configuration
 

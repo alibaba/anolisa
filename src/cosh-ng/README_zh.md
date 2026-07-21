@@ -65,7 +65,19 @@ cosh-cli checkpoint restore step-040 --workspace /home/agent/project
 # 安全审计
 cosh-cli audit check --action "rm -rf /var/log"
 # → {"ok":true,"data":{"outcome":"Deny","matched_rule":"shell-deny-destructive",...},...}
+
+# 在当前工作空间恢复 Agent 对话
+cosh-shell --resume              # 打开交互式会话选择器
+cosh-shell --resume <session-id> # 选择已知的 provider 会话
 ```
+
+在 cosh-shell 中，可使用 `/session` 浏览会话、`/session status`
+查看已选择和已激活的身份，并通过 `/session clear ...` 在确认后清理旧记录。
+会话恢复会还原模型可见的对话上下文，但不会伪装成已恢复历史终端证据。记录
+默认保存在 `~/.copilot-shell/cosh-core/sessions/`，可通过
+`session.persist_dir` 修改根目录。项目会话配置和相对存储路径均从
+cosh-shell 传给 Core 的工作空间解析。详见
+[会话恢复指南](../../docs/user-guide/zh/user-entrypoint/cosh-ng/shell/session-recovery.md)。
 
 ## 命令参考
 

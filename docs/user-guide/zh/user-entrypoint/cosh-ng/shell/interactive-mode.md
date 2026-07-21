@@ -24,6 +24,8 @@ cosh-shell 通过 `openpty()` 创建伪终端对，在 slave 端启动 bash 或 
 cosh-shell                    # 默认使用 auto（自动检测）
 cosh-shell --shell zsh        # 使用 zsh
 cosh-shell raw qwen --shell zsh
+cosh-shell --resume           # Shell 启动后打开会话选择器
+cosh-shell --resume <id>      # 选择要恢复的 provider 对话
 ```
 
 Shell 选择优先级：
@@ -84,8 +86,13 @@ ESC]1337;COSH;<payload>BEL
 | `/hooks [list\|enable\|disable] [name]` | 管理钩子 |
 | `/extensions [list\|enable\|disable] [name]` | 管理扩展 |
 | `/skills [list\|enable\|disable] [name]` | 管理技能 |
+| `/session [status\|list\|resume <id>\|clear ...]` | 管理 provider 对话 |
+| `/resume [id]` | 会话选择器或会话选择的别名 |
 | `/debug [state\|events\|adapter]` | 调试信息 |
 | `/auth` | 触发认证流程 |
+
+选择器按键、工作空间作用域、清理确认和可恢复错误处理详见
+[会话恢复](session-recovery.md)。
 
 ## 启动流程
 

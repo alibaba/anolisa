@@ -46,13 +46,18 @@ enabled = true
 custom_paths = []
 
 [session]
-# 会话持久化目录（相对于 ~/.copilot-shell/）
-persist_dir = "sessions"
+# 按工作空间隔离的 provider 对话根目录
+persist_dir = "~/.copilot-shell/cosh-core/sessions"
+# 设为 false 时仅保留内存会话，输出的 ID 不会用于后续恢复
 auto_persist = true
 
 [logging]
 level = "warn"
 ```
+
+项目配置层从 `<workspace>/.copilot-shell/config.toml` 加载，其中 `workspace`
+是 `--workspace` 或会话管理请求传入的路径。相对 `session.persist_dir` 从该
+工作空间解析，而不是从 Core 进程的启动目录解析。
 
 ## cosh-shell 配置
 

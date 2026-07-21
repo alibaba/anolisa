@@ -66,7 +66,20 @@ cosh-cli checkpoint restore step-040 --workspace /home/agent/project
 # Security audit
 cosh-cli audit check --action "rm -rf /var/log"
 # → {"ok":true,"data":{"outcome":"Deny","matched_rule":"shell-deny-destructive",...},...}
+
+# Resume an Agent conversation in the current workspace
+cosh-shell --resume              # Open the interactive session picker
+cosh-shell --resume <session-id> # Select a known provider session
 ```
+
+Inside cosh-shell, use `/session` to browse sessions, `/session status` to
+inspect the selected and active identities, and `/session clear ...` to remove
+old entries after confirmation. Session recovery restores model-visible
+conversation context; historical terminal evidence is intentionally not
+restored. Records default to `~/.copilot-shell/cosh-core/sessions/`; change the
+root with `session.persist_dir`. Project session settings and relative store
+paths are resolved from the workspace cosh-shell sends to Core. See the
+[session recovery guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/shell/session-recovery.md).
 
 ## Command reference
 

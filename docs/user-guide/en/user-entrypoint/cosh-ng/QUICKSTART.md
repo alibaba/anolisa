@@ -60,6 +60,12 @@ echo '{"type":"user","message":{"role":"user","content":"List files in current d
 ```bash
 # Start interactive AI Shell
 cosh-shell
+
+# Browse resumable conversations for the current workspace
+cosh-shell --resume
+
+# Or select a known provider session directly
+cosh-shell --resume <session-id>
 ```
 
 ## Configuration
@@ -73,4 +79,5 @@ See [Configuration](configuration.md) for details.
 - [cosh-cli Overview](cli/overview.md) — Learn about the CLI subsystems
 - [cosh-core Overview](core/overview.md) — Learn about headless mode and LLM integration
 - [cosh-shell Overview](shell/overview.md) — Learn about the interactive terminal
+- [Session Recovery](shell/session-recovery.md) — Resume, inspect, and safely clear Agent conversations
 - [Output Format](output-format.md) — Understand the JSON envelope and error codes
