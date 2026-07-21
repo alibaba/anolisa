@@ -13,9 +13,8 @@ RuntimeDirectory=agentsight
 RuntimeDirectoryMode=0750
 UMask=0007
 Environment=AGENTSIGHT_ENFORCER_SOCKET=/run/agentsight/enforcer.sock
-# Reserve only the taint and connect hooks needed for progressive exfiltration policies.
-Environment=ACTPLANE_RESERVE_FILE_FLOW=1
-Environment=ACTPLANE_RESERVE_NETWORK=1
+# Avoid the upstream openat tracepoint stack limit while retaining file-to-network IFC.
+Environment=ACTPLANE_PINNED_PROFILE=credential-exfiltration
 NoNewPrivileges=no
 PrivateTmp=yes
 ProtectHome=yes

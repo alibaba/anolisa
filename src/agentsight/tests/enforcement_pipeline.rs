@@ -408,6 +408,31 @@ fn handle_controlled_connection(
             state.bindings.push(binding.clone());
             Ok(ResponseBody::Applied(binding))
         }
+        Command::ApplyCredentialPolicy(request) => {
+            let policy = request.policy;
+            let binding = Binding {
+                request: ApplyPolicy {
+                    binding_id: request.binding_id,
+                    agent_id: request.agent_id,
+                    session_id: request.session_id,
+                    root_pid: request.root_pid,
+                    process_start_time: request.process_start_time,
+                    policy_id: policy.policy_id,
+                    policy_revision: policy.revision.to_string(),
+                    policy_dsl: String::new(),
+                },
+                state: BindingState::Enforced,
+                message: None,
+                domain_id: Some(1),
+            };
+            let mut state = state
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.apply_attempts += 1;
+            state.bindings.push(binding.clone());
+            Ok(ResponseBody::Applied(binding))
+        }
         Command::ListBindings => {
             let (shared, changed) = &*state;
             let mut shared = shared
