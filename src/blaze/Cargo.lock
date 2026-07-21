@@ -113,7 +113,7 @@ checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
 
 [[package]]
 name = "blaze-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "semver",
@@ -128,7 +128,7 @@ dependencies = [
 
 [[package]]
 name = "blazed"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",

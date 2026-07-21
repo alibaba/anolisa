@@ -1,14 +1,13 @@
 # ANOLISA Blaze
 
-Per-host sandbox daemon that manages sandbox instance lifecycles via HTTP API.
+[中文版](README_zh.md)
 
-## Overview
+Per-host sandbox orchestrator daemon for AI Agent workloads.
 
-Blaze is an API-only daemon that allocates, monitors, and destroys
-sandboxed execution environments on a single host. It supports multiple backends
-(Firecracker microVM, bubblewrap/bwrap) with policy-driven selection, and is
-designed to be called by upper-layer platforms such as Substrate or E2B-style
-orchestrators.
+Blaze manages sandbox instance lifecycles via HTTP API with policy-driven
+backend selection. It supports warm-pool pre-allocation, multi-backend
+fallback (Firecracker → Bubblewrap → Mock), and Prometheus metrics export.
+Designed as the per-host agent for E2B-style orchestrator platforms.
 
 ## Features
 

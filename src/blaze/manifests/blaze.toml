@@ -3,7 +3,7 @@
 
 [component]
 name = "blaze"
-version = "0.2.0"
+version = "0.2.1"
 layer = "runtime"
 domain = "blaze"
 description = "Per-host sandbox orchestrator — multi-backend lifecycle management, kernel coordination"
