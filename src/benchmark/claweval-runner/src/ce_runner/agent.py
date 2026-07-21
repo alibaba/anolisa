@@ -60,7 +60,7 @@ def _clear_agent_error() -> None:
 
 # ── HTTP API (multimodal) ────────────────────────────────────────────────────
 
-def _run_first_turn_via_api(session_id: str, text: str,
+def _run_first_turn_via_api(text: str,
                              image_attachments: list,
                              text_attachments: list,
                              timeout: int, agent_id: str | None,
@@ -76,6 +76,10 @@ def _run_first_turn_via_api(session_id: str, text: str,
     *text_attachments* are inlined as additional ``text`` content blocks
     after the prompt text so mixed image/text payloads survive a single
     multimodal request without crashing the model on non-image data.
+
+    *timeout* caps the total wall-clock time (seconds) for all HTTP attempts
+    combined, honouring the user-supplied ``--timeout`` CLI flag.  Per-read
+    inactivity is still governed by ``CE_RUNNER_HTTP_INACTIVITY_S``.
 
     Returns the session file path or empty string on failure.
     """
@@ -166,12 +170,21 @@ def _run_first_turn_via_api(session_id: str, text: str,
 
     last_exc: BaseException | None = None
     t0 = time.monotonic()
+    deadline = t0 + timeout
     for attempt in range(1, max_retries + 2):  # max_retries+1 total attempts
         if attempt > 1:
             backoff = 2 ** (attempt - 1)
+            if time.monotonic() + backoff > deadline:
+                log(f"  [WARNING] Wall-clock timeout ({timeout}s) reached, "
+                    f"aborting before attempt {attempt}")
+                break
             log(f"  [RETRY] attempt {attempt}/{max_retries + 1} after {backoff}s backoff")
             time.sleep(backoff)
             max_ts_before = _max_updated_at_for_prefix(sessions_dir, key_prefix)
+
+        if time.monotonic() > deadline:
+            log(f"  [WARNING] Wall-clock timeout ({timeout}s) exceeded")
+            break
 
         # Read timeout: fixed for the first 3 attempts (quick probe of
         # transient stalls), then doubles from attempt 4 onward to accommodate
@@ -236,6 +249,13 @@ def _run_first_turn_via_api(session_id: str, text: str,
         reason = f"http_timeout_after_{wall:.0f}s {ctx}"
         log(f"  [ERROR] HTTP API exhausted {max_retries + 1} attempts, "
             f"last error: {type(last_exc).__name__} {ctx}")
+        _set_agent_error(reason)
+        return ""
+
+    # Deadline exceeded without a successful response
+    if time.monotonic() > deadline:
+        wall = time.monotonic() - t0
+        reason = f"http_wall_clock_timeout_{wall:.0f}s (limit={timeout}s)"
         _set_agent_error(reason)
         return ""
 
@@ -382,7 +402,7 @@ def run_agent(session_id: str, task_yaml: str, timeout: int,
 
     if image_attachments:
         # Mixed or image-only: still go via multimodal HTTP API.
-        return _run_first_turn_via_api(session_id, text, image_attachments,
+        return _run_first_turn_via_api(text, image_attachments,
                                        text_attachments, timeout, agent_id,
                                        task_dir)
 
@@ -702,14 +722,36 @@ def _run_agent_continue(session_id: str, message: str, timeout: int,
     return session_file
 
 
+def _tokenize(text: str) -> set[str]:
+    """Split *text* into a token set for similarity comparison.
+
+    English words are split on whitespace.  CJK runs are decomposed into
+    character bigrams (mirroring the agentsight loop-detector strategy) so
+    that overlap reflects phrase-level similarity rather than the near-100%
+    character-set overlap that raw ``set(text)`` produces for Chinese.
+    """
+    tokens: set[str] = set()
+    for word in text.split():
+        cjk_chars = [ch for ch in word if '\u4e00' <= ch <= '\u9fff'
+                     or '\u3400' <= ch <= '\u4dbf' or '\uf900' <= ch <= '\ufaff']
+        if len(cjk_chars) >= 2:
+            for i in range(len(cjk_chars) - 1):
+                tokens.add(cjk_chars[i] + cjk_chars[i + 1])
+        elif len(cjk_chars) == 1:
+            tokens.add(cjk_chars[0])
+        else:
+            tokens.add(word.lower())
+    return tokens
+
+
 def _is_repetitive(reply: str, history: list[str], threshold: float = 0.7) -> bool:
-    """Check if reply is too similar to any previous UA reply (word overlap)."""
-    reply_words = set(reply)
+    """Check if reply is too similar to any previous UA reply (token overlap)."""
+    reply_tokens = _tokenize(reply)
     for prev in history:
-        prev_words = set(prev)
-        if not reply_words or not prev_words:
+        prev_tokens = _tokenize(prev)
+        if not reply_tokens or not prev_tokens:
             continue
-        overlap = len(reply_words & prev_words) / max(len(reply_words), len(prev_words))
+        overlap = len(reply_tokens & prev_tokens) / max(len(reply_tokens), len(prev_tokens))
         if overlap >= threshold:
             return True
     return False
