@@ -482,3 +482,31 @@ Do not update CHANGELOG files outside a release version-bump change.
 - `cargo doc --workspace --no-deps` passes when public API or rustdoc changes.
 - `crates/cosh-shell/scripts/check-layout.sh` passes without new debt.
 - Required English and Chinese user documentation is updated.
+
+## Code Organization Notes and Waivers
+
+- `cosh-core/src/session/store.rs` stays a focused owner: its inline test
+  suite lives in `session/store/tests.rs` and workspace-owned legacy
+  discovery/locking/removal lives in `session/store/legacy.rs`, keeping the
+  production owner file below the 1000-line no-growth threshold.
+- The twelve `adapter::Session*` contracts re-exported through the adapter
+  public surface are classified `private-candidate` in
+  `crates/cosh-shell/scripts/inventory-public-api.sh`: their only external
+  consumers are this crate's integration tests, matching the existing
+  `CoshCoreAdapter` classification. They must be made crate-private once
+  those tests migrate to an internal harness path, and must not be frozen
+  as stable API without a separate review.
+- Waiver, `cosh-core/src/protocol.rs` (owner: session recovery feature):
+  the file was already over the 1000-line no-growth threshold on base; this
+  feature adds only the `session_error_code` / `session_error_phase` /
+  `session_resumable` fields and the `session_result_error` constructor,
+  which cannot leave the `OutputMessage` protocol owner without splitting
+  the shared JSONL contract enum itself. Re-split condition: the next
+  change that adds a new protocol message family must extract a
+  `protocol/session.rs` (or equivalent) owner module first.
+- Waiver, `cosh-core/src/config.rs` (owner: session recovery feature): the
+  file was already over the 1000-line threshold on base; this feature adds
+  three lines (`DEFAULT_SESSION_PERSIST_DIR` and workspace-scoped config
+  loading) that belong to the existing config owner. Re-split condition:
+  the next change that adds a new `[session]` or provider config section
+  must extract the session config types into their own module first.
