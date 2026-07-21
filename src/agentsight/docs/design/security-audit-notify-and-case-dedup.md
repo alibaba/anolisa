@@ -56,4 +56,3 @@ appended after the existing links, preserving each source-taint-sink-decision ch
 - ActPlane profile tests prove only `trace_connect` is added to the lightweight profile.
 - A real Linux test verifies `audit` allows the connection and records a case.
 - A real Linux test verifies `enforce` blocks the same operation and records a critical case.
-
