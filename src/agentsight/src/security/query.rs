@@ -1,0 +1,149 @@
+//! Query and risk-case types shared by storage, APIs, and correlation.
+
+use agentsight_enforcement_protocol::SecurityEvent;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+/// Bounded filters for security-event queries.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityEventFilter {
+    /// Inclusive lower occurrence-time bound.
+    pub start_ns: Option<u64>,
+    /// Inclusive upper occurrence-time bound.
+    pub end_ns: Option<u64>,
+    /// Exact serialized event discriminator.
+    pub event_type: Option<String>,
+    /// Exact normalized result such as `allowed` or `blocked`.
+    pub result: Option<String>,
+    /// Exact product policy identifier.
+    pub policy_id: Option<String>,
+    /// Exact product Agent identifier.
+    pub agent_id: Option<String>,
+    /// Exact AgentSight session identifier.
+    pub session_id: Option<String>,
+    /// Exact policy-binding identifier.
+    pub binding_id: Option<Uuid>,
+    /// Requested page size; storage clamps it to `1..=1000`.
+    pub limit: usize,
+    /// Non-negative row offset.
+    pub offset: i64,
+}
+
+impl Default for SecurityEventFilter {
+    fn default() -> Self {
+        Self {
+            start_ns: None,
+            end_ns: None,
+            event_type: None,
+            result: None,
+            policy_id: None,
+            agent_id: None,
+            session_id: None,
+            binding_id: None,
+            limit: 100,
+            offset: 0,
+        }
+    }
+}
+
+/// One stable page of immutable security events.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityEventPage {
+    /// Events ordered by occurrence time descending.
+    pub items: Vec<SecurityEvent>,
+    /// Effective clamped page size.
+    pub limit: usize,
+    /// Effective non-negative offset.
+    pub offset: i64,
+}
+
+/// One grouping key and its event count.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityCountBy {
+    /// Grouping value; absent database values are returned as `unknown`.
+    pub key: String,
+    /// Number of matching events.
+    pub count: u64,
+}
+
+/// Aggregate security-event totals for the local store.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecuritySummary {
+    /// Total immutable events.
+    pub total_events: u64,
+    /// Policy decisions with an observed kernel block.
+    pub blocked_events: u64,
+    /// Evidence-loss state events.
+    pub evidence_loss_events: u64,
+}
+
+/// Review state for one correlated risk case.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskCaseStatus {
+    /// Awaiting review.
+    Open,
+    /// Confirmed as a real risk.
+    Confirmed,
+    /// Reviewed as a false positive.
+    FalsePositive,
+    /// Explicitly accepted without changing policy.
+    AcceptedRisk,
+    /// Remediated and closed.
+    Resolved,
+}
+
+/// Product-facing case priority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskSeverity {
+    /// Informational evidence without an active risk.
+    Low,
+    /// Trusted or lower-confidence match requiring review.
+    Medium,
+    /// Unknown-public exfiltration match.
+    High,
+    /// High-risk match with confirmed kernel denial.
+    Critical,
+}
+
+/// Stored risk-case summary used by list queries.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RiskCase {
+    /// Stable case identifier.
+    pub case_id: Uuid,
+    /// Idempotent correlation key.
+    pub correlation_key: String,
+    /// Product policy identifier.
+    pub policy_id: String,
+    /// Immutable policy revision.
+    pub policy_revision: u64,
+    /// Product Agent identifier.
+    pub agent_id: String,
+    /// Optional AgentSight session identifier.
+    pub session_id: Option<String>,
+    /// Product-facing priority.
+    pub severity: RiskSeverity,
+    /// Deterministic prioritization score.
+    pub risk_score: u8,
+    /// Current review state.
+    pub status: RiskCaseStatus,
+    /// Whether the kernel confirmed denial.
+    pub blocked: bool,
+    /// First evidence occurrence time.
+    pub opened_at_ns: u64,
+    /// Most recent case update time.
+    pub updated_at_ns: u64,
+    /// Minimized explanation suitable for list views.
+    pub summary: String,
+}
+
+/// Expanded case with immutable evidence in occurrence order.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RiskCaseDetail {
+    /// Stored case summary.
+    #[serde(flatten)]
+    pub case: RiskCase,
+    /// Linked evidence ordered by position.
+    pub evidence: Vec<SecurityEvent>,
+}

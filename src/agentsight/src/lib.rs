@@ -58,6 +58,7 @@ pub mod health;
 pub mod interruption;
 pub mod parser;
 pub mod response_map;
+pub mod security;
 #[cfg(feature = "server")]
 pub mod server;
 pub mod skill_metrics;
