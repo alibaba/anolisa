@@ -57,6 +57,7 @@ pub(super) fn render_help<W: Write>(state: &InlineState, output: &mut W) -> std:
     let mut body = Vec::new();
     for (group, label_id) in [
         ("Config", MessageId::HelpGroupConfig),
+        ("Health", MessageId::HelpGroupHealth),
         ("Modes", MessageId::HelpGroupModes),
         ("Hooks", MessageId::HelpGroupHooks),
         ("Registry", MessageId::HelpGroupRegistry),

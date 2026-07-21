@@ -21,6 +21,7 @@ pub(super) enum SlashCommand<'a> {
     Config(Option<&'a str>, Option<&'a str>),
     Debug(Option<&'a str>),
     Info(SlashInfoCommand),
+    Health,
     Removed(RemovedCommand<'a>),
     Hint(&'a str),
     Unknown(&'a str),
@@ -59,6 +60,7 @@ impl<'a> SlashCommand<'a> {
                 Some(Self::Config(sub, value))
             }
             "/debug" => Some(Self::Debug(parts.next())),
+            "/health" => Some(Self::Health),
             "/extensions" => {
                 let sub = parts.next();
                 let arg = parts.next();

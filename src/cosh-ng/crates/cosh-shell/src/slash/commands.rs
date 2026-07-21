@@ -9,6 +9,7 @@ use crate::slash::notices::{
 };
 use crate::slash::parser::SlashCommand;
 use crate::slash::skills::render_skills_command;
+use crate::slash::health::render_health_command;
 
 pub(super) fn render_slash_command<W: Write>(
     command: SlashCommand<'_>,
@@ -61,6 +62,10 @@ pub(super) fn render_slash_command<W: Write>(
         }
         SlashCommand::Skills(sub, arg) => {
             render_skills_command(sub, arg, adapter, state, output)?;
+            Ok(true)
+        }
+        SlashCommand::Health => {
+            render_health_command(state, output)?;
             Ok(true)
         }
     }
