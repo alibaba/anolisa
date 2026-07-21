@@ -148,11 +148,11 @@ impl ActPlaneBackend {
 impl EnforcementBackend for ActPlaneBackend {
     fn health(&self) -> Result<HealthStatus, BackendError> {
         let runtime_error = self.state.runtime_error().clone();
-        Ok(HealthStatus {
+        Ok(self.state.events.reflect_delivery_loss(HealthStatus {
             ready: runtime_error.is_none(),
             backend: "actplane".into(),
             message: runtime_error,
-        })
+        }))
     }
 
     fn apply(&self, request: ApplyPolicy) -> Result<Binding, BackendError> {
