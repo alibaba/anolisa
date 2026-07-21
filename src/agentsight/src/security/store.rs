@@ -3,18 +3,18 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
-use agentsight_enforcement_protocol::{
-    DestinationClass, SecurityEvent, SecurityEventKind,
-};
-use rusqlite::{Connection, OptionalExtension, params};
+use agentsight_enforcement_protocol::{DestinationClass, SecurityEvent, SecurityEventKind};
+use rusqlite::{params, Connection, OptionalExtension};
 use thiserror::Error;
 use uuid::Uuid;
 
-use super::{SecurityCountBy, SecurityEventFilter, SecurityEventPage, SecuritySummary};
+use super::{
+    RiskCase, RiskCaseDetail, RiskCaseStatus, RiskSeverity, SecurityCountBy, SecurityEventFilter,
+    SecurityEventPage, SecuritySummary,
+};
 use crate::storage::sqlite::{create_connection, default_base_path};
 
-const EVENT_QUERY: &str =
-    "SELECT event_json FROM security_events
+const EVENT_QUERY: &str = "SELECT event_json FROM security_events
      WHERE (?1 IS NULL OR occurred_at_ns >= ?1)
        AND (?2 IS NULL OR occurred_at_ns <= ?2)
        AND (?3 IS NULL OR event_type = ?3)
@@ -50,6 +50,9 @@ pub enum SecurityStoreError {
     /// Another thread poisoned the database connection lock.
     #[error("security database connection lock is poisoned")]
     Poisoned,
+    /// Stored identifiers or enum values violate the local schema contract.
+    #[error("invalid stored security data: {0}")]
+    InvalidData(String),
 }
 
 /// Unified interface used by coordinators and API handlers.
@@ -266,6 +269,154 @@ impl SecurityStore {
         Ok(deleted as u64)
     }
 
+    /// Creates or updates one idempotent risk case and its evidence links.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed database, timestamp, stored-data, or lock error.
+    pub fn upsert_case(
+        &self,
+        case: &RiskCase,
+        evidence_ids: &[Uuid],
+    ) -> Result<Uuid, SecurityStoreError> {
+        let mut conn = self.connection()?;
+        let transaction = conn.transaction()?;
+        transaction.execute(
+            "INSERT INTO risk_cases (
+                case_id, correlation_key, policy_id, policy_revision, agent_id, session_id,
+                severity, risk_score, status, blocked, opened_at_ns, updated_at_ns, summary
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(correlation_key) DO UPDATE SET
+                severity = excluded.severity,
+                risk_score = excluded.risk_score,
+                blocked = excluded.blocked,
+                updated_at_ns = excluded.updated_at_ns,
+                summary = excluded.summary",
+            params![
+                case.case_id.to_string(),
+                case.correlation_key,
+                case.policy_id,
+                sqlite_time(case.policy_revision)?,
+                case.agent_id,
+                case.session_id,
+                risk_severity(case.severity),
+                i64::from(case.risk_score),
+                risk_status(case.status),
+                i64::from(case.blocked),
+                sqlite_time(case.opened_at_ns)?,
+                sqlite_time(case.updated_at_ns)?,
+                case.summary,
+            ],
+        )?;
+        let stored_case_id: String = transaction.query_row(
+            "SELECT case_id FROM risk_cases WHERE correlation_key = ?1",
+            [&case.correlation_key],
+            |row| row.get(0),
+        )?;
+        for (position, event_id) in evidence_ids.iter().enumerate() {
+            transaction.execute(
+                "INSERT OR IGNORE INTO risk_evidence_links (case_id, event_id, position)
+                 VALUES (?1, ?2, ?3)",
+                params![stored_case_id, event_id.to_string(), position as i64],
+            )?;
+        }
+        transaction.commit()?;
+        parse_uuid(&stored_case_id)
+    }
+
+    /// Lists newest risk cases with bounded pagination.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed database, stored-data, or lock error.
+    pub fn list_cases(
+        &self,
+        limit: usize,
+        offset: i64,
+    ) -> Result<Vec<RiskCase>, SecurityStoreError> {
+        let conn = self.connection()?;
+        let mut statement = conn.prepare(
+            "SELECT case_id, correlation_key, policy_id, policy_revision, agent_id, session_id,
+                    severity, risk_score, status, blocked, opened_at_ns, updated_at_ns, summary
+             FROM risk_cases
+             ORDER BY updated_at_ns DESC, case_id ASC
+             LIMIT ?1 OFFSET ?2",
+        )?;
+        let rows = statement.query_map(
+            params![limit.clamp(1, 1_000) as i64, offset.max(0)],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, i64>(9)?,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, i64>(11)?,
+                    row.get::<_, String>(12)?,
+                ))
+            },
+        )?;
+        rows.map(|row| row.map_err(Into::into).and_then(risk_case_from_row))
+            .collect()
+    }
+
+    /// Loads one risk case with immutable evidence in correlation order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SecurityStoreError::MissingCase`] when absent, or a typed
+    /// database, serialization, stored-data, or lock error.
+    pub fn case_detail(&self, case_id: Uuid) -> Result<RiskCaseDetail, SecurityStoreError> {
+        let conn = self.connection()?;
+        let row = conn
+            .query_row(
+                "SELECT case_id, correlation_key, policy_id, policy_revision, agent_id,
+                        session_id, severity, risk_score, status, blocked, opened_at_ns,
+                        updated_at_ns, summary
+                 FROM risk_cases WHERE case_id = ?1",
+                [case_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, i64>(9)?,
+                        row.get::<_, i64>(10)?,
+                        row.get::<_, i64>(11)?,
+                        row.get::<_, String>(12)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or(SecurityStoreError::MissingCase(case_id))?;
+        let case = risk_case_from_row(row)?;
+        let mut statement = conn.prepare(
+            "SELECT events.event_json
+             FROM risk_evidence_links AS links
+             JOIN security_events AS events ON events.event_id = links.event_id
+             WHERE links.case_id = ?1
+             ORDER BY links.position ASC",
+        )?;
+        let rows = statement.query_map([case_id.to_string()], |row| row.get::<_, String>(0))?;
+        let mut evidence = Vec::new();
+        for row in rows {
+            evidence.push(serde_json::from_str(&row?)?);
+        }
+        Ok(RiskCaseDetail { case, evidence })
+    }
+
     fn connection(&self) -> Result<MutexGuard<'_, Connection>, SecurityStoreError> {
         self.conn.lock().map_err(|_| SecurityStoreError::Poisoned)
     }
@@ -367,7 +518,11 @@ impl<'a> EventMetadata<'a> {
                 event_type: "file_action",
                 policy_id: Some(&action.policy_id),
                 policy_revision: Some(action.policy_revision),
-                result: if action.succeeded { "allowed" } else { "failed" },
+                result: if action.succeeded {
+                    "allowed"
+                } else {
+                    "failed"
+                },
                 destination_class: None,
             },
             SecurityEventKind::TaintTransition(transition) => Self {
@@ -381,14 +536,22 @@ impl<'a> EventMetadata<'a> {
                 event_type: "network_action",
                 policy_id: Some(&action.policy_id),
                 policy_revision: Some(action.policy_revision),
-                result: if action.succeeded { "allowed" } else { "blocked" },
+                result: if action.succeeded {
+                    "allowed"
+                } else {
+                    "blocked"
+                },
                 destination_class: Some(destination_class(action.destination_class)),
             },
             SecurityEventKind::PolicyDecision(decision) => Self {
                 event_type: "policy_decision",
                 policy_id: Some(&decision.policy_id),
                 policy_revision: Some(decision.policy_revision),
-                result: if decision.blocked { "blocked" } else { "allowed" },
+                result: if decision.blocked {
+                    "blocked"
+                } else {
+                    "allowed"
+                },
                 destination_class: None,
             },
             SecurityEventKind::EnforcementState(state) => Self {
@@ -414,4 +577,93 @@ fn destination_class(class: DestinationClass) -> &'static str {
 
 fn sqlite_time(value: u64) -> Result<i64, SecurityStoreError> {
     i64::try_from(value).map_err(|_| SecurityStoreError::TimestampOutOfRange(value))
+}
+
+type RiskCaseRow = (
+    String,
+    String,
+    String,
+    i64,
+    String,
+    Option<String>,
+    String,
+    i64,
+    String,
+    i64,
+    i64,
+    i64,
+    String,
+);
+
+fn risk_case_from_row(row: RiskCaseRow) -> Result<RiskCase, SecurityStoreError> {
+    Ok(RiskCase {
+        case_id: parse_uuid(&row.0)?,
+        correlation_key: row.1,
+        policy_id: row.2,
+        policy_revision: unsigned(row.3, "policy_revision")?,
+        agent_id: row.4,
+        session_id: row.5,
+        severity: parse_severity(&row.6)?,
+        risk_score: u8::try_from(row.7)
+            .map_err(|_| SecurityStoreError::InvalidData("risk_score is out of range".into()))?,
+        status: parse_status(&row.8)?,
+        blocked: row.9 != 0,
+        opened_at_ns: unsigned(row.10, "opened_at_ns")?,
+        updated_at_ns: unsigned(row.11, "updated_at_ns")?,
+        summary: row.12,
+    })
+}
+
+fn parse_uuid(value: &str) -> Result<Uuid, SecurityStoreError> {
+    Uuid::parse_str(value)
+        .map_err(|error| SecurityStoreError::InvalidData(format!("invalid UUID: {error}")))
+}
+
+fn unsigned(value: i64, field: &str) -> Result<u64, SecurityStoreError> {
+    u64::try_from(value)
+        .map_err(|_| SecurityStoreError::InvalidData(format!("{field} is negative")))
+}
+
+fn risk_severity(value: RiskSeverity) -> &'static str {
+    match value {
+        RiskSeverity::Low => "low",
+        RiskSeverity::Medium => "medium",
+        RiskSeverity::High => "high",
+        RiskSeverity::Critical => "critical",
+    }
+}
+
+fn parse_severity(value: &str) -> Result<RiskSeverity, SecurityStoreError> {
+    match value {
+        "low" => Ok(RiskSeverity::Low),
+        "medium" => Ok(RiskSeverity::Medium),
+        "high" => Ok(RiskSeverity::High),
+        "critical" => Ok(RiskSeverity::Critical),
+        _ => Err(SecurityStoreError::InvalidData(format!(
+            "unknown risk severity '{value}'"
+        ))),
+    }
+}
+
+fn risk_status(value: RiskCaseStatus) -> &'static str {
+    match value {
+        RiskCaseStatus::Open => "open",
+        RiskCaseStatus::Confirmed => "confirmed",
+        RiskCaseStatus::FalsePositive => "false_positive",
+        RiskCaseStatus::AcceptedRisk => "accepted_risk",
+        RiskCaseStatus::Resolved => "resolved",
+    }
+}
+
+fn parse_status(value: &str) -> Result<RiskCaseStatus, SecurityStoreError> {
+    match value {
+        "open" => Ok(RiskCaseStatus::Open),
+        "confirmed" => Ok(RiskCaseStatus::Confirmed),
+        "false_positive" => Ok(RiskCaseStatus::FalsePositive),
+        "accepted_risk" => Ok(RiskCaseStatus::AcceptedRisk),
+        "resolved" => Ok(RiskCaseStatus::Resolved),
+        _ => Err(SecurityStoreError::InvalidData(format!(
+            "unknown risk status '{value}'"
+        ))),
+    }
 }
