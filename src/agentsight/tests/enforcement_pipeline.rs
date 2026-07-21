@@ -461,7 +461,7 @@ fn handle_controlled_connection(
                 }
             }
         }
-        Command::SubscribeViolations => {
+        Command::SubscribeViolations | Command::SubscribeSecurityEvents => {
             let (shared, changed) = &*state;
             let mut shared = shared
                 .lock()
