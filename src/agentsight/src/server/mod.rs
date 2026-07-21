@@ -20,7 +20,7 @@ use crate::config::ServerAuthConfig;
 use crate::enforcement::{EnforcementClient, EnforcementCoordinator, EnforcementStore};
 use crate::grader::EvaluationStore;
 use crate::health::{HealthChecker, HealthStore};
-use crate::security::SecurityStore;
+use crate::security::{SecurityCoordinator, SecurityStore};
 use crate::storage::sqlite::InterruptionStore;
 
 use self::auth::{AuthMiddleware, DashboardAuth};
@@ -196,6 +196,7 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(enforcement::health)
                 .service(enforcement::apply_binding)
                 .service(enforcement::apply_file_binding)
+                .service(enforcement::apply_credential_binding)
                 .service(enforcement::list_bindings)
                 .service(enforcement::detach_binding)
                 .service(enforcement::list_violations)
@@ -255,14 +256,24 @@ pub async fn run_server(
         .parent()
         .unwrap_or(std::path::Path::new("/var/log/sysak/.agentsight"))
         .join("enforcement.db");
+    let enforcement_client = EnforcementClient::new(enforcement_socket);
     let enforcement = Arc::new(EnforcementCoordinator::new(
-        EnforcementClient::new(enforcement_socket),
+        enforcement_client.clone(),
         EnforcementStore::open(&enforcement_path)
             .map_err(|error| std::io::Error::other(error.to_string()))?,
     ));
     let enforcement_ingestion = enforcement
         .start_ingestion()
         .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let security_coordinator =
+        SecurityCoordinator::new(enforcement_client, Arc::clone(&security_store));
+    let security_ingestion = match security_coordinator.start() {
+        Ok(ingestion) => ingestion,
+        Err(error) => {
+            stop_enforcement_ingestion(&enforcement, enforcement_ingestion);
+            return Err(std::io::Error::other(error.to_string()));
+        }
+    };
 
     // Initialize dashboard authentication
     let storage_base = storage_path
@@ -365,14 +376,26 @@ pub async fn run_server(
     {
         Ok(server) => server,
         Err(error) => {
+            stop_security_ingestion(&security_coordinator, security_ingestion);
             stop_enforcement_ingestion(&enforcement, enforcement_ingestion);
             return Err(error);
         }
     };
     let server_result = server.run().await;
 
+    stop_security_ingestion(&security_coordinator, security_ingestion);
     stop_enforcement_ingestion(&enforcement, enforcement_ingestion);
     server_result
+}
+
+fn stop_security_ingestion(
+    coordinator: &SecurityCoordinator,
+    ingestion: std::thread::JoinHandle<()>,
+) {
+    coordinator.stop();
+    if ingestion.join().is_err() {
+        log::error!("AgentSight security ingestion worker panicked during shutdown");
+    }
 }
 
 fn stop_enforcement_ingestion(

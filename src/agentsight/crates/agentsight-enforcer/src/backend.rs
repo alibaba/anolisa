@@ -3,7 +3,7 @@
 use std::sync::mpsc::Receiver;
 
 use agentsight_enforcement_protocol::{
-    ApplyPolicy, Binding, HealthStatus, SecurityEvent, ViolationEvent,
+    ApplyCredentialPolicy, ApplyPolicy, Binding, HealthStatus, SecurityEvent, ViolationEvent,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -46,6 +46,16 @@ pub trait EnforcementBackend: Send + Sync + 'static {
     ///
     /// Returns a typed conflict, process, compile, or kernel error.
     fn apply(&self, request: ApplyPolicy) -> Result<Binding, BackendError>;
+
+    /// Compiles and applies a product-level credential-exfiltration policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, compile, stale-process, or kernel error.
+    fn apply_credential_policy(
+        &self,
+        request: ApplyCredentialPolicy,
+    ) -> Result<Binding, BackendError>;
 
     /// Detaches one binding.
     ///

@@ -7,7 +7,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use agentsight_enforcement_protocol::{
-    ApplyPolicy, Binding, BindingState, HealthStatus, ViolationEvent,
+    ApplyCredentialPolicy, ApplyPolicy, Binding, BindingState, HealthStatus, ViolationEvent,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -227,6 +227,28 @@ impl EnforcementCoordinator {
                 Err(error.into())
             }
         }
+    }
+
+    /// Applies a product-level credential policy and persists the adapter acknowledgement.
+    ///
+    /// Product policy compilation remains inside the privileged adapter, so AgentSight only
+    /// persists the compiled binding returned by the enforcer.
+    ///
+    /// # Errors
+    ///
+    /// Returns when ingestion is unavailable, the adapter rejects the policy, or persistence
+    /// fails.
+    pub fn apply_credential_policy(
+        &self,
+        request: ApplyCredentialPolicy,
+    ) -> Result<Binding, EnforcementCoordinatorError> {
+        let _lifecycle = self.lifecycle();
+        if !self.ingestion_readiness.is_ready() {
+            return Err(EnforcementCoordinatorError::IngestionUnavailable);
+        }
+        let binding = self.client.apply_credential_policy(request)?;
+        self.store.upsert_binding(&binding)?;
+        Ok(binding)
     }
 
     /// Persists detaching state and waits for acknowledgement before detached.

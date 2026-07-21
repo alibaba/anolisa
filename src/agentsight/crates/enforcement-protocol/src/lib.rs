@@ -46,6 +46,8 @@ pub enum Command {
     Health,
     /// Compiles and attaches one policy binding.
     ApplyPolicy(ApplyPolicy),
+    /// Compiles a product-level credential policy inside the privileged adapter.
+    ApplyCredentialPolicy(ApplyCredentialPolicy),
     /// Detaches a binding by its stable identifier.
     DetachAgent {
         /// Binding to detach.
@@ -57,6 +59,23 @@ pub enum Command {
     SubscribeViolations,
     /// Keeps the connection open and streams normalized security events.
     SubscribeSecurityEvents,
+}
+
+/// Product-level credential policy binding sent across the privilege boundary.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplyCredentialPolicy {
+    /// Stable idempotency key for this binding.
+    pub binding_id: Uuid,
+    /// Product-level Agent identity.
+    pub agent_id: String,
+    /// Optional AgentSight session identity.
+    pub session_id: Option<String>,
+    /// Root PID whose process tree receives the policy.
+    pub root_pid: i32,
+    /// Linux process start time used to reject PID reuse.
+    pub process_start_time: u64,
+    /// ActPlane-independent taint and destination policy.
+    pub policy: CredentialExfiltrationPolicy,
 }
 
 /// Desired policy binding for one Agent process tree.
@@ -407,5 +426,31 @@ mod tests {
             .expect("fixture should decode")
             .expect("frame should exist");
         assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn credential_policy_command_round_trips_as_one_frame() {
+        let request = Request::new(Command::ApplyCredentialPolicy(ApplyCredentialPolicy {
+            binding_id: Uuid::new_v4(),
+            agent_id: "agent-1".into(),
+            session_id: Some("session-1".into()),
+            root_pid: 42,
+            process_start_time: 101,
+            policy: CredentialExfiltrationPolicy {
+                policy_id: "credential-exfiltration".into(),
+                revision: 3,
+                source_patterns: vec!["/root/.ssh/id_rsa".into()],
+                trusted_endpoints: vec!["10.0.0.8".into()],
+                taint_label: "CREDENTIAL".into(),
+                taint_ttl_secs: 900,
+                mode: PolicyMode::Audit,
+            },
+        }));
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &request).expect("fixture should encode");
+        let decoded: Request = read_frame(&mut BufReader::new(Cursor::new(bytes)))
+            .expect("fixture should decode")
+            .expect("frame should exist");
+        assert_eq!(decoded, request);
     }
 }

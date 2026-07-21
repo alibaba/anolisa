@@ -195,6 +195,9 @@ fn dispatch<B: EnforcementBackend>(
     match command {
         Command::Health => backend.health().map(ResponseBody::Health),
         Command::ApplyPolicy(request) => backend.apply(request).map(ResponseBody::Applied),
+        Command::ApplyCredentialPolicy(request) => backend
+            .apply_credential_policy(request)
+            .map(ResponseBody::Applied),
         Command::DetachAgent { binding_id } => {
             backend.detach(binding_id)?;
             Ok(ResponseBody::Detached)

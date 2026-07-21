@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use agentsight_enforcement_protocol::{
-    read_frame, write_frame, ApplyPolicy, Binding, Command, HealthStatus, ProtocolError, Request,
-    Response, ResponseBody, SecurityEvent, ViolationEvent,
+    ApplyCredentialPolicy, ApplyPolicy, Binding, Command, HealthStatus, ProtocolError, Request,
+    Response, ResponseBody, SecurityEvent, ViolationEvent, read_frame, write_frame,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -93,6 +93,21 @@ impl EnforcementClient {
         match self.call(Command::ApplyPolicy(request))? {
             ResponseBody::Applied(binding) => Ok(binding),
             body => Err(unexpected("apply", &body)),
+        }
+    }
+
+    /// Applies a product-level credential policy compiled by the enforcer adapter.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transport, validation, compilation, or response-shape error.
+    pub fn apply_credential_policy(
+        &self,
+        request: ApplyCredentialPolicy,
+    ) -> Result<Binding, EnforcementError> {
+        match self.call(Command::ApplyCredentialPolicy(request))? {
+            ResponseBody::Applied(binding) => Ok(binding),
+            body => Err(unexpected("apply credential policy", &body)),
         }
     }
 

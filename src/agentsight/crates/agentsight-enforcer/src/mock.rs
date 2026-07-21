@@ -6,9 +6,10 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agentsight_enforcement_protocol::{
-    ApplyPolicy, Binding, BindingState, DestinationClass, Effect, EventIdentity, FileAction,
-    HealthStatus, NetworkAction, NetworkDirection, PolicyDecision, PolicyMode, SecurityEvent,
-    SecurityEventKind, TaintTransition, TaintTransitionKind, ViolationEvent,
+    ApplyCredentialPolicy, ApplyPolicy, Binding, BindingState, DestinationClass, Effect,
+    EventIdentity, FileAction, HealthStatus, NetworkAction, NetworkDirection, PolicyDecision,
+    PolicyMode, SecurityEvent, SecurityEventKind, TaintTransition, TaintTransitionKind,
+    ViolationEvent,
 };
 use uuid::Uuid;
 
@@ -203,6 +204,42 @@ impl EnforcementBackend for MockBackend {
         };
         bindings.insert(binding.request.binding_id, binding.clone());
         Ok(binding)
+    }
+
+    fn apply_credential_policy(
+        &self,
+        request: ApplyCredentialPolicy,
+    ) -> Result<Binding, BackendError> {
+        request
+            .policy
+            .validate()
+            .map_err(|error| BackendError::CompileFailure(error.to_string()))?;
+        let action = if request.policy.mode == PolicyMode::Enforce {
+            "block"
+        } else {
+            "notify"
+        };
+        let mut policy_dsl = String::from("source AGENT = exec \"**\"\n");
+        for source in &request.policy.source_patterns {
+            policy_dsl.push_str(&format!(
+                "source {} = file \"{}\"\n",
+                request.policy.taint_label, source
+            ));
+        }
+        policy_dsl.push_str(&format!(
+            "rule agentsight-credential-exfiltration:\n  {action} connect endpoint \"*\" if {}\n",
+            request.policy.taint_label,
+        ));
+        self.apply(ApplyPolicy {
+            binding_id: request.binding_id,
+            agent_id: request.agent_id,
+            session_id: request.session_id,
+            root_pid: request.root_pid,
+            process_start_time: request.process_start_time,
+            policy_id: request.policy.policy_id,
+            policy_revision: request.policy.revision.to_string(),
+            policy_dsl,
+        })
     }
 
     fn detach(&self, binding_id: Uuid) -> Result<(), BackendError> {

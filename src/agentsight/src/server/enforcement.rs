@@ -4,7 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use actix_web::{HttpResponse, delete, get, post, web};
-use agentsight_enforcement_protocol::ApplyPolicy;
+use agentsight_enforcement_protocol::{
+    ApplyCredentialPolicy, ApplyPolicy, CredentialExfiltrationPolicy, PolicyMode,
+};
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
@@ -28,6 +30,19 @@ pub(super) struct FileBindingRequest {
     session_id: Option<String>,
     root_pid: i32,
     path: PathBuf,
+}
+
+/// Product fields for a taint-aware credential exfiltration binding.
+#[derive(Debug, Deserialize)]
+pub(super) struct CredentialBindingRequest {
+    agent_id: String,
+    session_id: Option<String>,
+    root_pid: i32,
+    source_path: PathBuf,
+    trusted_endpoint: Option<String>,
+    revision: u64,
+    mode: PolicyMode,
+    taint_ttl_secs: Option<u64>,
 }
 
 /// Returns privileged backend readiness.
@@ -81,6 +96,29 @@ pub(super) async fn apply_file_binding(
         }
     };
     run_blocking(move || coordinator.apply(request)).await
+}
+
+/// Builds a product-level taint policy and delegates DSL compilation to the enforcer.
+#[post("/enforcement/credential-bindings")]
+pub(super) async fn apply_credential_binding(
+    data: web::Data<AppState>,
+    body: web::Json<CredentialBindingRequest>,
+) -> HttpResponse {
+    let Some(coordinator) = data.enforcement.clone() else {
+        return unavailable();
+    };
+    let request = match build_credential_binding(body.into_inner()) {
+        Ok(request) => request,
+        Err(message) => {
+            return error_response(
+                actix_web::http::StatusCode::BAD_REQUEST,
+                "invalid_credential_binding",
+                &message,
+                false,
+            );
+        }
+    };
+    run_blocking(move || coordinator.apply_credential_policy(request)).await
 }
 
 /// Lists AgentSight's persisted desired binding states.
@@ -180,6 +218,48 @@ fn build_file_binding(request: FileBindingRequest) -> Result<ApplyPolicy, String
         policy_id: format!("agentsight-file-open:{binding_id}"),
         policy_revision: FILE_POLICY_REVISION.into(),
         policy_dsl,
+    })
+}
+
+fn build_credential_binding(
+    request: CredentialBindingRequest,
+) -> Result<ApplyCredentialPolicy, String> {
+    let agent_id = request.agent_id.trim();
+    if agent_id.is_empty() || agent_id.len() > 128 {
+        return Err("agent_id must contain 1 to 128 characters".into());
+    }
+    let source_path = validate_policy_path(&request.source_path)?;
+    let source_path = source_path
+        .to_str()
+        .ok_or_else(|| "source_path must be valid UTF-8".to_string())?
+        .to_string();
+    let process_start_time = read_target_start_time(request.root_pid)?;
+    let trusted_endpoints = request
+        .trusted_endpoint
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .into_iter()
+        .collect();
+    let policy = CredentialExfiltrationPolicy {
+        policy_id: "agentsight-credential-exfiltration".into(),
+        revision: request.revision,
+        source_patterns: vec![source_path],
+        trusted_endpoints,
+        taint_label: "CREDENTIAL".into(),
+        taint_ttl_secs: request.taint_ttl_secs.unwrap_or(900),
+        mode: request.mode,
+    };
+    policy.validate().map_err(|error| error.to_string())?;
+    Ok(ApplyCredentialPolicy {
+        binding_id: Uuid::new_v4(),
+        agent_id: agent_id.into(),
+        session_id: request
+            .session_id
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        root_pid: request.root_pid,
+        process_start_time,
+        policy,
     })
 }
 
@@ -356,6 +436,44 @@ mod tests {
             binding
                 .policy_dsl
                 .contains(path.canonicalize().unwrap().to_str().unwrap())
+        );
+
+        child.kill().expect("fixture process should stop");
+        child.wait().expect("fixture process should exit");
+        fs::remove_file(path).expect("fixture file should be removed");
+    }
+
+    #[test]
+    fn builds_taint_aware_credential_binding() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("fixture process should start");
+        let path = std::env::temp_dir().join(format!("agentsight-credential-{}", Uuid::new_v4()));
+        fs::write(&path, b"fixture").expect("fixture file should exist");
+
+        let binding = build_credential_binding(CredentialBindingRequest {
+            agent_id: " qoder ".into(),
+            session_id: Some(" session-1 ".into()),
+            root_pid: child.id() as i32,
+            source_path: path.clone(),
+            trusted_endpoint: Some(" 10.0.0.8 ".into()),
+            revision: 3,
+            mode: PolicyMode::Audit,
+            taint_ttl_secs: None,
+        })
+        .expect("valid credential policy should build");
+
+        assert_eq!(binding.agent_id, "qoder");
+        assert_eq!(binding.session_id.as_deref(), Some("session-1"));
+        assert_eq!(binding.policy.mode, PolicyMode::Audit);
+        assert_eq!(binding.policy.revision, 3);
+        assert_eq!(binding.policy.taint_label, "CREDENTIAL");
+        assert_eq!(binding.policy.taint_ttl_secs, 900);
+        assert_eq!(binding.policy.trusted_endpoints, ["10.0.0.8"]);
+        assert_eq!(
+            binding.policy.source_patterns,
+            [path.canonicalize().unwrap().to_str().unwrap()]
         );
 
         child.kill().expect("fixture process should stop");

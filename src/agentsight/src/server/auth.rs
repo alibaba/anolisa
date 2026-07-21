@@ -302,7 +302,9 @@ fn is_enforcement_mutation(method: &actix_web::http::Method, path: &str) -> bool
     match *method {
         actix_web::http::Method::POST => matches!(
             path,
-            "/api/enforcement/bindings" | "/api/enforcement/file-bindings"
+            "/api/enforcement/bindings"
+                | "/api/enforcement/file-bindings"
+                | "/api/enforcement/credential-bindings"
         ),
         actix_web::http::Method::DELETE => path
             .strip_prefix("/api/enforcement/bindings/")

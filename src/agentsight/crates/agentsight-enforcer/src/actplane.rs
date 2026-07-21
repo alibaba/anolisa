@@ -12,10 +12,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use actplane_ifc_compiler::compile_str;
 use agentsight_enforcement_protocol::{
-    ApplyPolicy, Binding, BindingState, CredentialExfiltrationPolicy, DestinationClass, Effect,
-    EventIdentity, FileAction, HealthStatus, NetworkAction, NetworkDirection, PolicyDecision,
-    PolicyMode, SecurityEvent, SecurityEventKind, TaintTransition, TaintTransitionKind,
-    ViolationEvent, PROTOCOL_VERSION,
+    ApplyCredentialPolicy, ApplyPolicy, Binding, BindingState, CredentialExfiltrationPolicy,
+    DestinationClass, Effect, EventIdentity, FileAction, HealthStatus, NetworkAction,
+    NetworkDirection, PROTOCOL_VERSION, PolicyDecision, PolicyMode, SecurityEvent,
+    SecurityEventKind, TaintTransition, TaintTransitionKind, ViolationEvent,
 };
 use ebpf_ifc_engine::capability::{
     AUTH_ADD_LABEL, AUTH_BIND_RULE, AUTH_DECLASSIFY, AUTH_DELEGATE, AUTH_NARROW_SCOPE,
@@ -268,6 +268,23 @@ impl EnforcementBackend for ActPlaneBackend {
         Ok(binding)
     }
 
+    fn apply_credential_policy(
+        &self,
+        request: ApplyCredentialPolicy,
+    ) -> Result<Binding, BackendError> {
+        let policy_dsl = compile_credential_exfiltration_policy(&request.policy)?;
+        self.apply(ApplyPolicy {
+            binding_id: request.binding_id,
+            agent_id: request.agent_id,
+            session_id: request.session_id,
+            root_pid: request.root_pid,
+            process_start_time: request.process_start_time,
+            policy_id: request.policy.policy_id,
+            policy_revision: request.policy.revision.to_string(),
+            policy_dsl,
+        })
+    }
+
     fn detach(&self, binding_id: Uuid) -> Result<(), BackendError> {
         let _lifecycle = self.lifecycle();
         let mut bindings = self.state.bindings();
@@ -451,7 +468,7 @@ pub fn compile_credential_exfiltration_policy(
         ));
     }
 
-    let mut dsl = String::new();
+    let mut dsl = String::from("source AGENT = exec \"**\"\n");
     for source in sources {
         dsl.push_str(&format!(
             "source {} = file \"{}\"\n",
@@ -478,14 +495,11 @@ pub fn compile_credential_exfiltration_policy(
 }
 
 fn validate_label(label: &str) -> Result<(), BackendError> {
-    let valid = label
-        .chars()
-        .enumerate()
-        .all(|(index, character)| {
-            character == '_'
-                || character.is_ascii_uppercase()
-                || (index > 0 && character.is_ascii_digit())
-        });
+    let valid = label.chars().enumerate().all(|(index, character)| {
+        character == '_'
+            || character.is_ascii_uppercase()
+            || (index > 0 && character.is_ascii_digit())
+    });
     if valid {
         Ok(())
     } else {
@@ -500,9 +514,7 @@ fn validate_literal(kind: &str, value: &str) -> Result<(), BackendError> {
         || value.len() >= 127
         || value
             .chars()
-            .any(|character| {
-                character == '"' || character == '\\' || character.is_control()
-            })
+            .any(|character| character == '"' || character == '\\' || character.is_control())
     {
         return Err(BackendError::CompileFailure(format!(
             "{kind} contains unsupported DSL characters or exceeds 126 bytes"
@@ -901,6 +913,7 @@ mod tests {
         let dsl = compile_credential_exfiltration_policy(&credential_policy())
             .expect("fixture policy should compile");
 
+        assert!(dsl.starts_with("source AGENT = exec \"**\"\n"));
         assert!(dsl.contains("source CREDENTIAL = file \"/root/.aws/credentials\""));
         assert!(dsl.contains("source CREDENTIAL = file \"/root/.ssh/id_rsa\""));
         assert!(dsl.contains("block connect endpoint \"*\" if CREDENTIAL"));
@@ -969,7 +982,10 @@ mod tests {
             panic!("second evidence must be a taint transition");
         };
         assert_eq!(taint.label, "CREDENTIAL");
-        assert!(matches!(events[2].kind, SecurityEventKind::NetworkAction(_)));
+        assert!(matches!(
+            events[2].kind,
+            SecurityEventKind::NetworkAction(_)
+        ));
         let SecurityEventKind::PolicyDecision(decision) = &events[3].kind else {
             panic!("last evidence must be a policy decision");
         };
