@@ -47,8 +47,8 @@ on:
         required: false
         type: boolean
         default: false
-      run_anvil:
-        description: 'Force run anvil tests (ignore change detection)'
+      run_blaze:
+        description: 'Force run blaze tests (ignore change detection)'
         required: false
         type: boolean
         default: false
@@ -88,7 +88,7 @@ jobs:
       skillfs: ${{ steps.changes.outputs.skillfs }}
       cosh_ng: ${{ steps.changes.outputs.cosh_ng }}
       ktuner: ${{ steps.changes.outputs.ktuner }}
-      anvil: ${{ steps.changes.outputs.anvil }}
+      blaze: ${{ steps.changes.outputs.blaze }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -152,7 +152,7 @@ jobs:
           if echo "$CHANGED" | grep -q "^src/ktuner/"; then
             KTUNER=true
           fi
-          if echo "$CHANGED" | grep -q "^src/anvil/"; then
+          if echo "$CHANGED" | grep -qE "^src/(anvil|blaze)/"; then
             ANVIL=true
           fi
 
@@ -187,7 +187,7 @@ jobs:
           if [[ "${{ inputs.run_ktuner }}" == "true" ]]; then
             KTUNER=true
           fi
-          if [[ "${{ inputs.run_anvil }}" == "true" ]]; then
+          if [[ "${{ inputs.run_blaze }}" == "true" ]]; then
             ANVIL=true
           fi
 
@@ -201,7 +201,7 @@ jobs:
           echo "skillfs=$SKILLFS" >> $GITHUB_OUTPUT
           echo "cosh_ng=$COSH_NG" >> $GITHUB_OUTPUT
           echo "ktuner=$KTUNER" >> $GITHUB_OUTPUT
-          echo "anvil=$ANVIL" >> $GITHUB_OUTPUT
+          echo "blaze=$ANVIL" >> $GITHUB_OUTPUT
 
           echo "### Change Detection Results" >> $GITHUB_STEP_SUMMARY
           echo "| Component | Changed |" >> $GITHUB_STEP_SUMMARY
@@ -216,7 +216,7 @@ jobs:
           echo "| SkillFS | $SKILLFS |" >> $GITHUB_STEP_SUMMARY
           echo "| cosh-ng | $COSH_NG |" >> $GITHUB_STEP_SUMMARY
           echo "| ktuner | $KTUNER |" >> $GITHUB_STEP_SUMMARY
-          echo "| anvil | $ANVIL |" >> $GITHUB_STEP_SUMMARY
+          echo "| blaze | $ANVIL |" >> $GITHUB_STEP_SUMMARY
 
   # =========================================================================
   # Step 2: Build & Lint copilot-shell
@@ -1034,12 +1034,12 @@ jobs:
           cargo test
 
   # =========================================================================
-  # Step 13: Test anvil (per-host sandbox daemon)
+  # Step 13: Test blaze (per-host sandbox daemon)
   # =========================================================================
-  test-anvil:
-    name: Test anvil
+  test-blaze:
+    name: Test blaze
     needs: detect-changes
-    if: needs.detect-changes.outputs.anvil == 'true'
+    if: needs.detect-changes.outputs.blaze == 'true'
     runs-on: anolisa-k8s-general-ci-x64
     steps:
       - uses: actions/checkout@v4
@@ -1051,19 +1051,19 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src/anvil
+          workspaces: src/blaze
 
       - name: Check formatting
         run: |
-          cd src/anvil
+          cd src/blaze
           cargo fmt --all --check
 
       - name: Lint
         run: |
-          cd src/anvil
+          cd src/blaze
           cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Run tests
         run: |
-          cd src/anvil
+          cd src/blaze
           cargo test --workspace
