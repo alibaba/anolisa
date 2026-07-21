@@ -13,8 +13,8 @@ use ratatui::{
 };
 
 use crate::diagnostics::health::{
-    HealthCollector, HealthFact, HealthFactValue, HealthFinding, HealthMessageId, HealthScanReport,
-    HealthSeverity, HealthTryItem, HealthUnavailableReason,
+    sorted_findings, sorted_try_items, HealthCollector, HealthFact, HealthFactValue, HealthFinding,
+    HealthMessageId, HealthScanReport, HealthSeverity, HealthUnavailableReason,
 };
 
 use super::{
@@ -720,35 +720,6 @@ fn top_finding(report: &HealthScanReport) -> Option<&HealthFinding> {
     sorted_findings(report).into_iter().next()
 }
 
-fn sorted_findings(report: &HealthScanReport) -> Vec<&HealthFinding> {
-    let mut findings = report.findings.iter().collect::<Vec<_>>();
-    findings.sort_by(|left, right| {
-        right
-            .severity
-            .precedence()
-            .cmp(&left.severity.precedence())
-            .then_with(|| finding_display_rank(left).cmp(&finding_display_rank(right)))
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    findings
-}
-
-fn finding_display_rank(finding: &HealthFinding) -> u8 {
-    match finding.title_id {
-        HealthMessageId::HealthFindingRecentOom => 0,
-        HealthMessageId::HealthFindingCpuLoadHigh => 1,
-        HealthMessageId::HealthFindingMemoryAvailableLow => 2,
-        HealthMessageId::HealthFindingSwapPressure => 3,
-        HealthMessageId::HealthFindingDiskHigh => 4,
-        HealthMessageId::HealthFindingServiceFailed
-        | HealthMessageId::HealthFindingServiceInactive => 5,
-        HealthMessageId::HealthFindingCoreCollectorUnavailable
-        | HealthMessageId::HealthFindingPlatformUnsupported => 6,
-        HealthMessageId::HealthFindingKernelPanic => 7,
-        _ => 8,
-    }
-}
-
 fn insight_id_for_finding(finding: &HealthFinding) -> HealthMessageId {
     match finding.title_id {
         HealthMessageId::HealthFindingMemoryAvailableLow => {
@@ -1180,31 +1151,6 @@ fn try_lines(
         lines.extend(wrap_prompt_line(&body, content_width));
     }
     lines
-}
-
-fn sorted_try_items(report: &HealthScanReport) -> Vec<&HealthTryItem> {
-    let visible_finding_rank = sorted_findings(report)
-        .into_iter()
-        .take(HEALTH_MAX_VISIBLE_FINDINGS)
-        .enumerate()
-        .map(|(rank, finding)| (finding.id.as_str(), rank))
-        .collect::<BTreeMap<_, _>>();
-    let mut items = report
-        .try_items
-        .iter()
-        .filter(|item| {
-            report.findings.is_empty()
-                || visible_finding_rank.contains_key(item.finding_id.as_str())
-        })
-        .collect::<Vec<_>>();
-    items.sort_by_key(|item| {
-        let finding_rank = visible_finding_rank
-            .get(item.finding_id.as_str())
-            .copied()
-            .unwrap_or(usize::MAX);
-        (finding_rank, std::cmp::Reverse(item.score), item.id.clone())
-    });
-    items
 }
 
 fn max_visible_prompt_count(content_width: usize) -> usize {

@@ -171,7 +171,7 @@ fn render_analysis_mode_command<W: Write>(
             Ok(false)
         }
         Some("smart") => {
-            state.analysis_mode = AnalysisMode::Smart;
+            set_analysis_mode(state, AnalysisMode::Smart);
             render_notice_panel(
                 output,
                 state.i18n().t(MessageId::AnalysisModeTitle),
@@ -183,7 +183,7 @@ fn render_analysis_mode_command<W: Write>(
             Ok(true)
         }
         Some("auto") => {
-            state.analysis_mode = AnalysisMode::Auto;
+            set_analysis_mode(state, AnalysisMode::Auto);
             render_notice_panel(
                 output,
                 state.i18n().t(MessageId::AnalysisModeTitle),
@@ -195,7 +195,7 @@ fn render_analysis_mode_command<W: Write>(
             Ok(true)
         }
         Some("manual") => {
-            state.analysis_mode = AnalysisMode::Manual;
+            set_analysis_mode(state, AnalysisMode::Manual);
             render_notice_panel(
                 output,
                 state.i18n().t(MessageId::AnalysisModeTitle),
@@ -328,7 +328,7 @@ fn apply_analysis_mode_selection<W: Write>(
 ) -> std::io::Result<()> {
     let mode = analysis_mode_from_index(selected.min(2));
     let unchanged = mode == state.analysis_mode;
-    state.analysis_mode = mode;
+    set_analysis_mode(state, mode);
     let label = state.analysis_mode.label();
     clear_active_mode_panel(state, output)?;
     state.control.clear_pending_mode_panel();
@@ -344,6 +344,21 @@ fn apply_analysis_mode_selection<W: Write>(
         Some(analysis_mode_footer(state.i18n(), state.analysis_mode)),
     )?;
     write_shell_prompt(state, output)
+}
+
+fn set_analysis_mode(state: &mut InlineState, mode: AnalysisMode) {
+    state.analysis_mode = mode;
+    if mode != AnalysisMode::Manual {
+        return;
+    }
+    if let Some(cancellation) = state.personalization.analyzer_cancellation.as_ref() {
+        cancellation.cancel_current();
+    }
+    state.personalization.analyzer_started = false;
+    state.clear_personal_prompt_ghost();
+    state.pending_input_ghost = None;
+    state.pending_input_ghost_route = Default::default();
+    state.pending_input_ghost_binding = None;
 }
 
 fn render_mode_cancel_notice<W: Write>(

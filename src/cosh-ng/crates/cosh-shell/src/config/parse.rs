@@ -77,6 +77,27 @@ pub(super) fn parse_toml_config(content: &str, config: &mut CoshConfig) {
     parse_health_toml_config(&value, config);
 }
 
+fn parse_recommendations_toml_config(
+    shell: &toml::map::Map<String, toml::Value>,
+    config: &mut CoshConfig,
+) {
+    let Some(recommendations) = shell.get("recommendations").and_then(toml::Value::as_table) else {
+        return;
+    };
+    if let Some(enabled) = recommendations
+        .get("enabled")
+        .and_then(toml::Value::as_bool)
+    {
+        config.recommendations.enabled = enabled;
+    }
+    if let Some(bash_history) = recommendations
+        .get("bash_history")
+        .and_then(toml::Value::as_bool)
+    {
+        config.recommendations.bash_history = bash_history;
+    }
+}
+
 fn parse_shell_toml_config(value: &toml::Value, config: &mut CoshConfig) {
     let Some(shell) = value.get("shell").and_then(toml::Value::as_table) else {
         return;
@@ -94,6 +115,7 @@ fn parse_shell_toml_config(value: &toml::Value, config: &mut CoshConfig) {
     if let Some(adapter_default) = shell.get("adapter_default").and_then(toml::Value::as_str) {
         config.adapter_default = adapter_default.to_string();
     }
+    parse_recommendations_toml_config(shell, config);
     if let Some(commands) = shell.get("trusted_commands") {
         match string_array(commands, "shell.trusted_commands") {
             Ok(commands) => config

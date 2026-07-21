@@ -4,8 +4,16 @@ use crate::insight::evidence::{
     build_provider_evidence_payload, provider_target_facts, take_bound_insight_metadata,
     trim_optional_context_hints, EvidenceBundleInput,
 };
+use crate::recommendation::personal_integration::activity_context;
 use crate::runtime::prelude::*;
 use crate::runtime::state::PendingInputGhostBinding;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PersonalPromptAction<'a> {
+    Accepted,
+    Dismissed,
+    Submitted(&'a str),
+}
 
 pub(crate) fn render_intercept_agent_guidance<W: Write>(
     events: &[ShellEvent],
@@ -17,7 +25,11 @@ pub(crate) fn render_intercept_agent_guidance<W: Write>(
 ) -> std::io::Result<()> {
     for (idx, event) in events.iter().enumerate() {
         let event_index = event_index_base + idx;
+        handle_personal_prompt_feedback(event, state);
         clear_dismissed_prompt_ghost_context(event, state);
+        if is_prompt_ghost_feedback_event(event) {
+            continue;
+        }
         if !is_standalone_agent_intercept(event) {
             continue;
         }
@@ -82,6 +94,12 @@ pub(crate) fn render_intercept_agent_guidance<W: Write>(
     Ok(())
 }
 
+fn is_prompt_ghost_feedback_event(event: &ShellEvent) -> bool {
+    event.kind == ShellEventKind::UserInputIntercepted
+        && prompt_ghost_suggestion_id(event).is_some()
+        && matches!(event.message.as_deref(), Some("accepted" | "dismissed"))
+}
+
 fn attach_bound_insight_evidence(request: &mut AgentRequest, state: &mut InlineState) {
     if request.command_block.exit_code != 0 {
         crate::agent::failed_command::attach_failure_evidence_bundle(request);
@@ -137,9 +155,217 @@ fn clear_dismissed_prompt_ghost_context(event: &ShellEvent, state: &mut InlineSt
     if event.kind == ShellEventKind::UserInputIntercepted
         && event.component.as_deref() == Some("prompt_ghost")
         && event.message.as_deref() == Some("dismissed")
+        && !matches!(
+            state.pending_input_ghost_binding,
+            Some(PendingInputGhostBinding::Personal(_))
+        )
     {
         state.pending_input_ghost_binding = None;
     }
+}
+
+fn handle_personal_prompt_feedback(event: &ShellEvent, state: &mut InlineState) {
+    if event.kind == ShellEventKind::UserInputIntercepted
+        && event.component.as_deref() == Some("prompt_ghost")
+        && event.message.as_deref() == Some("dismissed")
+    {
+        ignore_pending_personal_suggestions(event, state, None);
+        state.pending_prompt_suggestion_bindings.clear();
+        state.pending_input_ghost_binding = None;
+        return;
+    }
+    if let Some(Some(candidate_id)) = prompt_ghost_suggestion_id(event) {
+        let selected = state
+            .pending_prompt_suggestion_bindings
+            .get(candidate_id)
+            .and_then(|binding| match binding {
+                PendingInputGhostBinding::Personal(binding) => Some(binding.clone()),
+                _ => None,
+            });
+        match selected {
+            Some(binding) => {
+                ignore_pending_personal_suggestions(event, state, Some(candidate_id));
+                state
+                    .pending_prompt_suggestion_bindings
+                    .remove(candidate_id);
+                if let Some(writer) = state.personalization.writer.as_mut() {
+                    writer.arm_frozen_prompt(binding.clone());
+                }
+                state.pending_input_ghost_binding =
+                    Some(PendingInputGhostBinding::Personal(binding));
+            }
+            None if state
+                .pending_prompt_suggestion_bindings
+                .contains_key(candidate_id) =>
+            {
+                ignore_pending_personal_suggestions(event, state, None);
+            }
+            None => {}
+        }
+    }
+    let Some(PendingInputGhostBinding::Personal(binding)) =
+        state.pending_input_ghost_binding.as_ref().cloned()
+    else {
+        return;
+    };
+    let Some(action) = personal_prompt_action(event, &binding.candidate_id) else {
+        return;
+    };
+    let terminal = !matches!(action, PersonalPromptAction::Accepted);
+    let final_text = match action {
+        PersonalPromptAction::Submitted(text) => Some(text),
+        _ => None,
+    };
+    let feedback = {
+        let Some(writer) = state.personalization.writer.as_mut() else {
+            return;
+        };
+        match action {
+            PersonalPromptAction::Accepted => writer.accept_frozen_prompt(),
+            PersonalPromptAction::Dismissed => writer
+                .dismiss_frozen_prompt()
+                .or_else(|| writer.ignore_frozen_prompt()),
+            PersonalPromptAction::Submitted(text) => writer.submit_frozen_prompt(text),
+        }
+    };
+    if terminal {
+        state.pending_input_ghost_binding = None;
+    }
+    if final_text.is_some() {
+        state
+            .personalization
+            .signals
+            .set_pending_intent_lifecycle(binding.intent_lifecycle_id.clone());
+    }
+    let Some(feedback) = feedback else {
+        return;
+    };
+    record_personal_feedback(state, event, feedback);
+}
+
+pub(crate) fn finalize_personal_prompt_feedback_on_exit(
+    event: &ShellEvent,
+    state: &mut InlineState,
+) {
+    finalize_unresolved_personal_prompt_feedback(event, state);
+    state.pending_prompt_suggestion_bindings.clear();
+    state.pending_input_ghost_binding = None;
+}
+
+pub(crate) fn finalize_unresolved_personal_prompt_feedback(
+    event: &ShellEvent,
+    state: &mut InlineState,
+) {
+    ignore_pending_personal_suggestions(event, state, None);
+}
+
+fn ignore_pending_personal_suggestions(
+    event: &ShellEvent,
+    state: &mut InlineState,
+    selected_id: Option<&str>,
+) {
+    let mut ignored = state
+        .pending_prompt_suggestion_bindings
+        .iter()
+        .filter_map(|(candidate_id, binding)| match binding {
+            PendingInputGhostBinding::Personal(binding)
+                if selected_id != Some(candidate_id.as_str()) =>
+            {
+                Some(binding.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if selected_id.is_none() {
+        if let Some(PendingInputGhostBinding::Personal(binding)) =
+            state.pending_input_ghost_binding.as_ref()
+        {
+            if !ignored
+                .iter()
+                .any(|candidate| candidate.candidate_id == binding.candidate_id)
+            {
+                ignored.push(binding.clone());
+            }
+        }
+    }
+    state
+        .pending_prompt_suggestion_bindings
+        .retain(|candidate_id, binding| {
+            !matches!(binding, PendingInputGhostBinding::Personal(_))
+                || selected_id == Some(candidate_id.as_str())
+        });
+    for binding in ignored {
+        let mut lifecycle =
+            crate::recommendation::personal_feedback::FeedbackLifecycle::new(binding);
+        if let Some(feedback) = lifecycle.ignore() {
+            record_personal_feedback(state, event, feedback);
+        }
+    }
+    if selected_id.is_none() {
+        if let Some(writer) = state.personalization.writer.as_mut() {
+            writer.clear_frozen_prompt();
+        }
+    }
+}
+
+fn personal_prompt_action<'a>(
+    event: &'a ShellEvent,
+    candidate_id: &str,
+) -> Option<PersonalPromptAction<'a>> {
+    if event.kind != ShellEventKind::UserInputIntercepted {
+        return None;
+    }
+    if event.component.as_deref() == Some("prompt_ghost")
+        || event
+            .component
+            .as_deref()
+            .and_then(|component| component.strip_prefix("prompt_ghost:"))
+            == Some(candidate_id)
+    {
+        match event.message.as_deref() {
+            Some("accepted") => return Some(PersonalPromptAction::Accepted),
+            Some("dismissed") => return Some(PersonalPromptAction::Dismissed),
+            _ => {}
+        }
+    }
+    let submitted_id = event.component.as_deref()?.strip_prefix("prompt_ghost:")?;
+    if submitted_id != candidate_id {
+        return None;
+    }
+    event.input.as_deref().map(PersonalPromptAction::Submitted)
+}
+
+fn record_personal_feedback(
+    state: &mut InlineState,
+    event: &ShellEvent,
+    feedback: crate::recommendation::personal_feedback::FeedbackEvent,
+) {
+    let Some(writer) = state.personalization.writer.as_mut() else {
+        return;
+    };
+    let cwd = event
+        .cwd
+        .as_deref()
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_dir().ok());
+    let Some(context) = cwd.as_deref().and_then(|cwd| activity_context(writer, cwd)) else {
+        return;
+    };
+    let event_time_ms = event
+        .started_at_ms
+        .or(event.ended_at_ms)
+        .unwrap_or_default();
+    let observed_hour_bucket = event_time_ms / 3_600_000;
+    let identity = format!(
+        "{}\0{:?}\0{}",
+        feedback.candidate_id, feedback.action, event_time_ms
+    );
+    let Ok(Some(record)) =
+        writer.feedback_record(feedback, observed_hour_bucket, context, identity.as_bytes())
+    else {
+        return;
+    };
+    let _ = writer.try_enqueue_identified_deferred(record);
 }
 
 fn bind_pending_input_ghost_context(
@@ -153,12 +379,20 @@ fn bind_pending_input_ghost_context(
     if prompt_ghost_suggestion_id(event).is_none() {
         return;
     }
-    let Some(PendingInputGhostBinding::AgentContext(binding)) =
-        state.pending_input_ghost_binding.take()
-    else {
-        return;
-    };
-    crate::types::set_request_context_binding(request, binding);
+    let binding = prompt_ghost_suggestion_id(event)
+        .flatten()
+        .and_then(|id| state.pending_prompt_suggestion_bindings.remove(id))
+        .and_then(|binding| match binding {
+            PendingInputGhostBinding::Health(binding) => Some(binding),
+            _ => None,
+        })
+        .or_else(|| match state.pending_input_ghost_binding.take() {
+            Some(PendingInputGhostBinding::Health(binding)) => Some(binding),
+            _ => None,
+        });
+    if let Some(binding) = binding {
+        crate::types::set_request_context_binding(request, binding);
+    }
 }
 
 fn agent_request_from_pending_insight(
@@ -210,341 +444,5 @@ fn prompt_ghost_suggestion_id(event: &ShellEvent) -> Option<Option<&str>> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::agent::failed_command::failed_command_candidate;
-    use crate::insight::correlation::MemoryPressureFact;
-    use crate::insight::model::{
-        ExecutionScope, InsightBinding, InsightConfidence, InsightSeverity, InsightTarget,
-        OutputExcerptStatus, PromptSuggestion,
-    };
-
-    fn prompt_ghost_event(message: Option<&str>, input: Option<&str>) -> ShellEvent {
-        ShellEvent {
-            kind: ShellEventKind::UserInputIntercepted,
-            session_id: "session-1".to_string(),
-            command_id: None,
-            command: None,
-            cwd: None,
-            end_cwd: None,
-            exit_code: None,
-            started_at_ms: Some(1),
-            ended_at_ms: None,
-            duration_ms: None,
-            terminal_output_ref: None,
-            terminal_output_bytes: None,
-            input: input.map(str::to_string),
-            component: Some("prompt_ghost".to_string()),
-            message: message.map(str::to_string),
-            command_origin: None,
-            shell_environment_generation: None,
-        }
-    }
-
-    fn source_block() -> CommandBlock {
-        CommandBlock {
-            id: "cmd-1".to_string(),
-            session_id: "session-1".to_string(),
-            command: "cargo test".to_string(),
-            origin: Default::default(),
-            cwd: "/tmp".to_string(),
-            end_cwd: "/tmp".to_string(),
-            started_at_ms: 1,
-            ended_at_ms: 2,
-            duration_ms: 1,
-            exit_code: 1,
-            status: CommandStatus::Failed,
-            output: OutputRefs {
-                terminal_output_ref: None,
-                terminal_output_bytes: 0,
-            },
-            shell_environment_generation: None,
-        }
-    }
-
-    fn insight_binding(suggestion_id: &str) -> InsightBinding {
-        InsightBinding {
-            suggestion_id: suggestion_id.to_string(),
-            target: InsightTarget {
-                insight_id: "insight-1".to_string(),
-                source_session_id: "session-1".to_string(),
-                source_command_block_id: "cmd-1".to_string(),
-                scope: ExecutionScope::local("session-1"),
-                evidence_handle: None,
-                evidence_status: OutputExcerptStatus::Available,
-                severity: crate::insight::model::InsightSeverity::Warning,
-                confidence: crate::insight::model::InsightConfidence::High,
-                evidence: Vec::new(),
-                created_at_ms: 1,
-            },
-        }
-    }
-
-    #[test]
-    fn dismissed_prompt_ghost_clears_pending_binding() {
-        let mut state = InlineState {
-            pending_input_ghost_binding: Some(PendingInputGhostBinding::AgentContext(
-                AgentContextBinding::StartupHealthFollowUp,
-            )),
-            ..Default::default()
-        };
-
-        clear_dismissed_prompt_ghost_context(
-            &prompt_ghost_event(Some("dismissed"), None),
-            &mut state,
-        );
-
-        assert!(state.pending_input_ghost_binding.is_none());
-    }
-
-    #[test]
-    fn accepted_prompt_ghost_does_not_clear_pending_binding_before_binding() {
-        let mut state = InlineState {
-            pending_input_ghost_binding: Some(PendingInputGhostBinding::AgentContext(
-                AgentContextBinding::StartupHealthFollowUp,
-            )),
-            ..Default::default()
-        };
-
-        clear_dismissed_prompt_ghost_context(
-            &prompt_ghost_event(
-                Some("input intercepted before reaching bash"),
-                Some("analyze"),
-            ),
-            &mut state,
-        );
-
-        assert!(state.pending_input_ghost_binding.is_some());
-    }
-
-    #[test]
-    fn matching_insight_suggestion_consumes_binding_once_and_uses_source_block() {
-        let block = source_block();
-        let mut state = InlineState {
-            pending_input_ghost_binding: Some(PendingInputGhostBinding::Insight(Box::new(
-                insight_binding("suggestion-1"),
-            ))),
-            ..Default::default()
-        };
-        let mut event = prompt_ghost_event(
-            Some("input intercepted before reaching bash"),
-            Some("analyze edited failure"),
-        );
-        event.component = Some("prompt_ghost:suggestion-1".to_string());
-
-        let request =
-            agent_request_from_pending_insight(&event, std::slice::from_ref(&block), &mut state)
-                .expect("matching bound request");
-
-        assert_eq!(request.command_block.id, block.id);
-        assert_eq!(
-            request.user_input.as_deref(),
-            Some("analyze edited failure")
-        );
-        assert!(state.pending_input_ghost_binding.is_none());
-        assert!(agent_request_from_pending_insight(
-            &event,
-            std::slice::from_ref(&block),
-            &mut state,
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn mismatched_suggestion_clears_binding_and_falls_back_without_history() {
-        let block = source_block();
-        let mut state = InlineState {
-            pending_input_ghost_binding: Some(PendingInputGhostBinding::Insight(Box::new(
-                insight_binding("new-suggestion"),
-            ))),
-            ..Default::default()
-        };
-        let mut event = prompt_ghost_event(
-            Some("input intercepted before reaching bash"),
-            Some("analyze visible text"),
-        );
-        event.component = Some("prompt_ghost:old-suggestion".to_string());
-
-        assert!(agent_request_from_pending_insight(
-            &event,
-            std::slice::from_ref(&block),
-            &mut state,
-        )
-        .is_none());
-        assert!(state.pending_input_ghost_binding.is_none());
-
-        let fallback =
-            agent_request_from_intercepted_input(&event, 1, true).expect("free-form fallback");
-        assert_eq!(
-            crate::types::request_context_binding(&fallback),
-            AgentContextBinding::FreeForm
-        );
-        assert!(fallback.findings.is_empty());
-        assert!(fallback.context_blocks.is_empty());
-    }
-
-    #[test]
-    fn missing_source_block_clears_binding_without_cross_binding() {
-        let mut state = InlineState {
-            pending_input_ghost_binding: Some(PendingInputGhostBinding::Insight(Box::new(
-                insight_binding("suggestion-1"),
-            ))),
-            ..Default::default()
-        };
-        let mut event = prompt_ghost_event(
-            Some("input intercepted before reaching bash"),
-            Some("analyze visible text"),
-        );
-        event.component = Some("prompt_ghost:suggestion-1".to_string());
-
-        assert!(agent_request_from_pending_insight(&event, &[], &mut state).is_none());
-        assert!(state.pending_input_ghost_binding.is_none());
-    }
-
-    #[test]
-    fn session_mismatch_clears_binding_without_cross_binding() {
-        let block = source_block();
-        let mut state = InlineState {
-            pending_input_ghost_binding: Some(PendingInputGhostBinding::Insight(Box::new(
-                insight_binding("suggestion-1"),
-            ))),
-            ..Default::default()
-        };
-        let mut event = prompt_ghost_event(
-            Some("input intercepted before reaching bash"),
-            Some("analyze visible text"),
-        );
-        event.session_id = "other-session".to_string();
-        event.component = Some("prompt_ghost:suggestion-1".to_string());
-
-        assert!(agent_request_from_pending_insight(
-            &event,
-            std::slice::from_ref(&block),
-            &mut state,
-        )
-        .is_none());
-        assert!(state.pending_input_ghost_binding.is_none());
-    }
-
-    #[test]
-    fn memory_evidence_includes_recent_provider_safe_facts_not_boolean_marker() {
-        let mut block = source_block();
-        block.command = "ps aux".to_string();
-        block.exit_code = 0;
-        block.status = CommandStatus::Completed;
-        block.ended_at_ms = 2_000;
-        let mut request = AgentRequest {
-            id: "request-1".to_string(),
-            session_id: block.session_id.clone(),
-            command_block: block,
-            context_blocks: Vec::new(),
-            context_hints: Vec::new(),
-            user_input: Some("analyze memory".to_string()),
-            findings: Vec::new(),
-            mode: AgentMode::AnalysisOnly,
-            user_confirmed: true,
-            hook_finding: None,
-            recommended_skill: None,
-        };
-        let mut state = InlineState::default();
-        state.insight_correlation.record(MemoryPressureFact {
-            scope: ExecutionScope::local("session-1"),
-            ended_at_ms: 1_000,
-            severity: InsightSeverity::Warning,
-            confidence: InsightConfidence::High,
-            source_command_block_id: "cmd-pressure".to_string(),
-            provider_safe_fact: "memory_pressure severity=Warning ended_at_ms=1000".to_string(),
-        });
-
-        attach_bound_insight_evidence(&mut request, &mut state);
-
-        let evidence = request
-            .context_hints
-            .iter()
-            .find(|hint| hint.starts_with("insight_evidence\n"))
-            .expect("insight evidence");
-        assert!(evidence.contains(
-            "source_command_block_id=cmd-pressure; memory_pressure severity=Warning ended_at_ms=1000"
-        ));
-        assert!(!evidence.contains("recent_memory_pressure=true"));
-    }
-
-    #[test]
-    fn smart_and_auto_failure_requests_share_the_same_bounded_evidence() {
-        for (command, exit_code, output, expected_profile) in [
-            (
-                "./demo-script",
-                126,
-                "bash: ./demo-script: Permission denied\n",
-                "failure_profile=permission",
-            ),
-            (
-                "make all",
-                2,
-                "make: *** [Makefile:2: all] Error 1\n",
-                "failure_profile=build_or_test",
-            ),
-            (
-                "python3 demo.py",
-                1,
-                "Traceback (most recent call last):\n  File \"demo.py\", line 1\nRuntimeError: boom\n",
-                "failure_profile=runtime_exception",
-            ),
-            (
-                "./demo-signal",
-                139,
-                "Segmentation fault (core dumped)\n",
-                "failure_profile=abnormal_signal",
-            ),
-        ] {
-            let output_path = std::env::temp_dir().join(format!(
-                "cosh-smart-auto-prompt-parity-{}-{exit_code}",
-                std::process::id()
-            ));
-            std::fs::write(&output_path, output).expect("write failure output");
-            let mut block = source_block();
-            block.command = command.to_string();
-            block.exit_code = exit_code;
-            block.output.terminal_output_ref = Some(output_path.to_string_lossy().into_owned());
-            block.output.terminal_output_bytes = output.len() as u64;
-            let candidate = failed_command_candidate(&[], &block).expect("failure insight");
-            let PromptSuggestion::AgentPrompt { binding } =
-                candidate.suggestion.expect("agent prompt")
-            else {
-                panic!("expected agent prompt");
-            };
-            let mut state = InlineState {
-                pending_input_ghost_binding: Some(PendingInputGhostBinding::Insight(
-                    binding.clone(),
-                )),
-                ..Default::default()
-            };
-            let mut event = prompt_ghost_event(None, Some("分析这次失败"));
-            event.component = Some(format!("prompt_ghost:{}", binding.suggestion_id));
-            let mut smart =
-                agent_request_from_pending_insight(&event, std::slice::from_ref(&block), &mut state)
-                    .expect("smart request");
-            attach_bound_insight_evidence(&mut smart, &mut state);
-
-            let mut auto = agent_request_for_auto_failure("session-1", &block, &[]);
-            crate::agent::failed_command::attach_failure_evidence_bundle(&mut auto);
-            let _ = std::fs::remove_file(output_path);
-
-            let evidence = |request: &AgentRequest| {
-                request
-                    .context_hints
-                    .iter()
-                    .find(|hint| hint.starts_with("insight_evidence\n"))
-                    .cloned()
-                    .expect("insight evidence")
-            };
-            let smart_evidence = evidence(&smart);
-            assert_eq!(smart_evidence, evidence(&auto));
-            assert!(smart_evidence.contains(expected_profile), "{smart_evidence}");
-            assert!(smart.user_confirmed);
-            assert!(!auto.user_confirmed);
-            assert!(smart.user_input.is_some());
-            assert!(auto.user_input.is_none());
-        }
-    }
-}
+#[path = "intercept_tests.rs"]
+mod tests;

@@ -19,6 +19,7 @@ pub enum MessageId {
     HelpSummaryHelp,
     HelpSummaryAuth,
     HelpSummaryConfig,
+    HelpSummaryRecommendations,
     HelpSummaryModeApproval,
     HelpSummaryModeAnalysis,
     HelpSummaryAgent,

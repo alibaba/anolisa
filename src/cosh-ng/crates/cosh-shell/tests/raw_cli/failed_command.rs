@@ -501,11 +501,16 @@ fn raw_cli_natural_language_does_not_make_later_generic_failure_actionable() {
 
 #[test]
 fn raw_cli_natural_language_omits_unbound_recent_failed_command_context() {
-    let output = run_raw_cli_with_input(
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
         "fake",
-        "ls /path/that/does/not/exist\n\
-         please show context\n\
-         exit\n",
+        &[],
+        &[],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            ("cosh-osc$ ", b"ls /path/that/does/not/exist\n"),
+            ("No such file or directory", b"please show context\n"),
+            ("Recent context visible to Agent", b"exit\n"),
+        ],
     );
 
     assert!(

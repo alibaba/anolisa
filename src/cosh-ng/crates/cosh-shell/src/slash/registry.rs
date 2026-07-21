@@ -81,6 +81,14 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
             state: SlashCommandState::Hidden,
         },
         SlashCommandSpec {
+            name: "/recommendations",
+            usage: "/recommendations [on|off|status|privacy|clear]",
+            summary_id: MessageId::HelpSummaryRecommendations,
+            group: Some("Config"),
+            scope: "config",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
             name: "/mode",
             usage: "/mode approval [recommend|auto|trust]",
             summary_id: MessageId::HelpSummaryModeApproval,
@@ -329,6 +337,7 @@ mod tests {
         assert!(visible.contains(&"/mode approval [recommend|auto|trust]"));
         assert!(visible.contains(&"/mode analysis [smart|auto|manual]"));
         assert!(visible.contains(&"/hooks"));
+        assert!(visible.contains(&"/recommendations [on|off|status|privacy|clear]"));
         assert!(!visible.iter().any(|usage| usage.starts_with("/agent")));
         assert!(!visible.iter().any(|usage| usage.starts_with("/explain")));
         assert!(!visible.iter().any(|usage| usage.starts_with("/cancel")));
@@ -337,6 +346,19 @@ mod tests {
         assert!(!visible.iter().any(|usage| usage.starts_with("/select")));
         assert!(!visible.iter().any(|usage| usage.starts_with("/copy")));
         assert!(!visible.iter().any(|usage| usage.starts_with("/debug")));
+    }
+
+    #[test]
+    fn recommendations_is_public_local_config_control() {
+        let spec = slash_command_registry()
+            .iter()
+            .find(|spec| spec.name == "/recommendations")
+            .expect("recommendations spec");
+
+        assert_eq!(spec.group, Some("Config"));
+        assert_eq!(spec.scope, "config");
+        assert_eq!(spec.state, SlashCommandState::Public);
+        assert!(exact_slash_control_commands().any(|name| name == "/recommendations"));
     }
 
     #[test]

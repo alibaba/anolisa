@@ -3,11 +3,14 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::approval::handoff::trust_key_from_command;
+use crate::config::parse_recommendations_environment_override;
 use crate::diagnostics::health::{spawn_startup_health_scan, startup_health_scan_enabled_for_env};
 use crate::hooks::{
     dirs_for_hook_loading, is_trusted_project_root, load_hook_feedback_preferences,
     project_hook_root_from_cwd,
 };
+use crate::recommendation::personal_analysis_runtime::AnalyzerCancellation;
+use crate::recommendation::personal_runtime::PersonalRuntime;
 use crate::runtime::cli_args::{LaunchOptions, RawShellKind, ResumeLaunch};
 use crate::runtime::prelude::*;
 use crate::runtime::startup::bootstrap_process_path_from_shell;
@@ -107,6 +110,11 @@ pub(crate) fn run_raw(
     }
 
     let cosh_config = load_config();
+    let recommendations_environment_override = parse_recommendations_environment_override(
+        std::env::var("COSH_RECOMMENDATIONS_ENABLED")
+            .ok()
+            .as_deref(),
+    );
     config.input_classifier = config
         .input_classifier
         .with_ai_enabled(cosh_config.ai_enabled);
@@ -124,6 +132,45 @@ pub(crate) fn run_raw(
                     crate::slash::session::SessionLaunchRequest::Resume(id)
                 }
             });
+    }
+    inline_state.personalization.bash_history = cosh_config.recommendations.bash_history;
+    inline_state.personalization.ai_disabled = !cosh_config.ai_enabled;
+    inline_state.personalization.analyzer_cancellation = Some(AnalyzerCancellation::new());
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        let root = home.join(".copilot-shell/cosh/recommendations");
+        let configured_enabled = cosh_config.recommendations.enabled;
+        let environment_override = recommendations_environment_override;
+        inline_state.personalization.store_root = Some(root.clone());
+        inline_state.personalization.configured_enabled = configured_enabled;
+        inline_state.personalization.environment_override = environment_override;
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        inline_state.personalization.writer_pending = Some(receiver);
+        let _ = std::thread::Builder::new()
+            .name("cosh-recommendation-load".to_string())
+            .spawn(move || {
+                if let Ok(runtime) = PersonalRuntime::open_with_environment(
+                    configured_enabled,
+                    environment_override,
+                    root,
+                    now_hour_bucket(),
+                ) {
+                    if let Ok(writer) = runtime.spawn_writer() {
+                        let _ = sender.send(writer);
+                    }
+                }
+            });
+    }
+    if matches!(&shell_kind, RawShellKind::Bash)
+        && config.native_mode
+        && cosh_config.recommendations.enabled
+        && recommendations_environment_override != Some(false)
+        && cosh_config.recommendations.bash_history
+    {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        inline_state.personalization.history_file_pending = Some(receiver);
+        config.set_shell_history_file_observer(move |path| {
+            let _ = sender.send(path);
+        });
     }
     let snapshot_publisher = inline_state.shell_rewrite.start_worker();
     config.set_shell_environment_observer(move |snapshot| {
@@ -177,6 +224,14 @@ pub(crate) fn run_raw(
     };
 
     config.clear_shell_environment_observer();
+    config.clear_shell_history_file_observer();
+    inline_state.personalization.poll_ready();
+    if let Some(cancellation) = inline_state.personalization.analyzer_cancellation.as_ref() {
+        cancellation.cancel_current();
+    }
+    if let Some(mut writer) = inline_state.personalization.writer.take() {
+        let _ = writer.shutdown(now_hour_bucket(), std::time::Duration::from_millis(100));
+    }
     inline_state.shell_rewrite.shutdown();
 
     match raw_result {
@@ -187,6 +242,13 @@ pub(crate) fn run_raw(
             1
         }
     }
+}
+
+fn now_hour_bucket() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() / 3600)
+        .unwrap_or_default()
 }
 
 pub(crate) fn run_interactive(adapter_name: &str) -> i32 {

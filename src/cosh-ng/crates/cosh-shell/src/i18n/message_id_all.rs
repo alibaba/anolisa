@@ -21,6 +21,7 @@ impl MessageId {
         MessageId::HelpSummaryHelp,
         MessageId::HelpSummaryAuth,
         MessageId::HelpSummaryConfig,
+        MessageId::HelpSummaryRecommendations,
         MessageId::HelpSummaryModeApproval,
         MessageId::HelpSummaryModeAnalysis,
         MessageId::HelpSummaryAgent,

@@ -17,7 +17,11 @@ pub use language::{
     LanguageSetting,
 };
 pub use load::load_config;
-pub use model::{CoshConfig, HealthConfig, HealthServiceConfig, HealthServiceExpectedState};
+pub(crate) use load::parse_recommendations_environment_override;
+pub use model::{
+    CoshConfig, HealthConfig, HealthServiceConfig, HealthServiceExpectedState,
+    RecommendationsConfig,
+};
 pub use trust::{clear_project_trust_store, trust_project_root, untrust_project_root};
 
 #[cfg(test)]

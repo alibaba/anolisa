@@ -17,7 +17,9 @@ pub(super) fn drain_raw_input_events<W: Write>(
     let native_mode = prompt.is_empty();
     while let Ok(event) = input_events.try_recv() {
         match event {
-            RawInputEvent::ShellInputActivity => parser.push_shell_input_activity_event(),
+            RawInputEvent::ShellInputActivity { empty } => {
+                parser.push_shell_input_activity_event(empty)
+            }
             RawInputEvent::CtrlC => parser.push_control_event("ctrl_c"),
             RawInputEvent::CandidateRedraw { input, hint } => {
                 if native_mode {
@@ -55,7 +57,17 @@ pub(super) fn drain_raw_input_events<W: Write>(
             RawInputEvent::PromptGhostClear => {
                 clear_prompt_ghost_line(parser, output, prompt, native_candidate_echoed_len)?;
             }
-            RawInputEvent::PromptGhostDismissed => parser.push_prompt_ghost_event("dismissed"),
+            RawInputEvent::PromptGhostAccepted { suggestion_id } => {
+                parser.push_prompt_ghost_event("accepted", suggestion_id.as_deref());
+            }
+            RawInputEvent::PromptGhostCycle { text } => {
+                clear_prompt_ghost_line(parser, output, prompt, native_candidate_echoed_len)?;
+                super::write_prompt_ghost(output, &text, true)?;
+                output.flush()?;
+            }
+            RawInputEvent::PromptGhostDismissed => {
+                parser.push_prompt_ghost_event("dismissed", None)
+            }
             RawInputEvent::PromptGhostIntercept {
                 input,
                 suggestion_id,

@@ -113,6 +113,10 @@ impl NativeLineState {
         self.visible.is_empty()
     }
 
+    pub(super) fn is_empty(&self) -> bool {
+        self.visible.is_empty()
+    }
+
     pub(super) fn observe_shell_bytes(&mut self, bytes: &[u8]) {
         let mut idx = 0;
         while idx < bytes.len() {

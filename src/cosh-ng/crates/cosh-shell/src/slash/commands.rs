@@ -8,11 +8,13 @@ use crate::slash::notices::{
     render_help, render_hint, render_info, render_removed_command, render_unknown,
 };
 use crate::slash::parser::SlashCommand;
+use crate::slash::recommendations::render_recommendations_command;
 use crate::slash::session::render_session_command;
 use crate::slash::skills::render_skills_command;
 
 pub(super) fn render_slash_command<W: Write>(
     command: SlashCommand<'_>,
+    event: &ShellEvent,
     blocks: &[CommandBlock],
     adapter: &AdapterInstance,
     state: &mut InlineState,
@@ -66,6 +68,10 @@ pub(super) fn render_slash_command<W: Write>(
         }
         SlashCommand::Session(arguments) => {
             render_session_command(arguments, blocks, adapter, state, output)
+        }
+        SlashCommand::Recommendations(sub, arg, extra) => {
+            render_recommendations_command(sub, arg, extra, event, adapter, state, output)?;
+            Ok(true)
         }
     }
 }

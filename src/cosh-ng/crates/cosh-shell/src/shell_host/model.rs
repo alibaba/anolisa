@@ -18,6 +18,28 @@ impl std::fmt::Debug for ShellEnvironmentObserver {
     }
 }
 
+#[derive(Clone)]
+pub(super) struct ShellHistoryFileObserver(Arc<dyn Fn(PathBuf) + Send + Sync + 'static>);
+
+impl std::fmt::Debug for ShellHistoryFileObserver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ShellHistoryFileObserver")
+    }
+}
+
+impl ShellHistoryFileObserver {
+    pub(super) fn new<F>(observer: F) -> Self
+    where
+        F: Fn(PathBuf) + Send + Sync + 'static,
+    {
+        Self(Arc::new(observer))
+    }
+
+    pub(super) fn observe(&self, path: PathBuf) {
+        (self.0)(path);
+    }
+}
+
 impl ShellEnvironmentObserver {
     pub(super) fn new<F>(observer: F) -> Self
     where
@@ -44,6 +66,7 @@ pub struct ShellHostConfig {
     pub login_shell: bool,
     pub env_overrides: Vec<(String, String)>,
     pub(super) shell_environment_observer: Option<ShellEnvironmentObserver>,
+    pub(super) shell_history_file_observer: Option<ShellHistoryFileObserver>,
 }
 
 impl ShellHostConfig {
@@ -61,6 +84,7 @@ impl ShellHostConfig {
             login_shell: false,
             env_overrides: Vec::new(),
             shell_environment_observer: None,
+            shell_history_file_observer: None,
         }
     }
 
@@ -78,6 +102,17 @@ impl ShellHostConfig {
 
     pub(crate) fn clear_shell_environment_observer(&mut self) {
         self.shell_environment_observer = None;
+    }
+
+    pub(crate) fn set_shell_history_file_observer<F>(&mut self, observer: F)
+    where
+        F: Fn(PathBuf) + Send + Sync + 'static,
+    {
+        self.shell_history_file_observer = Some(ShellHistoryFileObserver::new(observer));
+    }
+
+    pub(crate) fn clear_shell_history_file_observer(&mut self) {
+        self.shell_history_file_observer = None;
     }
 }
 

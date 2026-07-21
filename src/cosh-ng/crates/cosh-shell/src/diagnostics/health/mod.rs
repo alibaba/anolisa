@@ -2,6 +2,7 @@ pub(crate) mod builder;
 pub(crate) mod collectors;
 pub(crate) mod context;
 pub(crate) mod model;
+mod prompt_selection;
 pub(crate) mod recommendation;
 pub(crate) mod rules;
 pub(crate) mod runtime;
@@ -21,6 +22,7 @@ pub(crate) use model::{
     HealthFinding, HealthFindingCategory, HealthMessageId, HealthScanReport, HealthSeverity,
     HealthTryItem, HealthTryKind, HealthUnavailableReason, UnavailableCollector,
 };
+pub(crate) use prompt_selection::{sorted_findings, sorted_try_items, startup_prompt_suggestions};
 pub(crate) use recommendation::{apply_try_recommendations, generate_try_recommendations};
 pub(crate) use rules::{apply_judgement_rules, evaluate_judgement_rules};
 pub(crate) use runtime::{

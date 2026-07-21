@@ -27,6 +27,9 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::HelpSummaryHelp => "显示命令参考",
         MessageId::HelpSummaryAuth => "配置 AI 服务商凭证",
         MessageId::HelpSummaryConfig => "配置界面语言",
+        MessageId::HelpSummaryRecommendations => {
+            "管理个性化提示词推荐；分析会向服务商发送有界活动，本地 clear 不控制服务商侧保留"
+        }
         MessageId::HelpSummaryModeApproval => "切换审批模式",
         MessageId::HelpSummaryModeAnalysis => "选择建议模式、自动分析或关闭主动介入",
         MessageId::HelpSummaryAgent => "发起明确的 Agent 请求",

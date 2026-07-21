@@ -312,18 +312,25 @@ fn write_pending_display_preserving_prompt_ghost<W: Write>(
     input_mode: &Arc<Mutex<RawInputMode>>,
 ) -> io::Result<()> {
     write_pending_display(parser, output, display_start, replayed_prompt_prefix)?;
-    let ghost_text = input_mode.lock().ok().and_then(|mode| match &*mode {
-        RawInputMode::PromptGhost { text, .. } => Some(text.clone()),
+    let ghost = input_mode.lock().ok().and_then(|mode| match &*mode {
+        RawInputMode::PromptGhost { text, route } => Some((
+            text.clone(),
+            matches!(
+                route,
+                crate::raw_input::PromptGhostRoute::AgentSelection { .. }
+            ),
+        )),
         _ => None,
     });
-    if let Some(text) = ghost_text {
-        write_prompt_ghost(output, &text)?;
+    if let Some((text, selection)) = ghost {
+        write_prompt_ghost(output, &text, selection)?;
     }
     Ok(())
 }
 
-fn write_prompt_ghost<W: Write>(output: &mut W, text: &str) -> io::Result<()> {
-    write!(output, "\x1b[s\x1b[2m {text}\x1b[0m\x1b[u")
+fn write_prompt_ghost<W: Write>(output: &mut W, text: &str, selection: bool) -> io::Result<()> {
+    let marker = if selection { " ›" } else { "" };
+    write!(output, "\x1b[s\x1b[2m{marker} {text}\x1b[0m\x1b[u")
 }
 
 fn write_display_slice<W: Write>(
@@ -533,13 +540,17 @@ fn resolve_pty_emit<W: Write>(
                 *replayed_prompt_prefix = Some(raw_prompt.to_vec());
             }
             if let Some(text) = &ghost_text {
+                let selection = matches!(
+                    ghost_route,
+                    crate::raw_input::PromptGhostRoute::AgentSelection { .. }
+                );
                 if let Ok(mut mode) = input_mode.lock() {
                     *mode = RawInputMode::PromptGhost {
                         text: text.clone(),
                         route: ghost_route,
                     };
                 }
-                write_prompt_ghost(output, text)?;
+                write_prompt_ghost(output, text, selection)?;
             }
             output.flush()?;
             Ok(RawObserverAction::Continue)

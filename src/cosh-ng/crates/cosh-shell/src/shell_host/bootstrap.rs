@@ -116,6 +116,9 @@ fn start_shell_session(
     if let Some(observer) = config.shell_environment_observer.clone() {
         parser = parser.with_environment_observer(observer);
     }
+    if let Some(observer) = config.shell_history_file_observer.clone() {
+        parser = parser.with_history_file_observer(observer);
+    }
     push_shell_started_event(&mut parser, config);
 
     Ok(PtySession {

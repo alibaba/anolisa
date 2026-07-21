@@ -17,6 +17,7 @@ use crate::question::runtime::{
     render_question_answer_actions, render_question_cancel_actions, render_question_focus_actions,
     render_question_input_actions, render_question_toggle_actions,
 };
+use crate::recommendation::personal_integration::record_completed_command_blocks;
 use crate::recommendation::runtime::render_selection_actions;
 use crate::runtime::cancel::render_agent_cancel_actions;
 use crate::runtime::details::render_runtime_details_card_actions;
@@ -36,7 +37,9 @@ use crate::slash::runtime::render_slash_actions;
 
 use super::controller::{pending_card_capture, shell_has_active_foreground_command};
 use super::events::{ShellEventBatch, ShellEventCursor, ShellEventSnapshot};
-use super::startup::{render_startup_banner, render_startup_health_banner};
+use super::startup::{
+    render_pending_recommendation_notice, render_startup_banner, render_startup_health_banner,
+};
 
 pub(crate) enum RuntimeAction {
     AdvanceEventCursor(ShellEventCursor),
@@ -96,6 +99,7 @@ fn render_inline_guidance_from_batch<W: Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {
+    state.personalization.poll_ready();
     let events = snapshot.events();
     let action_events = batch.events.as_slice();
     let event_index_base = batch.global_index(0);
@@ -103,8 +107,16 @@ fn render_inline_guidance_from_batch<W: Write>(
         .iter()
         .any(|event| event.kind == ShellEventKind::ShellExited);
     let ledger = build_command_blocks(events);
+    record_completed_command_blocks(state, &ledger.blocks);
     state.session_blocks = ledger.blocks.clone();
     if state.shell_exited {
+        if let Some(event) = events
+            .iter()
+            .rev()
+            .find(|event| event.kind == ShellEventKind::ShellExited)
+        {
+            crate::agent::intercept::finalize_personal_prompt_feedback_on_exit(event, state);
+        }
         stop_active_agent_run_without_rendering(state, output)?;
         return Ok(());
     }
@@ -138,6 +150,10 @@ fn render_inline_guidance_from_batch<W: Write>(
     RuntimeDispatcher::apply_actions(approval_actions, state);
     let shell_busy = shell_has_active_foreground_command(events);
     if shell_busy {
+        if let Some(cancellation) = state.personalization.analyzer_cancellation.as_ref() {
+            cancellation.set_foreground_idle(false);
+        }
+        state.personalization.idle_since = None;
         let slash_actions = SlashConsumer::consume(
             action_events,
             &ledger.blocks,
@@ -160,6 +176,14 @@ fn render_inline_guidance_from_batch<W: Write>(
 
     render_startup_banner(events, adapter, shell_label, state, output)?;
     render_startup_health_banner(state, output)?;
+    render_pending_recommendation_notice(state, output)?;
+    update_personal_shell_input_state(action_events, state);
+    let personal_idle = state.agent_run.active.is_none()
+        && !state.personalization.shell_input_active
+        && !action_events
+            .iter()
+            .any(|event| event.kind == ShellEventKind::UserInputIntercepted);
+    crate::recommendation::personal_session::poll_personal_session(state, adapter, personal_idle);
     let slash_actions = SlashConsumer::consume(
         action_events,
         &ledger.blocks,
@@ -295,6 +319,24 @@ fn render_inline_guidance_from_batch<W: Write>(
     render_owned_shell_prompt(state, output)?;
 
     Ok(())
+}
+
+fn update_personal_shell_input_state(events: &[ShellEvent], state: &mut InlineState) {
+    for event in events {
+        match event.kind {
+            ShellEventKind::ShellReady
+            | ShellEventKind::CommandStarted
+            | ShellEventKind::CommandCompleted
+            | ShellEventKind::CommandFailed => state.personalization.shell_input_active = false,
+            ShellEventKind::UserInputIntercepted
+                if event.component.as_deref() == Some("shell_input") =>
+            {
+                state.personalization.shell_input_active =
+                    event.message.as_deref() != Some("input empty");
+            }
+            _ => {}
+        }
+    }
 }
 
 fn render_owned_shell_prompt<W: Write>(
@@ -458,5 +500,50 @@ mod tests {
 
         assert_eq!(key, "auth:123:card_secret:7");
         assert!(!key.contains("secret-value"));
+    }
+
+    #[test]
+    fn personal_idle_tracks_whether_the_shell_input_line_is_empty() {
+        let mut state = InlineState::default();
+        let mut editing = ShellEvent::user_input_intercepted("s", "");
+        editing.component = Some("shell_input".to_string());
+        editing.message = Some("input editing".to_string());
+        update_personal_shell_input_state(&[editing], &mut state);
+        assert!(state.personalization.shell_input_active);
+
+        let mut empty = ShellEvent::user_input_intercepted("s", "");
+        empty.component = Some("shell_input".to_string());
+        empty.message = Some("input empty".to_string());
+        update_personal_shell_input_state(&[empty], &mut state);
+        assert!(!state.personalization.shell_input_active);
+    }
+
+    #[test]
+    fn busy_shell_updates_the_analyzer_foreground_gate() {
+        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+        let cancellation =
+            crate::recommendation::personal_analysis_runtime::AnalyzerCancellation::new();
+        let mut state = InlineState {
+            personalization: crate::recommendation::personal_state::PersonalizationState {
+                analyzer_cancellation: Some(cancellation.clone()),
+                ..Default::default()
+            },
+            ..InlineState::default()
+        };
+        let mut output = Vec::new();
+        let snapshot = ShellEventSnapshot::new(&[ShellEvent::command_started(
+            "session", "command", "sleep 1", "/tmp", 1,
+        )]);
+
+        RuntimeDispatcher::dispatch_inline_batch(
+            &snapshot,
+            &adapter,
+            "bash",
+            &mut state,
+            &mut output,
+        )
+        .expect("dispatch should render");
+
+        assert!(!cancellation.foreground_idle());
     }
 }

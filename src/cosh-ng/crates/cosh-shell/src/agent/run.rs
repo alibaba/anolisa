@@ -5,6 +5,7 @@ use crate::agent::poll::poll_active_agent_run;
 use crate::agent::skill_context::finalize_agent_request_skill_context;
 use crate::evidence::request::ParsedCoshRequest;
 use crate::evidence::stream::{CoshRequestAuditRecord, CoshRequestStreamFilter};
+use crate::recommendation::personal_integration::record_started_agent_request;
 use crate::runtime::prelude::*;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -167,6 +168,7 @@ fn start_agent_run_with_queue_policy<W: Write>(
     enforce_insight_context_budget(&mut request);
     let provider_mode = provider_mode_for_agent_run(&request, state.approval_mode);
     let handle = adapter.start_cancellable(request.clone(), provider_mode);
+    record_started_agent_request(state, &request);
     let now = Instant::now();
     let i18n = state.i18n();
     state.agent_run.host_executed_shell_result_delivered = false;

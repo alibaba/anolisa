@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
-use super::model::ShellEnvironmentObserver;
+use super::model::{ShellEnvironmentObserver, ShellHistoryFileObserver};
 use crate::types::{
     CommandOrigin, ShellEnvironmentSnapshot, ShellEvent, ShellEventKind, ShellHandoffRequest,
     SESSION_OUTPUT_REF_MAX_BYTES,
@@ -27,6 +27,7 @@ const ERASE_TO_END_OF_SCREEN: &[u8] = b"\x1b[J";
 const ERASE_TO_END_OF_LINE: &[u8] = b"\x1b[K";
 const BEL: u8 = b'\x07';
 const SHELL_PATH_MAX_BYTES: usize = 8 * 1024;
+const SHELL_HISTORY_FILE_MAX_BYTES: usize = 4 * 1024;
 
 #[derive(Debug)]
 struct CurrentCommand {
@@ -59,6 +60,7 @@ pub(super) struct OscParser {
     pending_handoff_echo: Option<PendingHandoffEcho>,
     pub(super) shell_environment_snapshot: Option<ShellEnvironmentSnapshot>,
     environment_observer: Option<ShellEnvironmentObserver>,
+    history_file_observer: Option<ShellHistoryFileObserver>,
 }
 
 #[derive(Debug, Clone)]
@@ -103,11 +105,17 @@ impl OscParser {
             pending_handoff_echo: None,
             shell_environment_snapshot: None,
             environment_observer: None,
+            history_file_observer: None,
         }
     }
 
     pub(super) fn with_environment_observer(mut self, observer: ShellEnvironmentObserver) -> Self {
         self.environment_observer = Some(observer);
+        self
+    }
+
+    pub(super) fn with_history_file_observer(mut self, observer: ShellHistoryFileObserver) -> Self {
+        self.history_file_observer = Some(observer);
         self
     }
 
@@ -184,6 +192,13 @@ impl OscParser {
             .as_deref()
             .is_some_and(|session_id| session_id != self.session_id)
         {
+            return Ok(());
+        }
+
+        if marker.event == "history_file" {
+            if marker.session_id.as_deref() == Some(self.session_id.as_str()) {
+                self.observe_history_file(marker.history_file.as_deref());
+            }
             return Ok(());
         }
 
@@ -336,6 +351,22 @@ impl OscParser {
             observer.observe(snapshot);
         }
         Some(generation)
+    }
+
+    fn observe_history_file(&self, history_file: Option<&str>) {
+        let Some(path) = history_file.filter(|value| {
+            value.len() <= SHELL_HISTORY_FILE_MAX_BYTES
+                && !value.chars().any(|character| character.is_control())
+        }) else {
+            return;
+        };
+        let path = PathBuf::from(path);
+        if !path.is_absolute() {
+            return;
+        }
+        if let Some(observer) = &self.history_file_observer {
+            observer.observe(path);
+        }
     }
 
     fn consume_pending_command_origin(&mut self, command: &str) -> CommandOrigin {
@@ -594,10 +625,14 @@ impl OscParser {
         );
     }
 
-    pub(super) fn push_shell_input_activity_event(&mut self) {
+    pub(super) fn push_shell_input_activity_event(&mut self, empty: bool) {
         self.push_self_session_input_event(
             "shell_input",
-            "user input observed while relaying to shell",
+            if empty {
+                "input empty"
+            } else {
+                "input editing"
+            },
             None,
         );
     }
@@ -610,8 +645,11 @@ impl OscParser {
         self.push_self_session_input_event("card_secret", action, Some(value));
     }
 
-    pub(super) fn push_prompt_ghost_event(&mut self, action: &str) {
-        self.push_self_session_input_event("prompt_ghost", action, None);
+    pub(super) fn push_prompt_ghost_event(&mut self, action: &str, suggestion_id: Option<&str>) {
+        let component = suggestion_id
+            .map(|id| format!("prompt_ghost:{id}"))
+            .unwrap_or_else(|| "prompt_ghost".to_string());
+        self.push_self_session_input_event(&component, action, None);
     }
 
     fn push_self_session_input_event(
@@ -659,6 +697,7 @@ struct Marker {
     status: Option<i32>,
     path: Option<String>,
     path_trusted: Option<bool>,
+    history_file: Option<String>,
 }
 
 fn command_finished_event(

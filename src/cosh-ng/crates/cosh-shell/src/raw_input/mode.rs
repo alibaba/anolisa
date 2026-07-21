@@ -21,7 +21,20 @@ pub enum RawObserverAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptGhostRoute {
     NativeShell,
-    AgentIntercept { suggestion_id: Option<String> },
+    AgentIntercept {
+        suggestion_id: Option<String>,
+    },
+    AgentSelection {
+        candidates: Vec<PromptGhostCandidate>,
+        active: usize,
+        pending_escape: Vec<u8>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptGhostCandidate {
+    pub text: String,
+    pub suggestion_id: String,
 }
 
 impl Default for PromptGhostRoute {

@@ -8,6 +8,7 @@ use crate::agent::events::{
 use crate::agent::run::{
     has_queued_run_before_held_text, start_agent_run_with_origin, ActiveAgentRun,
 };
+use crate::recommendation::personal_integration::record_finished_agent_run;
 use crate::runtime::evidence_requests::{
     record_cosh_requests_from_active_run, render_pending_evidence_requests,
 };
@@ -37,6 +38,7 @@ pub(crate) fn finish_active_agent_run<W: Write>(
     flush_cosh_request_filter_into_active_run(&mut active_run, output)?;
     active_run.markdown_stream.finish(output, None)?;
     let provider_timed_out = active_run_provider_timed_out(&active_run);
+    record_finished_agent_run(state, &active_run.request, &active_run.governed_events);
     let resume_fallback = if provider_timed_out {
         shell_handoff_resume_fallback_request(&active_run)
     } else {

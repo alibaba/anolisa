@@ -1,12 +1,70 @@
-use super::model::ShellEnvironmentObserver;
+use super::marker::{bash_marker_script, zsh_marker_script};
+use super::model::{ShellEnvironmentObserver, ShellHistoryFileObserver};
 use super::osc::*;
 use crate::types::{
     CommandOrigin, ShellEventKind, ShellHandoffRequest, COMMAND_OUTPUT_REF_MAX_BYTES,
     SESSION_OUTPUT_REF_MAX_BYTES,
 };
 use std::os::unix::fs::PermissionsExt;
+use std::sync::{Arc, Mutex};
 
 const TEST_MARKER_TOKEN: &str = "test-marker-token";
+
+#[test]
+fn trusted_history_file_marker_is_private_and_observed() {
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&observed);
+    let mut parser = parser_for_test("history-file").with_history_file_observer(
+        ShellHistoryFileObserver::new(move |path| {
+            sink.lock().expect("history observer lock").push(path);
+        }),
+    );
+    let marker = b"\x1b]1337;COSH;{\"event\":\"history_file\",\"token\":\"test-marker-token\",\"session_id\":\"history-file\",\"history_file\":\"/home/test/.bash_history\"}\x07";
+
+    parser.feed(marker).expect("feed history marker");
+
+    assert_eq!(
+        *observed.lock().expect("history observer lock"),
+        vec![std::path::PathBuf::from("/home/test/.bash_history")]
+    );
+    assert!(parser.events.is_empty());
+    assert!(parser.clean.is_empty());
+    assert!(parser.display.is_empty());
+}
+
+#[test]
+fn history_file_marker_rejects_untrusted_or_relative_paths() {
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&observed);
+    let mut parser = parser_for_test("history-file-reject").with_history_file_observer(
+        ShellHistoryFileObserver::new(move |path| {
+            sink.lock().expect("history observer lock").push(path);
+        }),
+    );
+
+    for marker in [
+        b"\x1b]1337;COSH;{\"event\":\"history_file\",\"token\":\"wrong\",\"session_id\":\"history-file-reject\",\"history_file\":\"/tmp/history\"}\x07".as_slice(),
+        b"\x1b]1337;COSH;{\"event\":\"history_file\",\"token\":\"test-marker-token\",\"history_file\":\"/tmp/history\"}\x07".as_slice(),
+        b"\x1b]1337;COSH;{\"event\":\"history_file\",\"token\":\"test-marker-token\",\"session_id\":\"history-file-reject\",\"history_file\":\"relative/history\"}\x07".as_slice(),
+        b"\x1b]1337;COSH;{\"event\":\"history_file\",\"token\":\"test-marker-token\",\"session_id\":\"history-file-reject\",\"history_file\":\"/tmp/line\\nhistory\"}\x07".as_slice(),
+    ] {
+        parser.feed(marker).expect("feed rejected history marker");
+    }
+
+    assert!(observed.lock().expect("history observer lock").is_empty());
+    assert!(parser.events.is_empty());
+}
+
+#[test]
+fn bash_history_file_marker_is_native_only() {
+    let script = bash_marker_script();
+
+    assert!(script.contains("_cosh_emit_native_history_file_marker"));
+    assert!(script.contains("[[ -n \"${COSH_SHELL_ISOLATED:-}\" ]]"));
+    assert!(script.contains("\"event\":\"history_file\""));
+    assert!(script.contains("[[:cntrl:]]"));
+    assert!(!zsh_marker_script().contains("\"event\":\"history_file\""));
+}
 
 #[test]
 fn parser_clean_strips_zsh_bracketed_paste_and_applies_backspace() {

@@ -360,6 +360,9 @@ fn poll_active_agent_run_with_policy<W: Write>(
             provider_native_shell_result_pending,
             force_hold_output,
         });
+        if let Some(model) = foreground_model_from_event(&event) {
+            state.personalization.foreground_model = Some(model.to_string());
+        }
         render_active_agent_event(active_run, event, output, text_hold_reason)?;
         if provider_progress_observed {
             state
@@ -416,6 +419,17 @@ fn poll_active_agent_run_with_policy<W: Write>(
     }
 
     Ok(())
+}
+
+fn foreground_model_from_event(event: &AgentEvent) -> Option<&str> {
+    let AgentEvent::StatusChanged { message, .. } = event else {
+        return None;
+    };
+    message
+        .strip_prefix("model initialized ")
+        .or_else(|| message.strip_prefix("model status: model_switched:"))
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
 }
 
 fn shell_evidence_action_signature(action: &crate::adapter::ShellEvidenceAction) -> String {
@@ -614,6 +628,26 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    #[test]
+    fn foreground_model_tracks_initialization_and_runtime_switch() {
+        let initialized = AgentEvent::StatusChanged {
+            run_id: "run".to_string(),
+            phase: "initialized".to_string(),
+            message: "model initialized project-model".to_string(),
+        };
+        let switched = AgentEvent::StatusChanged {
+            run_id: "run".to_string(),
+            phase: "model_switched".to_string(),
+            message: "model status: model_switched:next-model".to_string(),
+        };
+
+        assert_eq!(
+            foreground_model_from_event(&initialized),
+            Some("project-model")
+        );
+        assert_eq!(foreground_model_from_event(&switched), Some("next-model"));
+    }
 
     fn test_active_run() -> ActiveAgentRun {
         let request = AgentRequest {

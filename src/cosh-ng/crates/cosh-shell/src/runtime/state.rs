@@ -13,6 +13,8 @@ use crate::insight::policy::InterruptionBudget;
 use crate::insight::shell_rewrite::ShellRewriteCatalogService;
 use crate::question::runtime::RuntimeUserQuestion;
 use crate::raw_input::PromptGhostRoute;
+use crate::recommendation::personal_feedback::FrozenPromptBinding;
+use crate::recommendation::personal_state::PersonalizationState;
 use crate::runtime::events::ShellEventCursor;
 use crate::runtime::evidence_requests::EvidenceRequestState;
 use crate::runtime::evidence_state::EvidenceState;
@@ -102,17 +104,20 @@ pub(crate) struct InlineState {
     pub(crate) pending_input_ghost: Option<String>,
     pub(crate) pending_input_ghost_route: PromptGhostRoute,
     pub(crate) pending_input_ghost_binding: Option<PendingInputGhostBinding>,
+    pub(crate) pending_prompt_suggestion_bindings: HashMap<String, PendingInputGhostBinding>,
     pub(crate) shown_shell_rewrite_guidance: bool,
     pub(crate) shown_agent_prompt_guidance: bool,
     pub(crate) pending_shell_handoff_timeout_notice: Option<Duration>,
     pub(crate) continuity: ContinuityState,
     pub(crate) startup_health: StartupHealthState,
+    pub(crate) personalization: PersonalizationState,
 }
 
 #[derive(Clone)]
 pub(crate) enum PendingInputGhostBinding {
-    AgentContext(AgentContextBinding),
+    Health(AgentContextBinding),
     Insight(Box<InsightBinding>),
+    Personal(FrozenPromptBinding),
 }
 
 #[derive(Default)]

@@ -12,6 +12,9 @@ use ratatui::text::Span;
 use wait_timeout::ChildExt;
 
 const RAW_CLI_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(target_os = "linux")]
+const RAW_CLI_SHARED_PARALLELISM: usize = 4;
+#[cfg(not(target_os = "linux"))]
 const RAW_CLI_SHARED_PARALLELISM: usize = 1;
 pub(crate) const RAW_CLI_UNSET_ENV: &str = "__cosh_raw_cli_unset_env__";
 
@@ -135,6 +138,242 @@ pub(crate) fn run_raw_cli_with_args_env_and_delayed_input_after_start(
     )
 }
 
+pub(crate) fn run_raw_cli_with_analyzer_start_barrier(
+    adapter: &str,
+    envs: &[(&str, &str)],
+    initial_input: &[u8],
+    analyzer_started_marker: &Path,
+    analyzer_continue_marker: &Path,
+    foreground_input: &[u8],
+    foreground_marker: &str,
+) -> String {
+    let _run_guard = raw_cli_run_guard(RawCliRunMode::Exclusive);
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+    let mut command = Command::new(binary);
+    command
+        .args(["raw", adapter])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_raw_cli_command(&mut command);
+    apply_raw_cli_envs(&mut command, envs);
+    command.process_group(0);
+    let mut child = RawCliChildGuard::new(command.spawn().expect("spawn cosh-shell raw"));
+    let mut stdin = child.child_mut().stdin.take().expect("child stdin");
+    let stdout = child.child_mut().stdout.take().expect("child stdout");
+    let stderr = child.child_mut().stderr.take().expect("child stderr");
+    let (output_sender, output_receiver) = std::sync::mpsc::channel();
+    let stdout_reader = thread::spawn(move || {
+        let mut stdout = stdout;
+        let mut all = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        loop {
+            match stdout.read(&mut chunk) {
+                Ok(0) => return all,
+                Ok(count) => {
+                    all.extend_from_slice(&chunk[..count]);
+                    let _ = output_sender.send(chunk[..count].to_vec());
+                }
+                Err(error) => panic!("read raw cli stdout: {error}"),
+            }
+        }
+    });
+    let stderr_reader = read_pipe(stderr);
+
+    let mut observed = Vec::new();
+    if let Err(error) = wait_for_raw_cli_marker(
+        &output_receiver,
+        &mut observed,
+        "Prompt recommendations are on; the current AI uses recent Shell and Agent activity.",
+    ) {
+        abort_raw_cli_with_output(&mut child, stdout_reader, stderr_reader, &error);
+    }
+    let mut recommendations_ready = false;
+    for _ in 0..4 {
+        let response_start = observed.len();
+        stdin
+            .write_all(b"/recommendations on\n")
+            .expect("enable recommendations");
+        stdin.flush().expect("flush recommendation setup");
+        let ready = wait_for_raw_cli_marker_or_retry(
+            &output_receiver,
+            &mut observed,
+            response_start,
+            "Prompt recommendations are on.",
+            "Recommendation operation failed:",
+        );
+        let ready = match ready {
+            Ok(ready) => ready,
+            Err(error) => {
+                abort_raw_cli_with_output(&mut child, stdout_reader, stderr_reader, &error)
+            }
+        };
+        if ready {
+            recommendations_ready = true;
+            break;
+        }
+    }
+    assert!(
+        recommendations_ready,
+        "recommendation storage did not become ready: {}",
+        String::from_utf8_lossy(&observed)
+    );
+    stdin.write_all(initial_input).expect("write initial input");
+    stdin.flush().expect("flush initial input");
+    if let Err(error) = wait_for_path(analyzer_started_marker) {
+        abort_raw_cli_with_output(&mut child, stdout_reader, stderr_reader, &error);
+    }
+
+    stdin
+        .write_all(foreground_input)
+        .expect("write foreground input");
+    stdin.flush().expect("flush foreground input");
+    if let Err(error) = wait_for_raw_cli_marker(&output_receiver, &mut observed, foreground_marker)
+    {
+        abort_raw_cli_with_output(&mut child, stdout_reader, stderr_reader, &error);
+    }
+
+    fs::write(analyzer_continue_marker, b"1\n").expect("release Analyzer start barrier");
+    stdin.write_all(b"exit\n").expect("write exit");
+    drop(stdin);
+
+    let status = match child.wait_timeout(RAW_CLI_TIMEOUT).expect("wait raw cli") {
+        Some(status) => status,
+        None => abort_raw_cli_with_output(
+            &mut child,
+            stdout_reader,
+            stderr_reader,
+            "raw CLI timed out after Analyzer barrier",
+        ),
+    };
+    let stdout = join_reader(stdout_reader, "stdout");
+    let stderr = join_reader(stderr_reader, "stderr");
+    assert!(
+        status.success(),
+        "status={status:?}\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
+    );
+    let mut text = String::from_utf8_lossy(&stdout).to_string();
+    text.push_str(&String::from_utf8_lossy(&stderr));
+    text
+}
+
+fn wait_for_raw_cli_marker(
+    receiver: &std::sync::mpsc::Receiver<Vec<u8>>,
+    observed: &mut Vec<u8>,
+    marker: &str,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + RAW_CLI_TIMEOUT;
+    while !String::from_utf8_lossy(observed).contains(marker) {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(format!("raw CLI marker was not visible: {marker}"));
+        }
+        let chunk = receiver
+            .recv_timeout(remaining)
+            .map_err(|_| format!("raw CLI closed before marker: {marker}"))?;
+        observed.extend(chunk);
+    }
+    Ok(())
+}
+
+fn wait_for_raw_cli_marker_or_retry(
+    receiver: &std::sync::mpsc::Receiver<Vec<u8>>,
+    observed: &mut Vec<u8>,
+    response_start: usize,
+    marker: &str,
+    retry_marker: &str,
+) -> Result<bool, String> {
+    let deadline = std::time::Instant::now() + RAW_CLI_TIMEOUT;
+    loop {
+        let response = String::from_utf8_lossy(&observed[response_start..]);
+        if response.contains(marker) {
+            return Ok(true);
+        }
+        if response.contains(retry_marker) {
+            return Ok(false);
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(format!(
+                "raw CLI marker was not visible: {marker}\n{}",
+                String::from_utf8_lossy(observed)
+            ));
+        }
+        let chunk = receiver
+            .recv_timeout(remaining)
+            .map_err(|_| format!("raw CLI closed before marker: {marker}"))?;
+        observed.extend(chunk);
+    }
+}
+
+fn wait_for_path(path: &Path) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + RAW_CLI_TIMEOUT;
+    while !path.exists() {
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "Analyzer did not reach start barrier: {}",
+                path.display()
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
+fn abort_raw_cli_with_output(
+    child: &mut RawCliChildGuard,
+    stdout_reader: JoinHandle<Vec<u8>>,
+    stderr_reader: JoinHandle<Vec<u8>>,
+    reason: &str,
+) -> ! {
+    child.terminate_and_wait();
+    let stdout = join_reader(stdout_reader, "stdout");
+    let stderr = join_reader(stderr_reader, "stderr");
+    panic!(
+        "{reason}\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
+    );
+}
+
+struct RawCliChildGuard {
+    child: Option<Child>,
+}
+
+impl RawCliChildGuard {
+    fn new(child: Child) -> Self {
+        Self { child: Some(child) }
+    }
+
+    fn child_mut(&mut self) -> &mut Child {
+        self.child.as_mut().expect("raw CLI child is available")
+    }
+
+    fn wait_timeout(&mut self, timeout: Duration) -> std::io::Result<Option<ExitStatus>> {
+        let status = self.child_mut().wait_timeout(timeout)?;
+        if status.is_some() {
+            self.child = None;
+        }
+        Ok(status)
+    }
+
+    fn terminate_and_wait(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        terminate_raw_cli_processes(child.id(), libc::SIGKILL);
+        let _ = child.wait();
+    }
+}
+
+impl Drop for RawCliChildGuard {
+    fn drop(&mut self) {
+        self.terminate_and_wait();
+    }
+}
+
 pub(crate) fn run_raw_cli_serial_with_args_env_and_delayed_input(
     adapter: &str,
     extra_args: &[&str],
@@ -168,6 +407,65 @@ pub(crate) fn run_raw_cli_with_args_env_current_dir_and_delayed_input(
         RawCliRunMode::Shared,
         None,
     )
+}
+
+pub(crate) fn run_raw_cli_with_args_env_current_dir_and_marker_input(
+    adapter: &str,
+    extra_args: &[&str],
+    envs: &[(&str, &str)],
+    current_dir: &Path,
+    steps: &[(&str, &[u8])],
+) -> String {
+    let _run_guard = raw_cli_shared_run_guard();
+    let binary = env!("CARGO_BIN_EXE_cosh-shell");
+    let mut command = Command::new(binary);
+    command
+        .current_dir(current_dir)
+        .args(["raw", adapter])
+        .args(extra_args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_raw_cli_command(&mut command);
+    apply_raw_cli_envs(&mut command, envs);
+    command.process_group(0);
+    let mut child = RawCliChildGuard::new(command.spawn().expect("spawn cosh-shell raw"));
+    let mut stdin = child.child_mut().stdin.take().expect("child stdin");
+    let stdout = child.child_mut().stdout.take().expect("child stdout");
+    let stderr = child.child_mut().stderr.take().expect("child stderr");
+    let (output_receiver, stdout_reader) = read_pipe_with_chunks(stdout);
+    let stderr_reader = read_pipe(stderr);
+    let mut observed = Vec::new();
+
+    for (marker, input) in steps {
+        if let Err(error) = wait_for_raw_cli_marker(&output_receiver, &mut observed, marker) {
+            abort_raw_cli_with_output(&mut child, stdout_reader, stderr_reader, &error);
+        }
+        stdin.write_all(input).expect("write marker-gated input");
+        stdin.flush().expect("flush marker-gated input");
+    }
+    drop(stdin);
+
+    let status = match child.wait_timeout(RAW_CLI_TIMEOUT).expect("wait raw cli") {
+        Some(status) => status,
+        None => abort_raw_cli_with_output(
+            &mut child,
+            stdout_reader,
+            stderr_reader,
+            "raw CLI timed out after marker-gated input",
+        ),
+    };
+    let stdout = join_reader(stdout_reader, "stdout");
+    let stderr = join_reader(stderr_reader, "stderr");
+    assert!(
+        status.success(),
+        "status={status:?}\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
+    );
+    let mut text = String::from_utf8_lossy(&stdout).to_string();
+    text.push_str(&String::from_utf8_lossy(&stderr));
+    text
 }
 
 fn run_raw_cli_with_args_env_current_dir_and_delayed_input_inner(
@@ -380,6 +678,7 @@ fn configure_raw_cli_command(command: &mut Command) {
         .env("COSH_SHELL_LANG", "en-US")
         .env("COSH_SHELL_BOOTSTRAP_PATH", "0")
         .env("COSH_SHELL_HEALTH_SCAN", "disabled")
+        .env("COSH_RECOMMENDATIONS_ENABLED", "0")
         .env("LANG", "C.UTF-8")
         .env("LC_ALL", "C.UTF-8")
         .env("HOME", home)
@@ -484,6 +783,30 @@ where
         pipe.read_to_end(&mut output).expect("read raw cli output");
         output
     })
+}
+
+fn read_pipe_with_chunks<R>(
+    mut pipe: R,
+) -> (std::sync::mpsc::Receiver<Vec<u8>>, JoinHandle<Vec<u8>>)
+where
+    R: Read + Send + 'static,
+{
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let reader = thread::spawn(move || {
+        let mut output = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => return output,
+                Ok(count) => {
+                    output.extend_from_slice(&chunk[..count]);
+                    let _ = sender.send(chunk[..count].to_vec());
+                }
+                Err(error) => panic!("read raw cli stdout: {error}"),
+            }
+        }
+    });
+    (receiver, reader)
 }
 
 fn join_reader(reader: JoinHandle<Vec<u8>>, label: &str) -> Vec<u8> {

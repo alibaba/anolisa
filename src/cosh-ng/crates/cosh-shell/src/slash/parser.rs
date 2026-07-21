@@ -27,6 +27,7 @@ pub(super) enum SlashCommand<'a> {
     Extensions(Option<&'a str>, Option<&'a str>),
     Skills(Option<&'a str>, Option<&'a str>),
     Session(&'a str),
+    Recommendations(Option<&'a str>, Option<&'a str>, Option<&'a str>),
 }
 
 impl<'a> SlashCommand<'a> {
@@ -75,6 +76,11 @@ impl<'a> SlashCommand<'a> {
             )),
             "/resume" => Some(Self::Session(
                 input.strip_prefix("/resume").unwrap_or_default().trim(),
+            )),
+            "/recommendations" => Some(Self::Recommendations(
+                parts.next(),
+                parts.next(),
+                parts.next(),
             )),
             "/agent" | "/cancel" | "/clear" | "/copy" | "/details" | "/explain" | "/select"
             | "/send-to-shell" | "/shell" => None,
@@ -139,6 +145,18 @@ mod tests {
         match SlashCommand::parse("/resume abc") {
             Some(SlashCommand::Session(arguments)) => assert_eq!(arguments, "abc"),
             _ => panic!("/resume did not parse as a session command"),
+        }
+    }
+
+    #[test]
+    fn recommendations_preserves_subcommand_and_rejectable_extra_arguments() {
+        match SlashCommand::parse("/recommendations on unexpected extra") {
+            Some(SlashCommand::Recommendations(sub, arg, extra)) => {
+                assert_eq!(sub, Some("on"));
+                assert_eq!(arg, Some("unexpected"));
+                assert_eq!(extra, Some("extra"));
+            }
+            _ => panic!("recommendations command did not parse"),
         }
     }
 

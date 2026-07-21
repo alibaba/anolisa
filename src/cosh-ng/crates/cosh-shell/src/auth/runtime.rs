@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::adapter::{AdapterInstance, CoshCoreAdapter};
+use crate::auth::completion::finish_auth_configuration;
 use crate::auth::provider_display::auth_required_providers_for_display;
 use crate::runtime::dispatcher::stable_event_key;
 use crate::runtime::prelude::{
@@ -878,28 +879,7 @@ fn send_auth_response<W: std::io::Write>(
         }
     }
 
-    let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
-    renderer.write_notice_panel(
-        output,
-        NoticePanelModel {
-            title: "Auth configured",
-            body: vec![format!(
-                "Provider: {} \u{2014} credentials saved.",
-                provider.label
-            )],
-            footer: None,
-        },
-    )?;
-
-    if std::env::var("COSH_SHELL_ISOLATED").is_ok() {
-        writeln!(output)?;
-        write!(output, "cosh-osc$ ")?;
-    } else {
-        state.trigger_pty_prompt = true;
-    }
-
-    output.flush()?;
-    Ok(())
+    finish_auth_configuration(state, output, &provider.label)
 }
 
 fn render_current_auth_panel<W: std::io::Write>(

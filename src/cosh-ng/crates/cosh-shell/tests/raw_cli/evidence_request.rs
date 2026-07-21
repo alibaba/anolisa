@@ -159,9 +159,9 @@ fn raw_cli_cosh_request_card_ctrl_c_cancels_only_evidence_request() {
             ),
             (
                 b"?? request captured output evidence\n".to_vec(),
-                Duration::from_millis(300),
+                Duration::from_millis(700),
             ),
-            (vec![0x03], Duration::from_millis(1_500)),
+            (vec![0x03], Duration::from_millis(2_000)),
             (
                 b"echo after-evidence-cancel\nexit\n".to_vec(),
                 Duration::from_millis(500),

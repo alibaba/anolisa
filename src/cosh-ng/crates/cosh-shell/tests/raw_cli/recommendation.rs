@@ -1,8 +1,169 @@
 use super::*;
+use std::path::PathBuf;
+
+#[test]
+fn raw_cli_foreground_command_wins_before_analyzer_body_write() {
+    let home = temp_shell_home("analyzer-foreground-race");
+    let home_guard = TestDirectoryGuard::new(home.clone());
+    let bin_dir = home.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let recommendation_root = home.join(".copilot-shell/cosh/recommendations");
+    fs::create_dir_all(&recommendation_root).unwrap();
+    fs::set_permissions(&recommendation_root, fs::Permissions::from_mode(0o700)).unwrap();
+    let cosh_core_path = bin_dir.join("cosh-core");
+    let started_marker = home.join("analyzer-started");
+    let continue_marker = home.join("analyzer-continue");
+    let analyzer_body = home.join("analyzer-body.json");
+    write_executable(
+        &cosh_core_path,
+        r#"#!/bin/sh
+if [ "$1" = "--registry" ]; then
+  read -r request
+  printf '%s\n' '{"type":"registry_response","request_id":"registry","success":true,"data":{"model":"main-model","auth_hmac":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","configured":true}}'
+  exit 0
+fi
+case " $* " in
+  *" --bare "*)
+    trap 'exit 0' TERM INT HUP
+    read -r init
+    printf '1' > "$ANALYZER_STARTED_FILE"
+    while [ ! -f "$ANALYZER_CONTINUE_FILE" ]; do sleep 0.01; done
+    printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"recommendation-init","response":{"subtype":"initialize","capabilities":{}}}}'
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"analyzer-session","model":"main-model","tools":[]}'
+    if read -r body; then
+      printf '%s\n' "$body" > "$ANALYZER_BODY_FILE"
+    fi
+    ;;
+  *)
+    read -r init
+    printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{}}}}'
+    printf '%s\n' '{"type":"system","subtype":"init","session_id":"foreground-trigger","model":"main-model","tools":[]}'
+    read -r request
+    printf '%s\n' '{"type":"assistant","session_id":"foreground-trigger","message":{"content":[{"type":"text","text":"Trigger recorded."}]}}'
+    printf '%s\n' '{"type":"result","subtype":"success","session_id":"foreground-trigger","is_error":false,"result":"done"}'
+    ;;
+esac
+"#,
+    );
+    let home_str = home.to_string_lossy().to_string();
+    let core_str = cosh_core_path.to_string_lossy().to_string();
+    let started_str = started_marker.to_string_lossy().to_string();
+    let continue_str = continue_marker.to_string_lossy().to_string();
+    let body_str = analyzer_body.to_string_lossy().to_string();
+
+    let output = run_raw_cli_with_analyzer_start_barrier(
+        "cosh-core",
+        &[
+            ("HOME", &home_str),
+            ("COSH_CORE_PATH", &core_str),
+            ("ANALYZER_STARTED_FILE", &started_str),
+            ("ANALYZER_CONTINUE_FILE", &continue_str),
+            ("ANALYZER_BODY_FILE", &body_str),
+            ("COSH_RECOMMENDATIONS_ENABLED", "1"),
+            ("COSH_SHELL_STARTUP_BANNER", "1"),
+        ],
+        b"?? inspect foreground race\n",
+        &started_marker,
+        &continue_marker,
+        b"printf 'FOREGROUND-%s\\n' 'COMMAND-VISIBLE'\n",
+        "FOREGROUND-COMMAND-VISIBLE",
+    );
+    let body_written = analyzer_body.exists();
+
+    assert!(output.contains("FOREGROUND-COMMAND-VISIBLE"), "{output}");
+    assert!(!body_written, "Analyzer body was written\n{output}");
+    home_guard.remove();
+}
+
+struct TestDirectoryGuard(Option<PathBuf>);
+
+impl TestDirectoryGuard {
+    fn new(path: PathBuf) -> Self {
+        Self(Some(path))
+    }
+
+    fn remove(mut self) {
+        let path = self.0.take().expect("test directory is present");
+        fs::remove_dir_all(path).expect("remove Analyzer raw CLI test directory");
+    }
+}
+
+impl Drop for TestDirectoryGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+}
+
+#[test]
+fn raw_cli_default_on_recommendations_keep_foreground_shell_usable() {
+    let output = run_raw_cli_serial_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[
+            ("COSH_RECOMMENDATIONS_ENABLED", "1"),
+            ("COSH_SHELL_LANG", "en-US"),
+            ("COSH_SHELL_STARTUP_BANNER", "1"),
+        ],
+        vec![
+            (
+                b"echo default-on-foreground-ready\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            (b"exit 0\n".to_vec(), Duration::from_millis(100)),
+        ],
+    );
+
+    assert!(
+        output.contains(
+            "Prompt recommendations are on; the current AI uses recent Shell and Agent activity."
+        ),
+        "{output}"
+    );
+    assert!(output.contains("default-on-foreground-ready"), "{output}");
+}
+
+#[test]
+fn raw_cli_fresh_home_initializes_recommendation_store() {
+    let home = temp_shell_home("recommendation-fresh-home");
+    let home_guard = TestDirectoryGuard::new(home.clone());
+    let home_str = home.to_string_lossy().to_string();
+    let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
+        "fake",
+        &[],
+        &[
+            ("HOME", &home_str),
+            ("COSH_SHELL_STARTUP_BANNER", "1"),
+            ("COSH_SHELL_HEALTH_SCAN", "disabled"),
+            ("COSH_SHELL_LANG", "en-US"),
+            ("COSH_RECOMMENDATIONS_ENABLED", "1"),
+        ],
+        &home,
+        &[
+            (
+                "Prompt recommendations are on; the current AI uses recent Shell and Agent activity.",
+                b"/recommendations on\n",
+            ),
+            ("Prompt recommendations are on.", b"exit\n"),
+        ],
+    );
+
+    assert!(
+        output.contains("Prompt recommendations are on."),
+        "{output}"
+    );
+    assert!(
+        home.join(".copilot-shell/cosh/recommendations/state.json")
+            .is_file(),
+        "{output}"
+    );
+    home_guard.remove();
+}
 
 #[test]
 fn raw_cli_selects_recommendation_without_executing_it() {
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    let output = run_raw_cli_serial_with_args_env_and_delayed_input(
         "fake",
         &[],
         &[("COSH_SHELL_LANG", "en-US")],
@@ -26,7 +187,7 @@ fn raw_cli_selects_recommendation_without_executing_it() {
 
 #[test]
 fn raw_cli_zh_selects_recommendation_without_executing_it() {
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    let output = run_raw_cli_serial_with_args_env_and_delayed_input(
         "fake",
         &[],
         &[("COSH_SHELL_LANG", "zh-CN")],
@@ -59,7 +220,7 @@ fn raw_cli_zh_selects_recommendation_without_executing_it() {
 
 #[test]
 fn raw_cli_copy_fallback_shows_recommendation_without_executing_it() {
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    let output = run_raw_cli_serial_with_args_env_and_delayed_input(
         "fake",
         &[],
         &[("COSH_SHELL_LANG", "en-US")],
@@ -110,7 +271,7 @@ fn raw_cli_zh_select_before_recommendation_uses_catalog_fallback() {
 
 #[test]
 fn raw_cli_select_out_of_range_uses_structured_notice() {
-    let output = run_raw_cli_with_args_env_and_delayed_input(
+    let output = run_raw_cli_serial_with_args_env_and_delayed_input(
         "fake",
         &[],
         &[("COSH_SHELL_LANG", "en-US")],

@@ -5,7 +5,10 @@ use super::hook_feedback::{
     write_hook_feedback_entries_to_store_path, write_hook_feedback_to_store_path,
 };
 use super::language::{language_setting_from_config_content, write_language_config_to_path};
-use super::load::{config_read_file_path_for_home, load_config_file_into};
+use super::load::{
+    config_read_file_path_for_home, load_config_file_into,
+    parse_recommendations_environment_override,
+};
 use super::parse::{parse_simple_config, parse_toml_config};
 use super::trust::{
     add_trusted_project_root_to_store_path, load_project_trust_store,
@@ -62,6 +65,53 @@ fn default_config_values() {
     assert!(cfg.trusted_project_roots.is_empty());
     assert!(cfg.readonly.disabled.is_empty());
     assert!(cfg.readonly.overrides.is_empty());
+    assert!(cfg.recommendations.enabled);
+    assert!(!cfg.recommendations.bash_history);
+}
+
+#[test]
+fn recommendation_environment_override_is_separate_from_config_default() {
+    assert_eq!(
+        parse_recommendations_environment_override(Some("1")),
+        Some(true)
+    );
+    assert_eq!(
+        parse_recommendations_environment_override(Some("0")),
+        Some(false)
+    );
+    assert_eq!(
+        parse_recommendations_environment_override(Some("invalid")),
+        None
+    );
+    assert_eq!(parse_recommendations_environment_override(None), None);
+}
+
+#[test]
+fn parse_recommendation_config() {
+    let mut cfg = CoshConfig::default();
+    parse_toml_config(
+        r#"
+[shell.recommendations]
+enabled = false
+bash_history = true
+"#,
+        &mut cfg,
+    );
+
+    assert!(!cfg.recommendations.enabled);
+    assert!(cfg.recommendations.bash_history);
+}
+
+#[test]
+fn top_level_recommendations_table_does_not_extend_shared_config_schema() {
+    let mut cfg = CoshConfig::default();
+    parse_toml_config(
+        "[recommendations]\nenabled = false\nbash_history = true\n",
+        &mut cfg,
+    );
+
+    assert!(cfg.recommendations.enabled);
+    assert!(!cfg.recommendations.bash_history);
 }
 
 #[test]

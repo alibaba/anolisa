@@ -4,8 +4,17 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use crate::diagnostics::health::{
-    record_startup_health_recommendations, HealthScanReport, HealthSeverity,
+use crate::diagnostics::health::{record_startup_health_recommendations, HealthScanReport};
+use crate::raw_input::{PromptGhostCandidate, PromptGhostRoute};
+use crate::recommendation::personal_context::discover_repo_context;
+use crate::recommendation::personal_crypto::random_hex;
+use crate::recommendation::personal_feedback::{FeedbackEvent, FrozenPromptBinding};
+use crate::recommendation::personal_model::{
+    CandidateEvidenceSummary, CandidateSource, ContextAffinity, FeedbackAction, ScopeKind,
+    DISCLOSURE_VERSION,
+};
+use crate::recommendation::personal_planner::{
+    plan_startup, HealthResolution, PlannerCandidate, PlannerContext,
 };
 use crate::runtime::cli_args::RawShellKind;
 use crate::runtime::prelude::*;
@@ -33,106 +42,15 @@ const RESET: &str = "\x1b[0m";
 const LOGO_MIN_WIDTH: u16 = 42;
 const STARTUP_HEALTH_ROW_WAIT: Duration = Duration::from_millis(150);
 
-pub(crate) fn render_startup_banner<W: Write>(
-    events: &[ShellEvent],
-    adapter: &AdapterInstance,
-    shell_label: &str,
-    state: &mut InlineState,
-    output: &mut W,
-) -> std::io::Result<()> {
-    if state.rendered_startup_banner || !startup_banner_enabled() {
-        return Ok(());
-    }
-
-    let Some(event) = events
-        .iter()
-        .find(|event| event.kind == ShellEventKind::ShellReady)
-    else {
-        return Ok(());
-    };
-
-    state.rendered_startup_banner = true;
-    let cwd = event.cwd.as_deref().unwrap_or("<unknown>");
-    let i18n = state.i18n();
-    let startup_hook = evaluate_startup_hooks(cwd, i18n);
-
-    write!(output, "\r\x1b[2K")?;
-    let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
-
-    let term_width = ratatui::crossterm::terminal::size()
-        .map(|(cols, _)| cols)
-        .unwrap_or(80);
-
-    if term_width >= LOGO_MIN_WIDTH {
-        writeln!(output)?;
-        for (i, line) in LOGO_LINES.iter().enumerate() {
-            writeln!(output, "{}{}{}", LOGO_COLORS[i], line, RESET)?;
-        }
-        writeln!(output)?;
-    }
-
-    let mut body = vec![
-        i18n.format(
-            MessageId::StartupAdapterLine,
-            &[
-                ("adapter", adapter.name()),
-                ("shell", shell_label),
-                ("approval", state.approval_mode.label()),
-                ("analysis", state.analysis_mode.label()),
-            ],
-        ),
-        i18n.format(MessageId::StartupCwdLine, &[("cwd", cwd)]),
-        i18n.t(MessageId::StartupCommandsLine).to_string(),
-    ];
-    state.startup_health.wait_ready(STARTUP_HEALTH_ROW_WAIT);
-    if let Some(report) = state.startup_health.report.as_ref() {
-        let prompt_ghost = startup_health_prompt_ghost(report, i18n);
-        if health_uses_startup_row(report) {
-            body.push(renderer.startup_section_separator_line());
-            body.extend(renderer.health_startup_row_lines(HealthBannerModel { report }));
-            state.startup_health.rendered = true;
-            record_startup_health_recommendations(report);
-        }
-        set_startup_health_prompt_ghost(state, prompt_ghost);
-    }
-    if let Some(markdown) = startup_hook.markdown {
-        body.push(String::new());
-        body.push(startup_hook.summary);
-        for line in renderer.markdown_text_lines(&markdown) {
-            body.push(line);
-        }
-    }
-    body.push(i18n.t(MessageId::StartupSwitchHint).to_string());
-    renderer.write_banner(output, i18n.t(MessageId::StartupTitle), body, None)?;
-    writeln!(output)?;
-    restore_startup_prompt(state, output)?;
-    output.flush()
-}
-
-pub(crate) fn render_startup_health_banner<W: Write>(
-    state: &mut InlineState,
-    output: &mut W,
-) -> std::io::Result<()> {
-    if !state.rendered_startup_banner || state.startup_health.rendered {
-        return Ok(());
-    }
-
-    state.startup_health.poll_ready();
-    let Some(report) = state.startup_health.report.as_ref() else {
-        return Ok(());
-    };
-
-    state.startup_health.rendered = true;
-    let prompt_ghost = startup_health_prompt_ghost(report, state.i18n());
-    write!(output, "\r\x1b[2K")?;
-    let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
-    renderer.write_health_banner(output, HealthBannerModel { report })?;
-    record_startup_health_recommendations(report);
-    set_startup_health_prompt_ghost(state, prompt_ghost);
-    writeln!(output)?;
-    restore_startup_prompt(state, output)?;
-    output.flush()
-}
+mod recommendations;
+#[cfg(test)]
+pub(super) use recommendations::{
+    plan_startup_for_render, record_visible_personal_impressions, visible_personal_candidates,
+    write_startup_suggestion_card,
+};
+pub(crate) use recommendations::{
+    render_pending_recommendation_notice, render_startup_banner, render_startup_health_banner,
+};
 
 fn restore_startup_prompt<W: Write>(
     state: &mut InlineState,
@@ -146,37 +64,15 @@ fn restore_startup_prompt<W: Write>(
     Ok(())
 }
 
-fn startup_health_prompt_ghost(report: &HealthScanReport, i18n: crate::I18n) -> Option<String> {
-    startup_prompt_ghost_allowed(report).then(|| primary_health_prompt_suggestion(report, i18n))?
-}
-
-fn set_startup_health_prompt_ghost(state: &mut InlineState, prompt: Option<String>) {
-    state.pending_input_ghost = prompt.clone();
-    state.pending_input_ghost_binding = prompt.map(|_| {
-        PendingInputGhostBinding::AgentContext(AgentContextBinding::StartupHealthFollowUp)
-    });
-}
-
-fn startup_prompt_ghost_allowed(report: &HealthScanReport) -> bool {
-    if std::env::var("COSH_SHELL_ISOLATED").is_ok() || std::env::var("NO_COLOR").is_ok() {
-        return false;
-    }
-    if std::env::var("TERM")
-        .map(|term| term.eq_ignore_ascii_case("dumb"))
-        .unwrap_or(false)
-    {
-        return false;
-    }
-    if std::env::var("COSH_SHELL_RENDER")
-        .map(|mode| mode.eq_ignore_ascii_case("plain") || mode.eq_ignore_ascii_case("text"))
-        .unwrap_or(false)
-    {
-        return false;
-    }
-    !matches!(
-        report.overall_severity,
-        HealthSeverity::Unavailable | HealthSeverity::Degraded
+fn startup_prompt_ghost_allowed(_report: &HealthScanReport) -> bool {
+    startup_prompt_selection_supported(
+        std::env::var("COSH_SHELL_ISOLATED").is_ok(),
+        std::env::var("TERM").ok().as_deref(),
     )
+}
+
+fn startup_prompt_selection_supported(isolated: bool, term: Option<&str>) -> bool {
+    !isolated && !term.is_some_and(|term| term.eq_ignore_ascii_case("dumb"))
 }
 
 fn startup_banner_enabled() -> bool {
@@ -464,65 +360,5 @@ fn merge_path_lists(paths: &[&str]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{extract_bootstrap_path, merge_path_lists, raw_passthrough_args};
-
-    #[test]
-    fn bootstrap_path_extracts_last_marked_value() {
-        let text = "plugin noise\n__COSH_PATH_BEGIN__/a:/b__COSH_PATH_END__\n";
-        assert_eq!(extract_bootstrap_path(text), Some("/a:/b".to_string()));
-        assert_eq!(extract_bootstrap_path("plugin noise"), None);
-    }
-
-    #[test]
-    fn bootstrap_path_merge_keeps_existing_and_common_dirs() {
-        assert_eq!(
-            merge_path_lists(&[
-                "/opt/homebrew/bin:/usr/bin:/bin",
-                "/usr/local/bin:/bin",
-                "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-            ]),
-            "/opt/homebrew/bin:/usr/bin:/bin:/usr/local/bin:/usr/sbin:/sbin"
-        );
-    }
-
-    #[test]
-    fn raw_passthrough_args_strips_raw_adapter_for_dash_c() {
-        assert_eq!(
-            raw_passthrough_args(&[
-                "cosh-shell".to_string(),
-                "raw".to_string(),
-                "cosh-core".to_string(),
-                "-c".to_string(),
-                "echo ok".to_string()
-            ]),
-            Some(vec![
-                "cosh-shell".to_string(),
-                "-c".to_string(),
-                "echo ok".to_string()
-            ])
-        );
-    }
-
-    #[test]
-    fn raw_passthrough_args_preserves_shell_option() {
-        assert_eq!(
-            raw_passthrough_args(&[
-                "cosh-shell".to_string(),
-                "raw".to_string(),
-                "--shell".to_string(),
-                "bash".to_string(),
-                "cosh-core".to_string(),
-                "-c".to_string(),
-                "echo ok".to_string()
-            ]),
-            Some(vec![
-                "cosh-shell".to_string(),
-                "--shell".to_string(),
-                "bash".to_string(),
-                "-c".to_string(),
-                "echo ok".to_string()
-            ])
-        );
-    }
-}
+#[path = "startup_tests.rs"]
+mod tests;
