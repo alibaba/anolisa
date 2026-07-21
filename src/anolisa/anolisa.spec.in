@@ -124,7 +124,18 @@ install -m 0644 manifests/repo.toml %{buildroot}%{_sysconfdir}/anolisa/repo.toml
 #%%doc %%{_docdir}/%%{name}/README.md
 
 %changelog
-* Sat Jul 18 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Tue Jul 21 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- `anolisa adapter enable` now supports `--allow-unsafe-plugin-install` for explicitly authorized OpenClaw plugin installation.
+- OpenClaw adapter settings can now target specific OpenClaw versions.
+- `anolisa adapter enable` now checks OpenClaw compatibility before making changes.
+- `anolisa adapter enable` now verifies OpenClaw plugins are loaded before reporting success.
+- When OpenClaw blocks an unsafe plugin, ANOLISA now shows the reported findings.
+- When supported, OpenClaw safety errors now suggest retrying with explicit unsafe authorization.
+- Failed OpenClaw setting updates can now be retried without losing track of affected settings.
+- Re-enabling an OpenClaw adapter no longer loses track of settings applied by an earlier successful enable.
+- `anolisa adapter disable` now warns when OpenClaw settings may remain after an uncertain update.
+
+* Sat Jul 18 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.7-1
 - `anolisa adapter` now manages Qwen Code extensions through the `qwen` CLI for Qwen Code 0.17 and newer.
 - `anolisa upgrade` and `anolisa repair` now explain component manifest reconciliation in human and JSON output.
 - `anolisa upgrade` now refreshes component manifests after RPM package upgrades.

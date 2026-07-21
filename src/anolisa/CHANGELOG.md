@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-07-21
+
+### Added
+
+- `anolisa adapter enable` now supports `--allow-unsafe-plugin-install` for explicitly authorized OpenClaw plugin installation.
+- OpenClaw adapter settings can now target specific OpenClaw versions.
+
+### Changed
+
+- `anolisa adapter enable` now checks OpenClaw compatibility before making changes.
+- `anolisa adapter enable` now verifies OpenClaw plugins are loaded before reporting success.
+- When OpenClaw blocks an unsafe plugin, ANOLISA now shows the reported findings.
+- When supported, OpenClaw safety errors now suggest retrying with explicit unsafe authorization.
+
+### Fixed
+
+- Failed OpenClaw setting updates can now be retried without losing track of affected settings.
+- Re-enabling an OpenClaw adapter no longer loses track of settings applied by an earlier successful enable.
+- `anolisa adapter disable` now warns when OpenClaw settings may remain after an uncertain update.
+
 ## [0.2.7] - 2026-07-18
 
 ### Added
@@ -534,6 +554,26 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.2.8] - 2026-07-21
+
+### 新增
+
+- `anolisa adapter enable` 现支持以 `--allow-unsafe-plugin-install` 显式授权 OpenClaw 不安全插件安装。
+- OpenClaw 适配器设置现可限定适用的 OpenClaw 版本。
+
+### 变更
+
+- `anolisa adapter enable` 现会在执行任何更改前检查 OpenClaw 兼容性。
+- `anolisa adapter enable` 现会确认 OpenClaw 插件已加载后再报告成功。
+- OpenClaw 阻止不安全插件时，ANOLISA 现会显示检查结果。
+- OpenClaw 支持显式授权时，安全错误现会提示授权重试。
+
+### 修复
+
+- OpenClaw 设置更新失败后，现可保留受影响设置供重试。
+- 重新启用 OpenClaw 适配器时，不再丢失此前已应用的设置记录。
+- `anolisa adapter disable` 现会提示更新结果不确定且可能残留的 OpenClaw 设置。
 
 ## [0.2.7] - 2026-07-18
 
