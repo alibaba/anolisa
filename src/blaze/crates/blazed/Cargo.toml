@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 [package]
-name = "anvil"
+name = "blazed"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,11 +8,11 @@ rust-version.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "anvil"
+name = "blazed"
 path = "src/main.rs"
 
 [dependencies]
-anvil-core = { workspace = true }
+blaze-core = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

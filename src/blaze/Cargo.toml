@@ -2,8 +2,8 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/anvil-core",
-    "crates/anvil",
+    "crates/blaze-core",
+    "crates/blazed",
 ]
 
 [workspace.package]
@@ -44,7 +44,7 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 semver = "1.0"
 
 # Internal crates
-anvil-core = { path = "crates/anvil-core" }
+blaze-core = { path = "crates/blaze-core" }
 
 [profile.release]
 lto = "thin"

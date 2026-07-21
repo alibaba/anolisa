@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 [package]
-name = "anvil-core"
+name = "blaze-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -71,44 +71,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anvil"
-version = "0.1.0"
-dependencies = [
- "anvil-core",
- "anyhow",
- "async-trait",
- "chrono",
- "clap",
- "http-body-util",
- "hyper",
- "hyper-util",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "anvil-core"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "semver",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "toml",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "anyhow"
 version = "1.0.102"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -148,6 +110,44 @@ name = "bitflags"
 version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
+
+[[package]]
+name = "blaze-core"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "semver",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "toml",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "blazed"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "blaze-core",
+ "chrono",
+ "clap",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
 
 [[package]]
 name = "bumpalo"
