@@ -4,6 +4,7 @@ pub(crate) mod continuity;
 pub(crate) mod controller;
 pub(crate) mod details;
 pub(crate) mod dispatcher;
+pub(crate) mod doctor;
 pub(crate) mod events;
 pub(crate) mod evidence_delivery;
 pub(crate) mod evidence_requests;
