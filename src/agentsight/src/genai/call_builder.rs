@@ -760,6 +760,64 @@ mod tests {
         assert!(build_call(&builder, &[AnalysisResult::Http(http)]).is_none());
     }
 
+    // ── Verification: HTTPS-fallback trigger for unparsable LLM traffic ──
+    //
+    // An LLM API path whose body cannot be parsed into semantic messages must
+    // still build an LLMCall (path matched), but that call carries no messages,
+    // so `is_semantically_empty()` is true — this is exactly what drives the FFI
+    // divert to AgentsightHttpsData. A parsable exchange must NOT be empty.
+    #[test]
+    fn test_unparsable_llm_traffic_is_semantically_empty() {
+        let builder = GenAIBuilder::new();
+        let http = make_http(
+            "/v1/chat/completions",
+            Some("this is not a valid chat-completions body".to_string()),
+            Some("neither is this a parseable response".to_string()),
+        );
+        let call = build_call(&builder, &[AnalysisResult::Http(http)])
+            .expect("LLM path still builds an LLMCall");
+        assert!(
+            call.is_semantically_empty(),
+            "unparsable LLM body must yield a semantically-empty call (→ HTTPS fallback)"
+        );
+    }
+
+    #[test]
+    fn test_parsable_llm_traffic_is_not_semantically_empty() {
+        let builder = GenAIBuilder::new();
+        let anth_req = AnthropicRequest {
+            model: "claude-3".to_string(),
+            messages: vec![AnthMsg {
+                role: MessageRole::User,
+                content: AnthropicMessageContent::Text("Hi".to_string()),
+            }],
+            max_tokens: 200,
+            system: None,
+            stream: Some(false),
+            temperature: Some(0.5),
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
+            metadata: None,
+            tools: None,
+            tool_choice: None,
+        };
+        let parsed = ParsedApiMessage::AnthropicMessage {
+            request: Some(anth_req),
+            response: None,
+        };
+        let http = make_http("/v1/messages", None, None);
+        let call = build_call(
+            &builder,
+            &[AnalysisResult::Http(http), AnalysisResult::Message(parsed)],
+        )
+        .expect("valid LLM call builds");
+        assert!(
+            !call.is_semantically_empty(),
+            "a parsable LLM exchange must carry messages (no HTTPS fallback)"
+        );
+    }
+
     #[test]
     fn test_build_llm_call_returns_none_when_no_http() {
         let builder = GenAIBuilder::new();
