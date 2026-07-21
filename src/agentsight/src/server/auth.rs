@@ -298,6 +298,19 @@ fn is_localhost_only(path: &str) -> bool {
         .any(|prefix| path.starts_with(prefix))
 }
 
+fn is_enforcement_mutation(method: &actix_web::http::Method, path: &str) -> bool {
+    match *method {
+        actix_web::http::Method::POST => matches!(
+            path,
+            "/api/enforcement/bindings" | "/api/enforcement/file-bindings"
+        ),
+        actix_web::http::Method::DELETE => path
+            .strip_prefix("/api/enforcement/bindings/")
+            .is_some_and(|binding_id| !binding_id.is_empty() && !binding_id.contains('/')),
+        _ => false,
+    }
+}
+
 // ─── actix-web middleware ────────────────────────────────────────────────────
 
 /// actix-web `Transform` that wraps every request with token authentication.
@@ -371,6 +384,29 @@ where
         if *req.method() == actix_web::http::Method::OPTIONS {
             let fut = self.service.call(req);
             return Box::pin(async move { fut.await.map(|res| res.map_into_left_body()) });
+        }
+
+        // Kernel-policy mutations always require an explicit credential. Loopback is a
+        // network location, not an authorization boundary: unprivileged local processes
+        // must not be able to use the root server as a confused deputy.
+        if is_enforcement_mutation(req.method(), &path) {
+            let authenticated = self.auth.enabled
+                && extract_token(&req)
+                    .map(|candidate| {
+                        self.auth.verify_token(&candidate)
+                            || self.auth.verify_session_cookie(&candidate)
+                    })
+                    .unwrap_or(false);
+            if authenticated {
+                let fut = self.service.call(req);
+                return Box::pin(async move { fut.await.map(|res| res.map_into_left_body()) });
+            }
+            let response = req.into_response(
+                HttpResponse::Unauthorized()
+                    .json(serde_json::json!({"error": "unauthorized", "message": "Authentication required"}))
+                    .map_into_right_body(),
+            );
+            return Box::pin(async move { Ok(response) });
         }
 
         // If auth is disabled, pass through immediately.
@@ -767,6 +803,112 @@ mod tests {
             .to_request();
         let resp = actix_web::test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);
+    }
+
+    #[actix_web::test]
+    async fn middleware_requires_auth_for_loopback_enforcement_mutations() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        let dir = std::env::temp_dir().join("auth_mw_enforcement_loopback");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok();
+        let auth = Arc::new(DashboardAuth::init(
+            &ServerAuthConfig { enabled: true },
+            &dir,
+        ));
+        let token = auth.token().unwrap_or("").to_string();
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .wrap(AuthMiddleware::new(auth))
+                .route(
+                    "/api/enforcement/file-bindings",
+                    actix_web::web::post().to(|| async { HttpResponse::Ok().finish() }),
+                )
+                .route(
+                    "/api/enforcement/bindings/{binding_id}",
+                    actix_web::web::delete().to(|| async { HttpResponse::Ok().finish() }),
+                ),
+        )
+        .await;
+        let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
+
+        let unauthenticated_apply = actix_web::test::TestRequest::post()
+            .uri("/api/enforcement/file-bindings")
+            .peer_addr(loopback)
+            .to_request();
+        let response = actix_web::test::call_service(&app, unauthenticated_apply).await;
+        assert_eq!(response.status(), 401);
+
+        let unauthenticated_detach = actix_web::test::TestRequest::delete()
+            .uri("/api/enforcement/bindings/00000000-0000-0000-0000-000000000001")
+            .peer_addr(loopback)
+            .to_request();
+        let response = actix_web::test::call_service(&app, unauthenticated_detach).await;
+        assert_eq!(response.status(), 401);
+
+        let authenticated_apply = actix_web::test::TestRequest::post()
+            .uri("/api/enforcement/file-bindings")
+            .peer_addr(loopback)
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request();
+        let response = actix_web::test::call_service(&app, authenticated_apply).await;
+        assert_eq!(response.status(), 200);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[actix_web::test]
+    async fn middleware_rejects_enforcement_mutations_when_auth_is_disabled() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        let auth = Arc::new(DashboardAuth::init(
+            &ServerAuthConfig { enabled: false },
+            Path::new("/tmp"),
+        ));
+        let app = actix_web::test::init_service(
+            actix_web::App::new().wrap(AuthMiddleware::new(auth)).route(
+                "/api/enforcement/bindings",
+                actix_web::web::post().to(|| async { HttpResponse::Ok().finish() }),
+            ),
+        )
+        .await;
+        let request = actix_web::test::TestRequest::post()
+            .uri("/api/enforcement/bindings")
+            .peer_addr(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345))
+            .to_request();
+
+        let response = actix_web::test::call_service(&app, request).await;
+        assert_eq!(response.status(), 401);
+    }
+
+    #[actix_web::test]
+    async fn middleware_rejects_cross_origin_loopback_enforcement_mutation() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        let dir = std::env::temp_dir().join("auth_mw_enforcement_origin");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok();
+        let auth = Arc::new(DashboardAuth::init(
+            &ServerAuthConfig { enabled: true },
+            &dir,
+        ));
+        let app = actix_web::test::init_service(
+            actix_web::App::new().wrap(AuthMiddleware::new(auth)).route(
+                "/api/enforcement/file-bindings",
+                actix_web::web::post().to(|| async { HttpResponse::Ok().finish() }),
+            ),
+        )
+        .await;
+        let request = actix_web::test::TestRequest::post()
+            .uri("/api/enforcement/file-bindings")
+            .peer_addr(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345))
+            .insert_header(("Origin", "https://attacker.example"))
+            .to_request();
+
+        let response = actix_web::test::call_service(&app, request).await;
+        assert_eq!(response.status(), 401);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[actix_web::test]
