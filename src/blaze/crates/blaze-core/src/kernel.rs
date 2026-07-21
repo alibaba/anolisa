@@ -6,7 +6,7 @@
 //!
 //! ## Concurrency model
 //!
-//! HookRegistry itself contains no synchronization primitives. Callers (anvil daemon)
+//! HookRegistry itself contains no synchronization primitives. Callers (blaze daemon)
 //! must wrap it in `Mutex<HookRegistry>` or equivalent to ensure atomic activate/deactivate.
 //!
 //! Kernel hook registry.
@@ -24,7 +24,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::error::{AnvilError, Result};
+use crate::error::{BlazeError, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -53,14 +53,14 @@ impl fmt::Display for HookKind {
 }
 
 impl FromStr for HookKind {
-    type Err = AnvilError;
+    type Err = BlazeError;
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
             "mm-template" => Ok(HookKind::MmTemplate),
             "uffd-wp" => Ok(HookKind::UffdWp),
             "cgroup-high" => Ok(HookKind::CgroupHigh),
             "ept-lazy-load" => Ok(HookKind::EptLazyLoad),
-            other => Err(AnvilError::HookError {
+            other => Err(BlazeError::HookError {
                 hook_name: other.to_string(),
                 msg: "unknown hook kind".into(),
             }),
@@ -109,12 +109,12 @@ impl HookRegistry {
     }
 
     pub fn unregister(&mut self, kind: HookKind) -> Result<()> {
-        let entry = self.hooks.get(&kind).ok_or_else(|| AnvilError::HookError {
+        let entry = self.hooks.get(&kind).ok_or_else(|| BlazeError::HookError {
             hook_name: kind.to_string(),
             msg: "not registered".into(),
         })?;
         if entry.state == HookState::Activated {
-            return Err(AnvilError::HookError {
+            return Err(BlazeError::HookError {
                 hook_name: kind.to_string(),
                 msg: format!(
                     "cannot unregister while activated by instance {:?}",
@@ -129,12 +129,12 @@ impl HookRegistry {
 
     /// Activate `kind` on behalf of `instance_id`. Per-hook mutex: if
     /// another instance currently owns it, returns
-    /// [`AnvilError::HookError`].
+    /// [`BlazeError::HookError`].
     pub fn activate(&mut self, kind: HookKind, instance_id: Uuid) -> Result<()> {
         let entry = self
             .hooks
             .get_mut(&kind)
-            .ok_or_else(|| AnvilError::HookError {
+            .ok_or_else(|| BlazeError::HookError {
                 hook_name: kind.to_string(),
                 msg: "not registered".into(),
             })?;
@@ -143,7 +143,7 @@ impl HookRegistry {
                 // already ours, idempotent
                 return Ok(());
             }
-            return Err(AnvilError::HookError {
+            return Err(BlazeError::HookError {
                 hook_name: kind.to_string(),
                 msg: format!("already activated by instance {:?}", entry.instance_id),
             });
@@ -161,18 +161,18 @@ impl HookRegistry {
         let entry = self
             .hooks
             .get_mut(&kind)
-            .ok_or_else(|| AnvilError::HookError {
+            .ok_or_else(|| BlazeError::HookError {
                 hook_name: kind.to_string(),
                 msg: "not registered".into(),
             })?;
         if entry.state != HookState::Activated {
-            return Err(AnvilError::HookError {
+            return Err(BlazeError::HookError {
                 hook_name: kind.to_string(),
                 msg: "not currently activated".into(),
             });
         }
         if entry.instance_id != Some(instance_id) {
-            return Err(AnvilError::HookError {
+            return Err(BlazeError::HookError {
                 hook_name: kind.to_string(),
                 msg: format!(
                     "owned by instance {:?}, refusing to deactivate from {instance_id}",
@@ -239,7 +239,7 @@ mod tests {
         let err = reg
             .activate(HookKind::UffdWp, Uuid::new_v4())
             .expect_err("blocked");
-        assert!(matches!(err, AnvilError::HookError { .. }));
+        assert!(matches!(err, BlazeError::HookError { .. }));
     }
 
     #[test]
@@ -251,7 +251,7 @@ mod tests {
         let err = reg
             .deactivate(HookKind::CgroupHigh, Uuid::new_v4())
             .expect_err("must not steal");
-        assert!(matches!(err, AnvilError::HookError { .. }));
+        assert!(matches!(err, BlazeError::HookError { .. }));
     }
 
     #[test]
@@ -261,6 +261,6 @@ mod tests {
         reg.activate(HookKind::EptLazyLoad, Uuid::new_v4())
             .expect("ok");
         let err = reg.unregister(HookKind::EptLazyLoad).expect_err("blocked");
-        assert!(matches!(err, AnvilError::HookError { .. }));
+        assert!(matches!(err, BlazeError::HookError { .. }));
     }
 }

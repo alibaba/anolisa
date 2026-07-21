@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-//! `anvil` binary entry point.
+//! `blazed` binary entry point.
 //!
-//! anvil is daemon-only. All sandbox management operations are
+//! blazed is daemon-only. All sandbox management operations are
 //! exposed via the HTTP API; this binary only handles daemon lifecycle.
 
 mod api;
@@ -32,7 +32,7 @@ async fn main() -> ExitCode {
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("anvil: {err}");
+            eprintln!("blazed: {err}");
             ExitCode::from(1)
         }
     }
@@ -45,14 +45,14 @@ async fn run(cli: Cli) -> Result<()> {
             DaemonAction::Reload { socket } => {
                 println!("Sending reload signal to daemon at {}", socket.display());
                 // In v0.1 just print guidance; actual signal delivery deferred.
-                println!("  hint: kill -HUP $(pidof anvil)");
+                println!("  hint: kill -HUP $(pidof blazed)");
                 Ok(())
             }
             DaemonAction::Doctor { config } => {
-                let config_path = config.unwrap_or_else(|| "/etc/anolisa/anvil/config.toml".into());
-                println!("anvil doctor");
+                let config_path = config.unwrap_or_else(|| "/etc/anolisa/blaze/config.toml".into());
+                println!("blazed doctor");
                 println!("  config : {}", config_path.display());
-                match anvil_core::config::DaemonConfig::load(&config_path) {
+                match blaze_core::config::DaemonConfig::load(&config_path) {
                     Ok(_) => println!("  config parse : ok"),
                     Err(e) => println!("  config parse : FAIL ({e})"),
                 }

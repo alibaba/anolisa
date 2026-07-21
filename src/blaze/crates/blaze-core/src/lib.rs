@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-//! anvil-core: shared types and v0.1 in-memory implementations for the
-//! anvil sandbox-orchestration daemon.
+//! blaze-core: shared types and v0.1 in-memory implementations for the
+//! blaze sandbox-orchestration daemon.
 //!
 //! This crate intentionally has no I/O surface beyond JSON/TOML on local
-//! filesystems. Network/UDS surfaces are implemented in the `anvil` daemon
+//! filesystems. Network/UDS surfaces are implemented in the `blazed` daemon
 //! crate. Modules map 1:1 to the functional breakdown:
 //!
 //! - [`config`]: daemon TOML configuration
@@ -13,7 +13,7 @@
 //! - [`pool`]: warm-pool key/stat/manager
 //! - [`template`]: template registry + refcnt + GC
 //! - [`kernel`]: kernel hook registry, per-hook mutex
-//! - [`error`]: unified [`AnvilError`] error enum
+//! - [`error`]: unified [`BlazeError`] error enum
 
 pub mod backend;
 pub mod config;
@@ -24,4 +24,4 @@ pub mod policy;
 pub mod pool;
 pub mod template;
 
-pub use error::{AnvilError, Result};
+pub use error::{BlazeError, Result};

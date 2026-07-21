@@ -4,12 +4,12 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use anvil_core::backend::BackendKind;
-use anvil_core::config::{DaemonConfig, PolicyLoadErrorMode};
-use anvil_core::kernel::HookRegistry;
-use anvil_core::policy::PolicyEngine;
-use anvil_core::pool::PoolManager;
-use anvil_core::template::TemplateRegistry;
+use blaze_core::backend::BackendKind;
+use blaze_core::config::{DaemonConfig, PolicyLoadErrorMode};
+use blaze_core::kernel::HookRegistry;
+use blaze_core::policy::PolicyEngine;
+use blaze_core::pool::PoolManager;
+use blaze_core::template::TemplateRegistry;
 use http_body_util::Full;
 use hyper::body::Bytes;
 use hyper::server::conn::http1;
@@ -19,7 +19,7 @@ use tokio::net::{TcpListener, UnixListener};
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::api;
-use crate::error::{AnvilDaemonError, Result};
+use crate::error::{BlazeDaemonError, Result};
 use crate::spawner::{
     BackendSpawner, BubblewrapSpawner, DynSpawner, FirecrackerSpawner, MockSpawner,
 };
@@ -51,14 +51,14 @@ pub async fn run(config_path: &Path) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let listener = UnixListener::bind(&socket_path)?;
-    tracing::info!(socket = %socket_path.display(), "anvil UDS API listening");
+    tracing::info!(socket = %socket_path.display(), "blaze UDS API listening");
 
     // Optional TCP listener for remote platform API
     let tcp_listener = if !http_addr.is_empty() {
         let tcp = TcpListener::bind(&http_addr)
             .await
-            .map_err(|e| AnvilDaemonError::Internal(format!("bind TCP {http_addr}: {e}")))?;
-        tracing::info!(addr = %http_addr, "anvil HTTP API listening");
+            .map_err(|e| BlazeDaemonError::Internal(format!("bind TCP {http_addr}: {e}")))?;
+        tracing::info!(addr = %http_addr, "blaze HTTP API listening");
         Some(tcp)
     } else {
         None
@@ -149,7 +149,7 @@ async fn build_spawner(cfg: &DaemonConfig) -> DynSpawner {
 fn load_policy_engine(cfg: &DaemonConfig) -> Result<PolicyEngine> {
     if !cfg.policy.dir.exists() {
         if cfg.policy.on_load_error == PolicyLoadErrorMode::Fail {
-            return Err(AnvilDaemonError::Internal(format!(
+            return Err(BlazeDaemonError::Internal(format!(
                 "policy.dir does not exist: {}",
                 cfg.policy.dir.display()
             )));
@@ -172,11 +172,11 @@ fn load_policy_engine(cfg: &DaemonConfig) -> Result<PolicyEngine> {
 
 async fn serve(uds: UnixListener, tcp: Option<TcpListener>, state: Arc<ServerState>) -> Result<()> {
     let mut sighup = signal(SignalKind::hangup())
-        .map_err(|e| AnvilDaemonError::Internal(format!("install SIGHUP handler: {e}")))?;
+        .map_err(|e| BlazeDaemonError::Internal(format!("install SIGHUP handler: {e}")))?;
     let mut sigterm = signal(SignalKind::terminate())
-        .map_err(|e| AnvilDaemonError::Internal(format!("install SIGTERM handler: {e}")))?;
+        .map_err(|e| BlazeDaemonError::Internal(format!("install SIGTERM handler: {e}")))?;
     let mut sigint = signal(SignalKind::interrupt())
-        .map_err(|e| AnvilDaemonError::Internal(format!("install SIGINT handler: {e}")))?;
+        .map_err(|e| BlazeDaemonError::Internal(format!("install SIGINT handler: {e}")))?;
 
     loop {
         tokio::select! {
@@ -218,7 +218,7 @@ async fn serve(uds: UnixListener, tcp: Option<TcpListener>, state: Arc<ServerSta
         }
     }
 
-    tracing::info!("anvil daemon stopped");
+    tracing::info!("blaze daemon stopped");
     Ok(())
 }
 
@@ -243,7 +243,7 @@ fn reload_policies(state: &Arc<ServerState>) -> Result<()> {
         let cfg = state
             .config
             .lock()
-            .map_err(|_| AnvilDaemonError::Internal("config lock poisoned".into()))?;
+            .map_err(|_| BlazeDaemonError::Internal("config lock poisoned".into()))?;
         cfg.policy.dir.clone()
     };
     let engine = PolicyEngine::load_dir(&dir)?;
@@ -252,7 +252,7 @@ fn reload_policies(state: &Arc<ServerState>) -> Result<()> {
         let mut policy = state
             .policy
             .lock()
-            .map_err(|_| AnvilDaemonError::Internal("policy lock poisoned".into()))?;
+            .map_err(|_| BlazeDaemonError::Internal("policy lock poisoned".into()))?;
         *policy = engine;
     }
     tracing::info!(policies = count, "policy engine reloaded via SIGHUP");

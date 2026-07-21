@@ -23,13 +23,13 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use anvil_core::AnvilError;
-use anvil_core::backend::BackendKind;
-use anvil_core::lifecycle::SandboxInstance;
-use anvil_core::policy::{
+use async_trait::async_trait;
+use blaze_core::BlazeError;
+use blaze_core::backend::BackendKind;
+use blaze_core::lifecycle::SandboxInstance;
+use blaze_core::policy::{
     BackendConfigs, FirecrackerConfig, VmConfig, parse_memory_value, to_mib_ceil,
 };
-use async_trait::async_trait;
 use uuid::Uuid;
 
 /// Handle returned by [`BackendSpawner::spawn`]. Tracked by the daemon
@@ -68,17 +68,17 @@ pub trait BackendSpawner: Send + Sync {
         work_dir: &Path,
         backend_config: &BackendConfigs,
         vm_config: Option<&VmConfig>,
-    ) -> Result<SpawnHandle, AnvilError>;
+    ) -> Result<SpawnHandle, BlazeError>;
 
     /// Wait for the process to exit. v0.1 stub returns immediately;
     /// the real supervisor lands together with the v0.2 lifecycle work.
-    async fn wait(&self, handle: &SpawnHandle) -> Result<SpawnResult, AnvilError>;
+    async fn wait(&self, handle: &SpawnHandle) -> Result<SpawnResult, BlazeError>;
 
     /// Send SIGTERM to the process. No-op when the handle has no PID.
-    async fn kill(&self, handle: &SpawnHandle) -> Result<(), AnvilError>;
+    async fn kill(&self, handle: &SpawnHandle) -> Result<(), BlazeError>;
 
     /// Probe whether the backend binary at `binary_path` is usable.
-    async fn probe(&self, binary_path: &Path) -> Result<bool, AnvilError>;
+    async fn probe(&self, binary_path: &Path) -> Result<bool, BlazeError>;
 }
 
 /// Convenience alias used by `ServerState`.
@@ -102,7 +102,7 @@ impl BackendSpawner for BubblewrapSpawner {
         work_dir: &Path,
         _backend_config: &BackendConfigs,
         _vm_config: Option<&VmConfig>,
-    ) -> Result<SpawnHandle, AnvilError> {
+    ) -> Result<SpawnHandle, BlazeError> {
         // v0.1: spawn a minimal bwrap sandbox running `/bin/sleep 3600`
         // so the lifecycle (Running -> Destroyed via SIGTERM) can be
         // exercised end-to-end. `work_dir` is reserved for the future
@@ -126,11 +126,11 @@ impl BackendSpawner for BubblewrapSpawner {
                 "/bin/sleep",
                 "3600",
             ])
-            .env("ANVIL_INSTANCE_ID", instance.id.to_string())
+            .env("BLAZE_INSTANCE_ID", instance.id.to_string())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .map_err(|source| AnvilError::IoError { source })?;
+            .map_err(|source| BlazeError::IoError { source })?;
 
         let pid = child.id();
         // v0.1: we drop the `Child` here on purpose. Tracking child
@@ -152,7 +152,7 @@ impl BackendSpawner for BubblewrapSpawner {
         })
     }
 
-    async fn wait(&self, handle: &SpawnHandle) -> Result<SpawnResult, AnvilError> {
+    async fn wait(&self, handle: &SpawnHandle) -> Result<SpawnResult, BlazeError> {
         // v0.1 placeholder: the supervisor that holds the `Child` and
         // drives `wait()` lands in v0.2 (TODO).
         tracing::debug!(
@@ -166,7 +166,7 @@ impl BackendSpawner for BubblewrapSpawner {
         })
     }
 
-    async fn kill(&self, handle: &SpawnHandle) -> Result<(), AnvilError> {
+    async fn kill(&self, handle: &SpawnHandle) -> Result<(), BlazeError> {
         let Some(pid) = handle.pid else {
             return Ok(());
         };
@@ -178,7 +178,7 @@ impl BackendSpawner for BubblewrapSpawner {
             .arg(pid.to_string())
             .status()
             .await
-            .map_err(|source| AnvilError::IoError { source })?;
+            .map_err(|source| BlazeError::IoError { source })?;
         tracing::info!(
             instance_id = %handle.instance_id,
             pid,
@@ -188,7 +188,7 @@ impl BackendSpawner for BubblewrapSpawner {
         Ok(())
     }
 
-    async fn probe(&self, binary_path: &Path) -> Result<bool, AnvilError> {
+    async fn probe(&self, binary_path: &Path) -> Result<bool, BlazeError> {
         Ok(binary_path.exists())
     }
 }
@@ -209,7 +209,7 @@ fn resolve_firecracker_vcpus(fc: &FirecrackerConfig, vm: Option<&VmConfig>) -> u
 fn resolve_firecracker_memory(
     fc: &FirecrackerConfig,
     vm: Option<&VmConfig>,
-) -> Result<u64, AnvilError> {
+) -> Result<u64, BlazeError> {
     let source = if fc.memory.is_some() {
         "backend.firecracker.memory"
     } else if vm.is_some() {
@@ -223,7 +223,7 @@ fn resolve_firecracker_memory(
         .or(vm.map(|v| v.memory.as_str()))
         .unwrap_or("256Mi");
     Ok(to_mib_ceil(parse_memory_value(memory_str).map_err(
-        |e| AnvilError::BackendError {
+        |e| BlazeError::BackendError {
             msg: format!("invalid firecracker memory value \"{memory_str}\" from {source}: {e}"),
         },
     )?))
@@ -251,7 +251,7 @@ impl BackendSpawner for FirecrackerSpawner {
         work_dir: &Path,
         backend_config: &BackendConfigs,
         vm_config: Option<&VmConfig>,
-    ) -> Result<SpawnHandle, AnvilError> {
+    ) -> Result<SpawnHandle, BlazeError> {
         let fc_cfg = backend_config
             .firecracker
             .as_ref()
@@ -268,32 +268,32 @@ impl BackendSpawner for FirecrackerSpawner {
         let rootfs = self.images_dir.join("rootfs.ext4");
 
         if !vmlinux.exists() {
-            return Err(AnvilError::BackendError {
+            return Err(BlazeError::BackendError {
                 msg: format!("vmlinux not found at {}", vmlinux.display()),
             });
         }
         if !rootfs.exists() {
-            return Err(AnvilError::BackendError {
+            return Err(BlazeError::BackendError {
                 msg: format!("rootfs not found at {}", rootfs.display()),
             });
         }
 
         // Create per-instance runtime directory
         let instance_dir = work_dir.join(instance.id.to_string());
-        std::fs::create_dir_all(&instance_dir).map_err(|source| AnvilError::IoError { source })?;
+        std::fs::create_dir_all(&instance_dir).map_err(|source| BlazeError::IoError { source })?;
 
         let api_socket = instance_dir.join("api.sock");
         let log_file = instance_dir.join("firecracker.log");
 
         // Pre-compute UTF-8 path strings; Linux allows non-UTF-8 paths, so fail
         // explicitly rather than unwrap() inside the vmconfig builder.
-        let vmlinux_str = vmlinux.to_str().ok_or_else(|| AnvilError::BackendError {
+        let vmlinux_str = vmlinux.to_str().ok_or_else(|| BlazeError::BackendError {
             msg: format!("vmlinux path is not valid UTF-8: {}", vmlinux.display()),
         })?;
-        let rootfs_str = rootfs.to_str().ok_or_else(|| AnvilError::BackendError {
+        let rootfs_str = rootfs.to_str().ok_or_else(|| BlazeError::BackendError {
             msg: format!("rootfs path is not valid UTF-8: {}", rootfs.display()),
         })?;
-        let log_path_str = log_file.to_str().ok_or_else(|| AnvilError::BackendError {
+        let log_path_str = log_file.to_str().ok_or_else(|| BlazeError::BackendError {
             msg: format!(
                 "firecracker log path is not valid UTF-8: {}",
                 log_file.display()
@@ -326,11 +326,11 @@ impl BackendSpawner for FirecrackerSpawner {
 
         let config_path = instance_dir.join("vmconfig.json");
         let vmconfig_json =
-            serde_json::to_string_pretty(&vmconfig).map_err(|e| AnvilError::BackendError {
+            serde_json::to_string_pretty(&vmconfig).map_err(|e| BlazeError::BackendError {
                 msg: format!("failed to serialize firecracker vmconfig JSON: {e}"),
             })?;
         std::fs::write(&config_path, vmconfig_json)
-            .map_err(|source| AnvilError::IoError { source })?;
+            .map_err(|source| BlazeError::IoError { source })?;
 
         // Spawn firecracker process
         let mut cmd = tokio::process::Command::new(binary_path);
@@ -338,14 +338,14 @@ impl BackendSpawner for FirecrackerSpawner {
             .arg(&api_socket)
             .arg("--config-file")
             .arg(&config_path)
-            .env("ANVIL_INSTANCE_ID", instance.id.to_string());
+            .env("BLAZE_INSTANCE_ID", instance.id.to_string());
 
         // Guest ttyS0 output is emitted on Firecracker's stdout. When
         // serial_log is enabled, persist it to serial.log for debugging.
         if fc_cfg.serial_log {
             let serial_log = instance_dir.join("serial.log");
             let file = std::fs::File::create(&serial_log)
-                .map_err(|source| AnvilError::IoError { source })?;
+                .map_err(|source| BlazeError::IoError { source })?;
             cmd.stdout(file);
             tracing::info!(
                 instance_id = %instance.id,
@@ -359,7 +359,7 @@ impl BackendSpawner for FirecrackerSpawner {
 
         let child = cmd
             .spawn()
-            .map_err(|source| AnvilError::IoError { source })?;
+            .map_err(|source| BlazeError::IoError { source })?;
 
         let pid = child.id();
         drop(child); // v0.1: fire-and-forget, supervisor in v0.2
@@ -378,7 +378,7 @@ impl BackendSpawner for FirecrackerSpawner {
         })
     }
 
-    async fn wait(&self, handle: &SpawnHandle) -> Result<SpawnResult, AnvilError> {
+    async fn wait(&self, handle: &SpawnHandle) -> Result<SpawnResult, BlazeError> {
         // v0.1 placeholder
         tracing::debug!(
             instance_id = %handle.instance_id,
@@ -391,7 +391,7 @@ impl BackendSpawner for FirecrackerSpawner {
         })
     }
 
-    async fn kill(&self, handle: &SpawnHandle) -> Result<(), AnvilError> {
+    async fn kill(&self, handle: &SpawnHandle) -> Result<(), BlazeError> {
         let Some(pid) = handle.pid else {
             return Ok(());
         };
@@ -400,7 +400,7 @@ impl BackendSpawner for FirecrackerSpawner {
             .arg(pid.to_string())
             .status()
             .await
-            .map_err(|source| AnvilError::IoError { source })?;
+            .map_err(|source| BlazeError::IoError { source })?;
         tracing::info!(
             instance_id = %handle.instance_id,
             pid,
@@ -410,7 +410,7 @@ impl BackendSpawner for FirecrackerSpawner {
         Ok(())
     }
 
-    async fn probe(&self, binary_path: &Path) -> Result<bool, AnvilError> {
+    async fn probe(&self, binary_path: &Path) -> Result<bool, BlazeError> {
         // Check binary exists and is executable
         if !binary_path.exists() {
             return Ok(false);
@@ -445,7 +445,7 @@ impl BackendSpawner for MockSpawner {
         _work_dir: &Path,
         _backend_config: &BackendConfigs,
         _vm_config: Option<&VmConfig>,
-    ) -> Result<SpawnHandle, AnvilError> {
+    ) -> Result<SpawnHandle, BlazeError> {
         tracing::info!(
             instance_id = %instance.id,
             backend = %instance.backend,
@@ -458,7 +458,7 @@ impl BackendSpawner for MockSpawner {
         })
     }
 
-    async fn wait(&self, handle: &SpawnHandle) -> Result<SpawnResult, AnvilError> {
+    async fn wait(&self, handle: &SpawnHandle) -> Result<SpawnResult, BlazeError> {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         Ok(SpawnResult {
             instance_id: handle.instance_id,
@@ -467,12 +467,12 @@ impl BackendSpawner for MockSpawner {
         })
     }
 
-    async fn kill(&self, handle: &SpawnHandle) -> Result<(), AnvilError> {
+    async fn kill(&self, handle: &SpawnHandle) -> Result<(), BlazeError> {
         tracing::info!(instance_id = %handle.instance_id, "[mock] simulated kill");
         Ok(())
     }
 
-    async fn probe(&self, _binary_path: &Path) -> Result<bool, AnvilError> {
+    async fn probe(&self, _binary_path: &Path) -> Result<bool, BlazeError> {
         Ok(true)
     }
 }
@@ -481,9 +481,9 @@ impl BackendSpawner for MockSpawner {
 mod tests {
     use std::path::PathBuf;
 
-    use anvil_core::backend::BackendKind;
-    use anvil_core::lifecycle::{SandboxInstance, StartPath};
-    use anvil_core::policy::{VmConfig, WorkloadClass};
+    use blaze_core::backend::BackendKind;
+    use blaze_core::lifecycle::{SandboxInstance, StartPath};
+    use blaze_core::policy::{VmConfig, WorkloadClass};
 
     use super::*;
 

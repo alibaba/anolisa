@@ -6,13 +6,13 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{AnvilError, Result};
+use crate::error::{BlazeError, Result};
 
-/// All backends that anvil v0.1 knows about. Each backend maps to a
+/// All backends that blaze v0.1 knows about. Each backend maps to a
 /// binary path configured in the daemon `[backends]` section.
 ///
 /// `LinuxSandbox` and `Landlock` are recognized for policy deserialization
-/// but are not yet backed by a [`BackendSpawner`] implementation.
+/// but are not yet backed by a `BackendSpawner` implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BackendKind {
@@ -55,7 +55,7 @@ impl fmt::Display for BackendKind {
 }
 
 impl FromStr for BackendKind {
-    type Err = AnvilError;
+    type Err = BlazeError;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
@@ -70,7 +70,7 @@ impl FromStr for BackendKind {
             "bubblewrap" => Ok(BackendKind::Bubblewrap),
             "linux-sandbox" => Ok(BackendKind::LinuxSandbox),
             "landlock" => Ok(BackendKind::Landlock),
-            other => Err(AnvilError::PolicyEvalError {
+            other => Err(BlazeError::PolicyEvalError {
                 reason: format!("unknown backend kind: {other}"),
             }),
         }
@@ -87,7 +87,7 @@ pub struct BackendStatus {
 }
 
 /// Walk `priority` in order and return the first backend that is marked
-/// available. Returns [`AnvilError::BackendUnavailable`] when no entry in
+/// available. Returns [`BlazeError::BackendUnavailable`] when no entry in
 /// `priority` is available.
 pub fn select_backend(
     priority: &[BackendKind],
@@ -110,7 +110,7 @@ pub fn select_backend(
         .filter(|s| s.available)
         .map(|s| s.kind.as_str().to_string())
         .collect();
-    Err(AnvilError::BackendUnavailable {
+    Err(BlazeError::BackendUnavailable {
         requested,
         available,
     })
@@ -178,6 +178,6 @@ mod tests {
             version: None,
         }];
         let err = select_backend(&priority, &available).expect_err("must fail");
-        assert!(matches!(err, AnvilError::BackendUnavailable { .. }));
+        assert!(matches!(err, BlazeError::BackendUnavailable { .. }));
     }
 }

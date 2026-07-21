@@ -1,20 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Unified error type for `anvil-core`.
+//! Unified error type for `blaze-core`.
 
 use std::path::PathBuf;
 
 use thiserror::Error;
 
-/// Convenient `Result` alias defaulting to [`AnvilError`].
-pub type Result<T> = std::result::Result<T, AnvilError>;
+/// Convenient `Result` alias defaulting to [`BlazeError`].
+pub type Result<T> = std::result::Result<T, BlazeError>;
 
 #[derive(Debug, Error)]
-pub enum AnvilError {
+pub enum BlazeError {
     #[error("failed to load policy from {path}: {source}")]
     PolicyLoadError {
         path: PathBuf,
         #[source]
-        source: Box<AnvilError>,
+        source: Box<BlazeError>,
     },
 
     #[error("policy evaluation failed: {reason}")]
@@ -51,7 +51,7 @@ pub enum AnvilError {
     BackendError { msg: String },
 }
 
-/// Internal wrapper that lets [`AnvilError::ConfigError`] carry either a
+/// Internal wrapper that lets [`BlazeError::ConfigError`] carry either a
 /// TOML deserialization error or a JSON one without leaking those types
 /// to public APIs.
 #[derive(Debug, Error)]
@@ -66,23 +66,23 @@ pub enum ConfigErrorSource {
     InvalidValue(String),
 }
 
-impl From<std::io::Error> for AnvilError {
+impl From<std::io::Error> for BlazeError {
     fn from(source: std::io::Error) -> Self {
-        AnvilError::IoError { source }
+        BlazeError::IoError { source }
     }
 }
 
-impl From<toml::de::Error> for AnvilError {
+impl From<toml::de::Error> for BlazeError {
     fn from(err: toml::de::Error) -> Self {
-        AnvilError::ConfigError {
+        BlazeError::ConfigError {
             source: ConfigErrorSource::Toml(err),
         }
     }
 }
 
-impl From<serde_json::Error> for AnvilError {
+impl From<serde_json::Error> for BlazeError {
     fn from(err: serde_json::Error) -> Self {
-        AnvilError::ConfigError {
+        BlazeError::ConfigError {
             source: ConfigErrorSource::Json(err),
         }
     }

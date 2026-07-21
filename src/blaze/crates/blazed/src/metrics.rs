@@ -30,37 +30,37 @@ impl Metrics {
         let mut out = String::new();
         let series = [
             (
-                "anvil_requests_total",
-                "Total HTTP requests served by the anvil daemon",
+                "blaze_requests_total",
+                "Total HTTP requests served by the blaze daemon",
                 self.requests_total.load(Ordering::Relaxed),
             ),
             (
-                "anvil_instances_created_total",
+                "blaze_instances_created_total",
                 "Total sandbox instances created",
                 self.instances_created.load(Ordering::Relaxed),
             ),
             (
-                "anvil_instances_destroyed_total",
+                "blaze_instances_destroyed_total",
                 "Total sandbox instances destroyed",
                 self.instances_destroyed.load(Ordering::Relaxed),
             ),
             (
-                "anvil_instances_resets_total",
+                "blaze_instances_resets_total",
                 "Total sandbox instances reset",
                 self.instances_resets.load(Ordering::Relaxed),
             ),
             (
-                "anvil_pool_hits_total",
+                "blaze_pool_hits_total",
                 "Warm pool hits (instance reused)",
                 self.pool_hits.load(Ordering::Relaxed),
             ),
             (
-                "anvil_pool_misses_total",
+                "blaze_pool_misses_total",
                 "Warm pool misses (cold boot)",
                 self.pool_misses.load(Ordering::Relaxed),
             ),
             (
-                "anvil_policy_eval_failures_total",
+                "blaze_policy_eval_failures_total",
                 "Number of failed policy evaluations",
                 self.policy_eval_failures.load(Ordering::Relaxed),
             ),

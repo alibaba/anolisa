@@ -16,7 +16,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::backend::BackendKind;
-use crate::error::{AnvilError, Result};
+use crate::error::{BlazeError, Result};
 
 // ---------------------------------------------------------------------------
 // WorkloadClass
@@ -54,7 +54,7 @@ impl fmt::Display for WorkloadClass {
 }
 
 impl FromStr for WorkloadClass {
-    type Err = AnvilError;
+    type Err = BlazeError;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
@@ -64,7 +64,7 @@ impl FromStr for WorkloadClass {
             "dev-shell" => Ok(WorkloadClass::DevShell),
             "untrusted" => Ok(WorkloadClass::Untrusted),
             "function" => Ok(WorkloadClass::Function),
-            other => Err(AnvilError::PolicyEvalError {
+            other => Err(BlazeError::PolicyEvalError {
                 reason: format!("unknown workload class: {other}"),
             }),
         }
@@ -173,7 +173,7 @@ impl PolicyFile {
             && let Some(shares) = quota.cpu_shares
             && shares < 1
         {
-            return Err(AnvilError::PolicyEvalError {
+            return Err(BlazeError::PolicyEvalError {
                 reason: format!(
                     "policy \"{policy_name}\": [quota].cpu_shares must be at least 1, got {shares}",
                     policy_name = self.policy_name
@@ -185,7 +185,7 @@ impl PolicyFile {
         if let Some(pool) = self.pool.as_ref()
             && parse_duration(&pool.warm_ttl).is_none()
         {
-            return Err(AnvilError::PolicyEvalError {
+            return Err(BlazeError::PolicyEvalError {
                 reason: format!(
                     "policy \"{policy_name}\": [pool].warm_ttl must be a duration like \"30s\", \"30m\", \"1h\", \"1d\", got \"{warm_ttl}\"",
                     policy_name = self.policy_name,
@@ -205,23 +205,23 @@ fn validate_vm_resource(
     vcpus: Option<u32>,
 ) -> Result<()> {
     if let Some(memory) = memory {
-        parse_memory_value(memory).map_err(|e| AnvilError::PolicyEvalError {
+        parse_memory_value(memory).map_err(|e| BlazeError::PolicyEvalError {
             reason: format!("policy \"{policy_name}\": {}", format_parse_memory_error(e)),
         })?;
     }
     if let Some(vcpus) = vcpus
         && vcpus == 0
     {
-        return Err(AnvilError::PolicyEvalError {
+        return Err(BlazeError::PolicyEvalError {
             reason: format!("policy \"{policy_name}\": {field}.vcpus must be ≥ 1, got 0"),
         });
     }
     Ok(())
 }
 
-fn format_parse_memory_error(e: AnvilError) -> String {
+fn format_parse_memory_error(e: BlazeError) -> String {
     match e {
-        AnvilError::PolicyEvalError { reason } => reason,
+        BlazeError::PolicyEvalError { reason } => reason,
         other => other.to_string(),
     }
 }
@@ -445,7 +445,7 @@ where
 pub fn parse_memory_value(s: &str) -> Result<u64> {
     let s = s.trim();
     if s.is_empty() {
-        return Err(AnvilError::PolicyEvalError {
+        return Err(BlazeError::PolicyEvalError {
             reason: "memory value is empty".into(),
         });
     }
@@ -454,12 +454,12 @@ pub fn parse_memory_value(s: &str) -> Result<u64> {
     let (num_str, suffix) = s.split_at(first_non_digit);
 
     if num_str.is_empty() {
-        return Err(AnvilError::PolicyEvalError {
+        return Err(BlazeError::PolicyEvalError {
             reason: format!("invalid memory value \"{s}\" — missing digits"),
         });
     }
 
-    let value: u64 = num_str.parse().map_err(|_| AnvilError::PolicyEvalError {
+    let value: u64 = num_str.parse().map_err(|_| BlazeError::PolicyEvalError {
         reason: format!("invalid memory value \"{s}\""),
     })?;
 
@@ -474,7 +474,7 @@ pub fn parse_memory_value(s: &str) -> Result<u64> {
         "Gi" => 1 << 30,
         "Ti" => 1 << 40,
         other => {
-            return Err(AnvilError::PolicyEvalError {
+            return Err(BlazeError::PolicyEvalError {
                 reason: format!("invalid memory value \"{s}\" — unknown suffix \"{other}\""),
             });
         }
@@ -482,12 +482,12 @@ pub fn parse_memory_value(s: &str) -> Result<u64> {
 
     let bytes = value
         .checked_mul(multiplier)
-        .ok_or_else(|| AnvilError::PolicyEvalError {
+        .ok_or_else(|| BlazeError::PolicyEvalError {
             reason: format!("memory value \"{s}\" overflows u64"),
         })?;
 
     if bytes < MIB {
-        return Err(AnvilError::PolicyEvalError {
+        return Err(BlazeError::PolicyEvalError {
             reason: format!("memory \"{s}\" resolves to {bytes} bytes (< 1 MiB minimum)"),
         });
     }
@@ -561,16 +561,16 @@ impl PolicyEngine {
 
     /// Load every `*.toml` file under `dir` into a single engine. Files
     /// whose `manifest_version` is unsupported, or whose schema fails to
-    /// parse, are wrapped in [`AnvilError::PolicyLoadError`] (caller can
+    /// parse, are wrapped in [`BlazeError::PolicyLoadError`] (caller can
     /// decide between `fail`/`warn` per [`crate::config::PolicyLoadErrorMode`]).
     pub fn load_dir(dir: &Path) -> Result<Self> {
         let mut policies = Vec::new();
-        let entries = fs::read_dir(dir).map_err(|e| AnvilError::PolicyLoadError {
+        let entries = fs::read_dir(dir).map_err(|e| BlazeError::PolicyLoadError {
             path: dir.to_path_buf(),
-            source: Box::new(AnvilError::IoError { source: e }),
+            source: Box::new(BlazeError::IoError { source: e }),
         })?;
         for entry in entries {
-            let entry = entry.map_err(AnvilError::from)?;
+            let entry = entry.map_err(BlazeError::from)?;
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("toml") {
                 continue;
@@ -602,7 +602,7 @@ impl PolicyEngine {
     ) -> Result<RuntimeDecision> {
         let class = image_metadata
             .workload_class
-            .ok_or_else(|| AnvilError::PolicyEvalError {
+            .ok_or_else(|| BlazeError::PolicyEvalError {
                 reason: "image_metadata.workload_class is required (no silent fallback)".into(),
             })?;
 
@@ -621,25 +621,25 @@ impl PolicyEngine {
             return Ok(build_decision(policy));
         }
 
-        Err(AnvilError::PolicyEvalError {
+        Err(BlazeError::PolicyEvalError {
             reason: format!("no policy matched workload_class={class}"),
         })
     }
 }
 
 fn load_one(path: &Path) -> Result<PolicyFile> {
-    let raw = fs::read_to_string(path).map_err(|e| AnvilError::PolicyLoadError {
+    let raw = fs::read_to_string(path).map_err(|e| BlazeError::PolicyLoadError {
         path: path.to_path_buf(),
-        source: Box::new(AnvilError::IoError { source: e }),
+        source: Box::new(BlazeError::IoError { source: e }),
     })?;
-    let policy: PolicyFile = toml::from_str(&raw).map_err(|e| AnvilError::PolicyLoadError {
+    let policy: PolicyFile = toml::from_str(&raw).map_err(|e| BlazeError::PolicyLoadError {
         path: path.to_path_buf(),
-        source: Box::new(AnvilError::from(e)),
+        source: Box::new(BlazeError::from(e)),
     })?;
     if policy.manifest_version != 1 {
-        return Err(AnvilError::PolicyLoadError {
+        return Err(BlazeError::PolicyLoadError {
             path: path.to_path_buf(),
-            source: Box::new(AnvilError::PolicyEvalError {
+            source: Box::new(BlazeError::PolicyEvalError {
                 reason: format!(
                     "unsupported manifest_version {} (only 1 is supported)",
                     policy.manifest_version
@@ -826,7 +826,7 @@ sequence = ["template-reg:bind-mm-template"]
         let err = engine
             .evaluate(&HashMap::new(), &img)
             .expect_err("no class");
-        assert!(matches!(err, AnvilError::PolicyEvalError { .. }));
+        assert!(matches!(err, BlazeError::PolicyEvalError { .. }));
     }
 
     #[test]
@@ -841,7 +841,7 @@ sequence = ["template-reg:bind-mm-template"]
         let err = engine
             .evaluate(&HashMap::new(), &img)
             .expect_err("no match");
-        assert!(matches!(err, AnvilError::PolicyEvalError { .. }));
+        assert!(matches!(err, BlazeError::PolicyEvalError { .. }));
     }
 
     #[test]

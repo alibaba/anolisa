@@ -9,12 +9,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use anvil_core::config::DaemonConfig;
-use anvil_core::kernel::HookRegistry;
-use anvil_core::lifecycle::SandboxInstance;
-use anvil_core::policy::PolicyEngine;
-use anvil_core::pool::PoolManager;
-use anvil_core::template::TemplateRegistry;
+use blaze_core::config::DaemonConfig;
+use blaze_core::kernel::HookRegistry;
+use blaze_core::lifecycle::SandboxInstance;
+use blaze_core::policy::PolicyEngine;
+use blaze_core::pool::PoolManager;
+use blaze_core::template::TemplateRegistry;
 use uuid::Uuid;
 
 use crate::error::Result;

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::backend::BackendKind;
-use crate::error::{AnvilError, Result};
+use crate::error::{BlazeError, Result};
 use crate::policy::WorkloadClass;
 
 /// All known states. Transitions are enforced by [`SandboxInstance::transition`].
@@ -95,11 +95,11 @@ impl SandboxInstance {
     }
 
     /// Apply a state transition. Returns
-    /// [`AnvilError::InvalidStateTransition`] when the move is not part
+    /// [`BlazeError::InvalidStateTransition`] when the move is not part
     /// of the lifecycle state graph.
     pub fn transition(&mut self, target: SandboxState) -> Result<()> {
         if !is_valid_transition(self.state, target) {
-            return Err(AnvilError::InvalidStateTransition {
+            return Err(BlazeError::InvalidStateTransition {
                 from: self.state.to_string(),
                 to: target.to_string(),
             });
@@ -216,7 +216,7 @@ mod tests {
         let again = inst.transition(SandboxState::Destroyed);
         assert!(matches!(
             again,
-            Err(AnvilError::InvalidStateTransition { .. })
+            Err(BlazeError::InvalidStateTransition { .. })
         ));
     }
 
@@ -224,7 +224,7 @@ mod tests {
     fn illegal_pending_to_running() {
         let mut inst = fresh();
         let err = inst.transition(SandboxState::Running).expect_err("illegal");
-        assert!(matches!(err, AnvilError::InvalidStateTransition { .. }));
+        assert!(matches!(err, BlazeError::InvalidStateTransition { .. }));
     }
 
     #[test]
@@ -233,7 +233,7 @@ mod tests {
         inst.transition(SandboxState::Creating).expect("ok");
         inst.transition(SandboxState::Running).expect("ok");
         let err = inst.transition(SandboxState::Warm).expect_err("illegal");
-        assert!(matches!(err, AnvilError::InvalidStateTransition { .. }));
+        assert!(matches!(err, BlazeError::InvalidStateTransition { .. }));
     }
 
     #[test]
@@ -244,7 +244,7 @@ mod tests {
         inst.transition(SandboxState::Reset).expect("ok");
         inst.transition(SandboxState::Warm).expect("ok");
         let err = inst.transition(SandboxState::Running).expect_err("illegal");
-        assert!(matches!(err, AnvilError::InvalidStateTransition { .. }));
+        assert!(matches!(err, BlazeError::InvalidStateTransition { .. }));
     }
 
     #[test]

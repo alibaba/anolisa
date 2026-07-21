@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::error::{AnvilError, Result};
+use crate::error::{BlazeError, Result};
 
 /// Two kinds of shared kernel objects we track in v0.1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,11 +120,11 @@ impl TemplateRegistry {
         let entry =
             self.entries
                 .get_mut(&template_id)
-                .ok_or_else(|| AnvilError::TemplateError {
+                .ok_or_else(|| BlazeError::TemplateError {
                     msg: format!("template {template_id} not found"),
                 })?;
         if entry.invalidated {
-            return Err(AnvilError::TemplateError {
+            return Err(BlazeError::TemplateError {
                 msg: format!("template {template_id} is invalidated"),
             });
         }
@@ -140,7 +140,7 @@ impl TemplateRegistry {
         let entry =
             self.entries
                 .get_mut(&template_id)
-                .ok_or_else(|| AnvilError::TemplateError {
+                .ok_or_else(|| BlazeError::TemplateError {
                     msg: format!("template {template_id} not found"),
                 })?;
         if entry.holders.remove(&instance_id) {
@@ -157,7 +157,7 @@ impl TemplateRegistry {
         let entry =
             self.entries
                 .get_mut(&template_id)
-                .ok_or_else(|| AnvilError::TemplateError {
+                .ok_or_else(|| BlazeError::TemplateError {
                     msg: format!("template {template_id} not found"),
                 })?;
         entry.invalidated = true;
@@ -241,7 +241,7 @@ mod tests {
         );
         reg.invalidate(tid).expect("ok");
         let err = reg.register(tid, Uuid::new_v4()).expect_err("blocked");
-        assert!(matches!(err, AnvilError::TemplateError { .. }));
+        assert!(matches!(err, BlazeError::TemplateError { .. }));
     }
 
     #[test]

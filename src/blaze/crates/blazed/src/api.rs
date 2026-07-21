@@ -10,11 +10,11 @@ use std::convert::Infallible;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use anvil_core::backend::{BackendKind, BackendStatus, select_backend};
-use anvil_core::kernel::HookKind;
-use anvil_core::lifecycle::{SandboxInstance, SandboxState, StartPath};
-use anvil_core::policy::{ImageMetadata, RuntimeDecision, WorkloadClass, parse_duration};
-use anvil_core::pool::{PoolConfig, PoolKey};
+use blaze_core::backend::{BackendKind, BackendStatus, select_backend};
+use blaze_core::kernel::HookKind;
+use blaze_core::lifecycle::{SandboxInstance, SandboxState, StartPath};
+use blaze_core::policy::{ImageMetadata, RuntimeDecision, WorkloadClass, parse_duration};
+use blaze_core::pool::{PoolConfig, PoolKey};
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::header::CONTENT_TYPE;
@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::error::{AnvilDaemonError, Result};
+use crate::error::{BlazeDaemonError, Result};
 use crate::state::ServerState;
 
 /// Top-level request handler. Always returns `Ok(Response)`; internal
@@ -90,7 +90,7 @@ async fn dispatch(
         ("GET", ["v1", "hooks"]) => list_hooks(state),
         ("GET", ["v1", "metrics"]) => metrics(state),
         ("POST", ["v1", "admin", "reload"]) => admin_reload(state),
-        _ => Err(AnvilDaemonError::NotFound(format!("{method} {path}"))),
+        _ => Err(BlazeDaemonError::NotFound(format!("{method} {path}"))),
     }
 }
 
@@ -118,16 +118,16 @@ fn admin_reload(state: &Arc<ServerState>) -> Result<Response<Full<Bytes>>> {
         let cfg = state
             .config
             .lock()
-            .map_err(|_| AnvilDaemonError::Internal("config lock poisoned".into()))?;
+            .map_err(|_| BlazeDaemonError::Internal("config lock poisoned".into()))?;
         cfg.policy.dir.clone()
     };
-    let new_engine = anvil_core::policy::PolicyEngine::load_dir(&policy_dir)?;
+    let new_engine = blaze_core::policy::PolicyEngine::load_dir(&policy_dir)?;
     let count = new_engine.policies().len();
     {
         let mut engine = state
             .policy
             .lock()
-            .map_err(|_| AnvilDaemonError::Internal("policy lock poisoned".into()))?;
+            .map_err(|_| BlazeDaemonError::Internal("policy lock poisoned".into()))?;
         *engine = new_engine;
     }
     tracing::info!(policies = count, "policy engine reloaded");
@@ -159,7 +159,7 @@ fn list_instances(state: &Arc<ServerState>) -> Result<Response<Full<Bytes>>> {
     let map = state
         .instances
         .lock()
-        .map_err(|_| AnvilDaemonError::Internal("instances lock poisoned".into()))?;
+        .map_err(|_| BlazeDaemonError::Internal("instances lock poisoned".into()))?;
     let list: Vec<&SandboxInstance> = map.values().collect();
     json_ok(&list)
 }
@@ -169,16 +169,16 @@ fn get_instance(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<Byte
     let map = state
         .instances
         .lock()
-        .map_err(|_| AnvilDaemonError::Internal("instances lock poisoned".into()))?;
+        .map_err(|_| BlazeDaemonError::Internal("instances lock poisoned".into()))?;
     let inst = map
         .get(&uuid)
-        .ok_or_else(|| AnvilDaemonError::NotFound(format!("instance {uuid}")))?;
+        .ok_or_else(|| BlazeDaemonError::NotFound(format!("instance {uuid}")))?;
     json_ok(inst)
 }
 
 async fn create_instance(state: &Arc<ServerState>, body: &[u8]) -> Result<Response<Full<Bytes>>> {
     let req: CreateInstanceReq = serde_json::from_slice(body)
-        .map_err(|e| AnvilDaemonError::BadRequest(format!("invalid create body: {e}")))?;
+        .map_err(|e| BlazeDaemonError::BadRequest(format!("invalid create body: {e}")))?;
 
     let img = ImageMetadata {
         digest: req.image_digest.clone(),
@@ -191,7 +191,7 @@ async fn create_instance(state: &Arc<ServerState>, body: &[u8]) -> Result<Respon
         let engine = state
             .policy
             .lock()
-            .map_err(|_| AnvilDaemonError::Internal("policy lock poisoned".into()))?;
+            .map_err(|_| BlazeDaemonError::Internal("policy lock poisoned".into()))?;
         match engine.evaluate(&req.labels, &img) {
             Ok(d) => d,
             Err(e) => {
@@ -224,7 +224,7 @@ async fn create_instance(state: &Arc<ServerState>, body: &[u8]) -> Result<Respon
         let mut pool = state
             .pool
             .lock()
-            .map_err(|_| AnvilDaemonError::Internal("pool lock poisoned".into()))?;
+            .map_err(|_| BlazeDaemonError::Internal("pool lock poisoned".into()))?;
         if let Some(id) = pool.lookup(&pool_key) {
             reused = Some(id);
             start_path = StartPath::Warm;
@@ -239,7 +239,7 @@ async fn create_instance(state: &Arc<ServerState>, body: &[u8]) -> Result<Respon
         let mut map = state
             .instances
             .lock()
-            .map_err(|_| AnvilDaemonError::Internal("instances lock poisoned".into()))?;
+            .map_err(|_| BlazeDaemonError::Internal("instances lock poisoned".into()))?;
         match map.remove(&id) {
             Some(mut inst) => {
                 // warm → creating
@@ -282,7 +282,7 @@ async fn create_instance(state: &Arc<ServerState>, body: &[u8]) -> Result<Respon
         let cfg = state
             .config
             .lock()
-            .map_err(|_| AnvilDaemonError::Internal("config lock poisoned".into()))?;
+            .map_err(|_| BlazeDaemonError::Internal("config lock poisoned".into()))?;
         cfg.backends
             .get(backend.as_str())
             .cloned()
@@ -304,7 +304,7 @@ async fn create_instance(state: &Arc<ServerState>, body: &[u8]) -> Result<Respon
             let mut handles = state
                 .spawn_handles
                 .lock()
-                .map_err(|_| AnvilDaemonError::Internal("spawn_handles lock poisoned".into()))?;
+                .map_err(|_| BlazeDaemonError::Internal("spawn_handles lock poisoned".into()))?;
             handles.insert(instance.id, handle);
         }
         Err(err) => {
@@ -326,7 +326,7 @@ async fn create_instance(state: &Arc<ServerState>, body: &[u8]) -> Result<Respon
         let mut map = state
             .instances
             .lock()
-            .map_err(|_| AnvilDaemonError::Internal("instances lock poisoned".into()))?;
+            .map_err(|_| BlazeDaemonError::Internal("instances lock poisoned".into()))?;
         map.insert(instance.id, instance.clone());
     }
 
@@ -342,10 +342,10 @@ fn checkpoint(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<Bytes>
     let mut map = state
         .instances
         .lock()
-        .map_err(|_| AnvilDaemonError::Internal("instances lock poisoned".into()))?;
+        .map_err(|_| BlazeDaemonError::Internal("instances lock poisoned".into()))?;
     let inst = map
         .get_mut(&uuid)
-        .ok_or_else(|| AnvilDaemonError::NotFound(format!("instance {uuid}")))?;
+        .ok_or_else(|| BlazeDaemonError::NotFound(format!("instance {uuid}")))?;
 
     if inst.state == SandboxState::Running {
         inst.transition(SandboxState::Paused)?;
@@ -365,10 +365,10 @@ fn reset_instance(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<By
     let mut map = state
         .instances
         .lock()
-        .map_err(|_| AnvilDaemonError::Internal("instances lock poisoned".into()))?;
+        .map_err(|_| BlazeDaemonError::Internal("instances lock poisoned".into()))?;
     let inst = map
         .get_mut(&uuid)
-        .ok_or_else(|| AnvilDaemonError::NotFound(format!("instance {uuid}")))?;
+        .ok_or_else(|| BlazeDaemonError::NotFound(format!("instance {uuid}")))?;
     // TODO(v0.2): perform actual data-plane reset (full-recreate or
     // mm-template rollback per policy reset_mode) before returning to
     // pool. Current implementation is control-plane state only.
@@ -385,7 +385,7 @@ fn reset_instance(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<By
         let mut pool = state
             .pool
             .lock()
-            .map_err(|_| AnvilDaemonError::Internal("pool lock poisoned".into()))?;
+            .map_err(|_| BlazeDaemonError::Internal("pool lock poisoned".into()))?;
         pool.return_to_pool(key, inst_id);
     }
     state.metrics.inc(&state.metrics.instances_resets);
@@ -399,10 +399,10 @@ fn destroy_instance_state(
     let mut map = state
         .instances
         .lock()
-        .map_err(|_| AnvilDaemonError::Internal("instances lock poisoned".into()))?;
+        .map_err(|_| BlazeDaemonError::Internal("instances lock poisoned".into()))?;
     let inst = map
         .get_mut(&uuid)
-        .ok_or_else(|| AnvilDaemonError::NotFound(format!("instance {uuid}")))?;
+        .ok_or_else(|| BlazeDaemonError::NotFound(format!("instance {uuid}")))?;
     inst.transition(SandboxState::Destroyed)?;
     inst.persist(&state.state_dir)?;
     let snapshot = inst.clone();
@@ -411,7 +411,7 @@ fn destroy_instance_state(
         let mut handles = state
             .spawn_handles
             .lock()
-            .map_err(|_| AnvilDaemonError::Internal("spawn_handles lock poisoned".into()))?;
+            .map_err(|_| BlazeDaemonError::Internal("spawn_handles lock poisoned".into()))?;
         handles.remove(&uuid)
     };
     Ok((snapshot, handle))
@@ -440,7 +440,7 @@ fn list_pools(state: &Arc<ServerState>) -> Result<Response<Full<Bytes>>> {
     let pool = state
         .pool
         .lock()
-        .map_err(|_| AnvilDaemonError::Internal("pool lock poisoned".into()))?;
+        .map_err(|_| BlazeDaemonError::Internal("pool lock poisoned".into()))?;
     let listed: Vec<_> = pool
         .list_pools()
         .into_iter()
@@ -466,11 +466,11 @@ fn pool_status(
     let pool = state
         .pool
         .lock()
-        .map_err(|_| AnvilDaemonError::Internal("pool lock poisoned".into()))?;
+        .map_err(|_| BlazeDaemonError::Internal("pool lock poisoned".into()))?;
     let backend_kind = BackendKind::from_str(backend)
-        .map_err(|e| AnvilDaemonError::BadRequest(format!("backend: {e}")))?;
+        .map_err(|e| BlazeDaemonError::BadRequest(format!("backend: {e}")))?;
     let class_kind = WorkloadClass::from_str(class)
-        .map_err(|e| AnvilDaemonError::BadRequest(format!("class: {e}")))?;
+        .map_err(|e| BlazeDaemonError::BadRequest(format!("class: {e}")))?;
 
     let listed: Vec<_> = pool
         .list_pools()
@@ -496,9 +496,9 @@ fn drain_pool(
     class: &str,
 ) -> Result<Response<Full<Bytes>>> {
     let backend_kind = BackendKind::from_str(backend)
-        .map_err(|e| AnvilDaemonError::BadRequest(format!("backend: {e}")))?;
+        .map_err(|e| BlazeDaemonError::BadRequest(format!("backend: {e}")))?;
     let class_kind = WorkloadClass::from_str(class)
-        .map_err(|e| AnvilDaemonError::BadRequest(format!("class: {e}")))?;
+        .map_err(|e| BlazeDaemonError::BadRequest(format!("class: {e}")))?;
     // TODO(v0.2): after removing instance IDs from the pool, walk
     // spawn_handles and kill the underlying processes so that drain
     // actually frees host resources.
@@ -506,7 +506,7 @@ fn drain_pool(
         let mut pool = state
             .pool
             .lock()
-            .map_err(|_| AnvilDaemonError::Internal("pool lock poisoned".into()))?;
+            .map_err(|_| BlazeDaemonError::Internal("pool lock poisoned".into()))?;
         pool.drain(backend_kind, class_kind)
     };
     json_ok(&json!({
@@ -535,11 +535,11 @@ fn resize_pool(
     body: &[u8],
 ) -> Result<Response<Full<Bytes>>> {
     let req: ResizeReq = serde_json::from_slice(body)
-        .map_err(|e| AnvilDaemonError::BadRequest(format!("invalid resize body: {e}")))?;
+        .map_err(|e| BlazeDaemonError::BadRequest(format!("invalid resize body: {e}")))?;
     let backend_kind = BackendKind::from_str(backend)
-        .map_err(|e| AnvilDaemonError::BadRequest(format!("backend: {e}")))?;
+        .map_err(|e| BlazeDaemonError::BadRequest(format!("backend: {e}")))?;
     let class_kind = WorkloadClass::from_str(class)
-        .map_err(|e| AnvilDaemonError::BadRequest(format!("class: {e}")))?;
+        .map_err(|e| BlazeDaemonError::BadRequest(format!("class: {e}")))?;
     let key = PoolKey::new(
         backend_kind,
         class_kind,
@@ -551,13 +551,13 @@ fn resize_pool(
         target: req.target,
         max: req.max,
         warm_ttl: std::time::Duration::from_secs(req.warm_ttl_secs.unwrap_or(30 * 60)),
-        reset_mode: anvil_core::policy::ResetMode::default(),
+        reset_mode: blaze_core::policy::ResetMode::default(),
     };
     {
         let mut pool = state
             .pool
             .lock()
-            .map_err(|_| AnvilDaemonError::Internal("pool lock poisoned".into()))?;
+            .map_err(|_| BlazeDaemonError::Internal("pool lock poisoned".into()))?;
         pool.resize(&key, cfg);
     }
     json_ok(&json!({
@@ -575,7 +575,7 @@ fn list_templates(state: &Arc<ServerState>) -> Result<Response<Full<Bytes>>> {
     let reg = state
         .template
         .lock()
-        .map_err(|_| AnvilDaemonError::Internal("template lock poisoned".into()))?;
+        .map_err(|_| BlazeDaemonError::Internal("template lock poisoned".into()))?;
     json_ok(&reg.list())
 }
 
@@ -584,10 +584,10 @@ fn inspect_template(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<
     let reg = state
         .template
         .lock()
-        .map_err(|_| AnvilDaemonError::Internal("template lock poisoned".into()))?;
+        .map_err(|_| BlazeDaemonError::Internal("template lock poisoned".into()))?;
     let view = reg
         .inspect(uuid)
-        .ok_or_else(|| AnvilDaemonError::NotFound(format!("template {uuid}")))?;
+        .ok_or_else(|| BlazeDaemonError::NotFound(format!("template {uuid}")))?;
     json_ok(&view)
 }
 
@@ -596,14 +596,14 @@ fn gc_templates(state: &Arc<ServerState>) -> Result<Response<Full<Bytes>>> {
         let cfg = state
             .config
             .lock()
-            .map_err(|_| AnvilDaemonError::Internal("config lock poisoned".into()))?;
+            .map_err(|_| BlazeDaemonError::Internal("config lock poisoned".into()))?;
         parse_duration(&cfg.template.idle_ttl).unwrap_or(std::time::Duration::from_secs(3600))
     };
     let collected = {
         let mut reg = state
             .template
             .lock()
-            .map_err(|_| AnvilDaemonError::Internal("template lock poisoned".into()))?;
+            .map_err(|_| BlazeDaemonError::Internal("template lock poisoned".into()))?;
         reg.gc_unused(idle_ttl)
     };
     json_ok(&json!({
@@ -620,7 +620,7 @@ fn list_policies(state: &Arc<ServerState>) -> Result<Response<Full<Bytes>>> {
     let engine = state
         .policy
         .lock()
-        .map_err(|_| AnvilDaemonError::Internal("policy lock poisoned".into()))?;
+        .map_err(|_| BlazeDaemonError::Internal("policy lock poisoned".into()))?;
     let names: Vec<_> = engine
         .policies()
         .iter()
@@ -639,7 +639,7 @@ fn list_hooks(state: &Arc<ServerState>) -> Result<Response<Full<Bytes>>> {
     let reg = state
         .hook
         .lock()
-        .map_err(|_| AnvilDaemonError::Internal("hook lock poisoned".into()))?;
+        .map_err(|_| BlazeDaemonError::Internal("hook lock poisoned".into()))?;
     json_ok(&reg.list())
 }
 
@@ -648,7 +648,7 @@ fn list_hooks(state: &Arc<ServerState>) -> Result<Response<Full<Bytes>>> {
 // ---------------------------------------------------------------------------
 
 fn parse_uuid(s: &str) -> Result<Uuid> {
-    Uuid::parse_str(s).map_err(|e| AnvilDaemonError::BadRequest(format!("invalid uuid: {e}")))
+    Uuid::parse_str(s).map_err(|e| BlazeDaemonError::BadRequest(format!("invalid uuid: {e}")))
 }
 
 fn json_ok<T: Serialize>(value: &T) -> Result<Response<Full<Bytes>>> {
@@ -667,7 +667,7 @@ fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Result<Response
         .body(Full::new(Bytes::from(body)))?)
 }
 
-fn error_response(err: &AnvilDaemonError) -> Response<Full<Bytes>> {
+fn error_response(err: &BlazeDaemonError) -> Response<Full<Bytes>> {
     let status =
         StatusCode::from_u16(err.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let body = json!({

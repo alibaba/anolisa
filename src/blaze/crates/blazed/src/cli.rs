@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Minimal CLI for the `anvil` daemon binary.
+//! Minimal CLI for the `blazed` daemon binary.
 //!
-//! anvil is a daemon-first design: all sandbox management is done
+//! blazed is a daemon-first design: all sandbox management is done
 //! via the HTTP API. This CLI only provides daemon lifecycle commands.
 
 use std::path::PathBuf;
@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "anvil",
+    name = "blazed",
     version,
     about = "ANOLISA per-host sandbox daemon",
     long_about = None
@@ -38,7 +38,7 @@ pub enum DaemonAction {
     /// Signal a running daemon to reload policies (equivalent to SIGHUP).
     Reload {
         /// UDS socket path of the running daemon.
-        #[arg(long, default_value = "/run/anvil/api.sock")]
+        #[arg(long, default_value = "/run/blaze/api.sock")]
         socket: PathBuf,
     },
     /// Run local diagnostics (config paths, socket reachability).

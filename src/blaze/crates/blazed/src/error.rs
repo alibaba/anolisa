@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Local errors for the anvil binary (daemon + CLI client).
+//! Local errors for the blazed binary (daemon + CLI client).
 //!
-//! Wraps [`anvil_core::AnvilError`] so the daemon can additionally
+//! Wraps [`blaze_core::BlazeError`] so the daemon can additionally
 //! surface I/O, hyper, and CLI-side failures without expanding the
 //! public core error enum.
 
@@ -9,12 +9,12 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-pub type Result<T> = std::result::Result<T, AnvilDaemonError>;
+pub type Result<T> = std::result::Result<T, BlazeDaemonError>;
 
 #[derive(Debug, Error)]
-pub enum AnvilDaemonError {
+pub enum BlazeDaemonError {
     #[error("core error: {0}")]
-    Core(#[from] anvil_core::AnvilError),
+    Core(#[from] blaze_core::BlazeError),
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -32,7 +32,7 @@ pub enum AnvilDaemonError {
     Hyper(#[from] hyper::Error),
 
     #[error(
-        "could not connect to anvil daemon at {socket}: {source}\nIs the daemon running? Try: anvil daemon start --foreground"
+        "could not connect to blaze daemon at {socket}: {source}\nIs the daemon running? Try: blazed daemon start --foreground"
     )]
     #[allow(dead_code)] // Constructed by client code; kept for future use.
     SocketConnect {
@@ -55,16 +55,16 @@ pub enum AnvilDaemonError {
     Internal(String),
 }
 
-impl AnvilDaemonError {
+impl BlazeDaemonError {
     /// HTTP status code that should accompany this error in API responses.
     pub fn status_code(&self) -> u16 {
         match self {
-            AnvilDaemonError::BadRequest(_) => 400,
-            AnvilDaemonError::NotFound(_) => 404,
-            AnvilDaemonError::HttpStatus { status, .. } => *status,
-            AnvilDaemonError::Core(anvil_core::AnvilError::PolicyEvalError { .. })
-            | AnvilDaemonError::Core(anvil_core::AnvilError::InvalidStateTransition { .. }) => 422,
-            AnvilDaemonError::Core(anvil_core::AnvilError::BackendUnavailable { .. }) => 503,
+            BlazeDaemonError::BadRequest(_) => 400,
+            BlazeDaemonError::NotFound(_) => 404,
+            BlazeDaemonError::HttpStatus { status, .. } => *status,
+            BlazeDaemonError::Core(blaze_core::BlazeError::PolicyEvalError { .. })
+            | BlazeDaemonError::Core(blaze_core::BlazeError::InvalidStateTransition { .. }) => 422,
+            BlazeDaemonError::Core(blaze_core::BlazeError::BackendUnavailable { .. }) => 503,
             _ => 500,
         }
     }

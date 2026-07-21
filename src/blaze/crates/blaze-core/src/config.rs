@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Daemon configuration (`/etc/anolisa/anvil/config.toml`).
+//! Daemon configuration (`/etc/anolisa/blaze/config.toml`).
 
 use std::collections::HashMap;
 use std::fs;
@@ -156,7 +156,7 @@ impl DaemonConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let raw = fs::read_to_string(path)?;
         let cfg: DaemonConfig = toml::from_str(&raw)?;
-        tracing::info!(path = %path.display(), "loaded anvil daemon config");
+        tracing::info!(path = %path.display(), "loaded blaze daemon config");
         Ok(cfg)
     }
 }
@@ -167,13 +167,13 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 fn default_state_dir() -> PathBuf {
-    PathBuf::from("/var/lib/anvil")
+    PathBuf::from("/var/lib/blaze")
 }
 fn default_socket() -> PathBuf {
-    PathBuf::from("/run/anvil/api.sock")
+    PathBuf::from("/run/blaze/api.sock")
 }
 fn default_policy_dir() -> PathBuf {
-    PathBuf::from("/etc/anolisa/anvil/policies")
+    PathBuf::from("/etc/anolisa/blaze/policies")
 }
 fn default_on_load_error() -> PolicyLoadErrorMode {
     PolicyLoadErrorMode::Fail
@@ -185,7 +185,7 @@ fn default_pool_gc_interval() -> String {
     "5m".to_string()
 }
 fn default_template_dir() -> PathBuf {
-    PathBuf::from("/var/lib/anvil/templates")
+    PathBuf::from("/var/lib/blaze/templates")
 }
 fn default_template_gc_interval() -> String {
     "10m".to_string()
@@ -194,10 +194,10 @@ fn default_template_idle_ttl() -> String {
     "1h".to_string()
 }
 fn default_prometheus_socket() -> PathBuf {
-    PathBuf::from("/run/anvil/metrics.sock")
+    PathBuf::from("/run/blaze/metrics.sock")
 }
 fn default_images_dir() -> PathBuf {
-    PathBuf::from("/var/lib/anvil/images")
+    PathBuf::from("/var/lib/blaze/images")
 }
 
 #[cfg(test)]
@@ -217,15 +217,15 @@ mod tests {
         let toml_str = r#"
             [daemon]
             log_level = "debug"
-            state_dir = "/tmp/anvil"
-            socket = "/tmp/anvil/api.sock"
+            state_dir = "/tmp/blaze"
+            socket = "/tmp/blaze/api.sock"
 
             [backends]
             firecracker = "/usr/bin/firecracker"
             linux-sandbox = "/usr/bin/anolisa-linux-sandbox"
 
             [policy]
-            dir = "/etc/anolisa/anvil/policies"
+            dir = "/etc/anolisa/blaze/policies"
             on_load_error = "warn"
         "#;
         let cfg: DaemonConfig = toml::from_str(toml_str).expect("parses");
