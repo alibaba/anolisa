@@ -106,6 +106,11 @@ pub(crate) enum HealthFactCategory {
     Disk,
     Kernel,
     Service,
+    Provider,
+    Config,
+    Hooks,
+    Pty,
+    Permissions,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -168,6 +173,11 @@ pub(crate) enum HealthCollector {
     Disk,
     KernelSignal,
     ConfiguredService,
+    Provider,
+    Config,
+    Hooks,
+    Pty,
+    Permissions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -258,6 +268,16 @@ pub(crate) enum HealthMessageId {
     HealthFindingKernelPanic,
     HealthFindingServiceFailed,
     HealthFindingServiceInactive,
+    HealthFindingProviderUnconfigured,
+    HealthFindingConfigUnavailable,
+    HealthFindingHooksUntrusted,
+    HealthFindingPtyUnavailable,
+    HealthFindingPermissionsUnwritable,
+    HealthRemediationProvider,
+    HealthRemediationConfig,
+    HealthRemediationHooks,
+    HealthRemediationPty,
+    HealthRemediationPermissions,
     HealthTryReasonMemoryLow,
     HealthTryReasonSwapWithContext,
     HealthTryReasonRecentOom,
@@ -349,6 +369,22 @@ impl HealthMessageId {
             Self::HealthFindingKernelPanic => crate::MessageId::HealthFindingKernelPanic,
             Self::HealthFindingServiceFailed => crate::MessageId::HealthFindingServiceFailed,
             Self::HealthFindingServiceInactive => crate::MessageId::HealthFindingServiceInactive,
+            Self::HealthFindingProviderUnconfigured => {
+                crate::MessageId::HealthFindingProviderUnconfigured
+            }
+            Self::HealthFindingConfigUnavailable => {
+                crate::MessageId::HealthFindingConfigUnavailable
+            }
+            Self::HealthFindingHooksUntrusted => crate::MessageId::HealthFindingHooksUntrusted,
+            Self::HealthFindingPtyUnavailable => crate::MessageId::HealthFindingPtyUnavailable,
+            Self::HealthFindingPermissionsUnwritable => {
+                crate::MessageId::HealthFindingPermissionsUnwritable
+            }
+            Self::HealthRemediationProvider => crate::MessageId::HealthRemediationProvider,
+            Self::HealthRemediationConfig => crate::MessageId::HealthRemediationConfig,
+            Self::HealthRemediationHooks => crate::MessageId::HealthRemediationHooks,
+            Self::HealthRemediationPty => crate::MessageId::HealthRemediationPty,
+            Self::HealthRemediationPermissions => crate::MessageId::HealthRemediationPermissions,
             Self::HealthTryReasonMemoryLow => crate::MessageId::HealthTryReasonMemoryLow,
             Self::HealthTryReasonSwapWithContext => {
                 crate::MessageId::HealthTryReasonSwapWithContext

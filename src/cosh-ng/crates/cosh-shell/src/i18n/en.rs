@@ -28,6 +28,7 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::HelpTitle => "Slash commands",
         MessageId::HelpFooter => "Mode: {mode}. Strategy: {strategy}.",
         MessageId::HelpGroupConfig => "Config",
+        MessageId::HelpGroupHealth => "Health",
         MessageId::HelpGroupModes => "Modes",
         MessageId::HelpGroupHooks => "Hooks",
         MessageId::HelpSummaryHelp => "show command reference",
@@ -812,6 +813,32 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::HealthTryReasonServiceState => "configured service state is unexpected",
         MessageId::HealthTryReasonHighLoad => "load is elevated across recent windows",
         MessageId::HealthTryReasonMissingCoreCheck => "a core health check is unavailable",
+        MessageId::HelpSummaryHealth => "run an on-demand health check",
+        MessageId::DoctorTitle => "cosh-shell doctor",
+        MessageId::DoctorStatusLabel => "status",
+        MessageId::DoctorChecksLabel => "checks",
+        MessageId::DoctorRemediationLabel => "remediation",
+        MessageId::DoctorAllHealthy => "all checks passed",
+        MessageId::HealthFindingProviderUnconfigured => "AI provider not ready",
+        MessageId::HealthFindingConfigUnavailable => "configuration unavailable",
+        MessageId::HealthFindingHooksUntrusted => "project hooks not trusted",
+        MessageId::HealthFindingPtyUnavailable => "PTY support unavailable",
+        MessageId::HealthFindingPermissionsUnwritable => "config directory not writable",
+        MessageId::HealthRemediationProvider => {
+            "configure credentials for adapter '{adapter}' (env or config.toml) or run /auth"
+        }
+        MessageId::HealthRemediationConfig => {
+            "set HOME so cosh-shell can resolve ~/.copilot-shell and load config"
+        }
+        MessageId::HealthRemediationHooks => {
+            "review and trust project hooks under {path} before they can run"
+        }
+        MessageId::HealthRemediationPty => {
+            "run cosh-shell from a real terminal; interactive shell needs a PTY (/dev/ptmx)"
+        }
+        MessageId::HealthRemediationPermissions => {
+            "fix permissions on {path} so cosh-shell can write config, logs and state"
+        }
         MessageId::ToolOutputStdoutCapturedSummary => "stdout captured",
         MessageId::ToolOutputStderrCapturedSummary => "stderr captured",
         MessageId::ToolSummaryExit => "exit {exit}",

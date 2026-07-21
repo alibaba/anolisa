@@ -22,6 +22,7 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::HelpTitle => "Slash 命令",
         MessageId::HelpFooter => "模式: {mode}. 策略: {strategy}.",
         MessageId::HelpGroupConfig => "配置",
+        MessageId::HelpGroupHealth => "健康",
         MessageId::HelpGroupModes => "模式",
         MessageId::HelpGroupHooks => "Hooks",
         MessageId::HelpSummaryHelp => "显示命令参考",
@@ -684,6 +685,30 @@ pub(super) fn message(id: MessageId) -> &'static str {
         MessageId::HealthTryReasonServiceState => "配置服务状态异常",
         MessageId::HealthTryReasonHighLoad => "最近负载持续偏高",
         MessageId::HealthTryReasonMissingCoreCheck => "核心健康检查缺失",
+        MessageId::HelpSummaryHealth => "按需运行健康检查",
+        MessageId::DoctorTitle => "cosh-shell 体检",
+        MessageId::DoctorStatusLabel => "状态",
+        MessageId::DoctorChecksLabel => "检查项",
+        MessageId::DoctorRemediationLabel => "补救",
+        MessageId::DoctorAllHealthy => "全部检查通过",
+        MessageId::HealthFindingProviderUnconfigured => "AI provider 未就绪",
+        MessageId::HealthFindingConfigUnavailable => "配置不可用",
+        MessageId::HealthFindingHooksUntrusted => "项目 hooks 未信任",
+        MessageId::HealthFindingPtyUnavailable => "PTY 支持不可用",
+        MessageId::HealthFindingPermissionsUnwritable => "配置目录不可写",
+        MessageId::HealthRemediationProvider => {
+            "为 adapter '{adapter}' 配置凭据（环境变量或 config.toml），或运行 /auth"
+        }
+        MessageId::HealthRemediationConfig => {
+            "设置 HOME，以便 cosh-shell 解析 ~/.copilot-shell 并加载配置"
+        }
+        MessageId::HealthRemediationHooks => "检查并信任 {path} 下的项目 hooks 后它们才会运行",
+        MessageId::HealthRemediationPty => {
+            "请在真实终端中运行 cosh-shell；交互式 shell 需要 PTY（/dev/ptmx）"
+        }
+        MessageId::HealthRemediationPermissions => {
+            "修正 {path} 的权限，使 cosh-shell 能写入配置、日志与状态"
+        }
         MessageId::ToolOutputStdoutCapturedSummary => "stdout 已捕获",
         MessageId::ToolOutputStderrCapturedSummary => "stderr 已捕获",
         MessageId::ToolSummaryExit => "退出码 {exit}",

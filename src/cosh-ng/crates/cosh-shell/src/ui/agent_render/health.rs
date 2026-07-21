@@ -1537,6 +1537,11 @@ fn collector_label(collector: HealthCollector, i18n: crate::I18n) -> &'static st
         HealthCollector::Disk => i18n.t(crate::MessageId::HealthMetricDisk),
         HealthCollector::KernelSignal => i18n.t(crate::MessageId::HealthMetricSignal),
         HealthCollector::ConfiguredService => i18n.t(crate::MessageId::HealthMetricService),
+        HealthCollector::Provider => "Provider",
+        HealthCollector::Config => "Config",
+        HealthCollector::Hooks => "Hooks",
+        HealthCollector::Pty => "PTY",
+        HealthCollector::Permissions => "Permissions",
     }
 }
 
